@@ -176,6 +176,13 @@ impl Home {
 }
 
 fn mock_github() -> (tokio::runtime::Runtime, wiremock::MockServer) {
+    mock_github_with_delay(std::time::Duration::ZERO)
+}
+
+/// Every search response is delayed by `delay`, so a slow first sync is observable.
+fn mock_github_with_delay(
+    delay: std::time::Duration,
+) -> (tokio::runtime::Runtime, wiremock::MockServer) {
     use serde_json::json;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, ResponseTemplate};
@@ -189,11 +196,11 @@ fn mock_github() -> (tokio::runtime::Runtime, wiremock::MockServer) {
         });
         Mock::given(method("GET")).and(path("/search/issues"))
             .and(query_param("q", "is:pr is:open archived:false review-requested:@me"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "items": [issue(7, "acme/widgets", false)] })))
+            .respond_with(ResponseTemplate::new(200).set_delay(delay).set_body_json(json!({ "items": [issue(7, "acme/widgets", false)] })))
             .mount(&server).await;
         Mock::given(method("GET")).and(path("/search/issues"))
             .and(query_param("q", "is:pr is:open archived:false author:@me"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "items": [issue(3, "me/tool", true)] })))
+            .respond_with(ResponseTemplate::new(200).set_delay(delay).set_body_json(json!({ "items": [issue(3, "me/tool", true)] })))
             .mount(&server).await;
         Mock::given(method("GET")).and(path("/user"))
             .respond_with(ResponseTemplate::new(200).insert_header("x-oauth-scopes", "repo").set_body_json(json!({ "login": "octo" })))
@@ -219,6 +226,17 @@ fn prs_lists_both_sections() {
     assert!(out.contains("acme/widgets#7  PR 7  @maria"), "{out}");
     assert!(out.contains("Mine (1)"), "{out}");
     assert!(out.contains("me/tool#3  PR 3  @maria [draft]"), "{out}");
+}
+
+#[test]
+fn prs_lists_on_a_cold_start() {
+    let (_rt, gh) = mock_github_with_delay(std::time::Duration::from_millis(500));
+    let h = Home::new();
+    let o = h.clusia_github(&gh.uri(), Some("tok"), &["prs"], None);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("Assigned to me (1)"), "{out}");
+    assert!(out.contains("acme/widgets#7"), "{out}");
 }
 
 #[test]

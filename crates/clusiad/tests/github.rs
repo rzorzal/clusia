@@ -61,9 +61,13 @@ fn prs_of(reply: Reply) -> Vec<clusia_core::PrSummary> {
 }
 
 #[tokio::test]
-async fn list_prs_is_empty_before_the_first_sync() {
+async fn list_prs_without_token_is_empty_after_the_first_sync() {
     let d = TestDaemon::start().await;
     let mut c = d.client().await;
+    assert_eq!(
+        sync_of(c.request(Command::GetSyncStatus).await.unwrap()).state,
+        SyncState::NotYet
+    );
     assert!(
         prs_of(
             c.request(Command::ListPrs {
@@ -76,8 +80,38 @@ async fn list_prs_is_empty_before_the_first_sync() {
     );
     assert_eq!(
         sync_of(c.request(Command::GetSyncStatus).await.unwrap()).state,
-        SyncState::NotYet
+        SyncState::Unauthorized
     );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn list_prs_waits_for_first_sync() {
+    let server = MockServer::start().await;
+    mount_lists(
+        &server,
+        vec![issue(7, "acme/widgets")],
+        vec![issue(1, "me/a")],
+        None,
+    )
+    .await;
+    let d = daemon_for(&server, Some("tok")).await;
+    let mut c = d.client().await;
+    let assigned = prs_of(
+        c.request(Command::ListPrs {
+            filter: PrFilter::Assigned,
+        })
+        .await
+        .unwrap(),
+    );
+    assert_eq!(assigned.len(), 1);
+    assert_eq!(assigned[0].pr, "acme/widgets#7".parse().unwrap());
+    assert_eq!(
+        sync_of(c.request(Command::GetSyncStatus).await.unwrap()).state,
+        SyncState::Online
+    );
+    // The first sync ran once: one request per list.
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
     d.stop().await;
 }
 

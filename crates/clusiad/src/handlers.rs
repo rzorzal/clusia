@@ -32,6 +32,7 @@ pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
         },
         Command::SetConfigValue { key, value } => set_config_value(shared, key, value).await,
         Command::ListPrs { filter } => {
+            sync::wait_for_first_sync(shared).await;
             let prs = shared.prs.read().await;
             let list = match filter {
                 PrFilter::Assigned => prs.assigned.clone(),

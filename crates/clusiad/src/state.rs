@@ -38,12 +38,17 @@ pub(crate) struct Shared {
     /// Reused while host and token are unchanged, so ETag caching survives between syncs.
     pub client: Mutex<Option<Arc<GitHub>>>,
     pub worktree_lock: Mutex<()>,
+    /// Held for the whole of a sync, so the loop, `SyncNow` and `ListPrs` never overlap.
+    pub sync_lock: Mutex<()>,
+    /// Becomes `true` once the first sync has finished (whatever its outcome).
+    pub first_sync_done: watch::Sender<bool>,
 }
 
 impl Shared {
     pub fn new(paths: Paths, config: Config, options: DaemonOptions) -> Self {
         let (events, _) = broadcast::channel(256);
         let (shutdown, _) = watch::channel(false);
+        let (first_sync_done, _) = watch::channel(false);
         Self {
             paths,
             config: RwLock::new(config),
@@ -61,6 +66,8 @@ impl Shared {
             sync_now: Notify::new(),
             client: Mutex::new(None),
             worktree_lock: Mutex::new(()),
+            sync_lock: Mutex::new(()),
+            first_sync_done,
         }
     }
 

@@ -13,6 +13,8 @@ pub(crate) const NO_TOKEN: &str =
     "no GitHub token: run `gh auth login`, or pipe a token into `clusia auth login`";
 const OFFLINE_RETRY_SECS: u64 = 30;
 const IDLE_RETRY_SECS: u64 = 300;
+/// How long `ListPrs` waits for the first sync before answering from the (empty) cache.
+const FIRST_SYNC_WAIT: Duration = Duration::from_secs(10);
 
 pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
@@ -107,7 +109,38 @@ async fn set_status(shared: &Shared, status: SyncStatus) {
 }
 
 /// One sync with GitHub. The cached lists are only replaced on success.
+/// Syncs never run concurrently.
 pub(crate) async fn sync_once(shared: &Shared) -> SyncStatus {
+    let _guard = shared.sync_lock.lock().await;
+    let status = sync_locked(shared).await;
+    shared.first_sync_done.send_replace(true);
+    status
+}
+
+/// Returns once the first sync has finished, or after `FIRST_SYNC_WAIT`. Without the
+/// background loop, the first caller runs that sync itself.
+pub(crate) async fn wait_for_first_sync(shared: &Shared) {
+    if *shared.first_sync_done.borrow() {
+        return;
+    }
+    let wait = async {
+        if shared.background_sync {
+            let mut done = shared.first_sync_done.subscribe();
+            let _ = done.wait_for(|done| *done).await;
+        } else {
+            let _guard = shared.sync_lock.lock().await;
+            if !*shared.first_sync_done.borrow() {
+                sync_locked(shared).await;
+                shared.first_sync_done.send_replace(true);
+            }
+        }
+    };
+    if tokio::time::timeout(FIRST_SYNC_WAIT, wait).await.is_err() {
+        tracing::warn!("first sync still running; answering from the empty cache");
+    }
+}
+
+async fn sync_locked(shared: &Shared) -> SyncStatus {
     let poll = shared.config.read().await.github.poll_interval_secs;
     let now = now_unix();
     let last = shared.sync.read().await.last_sync_unix;
