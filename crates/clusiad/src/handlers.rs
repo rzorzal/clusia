@@ -26,6 +26,17 @@ pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
             Err(e) => key_error(e),
         },
         Command::SetConfigValue { key, value } => set_config_value(shared, key, value).await,
+        Command::ListPrs { .. }
+        | Command::GetPr { .. }
+        | Command::SyncNow
+        | Command::GetSyncStatus
+        | Command::AuthStatus
+        | Command::SetToken { .. }
+        | Command::ClearToken
+        | Command::PrepareWorktree { .. } => Outcome::Err(ProtocolError::new(
+            ErrorCode::Internal,
+            "not implemented yet",
+        )),
     }
 }
 
