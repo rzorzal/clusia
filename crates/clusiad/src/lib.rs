@@ -2,9 +2,12 @@
 
 mod connection;
 mod handlers;
+mod options;
 mod server;
 mod state;
+mod sync;
 
+pub use options::DaemonOptions;
 pub use server::{Daemon, ShutdownHandle, StartError};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -33,6 +33,10 @@ impl Home {
             .arg(self.dir.path())
             .args(args)
             .env("CLUSIA_DAEMON_BIN", clusiad_bin())
+            .env("CLUSIA_GITHUB_API", "http://127.0.0.1:9")
+            .env("CLUSIA_GH_BIN", "/nonexistent/gh")
+            .env("CLUSIA_SECRET_STORE", "memory")
+            .env_remove("CLUSIA_GITHUB_TOKEN")
             .output()
             .unwrap()
     }

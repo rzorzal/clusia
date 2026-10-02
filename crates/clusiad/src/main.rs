@@ -8,6 +8,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 #[derive(Parser)]
 #[command(name = "clusiad", version, about = "Clúsia daemon")]
+/// Environment overrides: CLUSIA_GITHUB_API, CLUSIA_GITHUB_TOKEN, CLUSIA_GH_BIN, CLUSIA_SECRET_STORE=memory.
 struct Args {
     /// Data directory (defaults to $CLUSIA_HOME or ~/Library/Application Support/Clusia).
     #[arg(long, value_name = "DIR")]

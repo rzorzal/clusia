@@ -291,7 +291,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clusia-core",
+ "clusia-platform",
  "clusia-protocol",
+ "clusia-provider",
  "clusia-store",
  "serde_json",
  "tempfile",
@@ -299,6 +301,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

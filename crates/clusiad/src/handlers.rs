@@ -2,12 +2,14 @@
 
 use std::sync::atomic::Ordering;
 
+use clusia_core::PrFilter;
 use clusia_protocol::{
     Command, DaemonStatus, ErrorCode, Event, Outcome, ProtocolError, Reply, topics,
 };
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
 use crate::state::Shared;
+use crate::sync;
 
 pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
     match cmd {
@@ -26,10 +28,17 @@ pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
             Err(e) => key_error(e),
         },
         Command::SetConfigValue { key, value } => set_config_value(shared, key, value).await,
-        Command::ListPrs { .. }
-        | Command::GetPr { .. }
-        | Command::SyncNow
-        | Command::GetSyncStatus
+        Command::ListPrs { filter } => {
+            let prs = shared.prs.read().await;
+            let list = match filter {
+                PrFilter::Assigned => prs.assigned.clone(),
+                PrFilter::Mine => prs.mine.clone(),
+            };
+            Outcome::Ok(Reply::Prs(list))
+        }
+        Command::SyncNow => Outcome::Ok(Reply::Sync(sync::sync_once(shared).await)),
+        Command::GetSyncStatus => Outcome::Ok(Reply::Sync(shared.sync.read().await.clone())),
+        Command::GetPr { .. }
         | Command::AuthStatus
         | Command::SetToken { .. }
         | Command::ClearToken

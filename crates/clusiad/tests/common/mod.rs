@@ -1,9 +1,24 @@
 #![allow(dead_code)] // each test file uses a different subset
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use clusia_core::Paths;
+use clusia_platform::MemoryStore;
 use clusia_protocol::Client;
-use clusiad::{Daemon, ShutdownHandle};
+use clusiad::{Daemon, DaemonOptions, ShutdownHandle};
 use tokio::task::JoinHandle;
+
+/// No network, no real gh, no Keychain, no background loop.
+pub fn test_options() -> DaemonOptions {
+    DaemonOptions {
+        github_api: Some("http://127.0.0.1:9".into()),
+        github_token: None,
+        gh_program: PathBuf::from("/nonexistent/gh"),
+        secrets: Arc::new(MemoryStore::default()),
+        background_sync: false,
+    }
+}
 
 pub struct TestDaemon {
     pub dir: tempfile::TempDir,
@@ -18,8 +33,14 @@ impl TestDaemon {
     }
 
     pub async fn start_in(dir: tempfile::TempDir) -> Self {
+        Self::start_with(dir, test_options()).await
+    }
+
+    pub async fn start_with(dir: tempfile::TempDir, options: DaemonOptions) -> Self {
         let paths = Paths::new(dir.path());
-        let daemon = Daemon::bind(paths.clone()).await.expect("daemon binds");
+        let daemon = Daemon::bind_with(paths.clone(), options)
+            .await
+            .expect("daemon binds");
         let handle = daemon.shutdown_handle();
         let task = tokio::spawn(daemon.run());
         Self {
