@@ -20,19 +20,6 @@ pub enum PathsError {
 
 impl Paths {
     /// Everything under `root`, logs in `root/logs`. Used by tests and `--home`.
-    pub fn repos_dir(&self) -> PathBuf {
-        self.root.join("repos")
-    }
-
-    pub fn worktrees_dir(&self) -> PathBuf {
-        self.root.join("worktrees")
-    }
-
-    /// Where the worktree for `pr` lives.
-    pub fn worktree_for(&self, pr: &crate::PrRef) -> PathBuf {
-        self.worktrees_dir().join(pr.file_key())
-    }
-
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let logs = root.join("logs");
@@ -53,6 +40,19 @@ impl Paths {
             root: home.join("Library/Application Support/Clusia"),
             logs: home.join("Library/Logs/Clusia"),
         })
+    }
+
+    pub fn repos_dir(&self) -> PathBuf {
+        self.root.join("repos")
+    }
+
+    pub fn worktrees_dir(&self) -> PathBuf {
+        self.root.join("worktrees")
+    }
+
+    /// Where the worktree for `pr` lives.
+    pub fn worktree_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.worktrees_dir().join(pr.file_key())
     }
 
     pub fn root(&self) -> &Path {
