@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use clusia_core::Paths;
-use clusia_protocol::{Client, ClientError, Command as Request, Reply};
+use clusia_protocol::{Client, ClientError, Command as Request, LaunchError, Reply, launcher};
 use serde_json::json;
 
 use crate::cli::{Command, ConfigCommand, DaemonCommand};
@@ -22,7 +22,18 @@ pub enum CliError {
     #[error("{0}")]
     Client(ClientError),
     #[error("{0}")]
+    Launch(LaunchError),
+    #[error("{0}")]
     Other(String),
+}
+
+impl From<LaunchError> for CliError {
+    fn from(e: LaunchError) -> Self {
+        match e {
+            LaunchError::Client(c) => c.into(),
+            other => CliError::Launch(other),
+        }
+    }
 }
 
 impl From<ClientError> for CliError {
@@ -48,6 +59,7 @@ impl CliError {
             CliError::Client(ClientError::Server(_)) => "server",
             CliError::Client(ClientError::Incompatible { .. }) => "incompatible",
             CliError::Client(_) => "connection",
+            CliError::Launch(_) => "launch",
             CliError::Other(_) => "other",
         }
     }
@@ -58,12 +70,17 @@ pub async fn run(paths: &Paths, home: Option<&Path>, command: Command) -> Result
         Command::Daemon(DaemonCommand::Start) => spawn::start(paths, home).await,
         Command::Daemon(DaemonCommand::Stop) => spawn::stop(paths).await,
         Command::Daemon(DaemonCommand::Status) => status(paths).await,
-        Command::Config(cmd) => config(paths, cmd).await,
+        Command::Config(cmd) => config(paths, home, cmd).await,
     }
 }
 
-async fn connect(paths: &Paths) -> Result<Client, CliError> {
-    Ok(Client::connect(&paths.socket(), "clusia").await?)
+/// Connects to the daemon, starting it when needed (spec §3.1).
+async fn connect(paths: &Paths, home: Option<&Path>) -> Result<Client, CliError> {
+    let (client, started) = launcher::ensure_daemon(paths, home, "clusia").await?;
+    if started {
+        eprintln!("clusia: started the Clúsia daemon");
+    }
+    Ok(client)
 }
 
 fn unexpected(reply: Reply) -> CliError {
@@ -82,7 +99,8 @@ pub fn uptime(secs: u64) -> String {
 }
 
 async fn status(paths: &Paths) -> Result<Output, CliError> {
-    match connect(paths).await?.request(Request::DaemonStatus).await? {
+    let mut client = Client::connect(&paths.socket(), "clusia").await?;
+    match client.request(Request::DaemonStatus).await? {
         Reply::Status(s) => Ok(Output {
             human: format!(
                 "clusiad {} · pid {} · up {} · {} client(s)\nsocket: {}",
@@ -98,8 +116,12 @@ async fn status(paths: &Paths) -> Result<Output, CliError> {
     }
 }
 
-async fn config(paths: &Paths, cmd: ConfigCommand) -> Result<Output, CliError> {
-    let mut client = connect(paths).await?;
+async fn config(
+    paths: &Paths,
+    home: Option<&Path>,
+    cmd: ConfigCommand,
+) -> Result<Output, CliError> {
+    let mut client = connect(paths, home).await?;
     match cmd {
         ConfigCommand::Show => match client.request(Request::GetConfig).await? {
             Reply::Config(c) => Ok(Output {

@@ -120,3 +120,17 @@ fn start_twice_reports_already_running() {
     assert!(o.status.success());
     assert!(stdout(&o).contains("already running"), "{}", stdout(&o));
 }
+
+#[test]
+fn commands_autostart_the_daemon() {
+    let h = Home::new();
+    let o = h.clusia(&["config", "get", "github.host"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "github.com");
+    assert!(
+        stderr(&o).contains("started the Clúsia daemon"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(h.clusia(&["daemon", "status"]).status.success());
+}
