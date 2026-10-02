@@ -13,9 +13,14 @@ clusia-platform.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+wiremock.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
