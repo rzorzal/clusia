@@ -8,6 +8,7 @@ use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use clusia_core::Paths;
+use clusia_core::paths::MAX_SOCKET_PATH;
 
 use crate::client::{Client, ClientError};
 
@@ -20,6 +21,9 @@ pub enum LaunchError {
     Client(#[from] ClientError),
     #[error("cannot start {}: {source}", bin.display())]
     Spawn { bin: PathBuf, source: io::Error },
+    // Same wording as clusiad's `StartError::PathTooLong`.
+    #[error("socket path {} is {len} bytes; macOS allows at most {MAX_SOCKET_PATH}. Use a shorter --home", path.display())]
+    PathTooLong { path: PathBuf, len: usize },
     #[error("{context}: {source}")]
     Io { context: String, source: io::Error },
     #[error("clusiad exited with {status}; see {}", log.display())]
@@ -42,6 +46,18 @@ pub fn daemon_binary() -> Result<PathBuf, LaunchError> {
     Ok(exe.with_file_name("clusiad"))
 }
 
+/// Fails when the socket path does not fit in a Unix socket address (macOS: 103 bytes).
+pub fn check_socket_path(paths: &Paths) -> Result<(), LaunchError> {
+    if paths.socket_path_fits() {
+        return Ok(());
+    }
+    let path = paths.socket();
+    Err(LaunchError::PathTooLong {
+        len: path.as_os_str().len(),
+        path,
+    })
+}
+
 /// Starts clusiad and waits until it accepts connections. Returns its pid.
 pub async fn start_daemon(paths: &Paths, home: Option<&Path>) -> Result<u32, LaunchError> {
     start_daemon_with(paths, home, &daemon_binary()?, READY_TIMEOUT).await
@@ -55,6 +71,7 @@ pub async fn start_daemon_with(
     bin: &Path,
     timeout: Duration,
 ) -> Result<u32, LaunchError> {
+    check_socket_path(paths)?;
     let logs = paths.logs_dir();
     std::fs::create_dir_all(logs).map_err(io_error(format!("cannot create {}", logs.display())))?;
     let log = logs.join("daemon.log");
@@ -67,20 +84,35 @@ pub async fn start_daemon_with(
         .try_clone()
         .map_err(io_error(format!("cannot open {}", log.display())))?;
 
-    let mut cmd = std::process::Command::new(bin);
+    // The child runs in `/`, so a relative path like `target/debug/clusiad` must be resolved here.
+    let program = if bin.is_relative() && bin.components().count() > 1 {
+        std::path::absolute(bin).unwrap_or_else(|_| bin.to_path_buf())
+    } else {
+        bin.to_path_buf()
+    };
+    let mut cmd = std::process::Command::new(&program);
     if let Some(home) = home {
         cmd.arg("--home").arg(home);
     }
-    let mut child = cmd
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::null())
         .stdout(out)
         .stderr(err)
-        .process_group(0)
-        .spawn()
-        .map_err(|source| LaunchError::Spawn {
-            bin: bin.to_path_buf(),
-            source,
-        })?;
+        .current_dir("/");
+    // A new session (and so a new process group) without a controlling terminal: the daemon
+    // never receives the terminal's SIGHUP/SIGINT and can never block reading from it.
+    // SAFETY: `setsid` is async-signal-safe and touches no memory of the parent.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(|source| LaunchError::Spawn {
+        bin: bin.to_path_buf(),
+        source,
+    })?;
 
     let deadline = Instant::now() + timeout;
     loop {
@@ -110,6 +142,7 @@ pub async fn ensure_daemon(
     home: Option<&Path>,
     client_name: &str,
 ) -> Result<(Client, bool), LaunchError> {
+    check_socket_path(paths)?;
     match Client::connect(&paths.socket(), client_name).await {
         Ok(client) => Ok((client, false)),
         Err(ClientError::NotRunning(_)) => {
@@ -192,6 +225,45 @@ mod tests {
                 .trim(),
             "--home /x/home"
         );
+    }
+
+    #[tokio::test]
+    async fn daemon_has_no_controlling_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let bin = script(
+            dir.path(),
+            "fake",
+            r#"d="$(dirname "$0")"; ps -o tty= -p $$ > "$d/tty.tmp"; pwd > "$d/cwd.tmp"; mv "$d/tty.tmp" "$d/tty"; mv "$d/cwd.tmp" "$d/cwd""#,
+        );
+        let _ = start_daemon_with(&paths, None, &bin, Duration::from_secs(5)).await;
+        let tty = std::fs::read_to_string(dir.path().join("tty")).unwrap();
+        assert!(
+            matches!(tty.trim(), "?" | "??"),
+            "the daemon has a controlling terminal: {tty:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cwd"))
+                .unwrap()
+                .trim(),
+            "/"
+        );
+    }
+
+    #[tokio::test]
+    async fn too_long_socket_path_is_refused_before_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("x".repeat(120)));
+        let bin = script(dir.path(), "fake", r#"touch "$(dirname "$0")/spawned""#);
+        let err = start_daemon_with(&paths, None, &bin, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("at most 103"), "{err}");
+        match ensure_daemon(&paths, None, "t").await {
+            Err(err) => assert!(err.to_string().contains("at most 103"), "{err}"),
+            Ok(_) => panic!("ensure_daemon accepted a too-long socket path"),
+        }
+        assert!(!dir.path().join("spawned").exists());
     }
 
     #[tokio::test]

@@ -312,3 +312,28 @@ fn worktree_rejects_invalid_pr() {
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr(&o).contains("owner/repo#number"), "{}", stderr(&o));
 }
+
+#[test]
+fn too_long_home_fails_before_running() {
+    let h = Home::new();
+    let base = h.dir.path().display().to_string();
+    let long = format!(
+        "{base}/{}",
+        "h".repeat(110usize.saturating_sub(base.len() + 1))
+    );
+    assert!(long.len() >= 110);
+    for args in [
+        &["daemon", "status"][..],
+        &["config", "get", "github.host"][..],
+    ] {
+        let o = Command::new(env!("CARGO_BIN_EXE_clusia"))
+            .arg("--home")
+            .arg(&long)
+            .args(args)
+            .env("CLUSIA_DAEMON_BIN", clusiad_bin())
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+        assert!(stderr(&o).contains("at most 103"), "{}", stderr(&o));
+    }
+}

@@ -28,6 +28,9 @@ async fn main() -> ExitCode {
             Err(e) => return fail(cli.json, &CliError::Other(e.to_string())),
         },
     };
+    if let Err(e) = clusia_protocol::launcher::check_socket_path(&paths) {
+        return fail(cli.json, &e.into());
+    }
     match run::run(&paths, home.as_deref(), cli.command).await {
         Ok(out) => {
             if cli.json {

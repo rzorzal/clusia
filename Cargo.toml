@@ -30,6 +30,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tempfile = "3.27.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "query", "http2", "charset"] }
 wiremock = "0.6.5"
+libc = "0.2.189"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
