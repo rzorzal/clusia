@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use clusia_core::Paths;
-use clusia_protocol::{Client, Command as Request, Reply};
+use clusia_protocol::{Client, ClientError, Command as Request, Reply};
 use serde_json::json;
 
 use crate::run::{CliError, Output};
@@ -32,15 +32,19 @@ fn other(context: &str, e: impl std::fmt::Display) -> CliError {
 // The daemon is meant to outlive this process, so it is deliberately never waited on.
 #[allow(clippy::zombie_processes)]
 pub async fn start(paths: &Paths, home: Option<&Path>) -> Result<Output, CliError> {
-    if let Ok(mut client) = Client::connect(&paths.socket(), "clusia").await {
-        let pid = match client.request(Request::DaemonStatus).await? {
-            Reply::Status(s) => s.pid,
-            _ => 0,
-        };
-        return Ok(Output {
-            human: format!("Clúsia daemon already running (pid {pid})"),
-            json: json!({ "started": false, "pid": pid }),
-        });
+    match Client::connect(&paths.socket(), "clusia").await {
+        Err(ClientError::NotRunning(_)) => {}
+        Err(e) => return Err(e.into()),
+        Ok(mut client) => {
+            let pid = match client.request(Request::DaemonStatus).await? {
+                Reply::Status(s) => s.pid,
+                _ => 0,
+            };
+            return Ok(Output {
+                human: format!("Clúsia daemon already running (pid {pid})"),
+                json: json!({ "started": false, "pid": pid }),
+            });
+        }
     }
 
     let bin = daemon_binary()?;

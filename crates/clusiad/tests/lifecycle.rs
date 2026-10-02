@@ -105,6 +105,22 @@ async fn second_daemon_refuses() {
 }
 
 #[tokio::test]
+async fn second_daemon_leaves_config_untouched() {
+    let d = TestDaemon::start().await;
+    let cfg = d.paths.config_file();
+    std::fs::write(&cfg, "[github\nhost = ").unwrap();
+    let err = Daemon::bind(d.paths.clone()).await.err().unwrap();
+    assert!(matches!(err, StartError::AlreadyRunning(_)), "{err}");
+    assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "[github\nhost = ");
+    let corrupt = std::fs::read_dir(d.paths.root())
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().contains(".corrupt-"));
+    assert!(!corrupt, "second daemon must not quarantine");
+    d.stop().await;
+}
+
+#[tokio::test]
 async fn long_socket_path_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let err = Daemon::bind(Paths::new(dir.path().join("x".repeat(100))))

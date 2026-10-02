@@ -273,12 +273,34 @@ mod tests {
             Reply::Ack,
             Reply::Config(Config::default()),
             Reply::Value("v".into()),
+            Reply::Status(DaemonStatus {
+                version: "0".into(),
+                pid: 1,
+                uptime_secs: 2,
+                clients: 3,
+                socket: "/s".into(),
+            }),
         ] {
             round_trip(ServerMessage::Response {
                 id: 2,
                 result: Outcome::Ok(reply),
             });
         }
+        round_trip(ServerMessage::Welcome {
+            protocol: 1,
+            daemon: "0".into(),
+        });
+        round_trip(ServerMessage::Incompatible {
+            daemon_protocol: 1,
+            message: "m".into(),
+        });
+        round_trip(ServerMessage::Event {
+            topic: "config".into(),
+            event: Event::ConfigChanged {
+                key: "k".into(),
+                value: "v".into(),
+            },
+        });
         for code in [
             ErrorCode::BadRequest,
             ErrorCode::UnknownConfigKey,

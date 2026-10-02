@@ -51,7 +51,6 @@ async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome 
     }
     let rendered = get_value(&updated, &key).unwrap_or(raw);
     *config = updated;
-    drop(config);
     shared.publish(
         topics::CONFIG,
         Event::ConfigChanged {

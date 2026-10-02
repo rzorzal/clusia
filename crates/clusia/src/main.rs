@@ -12,14 +12,23 @@ use crate::run::CliError;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let cli = cli::Cli::parse();
-    let paths = match &cli.home {
+    let home = match cli.home.as_deref().map(std::path::absolute).transpose() {
+        Ok(home) => home,
+        Err(e) => {
+            return fail(
+                cli.json,
+                &CliError::Other(format!("cannot resolve --home: {e}")),
+            );
+        }
+    };
+    let paths = match &home {
         Some(home) => Paths::new(home),
         None => match Paths::from_env() {
             Ok(p) => p,
             Err(e) => return fail(cli.json, &CliError::Other(e.to_string())),
         },
     };
-    match run::run(&paths, cli.home.as_deref(), cli.command).await {
+    match run::run(&paths, home.as_deref(), cli.command).await {
         Ok(out) => {
             if cli.json {
                 println!("{}", out.json);

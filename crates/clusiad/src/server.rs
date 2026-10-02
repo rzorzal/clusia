@@ -50,12 +50,23 @@ impl Daemon {
             });
         }
         fs::create_dir_all(paths.root())?;
-        let config = load_config(&paths)?.into_value();
 
-        if fs::symlink_metadata(&socket).is_ok() {
-            if UnixStream::connect(&socket).await.is_ok() {
-                return Err(StartError::AlreadyRunning(socket));
+        let socket_exists = fs::symlink_metadata(&socket).is_ok();
+        let mut stale = false;
+        if socket_exists {
+            match UnixStream::connect(&socket).await {
+                Ok(_) => return Err(StartError::AlreadyRunning(socket)),
+                Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => stale = true,
+                Err(e) => {
+                    return Err(StartError::Io(io::Error::new(
+                        e.kind(),
+                        format!("cannot probe existing socket {}: {e}", socket.display()),
+                    )));
+                }
             }
+        }
+        let config = load_config(&paths)?.into_value();
+        if stale {
             fs::remove_file(&socket)?;
             tracing::info!(socket = %socket.display(), "removed stale socket");
         }

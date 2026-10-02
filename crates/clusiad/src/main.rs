@@ -26,7 +26,13 @@ async fn main() -> ExitCode {
 
     let args = Args::parse();
     let paths = match args.home {
-        Some(home) => Paths::new(home),
+        Some(home) => match std::path::absolute(&home) {
+            Ok(home) => Paths::new(home),
+            Err(e) => {
+                eprintln!("clusiad: cannot resolve --home {}: {e}", home.display());
+                return ExitCode::FAILURE;
+            }
+        },
         None => match Paths::from_env() {
             Ok(p) => p,
             Err(e) => {
@@ -50,16 +56,17 @@ async fn main() -> ExitCode {
 
     let handle = daemon.shutdown_handle();
     tokio::spawn(async move {
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "cannot listen for SIGTERM");
-                return;
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
             }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+            Err(e) => {
+                tracing::error!(error = %e, "cannot listen for SIGTERM; waiting for Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+            }
         }
         handle.trigger();
     });

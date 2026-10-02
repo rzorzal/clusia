@@ -42,16 +42,31 @@ pub enum ConfigKeyError {
 
 pub fn load_config(paths: &Paths) -> io::Result<Loaded<Config>> {
     let path = paths.config_file();
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(Loaded::Fresh(Config::default()));
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("cannot read {}: {e}", path.display()),
+            ));
+        }
     };
-    let parsed = toml::from_str::<Config>(&text)
-        .map_err(|e| e.to_string())
-        .and_then(|c| c.validate().map(|()| c));
+    let parsed = String::from_utf8(bytes)
+        .map_err(|e| format!("not valid UTF-8: {e}"))
+        .and_then(|text| {
+            let config = toml::from_str::<Config>(&text).map_err(|e| e.to_string())?;
+            config.validate()?;
+            if let Ok(file) = toml::from_str::<toml::Table>(&text) {
+                let unknown = unknown_keys(&file, &to_table(&config));
+                if !unknown.is_empty() {
+                    tracing::warn!("ignoring unknown config keys: {}", unknown.join(", "));
+                }
+            }
+            Ok(config)
+        });
     match parsed {
         Ok(c) => Ok(Loaded::Read(c)),
         Err(error) => {
@@ -64,6 +79,31 @@ pub fn load_config(paths: &Paths) -> io::Result<Loaded<Config>> {
             })
         }
     }
+}
+
+/// Dotted paths of keys present in `file` but absent from `known` (typos that serde would silently ignore).
+pub fn unknown_keys(file: &toml::Table, known: &toml::Table) -> Vec<String> {
+    fn walk(file: &toml::Table, known: &toml::Table, prefix: &str, out: &mut Vec<String>) {
+        for (key, value) in file {
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            match known.get(key) {
+                None => out.push(path),
+                Some(toml::Value::Table(known_sub)) => {
+                    if let toml::Value::Table(sub) = value {
+                        walk(sub, known_sub, &path, out);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(file, known, "", &mut out);
+    out
 }
 
 pub fn save_config(paths: &Paths, cfg: &Config) -> io::Result<()> {
@@ -209,6 +249,50 @@ mod tests {
             other => panic!("expected Recovered, got {other:?}"),
         }
         assert!(!p.config_file().exists());
+    }
+
+    #[test]
+    fn non_utf8_file_is_quarantined() {
+        let (_d, p) = paths();
+        fs::create_dir_all(p.root()).unwrap();
+        fs::write(
+            p.config_file(),
+            b"[editor]\ncustom_command = \"\xe9 {path}\"\n",
+        )
+        .unwrap();
+        match load_config(&p).unwrap() {
+            Loaded::Recovered { quarantined, .. } => {
+                assert!(
+                    quarantined
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("config.toml.corrupt-")
+                );
+            }
+            other => panic!("expected Recovered, got {other:?}"),
+        }
+        assert!(!p.config_file().exists());
+    }
+
+    #[test]
+    fn unreadable_path_error_names_the_file() {
+        let (_d, p) = paths();
+        fs::create_dir_all(p.config_file()).unwrap();
+        let err = load_config(&p).unwrap_err();
+        assert!(err.to_string().contains("config.toml"), "{err}");
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_with_dotted_paths() {
+        let file: toml::Table =
+            toml::from_str("[github]\npoll_intervall_secs = 5\nhost = \"x\"\n").unwrap();
+        let known = to_table(&Config::default());
+        assert_eq!(
+            unknown_keys(&file, &known),
+            vec!["github.poll_intervall_secs".to_string()]
+        );
+        assert!(unknown_keys(&known, &known).is_empty());
     }
 
     #[test]
