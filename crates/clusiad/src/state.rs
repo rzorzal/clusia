@@ -33,4 +33,9 @@ impl Shared {
     pub fn trigger_shutdown(&self) {
         self.shutdown.send_replace(true);
     }
+
+    /// Sends `event` to every connection subscribed to `topic`. No listeners is fine.
+    pub fn publish(&self, topic: &str, event: Event) {
+        let _ = self.events.send((topic.to_string(), event));
+    }
 }
