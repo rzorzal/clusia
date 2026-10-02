@@ -1,12 +1,15 @@
 //! Executes a parsed command against the daemon.
 
+use std::io::{IsTerminal, Read};
 use std::path::Path;
 
-use clusia_core::Paths;
-use clusia_protocol::{Client, ClientError, Command as Request, LaunchError, Reply, launcher};
+use clusia_core::{Paths, PrFilter, PrRef, PrSummary};
+use clusia_protocol::{
+    Client, ClientError, Command as Request, LaunchError, Reply, SyncState, SyncStatus, launcher,
+};
 use serde_json::json;
 
-use crate::cli::{Command, ConfigCommand, DaemonCommand};
+use crate::cli::{AuthCommand, Command, ConfigCommand, DaemonCommand};
 use crate::spawn;
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
@@ -71,6 +74,10 @@ pub async fn run(paths: &Paths, home: Option<&Path>, command: Command) -> Result
         Command::Daemon(DaemonCommand::Stop) => spawn::stop(paths).await,
         Command::Daemon(DaemonCommand::Status) => status(paths).await,
         Command::Config(cmd) => config(paths, home, cmd).await,
+        Command::Prs { assigned, mine } => prs(paths, home, assigned, mine).await,
+        Command::Sync => sync(paths, home).await,
+        Command::Auth(cmd) => auth(paths, home, cmd).await,
+        Command::Worktree { pr } => worktree(paths, home, &pr).await,
     }
 }
 
@@ -155,6 +162,206 @@ async fn config(
                 other => Err(unexpected(other)),
             }
         }
+    }
+}
+
+fn state_name(state: SyncState) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn sync_line(s: &SyncStatus) -> String {
+    format!(
+        "sync: {} — {}",
+        state_name(s.state),
+        s.message.as_deref().unwrap_or("")
+    )
+}
+
+fn pr_line(p: &PrSummary) -> String {
+    let draft = if p.draft { " [draft]" } else { "" };
+    format!("  {}  {}  @{}{}", p.pr, p.title, p.author, draft)
+}
+
+async fn list(client: &mut Client, filter: PrFilter) -> Result<Vec<PrSummary>, CliError> {
+    match client.request(Request::ListPrs { filter }).await? {
+        Reply::Prs(list) => Ok(list),
+        other => Err(unexpected(other)),
+    }
+}
+
+async fn prs(
+    paths: &Paths,
+    home: Option<&Path>,
+    assigned: bool,
+    mine: bool,
+) -> Result<Output, CliError> {
+    let mut client = connect(paths, home).await?;
+    let (want_assigned, want_mine) = if assigned || mine {
+        (assigned, mine)
+    } else {
+        (true, true)
+    };
+    let mut human = Vec::new();
+    let mut json = serde_json::Map::new();
+    for (wanted, filter, title, key) in [
+        (
+            want_assigned,
+            PrFilter::Assigned,
+            "Assigned to me",
+            "assigned",
+        ),
+        (want_mine, PrFilter::Mine, "Mine", "mine"),
+    ] {
+        if !wanted {
+            continue;
+        }
+        let items = list(&mut client, filter).await?;
+        human.push(format!("{title} ({})", items.len()));
+        if items.is_empty() {
+            human.push("  (none)".to_string());
+        }
+        human.extend(items.iter().map(pr_line));
+        json.insert(key.into(), serde_json::to_value(&items).unwrap_or_default());
+    }
+    let status = match client.request(Request::GetSyncStatus).await? {
+        Reply::Sync(s) => s,
+        other => return Err(unexpected(other)),
+    };
+    if status.state != SyncState::Online {
+        human.push(sync_line(&status));
+    }
+    json.insert(
+        "sync".into(),
+        serde_json::to_value(&status).unwrap_or_default(),
+    );
+    Ok(Output {
+        human: human.join("\n"),
+        json: serde_json::Value::Object(json),
+    })
+}
+
+async fn sync(paths: &Paths, home: Option<&Path>) -> Result<Output, CliError> {
+    match connect(paths, home)
+        .await?
+        .request(Request::SyncNow)
+        .await?
+    {
+        Reply::Sync(s) => {
+            let human = match (s.state, s.next_sync_unix, s.last_sync_unix) {
+                (SyncState::Online, Some(next), Some(last)) => {
+                    format!("synced: online · next sync in {}s", next - last)
+                }
+                _ => sync_line(&s),
+            };
+            Ok(Output {
+                human,
+                json: serde_json::to_value(&s).unwrap_or_default(),
+            })
+        }
+        other => Err(unexpected(other)),
+    }
+}
+
+fn read_token_from_stdin() -> Result<String, CliError> {
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(CliError::Other(
+            "pipe the token on stdin, e.g. `gh auth token | clusia auth login`".into(),
+        ));
+    }
+    let mut input = String::new();
+    stdin
+        .read_to_string(&mut input)
+        .map_err(|e| CliError::Other(format!("cannot read stdin: {e}")))?;
+    input
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| CliError::Other("no token on stdin".into()))
+}
+
+async fn auth(paths: &Paths, home: Option<&Path>, cmd: AuthCommand) -> Result<Output, CliError> {
+    match cmd {
+        AuthCommand::Login => {
+            let token = read_token_from_stdin()?;
+            connect(paths, home)
+                .await?
+                .request(Request::SetToken {
+                    token: token.into(),
+                })
+                .await?;
+            Ok(Output {
+                human: "Token saved to the Keychain".into(),
+                json: json!({ "saved": true }),
+            })
+        }
+        AuthCommand::Logout => {
+            connect(paths, home)
+                .await?
+                .request(Request::ClearToken)
+                .await?;
+            Ok(Output {
+                human: "Token removed".into(),
+                json: json!({ "removed": true }),
+            })
+        }
+        AuthCommand::Status => {
+            let mut client = connect(paths, home).await?;
+            let host = match client
+                .request(Request::GetConfigValue {
+                    key: "github.host".into(),
+                })
+                .await?
+            {
+                Reply::Value(v) => v,
+                other => return Err(unexpected(other)),
+            };
+            let info = match client.request(Request::AuthStatus).await? {
+                Reply::Auth(a) => a,
+                other => return Err(unexpected(other)),
+            };
+            match (&info.login, &info.source) {
+                (Some(login), Some(source)) => {
+                    let source = serde_json::to_value(source)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    let mut human =
+                        format!("Logged in to {host} as @{login} (token from {source})");
+                    if !info.scopes.is_empty() {
+                        human.push_str(&format!("\nscopes: {}", info.scopes.join(", ")));
+                    }
+                    let mut value = serde_json::to_value(&info).unwrap_or_default();
+                    value["host"] = json!(host);
+                    Ok(Output { human, json: value })
+                }
+                _ => Err(CliError::Other(format!(
+                    "Not logged in: {}",
+                    info.error.unwrap_or_default()
+                ))),
+            }
+        }
+    }
+}
+
+async fn worktree(paths: &Paths, home: Option<&Path>, pr: &str) -> Result<Output, CliError> {
+    let pr: PrRef = pr
+        .parse()
+        .map_err(|e: clusia_core::PrRefError| CliError::Other(e.to_string()))?;
+    match connect(paths, home)
+        .await?
+        .request(Request::PrepareWorktree { pr })
+        .await?
+    {
+        Reply::Worktree(w) => Ok(Output {
+            human: w.path.clone(),
+            json: serde_json::to_value(&w).unwrap_or_default(),
+        }),
+        other => Err(unexpected(other)),
     }
 }
 
