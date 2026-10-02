@@ -1,6 +1,6 @@
 [package]
-name = "clusia-protocol"
-description = "Messages, codec and client for talking to clusiad"
+name = "clusia-git"
+description = "Local repositories: discovery, PR fetch and worktrees (shells out to git)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,6 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
-clusia-core.workspace = true
-libc.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

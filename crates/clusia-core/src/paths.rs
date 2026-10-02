@@ -42,6 +42,19 @@ impl Paths {
         })
     }
 
+    pub fn repos_dir(&self) -> PathBuf {
+        self.root.join("repos")
+    }
+
+    pub fn worktrees_dir(&self) -> PathBuf {
+        self.root.join("worktrees")
+    }
+
+    /// Where the worktree for `pr` lives.
+    pub fn worktree_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.worktrees_dir().join(pr.file_key())
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -111,5 +124,17 @@ mod tests {
     fn socket_path_fits_detects_long_roots() {
         assert!(Paths::new("/tmp/c").socket_path_fits());
         assert!(!Paths::new(format!("/tmp/{}", "a".repeat(120))).socket_path_fits());
+    }
+
+    #[test]
+    fn repo_and_worktree_dirs() {
+        let p = Paths::new("/tmp/c");
+        assert_eq!(p.repos_dir(), PathBuf::from("/tmp/c/repos"));
+        assert_eq!(p.worktrees_dir(), PathBuf::from("/tmp/c/worktrees"));
+        let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
+        assert_eq!(
+            p.worktree_for(&pr),
+            PathBuf::from("/tmp/c/worktrees/acme__widgets__7")
+        );
     }
 }

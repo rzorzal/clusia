@@ -1,0 +1,15 @@
+[package]
+name = "clusia-platform"
+description = "macOS integration: Keychain secrets (later notifications, sound, launchd)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+security-framework.workspace = true
+
+[lints]
+workspace = true

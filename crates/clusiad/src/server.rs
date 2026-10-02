@@ -12,7 +12,9 @@ use clusia_store::load_config;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::connection;
+use crate::options::DaemonOptions;
 use crate::state::Shared;
+use crate::sync;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -41,7 +43,12 @@ impl ShutdownHandle {
 }
 
 impl Daemon {
+    /// Binds with options from the environment (`DaemonOptions::from_env`).
     pub async fn bind(paths: Paths) -> Result<Self, StartError> {
+        Self::bind_with(paths, DaemonOptions::from_env()).await
+    }
+
+    pub async fn bind_with(paths: Paths, options: DaemonOptions) -> Result<Self, StartError> {
         let socket = paths.socket();
         if !paths.socket_path_fits() {
             return Err(StartError::PathTooLong {
@@ -75,7 +82,7 @@ impl Daemon {
 
         Ok(Self {
             listener,
-            shared: Arc::new(Shared::new(paths, config)),
+            shared: Arc::new(Shared::new(paths, config, options)),
             socket,
         })
     }
@@ -91,6 +98,9 @@ impl Daemon {
     pub async fn run(self) -> io::Result<()> {
         let mut shutdown = self.shared.shutdown.subscribe();
         tracing::info!(socket = %self.socket.display(), version = crate::VERSION, "clusiad listening");
+        if self.shared.background_sync {
+            tokio::spawn(sync::run_loop(self.shared.clone()));
+        }
         loop {
             if *shutdown.borrow_and_update() {
                 break;

@@ -18,6 +18,9 @@ path = "src/main.rs"
 clusia-core.workspace = true
 clusia-store.workspace = true
 clusia-protocol.workspace = true
+clusia-platform.workspace = true
+clusia-provider.workspace = true
+clusia-git.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -27,6 +30,8 @@ clap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+wiremock.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

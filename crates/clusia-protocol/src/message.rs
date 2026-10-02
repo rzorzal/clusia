@@ -1,11 +1,13 @@
 //! Every message that crosses the socket.
 
-use clusia_core::Config;
+use clusia_core::{Config, PrDetail, PrFilter, PrRef, PrSummary};
 use serde::{Deserialize, Serialize};
 
 /// Topics a client can subscribe to.
 pub mod topics {
     pub const CONFIG: &str = "config";
+    pub const PRS: &str = "prs";
+    pub const SYNC: &str = "sync";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,6 +27,7 @@ pub enum ClientMessage {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // PrDetail is large; boxing would change the pinned test API
 pub enum ServerMessage {
     Welcome {
         protocol: u32,
@@ -51,13 +54,42 @@ pub enum Command {
     DaemonStatus,
     Shutdown,
     GetConfig,
-    GetConfigValue { key: String },
-    SetConfigValue { key: String, value: String },
-    Subscribe { topics: Vec<String> },
+    GetConfigValue {
+        key: String,
+    },
+    SetConfigValue {
+        key: String,
+        value: String,
+    },
+    Subscribe {
+        topics: Vec<String>,
+    },
+    /// Cached list; refreshed by the background sync or `SyncNow`.
+    ListPrs {
+        filter: PrFilter,
+    },
+    /// Live fetch of one pull request.
+    GetPr {
+        pr: PrRef,
+    },
+    /// Sync with GitHub now and return the resulting status.
+    SyncNow,
+    GetSyncStatus,
+    AuthStatus,
+    /// Store a personal access token in the Keychain for the configured host.
+    SetToken {
+        token: Secret,
+    },
+    ClearToken,
+    /// Fetch the PR head and create/update its worktree.
+    PrepareWorktree {
+        pr: PrRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // PrDetail is large; boxing would change the pinned test API
 pub enum Outcome {
     Ok(Reply),
     Err(ProtocolError),
@@ -70,6 +102,11 @@ pub enum Reply {
     Status(DaemonStatus),
     Config(Config),
     Value(String),
+    Prs(Vec<PrSummary>),
+    Pr(PrDetail),
+    Sync(SyncStatus),
+    Auth(AuthInfo),
+    Worktree(WorktreeInfo),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +116,87 @@ pub struct DaemonStatus {
     pub uptime_secs: u64,
     pub clients: usize,
     pub socket: String,
+}
+
+/// A secret on the wire (e.g. a GitHub token). Serializes as a plain string; `Debug` never shows it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
+}
+
+impl std::ops::Deref for Secret {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Secret {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SyncStatus {
+    pub state: SyncState,
+    pub last_sync_unix: Option<i64>,
+    pub next_sync_unix: Option<i64>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncState {
+    #[default]
+    NotYet,
+    Online,
+    Offline,
+    RateLimited,
+    Unauthorized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthInfo {
+    pub source: Option<TokenSource>,
+    pub login: Option<String>,
+    pub scopes: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TokenSource {
+    Env,
+    GhCli,
+    Pat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeInfo {
+    pub path: String,
+    pub head_sha: String,
+    /// The repository the worktree belongs to (the user's clone, or Clúsia's cache clone).
+    pub clone: String,
+    /// True when Clúsia had to clone because no local clone was found.
+    pub cloned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,12 +221,21 @@ pub enum ErrorCode {
     UnknownConfigKey,
     InvalidConfigValue,
     Internal,
+    Unauthorized,
+    NotFound,
+    RateLimited,
+    Offline,
+    /// GitHub answered with an unexpected error.
+    Upstream,
+    Git,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Event {
     ConfigChanged { key: String, value: String },
+    PrsUpdated { assigned: usize, mine: usize },
+    SyncChanged(SyncStatus),
 }
 
 #[cfg(test)]
@@ -312,5 +439,198 @@ mod tests {
                 result: Outcome::Err(ProtocolError::new(code, "m")),
             });
         }
+    }
+
+    fn acme7() -> clusia_core::PrRef {
+        "acme/widgets#7".parse().unwrap()
+    }
+
+    fn summary() -> clusia_core::PrSummary {
+        clusia_core::PrSummary {
+            pr: acme7(),
+            title: "Fix cache".into(),
+            author: "maria".into(),
+            url: "https://github.com/acme/widgets/pull/7".into(),
+            draft: false,
+            updated_at: "2026-10-01T12:00:00Z".into(),
+            comments: 3,
+        }
+    }
+
+    #[test]
+    fn m2_messages_wire_format() {
+        let list = ClientMessage::Request {
+            id: 1,
+            cmd: Command::ListPrs {
+                filter: clusia_core::PrFilter::Assigned,
+            },
+        };
+        assert_eq!(
+            wire(&list),
+            r#"{"type":"request","id":1,"cmd":{"list_prs":{"filter":"assigned"}}}"#
+        );
+
+        let get = ClientMessage::Request {
+            id: 2,
+            cmd: Command::GetPr { pr: acme7() },
+        };
+        assert_eq!(
+            wire(&get),
+            r#"{"type":"request","id":2,"cmd":{"get_pr":{"pr":"acme/widgets#7"}}}"#
+        );
+
+        let sync = ClientMessage::Request {
+            id: 3,
+            cmd: Command::SyncNow,
+        };
+        assert_eq!(wire(&sync), r#"{"type":"request","id":3,"cmd":"sync_now"}"#);
+
+        let status = ServerMessage::Response {
+            id: 3,
+            result: Outcome::Ok(Reply::Sync(SyncStatus {
+                state: SyncState::RateLimited,
+                last_sync_unix: Some(100),
+                next_sync_unix: Some(160),
+                message: Some("rate limit".into()),
+            })),
+        };
+        assert_eq!(
+            wire(&status),
+            r#"{"type":"response","id":3,"result":{"ok":{"sync":{"state":"rate_limited","last_sync_unix":100,"next_sync_unix":160,"message":"rate limit"}}}}"#
+        );
+
+        let auth = ServerMessage::Response {
+            id: 4,
+            result: Outcome::Ok(Reply::Auth(AuthInfo {
+                source: Some(TokenSource::GhCli),
+                login: Some("octo".into()),
+                scopes: vec!["repo".into()],
+                error: None,
+            })),
+        };
+        assert_eq!(
+            wire(&auth),
+            r#"{"type":"response","id":4,"result":{"ok":{"auth":{"source":"gh-cli","login":"octo","scopes":["repo"],"error":null}}}}"#
+        );
+
+        let updated = ServerMessage::Event {
+            topic: topics::PRS.into(),
+            event: Event::PrsUpdated {
+                assigned: 2,
+                mine: 1,
+            },
+        };
+        assert_eq!(
+            wire(&updated),
+            r#"{"type":"event","topic":"prs","event":{"prs_updated":{"assigned":2,"mine":1}}}"#
+        );
+
+        let err = ServerMessage::Response {
+            id: 5,
+            result: Outcome::Err(ProtocolError::new(ErrorCode::Unauthorized, "m")),
+        };
+        assert_eq!(
+            wire(&err),
+            r#"{"type":"response","id":5,"result":{"err":{"code":"unauthorized","message":"m"}}}"#
+        );
+    }
+
+    #[test]
+    fn m2_messages_round_trip() {
+        for cmd in [
+            Command::ListPrs {
+                filter: clusia_core::PrFilter::Mine,
+            },
+            Command::GetPr { pr: acme7() },
+            Command::SyncNow,
+            Command::GetSyncStatus,
+            Command::AuthStatus,
+            Command::SetToken { token: "t".into() },
+            Command::ClearToken,
+            Command::PrepareWorktree { pr: acme7() },
+        ] {
+            round_trip(ClientMessage::Request { id: 1, cmd });
+        }
+        let detail = clusia_core::PrDetail {
+            summary: summary(),
+            base_ref: "main".into(),
+            head_ref: "fix".into(),
+            base_sha: "a".repeat(40),
+            head_sha: "b".repeat(40),
+            additions: 10,
+            deletions: 2,
+            changed_files: 3,
+            clone_url: "https://github.com/acme/widgets.git".into(),
+        };
+        for reply in [
+            Reply::Prs(vec![summary()]),
+            Reply::Pr(detail),
+            Reply::Sync(SyncStatus::default()),
+            Reply::Auth(AuthInfo {
+                source: None,
+                login: None,
+                scopes: vec![],
+                error: Some("no token".into()),
+            }),
+            Reply::Worktree(WorktreeInfo {
+                path: "/w".into(),
+                head_sha: "b".repeat(40),
+                clone: "/c".into(),
+                cloned: false,
+            }),
+        ] {
+            round_trip(ServerMessage::Response {
+                id: 2,
+                result: Outcome::Ok(reply),
+            });
+        }
+        for code in [
+            ErrorCode::Unauthorized,
+            ErrorCode::NotFound,
+            ErrorCode::RateLimited,
+            ErrorCode::Offline,
+            ErrorCode::Upstream,
+            ErrorCode::Git,
+        ] {
+            round_trip(ServerMessage::Response {
+                id: 3,
+                result: Outcome::Err(ProtocolError::new(code, "m")),
+            });
+        }
+        round_trip(ServerMessage::Event {
+            topic: topics::SYNC.into(),
+            event: Event::SyncChanged(SyncStatus {
+                state: SyncState::Online,
+                ..SyncStatus::default()
+            }),
+        });
+        assert_eq!(SyncStatus::default().state, SyncState::NotYet);
+    }
+
+    #[test]
+    fn set_token_debug_is_redacted() {
+        let msg = ClientMessage::Request {
+            id: 1,
+            cmd: Command::SetToken {
+                token: "ghp_supersecret".into(),
+            },
+        };
+        let dbg = format!("{msg:?}");
+        assert!(!dbg.contains("supersecret"), "{dbg}");
+        assert!(dbg.contains("Secret(***)"));
+    }
+
+    #[test]
+    fn set_token_wire_format() {
+        let msg = ClientMessage::Request {
+            id: 9,
+            cmd: Command::SetToken {
+                token: "ghp_x".into(),
+            },
+        };
+        assert_eq!(
+            wire(&msg),
+            r#"{"type":"request","id":9,"cmd":{"set_token":{"token":"ghp_x"}}}"#
+        );
     }
 }

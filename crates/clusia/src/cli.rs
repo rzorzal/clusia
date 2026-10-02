@@ -25,6 +25,25 @@ pub enum Command {
     /// Read or change settings.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// List pull requests: assigned to me and mine (both unless filtered).
+    Prs {
+        /// Only pull requests where my review is requested.
+        #[arg(long, conflicts_with = "mine")]
+        assigned: bool,
+        /// Only pull requests I authored.
+        #[arg(long)]
+        mine: bool,
+    },
+    /// Refresh pull requests from GitHub now.
+    Sync,
+    /// GitHub authentication.
+    #[command(subcommand)]
+    Auth(AuthCommand),
+    /// Prepare a local worktree for a pull request and print its path.
+    Worktree {
+        /// `owner/repo#number` or a pull request URL.
+        pr: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -45,4 +64,14 @@ pub enum ConfigCommand {
     Get { key: String },
     /// Change one value.
     Set { key: String, value: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    /// Show which token is used and for whom.
+    Status,
+    /// Store a personal access token in the Keychain. The token is read from stdin.
+    Login,
+    /// Remove the stored token.
+    Logout,
 }
