@@ -1,0 +1,111 @@
+//! Socket ownership: binding safely, accepting clients, shutting down.
+
+use std::fs;
+use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use clusia_core::Paths;
+use clusia_core::paths::MAX_SOCKET_PATH;
+use clusia_store::load_config;
+use tokio::net::{UnixListener, UnixStream};
+
+use crate::connection;
+use crate::state::Shared;
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error("socket path {} is {len} bytes; macOS allows at most {MAX_SOCKET_PATH}. Use a shorter --home", path.display())]
+    PathTooLong { path: PathBuf, len: usize },
+    #[error("another clusiad is already running on {}", .0.display())]
+    AlreadyRunning(PathBuf),
+    #[error("could not start: {0}")]
+    Io(#[from] io::Error),
+}
+
+pub struct Daemon {
+    listener: UnixListener,
+    shared: Arc<Shared>,
+    socket: PathBuf,
+}
+
+/// Stops a running daemon from anywhere (signal handler, tests).
+#[derive(Clone)]
+pub struct ShutdownHandle(Arc<Shared>);
+
+impl ShutdownHandle {
+    pub fn trigger(&self) {
+        self.0.trigger_shutdown();
+    }
+}
+
+impl Daemon {
+    pub async fn bind(paths: Paths) -> Result<Self, StartError> {
+        let socket = paths.socket();
+        if !paths.socket_path_fits() {
+            return Err(StartError::PathTooLong {
+                len: socket.as_os_str().len(),
+                path: socket,
+            });
+        }
+        fs::create_dir_all(paths.root())?;
+        let config = load_config(&paths)?.into_value();
+
+        if fs::symlink_metadata(&socket).is_ok() {
+            if UnixStream::connect(&socket).await.is_ok() {
+                return Err(StartError::AlreadyRunning(socket));
+            }
+            fs::remove_file(&socket)?;
+            tracing::info!(socket = %socket.display(), "removed stale socket");
+        }
+        let listener = UnixListener::bind(&socket)?;
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+
+        Ok(Self {
+            listener,
+            shared: Arc::new(Shared::new(paths, config)),
+            socket,
+        })
+    }
+
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle(self.shared.clone())
+    }
+
+    pub async fn run(self) -> io::Result<()> {
+        let mut shutdown = self.shared.shutdown.subscribe();
+        tracing::info!(socket = %self.socket.display(), version = crate::VERSION, "clusiad listening");
+        loop {
+            if *shutdown.borrow_and_update() {
+                break;
+            }
+            tokio::select! {
+                accepted = self.listener.accept() => match accepted {
+                    Ok((stream, _)) => {
+                        tokio::spawn(connection::serve(stream, self.shared.clone()));
+                    }
+                    Err(e) => tracing::warn!(error = %e, "accept failed"),
+                },
+                changed = shutdown.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        drop(self.listener);
+        match fs::remove_file(&self.socket) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                tracing::warn!(error = %e, "could not remove socket")
+            }
+            _ => {}
+        }
+        tracing::info!("clusiad stopped");
+        Ok(())
+    }
+}
