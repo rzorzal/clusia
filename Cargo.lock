@@ -163,6 +163,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clusia-provider"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "clusia-platform",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "clusia-store"
 version = "0.1.0"
 dependencies = [
