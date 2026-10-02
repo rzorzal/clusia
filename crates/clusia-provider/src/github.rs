@@ -167,6 +167,24 @@ impl GitHub {
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<(serde_json::Value, header::HeaderMap), ProviderError> {
+        self.request(path, query, true).await
+    }
+
+    /// GET without the ETag cache, for responses whose headers matter (a 304 carries none).
+    async fn get_uncached(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<(serde_json::Value, header::HeaderMap), ProviderError> {
+        self.request(path, query, false).await
+    }
+
+    async fn request(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        use_cache: bool,
+    ) -> Result<(serde_json::Value, header::HeaderMap), ProviderError> {
         let mut request = self
             .http
             .get(format!("{}{}", self.api, path))
@@ -177,12 +195,15 @@ impl GitHub {
             .build()
             .map_err(|e| ProviderError::Decode(e.to_string()))?;
         let key = request.url().to_string();
-        let cached = self
-            .cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&key)
-            .cloned();
+        let cached = if use_cache {
+            self.cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&key)
+                .cloned()
+        } else {
+            None
+        };
         if let Some((etag, _)) = &cached
             && let Ok(value) = header::HeaderValue::from_str(etag)
         {
@@ -229,7 +250,7 @@ impl GitHub {
         }
         let body: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| ProviderError::Decode(e.to_string()))?;
-        if let Some(etag) = headers.get(header::ETAG).and_then(|v| v.to_str().ok()) {
+        if use_cache && let Some(etag) = headers.get(header::ETAG).and_then(|v| v.to_str().ok()) {
             self.cache
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -239,7 +260,7 @@ impl GitHub {
     }
 
     pub async fn viewer(&self) -> Result<Viewer, ProviderError> {
-        let (body, headers) = self.get("/user", &[]).await?;
+        let (body, headers) = self.get_uncached("/user", &[]).await?;
         let login = body
             .get("login")
             .and_then(|v| v.as_str())
@@ -267,7 +288,17 @@ impl GitHub {
         ];
         let (body, _) = self.get("/search/issues", &query).await?;
         let parsed: SearchResponse = decode(body)?;
-        parsed.items.into_iter().map(summary_from_issue).collect()
+        // One malformed item must not hide the others.
+        Ok(parsed
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let number = item.number;
+                summary_from_issue(item)
+                    .inspect_err(|e| tracing::warn!(number, error = %e, "skipping search result"))
+                    .ok()
+            })
+            .collect())
     }
 
     pub async fn get_pr(&self, pr: &PrRef) -> Result<PrDetail, ProviderError> {
@@ -559,6 +590,54 @@ mod tests {
                 login: "octo".into(),
                 scopes: vec!["repo".into(), "read:org".into()]
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn one_bad_search_item_is_skipped() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({ "items": [issue(7, "acme/widgets"), issue(8, "bad_owner/widgets")] }),
+            ))
+            .mount(&server)
+            .await;
+        let prs = gh(&server).list_prs(PrFilter::Assigned).await.unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].pr, "acme/widgets#7".parse().unwrap());
+    }
+
+    #[tokio::test]
+    async fn viewer_never_sends_if_none_match() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(wiremock::matchers::header_exists("if-none-match"))
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("etag", "\"u1\"")
+                    .insert_header("x-oauth-scopes", "repo")
+                    .set_body_json(json!({ "login": "octo" })),
+            )
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        client.viewer().await.unwrap();
+        let second = client.viewer().await.unwrap();
+        assert_eq!(second.scopes, vec!["repo".to_string()]);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|r| !r.headers.contains_key("if-none-match")),
+            "viewer() must bypass the ETag cache"
         );
     }
 
