@@ -4,12 +4,15 @@ use std::sync::atomic::Ordering;
 
 use clusia_core::PrFilter;
 use clusia_protocol::{
-    Command, DaemonStatus, ErrorCode, Event, Outcome, ProtocolError, Reply, topics,
+    AuthInfo, Command, DaemonStatus, ErrorCode, Event, Outcome, ProtocolError, Reply, TokenSource,
+    topics,
 };
+use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
 use crate::state::Shared;
 use crate::sync;
+use crate::worktrees;
 
 pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
     match cmd {
@@ -38,14 +41,18 @@ pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
         }
         Command::SyncNow => Outcome::Ok(Reply::Sync(sync::sync_once(shared).await)),
         Command::GetSyncStatus => Outcome::Ok(Reply::Sync(shared.sync.read().await.clone())),
-        Command::GetPr { .. }
-        | Command::AuthStatus
-        | Command::SetToken { .. }
-        | Command::ClearToken
-        | Command::PrepareWorktree { .. } => Outcome::Err(ProtocolError::new(
-            ErrorCode::Internal,
-            "not implemented yet",
-        )),
+        Command::GetPr { pr } => match sync::github_client(shared).await {
+            Ok(Some(gh)) => match gh.get_pr(&pr).await {
+                Ok(detail) => Outcome::Ok(Reply::Pr(detail)),
+                Err(e) => provider_error(e),
+            },
+            Ok(None) => no_token(),
+            Err(e) => provider_error(e),
+        },
+        Command::AuthStatus => Outcome::Ok(Reply::Auth(auth_status(shared).await)),
+        Command::SetToken { token } => set_token(shared, &token).await,
+        Command::ClearToken => clear_token(shared).await,
+        Command::PrepareWorktree { pr } => worktrees::prepare(shared, &pr).await,
     }
 }
 
@@ -79,4 +86,90 @@ async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome 
         },
     );
     Outcome::Ok(Reply::Value(rendered))
+}
+
+pub(crate) fn provider_error(e: ProviderError) -> Outcome {
+    let code = match &e {
+        ProviderError::Unauthorized => ErrorCode::Unauthorized,
+        ProviderError::RateLimited { .. } => ErrorCode::RateLimited,
+        ProviderError::NotFound(_) => ErrorCode::NotFound,
+        ProviderError::Offline(_) => ErrorCode::Offline,
+        ProviderError::Http { .. } | ProviderError::Decode(_) => ErrorCode::Upstream,
+    };
+    Outcome::Err(ProtocolError::new(code, e.to_string()))
+}
+
+pub(crate) fn no_token() -> Outcome {
+    Outcome::Err(ProtocolError::new(ErrorCode::Unauthorized, sync::NO_TOKEN))
+}
+
+fn token_source(origin: TokenOrigin) -> TokenSource {
+    match origin {
+        TokenOrigin::Env => TokenSource::Env,
+        TokenOrigin::GhCli => TokenSource::GhCli,
+        TokenOrigin::Pat => TokenSource::Pat,
+    }
+}
+
+async fn auth_status(shared: &Shared) -> AuthInfo {
+    let missing = |error: String| AuthInfo {
+        source: None,
+        login: None,
+        scopes: Vec::new(),
+        error: Some(error),
+    };
+    match sync::github_client(shared).await {
+        Ok(None) => missing(sync::NO_TOKEN.to_string()),
+        Err(e) => missing(e.to_string()),
+        Ok(Some(gh)) => {
+            let source = Some(token_source(gh.token().origin));
+            match gh.viewer().await {
+                Ok(v) => AuthInfo {
+                    source,
+                    login: Some(v.login),
+                    scopes: v.scopes,
+                    error: None,
+                },
+                Err(e) => AuthInfo {
+                    source,
+                    login: None,
+                    scopes: Vec::new(),
+                    error: Some(e.to_string()),
+                },
+            }
+        }
+    }
+}
+
+async fn set_token(shared: &Shared, token: &str) -> Outcome {
+    let token = token.trim();
+    if token.is_empty() {
+        return Outcome::Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            "the token is empty",
+        ));
+    }
+    let host = shared.config.read().await.github.host.clone();
+    if let Err(e) = shared.secrets.set(&host, token) {
+        return Outcome::Err(ProtocolError::new(
+            ErrorCode::Internal,
+            format!("could not store the token: {e}"),
+        ));
+    }
+    shared.sync_now.notify_one();
+    Outcome::Ok(Reply::Ack)
+}
+
+async fn clear_token(shared: &Shared) -> Outcome {
+    let host = shared.config.read().await.github.host.clone();
+    match shared.secrets.delete(&host) {
+        Ok(_) => {
+            shared.sync_now.notify_one();
+            Outcome::Ok(Reply::Ack)
+        }
+        Err(e) => Outcome::Err(ProtocolError::new(
+            ErrorCode::Internal,
+            format!("could not remove the token: {e}"),
+        )),
+    }
 }

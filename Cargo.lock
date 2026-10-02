@@ -291,6 +291,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clusia-core",
+ "clusia-git",
  "clusia-platform",
  "clusia-protocol",
  "clusia-provider",

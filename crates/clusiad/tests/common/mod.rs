@@ -1,5 +1,7 @@
 #![allow(dead_code)] // each test file uses a different subset
 
+pub mod git_fixture;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

@@ -37,6 +37,7 @@ pub(crate) struct Shared {
     pub sync_now: Notify,
     /// Reused while host and token are unchanged, so ETag caching survives between syncs.
     pub client: Mutex<Option<Arc<GitHub>>>,
+    pub worktree_lock: Mutex<()>,
 }
 
 impl Shared {
@@ -59,6 +60,7 @@ impl Shared {
             sync: RwLock::new(SyncStatus::default()),
             sync_now: Notify::new(),
             client: Mutex::new(None),
+            worktree_lock: Mutex::new(()),
         }
     }
 

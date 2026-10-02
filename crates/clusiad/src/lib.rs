@@ -6,6 +6,7 @@ mod options;
 mod server;
 mod state;
 mod sync;
+mod worktrees;
 
 pub use options::DaemonOptions;
 pub use server::{Daemon, ShutdownHandle, StartError};
