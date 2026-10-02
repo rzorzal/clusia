@@ -78,7 +78,7 @@ pub enum Command {
     AuthStatus,
     /// Store a personal access token in the Keychain for the configured host.
     SetToken {
-        token: String,
+        token: Secret,
     },
     ClearToken,
     /// Fetch the PR head and create/update its worktree.
@@ -116,6 +116,42 @@ pub struct DaemonStatus {
     pub uptime_secs: u64,
     pub clients: usize,
     pub socket: String,
+}
+
+/// A secret on the wire (e.g. a GitHub token). Serializes as a plain string; `Debug` never shows it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
+}
+
+impl std::ops::Deref for Secret {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Secret {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -569,5 +605,32 @@ mod tests {
             }),
         });
         assert_eq!(SyncStatus::default().state, SyncState::NotYet);
+    }
+
+    #[test]
+    fn set_token_debug_is_redacted() {
+        let msg = ClientMessage::Request {
+            id: 1,
+            cmd: Command::SetToken {
+                token: "ghp_supersecret".into(),
+            },
+        };
+        let dbg = format!("{msg:?}");
+        assert!(!dbg.contains("supersecret"), "{dbg}");
+        assert!(dbg.contains("Secret(***)"));
+    }
+
+    #[test]
+    fn set_token_wire_format() {
+        let msg = ClientMessage::Request {
+            id: 9,
+            cmd: Command::SetToken {
+                token: "ghp_x".into(),
+            },
+        };
+        assert_eq!(
+            wire(&msg),
+            r#"{"type":"request","id":9,"cmd":{"set_token":{"token":"ghp_x"}}}"#
+        );
     }
 }
