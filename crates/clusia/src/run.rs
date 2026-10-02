@@ -172,12 +172,33 @@ fn state_name(state: SyncState) -> String {
         .unwrap_or_default()
 }
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn sync_line(s: &SyncStatus) -> String {
-    format!(
-        "sync: {} — {}",
-        state_name(s.state),
-        s.message.as_deref().unwrap_or("")
-    )
+    sync_line_at(s, now_unix())
+}
+
+fn sync_line_at(s: &SyncStatus, now: i64) -> String {
+    let mut line = format!("sync: {}", state_name(s.state));
+    if let Some(message) = s.message.as_deref().filter(|m| !m.is_empty()) {
+        line.push_str(&format!(" — {message}"));
+    }
+    if let Some(next) = s.next_sync_unix {
+        line.push_str(&format!(" · next sync in {}s", (next - now).max(0)));
+    }
+    line
+}
+
+fn not_logged_in(error: Option<String>) -> String {
+    match error.filter(|e| !e.is_empty()) {
+        Some(e) => format!("Not logged in: {e}"),
+        None => "Not logged in".to_string(),
+    }
 }
 
 fn pr_line(p: &PrSummary) -> String {
@@ -339,10 +360,7 @@ async fn auth(paths: &Paths, home: Option<&Path>, cmd: AuthCommand) -> Result<Ou
                     value["host"] = json!(host);
                     Ok(Output { human, json: value })
                 }
-                _ => Err(CliError::Other(format!(
-                    "Not logged in: {}",
-                    info.error.unwrap_or_default()
-                ))),
+                _ => Err(CliError::Other(not_logged_in(info.error))),
             }
         }
     }
@@ -374,6 +392,54 @@ mod tests {
         assert_eq!(uptime(5), "5s");
         assert_eq!(uptime(65), "1m 5s");
         assert_eq!(uptime(3 * 3600 + 120), "3h 2m");
+    }
+
+    fn status(state: SyncState, message: Option<&str>, next: Option<i64>) -> SyncStatus {
+        SyncStatus {
+            state,
+            last_sync_unix: None,
+            next_sync_unix: next,
+            message: message.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn sync_line_has_no_dangling_separator() {
+        assert_eq!(
+            sync_line_at(&status(SyncState::NotYet, None, None), 100),
+            "sync: not_yet"
+        );
+        assert_eq!(
+            sync_line_at(
+                &status(SyncState::Unauthorized, Some("no token"), None),
+                100
+            ),
+            "sync: unauthorized — no token"
+        );
+    }
+
+    #[test]
+    fn sync_line_shows_next_sync() {
+        assert_eq!(
+            sync_line_at(
+                &status(SyncState::RateLimited, Some("slow down"), Some(190)),
+                100
+            ),
+            "sync: rate_limited — slow down · next sync in 90s"
+        );
+        assert_eq!(
+            sync_line_at(&status(SyncState::Offline, None, Some(90)), 100),
+            "sync: offline · next sync in 0s"
+        );
+    }
+
+    #[test]
+    fn not_logged_in_has_no_dangling_colon() {
+        assert_eq!(not_logged_in(None), "Not logged in");
+        assert_eq!(
+            not_logged_in(Some("bad token".into())),
+            "Not logged in: bad token"
+        );
     }
 
     #[test]
