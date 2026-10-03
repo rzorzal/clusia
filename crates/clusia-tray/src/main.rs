@@ -16,6 +16,12 @@ struct Args {
     /// Paint the popover with demo data to this PNG and exit (no menu bar item, no daemon).
     #[arg(long, value_name = "PNG")]
     render: Option<PathBuf>,
+    /// Draw the menu bar icon to this PNG and exit.
+    #[arg(long, value_name = "PNG")]
+    render_icon: Option<PathBuf>,
+    /// With --render-icon: draw the variant with the new-activity dot.
+    #[arg(long)]
+    news: bool,
     /// With --render: use the dark appearance.
     #[arg(long)]
     dark: bool,
@@ -41,6 +47,15 @@ fn main() -> ExitCode {
         eprintln!("clusia-tray: must run on the main thread");
         return ExitCode::FAILURE;
     };
+    if let Some(out) = &args.render_icon {
+        return match ui::icon::render_png(args.news, out) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("clusia-tray: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if let Some(out) = &args.render {
         let _app = NSApplication::sharedApplication(mtm);
         let now = now();

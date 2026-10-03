@@ -13,9 +13,8 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSPopover,
-    NSPopoverBehavior, NSPopoverDelegate, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
-    NSViewController, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSVisualEffectView,
+    NSPopoverBehavior, NSPopoverDelegate, NSStatusBar, NSStatusItem, NSViewController,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRectEdge, NSSize,
@@ -113,7 +112,7 @@ define_class!(
         fn did_finish_launching(&self, _notification: &NSNotification) {
             let mtm = self.mtm();
             let Some((paths, app_bin)) = self.ivars().setup.take() else { return };
-            let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+            let item = NSStatusBar::systemStatusBar().statusItemWithLength(icon::ITEM_LENGTH);
             if let Some(button) = item.button(mtm) {
                 button.setImage(Some(&icon::status_image(false)));
                 // SAFETY: the delegate lives for the whole run of the app, so the target outlives the button.

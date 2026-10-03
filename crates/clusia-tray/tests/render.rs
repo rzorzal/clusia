@@ -26,3 +26,21 @@ fn renders_the_demo_popover_in_both_appearances() {
         assert!(h >= 400 * scale && h <= 700 * scale, "height {h}");
     }
 }
+
+#[test]
+fn renders_the_status_icon_with_and_without_the_dot() {
+    for news in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("icon.png");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clusia-tray"));
+        cmd.arg("--render-icon").arg(&out);
+        if news {
+            cmd.arg("--news");
+        }
+        let o = cmd.output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let (w, h) = png_size(&std::fs::read(&out).unwrap());
+        assert!(h == 18 || h == 36, "height {h}");
+        assert!(w >= h, "width {w}");
+    }
+}
