@@ -202,3 +202,60 @@ async fn nothing_to_publish_is_a_bad_request() {
     );
     w.daemon.stop().await;
 }
+
+#[tokio::test]
+async fn posted_but_close_failed_returns_upstream_with_url_and_forgets_draft() {
+    let w = world().await;
+    w.server.reset().await;
+    let mut mock = PrMock::new(&w.head, &w.base, &w.origin);
+    mock.viewer = "maria".into();
+    mount_pr(&w.server, &mock).await;
+    Mock::given(method("POST"))
+        .and(path("/repos/acme/widgets/pulls/7/reviews"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": 43, "html_url": REVIEW_URL })),
+        )
+        .expect(1)
+        .mount(&w.server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/repos/acme/widgets/pulls/7"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "message": "boom" })))
+        .mount(&w.server)
+        .await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    match c.request(publish(Verdict::ClosePr, "Superseded")).await {
+        Err(ClientError::Server(e)) => {
+            assert_eq!(e.code, ErrorCode::Upstream);
+            assert!(e.message.contains(REVIEW_URL), "{}", e.message);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!w.daemon.paths.review_file(&pr7()).exists());
+    assert_eq!(
+        code(c.request(Command::GetReview { pr: pr7() }).await),
+        ErrorCode::InvalidState
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn reviewer_cannot_close() {
+    let w = world().await;
+    Mock::given(method("POST"))
+        .and(path("/repos/acme/widgets/pulls/7/reviews"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": 44, "html_url": REVIEW_URL })),
+        )
+        .expect(0)
+        .mount(&w.server)
+        .await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    assert_eq!(
+        code(c.request(publish(Verdict::ClosePr, "nope")).await),
+        ErrorCode::BadRequest
+    );
+    w.daemon.stop().await;
+}

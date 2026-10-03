@@ -7,6 +7,7 @@ use clusia_core::{
 };
 use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, PublishResult, Reply};
+use clusia_provider::ProviderError;
 
 use crate::handlers::{no_token, provider_error};
 use crate::reviews::{
@@ -28,6 +29,24 @@ fn fail_publish(shared: &Shared, review: &mut Review) {
     if let Err(Outcome::Err(e)) = save(shared, review) {
         tracing::warn!(error = %e.message, "cannot save the review after a failed publish");
     }
+}
+
+/// Records a completed publish and removes the review file. The review is already on
+/// GitHub, so failures here are logged, never returned.
+fn finish_published(
+    shared: &Shared,
+    review: &mut Review,
+    pr: &PrRef,
+    client: &str,
+    url: Option<String>,
+) {
+    if let Err(e) = review.apply(ReviewEvent::PublishOk, now_unix()) {
+        tracing::warn!(error = %e, pr = %pr, "unexpected state after publishing");
+    }
+    if let Err(e) = clusia_store::delete_review(&shared.paths, pr) {
+        tracing::warn!(error = %e, pr = %pr, "published, but cannot delete the review file");
+    }
+    record(shared, ActivityKind::ReviewPublished, pr, client, url, None);
 }
 
 pub(crate) async fn publish(
@@ -64,7 +83,12 @@ pub(crate) async fn publish(
         if let Err(e) = &checkout {
             tracing::warn!(error = %e, pr = %pr, "cannot check out the new head to re-anchor the review");
         }
-        if let Ok((info, _remote)) = checkout {
+        let Ok((info, _remote)) = checkout else {
+            return conflict(
+                "the pull request changed since you started this review; open it again to re-anchor your comments",
+            );
+        };
+        {
             let repo = PathBuf::from(&info.clone);
             relocate::relocate_review(&mut review, &detail, &repo).await;
             let _ = review.apply(ReviewEvent::NewHead, now_unix());
@@ -103,11 +127,26 @@ pub(crate) async fn publish(
     let mut url = None;
     if let Some(payload) = &plan.review {
         match gh.create_review(pr, payload).await {
-            Ok(published) => url = Some(published.url),
+            Ok(published) => {
+                // Persist the terminal state before any further network call, so a crash
+                // during the close cannot leave a `publishing` file that invites a re-post.
+                finish_published(shared, &mut review, pr, client, Some(published.url.clone()));
+                url = Some(published.url);
+            }
             Err(e) => {
                 fail_publish(shared, &mut review);
                 announce(shared, &review);
-                return provider_error(e);
+                return match e {
+                    ProviderError::Offline(_) | ProviderError::Decode(_) => {
+                        Outcome::Err(ProtocolError::new(
+                            ErrorCode::Upstream,
+                            format!(
+                                "the review may have been posted; check the pull request on GitHub before publishing again ({e})"
+                            ),
+                        ))
+                    }
+                    e => provider_error(e),
+                };
             }
         }
     }
@@ -122,24 +161,11 @@ pub(crate) async fn publish(
         }
         close_error = Some(e);
     }
-
-    if let Err(e) = review.apply(ReviewEvent::PublishOk, now_unix()) {
-        tracing::warn!(error = %e, pr = %pr, "unexpected state after publishing");
-    }
-    // The review is already on GitHub: a failure here must not turn into an error reply.
-    if let Err(e) = clusia_store::delete_review(&shared.paths, pr) {
-        tracing::warn!(error = %e, pr = %pr, "published, but cannot delete the review file");
+    if url.is_none() {
+        finish_published(shared, &mut review, pr, client, None);
     }
     cleanup_checkout(shared, pr).await;
     shared.files_cache.lock().await.remove(pr);
-    record(
-        shared,
-        ActivityKind::ReviewPublished,
-        pr,
-        client,
-        url.clone(),
-        None,
-    );
     announce(shared, &review);
     if let Some(e) = close_error {
         let message = format!(
