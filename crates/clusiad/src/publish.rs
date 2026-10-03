@@ -11,7 +11,7 @@ use clusia_provider::ProviderError;
 
 use crate::handlers::{no_token, provider_error};
 use crate::reviews::{
-    announce, cleanup_checkout, invalid_state, load_existing, lock, record, save,
+    announce, cleanup_checkout, files_for, invalid_state, load_existing, lock, record, save,
 };
 use crate::state::Shared;
 use crate::sync::{github_client, now_unix};
@@ -99,14 +99,28 @@ pub(crate) async fn publish(
         if let Err(e) = &checkout {
             tracing::warn!(error = %e, pr = %pr, "cannot check out the new head to re-anchor the review");
         }
-        let Ok((info, _remote)) = checkout else {
+        let Ok((info, remote)) = checkout else {
             return conflict(
                 "the pull request changed since you started this review; open it again to re-anchor your comments",
             );
         };
         {
             let repo = PathBuf::from(&info.clone);
-            relocate::relocate_review(&mut review, &detail, &repo).await;
+            relocate::refresh_base(&repo, &remote, pr, &detail.base_ref).await;
+            let files = match files_for(shared, pr, &detail.head_sha).await {
+                Ok(f) => Some(f),
+                Err(_) => {
+                    tracing::warn!(pr = %pr, "cannot load the files to check the re-anchored comments");
+                    None
+                }
+            };
+            relocate::relocate_review(
+                &mut review,
+                &detail,
+                &repo,
+                files.as_deref().map(Vec::as_slice),
+            )
+            .await;
             let _ = review.apply(ReviewEvent::NewHead, now_unix());
             if let Err(out) = save(shared, &review) {
                 return out;

@@ -8,6 +8,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 pub struct PrMock {
     pub head: String,
     pub base: String,
+    /// The base branch name.
+    pub base_ref: String,
     pub author: String,
     pub viewer: String,
     pub clone_url: String,
@@ -22,12 +24,23 @@ impl PrMock {
         Self {
             head: head.into(),
             base: base.into(),
+            base_ref: "main".into(),
             author: "maria".into(),
             viewer: "me".into(),
             clone_url: clone_url.into(),
             files: json!([{ "filename": "feature.txt", "status": "added", "additions": 1, "deletions": 0, "patch": "@@ -0,0 +1,3 @@\n+one\n+two\n+three" }]),
             commits: json!([]),
         }
+    }
+}
+
+impl PrMock {
+    /// GitHub's `/files` for a PR that adds `feature.txt` with `content`.
+    pub fn adding_feature(mut self, content: &str) -> Self {
+        let lines: Vec<String> = content.lines().map(|l| format!("+{l}")).collect();
+        let patch = format!("@@ -0,0 +1,{} @@\n{}", lines.len(), lines.join("\n"));
+        self.files = json!([{ "filename": "feature.txt", "status": "added", "additions": lines.len(), "deletions": 0, "patch": patch }]);
+        self
     }
 }
 
@@ -38,7 +51,7 @@ pub async fn mount_pr(server: &MockServer, pr: &PrMock) {
         "number": 7, "title": "Add feature", "html_url": "https://github.com/acme/widgets/pull/7",
         "user": { "login": pr.author }, "draft": false, "updated_at": "2026-10-01T12:00:00Z",
         "comments": 0, "review_comments": 0, "additions": 3, "deletions": 0, "changed_files": 1,
-        "base": { "ref": "main", "sha": pr.base, "repo": { "clone_url": pr.clone_url } },
+        "base": { "ref": pr.base_ref, "sha": pr.base, "repo": { "clone_url": pr.clone_url } },
         "head": { "ref": "feature", "sha": pr.head, "repo": null }
     }))).mount(server).await;
     Mock::given(method("GET"))

@@ -8,7 +8,7 @@ use clusia_core::{
     Role, Side, can_comment,
 };
 use clusia_git::{
-    base_pin_ref, fetch_branch, pin_commit, remove_worktree, repo_of_worktree, reviewed_ref, unpin,
+    base_pin_ref, pin_commit, remove_worktree, repo_of_worktree, reviewed_ref, unpin,
 };
 use clusia_protocol::{
     AnchorInput, ErrorCode, Event, FileSummary, LoadStep, LoadStepKind, Outcome, ProtocolError,
@@ -171,11 +171,7 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         Some(info.path.clone()),
     );
     let repo = PathBuf::from(&info.clone);
-    if let Ok(sha) = fetch_branch(&repo, &remote, &detail.base_ref).await
-        && let Err(e) = pin_commit(&repo, &base_pin_ref(pr.number), &sha).await
-    {
-        tracing::warn!(error = %e, pr = %pr, "cannot pin the base commit");
-    }
+    relocate::refresh_base(&repo, &remote, pr, &detail.base_ref).await;
 
     step(shared, pr, LoadStepKind::Pr, StepStatus::Running, None);
     let files = match gh.get_files(pr).await {
@@ -246,8 +242,13 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         let _ = review.apply(ReviewEvent::PublishFailed, now);
     }
     if review.head_sha != detail.head_sha || review.base_sha != detail.base_sha {
-        let report = relocate::relocate_review(&mut review, &detail, &repo).await;
-        let _ = review.apply(ReviewEvent::NewHead, now);
+        let head_changed = review.head_sha != detail.head_sha;
+        let report =
+            relocate::relocate_review(&mut review, &detail, &repo, Some(files.as_slice())).await;
+        // A base that only moved ahead changes nothing for the draft: take it silently.
+        if head_changed || report.moved + report.obsolete > 0 {
+            let _ = review.apply(ReviewEvent::NewHead, now);
+        }
         if report.moved + report.obsolete > 0 {
             let note = format!("{} moved, {} obsolete", report.moved, report.obsolete);
             record(
@@ -330,7 +331,11 @@ fn editable(review: &Review) -> bool {
 
 /// PR files for `head`, from the cache or GitHub.
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
-async fn files_for(shared: &Shared, pr: &PrRef, head: &str) -> Result<Arc<Vec<FileDiff>>, Outcome> {
+pub(crate) async fn files_for(
+    shared: &Shared,
+    pr: &PrRef,
+    head: &str,
+) -> Result<Arc<Vec<FileDiff>>, Outcome> {
     if let Some((cached_head, files)) = shared.files_cache.lock().await.get(pr)
         && cached_head == head
     {
@@ -381,13 +386,24 @@ async fn resolve_anchor(
         Side::Right => review.head_sha.clone(),
         Side::Left => review.base_sha.clone(),
     };
-    Ok(Anchor {
+    let anchor = Anchor {
         path: input.path,
         line: input.line,
         start_line: input.start_line,
         side: input.side,
         commit,
-    })
+    };
+    // Every line of a range must be commentable: GitHub rejects ranges that span two hunks.
+    if let Some(start) = anchor.start_line
+        && start <= anchor.line
+        && !relocate::fits_diff(&files, &anchor)
+    {
+        return Err(bad_request(format!(
+            "lines {start}-{} of {} are not one continuous part of this pull request's diff",
+            anchor.line, anchor.path
+        )));
+    }
+    Ok(anchor)
 }
 
 pub(crate) async fn get(shared: &Shared, pr: &PrRef) -> Outcome {

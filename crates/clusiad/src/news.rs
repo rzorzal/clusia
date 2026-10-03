@@ -12,7 +12,7 @@ use clusia_protocol::{Event, NewsItem, NewsKind, Outcome, Reply, SyncState, topi
 use clusia_store::{list_reviews, read_activity};
 
 use crate::handlers::{no_token, provider_error};
-use crate::reviews::{announce, load_existing, load_stored, lock, record, save};
+use crate::reviews::{announce, files_for, load_existing, load_stored, lock, record, save};
 use crate::state::Shared;
 use crate::sync::{github_client, now_unix};
 use crate::{relocate, worktrees};
@@ -296,7 +296,7 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             let _serialized = shared.worktree_lock.lock().await;
             worktrees::checkout(shared, &pr, &detail).await
         };
-        let (info, _remote) = match checkout {
+        let (info, remote) = match checkout {
             Ok(x) => x,
             Err(e) => {
                 tracing::warn!(error = %e, pr = %pr, "cannot update the worktree of a saved review");
@@ -304,7 +304,29 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             }
         };
         let repo = PathBuf::from(&info.clone);
-        let report = relocate::relocate_review(&mut review, &detail, &repo).await;
+        relocate::refresh_base(&repo, &remote, &pr, &detail.base_ref).await;
+        let files = match files_for(shared, &pr, &detail.head_sha).await {
+            Ok(f) => Some(f),
+            Err(_) => {
+                tracing::warn!(pr = %pr, "cannot load the files of a saved review's pull request");
+                None
+            }
+        };
+        let head_changed = review.head_sha != detail.head_sha;
+        let report = relocate::relocate_review(
+            &mut review,
+            &detail,
+            &repo,
+            files.as_deref().map(Vec::as_slice),
+        )
+        .await;
+        if !head_changed && report.moved + report.obsolete == 0 {
+            // Only the base moved ahead: nothing for the reviewer to re-check.
+            if save(shared, &review).is_err() {
+                tracing::warn!(pr = %pr, "cannot save a review's new base");
+            }
+            continue;
+        }
         if let Err(e) = review.apply(ReviewEvent::NewHead, now_unix()) {
             tracing::warn!(error = %e, pr = %pr, "cannot mark a saved review outdated");
             continue;

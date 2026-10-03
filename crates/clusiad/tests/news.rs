@@ -69,7 +69,11 @@ async fn saved_review_goes_outdated_and_relocates() {
 
     let new_head = advance_pr(w.tmp.path(), 7, "feature.txt", "zero\none\ntwo\nthree\n");
     w.server.reset().await;
-    mount_pr(&w.server, &PrMock::new(&new_head, &w.base, &w.origin)).await;
+    mount_pr(
+        &w.server,
+        &PrMock::new(&new_head, &w.base, &w.origin).adding_feature("zero\none\ntwo\nthree\n"),
+    )
+    .await;
     // The check only runs while GitHub is reachable, so the PR lists must sync too.
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/search/issues"))
@@ -148,4 +152,97 @@ async fn retention_removes_orphans_and_keeps_live_reviews() {
     assert!(gone(d.paths.worktrees_dir().join("acme~widgets~2")).await);
     assert!(d.paths.worktree_for(&live).exists());
     d.stop().await;
+}
+
+#[tokio::test]
+async fn base_only_move_keeps_a_saved_review_saved() {
+    let w = world().await;
+    w.server.reset().await;
+    // GitHub also lists README.md so a left-side comment on it is valid.
+    let files = json!([
+        { "filename": "feature.txt", "status": "added", "additions": 3, "deletions": 0, "patch": "@@ -0,0 +1,3 @@\n+one\n+two\n+three" },
+        { "filename": "README.md", "status": "modified", "additions": 1, "deletions": 1, "patch": "@@ -1 +1 @@\n-hello\n+hello!" }
+    ]);
+    let mut mock = PrMock::new(&w.head, &w.base, &w.origin);
+    mock.files = files.clone();
+    mount_pr(&w.server, &mock).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    for (path, line, side) in [
+        ("feature.txt", 2, Side::Right),
+        ("README.md", 1, Side::Left),
+    ] {
+        c.request(Command::AddDraftItem {
+            pr: pr7(),
+            kind: DraftKind::LineComment,
+            anchor: Some(clusia_protocol::AnchorInput {
+                path: path.into(),
+                line,
+                start_line: None,
+                side,
+            }),
+            body: "x".into(),
+        })
+        .await
+        .unwrap();
+    }
+    c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
+
+    // Someone merges an unrelated change into main; the PR head stays the same.
+    let seed = w.tmp.path().join("seed");
+    common::git_fixture::sh(&seed, &["checkout", "-q", "main"]);
+    std::fs::write(seed.join("other.txt"), "unrelated\n").unwrap();
+    common::git_fixture::sh(&seed, &["add", "."]);
+    common::git_fixture::sh(&seed, &["commit", "-q", "-m", "unrelated"]);
+    common::git_fixture::sh(&seed, &["push", "-q", "origin", "main"]);
+    let new_base = common::git_fixture::sh(&seed, &["rev-parse", "HEAD"]);
+    common::git_fixture::sh(&seed, &["checkout", "-q", "feature"]);
+
+    let mut watcher = w.daemon.client().await;
+    watcher
+        .request(Command::Subscribe {
+            topics: vec![topics::REVIEWS.into()],
+        })
+        .await
+        .unwrap();
+    w.server.reset().await;
+    let mut mock = PrMock::new(&w.head, &new_base, &w.origin);
+    mock.files = files;
+    mount_pr(&w.server, &mock).await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/search/issues"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({ "total_count": 0, "items": [] })),
+        )
+        .mount(&w.server)
+        .await;
+    c.request(Command::SyncNow).await.unwrap();
+
+    match c.request(Command::GetReview { pr: pr7() }).await.unwrap() {
+        Reply::ReviewFile(r) => {
+            assert_eq!(r.state, ReviewState::Saved);
+            assert_eq!(r.base_sha, new_base);
+            assert_eq!(r.head_sha, w.head);
+            for item in &r.draft.items {
+                assert_eq!(item.status, ItemStatus::Ok, "{item:?}");
+            }
+        }
+        other => panic!("{other:?}"),
+    }
+    while let Ok(Ok((_, event))) =
+        tokio::time::timeout(Duration::from_millis(300), watcher.next_event()).await
+    {
+        assert!(
+            !matches!(event, Event::ReviewOutdated { .. }),
+            "unexpected {event:?}"
+        );
+    }
+    let (activity, _) = clusia_store::read_activity(&w.daemon.paths).unwrap();
+    assert!(
+        !activity
+            .iter()
+            .any(|a| a.kind == ActivityKind::ReviewOutdated)
+    );
+    w.daemon.stop().await;
 }

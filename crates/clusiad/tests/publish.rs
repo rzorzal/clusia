@@ -122,7 +122,11 @@ async fn publish_after_new_commits_conflicts() {
     comment_on_line_2(&mut c).await;
     let new_head = advance_pr(w.tmp.path(), 7, "feature.txt", "zero\none\ntwo\nthree\n");
     w.server.reset().await;
-    mount_pr(&w.server, &PrMock::new(&new_head, &w.base, &w.origin)).await;
+    mount_pr(
+        &w.server,
+        &PrMock::new(&new_head, &w.base, &w.origin).adding_feature("zero\none\ntwo\nthree\n"),
+    )
+    .await;
 
     assert_eq!(
         code(c.request(publish(Verdict::Comment, "")).await),

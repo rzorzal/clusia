@@ -2,6 +2,7 @@ mod common;
 
 use clusia_core::{DraftKind, ItemStatus, ReviewState, Side};
 use clusia_protocol::{AnchorInput, ClientError, Command, ErrorCode, Reply};
+use common::github_mock::{PrMock, mount_pr};
 use common::review_world::{open, pr7, world};
 
 fn code(r: Result<Reply, ClientError>) -> ErrorCode {
@@ -255,5 +256,38 @@ async fn read_error_is_not_reported_as_missing() {
         ErrorCode::Internal
     );
     assert!(file.is_dir());
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn range_spanning_two_hunks_is_rejected() {
+    let w = world().await;
+    w.server.reset().await;
+    let mut mock = PrMock::new(&w.head, &w.base, &w.origin);
+    mock.files = serde_json::json!([{
+        "filename": "feature.txt", "status": "modified", "additions": 2, "deletions": 2,
+        "patch": "@@ -1,2 +1,2 @@\n a\n-b\n+B\n@@ -10,2 +10,2 @@\n x\n-y\n+Y"
+    }]);
+    mount_pr(&w.server, &mock).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    let ranged = |start: u32, end: u32| {
+        Some(AnchorInput {
+            path: "feature.txt".into(),
+            line: end,
+            start_line: Some(start),
+            side: Side::Right,
+        })
+    };
+    c.request(add(ranged(1, 2), DraftKind::LineComment, "inside one hunk"))
+        .await
+        .unwrap();
+    assert_eq!(
+        code(
+            c.request(add(ranged(2, 10), DraftKind::LineComment, "spans the gap"))
+                .await
+        ),
+        ErrorCode::BadRequest
+    );
     w.daemon.stop().await;
 }

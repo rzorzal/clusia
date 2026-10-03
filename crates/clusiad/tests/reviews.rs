@@ -108,7 +108,11 @@ async fn reopen_relocates_comments_after_new_commits() {
     // The PR gains a line at the top.
     let new_head = advance_pr(w.tmp.path(), 7, "feature.txt", "zero\none\ntwo\nthree\n");
     w.server.reset().await;
-    mount_pr(&w.server, &PrMock::new(&new_head, &w.base, &w.origin)).await;
+    mount_pr(
+        &w.server,
+        &PrMock::new(&new_head, &w.base, &w.origin).adding_feature("zero\none\ntwo\nthree\n"),
+    )
+    .await;
 
     let view = open(&mut c).await;
     let item = &view.review.draft.items[0];
@@ -162,5 +166,101 @@ async fn unreadable_review_file_is_not_overwritten() {
         other => panic!("{other:?}"),
     }
     assert!(file.is_dir());
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn relocated_comment_outside_the_new_diff_is_obsolete() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    for line in [1, 3] {
+        c.request(Command::AddDraftItem {
+            pr: pr7(),
+            kind: clusia_core::DraftKind::LineComment,
+            anchor: Some(clusia_protocol::AnchorInput {
+                path: "feature.txt".into(),
+                line,
+                start_line: None,
+                side: clusia_core::Side::Right,
+            }),
+            body: format!("on {line}"),
+        })
+        .await
+        .unwrap();
+    }
+
+    // A line is added at the top; GitHub's diff now only covers lines 1-2 of the file.
+    let new_head = advance_pr(w.tmp.path(), 7, "feature.txt", "zero\none\ntwo\nthree\n");
+    w.server.reset().await;
+    let mut mock = PrMock::new(&new_head, &w.base, &w.origin);
+    mock.files = serde_json::json!([{
+        "filename": "feature.txt", "status": "added", "additions": 2, "deletions": 0,
+        "patch": "@@ -0,0 +1,2 @@\n+zero\n+one"
+    }]);
+    mount_pr(&w.server, &mock).await;
+
+    let view = open(&mut c).await;
+    let items = &view.review.draft.items;
+    assert_eq!(items[0].anchor.as_ref().unwrap().line, 2);
+    assert!(matches!(
+        items[0].status,
+        clusia_core::ItemStatus::Moved { .. }
+    ));
+    assert_eq!(
+        items[1].status,
+        clusia_core::ItemStatus::Obsolete {
+            reason: "no longer part of the pull request's diff".into()
+        }
+    );
+    let (activity, _) = clusia_store::read_activity(&w.daemon.paths).unwrap();
+    let outdated = activity
+        .iter()
+        .find(|a| a.kind == clusia_core::ActivityKind::ReviewOutdated)
+        .unwrap();
+    assert_eq!(outdated.note.as_deref(), Some("1 moved, 1 obsolete"));
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn left_comments_are_obsolete_when_the_base_cannot_be_fetched() {
+    let w = world().await;
+    w.server.reset().await;
+    let files = serde_json::json!([
+        { "filename": "feature.txt", "status": "added", "additions": 3, "deletions": 0, "patch": "@@ -0,0 +1,3 @@\n+one\n+two\n+three" },
+        { "filename": "README.md", "status": "modified", "additions": 1, "deletions": 1, "patch": "@@ -1 +1 @@\n-hello\n+hello!" }
+    ]);
+    let mut mock = PrMock::new(&w.head, &w.base, &w.origin);
+    mock.files = files.clone();
+    mount_pr(&w.server, &mock).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(Command::AddDraftItem {
+        pr: pr7(),
+        kind: clusia_core::DraftKind::LineComment,
+        anchor: Some(clusia_protocol::AnchorInput {
+            path: "README.md".into(),
+            line: 1,
+            start_line: None,
+            side: clusia_core::Side::Left,
+        }),
+        body: "why?".into(),
+    })
+    .await
+    .unwrap();
+
+    // The PR was retargeted to a branch the remote does not have (any more).
+    w.server.reset().await;
+    let mut mock = PrMock::new(&w.head, &"f".repeat(40), &w.origin);
+    mock.base_ref = "gone".into();
+    mock.files = files;
+    mount_pr(&w.server, &mock).await;
+    let view = open(&mut c).await;
+    assert_eq!(
+        view.review.draft.items[0].status,
+        clusia_core::ItemStatus::Obsolete {
+            reason: "cannot fetch the base branch".into()
+        }
+    );
     w.daemon.stop().await;
 }
