@@ -1,11 +1,12 @@
 //! State shared by every connection and the sync loop.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
-use clusia_core::{Config, Paths, PrSummary};
+use clusia_core::{Config, FileDiff, Paths, PrRef, PrSummary};
 use clusia_platform::SecretStore;
 use clusia_protocol::{Event, SyncStatus};
 use clusia_provider::GitHub;
@@ -18,6 +19,9 @@ pub(crate) struct PrLists {
     pub assigned: Vec<PrSummary>,
     pub mine: Vec<PrSummary>,
 }
+
+/// Head SHA and the parsed files fetched for it.
+pub(crate) type CachedFiles = (String, Arc<Vec<FileDiff>>);
 
 pub(crate) struct Shared {
     pub paths: Paths,
@@ -38,6 +42,12 @@ pub(crate) struct Shared {
     /// Reused while host and token are unchanged, so ETag caching survives between syncs.
     pub client: Mutex<Option<Arc<GitHub>>>,
     pub worktree_lock: Mutex<()>,
+    /// File keys of pull requests checked out since the daemon started; retention leaves them alone.
+    pub touched: std::sync::Mutex<HashSet<String>>,
+    /// One mutex per PR serialises review mutations.
+    pub review_locks: std::sync::Mutex<HashMap<PrRef, Arc<tokio::sync::Mutex<()>>>>,
+    /// Parsed files per PR, keyed by the head SHA they were fetched for.
+    pub files_cache: Mutex<HashMap<PrRef, CachedFiles>>,
     /// Held for the whole of a sync, so the loop, `SyncNow` and `ListPrs` never overlap.
     pub sync_lock: Mutex<()>,
     /// Becomes `true` once the first sync has finished (whatever its outcome).
@@ -66,9 +76,27 @@ impl Shared {
             sync_now: Notify::new(),
             client: Mutex::new(None),
             worktree_lock: Mutex::new(()),
+            touched: std::sync::Mutex::new(HashSet::new()),
+            review_locks: std::sync::Mutex::new(HashMap::new()),
+            files_cache: Mutex::new(HashMap::new()),
             sync_lock: Mutex::new(()),
             first_sync_done,
         }
+    }
+
+    /// Marks `pr`'s worktree as in use this session. Call before checking it out.
+    pub fn touch(&self, pr: &PrRef) {
+        self.touched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(pr.file_key());
+    }
+
+    pub fn is_touched(&self, key: &str) -> bool {
+        self.touched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(key)
     }
 
     pub fn trigger_shutdown(&self) {

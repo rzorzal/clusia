@@ -97,3 +97,22 @@ pub fn user_clone(origin: &Origin, dest: &Path, remote_url: &str) -> PathBuf {
     );
     dest.to_path_buf()
 }
+
+/// Commits `content` to `file` on the fixture's feature branch and force-pushes it as PR `number`'s head.
+pub fn advance_pr(root: &Path, number: u64, file: &str, content: &str) -> String {
+    let seed = root.join("seed");
+    std::fs::write(seed.join(file), content).unwrap();
+    sh(&seed, &["add", "."]);
+    sh(&seed, &["commit", "-q", "-m", "advance"]);
+    sh(
+        &seed,
+        &[
+            "push",
+            "-q",
+            "-f",
+            "origin",
+            &format!("feature:refs/pull/{number}/head"),
+        ],
+    );
+    sh(&seed, &["rev-parse", "HEAD"])
+}

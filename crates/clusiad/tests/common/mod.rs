@@ -1,6 +1,8 @@
 #![allow(dead_code)] // each test file uses a different subset
 
 pub mod git_fixture;
+pub mod github_mock;
+pub mod review_world;
 
 use std::path::PathBuf;
 use std::sync::Arc;

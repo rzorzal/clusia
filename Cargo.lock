@@ -212,12 +212,20 @@ dependencies = [
  "clap",
  "clusia-core",
  "clusia-protocol",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
  "toml",
  "wiremock",
+]
+
+[[package]]
+name = "clusia-analytics"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
 ]
 
 [[package]]
@@ -281,6 +289,7 @@ version = "0.1.0"
 dependencies = [
  "clusia-core",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "toml",
@@ -292,12 +301,14 @@ name = "clusiad"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clusia-analytics",
  "clusia-core",
  "clusia-git",
  "clusia-platform",
  "clusia-protocol",
  "clusia-provider",
  "clusia-store",
+ "libc",
  "serde_json",
  "tempfile",
  "thiserror",

@@ -178,6 +178,7 @@ pub(crate) async fn run_loop(shared: Arc<Shared>) {
             return;
         }
         let status = sync_once(&shared).await;
+        crate::news::check_saved_reviews(&shared).await;
         let wait = status
             .next_sync_unix
             .map_or(IDLE_RETRY_SECS, |at| (at - now_unix()).max(1) as u64);

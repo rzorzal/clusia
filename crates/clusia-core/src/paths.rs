@@ -33,7 +33,8 @@ impl Paths {
 
     fn resolve(clusia_home: Option<OsString>, home: Option<OsString>) -> Result<Self, PathsError> {
         if let Some(dir) = clusia_home.filter(|d| !d.is_empty()) {
-            return Ok(Self::new(dir));
+            let dir = PathBuf::from(dir);
+            return Ok(Self::new(std::path::absolute(&dir).unwrap_or(dir)));
         }
         let home = PathBuf::from(home.filter(|h| !h.is_empty()).ok_or(PathsError::NoHome)?);
         Ok(Self {
@@ -53,6 +54,18 @@ impl Paths {
     /// Where the worktree for `pr` lives.
     pub fn worktree_for(&self, pr: &crate::PrRef) -> PathBuf {
         self.worktrees_dir().join(pr.file_key())
+    }
+
+    pub fn reviews_dir(&self) -> PathBuf {
+        self.root.join("reviews")
+    }
+
+    pub fn review_file(&self, pr: &crate::PrRef) -> PathBuf {
+        self.reviews_dir().join(format!("{}.json", pr.file_key()))
+    }
+
+    pub fn activity_file(&self) -> PathBuf {
+        self.root.join("activity.jsonl")
     }
 
     pub fn root(&self) -> &Path {
@@ -134,7 +147,26 @@ mod tests {
         let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
         assert_eq!(
             p.worktree_for(&pr),
-            PathBuf::from("/tmp/c/worktrees/acme__widgets__7")
+            PathBuf::from("/tmp/c/worktrees/acme~widgets~7")
         );
+    }
+
+    #[test]
+    fn review_and_activity_files() {
+        let p = Paths::new("/tmp/c");
+        let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
+        assert_eq!(p.reviews_dir(), PathBuf::from("/tmp/c/reviews"));
+        assert_eq!(
+            p.review_file(&pr),
+            PathBuf::from("/tmp/c/reviews/acme~widgets~7.json")
+        );
+        assert_eq!(p.activity_file(), PathBuf::from("/tmp/c/activity.jsonl"));
+    }
+
+    #[test]
+    fn relative_clusia_home_is_made_absolute() {
+        let p = Paths::resolve(Some("rel/home".into()), Some("/Users/me".into())).unwrap();
+        assert!(p.root().is_absolute());
+        assert!(p.root().ends_with("rel/home"));
     }
 }

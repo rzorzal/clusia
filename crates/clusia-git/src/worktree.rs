@@ -14,6 +14,7 @@ pub fn pr_ref_name(number: u64) -> String {
 
 /// Fetches the PR head into `refs/clusia/pr-<n>` (never a branch) and returns its SHA.
 pub async fn fetch_pr(repo: &Path, remote: &str, number: u64) -> Result<String, GitError> {
+    crate::diff::reject_dash("remote", remote)?;
     let refname = pr_ref_name(number);
     let refspec = format!("+refs/pull/{number}/head:{refname}");
     // No FETCH_HEAD and no auto-gc/maintenance: the user's clone only gains the ref above.
@@ -96,7 +97,14 @@ async fn discard_worktree(repo: &Path, path: &Path) -> Result<(), GitError> {
             .is_ok(),
         None => false,
     };
-    if !removed && tokio::fs::try_exists(path).await? {
+    if removed {
+        // `worktree remove` already dropped the registration; pruning would also touch the
+        // user's own stale entries.
+        return Ok(());
+    }
+    // Fallback: the registration could not be removed, so delete the directory by hand and
+    // let git forget the now-missing worktree.
+    if tokio::fs::try_exists(path).await? {
         tokio::fs::remove_dir_all(path).await?;
     }
     if let Some(old) = &old_repo {
@@ -123,9 +131,11 @@ async fn exclude_clusia_dir(worktree: &Path) -> Result<(), GitError> {
     )
     .await?;
     let exclude = Path::new(&common).join("info/exclude");
-    let current = tokio::fs::read_to_string(&exclude)
-        .await
-        .unwrap_or_default();
+    let current = match tokio::fs::read_to_string(&exclude).await {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
     if current.lines().any(|l| l.trim() == ".clusia/") {
         return Ok(());
     }
@@ -141,12 +151,18 @@ async fn exclude_clusia_dir(worktree: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Removes Clúsia's worktree at `path` from `repo`. Never runs `git worktree prune`: that would
+/// also drop the user's own stale worktree entries. A registration whose directory is already
+/// gone is removed by path instead.
 pub async fn remove_worktree(repo: &Path, path: &Path) -> Result<(), GitError> {
+    let target = path.to_string_lossy();
     if path.exists() {
-        let target = path.to_string_lossy();
         git(repo, &["worktree", "remove", "--force", &target]).await?;
+    } else {
+        // Not registered at all is fine: there is nothing left to remove.
+        let _ = git(repo, &["worktree", "remove", "--force", &target]).await;
     }
-    git(repo, &["worktree", "prune"]).await.map(|_| ())
+    Ok(())
 }
 
 /// Blob-less clone used when the user has no local clone of the repository.
@@ -274,7 +290,7 @@ mod tests {
     async fn ensure_worktree_creates_detached_and_leaves_user_tree() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         assert!(wt.join("feature.txt").exists());
         assert_eq!(sh(&wt, &["rev-parse", "HEAD"]), sha);
@@ -292,7 +308,7 @@ mod tests {
     async fn ensure_worktree_moves_to_new_sha_and_keeps_clusia_dir() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         std::fs::create_dir_all(wt.join(".clusia")).unwrap();
         std::fs::write(wt.join(".clusia/review.md"), "notes\n").unwrap();
@@ -345,7 +361,7 @@ mod tests {
     async fn ensure_worktree_recreates_when_repo_changes() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         std::fs::create_dir_all(wt.join(".clusia")).unwrap();
         std::fs::write(wt.join(".clusia/review.md"), "notes\n").unwrap();
@@ -375,7 +391,7 @@ mod tests {
     async fn ensure_worktree_recovers_from_deleted_owner() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         std::fs::create_dir_all(wt.join(".clusia")).unwrap();
         std::fs::write(wt.join(".clusia/review.md"), "notes\n").unwrap();
@@ -399,12 +415,46 @@ mod tests {
     async fn remove_worktree_cleans_up() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         remove_worktree(&f.clone, &wt).await.unwrap();
         assert!(!wt.exists());
         assert_eq!(sh(&f.clone, &["worktree", "list"]).lines().count(), 1);
         remove_worktree(&f.clone, &wt).await.unwrap(); // idempotent
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_leaves_the_users_other_worktrees_alone() {
+        let f = fixture();
+        let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
+        // The user's own worktree whose directory they deleted: `git worktree prune` would drop it.
+        let theirs = f.root.join("their-wt");
+        sh(
+            &f.clone,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                theirs.to_str().unwrap(),
+            ],
+        );
+        std::fs::remove_dir_all(&theirs).unwrap();
+        let listed = |f: &Fixture| sh(&f.clone, &["worktree", "list"]);
+
+        let wt = f.root.join("worktrees/acme~widgets~1");
+        ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
+        remove_worktree(&f.clone, &wt).await.unwrap();
+        assert!(!wt.exists());
+        assert!(!listed(&f).contains("acme~widgets~1"), "{}", listed(&f));
+        assert!(listed(&f).contains("their-wt"), "{}", listed(&f));
+
+        // Our directory already gone (removed by hand): only our registration is dropped.
+        ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
+        std::fs::remove_dir_all(&wt).unwrap();
+        remove_worktree(&f.clone, &wt).await.unwrap();
+        assert!(!listed(&f).contains("acme~widgets~1"), "{}", listed(&f));
+        assert!(listed(&f).contains("their-wt"), "{}", listed(&f));
     }
 
     #[tokio::test]
@@ -423,6 +473,15 @@ mod tests {
         let f = fixture();
         assert!(matches!(
             fetch_pr(&f.clone, "origin", 99).await,
+            Err(GitError::Failed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn dash_remote_is_rejected_without_running_git() {
+        let f = fixture();
+        assert!(matches!(
+            fetch_pr(&f.clone, "--upload-pack=evil", 1).await,
             Err(GitError::Failed { .. })
         ));
     }

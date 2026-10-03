@@ -44,6 +44,16 @@ pub enum Command {
         /// `owner/repo#number` or a pull request URL.
         pr: String,
     },
+    /// Open a pull request for review: refresh, prepare the worktree, show what's new.
+    Open {
+        /// `owner/repo#number` or a pull request URL.
+        pr: String,
+    },
+    /// Work on a review's draft and publish it.
+    #[command(subcommand)]
+    Review(ReviewCommand),
+    /// Your review activity: heatmap and stats.
+    Activity,
 }
 
 #[derive(Debug, Subcommand)]
@@ -74,4 +84,49 @@ pub enum AuthCommand {
     Login,
     /// Remove the stored token.
     Logout,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReviewCommand {
+    /// List saved reviews, or show one review's draft.
+    Status { pr: Option<String> },
+    /// Add a line comment at `path:line` or `path:start-end`.
+    Comment {
+        pr: String,
+        location: String,
+        body: String,
+        /// Comment on the base side (removed lines).
+        #[arg(long)]
+        left: bool,
+    },
+    /// Add a general comment (it goes into the review body).
+    Note { pr: String, body: String },
+    /// Change a draft item's text.
+    Edit {
+        pr: String,
+        id: String,
+        body: String,
+    },
+    /// Remove a draft item.
+    Rm { pr: String, id: String },
+    /// Publish the draft as one GitHub review.
+    Publish {
+        pr: String,
+        #[arg(long, value_enum)]
+        verdict: VerdictArg,
+        #[arg(long, default_value = "")]
+        summary: String,
+    },
+    /// Leave the review (kept if it has comments).
+    Close { pr: String },
+    /// Throw the review away.
+    Discard { pr: String },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum VerdictArg {
+    Approve,
+    RequestChanges,
+    Comment,
+    Close,
 }

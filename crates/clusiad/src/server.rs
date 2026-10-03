@@ -101,6 +101,30 @@ impl Daemon {
         if self.shared.background_sync {
             tokio::spawn(sync::run_loop(self.shared.clone()));
         }
+        {
+            let shared = self.shared.clone();
+            let periodic = self.shared.background_sync;
+            tokio::spawn(async move {
+                let mut shutdown = shared.shutdown.subscribe();
+                loop {
+                    let removed = crate::retention::sweep(&shared).await;
+                    if removed > 0 {
+                        tracing::info!(removed, "removed stale worktrees");
+                    }
+                    if !periodic {
+                        return;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(crate::retention::SWEEP_EVERY) => {}
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+        }
         loop {
             if *shutdown.borrow_and_update() {
                 break;

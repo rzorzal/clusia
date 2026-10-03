@@ -1,10 +1,15 @@
 //! Local git repositories. Clúsia never changes the user's working tree or branches (spec §5.2).
 
+pub mod diff;
 pub mod discover;
 pub mod remote;
 pub mod run;
 pub mod worktree;
 
+pub use diff::{
+    base_pin_ref, diff_between, fetch_branch, is_object_id, merge_base, pin_commit,
+    repo_of_worktree, reviewed_ref, unpin,
+};
 pub use discover::{
     DISCOVERY_DEPTH, LocalClone, Remote, expand_root, find_clones, find_local_clone, remotes,
 };

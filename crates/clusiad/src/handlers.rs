@@ -10,11 +10,15 @@ use clusia_protocol::{
 use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
+use crate::activity;
+use crate::news;
+use crate::publish;
+use crate::reviews;
 use crate::state::Shared;
 use crate::sync;
 use crate::worktrees;
 
-pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
+pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outcome {
     match cmd {
         Command::DaemonStatus => Outcome::Ok(Reply::Status(DaemonStatus {
             version: crate::VERSION.to_string(),
@@ -40,7 +44,11 @@ pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
             };
             Outcome::Ok(Reply::Prs(list))
         }
-        Command::SyncNow => Outcome::Ok(Reply::Sync(sync::sync_once(shared).await)),
+        Command::SyncNow => {
+            let status = sync::sync_once(shared).await;
+            news::check_saved_reviews(shared).await;
+            Outcome::Ok(Reply::Sync(status))
+        }
         Command::GetSyncStatus => Outcome::Ok(Reply::Sync(shared.sync.read().await.clone())),
         Command::GetPr { pr } => match sync::github_client(shared).await {
             Ok(Some(gh)) => match gh.get_pr(&pr).await {
@@ -54,6 +62,31 @@ pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
         Command::SetToken { token } => set_token(shared, &token).await,
         Command::ClearToken => clear_token(shared).await,
         Command::PrepareWorktree { pr } => worktrees::prepare(shared, &pr).await,
+        Command::OpenReview { pr } => reviews::open(shared, client, &pr).await,
+        Command::GetReview { pr } => reviews::get(shared, &pr).await,
+        Command::AddDraftItem {
+            pr,
+            kind,
+            anchor,
+            body,
+        } => reviews::add_item(shared, client, &pr, kind, anchor, &body).await,
+        Command::UpdateDraftItem { pr, id, body } => {
+            reviews::update_item(shared, &pr, &id, &body).await
+        }
+        Command::RemoveDraftItem { pr, id } => reviews::remove_item(shared, &pr, &id).await,
+        Command::CloseReview { pr } => reviews::close(shared, client, &pr).await,
+        Command::DiscardReview { pr } => reviews::discard(shared, client, &pr).await,
+        Command::ListReviews => reviews::list(shared).await,
+        Command::GetDiff { pr } => reviews::diff(shared, &pr).await,
+        Command::GetConversation { pr } => reviews::conversation(shared, &pr).await,
+        Command::Publish {
+            pr,
+            verdict,
+            summary,
+        } => publish::publish(shared, client, &pr, verdict, &summary).await,
+        Command::GetWhatsNew { pr } => news::whats_new(shared, &pr).await,
+        Command::MarkSeen { pr } => news::mark_seen(shared, &pr).await,
+        Command::GetActivity => activity::summary(shared).await,
     }
 }
 
