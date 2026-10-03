@@ -288,7 +288,7 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
 
 /// Loads the stored review; `Ok(None)` when there is none (or it was quarantined).
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
-fn load_stored(shared: &Shared, pr: &PrRef) -> Result<Option<Review>, Outcome> {
+pub(crate) fn load_stored(shared: &Shared, pr: &PrRef) -> Result<Option<Review>, Outcome> {
     match load_review(&shared.paths, pr) {
         Ok(ReviewLoad::Found(r)) => Ok(Some(r)),
         Ok(ReviewLoad::Missing) => Ok(None),

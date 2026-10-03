@@ -2,9 +2,11 @@
 
 mod connection;
 mod handlers;
+mod news;
 mod options;
 mod publish;
 mod relocate;
+mod retention;
 mod reviews;
 mod server;
 mod state;

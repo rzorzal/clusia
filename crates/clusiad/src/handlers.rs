@@ -10,6 +10,7 @@ use clusia_protocol::{
 use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
+use crate::news;
 use crate::publish;
 use crate::reviews;
 use crate::state::Shared;
@@ -42,7 +43,11 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             };
             Outcome::Ok(Reply::Prs(list))
         }
-        Command::SyncNow => Outcome::Ok(Reply::Sync(sync::sync_once(shared).await)),
+        Command::SyncNow => {
+            let status = sync::sync_once(shared).await;
+            news::check_saved_reviews(shared).await;
+            Outcome::Ok(Reply::Sync(status))
+        }
         Command::GetSyncStatus => Outcome::Ok(Reply::Sync(shared.sync.read().await.clone())),
         Command::GetPr { pr } => match sync::github_client(shared).await {
             Ok(Some(gh)) => match gh.get_pr(&pr).await {
@@ -78,12 +83,12 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             verdict,
             summary,
         } => publish::publish(shared, client, &pr, verdict, &summary).await,
-        Command::GetWhatsNew { .. } | Command::MarkSeen { .. } | Command::GetActivity => {
-            Outcome::Err(ProtocolError::new(
-                ErrorCode::Internal,
-                "not implemented yet",
-            ))
-        }
+        Command::GetWhatsNew { pr } => news::whats_new(shared, &pr).await,
+        Command::MarkSeen { pr } => news::mark_seen(shared, &pr).await,
+        Command::GetActivity => Outcome::Err(ProtocolError::new(
+            ErrorCode::Internal,
+            "not implemented yet",
+        )),
     }
 }
 
