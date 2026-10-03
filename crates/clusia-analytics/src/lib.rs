@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use clusia_core::time::{day_number, format_day};
 use clusia_core::{Activity, ActivityKind, ActivitySummary, DayCount, PrRef};
 
-pub const HEATMAP_WEEKS: u32 = 16;
+/// About six months, filling the tray's full width (spec §7.3, user decision 2026-10-03).
+pub const HEATMAP_WEEKS: u32 = 26;
 
 pub fn heatmap(activities: &[Activity], now: i64, offset_secs: i64, weeks: u32) -> Vec<DayCount> {
     let today = day_number(now, offset_secs);

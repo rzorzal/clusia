@@ -391,4 +391,15 @@ mod tests {
             Err(ConfigKeyError::Unknown("nope.x".into()))
         );
     }
+
+    #[test]
+    fn list_preferences_round_trip_through_keys() {
+        let c = Config::default();
+        let c = set_value(&c, "lists.assigned_sort", "repository").unwrap();
+        assert_eq!(get_value(&c, "lists.assigned_sort").unwrap(), "repository");
+        let c = set_value(&c, "lists.filter", "auth refresh").unwrap();
+        assert_eq!(get_value(&c, "lists.filter").unwrap(), "auth refresh");
+        assert!(set_value(&c, "lists.saved_sort", "sideways").is_err());
+        assert!(set_value(&c, "lists.repository", "nope").is_err());
+    }
 }
