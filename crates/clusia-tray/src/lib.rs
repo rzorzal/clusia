@@ -2,4 +2,5 @@
 
 pub mod actions;
 pub mod heatmap;
+pub mod layout;
 pub mod model;
