@@ -249,6 +249,46 @@ fn decode<T: serde::de::DeserializeOwned>(body: serde_json::Value) -> Result<T, 
     serde_json::from_value(body).map_err(|e| ProviderError::Decode(e.to_string()))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedReview {
+    pub id: u64,
+    pub url: String,
+}
+
+#[derive(Deserialize)]
+struct RawPublished {
+    id: u64,
+    html_url: String,
+}
+
+/// `message` plus the details of `errors[]` (strings or `{ "message": … }` objects).
+fn error_message(body: &serde_json::Value) -> String {
+    let message = body
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    let details: Vec<String> = body
+        .get("errors")
+        .and_then(|e| e.as_array())
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|e| {
+                    e.as_str()
+                        .map(str::to_string)
+                        .or_else(|| e.get("message")?.as_str().map(str::to_string))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if details.is_empty() {
+        message
+    } else {
+        format!("{message}: {}", details.join("; "))
+    }
+}
+
 impl GitHub {
     pub fn new(api_base: &str, token: Token) -> Result<Self, ProviderError> {
         let http = reqwest::Client::builder()
@@ -303,6 +343,77 @@ impl GitHub {
             }
         }
         Ok(items)
+    }
+
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let response = self
+            .http
+            .request(method, format!("{}{}", self.api, path))
+            .bearer_auth(self.token.secret())
+            .header(header::ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Offline(e.to_string()))?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(ProviderError::Unauthorized);
+        }
+        if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
+            return Err(ProviderError::RateLimited { retry_after_secs });
+        }
+        let text = response
+            .text()
+            .await
+            .map_err(|e| ProviderError::Offline(e.to_string()))?;
+        if status == StatusCode::NOT_FOUND {
+            return Err(ProviderError::NotFound(path.to_string()));
+        }
+        let parsed = if text.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)
+        };
+        if !status.is_success() {
+            return Err(ProviderError::Http {
+                status: status.as_u16(),
+                message: error_message(&parsed),
+            });
+        }
+        Ok(parsed)
+    }
+
+    pub async fn create_review(
+        &self,
+        pr: &PrRef,
+        payload: &clusia_core::ReviewPayload,
+    ) -> Result<PublishedReview, ProviderError> {
+        let body =
+            serde_json::to_value(payload).map_err(|e| ProviderError::Decode(e.to_string()))?;
+        let path = format!("{}/pulls/{}/reviews", Self::repo_path(pr), pr.number);
+        let raw: RawPublished = decode(self.send(reqwest::Method::POST, &path, &body).await?)?;
+        Ok(PublishedReview {
+            id: raw.id,
+            url: raw.html_url,
+        })
+    }
+
+    pub async fn close_pr(&self, pr: &PrRef) -> Result<(), ProviderError> {
+        let path = format!("{}/pulls/{}", Self::repo_path(pr), pr.number);
+        self.send(
+            reqwest::Method::PATCH,
+            &path,
+            &serde_json::json!({ "state": "closed" }),
+        )
+        .await
+        .map(|_| ())
     }
 
     fn repo_path(pr: &PrRef) -> String {
@@ -1124,5 +1235,96 @@ mod tests {
         let files = gh(&server).get_files(&pr7()).await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    fn payload() -> clusia_core::ReviewPayload {
+        clusia_core::ReviewPayload {
+            commit_id: "h1".into(),
+            event: "REQUEST_CHANGES".into(),
+            body: "Please fix".into(),
+            comments: vec![clusia_core::ReviewComment {
+                path: "a.rs".into(),
+                body: "nit".into(),
+                line: 3,
+                side: "RIGHT".into(),
+                start_line: None,
+                start_side: None,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn create_review_posts_the_payload() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/acme/widgets/pulls/7/reviews"))
+            .and(h("authorization", "Bearer tok123"))
+            .and(wiremock::matchers::body_json(json!({
+                "commit_id": "h1", "event": "REQUEST_CHANGES", "body": "Please fix",
+                "comments": [{ "path": "a.rs", "body": "nit", "line": 3, "side": "RIGHT" }]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": 42, "html_url": "https://github.com/acme/widgets/pull/7#pullrequestreview-42" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let published = gh(&server).create_review(&pr7(), &payload()).await.unwrap();
+        assert_eq!(
+            published,
+            PublishedReview {
+                id: 42,
+                url: "https://github.com/acme/widgets/pull/7#pullrequestreview-42".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_errors_carry_github_details() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+                "message": "Unprocessable Entity",
+                "errors": ["Line could not be resolved", { "message": "pull_request_review_thread.line must be part of the diff" }]
+            })))
+            .mount(&server)
+            .await;
+        match gh(&server).create_review(&pr7(), &payload()).await {
+            Err(ProviderError::Http {
+                status: 422,
+                message,
+            }) => {
+                assert!(message.starts_with("Unprocessable Entity: "), "{message}");
+                assert!(
+                    message.contains("Line could not be resolved; pull_request_review_thread.line"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected 422, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn close_pr_patches_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/acme/widgets/pulls/7"))
+            .and(wiremock::matchers::body_json(json!({ "state": "closed" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "state": "closed" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        gh(&server).close_pr(&pr7()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn writes_map_unauthorized() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            gh(&server).close_pr(&pr7()).await,
+            Err(ProviderError::Unauthorized)
+        );
     }
 }
