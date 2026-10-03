@@ -106,7 +106,11 @@ fn deliver(update: Update) {
                 ui.model.write_failed(&key);
             }
         }),
-        Update::Quit(reason) => {
+        Update::Quit {
+            reason,
+            failure: true,
+        } => fail(&reason),
+        Update::Quit { reason, .. } => {
             tracing::info!(%reason, "exiting");
             NSApplication::sharedApplication(mtm).terminate(None);
         }

@@ -18,8 +18,12 @@ pub enum Update {
     Snapshot(Box<Snapshot>),
     /// The daemon rejected a config write for this key.
     WriteFailed(String),
-    /// The tray must exit (the daemon is gone or unreachable).
-    Quit(String),
+    /// The tray must exit. `failure` asks for a non-zero status, so the daemon's supervisor
+    /// restarts the tray; a clean exit means the daemon (or the UI) is gone.
+    Quit {
+        reason: String,
+        failure: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -27,6 +31,9 @@ struct Refresh {
     lists: bool,
     reviews: bool,
     activity: bool,
+    /// A `lists.*` config event arrived: the UI hears about it even when nothing changed,
+    /// so a write echoed back to the last snapshot's value still clears its pending state.
+    preferences: bool,
 }
 
 impl Refresh {
@@ -34,6 +41,7 @@ impl Refresh {
         self.lists |= other.lists;
         self.reviews |= other.reviews;
         self.activity |= other.activity;
+        self.preferences |= other.preferences;
     }
 }
 
@@ -57,10 +65,12 @@ fn refresh_for(event: Event, snap: &mut Snapshot) -> Refresh {
             ..Refresh::default()
         },
         Event::ConfigChanged { key, value } => {
-            // Only `lists.*` keys touch the snapshot; the comparison with the last one
-            // sent decides whether the UI hears about it.
+            // Only `lists.*` keys touch the snapshot.
             snap.lists.apply(&key, &value);
-            Refresh::default()
+            Refresh {
+                preferences: key.starts_with("lists."),
+                ..Refresh::default()
+            }
         }
         _ => Refresh::default(),
     }
@@ -69,36 +79,77 @@ fn refresh_for(event: Event, snap: &mut Snapshot) -> Refresh {
 /// Config writes queued by the UI: `(key, value)`, sent as `SetConfigValue`.
 pub type Writes = UnboundedReceiver<(String, String)>;
 
+/// Why a session ended.
+struct Stop {
+    reason: String,
+    /// Anything but "the daemon (or the UI) is gone": the supervisor should restart the tray.
+    failure: bool,
+}
+
+impl Stop {
+    fn clean(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            failure: false,
+        }
+    }
+
+    fn failure(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            failure: true,
+        }
+    }
+}
+
+const DAEMON_GONE: &str = "clusiad closed the connection";
+
+/// A closed connection means the daemon is gone; every other error is a failure.
+fn stop_for(e: ClientError) -> Stop {
+    match e {
+        ClientError::Closed => Stop::clean(DAEMON_GONE),
+        e => Stop::failure(e.to_string()),
+    }
+}
+
 /// Runs until the daemon goes away (or the UI drops `writes`), then sends `Update::Quit`
 /// (always the last update).
 pub async fn run(socket: PathBuf, send: impl Fn(Update) + Send + Sync + 'static, writes: Writes) {
-    let reason = match session(&socket, &send, writes).await {
-        Ok(()) => "clusiad closed the connection".to_string(),
-        Err(e) => e,
+    let stop = match session(&socket, &send, writes).await {
+        Ok(()) => Stop::clean(DAEMON_GONE),
+        Err(stop) => stop,
     };
-    send(Update::Quit(reason));
+    send(Update::Quit {
+        reason: stop.reason,
+        failure: stop.failure,
+    });
 }
 
 async fn session(
     socket: &std::path::Path,
     send: &(impl Fn(Update) + Sync),
     mut writes: Writes,
-) -> Result<(), String> {
-    let mut client = Client::connect(socket, CLIENT_NAME)
-        .await
-        .map_err(|e| format!("cannot reach clusiad: {e}"))?;
-    request(
-        &mut client,
-        Command::Subscribe {
+) -> Result<(), Stop> {
+    let mut client = Client::connect(socket, CLIENT_NAME).await.map_err(|e| {
+        let reason = format!("cannot reach clusiad: {e}");
+        match e {
+            // No daemon: the tray never starts one, so it just leaves.
+            ClientError::NotRunning(_) | ClientError::Closed => Stop::clean(reason),
+            _ => Stop::failure(reason),
+        }
+    })?;
+    // Without the subscription the tray would never refresh: any error ends the session.
+    client
+        .request(Command::Subscribe {
             topics: vec![
                 topics::PRS.into(),
                 topics::SYNC.into(),
                 topics::REVIEWS.into(),
                 topics::CONFIG.into(),
             ],
-        },
-    )
-    .await?;
+        })
+        .await
+        .map_err(stop_for)?;
     let mut snap = Snapshot::default();
     if let Reply::Config(config) = request(&mut client, Command::GetConfig).await? {
         snap.host = config.github.host;
@@ -134,12 +185,11 @@ async fn session(
         let mut todo = tokio::select! {
             event = client.next_event() => match event {
                 Ok((_, event)) => refresh_for(event, &mut snap),
-                Err(ClientError::Closed) => return Ok(()),
-                Err(e) => return Err(e.to_string()),
+                Err(e) => return Err(stop_for(e)),
             },
             write = writes.recv() => {
                 let Some((key, value)) = write else {
-                    return Err("the tray UI is gone".into());
+                    return Err(Stop::clean("the tray UI is gone"));
                 };
                 write_config(&mut client, send, key, value).await?;
                 continue;
@@ -149,42 +199,43 @@ async fn session(
         loop {
             match tokio::time::timeout_at(deadline, client.next_event()).await {
                 Ok(Ok((_, event))) => todo.merge(refresh_for(event, &mut snap)),
-                Ok(Err(ClientError::Closed)) => return Ok(()),
-                Ok(Err(e)) => return Err(e.to_string()),
+                Ok(Err(e)) => return Err(stop_for(e)),
                 Err(_) => break,
             }
         }
         fetch(&mut client, &mut snap, todo).await?;
-        if snap != last {
+        if snap != last || todo.preferences {
             send(Update::Snapshot(Box::new(snap.clone())));
             last = snap.clone();
         }
     }
 }
 
-async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Result<(), String> {
+async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Result<(), Stop> {
     if what.lists {
-        if let Reply::Prs(prs) = request(
+        let assigned = request(
             client,
             Command::ListPrs {
                 filter: PrFilter::Assigned,
             },
         )
-        .await?
-        {
-            snap.assigned = prs;
-        }
-        if let Reply::Prs(prs) = request(
+        .await?;
+        let mine = request(
             client,
             Command::ListPrs {
                 filter: PrFilter::Mine,
             },
         )
-        .await?
-        {
+        .await?;
+        let both = matches!((&assigned, &mine), (Reply::Prs(_), Reply::Prs(_)));
+        if let Reply::Prs(prs) = assigned {
+            snap.assigned = prs;
+        }
+        if let Reply::Prs(prs) = mine {
             snap.mine = prs;
         }
-        snap.lists_loaded = true;
+        // Loaded only once both lists really arrived.
+        snap.lists_loaded |= both;
     }
     if what.reviews
         && let Reply::Reviews(reviews) = request(client, Command::ListReviews).await?
@@ -205,7 +256,7 @@ async fn write_config(
     send: &(impl Fn(Update) + Sync),
     key: String,
     value: String,
-) -> Result<(), String> {
+) -> Result<(), Stop> {
     match client
         .request(Command::SetConfigValue {
             key: key.clone(),
@@ -219,20 +270,18 @@ async fn write_config(
             send(Update::WriteFailed(key));
             Ok(())
         }
-        Err(ClientError::Closed) => Err("clusiad closed the connection".into()),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(stop_for(e)),
     }
 }
 
 /// A daemon-side error (e.g. one list failing) is logged and skipped; a broken connection ends the session.
-async fn request(client: &mut Client, cmd: Command) -> Result<Reply, String> {
+async fn request(client: &mut Client, cmd: Command) -> Result<Reply, Stop> {
     match client.request(cmd).await {
         Ok(reply) => Ok(reply),
         Err(ClientError::Server(e)) => {
             tracing::warn!(error = %e.message, "daemon request failed");
             Ok(Reply::Ack)
         }
-        Err(ClientError::Closed) => Err("clusiad closed the connection".into()),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(stop_for(e)),
     }
 }
