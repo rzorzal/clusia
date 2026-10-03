@@ -23,7 +23,7 @@ fn renders_the_demo_popover_in_both_appearances() {
         let (w, h) = png_size(&std::fs::read(&out).unwrap());
         assert!(w == 360 || w == 720, "width {w} (1x or 2x of 360 pt)");
         let scale = w / 360;
-        assert!(h >= 400 * scale && h <= 700 * scale, "height {h}");
+        assert!(h >= 400 * scale && h <= 720 * scale, "height {h}");
     }
 }
 

@@ -45,6 +45,21 @@ pub fn demo(now: i64) -> Vec<Snapshot> {
                 false,
             ),
             pr("blog", 36, "Write the M3 post", now - 3 * 86_400, true),
+            pr(
+                "site",
+                12,
+                "Dark mode for the docs",
+                now - 4 * 86_400,
+                false,
+            ),
+            pr(
+                "clusia",
+                91,
+                "refactor: split the protocol codec",
+                now - 6 * 86_400,
+                false,
+            ),
+            pr("blog", 30, "Fix broken RSS links", now - 9 * 86_400, false),
         ],
         mine: vec![pr(
             "clusia",
@@ -78,7 +93,7 @@ pub fn demo(now: i64) -> Vec<Snapshot> {
             },
         ],
         activity: Some(ActivitySummary {
-            heatmap: (0..112)
+            heatmap: (0..182)
                 .map(|i: u32| DayCount {
                     date: String::new(),
                     count: (i * 7 + i / 5) % 6 * u32::from(i % 7 < 5),
@@ -96,7 +111,10 @@ pub fn demo(now: i64) -> Vec<Snapshot> {
         }),
         host: "github.com".into(),
         lists_loaded: true,
-        lists: Lists::default(),
+        lists: Lists {
+            filter: String::new(),
+            ..Lists::default()
+        },
     };
     let mut second = first.clone();
     second.assigned[0].updated_at = rfc3339(now - 300);

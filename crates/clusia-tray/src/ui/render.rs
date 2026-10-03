@@ -9,15 +9,19 @@ use objc2_app_kit::{
 };
 use objc2_foundation::NSDictionary;
 
-use crate::layout::Layout;
+use crate::layout::{Layout, search_placeholder};
 use crate::ui::paint::ContentView;
 
 pub fn render_png(
     mtm: MainThreadMarker,
-    layout: Layout,
+    mut layout: Layout,
     dark: bool,
     out: &Path,
 ) -> Result<(), String> {
+    // No native search field offscreen: paint its placeholder in the reserved row.
+    if let Some(r) = layout.search {
+        layout.shapes.extend(search_placeholder(r));
+    }
     let view = ContentView::new(mtm, true);
     view.set_layout(layout);
     // SAFETY: the appearance names are immutable NSString statics.

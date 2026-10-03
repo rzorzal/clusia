@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use clusia_core::{PrFilter, ReviewState};
 use clusia_protocol::{Client, ClientError, Command, Event, Reply, topics};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::model::Snapshot;
 
@@ -15,6 +16,8 @@ pub const COALESCE: Duration = Duration::from_millis(200);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     Snapshot(Box<Snapshot>),
+    /// The daemon rejected a config write for this key.
+    WriteFailed(String),
     /// The tray must exit (the daemon is gone or unreachable).
     Quit(String),
 }
@@ -53,20 +56,34 @@ fn refresh_for(event: Event, snap: &mut Snapshot) -> Refresh {
             reviews: true,
             ..Refresh::default()
         },
+        Event::ConfigChanged { key, value } => {
+            // Only `lists.*` keys touch the snapshot; the comparison with the last one
+            // sent decides whether the UI hears about it.
+            snap.lists.apply(&key, &value);
+            Refresh::default()
+        }
         _ => Refresh::default(),
     }
 }
 
-/// Runs until the daemon goes away, then sends `Update::Quit` (always the last update).
-pub async fn run(socket: PathBuf, send: impl Fn(Update) + Send + Sync + 'static) {
-    let reason = match session(&socket, &send).await {
+/// Config writes queued by the UI: `(key, value)`, sent as `SetConfigValue`.
+pub type Writes = UnboundedReceiver<(String, String)>;
+
+/// Runs until the daemon goes away (or the UI drops `writes`), then sends `Update::Quit`
+/// (always the last update).
+pub async fn run(socket: PathBuf, send: impl Fn(Update) + Send + Sync + 'static, writes: Writes) {
+    let reason = match session(&socket, &send, writes).await {
         Ok(()) => "clusiad closed the connection".to_string(),
         Err(e) => e,
     };
     send(Update::Quit(reason));
 }
 
-async fn session(socket: &std::path::Path, send: &(impl Fn(Update) + Sync)) -> Result<(), String> {
+async fn session(
+    socket: &std::path::Path,
+    send: &(impl Fn(Update) + Sync),
+    mut writes: Writes,
+) -> Result<(), String> {
     let mut client = Client::connect(socket, CLIENT_NAME)
         .await
         .map_err(|e| format!("cannot reach clusiad: {e}"))?;
@@ -77,6 +94,7 @@ async fn session(socket: &std::path::Path, send: &(impl Fn(Update) + Sync)) -> R
                 topics::PRS.into(),
                 topics::SYNC.into(),
                 topics::REVIEWS.into(),
+                topics::CONFIG.into(),
             ],
         },
     )
@@ -84,6 +102,7 @@ async fn session(socket: &std::path::Path, send: &(impl Fn(Update) + Sync)) -> R
     let mut snap = Snapshot::default();
     if let Reply::Config(config) = request(&mut client, Command::GetConfig).await? {
         snap.host = config.github.host;
+        snap.lists = config.lists;
     }
     fetch(
         &mut client,
@@ -112,10 +131,19 @@ async fn session(socket: &std::path::Path, send: &(impl Fn(Update) + Sync)) -> R
     send(Update::Snapshot(Box::new(snap.clone())));
     let mut last = snap.clone();
     loop {
-        let mut todo = match client.next_event().await {
-            Ok((_, event)) => refresh_for(event, &mut snap),
-            Err(ClientError::Closed) => return Ok(()),
-            Err(e) => return Err(e.to_string()),
+        let mut todo = tokio::select! {
+            event = client.next_event() => match event {
+                Ok((_, event)) => refresh_for(event, &mut snap),
+                Err(ClientError::Closed) => return Ok(()),
+                Err(e) => return Err(e.to_string()),
+            },
+            write = writes.recv() => {
+                let Some((key, value)) = write else {
+                    return Err("the tray UI is gone".into());
+                };
+                write_config(&mut client, send, key, value).await?;
+                continue;
+            }
         };
         let deadline = tokio::time::Instant::now() + COALESCE;
         loop {
@@ -169,6 +197,31 @@ async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Resul
         snap.activity = Some(activity);
     }
     Ok(())
+}
+
+/// Sends one config write; a rejected value is reported to the UI and the session goes on.
+async fn write_config(
+    client: &mut Client,
+    send: &(impl Fn(Update) + Sync),
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    match client
+        .request(Command::SetConfigValue {
+            key: key.clone(),
+            value,
+        })
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(ClientError::Server(e)) => {
+            tracing::warn!(%key, error = %e.message, "config write rejected");
+            send(Update::WriteFailed(key));
+            Ok(())
+        }
+        Err(ClientError::Closed) => Err("clusiad closed the connection".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// A daemon-side error (e.g. one list failing) is logged and skipped; a broken connection ends the session.

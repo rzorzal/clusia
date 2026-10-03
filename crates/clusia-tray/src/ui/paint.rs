@@ -159,9 +159,10 @@ fn font(style: Style) -> Retained<NSFont> {
         Style::Body => NSFont::systemFontOfSize_weight(13.0, regular),
         Style::Number => NSFont::monospacedDigitSystemFontOfSize_weight(12.0, regular),
         Style::Meta | Style::CounterLabel => NSFont::systemFontOfSize_weight(11.0, regular),
-        Style::CounterValue => NSFont::monospacedDigitSystemFontOfSize_weight(22.0, semibold),
+        Style::CounterValue => NSFont::monospacedDigitSystemFontOfSize_weight(20.0, semibold),
         Style::Badge => NSFont::systemFontOfSize_weight(10.0, semibold),
-        Style::Glyph => NSFont::systemFontOfSize_weight(14.0, regular),
+        Style::Glyph => NSFont::systemFontOfSize_weight(18.0, regular),
+        Style::Chevron => NSFont::systemFontOfSize_weight(13.0, regular),
     }
 }
 
@@ -170,7 +171,7 @@ fn draw_text(r: Rect, text: &str, style: Style, ink: Ink, right: bool) {
     para.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     para.setAlignment(if right {
         NSTextAlignment::Right
-    } else if style == Style::Badge {
+    } else if matches!(style, Style::Badge | Style::Glyph | Style::Chevron) {
         NSTextAlignment::Center
     } else {
         NSTextAlignment::Left

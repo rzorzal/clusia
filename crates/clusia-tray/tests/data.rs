@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use clusia_core::{ActivitySummary, Config, PrFilter, PrRef, PrSummary, ReviewState};
 use clusia_protocol::{
-    ClientMessage, Command, Event, MessageReader, Outcome, PROTOCOL_VERSION, Reply, ServerMessage,
-    SyncState, SyncStatus, write_message,
+    ClientMessage, Command, ErrorCode, Event, MessageReader, Outcome, PROTOCOL_VERSION,
+    ProtocolError, Reply, ServerMessage, SyncState, SyncStatus, write_message,
 };
 use clusia_tray::data::{self, Update};
 use tokio::net::UnixListener;
@@ -73,11 +73,12 @@ fn online() -> SyncStatus {
     }
 }
 
-fn reply(cmd: &Command) -> Reply {
-    match cmd {
+fn reply(cmd: &Command) -> Outcome {
+    Outcome::Ok(match cmd {
         Command::GetConfig => {
             let mut c = Config::default();
             c.github.host = "ghe.example.com".into();
+            c.lists.saved_sort = clusia_core::ListSort::Repository;
             Reply::Config(c)
         }
         Command::ListPrs {
@@ -92,8 +93,15 @@ fn reply(cmd: &Command) -> Reply {
             avg_review_secs: None,
         }),
         Command::GetSyncStatus => Reply::Sync(online()),
+        Command::SetConfigValue { value, .. } if value == "bogus" => {
+            return Outcome::Err(ProtocolError::new(
+                ErrorCode::InvalidConfigValue,
+                "not a list sort",
+            ));
+        }
+        Command::SetConfigValue { value, .. } => Reply::Value(value.clone()),
         _ => Reply::Ack,
-    }
+    })
 }
 
 fn fake() -> Fake {
@@ -122,7 +130,10 @@ fn fake() -> Fake {
                 msg = reader.next::<ClientMessage>() => {
                     let Ok(Some(ClientMessage::Request { id, cmd })) = msg else { return };
                     seen.lock().unwrap().push(name(&cmd));
-                    let response = ServerMessage::Response { id, result: Outcome::Ok(reply(&cmd)) };
+                    if let Command::Subscribe { topics } = &cmd {
+                        seen.lock().unwrap().push(format!("topics:{}", topics.join(",")));
+                    }
+                    let response = ServerMessage::Response { id, result: reply(&cmd) };
                     if write_message(&mut w, &response).await.is_err() { return; }
                 }
                 p = rx.recv() => match p {
@@ -143,12 +154,19 @@ fn fake() -> Fake {
     }
 }
 
-fn start(socket: PathBuf) -> Receiver<Update> {
+type Writes = mpsc::UnboundedSender<(String, String)>;
+
+fn start(socket: PathBuf) -> (Receiver<Update>, Writes) {
     let (tx, rx) = std::sync::mpsc::channel();
-    tokio::spawn(data::run(socket, move |u| {
-        let _ = tx.send(u);
-    }));
-    rx
+    let (writes, queue) = mpsc::unbounded_channel();
+    tokio::spawn(data::run(
+        socket,
+        move |u| {
+            let _ = tx.send(u);
+        },
+        queue,
+    ));
+    (rx, writes)
 }
 
 fn next(rx: &Receiver<Update>) -> Update {
@@ -165,9 +183,10 @@ fn snapshot(rx: &Receiver<Update>) -> clusia_tray::model::Snapshot {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshots_then_quit_when_the_daemon_hangs_up() {
     let fake = fake();
-    let rx = start(fake.socket.clone());
+    let (rx, _writes) = start(fake.socket.clone());
     let early = snapshot(&rx);
     assert_eq!(early.host, "ghe.example.com");
+    assert_eq!(early.lists.saved_sort, clusia_core::ListSort::Repository);
     assert!(
         !early.lists_loaded,
         "lists come second: ListPrs waits for the first sync"
@@ -181,6 +200,7 @@ async fn snapshots_then_quit_when_the_daemon_hangs_up() {
         fake.requests(),
         [
             "Subscribe",
+            "topics:prs,sync,reviews,config",
             "GetConfig",
             "ListReviews",
             "GetActivity",
@@ -199,7 +219,7 @@ async fn snapshots_then_quit_when_the_daemon_hangs_up() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unreachable_daemon_quits_at_once() {
     let dir = tempfile::tempdir().unwrap();
-    let rx = start(dir.path().join("missing.sock"));
+    let (rx, _writes) = start(dir.path().join("missing.sock"));
     match next(&rx) {
         Update::Quit(reason) => assert!(reason.starts_with("cannot reach clusiad"), "{reason}"),
         other => panic!("expected Quit, got {other:?}"),
@@ -209,7 +229,7 @@ async fn unreachable_daemon_quits_at_once() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn event_burst_is_one_refresh() {
     let fake = fake();
-    let rx = start(fake.socket.clone());
+    let (rx, _writes) = start(fake.socket.clone());
     snapshot(&rx);
     snapshot(&rx);
     fake.clear();
@@ -235,7 +255,7 @@ async fn event_burst_is_one_refresh() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn published_review_refreshes_activity_and_sync_changes_need_no_request() {
     let fake = fake();
-    let rx = start(fake.socket.clone());
+    let (rx, _writes) = start(fake.socket.clone());
     snapshot(&rx);
     snapshot(&rx);
     fake.clear();
@@ -261,4 +281,67 @@ async fn published_review_refreshes_activity_and_sync_changes_need_no_request() 
     fake.event("sync", Event::SyncChanged(offline.clone()));
     assert_eq!(snapshot(&rx).sync, Some(offline));
     assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn writes_become_config_sets_and_config_events_update_lists() {
+    let fake = fake();
+    let (rx, writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    fake.clear();
+    writes
+        .send(("lists.assigned_sort".into(), "oldest".into()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake.requests(), ["SetConfigValue"]);
+    fake.event(
+        "config",
+        Event::ConfigChanged {
+            key: "lists.assigned_sort".into(),
+            value: "oldest".into(),
+        },
+    );
+    let s = snapshot(&rx);
+    assert_eq!(s.lists.assigned_sort, clusia_core::ListSort::Oldest);
+    fake.event(
+        "config",
+        Event::ConfigChanged {
+            key: "github.poll_interval_secs".into(),
+            value: "90".into(),
+        },
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "unrelated config keys don't produce snapshots"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_write_is_reported_and_the_session_goes_on() {
+    let fake = fake();
+    let (rx, writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    writes
+        .send(("lists.assigned_sort".into(), "bogus".into()))
+        .unwrap();
+    assert_eq!(next(&rx), Update::WriteFailed("lists.assigned_sort".into()));
+    let offline = SyncStatus {
+        state: SyncState::Offline,
+        ..online()
+    };
+    fake.event("sync", Event::SyncChanged(offline.clone()));
+    assert_eq!(snapshot(&rx).sync, Some(offline));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_writes_channel_ends_the_session() {
+    let fake = fake();
+    let (rx, writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    drop(writes);
+    assert!(matches!(next(&rx), Update::Quit(_)));
 }

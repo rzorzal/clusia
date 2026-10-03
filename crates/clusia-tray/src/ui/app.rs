@@ -13,16 +13,18 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSPopover,
-    NSPopoverBehavior, NSPopoverDelegate, NSStatusBar, NSStatusItem, NSViewController,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSPopoverBehavior, NSPopoverDelegate, NSSearchField, NSStatusBar, NSStatusItem,
+    NSViewController, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+    NSVisualEffectView,
 };
 use objc2_foundation::{
-    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRectEdge, NSSize,
+    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRectEdge, NSSize, NSString,
 };
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::actions;
 use crate::data::{self, Update};
-use crate::layout::{WIDTH, layout};
+use crate::layout::{SEARCH_PLACEHOLDER, WIDTH, layout};
 use crate::model::TrayModel;
 use crate::ui::icon;
 use crate::ui::paint::ContentView;
@@ -32,6 +34,9 @@ struct Ui {
     item: Retained<NSStatusItem>,
     popover: Retained<NSPopover>,
     content: Retained<ContentView>,
+    search: Retained<NSSearchField>,
+    /// Config writes for the data loop (sent to the daemon as `SetConfigValue`).
+    writes: UnboundedSender<(String, String)>,
     paths: Paths,
     app_bin: Option<PathBuf>,
 }
@@ -48,16 +53,38 @@ fn now() -> i64 {
 }
 
 impl Ui {
-    /// Re-lays out the popover and updates the icon's dot.
+    /// Re-lays out the popover, places the search field and updates the icon's dot.
     fn render(&self, mtm: MainThreadMarker) {
         let view = self.model.view(now());
         let l = layout(&view);
         let size = NSSize::new(WIDTH, l.height);
+        let search = l.search;
         self.content.set_layout(l);
+        match search {
+            Some(r) => {
+                self.search
+                    .setFrame(NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.w, r.h)));
+                self.search.setHidden(false);
+            }
+            None => self.search.setHidden(true),
+        }
+        // Never overwrite what the user is typing.
+        if self.search.currentEditor().is_none() {
+            self.search.setStringValue(&NSString::from_str(&view.query));
+        }
         self.content.setFrameOrigin(NSPoint::new(0.0, 0.0));
         self.popover.setContentSize(size);
         if let Some(button) = self.item.button(mtm) {
             button.setImage(Some(&icon::status_image(view.has_news)));
+        }
+    }
+
+    /// Hands the model's queued config writes to the data loop.
+    fn push_writes(&mut self) {
+        for write in self.model.take_writes() {
+            if self.writes.send(write).is_err() {
+                tracing::warn!("the data loop is gone; dropping a config write");
+            }
         }
     }
 }
@@ -72,6 +99,11 @@ fn deliver(update: Update) {
             if let Some(ui) = ui {
                 ui.model.apply(*snapshot);
                 ui.render(mtm);
+            }
+        }),
+        Update::WriteFailed(key) => UI.with_borrow_mut(|ui| {
+            if let Some(ui) = ui {
+                ui.model.write_failed(&key);
             }
         }),
         Update::Quit(reason) => {
@@ -142,7 +174,27 @@ define_class!(
             popover.setBehavior(NSPopoverBehavior::Transient);
             popover.setAnimates(true);
             popover.setDelegate(Some(ProtocolObject::from_ref(self)));
-            content.on_click(Box::new(|action| {
+            let search = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
+            search.setPlaceholderString(Some(&NSString::from_str(SEARCH_PLACEHOLDER)));
+            search.setSendsSearchStringImmediately(true);
+            // SAFETY: the delegate lives for the whole run of the app, so the target outlives the field.
+            unsafe {
+                search.setTarget(Some(self));
+                search.setAction(Some(sel!(search:)));
+            }
+            content.addSubview(&search);
+            content.on_click(Box::new(move |action| {
+                if action.is_local() {
+                    // Sorting, paging and chips change the popover in place; it stays open.
+                    UI.with_borrow_mut(|ui| {
+                        if let Some(ui) = ui {
+                            ui.model.handle(&action);
+                            ui.push_writes();
+                            ui.render(mtm);
+                        }
+                    });
+                    return;
+                }
                 // Short borrow: closing the popover re-enters UI through popoverDidClose:.
                 let target = UI.with_borrow(|ui| {
                     ui.as_ref().map(|ui| {
@@ -158,13 +210,19 @@ define_class!(
                 }
             }));
             let socket = paths.socket();
-            UI.set(Some(Ui { model, item, popover, content, paths, app_bin }));
+            let (writes, queue) = unbounded_channel();
+            UI.set(Some(Ui { model, item, popover, content, search, writes, paths, app_bin }));
+            UI.with_borrow(|ui| {
+                if let Some(ui) = ui {
+                    ui.render(mtm);
+                }
+            });
             // Start the data loop only now, so no update can arrive before `UI` exists.
             let spawned = std::thread::Builder::new().name("clusia-tray-data".into()).spawn(move || {
                 match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                     Ok(rt) => {
                         let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                            rt.block_on(data::run(socket, deliver_on_main))
+                            rt.block_on(data::run(socket, deliver_on_main, queue))
                         }));
                         if run.is_err() {
                             // Non-zero so the supervisor restarts us; exit 0 is reserved for "daemon gone".
@@ -188,6 +246,8 @@ define_class!(
             UI.with_borrow_mut(|ui| {
                 if let Some(ui) = ui {
                     ui.model.mark_seen();
+                    ui.model.flush_query();
+                    ui.push_writes();
                     ui.render(mtm);
                 }
             });
@@ -195,6 +255,19 @@ define_class!(
     }
 
     impl Delegate {
+        /// The search field changed (sent on every keystroke).
+        #[unsafe(method(search:))]
+        fn search(&self, _sender: Option<&AnyObject>) {
+            let mtm = self.mtm();
+            UI.with_borrow_mut(|ui| {
+                if let Some(ui) = ui {
+                    let text = ui.search.stringValue().to_string();
+                    ui.model.set_query(&text);
+                    ui.render(mtm);
+                }
+            });
+        }
+
         #[unsafe(method(toggle:))]
         fn toggle(&self, _sender: Option<&AnyObject>) {
             let mtm = self.mtm();
