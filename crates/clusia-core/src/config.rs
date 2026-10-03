@@ -212,7 +212,10 @@ impl Config {
             ));
         }
         let repo = &self.lists.repository;
-        if !repo.is_empty() && repo.split('/').filter(|p| !p.is_empty()).count() != 2 {
+        let owner_repo = repo.split_once('/').is_some_and(|(owner, name)| {
+            !owner.is_empty() && !name.is_empty() && !name.contains('/')
+        });
+        if !repo.is_empty() && !owner_repo {
             return Err("lists.repository must be empty or owner/repo".into());
         }
         Ok(())
@@ -344,8 +347,13 @@ mod tests {
         c.lists.filter = "x".repeat(201);
         assert!(c.validate().unwrap_err().contains("lists.filter"));
         c.lists.filter.clear();
-        c.lists.repository = "no-slash".into();
-        assert!(c.validate().unwrap_err().contains("lists.repository"));
+        for bad in ["no-slash", "a//b", "/a/b", "a/b/", "/b", "a/"] {
+            c.lists.repository = bad.into();
+            assert!(
+                c.validate().unwrap_err().contains("lists.repository"),
+                "{bad}"
+            );
+        }
         c.lists.repository = "rzorzal/clusia".into();
         assert!(c.validate().is_ok());
     }
