@@ -10,10 +10,10 @@ use clusia_core::Paths;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSPopover,
-    NSPopoverBehavior, NSPopoverDelegate, NSSearchField, NSStatusBar, NSStatusItem,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSMenu, NSMenuItem,
+    NSPopover, NSPopoverBehavior, NSPopoverDelegate, NSSearchField, NSStatusBar, NSStatusItem,
     NSViewController, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSVisualEffectView,
 };
@@ -22,8 +22,8 @@ use objc2_foundation::{
 };
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
-use crate::actions;
-use crate::data::{self, Update};
+use crate::actions::{self, Action};
+use crate::data::{self, Outgoing, Update};
 use crate::layout::{SEARCH_PLACEHOLDER, WIDTH, layout};
 use crate::model::TrayModel;
 use crate::ui::icon;
@@ -36,7 +36,7 @@ struct Ui {
     content: Retained<ContentView>,
     search: Retained<NSSearchField>,
     /// Config writes for the data loop (sent to the daemon as `SetConfigValue`).
-    writes: UnboundedSender<crate::data::Outgoing>,
+    writes: UnboundedSender<Outgoing>,
     paths: Paths,
     app_bin: Option<PathBuf>,
 }
@@ -82,13 +82,13 @@ impl Ui {
     /// Hands the model's queued config writes to the data loop.
     fn push_writes(&mut self) {
         for write in self.model.take_writes() {
-            if self
-                .writes
-                .send(crate::data::Outgoing::Config(write.0, write.1))
-                .is_err()
-            {
-                tracing::warn!("the data loop is gone; dropping a config write");
-            }
+            self.send(Outgoing::Config(write.0, write.1));
+        }
+    }
+
+    fn send(&self, out: Outgoing) {
+        if self.writes.send(out).is_err() {
+            tracing::warn!("the data loop is gone; dropping a request");
         }
     }
 }
@@ -135,6 +135,43 @@ fn fail(reason: &str) -> ! {
 
 fn deliver_on_main(update: Update) {
     DispatchQueue::main().exec_async(move || deliver(update));
+}
+
+/// Pops up the Turn off menu under its toolbar button (`rect` in the content view's flipped
+/// coordinates). Item targets are the delegate, which lives for the whole app.
+fn show_turn_off_menu(
+    mtm: MainThreadMarker,
+    delegate: &Delegate,
+    content: &ContentView,
+    rect: crate::layout::Rect,
+    paused: bool,
+) {
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+    let item = |title: &str, action: objc2::runtime::Sel| {
+        // SAFETY: `initWithTitle:action:keyEquivalent:` is NSMenuItem's designated initializer.
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(""),
+            )
+        };
+        // SAFETY: the delegate outlives the menu (it lives for the whole run of the app).
+        unsafe { item.setTarget(Some(delegate)) };
+        item
+    };
+    let sync = if paused {
+        item("Resume syncing", sel!(resumeSync:))
+    } else {
+        item("Pause syncing", sel!(pauseSync:))
+    };
+    menu.addItem(&sync);
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    menu.addItem(&item("Quit Cl\u{fa}sia", sel!(quit:)));
+    let at = NSPoint::new(rect.x, rect.y + rect.h + 4.0);
+    menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(content));
 }
 
 #[derive(Default)]
@@ -197,7 +234,48 @@ define_class!(
                 search.setAction(Some(sel!(search:)));
             }
             content.addSubview(&search);
+            let delegate = self.retain();
             content.on_click(Box::new(move |action| {
+                match action {
+                    Action::Refresh => {
+                        UI.with_borrow_mut(|ui| {
+                            if let Some(ui) = ui {
+                                ui.model.refresh_started();
+                                ui.send(Outgoing::SyncNow);
+                                ui.render(mtm);
+                            }
+                        });
+                        return;
+                    }
+                    Action::TurnOff => {
+                        // Short borrow: the popup below runs a nested event loop.
+                        let anchor = UI.with_borrow(|ui| {
+                            ui.as_ref().map(|ui| {
+                                let l = layout(&ui.model.view(now()));
+                                let rect = l.hits.iter().find(|(_, a)| *a == Action::TurnOff).map(|(r, _)| *r);
+                                (rect, ui.model.is_paused(), ui.content.clone())
+                            })
+                        });
+                        if let Some((Some(rect), paused, content)) = anchor {
+                            show_turn_off_menu(mtm, &delegate, &content, rect, paused);
+                        }
+                        return;
+                    }
+                    Action::PauseSync | Action::ResumeSync | Action::Quit => {
+                        // Reached only through the menu (selectors below); kept for completeness.
+                        UI.with_borrow(|ui| {
+                            if let Some(ui) = ui {
+                                ui.send(match action {
+                                    Action::PauseSync => Outgoing::PauseSync,
+                                    Action::ResumeSync => Outgoing::ResumeSync,
+                                    _ => Outgoing::Shutdown,
+                                });
+                            }
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
                 if action.is_local() {
                     // Sorting, paging and chips change the popover in place; it stays open.
                     UI.with_borrow_mut(|ui| {
@@ -290,6 +368,39 @@ define_class!(
                     ui.render(mtm);
                 }
             });
+        }
+
+        #[unsafe(method(pauseSync:))]
+        fn pause_sync(&self, _sender: Option<&AnyObject>) {
+            UI.with_borrow(|ui| {
+                if let Some(ui) = ui {
+                    ui.send(Outgoing::PauseSync);
+                }
+            });
+        }
+
+        #[unsafe(method(resumeSync:))]
+        fn resume_sync(&self, _sender: Option<&AnyObject>) {
+            UI.with_borrow(|ui| {
+                if let Some(ui) = ui {
+                    ui.send(Outgoing::ResumeSync);
+                }
+            });
+        }
+
+        /// Stops the daemon; the tray follows when the socket closes (exit 0, not restarted).
+        #[unsafe(method(quit:))]
+        fn quit(&self, _sender: Option<&AnyObject>) {
+            let popover = UI.with_borrow(|ui| {
+                ui.as_ref().map(|ui| {
+                    ui.send(Outgoing::Shutdown);
+                    ui.popover.clone()
+                })
+            });
+            if let Some(popover) = popover {
+                // SAFETY: called on the main thread with no sender.
+                unsafe { popover.performClose(None) };
+            }
         }
 
         #[unsafe(method(toggle:))]
