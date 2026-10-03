@@ -30,6 +30,7 @@ pub(crate) async fn lock(shared: &Shared, pr: &PrRef) -> tokio::sync::OwnedMutex
     mutex.lock_owned().await
 }
 
+#[allow(dead_code)] // used by the later review commands
 pub(crate) fn load(shared: &Shared, pr: &PrRef) -> Option<Review> {
     match load_review(&shared.paths, pr) {
         Ok(ReviewLoad::Found(r)) => Some(r),
@@ -116,7 +117,7 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         Err(e) => return provider_error(e),
     };
     step(shared, pr, LoadStepKind::Repo, StepStatus::Running, None);
-    let detail = match gh.get_pr(pr).await {
+    let mut detail = match gh.get_pr(pr).await {
         Ok(d) => d,
         Err(e) => {
             step(
@@ -146,6 +147,23 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
             return Outcome::Err(ProtocolError::new(ErrorCode::Git, e.to_string()));
         }
     };
+    if info.head_sha != detail.head_sha {
+        // A push landed between get_pr and the fetch; accept it only if GitHub now agrees.
+        match gh.get_pr(pr).await {
+            Ok(d) if d.head_sha == info.head_sha => detail = d,
+            _ => {
+                let msg = "the pull request changed while opening; try again";
+                step(
+                    shared,
+                    pr,
+                    LoadStepKind::Repo,
+                    StepStatus::Failed,
+                    Some(msg.into()),
+                );
+                return Outcome::Err(ProtocolError::new(ErrorCode::Conflict, msg));
+            }
+        }
+    }
     step(
         shared,
         pr,
@@ -161,8 +179,10 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         Some(info.path.clone()),
     );
     let repo = PathBuf::from(&info.clone);
-    if let Ok(sha) = fetch_branch(&repo, &remote, &detail.base_ref).await {
-        let _ = pin_commit(&repo, &base_pin_ref(pr.number), &sha).await;
+    if let Ok(sha) = fetch_branch(&repo, &remote, &detail.base_ref).await
+        && let Err(e) = pin_commit(&repo, &base_pin_ref(pr.number), &sha).await
+    {
+        tracing::warn!(error = %e, pr = %pr, "cannot pin the base commit");
     }
 
     step(shared, pr, LoadStepKind::Pr, StepStatus::Running, None);
@@ -199,9 +219,25 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         Some("arrives with the harness (SP2)".into()),
     );
 
+    let viewer = gh.viewer().await.ok().map(|v| v.login);
+
     let _guard = lock(shared, pr).await;
     let now = now_unix();
-    let mut review = match load(shared, pr) {
+    let stored = match load_review(&shared.paths, pr) {
+        Ok(ReviewLoad::Found(r)) => Some(r),
+        Ok(ReviewLoad::Missing) => None,
+        Ok(ReviewLoad::Quarantined { path, .. }) => {
+            tracing::warn!(file = %path.display(), "review file was corrupt and has been set aside");
+            None
+        }
+        Err(e) => {
+            return Outcome::Err(ProtocolError::new(
+                ErrorCode::Internal,
+                format!("cannot read the stored review for {pr}: {e}; it was left untouched"),
+            ));
+        }
+    };
+    let mut review = match stored {
         Some(r) if !r.state.is_terminal() => r,
         _ => {
             record(shared, ActivityKind::ReviewOpened, pr, client, None, None);
@@ -239,10 +275,11 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
     if let Err(out) = save(shared, &review) {
         return out;
     }
-    let _ = pin_commit(&repo, &reviewed_ref(pr.number), &review.head_sha).await;
+    if let Err(e) = pin_commit(&repo, &reviewed_ref(pr.number), &review.head_sha).await {
+        tracing::warn!(error = %e, pr = %pr, "cannot pin the reviewed commit");
+    }
     announce(shared, &review);
 
-    let viewer = gh.viewer().await.ok().map(|v| v.login);
     let role = match &viewer {
         Some(login) if login.eq_ignore_ascii_case(&detail.summary.author) => Role::Author,
         _ => Role::Reviewer,

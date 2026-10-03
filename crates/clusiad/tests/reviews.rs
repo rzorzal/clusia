@@ -146,3 +146,21 @@ async fn open_without_token_is_unauthorized() {
     }
     d.stop().await;
 }
+
+#[tokio::test]
+async fn unreadable_review_file_is_not_overwritten() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    let file = w.daemon.paths.review_file(&pr7());
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    match c.request(Command::OpenReview { pr: pr7() }).await {
+        Err(clusia_protocol::ClientError::Server(e)) => {
+            assert_eq!(e.code, clusia_protocol::ErrorCode::Internal)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(file.is_dir());
+    w.daemon.stop().await;
+}
