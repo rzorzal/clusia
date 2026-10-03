@@ -10,6 +10,7 @@ use clusia_protocol::{
 use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
+use crate::publish;
 use crate::reviews;
 use crate::state::Shared;
 use crate::sync;
@@ -72,13 +73,17 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::ListReviews => reviews::list(shared).await,
         Command::GetDiff { pr } => reviews::diff(shared, &pr).await,
         Command::GetConversation { pr } => reviews::conversation(shared, &pr).await,
-        Command::Publish { .. }
-        | Command::GetWhatsNew { .. }
-        | Command::MarkSeen { .. }
-        | Command::GetActivity => Outcome::Err(ProtocolError::new(
-            ErrorCode::Internal,
-            "not implemented yet",
-        )),
+        Command::Publish {
+            pr,
+            verdict,
+            summary,
+        } => publish::publish(shared, client, &pr, verdict, &summary).await,
+        Command::GetWhatsNew { .. } | Command::MarkSeen { .. } | Command::GetActivity => {
+            Outcome::Err(ProtocolError::new(
+                ErrorCode::Internal,
+                "not implemented yet",
+            ))
+        }
     }
 }
 

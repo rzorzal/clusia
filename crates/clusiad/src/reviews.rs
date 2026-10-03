@@ -308,7 +308,7 @@ fn load_stored(shared: &Shared, pr: &PrRef) -> Result<Option<Review>, Outcome> {
 
 /// Loads the review a mutation command acts on; it must already exist.
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
-fn load_existing(shared: &Shared, pr: &PrRef) -> Result<Review, Outcome> {
+pub(crate) fn load_existing(shared: &Shared, pr: &PrRef) -> Result<Review, Outcome> {
     load_stored(shared, pr)?.ok_or_else(|| no_review(pr))
 }
 
