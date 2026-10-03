@@ -1,0 +1,26 @@
+[package]
+name = "clusia-tray"
+description = "Clúsia menu bar tray"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+clusia-core.workspace = true
+clusia-protocol.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+dispatch2.workspace = true
+clap.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <title>Clúsia app icon</title>
+  <defs>
+    <radialGradient id="bg" cx="30%" cy="20%" r="120%"><stop offset="0" stop-color="#23282a"/><stop offset="1" stop-color="#0c0e0d"/></radialGradient>
+    <mask id="w" maskUnits="userSpaceOnUse" x="-20" y="-20" width="104" height="104">
+    <rect x="-20" y="-20" width="104" height="104" fill="#fff"/>
+    <g transform="rotate(-14 32 34)" fill="none" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 26c3-4 5 4 8 0s5 4 8 0s5 4 7 0"/><path d="M22 36c3-4 5 4 8 0s5 4 8 0"/></g>
+  </mask>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <g transform="translate(232 222) scale(8.75)">
+    <g transform="rotate(-14 32 34)"><path d="M32 55V63" stroke="#9AA49C" stroke-width="3" stroke-linecap="round"/></g>
+    <g mask="url(#w)"><path transform="rotate(-14 32 34)" d="M32 3C45 11 53 24 51 37C49 48 41 54 32 56C23 54 15 48 13 37C11 24 19 11 32 3Z" fill="#4CC35F"/></g>
+    <circle transform="rotate(-14 32 34)" cx="40" cy="45" r="3.6" fill="#F07A4A"/>
+  </g>
+</svg>

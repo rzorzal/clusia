@@ -35,6 +35,7 @@ pub(crate) struct Shared {
     pub gh_program: PathBuf,
     pub secrets: Arc<dyn SecretStore>,
     pub background_sync: bool,
+    pub tray_program: Option<PathBuf>,
     pub prs: RwLock<PrLists>,
     pub sync: RwLock<SyncStatus>,
     /// Wakes the sync loop early (e.g. after a new token is stored).
@@ -71,6 +72,7 @@ impl Shared {
             gh_program: options.gh_program,
             secrets: options.secrets,
             background_sync: options.background_sync,
+            tray_program: options.tray_program,
             prs: RwLock::new(PrLists::default()),
             sync: RwLock::new(SyncStatus::default()),
             sync_now: Notify::new(),

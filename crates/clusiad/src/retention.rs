@@ -113,6 +113,7 @@ mod tests {
             gh_program: "/nonexistent/gh".into(),
             secrets: Arc::new(MemoryStore::default()),
             background_sync: false,
+            tray_program: None,
         };
         let shared = Shared::new(Paths::new(dir.path()), Config::default(), options);
         (dir, shared)

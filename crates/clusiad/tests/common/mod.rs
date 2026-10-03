@@ -21,6 +21,7 @@ pub fn test_options() -> DaemonOptions {
         gh_program: PathBuf::from("/nonexistent/gh"),
         secrets: Arc::new(MemoryStore::default()),
         background_sync: false,
+        tray_program: None,
     }
 }
 

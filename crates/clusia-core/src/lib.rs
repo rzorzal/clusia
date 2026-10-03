@@ -12,7 +12,7 @@ pub mod review;
 pub mod time;
 
 pub use activity::{Activity, ActivityKind, ActivitySummary, DayCount};
-pub use config::Config;
+pub use config::{Config, ListSort, Lists};
 pub use diffmap::{
     DiffMap, FileChange, Hunk, LineMap, Relocation, can_comment, commentable_lines, relocate,
 };

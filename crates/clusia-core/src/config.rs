@@ -13,6 +13,7 @@ pub struct Config {
     pub repositories: Repositories,
     pub editor: Editor,
     pub notifications: Notifications,
+    pub lists: Lists,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -101,6 +102,92 @@ pub struct Notifications {
     pub do_not_disturb: bool,
 }
 
+/// How the pull request lists (tray and Home) are ordered, filtered and narrowed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Lists {
+    pub assigned_sort: ListSort,
+    pub saved_sort: ListSort,
+    /// Case-insensitive text matched against title, repository and #number, in both lists.
+    pub filter: String,
+    /// Only this repository (`owner/repo`); empty shows all.
+    pub repository: String,
+}
+
+pub const MAX_FILTER_CHARS: usize = 200;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ListSort {
+    /// Most recently updated first.
+    #[default]
+    Updated,
+    /// Least recently updated first.
+    Oldest,
+    /// `owner/repo` A-Z, then most recently updated.
+    Repository,
+    /// Highest pull request number first.
+    Number,
+}
+
+impl ListSort {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Updated => Self::Oldest,
+            Self::Oldest => Self::Repository,
+            Self::Repository => Self::Number,
+            Self::Number => Self::Updated,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Updated => "Updated",
+            Self::Oldest => "Oldest",
+            Self::Repository => "Repository",
+            Self::Number => "Number",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Updated => "updated",
+            Self::Oldest => "oldest",
+            Self::Repository => "repository",
+            Self::Number => "number",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::Updated, Self::Oldest, Self::Repository, Self::Number]
+            .into_iter()
+            .find(|v| v.as_str() == s)
+    }
+}
+
+impl Lists {
+    /// Applies one `ConfigChanged { key, value }`; `true` when a field changed.
+    pub fn apply(&mut self, key: &str, value: &str) -> bool {
+        let before = self.clone();
+        match key {
+            "lists.assigned_sort" => {
+                if let Some(s) = ListSort::parse(value) {
+                    self.assigned_sort = s;
+                }
+            }
+            "lists.saved_sort" => {
+                if let Some(s) = ListSort::parse(value) {
+                    self.saved_sort = s;
+                }
+            }
+            "lists.filter" => self.filter = value.to_string(),
+            "lists.repository" => self.repository = value.to_string(),
+            _ => {}
+        }
+        *self != before
+    }
+}
+
 impl Config {
     /// Rules serde can't express. The message names the offending key.
     pub fn validate(&self) -> Result<(), String> {
@@ -118,6 +205,18 @@ impl Config {
             return Err(
                 "editor.custom_command must contain {path} when editor.kind is custom".into(),
             );
+        }
+        if self.lists.filter.chars().count() > MAX_FILTER_CHARS {
+            return Err(format!(
+                "lists.filter must be at most {MAX_FILTER_CHARS} characters"
+            ));
+        }
+        let repo = &self.lists.repository;
+        let owner_repo = repo.split_once('/').is_some_and(|(owner, name)| {
+            !owner.is_empty() && !name.is_empty() && !name.contains('/')
+        });
+        if !repo.is_empty() && !owner_repo {
+            return Err("lists.repository must be empty or owner/repo".into());
         }
         Ok(())
     }
@@ -196,5 +295,66 @@ mod tests {
         assert!(c.validate().unwrap_err().contains("{path}"));
         c.editor.custom_command = "myeditor {path}:{line}".into();
         assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn list_preferences_default_and_cycle() {
+        let c = Config::default();
+        assert_eq!(c.lists.assigned_sort, ListSort::Updated);
+        assert_eq!(c.lists.saved_sort, ListSort::Updated);
+        assert_eq!(c.lists.filter, "");
+        assert_eq!(c.lists.repository, "");
+        let mut s = ListSort::Updated;
+        let mut seen = vec![];
+        for _ in 0..4 {
+            seen.push(s.label());
+            s = s.next();
+        }
+        assert_eq!(seen, ["Updated", "Oldest", "Repository", "Number"]);
+        assert_eq!(s, ListSort::Updated);
+        assert_eq!(ListSort::parse("repository"), Some(ListSort::Repository));
+        assert_eq!(ListSort::parse("bogus"), None);
+        assert_eq!(ListSort::Oldest.as_str(), "oldest");
+    }
+
+    #[test]
+    fn lists_apply_config_changes() {
+        let mut l = Lists::default();
+        assert!(l.apply("lists.assigned_sort", "number"));
+        assert_eq!(l.assigned_sort, ListSort::Number);
+        assert!(
+            !l.apply("lists.assigned_sort", "number"),
+            "same value is not a change"
+        );
+        assert!(l.apply("lists.filter", "auth"));
+        assert!(l.apply("lists.repository", "rzorzal/clusia"));
+        assert!(!l.apply("lists.saved_sort", "bogus"));
+        assert!(!l.apply("github.host", "x"));
+        assert_eq!(
+            l,
+            Lists {
+                assigned_sort: ListSort::Number,
+                saved_sort: ListSort::Updated,
+                filter: "auth".into(),
+                repository: "rzorzal/clusia".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn list_preferences_are_validated() {
+        let mut c = Config::default();
+        c.lists.filter = "x".repeat(201);
+        assert!(c.validate().unwrap_err().contains("lists.filter"));
+        c.lists.filter.clear();
+        for bad in ["no-slash", "a//b", "/a/b", "a/b/", "/b", "a/"] {
+            c.lists.repository = bad.into();
+            assert!(
+                c.validate().unwrap_err().contains("lists.repository"),
+                "{bad}"
+            );
+        }
+        c.lists.repository = "rzorzal/clusia".into();
+        assert!(c.validate().is_ok());
     }
 }

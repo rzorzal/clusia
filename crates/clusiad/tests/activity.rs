@@ -37,7 +37,7 @@ async fn activity_summary_from_the_log() {
         Reply::Activity(s) => {
             assert_eq!((s.published_total, s.published_this_week), (1, 1));
             assert_eq!(s.avg_review_secs, Some(3000));
-            assert_eq!(s.heatmap.len(), 16 * 7);
+            assert_eq!(s.heatmap.len(), 26 * 7);
             assert_eq!(s.heatmap.iter().map(|d| d.count).sum::<u32>(), 1);
         }
         other => panic!("{other:?}"),
