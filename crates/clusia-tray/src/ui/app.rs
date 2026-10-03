@@ -243,11 +243,21 @@ define_class!(
         #[unsafe(method(popoverDidClose:))]
         fn popover_did_close(&self, _notification: &NSNotification) {
             let mtm = self.mtm();
-            UI.with_borrow_mut(|ui| {
-                if let Some(ui) = ui {
+            let window = UI.with_borrow_mut(|ui| {
+                ui.as_mut().and_then(|ui| {
                     ui.model.mark_seen();
                     ui.model.flush_query();
                     ui.push_writes();
+                    ui.search.window()
+                })
+            });
+            // Detach the field editor, so later `lists.filter` changes reach the field and the
+            // next keystroke starts from them. Outside the borrow: ending editing may send `search:`.
+            if let Some(window) = window {
+                window.makeFirstResponder(None);
+            }
+            UI.with_borrow(|ui| {
+                if let Some(ui) = ui {
                     ui.render(mtm);
                 }
             });
