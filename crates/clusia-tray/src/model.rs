@@ -179,6 +179,12 @@ impl TrayModel {
         }
         self.adopt(&snapshot.lists);
         self.snapshot = snapshot;
+        for id in [ListId::Assigned, ListId::Saved] {
+            let last = self.filtered(id).len().div_ceil(PAGE_SIZE).max(1) - 1;
+            if let Some(p) = self.pages.get_mut(&id) {
+                *p = (*p).min(last);
+            }
+        }
     }
 
     /// Takes preferences from the snapshot: the first one seeds them, later ones only
@@ -199,12 +205,18 @@ impl TrayModel {
                 None if value == old => {} // unchanged since the last snapshot
                 None => {
                     self.prefs.apply(&key, &value);
+                    self.pages.clear();
                     if key == "lists.filter" {
                         self.saved_query = value;
                     }
                 }
             }
         }
+    }
+
+    /// The daemon rejected a write: forget it so snapshots are adopted again.
+    pub fn write_failed(&mut self, key: &str) {
+        self.pending.remove(key);
     }
 
     pub fn prefs(&self) -> &Lists {
@@ -394,7 +406,12 @@ impl TrayModel {
             .assigned
             .iter()
             .map(|p| &p.pr)
-            .chain(s.reviews.iter().map(|r| &r.pr))
+            .chain(
+                s.reviews
+                    .iter()
+                    .filter(|r| is_saved(r.state))
+                    .map(|r| &r.pr),
+            )
             .map(|pr| (pr.repo.clone(), format!("{}/{}", pr.owner, pr.repo)))
             .collect();
         repos.sort();
@@ -1132,5 +1149,70 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["#2"]
         );
+    }
+
+    #[test]
+    fn chips_only_for_listed_repositories() {
+        let mut m = TrayModel::new(false);
+        m.apply(Snapshot {
+            reviews: vec![review(7, ReviewState::Active, 1, NOW)],
+            ..snap(many(2))
+        });
+        assert!(m.view(NOW).chips.is_empty());
+    }
+
+    #[test]
+    fn same_short_name_uses_full_labels() {
+        let mut m = TrayModel::new(false);
+        let mut prs = many(2);
+        prs[0].pr.owner = "octo".into();
+        prs[0].pr.repo = "app".into();
+        prs[1].pr.owner = "acme".into();
+        prs[1].pr.repo = "app".into();
+        m.apply(snap(prs));
+        let labels: Vec<_> = m.view(NOW).chips.iter().map(|c| c.label.clone()).collect();
+        assert_eq!(labels, ["All", "acme/app", "octo/app"]);
+    }
+
+    #[test]
+    fn pages_reset_on_query_sort_and_repository_changes() {
+        let mut m = TrayModel::new(false);
+        let mut prs = many(10);
+        prs[0].pr.repo = "other".into();
+        m.apply(snap(prs));
+        let page = |m: &TrayModel| m.view(NOW).sections[0].page;
+        m.handle(&Action::Page(ListId::Assigned, 1));
+        m.set_query("change");
+        assert_eq!(page(&m), 0);
+        m.handle(&Action::Page(ListId::Assigned, 1));
+        m.cycle_sort(ListId::Assigned);
+        assert_eq!(page(&m), 0);
+        m.handle(&Action::Page(ListId::Assigned, 1));
+        m.set_repository(Some("rzorzal/clusia".into()));
+        assert_eq!(page(&m), 0);
+    }
+
+    #[test]
+    fn query_is_capped() {
+        let mut m = TrayModel::new(false);
+        m.set_query(&"a".repeat(500));
+        assert_eq!(m.prefs().filter.chars().count(), 200);
+    }
+
+    #[test]
+    fn external_change_resets_pages_and_failed_writes_unblock() {
+        let mut m = TrayModel::new(false);
+        m.apply(snap(many(10)));
+        m.handle(&Action::Page(ListId::Assigned, 1));
+        let mut ext = snap(many(10));
+        ext.lists.saved_sort = ListSort::Number;
+        m.apply(ext);
+        assert_eq!(m.view(NOW).sections[0].page, 0);
+        m.cycle_sort(ListId::Saved);
+        m.write_failed("lists.saved_sort");
+        let mut s = snap(many(10));
+        s.lists.saved_sort = ListSort::Repository;
+        m.apply(s);
+        assert_eq!(m.prefs().saved_sort, ListSort::Repository);
     }
 }
