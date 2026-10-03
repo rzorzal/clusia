@@ -442,6 +442,12 @@ pub(crate) async fn update_item(shared: &Shared, pr: &PrRef, id: &str, body: &st
         Ok(r) => r,
         Err(out) => return out,
     };
+    if !editable(&review) {
+        return invalid_state(format!(
+            "the review of {pr} is {:?}; open it again",
+            review.state
+        ));
+    }
     if let Err(e) = review.draft.update_body(id, body) {
         return bad_request(e.to_string());
     }
@@ -462,6 +468,12 @@ pub(crate) async fn remove_item(shared: &Shared, pr: &PrRef, id: &str) -> Outcom
         Ok(r) => r,
         Err(out) => return out,
     };
+    if !editable(&review) {
+        return invalid_state(format!(
+            "the review of {pr} is {:?}; open it again",
+            review.state
+        ));
+    }
     if let Err(e) = review.draft.remove(id) {
         return bad_request(e.to_string());
     }
@@ -484,7 +496,12 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
         return Outcome::Ok(Reply::Ack);
     }
     if review.draft.is_empty() {
-        let _ = delete_review(&shared.paths, pr);
+        if let Err(e) = delete_review(&shared.paths, pr) {
+            return Outcome::Err(ProtocolError::new(
+                ErrorCode::Internal,
+                format!("could not delete the review file: {e}"),
+            ));
+        }
         return Outcome::Ok(Reply::Ack);
     }
     if let Err(e) = review.apply(ReviewEvent::Leave, now_unix()) {
@@ -522,7 +539,12 @@ pub(crate) async fn discard(shared: &Shared, client: &str, pr: &PrRef) -> Outcom
     if let Err(e) = review.apply(ReviewEvent::Discard, now_unix()) {
         return invalid_state(e.to_string());
     }
-    let _ = delete_review(&shared.paths, pr);
+    if let Err(e) = delete_review(&shared.paths, pr) {
+        return Outcome::Err(ProtocolError::new(
+            ErrorCode::Internal,
+            format!("could not delete the review file: {e}"),
+        ));
+    }
     cleanup_checkout(shared, pr).await;
     record(
         shared,

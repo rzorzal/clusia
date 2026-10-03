@@ -205,3 +205,55 @@ async fn diff_and_conversation_come_from_github() {
     }
     w.daemon.stop().await;
 }
+
+#[tokio::test]
+async fn range_and_left_side_validation() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    let ranged = |start: u32, end: u32| {
+        Some(AnchorInput {
+            path: "feature.txt".into(),
+            line: end,
+            start_line: Some(start),
+            side: Side::Right,
+        })
+    };
+    c.request(add(ranged(1, 3), DraftKind::LineComment, "range"))
+        .await
+        .unwrap();
+    assert_eq!(
+        code(
+            c.request(add(ranged(1, 9), DraftKind::LineComment, "x"))
+                .await
+        ),
+        ErrorCode::BadRequest
+    );
+    let left = Some(AnchorInput {
+        path: "feature.txt".into(),
+        line: 1,
+        start_line: None,
+        side: Side::Left,
+    });
+    assert_eq!(
+        code(c.request(add(left, DraftKind::LineComment, "x")).await),
+        ErrorCode::BadRequest
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn read_error_is_not_reported_as_missing() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    let file = w.daemon.paths.review_file(&pr7());
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    assert_eq!(
+        code(c.request(Command::GetReview { pr: pr7() }).await),
+        ErrorCode::Internal
+    );
+    assert!(file.is_dir());
+    w.daemon.stop().await;
+}
