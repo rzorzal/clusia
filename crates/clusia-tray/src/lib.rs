@@ -2,6 +2,9 @@
 
 pub mod actions;
 pub mod data;
+pub mod fixture;
 pub mod heatmap;
 pub mod layout;
 pub mod model;
+pub mod theme;
+pub mod ui;
