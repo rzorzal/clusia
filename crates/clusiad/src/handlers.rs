@@ -56,18 +56,25 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::ClearToken => clear_token(shared).await,
         Command::PrepareWorktree { pr } => worktrees::prepare(shared, &pr).await,
         Command::OpenReview { pr } => reviews::open(shared, client, &pr).await,
-        Command::GetReview { .. }
-        | Command::CloseReview { .. }
-        | Command::DiscardReview { .. }
-        | Command::GetDiff { .. }
-        | Command::GetConversation { .. }
-        | Command::AddDraftItem { .. }
-        | Command::UpdateDraftItem { .. }
-        | Command::RemoveDraftItem { .. }
-        | Command::Publish { .. }
+        Command::GetReview { pr } => reviews::get(shared, &pr).await,
+        Command::AddDraftItem {
+            pr,
+            kind,
+            anchor,
+            body,
+        } => reviews::add_item(shared, client, &pr, kind, anchor, &body).await,
+        Command::UpdateDraftItem { pr, id, body } => {
+            reviews::update_item(shared, &pr, &id, &body).await
+        }
+        Command::RemoveDraftItem { pr, id } => reviews::remove_item(shared, &pr, &id).await,
+        Command::CloseReview { pr } => reviews::close(shared, client, &pr).await,
+        Command::DiscardReview { pr } => reviews::discard(shared, client, &pr).await,
+        Command::ListReviews => reviews::list(shared).await,
+        Command::GetDiff { pr } => reviews::diff(shared, &pr).await,
+        Command::GetConversation { pr } => reviews::conversation(shared, &pr).await,
+        Command::Publish { .. }
         | Command::GetWhatsNew { .. }
         | Command::MarkSeen { .. }
-        | Command::ListReviews
         | Command::GetActivity => Outcome::Err(ProtocolError::new(
             ErrorCode::Internal,
             "not implemented yet",
