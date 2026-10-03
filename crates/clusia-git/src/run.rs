@@ -70,10 +70,33 @@ async fn run(dir: &Path, args: &[&str]) -> Result<String, GitError> {
     if !out.status.success() {
         return Err(GitError::Failed {
             args: args.join(" "),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            stderr: redact_credentials(String::from_utf8_lossy(&out.stderr).trim()),
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+/// Replaces `scheme://userinfo@` with `scheme://***@` so tokens in remote URLs never reach logs or the UI.
+pub fn redact_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("://") {
+        let (before, after) = rest.split_at(pos + 3);
+        out.push_str(before);
+        let end = after
+            .find(|c: char| c == '/' || c.is_whitespace() || c == '\'' || c == '"')
+            .unwrap_or(after.len());
+        match after[..end].rfind('@') {
+            Some(at) => {
+                out.push_str("***");
+                out.push_str(&after[at..end]);
+            }
+            None => out.push_str(&after[..end]),
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]

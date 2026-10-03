@@ -14,6 +14,7 @@ pub fn pr_ref_name(number: u64) -> String {
 
 /// Fetches the PR head into `refs/clusia/pr-<n>` (never a branch) and returns its SHA.
 pub async fn fetch_pr(repo: &Path, remote: &str, number: u64) -> Result<String, GitError> {
+    crate::diff::reject_dash("remote", remote)?;
     let refname = pr_ref_name(number);
     let refspec = format!("+refs/pull/{number}/head:{refname}");
     // No FETCH_HEAD and no auto-gc/maintenance: the user's clone only gains the ref above.
@@ -123,9 +124,11 @@ async fn exclude_clusia_dir(worktree: &Path) -> Result<(), GitError> {
     )
     .await?;
     let exclude = Path::new(&common).join("info/exclude");
-    let current = tokio::fs::read_to_string(&exclude)
-        .await
-        .unwrap_or_default();
+    let current = match tokio::fs::read_to_string(&exclude).await {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
     if current.lines().any(|l| l.trim() == ".clusia/") {
         return Ok(());
     }
@@ -423,6 +426,15 @@ mod tests {
         let f = fixture();
         assert!(matches!(
             fetch_pr(&f.clone, "origin", 99).await,
+            Err(GitError::Failed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn dash_remote_is_rejected_without_running_git() {
+        let f = fixture();
+        assert!(matches!(
+            fetch_pr(&f.clone, "--upload-pack=evil", 1).await,
             Err(GitError::Failed { .. })
         ));
     }
