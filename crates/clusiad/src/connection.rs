@@ -42,8 +42,12 @@ async fn session(stream: UnixStream, shared: &Shared) -> Result<(), CodecError> 
     let (r, mut w) = stream.into_split();
     let mut reader = MessageReader::new(r);
 
+    let client_name;
     match reader.next::<ClientMessage>().await {
-        Ok(Some(ClientMessage::Hello { protocol, .. })) if protocol == PROTOCOL_VERSION => {
+        Ok(Some(ClientMessage::Hello {
+            protocol, client, ..
+        })) if protocol == PROTOCOL_VERSION => {
+            client_name = client;
             let welcome = ServerMessage::Welcome {
                 protocol: PROTOCOL_VERSION,
                 daemon: crate::VERSION.into(),
@@ -101,7 +105,7 @@ async fn session(stream: UnixStream, shared: &Shared) -> Result<(), CodecError> 
                     topics.extend(wanted.iter().cloned());
                 }
                 let stop = matches!(cmd, Command::Shutdown);
-                let result = handlers::handle(shared, cmd).await;
+                let result = handlers::handle(shared, &client_name, cmd).await;
                 write_message(&mut w, &ServerMessage::Response { id, result }).await?;
                 if stop {
                     shared.trigger_shutdown();

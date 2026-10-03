@@ -10,11 +10,12 @@ use clusia_protocol::{
 use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
+use crate::reviews;
 use crate::state::Shared;
 use crate::sync;
 use crate::worktrees;
 
-pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
+pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outcome {
     match cmd {
         Command::DaemonStatus => Outcome::Ok(Reply::Status(DaemonStatus {
             version: crate::VERSION.to_string(),
@@ -54,8 +55,8 @@ pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
         Command::SetToken { token } => set_token(shared, &token).await,
         Command::ClearToken => clear_token(shared).await,
         Command::PrepareWorktree { pr } => worktrees::prepare(shared, &pr).await,
-        Command::OpenReview { .. }
-        | Command::GetReview { .. }
+        Command::OpenReview { pr } => reviews::open(shared, client, &pr).await,
+        Command::GetReview { .. }
         | Command::CloseReview { .. }
         | Command::DiscardReview { .. }
         | Command::GetDiff { .. }

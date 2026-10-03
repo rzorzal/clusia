@@ -3,6 +3,8 @@
 mod connection;
 mod handlers;
 mod options;
+mod relocate;
+mod reviews;
 mod server;
 mod state;
 mod sync;
