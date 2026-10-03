@@ -297,6 +297,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clusia-tray"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "clusia-protocol",
+ "tracing",
+]
+
+[[package]]
 name = "clusiad"
 version = "0.1.0"
 dependencies = [

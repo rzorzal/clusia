@@ -1,0 +1,16 @@
+[package]
+name = "clusia-tray"
+description = "Clúsia menu bar tray"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+clusia-core.workspace = true
+clusia-protocol.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
