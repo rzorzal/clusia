@@ -2,6 +2,7 @@
 //! All AppKit state lives on the main thread in `UI`; the runtime hops there with GCD.
 
 use std::cell::RefCell;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -81,6 +82,12 @@ fn deliver(update: Update) {
     }
 }
 
+/// Ends the process with a failure status, so the daemon's supervisor restarts the tray.
+fn fail(reason: &str) -> ! {
+    tracing::error!(%reason, "exiting with failure");
+    std::process::exit(1);
+}
+
 fn deliver_on_main(update: Update) {
     DispatchQueue::main().exec_async(move || deliver(update));
 }
@@ -156,12 +163,20 @@ define_class!(
             // Start the data loop only now, so no update can arrive before `UI` exists.
             let spawned = std::thread::Builder::new().name("clusia-tray-data".into()).spawn(move || {
                 match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                    Ok(rt) => rt.block_on(data::run(socket, deliver_on_main)),
-                    Err(e) => deliver_on_main(Update::Quit(format!("cannot start the runtime: {e}"))),
+                    Ok(rt) => {
+                        let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            rt.block_on(data::run(socket, deliver_on_main))
+                        }));
+                        if run.is_err() {
+                            // Non-zero so the supervisor restarts us; exit 0 is reserved for "daemon gone".
+                            fail("the data loop panicked");
+                        }
+                    }
+                    Err(e) => fail(&format!("cannot start the runtime: {e}")),
                 }
             });
             if let Err(e) = spawned {
-                deliver(Update::Quit(format!("cannot start the data thread: {e}")));
+                fail(&format!("cannot start the data thread: {e}"));
             }
         }
     }
