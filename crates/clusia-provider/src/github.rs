@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clusia_core::{PrDetail, PrFilter, PrRef, PrSummary};
+use clusia_core::{
+    ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, PrDetail, PrFilter, PrRef,
+    PrSummary, ReviewInfo, Side, ThreadComment,
+};
 use reqwest::{StatusCode, header};
 use serde::Deserialize;
 
@@ -82,6 +85,110 @@ fn rate_limit_wait(status: StatusCode, headers: &header::HeaderMap) -> Option<u6
 #[derive(Deserialize)]
 struct UserRef {
     login: String,
+}
+
+const MAX_PAGES: usize = 30;
+
+fn next_link(headers: &header::HeaderMap) -> Option<String> {
+    headers
+        .get(header::LINK)?
+        .to_str()
+        .ok()?
+        .split(',')
+        .find_map(|part| {
+            let (url, rel) = part.split_once(';')?;
+            rel.contains("rel=\"next\"").then(|| {
+                url.trim()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_string()
+            })
+        })
+}
+
+#[derive(Deserialize)]
+struct RawFile {
+    filename: String,
+    previous_filename: Option<String>,
+    status: String,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
+    patch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawThread {
+    id: u64,
+    in_reply_to_id: Option<u64>,
+    path: String,
+    line: Option<u32>,
+    side: Option<String>,
+    user: Option<UserRef>,
+    body: String,
+    created_at: String,
+    html_url: String,
+}
+
+#[derive(Deserialize)]
+struct RawIssueComment {
+    id: u64,
+    user: Option<UserRef>,
+    body: String,
+    created_at: String,
+    html_url: String,
+}
+
+#[derive(Deserialize)]
+struct RawReview {
+    id: u64,
+    user: Option<UserRef>,
+    state: String,
+    #[serde(default)]
+    body: Option<String>,
+    submitted_at: Option<String>,
+    html_url: String,
+}
+
+#[derive(Deserialize)]
+struct RawCommit {
+    sha: String,
+    author: Option<UserRef>,
+    commit: RawCommitInner,
+}
+
+#[derive(Deserialize)]
+struct RawCommitInner {
+    message: String,
+    author: RawGitAuthor,
+}
+
+#[derive(Deserialize)]
+struct RawGitAuthor {
+    name: String,
+    date: String,
+}
+
+#[derive(Deserialize)]
+struct RawCheckRuns {
+    check_runs: Vec<RawCheckRun>,
+}
+
+#[derive(Deserialize)]
+struct RawCheckRun {
+    status: String,
+    conclusion: Option<String>,
+}
+
+fn login(user: Option<UserRef>) -> String {
+    user.map(|u| u.login).unwrap_or_else(|| "ghost".to_string())
+}
+
+fn decode_list<T: serde::de::DeserializeOwned>(
+    values: Vec<serde_json::Value>,
+) -> Result<Vec<T>, ProviderError> {
+    values.into_iter().map(decode).collect()
 }
 
 #[derive(Deserialize)]
@@ -162,6 +269,166 @@ impl GitHub {
         &self.token
     }
 
+    /// Every page of a list endpoint (`per_page=100`, following `Link: rel="next"`).
+    async fn get_paginated(&self, path: &str) -> Result<Vec<serde_json::Value>, ProviderError> {
+        let (first, mut headers) = self.request(path, &[("per_page", "100")], true).await?;
+        let mut items = match first {
+            serde_json::Value::Array(a) => a,
+            _ => {
+                return Err(ProviderError::Decode(format!(
+                    "{path} did not return a list"
+                )));
+            }
+        };
+        for _ in 1..MAX_PAGES {
+            let Some(next) = next_link(&headers) else {
+                break;
+            };
+            let (page, h) = self.request_url(next, &[], true).await?;
+            headers = h;
+            match page {
+                serde_json::Value::Array(a) => items.extend(a),
+                _ => {
+                    return Err(ProviderError::Decode(format!(
+                        "{path} did not return a list"
+                    )));
+                }
+            }
+        }
+        Ok(items)
+    }
+
+    fn repo_path(pr: &PrRef) -> String {
+        format!("/repos/{}/{}", pr.owner, pr.repo)
+    }
+
+    pub async fn get_files(&self, pr: &PrRef) -> Result<Vec<FileDiff>, ProviderError> {
+        let raw: Vec<RawFile> = decode_list(
+            self.get_paginated(&format!(
+                "{}/pulls/{}/files",
+                Self::repo_path(pr),
+                pr.number
+            ))
+            .await?,
+        )?;
+        Ok(raw
+            .into_iter()
+            .map(|f| FileDiff {
+                path: f.filename,
+                previous_path: f.previous_filename,
+                status: f.status,
+                additions: f.additions,
+                deletions: f.deletions,
+                patch: f.patch,
+            })
+            .collect())
+    }
+
+    pub async fn get_conversation(&self, pr: &PrRef) -> Result<PrConversation, ProviderError> {
+        let base = Self::repo_path(pr);
+        let threads: Vec<RawThread> = decode_list(
+            self.get_paginated(&format!("{base}/pulls/{}/comments", pr.number))
+                .await?,
+        )?;
+        let comments: Vec<RawIssueComment> = decode_list(
+            self.get_paginated(&format!("{base}/issues/{}/comments", pr.number))
+                .await?,
+        )?;
+        let reviews: Vec<RawReview> = decode_list(
+            self.get_paginated(&format!("{base}/pulls/{}/reviews", pr.number))
+                .await?,
+        )?;
+        Ok(PrConversation {
+            threads: threads
+                .into_iter()
+                .map(|t| ThreadComment {
+                    id: t.id,
+                    in_reply_to: t.in_reply_to_id,
+                    path: t.path,
+                    line: t.line,
+                    side: match t.side.as_deref() {
+                        Some("LEFT") => Some(Side::Left),
+                        Some("RIGHT") => Some(Side::Right),
+                        _ => None,
+                    },
+                    author: login(t.user),
+                    body: t.body,
+                    created_at: t.created_at,
+                    url: t.html_url,
+                })
+                .collect(),
+            comments: comments
+                .into_iter()
+                .map(|c| IssueComment {
+                    id: c.id,
+                    author: login(c.user),
+                    body: c.body,
+                    created_at: c.created_at,
+                    url: c.html_url,
+                })
+                .collect(),
+            reviews: reviews
+                .into_iter()
+                .filter(|r| r.state != "PENDING")
+                .map(|r| ReviewInfo {
+                    id: r.id,
+                    author: login(r.user),
+                    state: r.state,
+                    body: r.body.unwrap_or_default(),
+                    submitted_at: r.submitted_at,
+                    url: r.html_url,
+                })
+                .collect(),
+        })
+    }
+
+    pub async fn get_commits(&self, pr: &PrRef) -> Result<Vec<CommitInfo>, ProviderError> {
+        let raw: Vec<RawCommit> = decode_list(
+            self.get_paginated(&format!(
+                "{}/pulls/{}/commits",
+                Self::repo_path(pr),
+                pr.number
+            ))
+            .await?,
+        )?;
+        Ok(raw
+            .into_iter()
+            .map(|c| CommitInfo {
+                sha: c.sha,
+                author: c.author.map(|u| u.login).unwrap_or(c.commit.author.name),
+                message: c
+                    .commit
+                    .message
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+                date: c.commit.author.date,
+            })
+            .collect())
+    }
+
+    pub async fn get_checks(&self, pr: &PrRef, sha: &str) -> Result<ChecksSummary, ProviderError> {
+        let path = format!("{}/commits/{sha}/check-runs", Self::repo_path(pr));
+        let (body, _) = self.get(&path, &[("per_page", "100")]).await?;
+        let runs: RawCheckRuns = decode(body)?;
+        let mut summary = ChecksSummary::default();
+        for run in runs.check_runs {
+            summary.total += 1;
+            if run.status != "completed" {
+                summary.pending += 1;
+            } else if matches!(
+                run.conclusion.as_deref(),
+                Some("success" | "neutral" | "skipped")
+            ) {
+                summary.passed += 1;
+            } else {
+                summary.failed += 1;
+            }
+        }
+        Ok(summary)
+    }
+
     async fn get(
         &self,
         path: &str,
@@ -185,15 +452,26 @@ impl GitHub {
         query: &[(&str, &str)],
         use_cache: bool,
     ) -> Result<(serde_json::Value, header::HeaderMap), ProviderError> {
+        self.request_url(format!("{}{}", self.api, path), query, use_cache)
+            .await
+    }
+
+    async fn request_url(
+        &self,
+        url: String,
+        query: &[(&str, &str)],
+        use_cache: bool,
+    ) -> Result<(serde_json::Value, header::HeaderMap), ProviderError> {
         let mut request = self
             .http
-            .get(format!("{}{}", self.api, path))
+            .get(url)
             .query(query)
             .bearer_auth(self.token.secret())
             .header(header::ACCEPT, "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .build()
             .map_err(|e| ProviderError::Decode(e.to_string()))?;
+        let request_path = request.url().path().to_string();
         let key = request.url().to_string();
         let cached = if use_cache {
             self.cache
@@ -236,7 +514,7 @@ impl GitHub {
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
         if status == StatusCode::NOT_FOUND {
-            return Err(ProviderError::NotFound(path.to_string()));
+            return Err(ProviderError::NotFound(request_path));
         }
         if !status.is_success() {
             let message = serde_json::from_str::<serde_json::Value>(&text)
@@ -648,5 +926,124 @@ mod tests {
             client.list_prs(PrFilter::Assigned).await,
             Err(ProviderError::Offline(_))
         ));
+    }
+
+    fn pr7() -> PrRef {
+        "acme/widgets#7".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn files_follow_pagination() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "<{}/repos/acme/widgets/pulls/7/files?per_page=100&page=2>; rel=\"next\"",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls/7/files"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "filename": "b.rs", "status": "renamed", "previous_filename": "old_b.rs", "additions": 0, "deletions": 0 }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls/7/files"))
+            .and(query_param("per_page", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", next.as_str())
+                    .set_body_json(json!([
+                        { "filename": "a.rs", "status": "modified", "additions": 2, "deletions": 1, "patch": "@@ -1 +1,2 @@\n-a\n+b\n+c" }
+                    ])),
+            )
+            .with_priority(10)
+            .mount(&server)
+            .await;
+        let files = gh(&server).get_files(&pr7()).await.unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            (
+                files[0].path.as_str(),
+                files[0].additions,
+                files[0].patch.is_some()
+            ),
+            ("a.rs", 2, true)
+        );
+        assert_eq!(
+            (files[1].path.as_str(), files[1].previous_path.as_deref()),
+            ("b.rs", Some("old_b.rs"))
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_collects_threads_comments_and_reviews() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/repos/acme/widgets/pulls/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 1, "path": "a.rs", "line": 3, "side": "RIGHT", "user": { "login": "joao" }, "body": "why?", "created_at": "2026-10-01T10:00:00Z", "html_url": "u1" },
+                { "id": 2, "in_reply_to_id": 1, "path": "a.rs", "line": null, "side": null, "user": { "login": "maria" }, "body": "because", "created_at": "2026-10-01T11:00:00Z", "html_url": "u2" }
+            ]))).mount(&server).await;
+        Mock::given(method("GET")).and(path("/repos/acme/widgets/issues/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 9, "user": { "login": "ana" }, "body": "LGTM", "created_at": "2026-10-01T12:00:00Z", "html_url": "u9" }
+            ]))).mount(&server).await;
+        Mock::given(method("GET")).and(path("/repos/acme/widgets/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 5, "user": { "login": "ana" }, "state": "APPROVED", "body": "", "submitted_at": "2026-10-01T12:30:00Z", "html_url": "u5" },
+                { "id": 6, "user": { "login": "me" }, "state": "PENDING", "body": "", "html_url": "u6" }
+            ]))).mount(&server).await;
+        let c = gh(&server).get_conversation(&pr7()).await.unwrap();
+        assert_eq!(c.threads.len(), 2);
+        assert_eq!(
+            (
+                c.threads[0].side,
+                c.threads[1].in_reply_to,
+                c.threads[1].line
+            ),
+            (Some(Side::Right), Some(1), None)
+        );
+        assert_eq!(c.comments[0].author, "ana");
+        assert_eq!(c.reviews.len(), 1, "pending reviews are dropped");
+        assert_eq!(c.reviews[0].state, "APPROVED");
+    }
+
+    #[tokio::test]
+    async fn commits_and_checks() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/repos/acme/widgets/pulls/7/commits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "sha": "c1", "author": { "login": "maria" }, "commit": { "message": "fix: x\n\nbody", "author": { "name": "Maria", "date": "2026-10-01T09:00:00Z" } } },
+                { "sha": "c2", "author": null, "commit": { "message": "wip", "author": { "name": "Bot", "date": "2026-10-01T09:30:00Z" } } }
+            ]))).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/commits/c2/check-runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 3,
+                "check_runs": [
+                    { "status": "completed", "conclusion": "success" },
+                    { "status": "completed", "conclusion": "failure" },
+                    { "status": "in_progress", "conclusion": null }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        let commits = client.get_commits(&pr7()).await.unwrap();
+        assert_eq!(
+            (commits[0].author.as_str(), commits[0].message.as_str()),
+            ("maria", "fix: x")
+        );
+        assert_eq!(commits[1].author, "Bot");
+        let checks = client.get_checks(&pr7(), "c2").await.unwrap();
+        assert_eq!(
+            checks,
+            ChecksSummary {
+                total: 3,
+                passed: 1,
+                failed: 1,
+                pending: 1
+            }
+        );
     }
 }
