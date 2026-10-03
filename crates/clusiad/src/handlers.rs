@@ -54,6 +54,23 @@ pub(crate) async fn handle(shared: &Shared, cmd: Command) -> Outcome {
         Command::SetToken { token } => set_token(shared, &token).await,
         Command::ClearToken => clear_token(shared).await,
         Command::PrepareWorktree { pr } => worktrees::prepare(shared, &pr).await,
+        Command::OpenReview { .. }
+        | Command::GetReview { .. }
+        | Command::CloseReview { .. }
+        | Command::DiscardReview { .. }
+        | Command::GetDiff { .. }
+        | Command::GetConversation { .. }
+        | Command::AddDraftItem { .. }
+        | Command::UpdateDraftItem { .. }
+        | Command::RemoveDraftItem { .. }
+        | Command::Publish { .. }
+        | Command::GetWhatsNew { .. }
+        | Command::MarkSeen { .. }
+        | Command::ListReviews
+        | Command::GetActivity => Outcome::Err(ProtocolError::new(
+            ErrorCode::Internal,
+            "not implemented yet",
+        )),
     }
 }
 

@@ -1,6 +1,9 @@
 //! Every message that crosses the socket.
 
-use clusia_core::{Config, PrDetail, PrFilter, PrRef, PrSummary};
+use clusia_core::{
+    ActivitySummary, Config, DraftItem, DraftKind, FileDiff, PrConversation, PrDetail, PrFilter,
+    PrRef, PrSummary, Review, ReviewState, Role, Side, Verdict,
+};
 use serde::{Deserialize, Serialize};
 
 /// Topics a client can subscribe to.
@@ -8,6 +11,7 @@ pub mod topics {
     pub const CONFIG: &str = "config";
     pub const PRS: &str = "prs";
     pub const SYNC: &str = "sync";
+    pub const REVIEWS: &str = "reviews";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,6 +89,55 @@ pub enum Command {
     PrepareWorktree {
         pr: PrRef,
     },
+    /// Refresh everything from GitHub, prepare the worktree, and create or reopen the review.
+    OpenReview {
+        pr: PrRef,
+    },
+    /// The stored review file, without network.
+    GetReview {
+        pr: PrRef,
+    },
+    /// Leave: saved if the draft has content, otherwise forgotten.
+    CloseReview {
+        pr: PrRef,
+    },
+    DiscardReview {
+        pr: PrRef,
+    },
+    GetDiff {
+        pr: PrRef,
+    },
+    GetConversation {
+        pr: PrRef,
+    },
+    AddDraftItem {
+        pr: PrRef,
+        kind: DraftKind,
+        anchor: Option<AnchorInput>,
+        body: String,
+    },
+    UpdateDraftItem {
+        pr: PrRef,
+        id: String,
+        body: String,
+    },
+    RemoveDraftItem {
+        pr: PrRef,
+        id: String,
+    },
+    Publish {
+        pr: PrRef,
+        verdict: Verdict,
+        summary: String,
+    },
+    GetWhatsNew {
+        pr: PrRef,
+    },
+    MarkSeen {
+        pr: PrRef,
+    },
+    ListReviews,
+    GetActivity,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,6 +160,15 @@ pub enum Reply {
     Sync(SyncStatus),
     Auth(AuthInfo),
     Worktree(WorktreeInfo),
+    Review(Box<ReviewView>),
+    ReviewFile(Box<Review>),
+    Diff(Vec<FileDiff>),
+    Conversation(PrConversation),
+    DraftItem(DraftItem),
+    Published(PublishResult),
+    WhatsNew(Vec<NewsItem>),
+    Reviews(Vec<ReviewSummary>),
+    Activity(ActivitySummary),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,14 +290,138 @@ pub enum ErrorCode {
     /// GitHub answered with an unexpected error.
     Upstream,
     Git,
+    /// The PR moved under the draft.
+    Conflict,
+    /// E.g. no open review.
+    InvalidState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Event {
-    ConfigChanged { key: String, value: String },
-    PrsUpdated { assigned: usize, mine: usize },
+    ConfigChanged {
+        key: String,
+        value: String,
+    },
+    PrsUpdated {
+        assigned: usize,
+        mine: usize,
+    },
     SyncChanged(SyncStatus),
+    LoadStep(LoadStep),
+    ReviewChanged {
+        pr: PrRef,
+        state: ReviewState,
+        items: usize,
+    },
+    ReviewOutdated {
+        pr: PrRef,
+        moved: usize,
+        obsolete: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorInput {
+    pub path: String,
+    pub line: u32,
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    pub side: Side,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSummary {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub status: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+impl From<&FileDiff> for FileSummary {
+    fn from(f: &FileDiff) -> Self {
+        Self {
+            path: f.path.clone(),
+            previous_path: f.previous_path.clone(),
+            status: f.status.clone(),
+            additions: f.additions,
+            deletions: f.deletions,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewView {
+    pub review: Review,
+    pub pr: PrDetail,
+    pub files: Vec<FileSummary>,
+    pub role: Role,
+    pub worktree: Option<String>,
+    pub viewer: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadStepKind {
+    Repo,
+    Branch,
+    Pr,
+    Agent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Running,
+    Done,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadStep {
+    pub pr: PrRef,
+    pub step: LoadStepKind,
+    pub status: StepStatus,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewsKind {
+    Commits,
+    Comment,
+    Review,
+    Checks,
+    Local,
+    Moved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewsItem {
+    pub kind: NewsKind,
+    /// Where it came from: `GitHub`, `GitHub Actions`, `You via clusia`, `Clúsia`.
+    pub source: String,
+    pub who: Option<String>,
+    pub at: i64,
+    pub summary: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSummary {
+    pub pr: PrRef,
+    pub title: String,
+    pub state: ReviewState,
+    pub items: usize,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishResult {
+    pub url: Option<String>,
+    pub closed: bool,
 }
 
 #[cfg(test)]
@@ -632,5 +818,162 @@ mod tests {
             wire(&msg),
             r#"{"type":"request","id":9,"cmd":{"set_token":{"token":"ghp_x"}}}"#
         );
+    }
+
+    #[test]
+    fn m3_messages_wire_format() {
+        let open = ClientMessage::Request {
+            id: 1,
+            cmd: Command::OpenReview { pr: acme7() },
+        };
+        assert_eq!(
+            wire(&open),
+            r#"{"type":"request","id":1,"cmd":{"open_review":{"pr":"acme/widgets#7"}}}"#
+        );
+
+        let add = ClientMessage::Request {
+            id: 2,
+            cmd: Command::AddDraftItem {
+                pr: acme7(),
+                kind: clusia_core::DraftKind::LineComment,
+                anchor: Some(AnchorInput {
+                    path: "a.rs".into(),
+                    line: 3,
+                    start_line: None,
+                    side: clusia_core::Side::Right,
+                }),
+                body: "nit".into(),
+            },
+        };
+        assert_eq!(
+            wire(&add),
+            r#"{"type":"request","id":2,"cmd":{"add_draft_item":{"pr":"acme/widgets#7","kind":"line_comment","anchor":{"path":"a.rs","line":3,"start_line":null,"side":"right"},"body":"nit"}}}"#
+        );
+
+        let publish = ClientMessage::Request {
+            id: 3,
+            cmd: Command::Publish {
+                pr: acme7(),
+                verdict: clusia_core::Verdict::RequestChanges,
+                summary: "fix".into(),
+            },
+        };
+        assert_eq!(
+            wire(&publish),
+            r#"{"type":"request","id":3,"cmd":{"publish":{"pr":"acme/widgets#7","verdict":"request_changes","summary":"fix"}}}"#
+        );
+
+        let step = ServerMessage::Event {
+            topic: topics::REVIEWS.into(),
+            event: Event::LoadStep(LoadStep {
+                pr: acme7(),
+                step: LoadStepKind::Branch,
+                status: StepStatus::Done,
+                message: None,
+            }),
+        };
+        assert_eq!(
+            wire(&step),
+            r#"{"type":"event","topic":"reviews","event":{"load_step":{"pr":"acme/widgets#7","step":"branch","status":"done","message":null}}}"#
+        );
+
+        let outdated = ServerMessage::Event {
+            topic: topics::REVIEWS.into(),
+            event: Event::ReviewOutdated {
+                pr: acme7(),
+                moved: 2,
+                obsolete: 1,
+            },
+        };
+        assert_eq!(
+            wire(&outdated),
+            r#"{"type":"event","topic":"reviews","event":{"review_outdated":{"pr":"acme/widgets#7","moved":2,"obsolete":1}}}"#
+        );
+    }
+
+    #[test]
+    fn m3_messages_round_trip() {
+        let review = clusia_core::Review::new(acme7(), "Fix".into(), "b".into(), "h".into(), 1);
+        for cmd in [
+            Command::OpenReview { pr: acme7() },
+            Command::GetReview { pr: acme7() },
+            Command::CloseReview { pr: acme7() },
+            Command::DiscardReview { pr: acme7() },
+            Command::GetDiff { pr: acme7() },
+            Command::GetConversation { pr: acme7() },
+            Command::UpdateDraftItem {
+                pr: acme7(),
+                id: "i1".into(),
+                body: "b".into(),
+            },
+            Command::RemoveDraftItem {
+                pr: acme7(),
+                id: "i1".into(),
+            },
+            Command::GetWhatsNew { pr: acme7() },
+            Command::MarkSeen { pr: acme7() },
+            Command::ListReviews,
+            Command::GetActivity,
+        ] {
+            round_trip(ClientMessage::Request { id: 1, cmd });
+        }
+        let file = clusia_core::FileDiff {
+            path: "a.rs".into(),
+            previous_path: None,
+            status: "modified".into(),
+            additions: 1,
+            deletions: 0,
+            patch: None,
+        };
+        assert_eq!(FileSummary::from(&file).path, "a.rs");
+        for reply in [
+            Reply::ReviewFile(Box::new(review.clone())),
+            Reply::Diff(vec![file]),
+            Reply::Conversation(clusia_core::PrConversation::default()),
+            Reply::Published(PublishResult {
+                url: Some("u".into()),
+                closed: false,
+            }),
+            Reply::WhatsNew(vec![NewsItem {
+                kind: NewsKind::Commits,
+                source: "GitHub".into(),
+                who: Some("maria".into()),
+                at: 5,
+                summary: "2 new commits".into(),
+                url: None,
+            }]),
+            Reply::Reviews(vec![ReviewSummary {
+                pr: acme7(),
+                title: "Fix".into(),
+                state: clusia_core::ReviewState::Saved,
+                items: 2,
+                updated_at: 9,
+            }]),
+            Reply::Activity(clusia_core::ActivitySummary {
+                heatmap: vec![],
+                published_this_week: 0,
+                published_total: 0,
+                avg_review_secs: None,
+            }),
+        ] {
+            round_trip(ServerMessage::Response {
+                id: 2,
+                result: Outcome::Ok(reply),
+            });
+        }
+        for code in [ErrorCode::Conflict, ErrorCode::InvalidState] {
+            round_trip(ServerMessage::Response {
+                id: 3,
+                result: Outcome::Err(ProtocolError::new(code, "m")),
+            });
+        }
+        round_trip(ServerMessage::Event {
+            topic: topics::REVIEWS.into(),
+            event: Event::ReviewChanged {
+                pr: acme7(),
+                state: clusia_core::ReviewState::Active,
+                items: 1,
+            },
+        });
     }
 }
