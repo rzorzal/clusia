@@ -22,6 +22,14 @@ pub enum Action {
     Page(crate::model::ListId, i8),
     /// Show one repository (`owner/repo`) or all of them.
     Repository(Option<String>),
+    /// Sync with GitHub now.
+    Refresh,
+    /// Open the Turn off menu (AppKit pops it up).
+    TurnOff,
+    PauseSync,
+    ResumeSync,
+    /// Stop the daemon (and with it the tray and the window).
+    Quit,
 }
 
 impl Action {
@@ -80,7 +88,14 @@ pub fn plan(action: &Action, app: Option<&Path>, paths: &Paths) -> Option<Launch
         })
     };
     match action {
-        Action::CycleSort(_) | Action::Page(..) | Action::Repository(_) => None,
+        Action::CycleSort(_)
+        | Action::Page(..)
+        | Action::Repository(_)
+        | Action::Refresh
+        | Action::TurnOff
+        | Action::PauseSync
+        | Action::ResumeSync
+        | Action::Quit => None,
         Action::OpenReview { pr, url } => {
             window(&["--review".into(), pr.to_string()]).or_else(|| browser(url))
         }

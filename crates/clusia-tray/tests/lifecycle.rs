@@ -86,3 +86,51 @@ fn tray_follows_the_daemon() {
         tray_pids(home)
     );
 }
+
+#[test]
+#[ignore = "shows a real menu bar item; run explicitly with --ignored"]
+fn quit_sends_shutdown_and_the_tray_exits_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let mut daemon = KillOnDrop(
+        Command::new(clusiad_bin())
+            .arg("--home")
+            .arg(home)
+            .env("CLUSIA_TRAY_BIN", env!("CARGO_BIN_EXE_clusia-tray"))
+            .env("CLUSIA_APP_BIN", "none")
+            .env("CLUSIA_GITHUB_API", "http://127.0.0.1:9")
+            .env("CLUSIA_GH_BIN", "/nonexistent/gh")
+            .env("CLUSIA_SECRET_STORE", "memory")
+            .env_remove("CLUSIA_GITHUB_TOKEN")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || tray_pids(home).len() == 1),
+        "tray never started"
+    );
+    // What the Quit menu item does: the same Shutdown request the tray's data loop sends.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let paths = clusia_core::Paths::new(home);
+        let mut c = clusia_protocol::Client::connect(&paths.socket(), "quit-test")
+            .await
+            .unwrap();
+        c.request(clusia_protocol::Command::Shutdown).await.unwrap();
+    });
+    let exited = wait_until(Duration::from_secs(10), || {
+        matches!(daemon.0.try_wait(), Ok(Some(_)))
+    });
+    assert!(exited, "the daemon stopped");
+    assert!(daemon.0.wait().unwrap().success(), "a clean stop exits 0");
+    assert!(
+        wait_until(Duration::from_secs(5), || tray_pids(home).is_empty()),
+        "the tray followed the daemon: {:?}",
+        tray_pids(home)
+    );
+}

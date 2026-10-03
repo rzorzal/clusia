@@ -97,7 +97,7 @@ fn reply(cmd: &Command, fail: &[&str]) -> Outcome {
             published_total: 9,
             avg_review_secs: None,
         }),
-        Command::GetSyncStatus => Reply::Sync(online()),
+        Command::GetSyncStatus | Command::SyncNow => Reply::Sync(online()),
         Command::SetConfigValue { value, .. } if value == "bogus" => {
             return Outcome::Err(ProtocolError::new(
                 ErrorCode::InvalidConfigValue,
@@ -167,7 +167,7 @@ fn fake_failing(fail: &'static [&'static str]) -> Fake {
     }
 }
 
-type WriteQueue = mpsc::UnboundedSender<(String, String)>;
+type WriteQueue = mpsc::UnboundedSender<data::Outgoing>;
 
 fn start(socket: PathBuf) -> (Receiver<Update>, WriteQueue) {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -313,7 +313,10 @@ async fn writes_become_config_sets_and_config_events_update_lists() {
     snapshot(&rx);
     fake.clear();
     writes
-        .send(("lists.assigned_sort".into(), "oldest".into()))
+        .send(data::Outgoing::Config(
+            "lists.assigned_sort".into(),
+            "oldest".into(),
+        ))
         .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(fake.requests(), ["SetConfigValue"]);
@@ -341,13 +344,69 @@ async fn writes_become_config_sets_and_config_events_update_lists() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refresh_runs_sync_now_and_reports_done() {
+    let fake = fake();
+    let (rx, writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    fake.clear();
+    writes.send(data::Outgoing::SyncNow).unwrap();
+    loop {
+        if next(&rx) == Update::Refreshed {
+            break;
+        }
+    }
+    assert!(fake.requests().contains(&"SyncNow".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_refresh_still_reports_done() {
+    let fake = fake_failing(&["SyncNow"]);
+    let (rx, writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    writes.send(data::Outgoing::SyncNow).unwrap();
+    loop {
+        if next(&rx) == Update::Refreshed {
+            break;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pause_resume_and_quit_are_sent() {
+    let fake = fake();
+    let (rx, writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    fake.clear();
+    writes.send(data::Outgoing::PauseSync).unwrap();
+    writes.send(data::Outgoing::ResumeSync).unwrap();
+    writes.send(data::Outgoing::Shutdown).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let r = fake.requests();
+        if r.contains(&"Shutdown".to_string()) {
+            assert!(r.contains(&"PauseSync".to_string()) && r.contains(&"ResumeSync".to_string()));
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{r:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(rx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejected_write_is_reported_and_the_session_goes_on() {
     let fake = fake();
     let (rx, writes) = start(fake.socket.clone());
     snapshot(&rx);
     snapshot(&rx);
     writes
-        .send(("lists.assigned_sort".into(), "bogus".into()))
+        .send(data::Outgoing::Config(
+            "lists.assigned_sort".into(),
+            "bogus".into(),
+        ))
         .unwrap();
     assert_eq!(next(&rx), Update::WriteFailed("lists.assigned_sort".into()));
     let offline = SyncStatus {

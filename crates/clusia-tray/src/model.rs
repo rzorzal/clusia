@@ -114,6 +114,11 @@ pub struct TrayView {
     /// Heatmap levels 0–4, oldest day first (empty before activity arrives).
     pub heat: Vec<u8>,
     pub week_label: String,
+    /// A refresh is running.
+    pub syncing: bool,
+    pub paused: bool,
+    /// Right side of the caption over the heatmap.
+    pub sync_caption: Option<StatusLine>,
     pub status: Option<StatusLine>,
     pub sections: Vec<Section>,
     /// The window is installed, so ⤢ can open Home.
@@ -143,6 +148,8 @@ pub struct TrayModel {
     /// Query value last written to the config.
     saved_query: String,
     pages: HashMap<ListId, usize>,
+    /// A `SyncNow` asked for by the UI is running.
+    refreshing: bool,
 }
 
 impl TrayModel {
@@ -151,6 +158,18 @@ impl TrayModel {
             app_available,
             ..Self::default()
         }
+    }
+
+    pub fn refresh_started(&mut self) {
+        self.refreshing = true;
+    }
+
+    pub fn refresh_done(&mut self) {
+        self.refreshing = false;
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.snapshot.sync.as_ref().is_some_and(|s| s.paused)
     }
 
     pub fn apply(&mut self, snapshot: Snapshot) {
@@ -342,6 +361,9 @@ impl TrayModel {
                 .as_ref()
                 .map(|a| week_label(a.published_this_week))
                 .unwrap_or_default(),
+            syncing: self.refreshing,
+            paused: self.is_paused(),
+            sync_caption: sync_caption(s.sync.as_ref(), self.refreshing, now),
             status: status_line(s.sync.as_ref(), now),
             sections: vec![
                 self.section(ListId::Assigned, now, &web),
@@ -596,6 +618,27 @@ pub fn week_label(published: u32) -> String {
     }
 }
 
+/// "Syncing…" during a refresh, "Syncing paused", "Synced 2m ago", or nothing.
+pub fn sync_caption(sync: Option<&SyncStatus>, refreshing: bool, now: i64) -> Option<StatusLine> {
+    let line = |text: String, tone| Some(StatusLine { text, tone });
+    if refreshing {
+        return line("Syncing…".into(), Tone::Neutral);
+    }
+    let s = sync?;
+    if s.paused {
+        return line("Syncing paused".into(), Tone::Warning);
+    }
+    match (s.state, s.last_sync_unix) {
+        (SyncState::Online, Some(t)) if now - t < 60 => {
+            line("Synced just now".into(), Tone::Neutral)
+        }
+        (SyncState::Online, Some(t)) => {
+            line(format!("Synced {} ago", format_age(now, t)), Tone::Neutral)
+        }
+        _ => None,
+    }
+}
+
 pub fn status_line(sync: Option<&SyncStatus>, now: i64) -> Option<StatusLine> {
     let line = |text: &str, tone| {
         Some(StatusLine {
@@ -706,6 +749,64 @@ mod tests {
             lists_loaded: true,
             ..Snapshot::default()
         }
+    }
+
+    #[test]
+    fn sync_captions() {
+        let s = |paused, last| SyncStatus {
+            state: SyncState::Online,
+            last_sync_unix: last,
+            next_sync_unix: None,
+            message: None,
+            paused,
+        };
+        assert_eq!(sync_caption(None, false, NOW), None);
+        assert_eq!(sync_caption(None, true, NOW).unwrap().text, "Syncing…");
+        assert_eq!(
+            sync_caption(Some(&s(false, Some(NOW - 120))), false, NOW)
+                .unwrap()
+                .text,
+            "Synced 2m ago"
+        );
+        assert_eq!(
+            sync_caption(Some(&s(false, Some(NOW - 10))), false, NOW)
+                .unwrap()
+                .text,
+            "Synced just now"
+        );
+        let paused = sync_caption(Some(&s(true, Some(NOW - 10))), false, NOW).unwrap();
+        assert_eq!(
+            (paused.text.as_str(), paused.tone),
+            ("Syncing paused", Tone::Warning)
+        );
+        assert_eq!(
+            sync_caption(Some(&s(true, None)), true, NOW).unwrap().text,
+            "Syncing…",
+            "a manual refresh while paused still shows progress"
+        );
+    }
+
+    #[test]
+    fn refresh_shows_syncing_until_the_reply() {
+        let mut m = TrayModel::new(true);
+        m.apply(snap(many(1)));
+        assert!(!m.view(NOW).syncing);
+        m.refresh_started();
+        assert!(m.view(NOW).syncing);
+        m.apply(snap(many(1)));
+        assert!(m.view(NOW).syncing, "snapshots alone do not end it");
+        m.refresh_done();
+        assert!(!m.view(NOW).syncing);
+    }
+
+    #[test]
+    fn paused_comes_from_the_snapshot() {
+        let mut m = TrayModel::new(true);
+        let mut first = snap(many(1));
+        first.sync.as_mut().unwrap().paused = true;
+        m.apply(first);
+        assert!(m.is_paused());
+        assert!(m.view(NOW).paused);
     }
 
     #[test]

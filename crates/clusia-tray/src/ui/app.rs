@@ -36,7 +36,7 @@ struct Ui {
     content: Retained<ContentView>,
     search: Retained<NSSearchField>,
     /// Config writes for the data loop (sent to the daemon as `SetConfigValue`).
-    writes: UnboundedSender<(String, String)>,
+    writes: UnboundedSender<crate::data::Outgoing>,
     paths: Paths,
     app_bin: Option<PathBuf>,
 }
@@ -82,7 +82,11 @@ impl Ui {
     /// Hands the model's queued config writes to the data loop.
     fn push_writes(&mut self) {
         for write in self.model.take_writes() {
-            if self.writes.send(write).is_err() {
+            if self
+                .writes
+                .send(crate::data::Outgoing::Config(write.0, write.1))
+                .is_err()
+            {
                 tracing::warn!("the data loop is gone; dropping a config write");
             }
         }
@@ -98,6 +102,12 @@ fn deliver(update: Update) {
         Update::Snapshot(snapshot) => UI.with_borrow_mut(|ui| {
             if let Some(ui) = ui {
                 ui.model.apply(*snapshot);
+                ui.render(mtm);
+            }
+        }),
+        Update::Refreshed => UI.with_borrow_mut(|ui| {
+            if let Some(ui) = ui {
+                ui.model.refresh_done();
                 ui.render(mtm);
             }
         }),
