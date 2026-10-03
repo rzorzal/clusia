@@ -157,7 +157,7 @@ fn next(rx: &Receiver<Update>) -> Update {
 
 fn snapshot(rx: &Receiver<Update>) -> clusia_tray::model::Snapshot {
     match next(rx) {
-        Update::Snapshot(s) => s,
+        Update::Snapshot(s) => *s,
         other => panic!("expected a snapshot, got {other:?}"),
     }
 }

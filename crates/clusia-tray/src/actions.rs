@@ -16,6 +16,22 @@ pub enum Action {
     OpenUrl(String),
     OpenHome,
     OpenConfig,
+    /// Next sort order for that list (handled inside the tray, saved to the config).
+    CycleSort(crate::model::ListId),
+    /// Move one page back (-1) or forward (+1).
+    Page(crate::model::ListId, i8),
+    /// Show one repository (`owner/repo`) or all of them.
+    Repository(Option<String>),
+}
+
+impl Action {
+    /// Changes the popover itself instead of launching something.
+    pub fn is_local(&self) -> bool {
+        matches!(
+            self,
+            Action::CycleSort(_) | Action::Page(..) | Action::Repository(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +80,7 @@ pub fn plan(action: &Action, app: Option<&Path>, paths: &Paths) -> Option<Launch
         })
     };
     match action {
+        Action::CycleSort(_) | Action::Page(..) | Action::Repository(_) => None,
         Action::OpenReview { pr, url } => {
             window(&["--review".into(), pr.to_string()]).or_else(|| browser(url))
         }
@@ -240,5 +257,20 @@ mod tests {
             app_binary_from(None, Some(exe)),
             Some(dir.path().join("clusia-app"))
         );
+    }
+
+    #[test]
+    fn local_actions_launch_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        for a in [
+            Action::CycleSort(crate::model::ListId::Assigned),
+            Action::Page(crate::model::ListId::Saved, 1),
+            Action::Repository(None),
+        ] {
+            assert!(a.is_local());
+            assert_eq!(plan(&a, Some(Path::new("/x/app")), &paths), None);
+        }
+        assert!(!Action::OpenHome.is_local());
     }
 }

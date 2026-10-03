@@ -14,7 +14,7 @@ pub const COALESCE: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
-    Snapshot(Snapshot),
+    Snapshot(Box<Snapshot>),
     /// The tray must exit (the daemon is gone or unreachable).
     Quit(String),
 }
@@ -98,7 +98,7 @@ async fn session(socket: &std::path::Path, send: &(impl Fn(Update) + Sync)) -> R
     if let Reply::Sync(status) = request(&mut client, Command::GetSyncStatus).await? {
         snap.sync = Some(status);
     }
-    send(Update::Snapshot(snap.clone()));
+    send(Update::Snapshot(Box::new(snap.clone())));
     // ListPrs waits for the daemon's first sync, so the lists come in a second snapshot.
     fetch(
         &mut client,
@@ -109,7 +109,7 @@ async fn session(socket: &std::path::Path, send: &(impl Fn(Update) + Sync)) -> R
         },
     )
     .await?;
-    send(Update::Snapshot(snap.clone()));
+    send(Update::Snapshot(Box::new(snap.clone())));
     let mut last = snap.clone();
     loop {
         let mut todo = match client.next_event().await {
@@ -128,7 +128,7 @@ async fn session(socket: &std::path::Path, send: &(impl Fn(Update) + Sync)) -> R
         }
         fetch(&mut client, &mut snap, todo).await?;
         if snap != last {
-            send(Update::Snapshot(snap.clone()));
+            send(Update::Snapshot(Box::new(snap.clone())));
             last = snap.clone();
         }
     }

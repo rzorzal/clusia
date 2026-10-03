@@ -1,6 +1,6 @@
 //! Demo data for `--render` (generic and `rzorzal/*` only).
 
-use clusia_core::{ActivitySummary, DayCount, PrRef, PrSummary, ReviewState};
+use clusia_core::{ActivitySummary, DayCount, Lists, PrRef, PrSummary, ReviewState};
 use clusia_protocol::{ReviewSummary, SyncState, SyncStatus};
 
 use crate::model::Snapshot;
@@ -96,6 +96,7 @@ pub fn demo(now: i64) -> Vec<Snapshot> {
         }),
         host: "github.com".into(),
         lists_loaded: true,
+        lists: Lists::default(),
     };
     let mut second = first.clone();
     second.assigned[0].updated_at = rfc3339(now - 300);

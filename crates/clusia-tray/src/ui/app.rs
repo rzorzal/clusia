@@ -70,7 +70,7 @@ fn deliver(update: Update) {
     match update {
         Update::Snapshot(snapshot) => UI.with_borrow_mut(|ui| {
             if let Some(ui) = ui {
-                ui.model.apply(snapshot);
+                ui.model.apply(*snapshot);
                 ui.render(mtm);
             }
         }),

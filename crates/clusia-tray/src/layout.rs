@@ -281,19 +281,6 @@ pub fn layout(view: &TrayView) -> Layout {
             ));
             y += ROW_H;
         }
-        if section.more > 0 {
-            let r = Rect::new(PAD + 56.0, y, inner - 56.0, 16.0);
-            l.shapes.push(text(
-                r,
-                &format!("+{} more", section.more),
-                Style::Meta,
-                Ink::Secondary,
-            ));
-            if view.show_home {
-                l.hits.push((r, Action::OpenHome));
-            }
-            y += 22.0;
-        }
         y += 6.0;
     }
     l.height = (y + PAD - 6.0).ceil();
@@ -394,7 +381,6 @@ mod tests {
     fn height_stays_bounded_with_long_lists() {
         let l = layout(&view(50, true, true));
         assert!(l.height <= 700.0, "height {}", l.height);
-        assert!(texts(&l).contains(&"+46 more"));
         for s in &l.shapes {
             let r = match s {
                 Shape::Text { rect, .. }
