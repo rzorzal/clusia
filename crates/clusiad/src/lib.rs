@@ -12,6 +12,7 @@ mod reviews;
 mod server;
 mod state;
 mod sync;
+mod tray;
 mod worktrees;
 
 pub use options::DaemonOptions;

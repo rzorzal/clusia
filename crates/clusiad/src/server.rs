@@ -101,6 +101,15 @@ impl Daemon {
         if self.shared.background_sync {
             tokio::spawn(sync::run_loop(self.shared.clone()));
         }
+        let tray = self.shared.tray_program.clone().map(|program| {
+            tokio::spawn(crate::tray::supervise(
+                program,
+                self.shared.paths.root().to_path_buf(),
+                self.shared.paths.logs_dir().join("tray.log"),
+                self.shared.shutdown.subscribe(),
+                crate::tray::RestartPolicy::DEFAULT,
+            ))
+        });
         {
             let shared = self.shared.clone();
             let periodic = self.shared.background_sync;
@@ -144,6 +153,10 @@ impl Daemon {
             }
         }
         drop(self.listener);
+        if let Some(tray) = tray {
+            // The supervisor kills the tray on shutdown; give it a moment to reap it.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), tray).await;
+        }
         match fs::remove_file(&self.socket) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => {
                 tracing::warn!(error = %e, "could not remove socket")
