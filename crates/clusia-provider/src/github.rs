@@ -55,7 +55,7 @@ pub struct GitHub {
     api: String,
     token: Token,
     /// Full URL → (ETag, body) for conditional requests.
-    cache: Mutex<HashMap<String, (String, serde_json::Value)>>,
+    cache: Mutex<HashMap<String, CacheEntry>>,
 }
 
 fn now_secs() -> u64 {
@@ -81,6 +81,9 @@ fn rate_limit_wait(status: StatusCode, headers: &header::HeaderMap) -> Option<u6
     }
     (status == StatusCode::TOO_MANY_REQUESTS).then_some(60)
 }
+
+/// ETag, body and the `Link` header (a 304 carries none).
+type CacheEntry = (String, serde_json::Value, Option<header::HeaderValue>);
 
 #[derive(Deserialize)]
 struct UserRef {
@@ -284,6 +287,10 @@ impl GitHub {
             let Some(next) = next_link(&headers) else {
                 break;
             };
+            if !next.starts_with(&self.api) {
+                tracing::warn!(path, "ignoring pagination link to a different host");
+                break;
+            }
             let (page, h) = self.request_url(next, &[], true).await?;
             headers = h;
             match page {
@@ -482,7 +489,7 @@ impl GitHub {
         } else {
             None
         };
-        if let Some((etag, _)) = &cached
+        if let Some((etag, _, _)) = &cached
             && let Ok(value) = header::HeaderValue::from_str(etag)
         {
             request.headers_mut().insert(header::IF_NONE_MATCH, value);
@@ -494,10 +501,16 @@ impl GitHub {
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
         let status = response.status();
-        let headers = response.headers().clone();
+        let mut headers = response.headers().clone();
         if status == StatusCode::NOT_MODIFIED {
             return match cached {
-                Some((_, body)) => Ok((body, headers)),
+                Some((_, body, link)) => {
+                    // A 304 carries no `Link`; restore the cached one so pagination continues.
+                    if let Some(link) = link {
+                        headers.insert(header::LINK, link);
+                    }
+                    Ok((body, headers))
+                }
                 None => Err(ProviderError::Decode(
                     "304 without a cached response".into(),
                 )),
@@ -529,10 +542,14 @@ impl GitHub {
         let body: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| ProviderError::Decode(e.to_string()))?;
         if use_cache && let Some(etag) = headers.get(header::ETAG).and_then(|v| v.to_str().ok()) {
-            self.cache
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(key, (etag.to_string(), body.clone()));
+            self.cache.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                key,
+                (
+                    etag.to_string(),
+                    body.clone(),
+                    headers.get(header::LINK).cloned(),
+                ),
+            );
         }
         Ok((body, headers))
     }
@@ -1045,5 +1062,67 @@ mod tests {
                 pending: 1
             }
         );
+    }
+
+    #[tokio::test]
+    async fn pagination_survives_304_revalidation() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "<{}/repos/acme/widgets/pulls/7/files?per_page=100&page=2>; rel=\"next\"",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls/7/files"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "filename": "b.rs", "status": "added", "additions": 1, "deletions": 0 }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls/7/files"))
+            .and(query_param("per_page", "100"))
+            .and(wiremock::matchers::header_exists("if-none-match"))
+            .respond_with(ResponseTemplate::new(304))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls/7/files"))
+            .and(query_param("per_page", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("etag", "\"p1\"")
+                    .insert_header("link", next.as_str())
+                    .set_body_json(json!([
+                        { "filename": "a.rs", "status": "modified", "additions": 1, "deletions": 1 }
+                    ])),
+            )
+            .up_to_n_times(1)
+            .with_priority(5)
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        assert_eq!(client.get_files(&pr7()).await.unwrap().len(), 2);
+        assert_eq!(client.get_files(&pr7()).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn foreign_next_link_is_not_followed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls/7/files"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", "<http://evil.example/x?page=2>; rel=\"next\"")
+                    .set_body_json(json!([
+                        { "filename": "a.rs", "status": "modified", "additions": 1, "deletions": 1 }
+                    ])),
+            )
+            .mount(&server)
+            .await;
+        let files = gh(&server).get_files(&pr7()).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }
