@@ -1,5 +1,6 @@
 //! Clúsia domain types and pure logic. No I/O beyond reading environment variables.
 
+pub mod activity;
 pub mod config;
 pub mod diffmap;
 pub mod draft;
@@ -9,6 +10,7 @@ pub mod publish;
 pub mod review;
 pub mod time;
 
+pub use activity::{Activity, ActivityKind, ActivitySummary, DayCount};
 pub use config::Config;
 pub use diffmap::{
     DiffMap, FileChange, Hunk, LineMap, Relocation, can_comment, commentable_lines, relocate,
