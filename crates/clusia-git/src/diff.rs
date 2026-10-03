@@ -17,8 +17,26 @@ pub(crate) fn reject_dash(kind: &str, name: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// A full SHA-1 (40) or SHA-256 (64) hex object name.
+pub fn is_object_id(name: &str) -> bool {
+    matches!(name.len(), 40 | 64) && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Rejects anything but a full object id before it reaches git's argv as a positional argument.
+pub(crate) fn require_object_id(name: &str) -> Result<(), GitError> {
+    if is_object_id(name) {
+        return Ok(());
+    }
+    Err(GitError::Failed {
+        args: String::new(),
+        stderr: format!("invalid commit id {name:?}"),
+    })
+}
+
 /// Zero-context diff with rename detection, the input of `clusia_core::DiffMap::parse`.
 pub async fn diff_between(repo: &Path, old: &str, new: &str) -> Result<String, GitError> {
+    require_object_id(old)?;
+    require_object_id(new)?;
     git(
         repo,
         &[
@@ -46,6 +64,7 @@ pub fn reviewed_ref(number: u64) -> String {
 
 /// Keeps `sha` reachable (a force-push would otherwise let gc drop the reviewed commit).
 pub async fn pin_commit(repo: &Path, refname: &str, sha: &str) -> Result<(), GitError> {
+    require_object_id(sha)?;
     git(repo, &["update-ref", refname, sha]).await.map(|_| ())
 }
 
@@ -95,6 +114,8 @@ pub fn base_pin_ref(number: u64) -> String {
 
 /// The merge base of two commits: the version a PR's left-side line numbers refer to.
 pub async fn merge_base(repo: &Path, a: &str, b: &str) -> Result<String, GitError> {
+    require_object_id(a)?;
+    require_object_id(b)?;
     git(repo, &["merge-base", a, b]).await
 }
 
@@ -247,6 +268,41 @@ mod tests {
         let side = sh(&repo, &["rev-parse", "HEAD"]);
         assert_eq!(merge_base(&repo, &second, &side).await.unwrap(), first);
         assert_eq!(base_pin_ref(7), "refs/clusia/reviewed/pr-7-base");
+    }
+
+    #[test]
+    fn object_ids_are_full_hex_shas() {
+        assert!(is_object_id(&"a".repeat(40)));
+        assert!(is_object_id(&"0123456789ABCDEFabcdef".repeat(2)[..40]));
+        assert!(is_object_id(&"f".repeat(64)));
+        for bad in [
+            String::new(),
+            "abc123".to_string(),
+            "g".repeat(40),
+            "a".repeat(41),
+            "a".repeat(63),
+            format!("-{}", "a".repeat(39)),
+            "HEAD".to_string(),
+            "refs/heads/main".to_string(),
+        ] {
+            assert!(!is_object_id(&bad), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn positional_shas_are_validated_before_running_git() {
+        let (_t, repo, first, second) = repo_with_two_commits();
+        let evil = "--output=/tmp/clusia-pwned";
+        assert!(diff_between(&repo, evil, &second).await.is_err());
+        assert!(diff_between(&repo, &first, evil).await.is_err());
+        assert!(merge_base(&repo, evil, &second).await.is_err());
+        assert!(merge_base(&repo, &first, "HEAD").await.is_err());
+        assert!(pin_commit(&repo, &reviewed_ref(7), evil).await.is_err());
+        assert!(
+            pin_commit(&repo, &reviewed_ref(7), "HEAD").await.is_err(),
+            "symbolic names are not accepted"
+        );
+        assert!(merge_base(&repo, &first, &second).await.is_ok());
     }
 
     #[test]
