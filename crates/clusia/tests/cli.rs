@@ -453,6 +453,35 @@ mod review_flow {
     }
 
     #[test]
+    fn open_failure_shows_the_failed_step() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, base, head) = origin(tmp.path());
+        let missing = tmp.path().join("no-such-origin.git");
+        let server = rt.block_on(async {
+            let s = MockServer::start().await;
+            mount(&s, &head, &base, missing.to_str().unwrap()).await;
+            s
+        });
+        let h = Home::new();
+        let roots = tmp.path().join("roots");
+        std::fs::create_dir_all(&roots).unwrap();
+        let api = server.uri();
+        let run = |args: &[&str]| h.clusia_github(&api, Some("tok"), args, None);
+        let o = run(&[
+            "config",
+            "set",
+            "repositories.roots",
+            &format!("[\"{}\"]", roots.display()),
+        ]);
+        assert!(o.status.success(), "{}", stderr(&o));
+
+        let o = run(&["open", "acme/widgets#7"]);
+        assert!(!o.status.success());
+        assert!(stderr(&o).contains("✗ repo"), "stderr={:?}", stderr(&o));
+    }
+
+    #[test]
     fn open_comment_relocate_publish() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let tmp = tempfile::tempdir().unwrap();

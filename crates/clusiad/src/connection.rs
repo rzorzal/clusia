@@ -9,7 +9,8 @@ use clusia_protocol::{
     ProtocolError, ServerMessage, write_message,
 };
 use tokio::net::UnixStream;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::task::JoinHandle;
 
 use crate::handlers;
 use crate::state::Shared;
@@ -38,7 +39,7 @@ fn id_of(line: &[u8]) -> u64 {
         .unwrap_or(0)
 }
 
-async fn session(stream: UnixStream, shared: &Shared) -> Result<(), CodecError> {
+async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecError> {
     let (r, mut w) = stream.into_split();
     let mut reader = MessageReader::new(r);
 
@@ -82,12 +83,15 @@ async fn session(stream: UnixStream, shared: &Shared) -> Result<(), CodecError> 
     let mut events = shared.events.subscribe();
     let mut shutdown = shared.shutdown.subscribe();
     let mut topics: HashSet<String> = HashSet::new();
+    // The request being handled: (id, whether it is Shutdown, the handler task). Requests stay
+    // sequential (the next line is read only once it is answered), but events keep flowing.
+    let mut pending: Option<(u64, bool, JoinHandle<Outcome>)> = None;
     loop {
-        if *shutdown.borrow_and_update() {
+        if pending.is_none() && *shutdown.borrow_and_update() {
             return Ok(());
         }
         tokio::select! {
-            line = reader.next_line() => {
+            line = reader.next_line(), if pending.is_none() => {
                 let Some(line) = line? else { return Ok(()) };
                 let (id, cmd) = match serde_json::from_slice::<ClientMessage>(line) {
                     Ok(ClientMessage::Request { id, cmd }) => (id, cmd),
@@ -105,7 +109,29 @@ async fn session(stream: UnixStream, shared: &Shared) -> Result<(), CodecError> 
                     topics.extend(wanted.iter().cloned());
                 }
                 let stop = matches!(cmd, Command::Shutdown);
-                let result = handlers::handle(shared, &client_name, cmd).await;
+                let task_shared = shared.clone();
+                let client = client_name.clone();
+                let task = tokio::spawn(async move { handlers::handle(&task_shared, &client, cmd).await });
+                pending = Some((id, stop, task));
+            }
+            joined = async { pending.as_mut().map(|(_, _, task)| task).expect("guarded").await }, if pending.is_some() => {
+                let Some((id, stop, _)) = pending.take() else { continue };
+                let result = joined.unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "a request handler failed");
+                    Outcome::Err(ProtocolError::new(ErrorCode::Internal, "the request failed inside the daemon"))
+                });
+                // Events published while the request ran go out before its response.
+                loop {
+                    match events.try_recv() {
+                        Ok((topic, event)) => {
+                            if topics.contains(&topic) {
+                                write_message(&mut w, &ServerMessage::Event { topic, event }).await?;
+                            }
+                        }
+                        Err(TryRecvError::Lagged(missed)) => tracing::warn!(missed, "client too slow; events dropped"),
+                        Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                    }
+                }
                 write_message(&mut w, &ServerMessage::Response { id, result }).await?;
                 if stop {
                     shared.trigger_shutdown();
@@ -120,7 +146,8 @@ async fn session(stream: UnixStream, shared: &Shared) -> Result<(), CodecError> 
                 Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "client too slow; events dropped"),
                 Err(RecvError::Closed) => return Ok(()),
             },
-            changed = shutdown.changed() => {
+            // While a request runs, shutdown waits for its response (checked at the loop top).
+            changed = shutdown.changed(), if pending.is_none() => {
                 if changed.is_err() {
                     return Ok(());
                 }

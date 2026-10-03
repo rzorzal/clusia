@@ -264,3 +264,33 @@ async fn left_comments_are_obsolete_when_the_base_cannot_be_fetched() {
     );
     w.daemon.stop().await;
 }
+
+#[tokio::test]
+async fn load_steps_arrive_before_the_open_response() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    c.request(Command::Subscribe {
+        topics: vec![topics::REVIEWS.into()],
+    })
+    .await
+    .unwrap();
+    open(&mut c).await;
+    // Events that came in while the request ran are buffered by the client before the response.
+    let steps: Vec<_> = c
+        .take_events()
+        .into_iter()
+        .filter_map(|(_, e)| match e {
+            Event::LoadStep(s) => Some((s.step, s.status)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        steps.contains(&(LoadStepKind::Repo, StepStatus::Running)),
+        "{steps:?}"
+    );
+    assert!(
+        steps.contains(&(LoadStepKind::Agent, StepStatus::Skipped)),
+        "{steps:?}"
+    );
+    w.daemon.stop().await;
+}

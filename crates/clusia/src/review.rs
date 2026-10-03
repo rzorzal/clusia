@@ -52,11 +52,13 @@ fn news_line(n: &NewsItem) -> String {
     }
 }
 
-/// Prints the load steps the daemon sent. It writes events after the response of the
-/// request that caused them, so they are buffered by the requests that follow.
-fn print_steps(client: &mut clusia_protocol::Client) {
+/// Prints the load steps of `pr` that arrived while the open request ran (the daemon sends
+/// them before its response, and the client buffers them).
+fn print_steps(client: &mut clusia_protocol::Client, pr: &clusia_core::PrRef) {
     for (_, event) in client.take_events() {
-        if let Event::LoadStep(s) = event {
+        if let Event::LoadStep(s) = event
+            && &s.pr == pr
+        {
             let mark = match s.status {
                 StepStatus::Done => "✓",
                 StepStatus::Skipped => "–",
@@ -85,15 +87,11 @@ pub(crate) async fn open(
         })
         .await?;
     let result = client.request(Request::OpenReview { pr: pr.clone() }).await;
+    print_steps(&mut client, &pr);
     let view = match result {
         Ok(Reply::Review(v)) => *v,
         Ok(other) => return Err(unexpected(other)),
-        Err(e) => {
-            // Flush the buffered steps so the failed one is shown with the error.
-            let _ = client.request(Request::ListReviews).await;
-            print_steps(&mut client);
-            return Err(e.into());
-        }
+        Err(e) => return Err(e.into()),
     };
     let whats_new = match client
         .request(Request::GetWhatsNew { pr: pr.clone() })
@@ -104,7 +102,6 @@ pub(crate) async fn open(
     };
     let had_seen = view.review.last_seen_at.is_some();
     client.request(Request::MarkSeen { pr: pr.clone() }).await?;
-    print_steps(&mut client);
 
     let d = &view.pr;
     let role = match view.role {
