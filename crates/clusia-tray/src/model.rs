@@ -232,7 +232,15 @@ impl TrayModel {
         std::mem::take(&mut self.writes)
     }
 
+    /// Preferences are seeded by the first snapshot; changes before it would be lost.
+    fn seeded(&self) -> bool {
+        self.seen.is_some()
+    }
+
     pub fn set_query(&mut self, query: &str) {
+        if !self.seeded() {
+            return;
+        }
         let query: String = query
             .chars()
             .take(clusia_core::config::MAX_FILTER_CHARS)
@@ -280,9 +288,11 @@ impl TrayModel {
         self.pages.insert(id, next);
     }
 
-    /// Applies a local action; `false` for actions that launch something.
+    /// Applies a local action; `false` for actions that launch something, and for
+    /// preference changes before the first snapshot (ignored: seeding would overwrite them).
     pub fn handle(&mut self, action: &Action) -> bool {
         match action {
+            Action::CycleSort(_) | Action::Repository(_) if !self.seeded() => return false,
             Action::CycleSort(id) => self.cycle_sort(*id),
             Action::Page(id, delta) => self.page(*id, *delta),
             Action::Repository(repo) => self.set_repository(repo.clone()),
@@ -982,6 +992,27 @@ mod tests {
     }
 
     #[test]
+    fn preferences_wait_for_the_first_snapshot() {
+        let mut m = TrayModel::new(false);
+        assert!(!m.handle(&Action::CycleSort(ListId::Assigned)));
+        assert!(!m.handle(&Action::Repository(Some("rzorzal/blog".into()))));
+        m.set_query("auth");
+        m.flush_query();
+        assert!(m.take_writes().is_empty(), "nothing to overwrite yet");
+        let mut first = snap(many(3));
+        first.lists.assigned_sort = ListSort::Number;
+        m.apply(first);
+        assert_eq!(m.prefs().assigned_sort, ListSort::Number, "seeded as-is");
+        assert_eq!(m.prefs().repository, "");
+        assert_eq!(m.prefs().filter, "");
+        assert!(m.handle(&Action::CycleSort(ListId::Assigned)));
+        assert_eq!(
+            m.take_writes(),
+            vec![("lists.assigned_sort".to_string(), "updated".to_string())]
+        );
+    }
+
+    #[test]
     fn sort_cycles_and_is_saved() {
         let mut m = TrayModel::new(false);
         let mut prs = many(3);
@@ -1195,6 +1226,7 @@ mod tests {
     #[test]
     fn query_is_capped() {
         let mut m = TrayModel::new(false);
+        m.apply(snap(many(1)));
         m.set_query(&"a".repeat(500));
         assert_eq!(m.prefs().filter.chars().count(), 200);
     }
