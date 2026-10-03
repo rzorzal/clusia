@@ -1,6 +1,7 @@
 //! Removing worktrees nobody needs any more (spec §5.2: on publish/discard, and after N idle days).
 
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
 
 use clusia_core::{PrRef, ReviewState};
 use clusia_git::{remove_worktree, repo_of_worktree};
@@ -12,15 +13,27 @@ use crate::sync::now_unix;
 
 pub(crate) const SWEEP_EVERY: Duration = Duration::from_secs(6 * 3600);
 
-/// Whether the review of `pr` still needs its worktree.
-fn needed(shared: &Shared, pr: &PrRef, cutoff: i64) -> bool {
+/// Whether `dir` was modified at or after `cutoff` (unknown times count as recent).
+fn recently_modified(dir: &Path, cutoff: i64) -> bool {
+    let Ok(modified) = std::fs::metadata(dir).and_then(|m| m.modified()) else {
+        return true;
+    };
+    match modified.duration_since(UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX) >= cutoff,
+        Err(_) => false,
+    }
+}
+
+/// Whether the review of `pr` still needs its worktree at `dir`.
+fn needed(shared: &Shared, pr: &PrRef, dir: &Path, cutoff: i64) -> bool {
     match load_review(&shared.paths, pr) {
         // Work in flight is never swept, however long it has been idle.
         Ok(ReviewLoad::Found(r)) => {
             matches!(r.state, ReviewState::Active | ReviewState::Publishing)
                 || (!r.state.is_terminal() && r.updated_at >= cutoff)
         }
-        Ok(_) => false,
+        // No review claims it: an orphan ages out like any other worktree.
+        Ok(_) => recently_modified(dir, cutoff),
         Err(e) => {
             tracing::warn!(error = %e, pr = %pr, "cannot read a review; keeping its worktree");
             true
@@ -52,7 +65,7 @@ pub(crate) async fn sweep(shared: &Shared) -> usize {
             // Same order as publish and the saved-review check: review lock, then worktree lock.
             let _guard = lock(shared, &pr).await;
             // Decide under the lock: the review may have been opened or saved meanwhile.
-            if shared.is_touched(&name) || needed(shared, &pr, cutoff) {
+            if shared.is_touched(&name) || needed(shared, &pr, &path, cutoff) {
                 continue;
             }
             cleanup_checkout(shared, &pr).await;
@@ -63,7 +76,10 @@ pub(crate) async fn sweep(shared: &Shared) -> usize {
             removed += 1;
             continue;
         }
-        // Not one of ours (e.g. an old key format): no review can claim it.
+        // Not one of ours (e.g. an old key format): no review can claim it, so only age counts.
+        if recently_modified(&path, cutoff) {
+            continue;
+        }
         let _serialized = shared.worktree_lock.lock().await;
         let done = match repo_of_worktree(&path).await {
             Ok(repo) => remove_worktree(&repo, &path).await.is_ok(),
@@ -116,6 +132,38 @@ mod tests {
         save_review(&shared.paths, &review).unwrap();
         std::fs::create_dir_all(shared.paths.worktree_for(&pr)).unwrap();
         pr
+    }
+
+    /// Backdates `dir`'s modification time by `days`.
+    fn age(dir: &std::path::Path, days: u64) {
+        let when = std::time::SystemTime::now() - Duration::from_secs(days * 86_400);
+        std::fs::File::open(dir)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_recent_orphans_and_removes_old_ones() {
+        let (_dir, shared) = shared();
+        let fresh: PrRef = "acme/widgets#5".parse().unwrap();
+        let old: PrRef = "acme/widgets#6".parse().unwrap();
+        for pr in [&fresh, &old] {
+            std::fs::create_dir_all(shared.paths.worktree_for(pr)).unwrap();
+        }
+        age(&shared.paths.worktree_for(&old), 100);
+        let fresh_foreign = shared.paths.worktrees_dir().join("acme__widgets__8");
+        let old_foreign = shared.paths.worktrees_dir().join("acme__widgets__9");
+        for dir in [&fresh_foreign, &old_foreign] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        age(&old_foreign, 100);
+
+        assert_eq!(sweep(&shared).await, 2);
+        assert!(shared.paths.worktree_for(&fresh).exists());
+        assert!(!shared.paths.worktree_for(&old).exists());
+        assert!(fresh_foreign.exists());
+        assert!(!old_foreign.exists());
     }
 
     #[tokio::test]

@@ -117,6 +117,14 @@ async fn retention_removes_orphans_and_keeps_live_reviews() {
     let paths = clusia_core::Paths::new(dir.path());
     std::fs::create_dir_all(paths.worktrees_dir().join("acme__widgets__1")).unwrap(); // old M2 key: orphan
     std::fs::create_dir_all(paths.worktrees_dir().join("acme~widgets~2")).unwrap(); // no review: orphan
+    // Orphans are only removed once they are older than the retention period.
+    let long_ago = std::time::SystemTime::now() - Duration::from_secs(100 * 86_400);
+    for name in ["acme__widgets__1", "acme~widgets~2"] {
+        std::fs::File::open(paths.worktrees_dir().join(name))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+    }
     let live: clusia_core::PrRef = "acme/widgets#3".parse().unwrap();
     std::fs::create_dir_all(paths.worktree_for(&live)).unwrap();
     let now = std::time::SystemTime::now()
