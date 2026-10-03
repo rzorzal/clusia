@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Review tests</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span></span>
+  </div>
+
+  <div style="flex: none; display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px;">
+    <span style="color: {{t.muted}};">rzorzal/clusia</span>
+    <span style="font-family: 'JetBrains Mono', monospace; color: {{t.muted}};">#123</span>
+    <span style="font-size: 17px; font-weight: 600;">feat: auth refresh</span>
+  </div>
+
+  <div style="flex: none; display: flex; gap: 4px; padding: 0 20px; border-bottom: 1px solid {{t.line}};">
+    <sc-for list="{{sections}}" as="s" hint-placeholder-count="6">
+      <a href="{{s.href}}" style="height: 36px; padding: 0 12px; display: flex; align-items: center; gap: 6px; text-decoration: none; color: {{s.fg}}; font-weight: {{s.w}}; box-shadow: inset 0 -2px 0 {{s.bar}};">{{s.label}}</a>
+    </sc-for>
+  </div>
+
+  <!-- Score · runtime · trigger -->
+  <div style="flex: none; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 0.9fr); gap: 16px; padding: 18px 24px 0;">
+    <div style="display: flex; gap: 18px; padding: 16px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+      <div style="width: 104px; height: 104px; flex: none; border-radius: 52px; background: conic-gradient({{t.green}} 0 82%, {{t.chrome}} 82% 100%); display: flex; align-items: center; justify-content: center;">
+        <div style="width: 84px; height: 84px; border-radius: 42px; background: {{t.surface}}; display: flex; flex-direction: column; align-items: center; justify-content: center;">
+          <span style="font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1;">82</span>
+          <span style="font-size: 11px; color: {{t.faint}};">of 100</span>
+        </div>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px;">
+        <span style="display: flex; align-items: baseline; gap: 8px;"><span style="font-weight: 600;">Test quality of this change</span><span style="color: {{t.green}}; font-size: 12px; font-weight: 600;">Good · 2 gaps</span></span>
+        <sc-for list="{{score}}" as="s" hint-placeholder-count="4">
+          <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
+            <span style="flex: 1; min-width: 0; color: {{t.muted}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{s.label}}</span>
+            <div style="width: 70px; height: 5px; border-radius: 3px; background: {{t.chrome}}; overflow: hidden;"><div style="height: 5px; width: {{s.pct}}; background: {{s.color}};"></div></div>
+            <span style="width: 40px; text-align: right; font-variant-numeric: tabular-nums; color: {{s.color}}; font-weight: 600;">{{s.value}}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 8px; padding: 16px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+      <span style="display: flex; align-items: baseline; gap: 8px;"><span style="font-weight: 600; flex: 1;">Run time vs main</span><span style="color: {{t.orange}}; font-weight: 600; font-variant-numeric: tabular-nums;">+14 s · +7%</span></span>
+      <div style="display: grid; grid-template-columns: 48px minmax(0, 1fr) 52px; align-items: center; gap: 6px 8px; font-size: 12px;">
+        <span style="color: {{t.faint}};">main</span><div style="height: 8px; border-radius: 4px; background: {{t.edge}}; width: 93%;"></div><span style="font-variant-numeric: tabular-nums; text-align: right; color: {{t.muted}};">3m 10s</span>
+        <span style="color: {{t.faint}};">this PR</span><div style="height: 8px; border-radius: 4px; background: {{t.orange}}; width: 100%;"></div><span style="font-variant-numeric: tabular-nums; text-align: right;">3m 24s</span>
+      </div>
+      <sc-for list="{{slow}}" as="s" hint-placeholder-count="3">
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
+          <span style="flex: 1; min-width: 0; font-family: 'JetBrains Mono', monospace; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{s.name}}</span>
+          <span style="color: {{t.faint}};">{{s.why}}</span>
+          <span style="width: 48px; text-align: right; font-variant-numeric: tabular-nums; color: {{s.color}}; font-weight: 600;">{{s.delta}}</span>
+        </div>
+      </sc-for>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px; padding: 16px; border-radius: 8px; background: {{t.greenSoft}}; box-shadow: 0 0 0 1.5px {{t.green}};">
+      <span style="font-weight: 600;">Test this change end to end</span>
+      <span style="color: {{t.muted}}; font-size: 12px; line-height: 1.45;">Claude Code wrote 4 scenarios for this change, with fake data you can edit before running them against this branch and main.</span>
+      <div style="flex: 1;"></div>
+      <a href="TestCockpit.dc.html" style="height: 32px; border-radius: 6px; display: flex; align-items: center; justify-content: center; text-decoration: none; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Open the QA cockpit</a>
+      <button style="height: 30px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Run all tests in the worktree</button>
+    </div>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 16px 24px 18px; overflow: hidden;">
+    <!-- Left: checks + coverage -->
+    <div style="display: flex; flex-direction: column; gap: 16px; min-width: 0;">
+      <div style="display: flex; flex-direction: column; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; overflow: hidden;">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 12px 14px;">
+          <span style="font-weight: 600; flex: 1;">Checks on GitHub</span>
+          <span style="color: {{t.green}}; font-weight: 600; font-size: 12px;">4 of 4 passed</span>
+        </div>
+        <sc-for list="{{checks}}" as="c" hint-placeholder-count="4">
+          <div style="display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-top: 1px solid {{t.line}};">
+            <span style="width: 18px; height: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; background: {{t.greenSoft}}; color: {{t.green}};">✓</span>
+            <span style="flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 12px;">{{c.name}}</span>
+            <span style="color: {{t.muted}}; font-size: 12px;">{{c.detail}}</span>
+            <span style="color: {{t.faint}}; font-size: 12px; width: 44px; text-align: right;">{{c.time}}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-size: 12px;">
+        <span style="font-weight: 600; font-size: 13px;">Coverage</span>
+        <sc-for list="{{coverage}}" as="f" hint-placeholder-count="4">
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: {{t.muted}};">{{f.short}} <b style="font-family: Inter, sans-serif; color: {{f.color}};">{{f.pct}}</b></span>
+        </sc-for>
+      </div>
+    </div>
+
+    <!-- Right: suggested tests -->
+    <div style="display: flex; flex-direction: column; gap: 12px; min-width: 0;">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="font-weight: 600; flex: 1;">Tests the agent suggests</span>
+        <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Run tests in the worktree</button>
+      </div>
+      <sc-for list="{{suggestions}}" as="s" hint-placeholder-count="1">
+        <div style="display: flex; flex-direction: column; gap: 8px; padding: 14px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+          <span style="font-weight: 600;">{{s.title}}</span>
+          <span style="color: {{t.muted}}; line-height: 1.5;">{{s.why}}</span>
+          <div style="padding: 8px 12px; border-radius: 6px; background: {{t.code}}; font-family: 'JetBrains Mono', monospace; font-size: 12px; white-space: pre; line-height: 1.6; overflow: hidden;">{{s.code}}</div>
+          <div style="display: flex; gap: 8px;">
+            <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Suggest it in a comment</button>
+            <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}};">Dismiss</button>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <div style="height: 48px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 12px 0 20px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+    <span style="display: flex; align-items: center; gap: 8px; color: {{t.muted}};"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Claude Code · session active</span>
+    <span style="color: {{t.faint}};">Draft saved · 4 items</span>
+    <div style="flex: 1;"></div>
+    <a href="Finalize.dc.html" style="height: 34px; padding: 0 16px; border-radius: 6px; display: flex; align-items: center; text-decoration: none; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Finalize review</a>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', code: '#F6F7F5', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.12)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', code: '#121514', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.14)' };
+    const t = dark ? D : L;
+    const tab = (label, on, href) => ({ label, href: href || '', fg: on ? t.fg : t.muted, w: on ? 600 : 400, bar: on ? t.green : 'transparent' });
+    const cov = (name, n) => ({ name, short: name.split('/').pop(), pct: n + '%', color: n >= 70 ? t.green : t.orange });
+    const sc = (label, value, pct, ok) => ({ label, value, pct: pct + '%', color: ok ? t.green : t.orange });
+    return {
+      t: { ...t, edge: dark ? '#59625B' : '#A4ACA6' },
+      score: [
+        sc('All tests pass (412)', '100%', 100, true),
+        sc('Changed lines covered', '78%', 78, true),
+        sc('Changed flows run end to end', '3 of 5', 60, false),
+        sc('Edge cases the agent found, covered', '2 of 4', 50, false),
+      ],
+      slow: [
+        { name: 'http::retries_back_off', why: 'new · sleeps on purpose', delta: '+9.8 s', color: t.orange },
+        { name: 'refresh_race', why: 'new', delta: '+3.1 s', color: t.orange },
+        { name: 'store::save_round_trip', why: 'temp file + rename', delta: '+1.2 s', color: t.orange },
+      ],
+      sections: [tab('Diagrams', false, 'Diagrams.dc.html'), tab('Security', false, 'Security.dc.html'), tab('Diff', false, 'Review.dc.html'), tab('Audits', false, 'Audits.dc.html'), tab('Comments', false, 'Comments.dc.html'), tab('Tests', true)],
+      checks: [
+        { name: 'build', detail: 'cargo build', time: '1m 52s' },
+        { name: 'clippy', detail: 'no warnings', time: '58s' },
+        { name: 'test (macOS)', detail: '412 passed', time: '3m 10s' },
+        { name: 'test (linux)', detail: '409 passed · 3 skipped', time: '2m 41s' },
+      ],
+      coverage: [cov('src/auth/refresh.rs', 92), cov('src/auth/store.rs', 81), cov('src/client/http.rs', 48), cov('src/config.rs', 100)],
+      suggestions: [
+        { title: 'A failed exchange keeps the old token', why: 'Nothing checks that the stored token survives when the endpoint returns an error.', code: '#[tokio::test]\nasync fn failed_exchange_keeps_the_old_token() {\n    let store = store_with(expired_token());\n    mock_exchange_error(500);\n    assert!(store.refresh().await.is_err());\n    assert_eq!(store.load().await?, expired_token());\n}' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

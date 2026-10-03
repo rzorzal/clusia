@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>First run</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-weight: 600;">Home</span>
+  </div>
+
+  <div style="flex: 1; display: flex; align-items: center; justify-content: center;">
+    <div style="width: 640px; display: flex; flex-direction: column; gap: 22px;">
+      <div style="display: flex; align-items: center; gap: 16px;">
+        <svg width="56" height="56" viewBox="0 0 64 64" aria-hidden="true"><g transform="rotate(-14 32 34)"><path d="M32 55V63" stroke="{{t.muted}}" stroke-width="3" stroke-linecap="round"></path><path d="M32 3C45 11 53 24 51 37C49 48 41 54 32 56C23 54 15 48 13 37C11 24 19 11 32 3Z" fill="{{t.green}}"></path><g fill="none" stroke="{{t.bg}}" stroke-width="3" stroke-linecap="round"><path d="M21 26c3-4 5 4 8 0s5 4 8 0s5 4 7 0"></path><path d="M22 36c3-4 5 4 8 0s5 4 8 0"></path></g><circle cx="40" cy="45" r="3.6" fill="{{t.orange}}"></circle></g></svg>
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <h1 style="margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.01em;">Welcome to Clúsia</h1>
+          <span style="color: {{t.muted}};">Three quick steps and your pull requests show up here and in the menu bar.</span>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="width: 22px; height: 22px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; background: {{t.green}}; color: {{t.onGreen}};">1</span>
+          <span style="font-weight: 600; flex: 1;">Connect GitHub</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 6px; background: {{t.greenSoft}}; box-shadow: 0 0 0 1.5px {{t.green}};">
+          <span style="display: flex; flex-direction: column; gap: 2px; flex: 1;"><span style="font-weight: 600;">Found the GitHub CLI</span><span style="color: {{t.muted}}; font-size: 12px;">Signed in as @rzorzal on github.com. Clúsia reuses that login.</span></span>
+          <button style="height: 32px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Use gh</button>
+        </div>
+        <span style="color: {{t.muted}}; font-size: 12px;">Or paste a personal access token (stored in the Keychain): <button style="border: none; background: transparent; color: {{t.green}}; font-weight: 600; padding: 0; font-size: 12px;">use a token instead</button></span>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; opacity: 0.75;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="width: 22px; height: 22px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; background: {{t.chrome}}; color: {{t.muted}};">2</span>
+          <span style="font-weight: 600; flex: 1;">Where are your repositories?</span>
+        </div>
+        <span style="color: {{t.muted}};">Clúsia looks for your clones here so it can review in a separate worktree, never touching your branch.</span>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          <sc-for list="{{roots}}" as="r" hint-placeholder-count="4">
+            <span style="height: 28px; padding: 0 12px; border-radius: 14px; display: flex; align-items: center; gap: 6px; background: {{t.chrome}}; font-family: 'JetBrains Mono', monospace; font-size: 12px;">{{r.path}}<span style="font-family: Inter, sans-serif; color: {{t.faint}};">{{r.found}}</span></span>
+          </sc-for>
+          <button style="height: 28px; padding: 0 12px; border: none; border-radius: 14px; background: transparent; box-shadow: 0 0 0 1px {{t.line}}; color: {{t.muted}};">+ Add folder</button>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; opacity: 0.75;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="width: 22px; height: 22px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; background: {{t.chrome}}; color: {{t.muted}};">3</span>
+          <span style="font-weight: 600; flex: 1;">Connect your AI harness</span>
+          <span style="color: {{t.faint}}; font-size: 12px;">optional</span>
+        </div>
+        <span style="color: {{t.muted}};">The agent draws diagrams, checks security and audits each review with the tool you already use. Reviewing works without it.</span>
+        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;">
+          <sc-for list="{{harnesses}}" as="h" hint-placeholder-count="3">
+            <button style="display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border: none; border-radius: 6px; text-align: left; background: {{h.bg}}; box-shadow: 0 0 0 {{h.ringW}} {{h.ring}};">
+              <span style="font-weight: 600;">{{h.name}}</span>
+              <span style="color: {{h.noteFg}}; font-size: 12px;">{{h.note}}</span>
+            </button>
+          </sc-for>
+        </div>
+        <span style="color: {{t.muted}}; font-size: 12px;">You can change this later in Config › Harness. <button style="border: none; background: transparent; color: {{t.green}}; font-weight: 600; padding: 0; font-size: 12px;">Skip for now</button></span>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.10)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.12)' };
+    const t = dark ? D : L;
+    const h = (name, note, found) => ({ name, note, bg: found ? t.greenSoft : t.surface, ring: found ? t.green : t.line, ringW: found ? '1.5px' : '1px', noteFg: found ? t.green : t.faint });
+    return {
+      t,
+      harnesses: [h('Claude Code', 'Found · /opt/homebrew/bin/claude', true), h('Codex', 'Not found on your PATH', false), h('Custom command', 'Any tool that speaks JSON', false)],
+      roots: [
+        { path: '~/Repos', found: '12 repos' },
+        { path: '~/Projects', found: '3 repos' },
+        { path: '~/src', found: 'empty' },
+        { path: '~/code', found: 'not found' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

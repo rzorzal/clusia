@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Opening a review</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}}; position: relative;">
+
+  <!-- Title bar -->
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; color: {{t.muted}};">Home</span>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span></span>
+  </div>
+
+  <!-- Cached content underneath, dimmed -->
+  <div style="flex: 1; display: flex; flex-direction: column; gap: 14px; padding: 16px 20px; opacity: 0.35;">
+    <div style="display: flex; gap: 10px; align-items: baseline;"><span style="color: {{t.muted}};">rzorzal/clusia</span><span style="font-size: 17px; font-weight: 600;">feat: auth refresh</span></div>
+    <div style="display: flex; gap: 20px; border-bottom: 1px solid {{t.line}}; padding-bottom: 10px; color: {{t.muted}};"><span>Diagrams</span><span>Security</span><span style="color: {{t.fg}}; font-weight: 600;">Diff</span><span>Audits</span><span>Comments</span><span>Tests</span></div>
+    <div style="display: flex; gap: 16px; flex: 1;">
+      <div style="width: 220px; display: flex; flex-direction: column; gap: 10px;">
+        <sc-for list="{{skeleton}}" as="s" hint-placeholder-count="7"><span style="height: 12px; border-radius: 4px; background: {{t.chrome}}; width: {{s.w}};"></span></sc-for>
+      </div>
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 10px; background: {{t.surface}}; border-radius: 6px; padding: 16px;">
+        <sc-for list="{{code}}" as="s" hint-placeholder-count="12"><span style="height: 10px; border-radius: 3px; background: {{t.chrome}}; width: {{s.w}};"></span></sc-for>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading card -->
+  <div style="position: absolute; left: 0; right: 0; top: 44px; bottom: 0; display: flex; align-items: center; justify-content: center;">
+    <div style="width: 520px; display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 32px 36px 28px; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 18px 50px {{t.shadow}};">
+      <svg width="260" height="132" viewBox="0 0 260 132" aria-label="Loading steps">
+        <path d="M18 124H242" stroke="{{t.line}}" stroke-width="2" stroke-linecap="round"></path>
+        <!-- Repo: done -->
+        <path d="M50 124V62" stroke="{{t.muted}}" stroke-width="2.5" stroke-linecap="round"></path>
+        <path d="M50 22C62 30 68 43 66 53C64 61 57 64 50 66C43 64 36 61 34 53C32 43 38 30 50 22Z" fill="{{t.green}}"></path>
+        <!-- Branch: done -->
+        <path d="M103 124V54" stroke="{{t.muted}}" stroke-width="2.5" stroke-linecap="round"></path>
+        <path d="M103 14C115 22 121 35 119 45C117 53 110 56 103 58C96 56 89 53 87 45C85 35 91 22 103 14Z" fill="{{t.green}}"></path>
+        <!-- PR: growing -->
+        <path d="M156 124V84" stroke="{{t.muted}}" stroke-width="2.5" stroke-linecap="round"></path>
+        <path d="M156 58C164 63 168 72 167 79C166 84 161 86 156 88C151 86 146 84 145 79C144 72 148 63 156 58Z" fill="{{t.green}}" opacity="0.55"></path>
+        <!-- Agent: skipped -->
+        <path d="M209 124V104" stroke="{{t.line}}" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="3 4"></path>
+      </svg>
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 4px;">
+        <span style="font-size: 16px; font-weight: 600;">Opening rzorzal/clusia #123</span>
+        <span style="color: {{t.muted}};">Fresh data from GitHub. You can keep reading the cached version below.</span>
+      </div>
+      <div style="align-self: stretch; display: flex; flex-direction: column; gap: 2px;">
+        <sc-for list="{{steps}}" as="s" hint-placeholder-count="4">
+          <div style="display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 6px; background: {{s.bg}};">
+            <span style="width: 18px; height: 18px; flex: none; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; background: {{s.dotBg}}; color: {{s.dotFg}};">{{s.icon}}</span>
+            <span style="width: 64px; flex: none; font-weight: 600;">{{s.name}}</span>
+            <span style="flex: 1; min-width: 0; color: {{t.muted}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: {{s.font}}; font-size: 12px;">{{s.detail}}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button style="height: 32px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Open from cache</button>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', greenSoft: 'rgba(47,158,68,0.12)', shadow: 'rgba(20,30,22,0.14)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', greenSoft: 'rgba(76,195,95,0.14)', shadow: 'rgba(0,0,0,0.5)' };
+    const t = dark ? D : L;
+    const mono = "'JetBrains Mono', monospace";
+    const sans = 'Inter, sans-serif';
+    const done = { icon: '✓', dotBg: t.green, dotFg: t.onGreen, bg: 'transparent' };
+    return {
+      t,
+      skeleton: ['80%', '64%', '72%', '58%', '76%', '52%', '68%'].map((w) => ({ w })),
+      code: ['70%', '84%', '46%', '62%', '90%', '38%', '74%', '56%', '80%', '44%', '66%', '52%'].map((w) => ({ w })),
+      steps: [
+        { ...done, name: 'Repo', detail: 'Your clone at ~/Repos/clusia', font: mono },
+        { ...done, name: 'Branch', detail: 'Worktree ready at worktrees/rzorzal~clusia~123', font: mono },
+        { name: 'PR', detail: 'Files, comments and checks…', font: sans, icon: '•', dotBg: t.greenSoft, dotFg: t.green, bg: t.greenSoft },
+        { name: 'Agent', detail: 'Skipped: no harness set up', font: sans, icon: '–', dotBg: t.chrome, dotFg: t.faint, bg: 'transparent' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

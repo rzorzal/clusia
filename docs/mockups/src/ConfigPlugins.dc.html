@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Config plugins and skills</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-weight: 600;">Config</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <nav aria-label="Config sections" style="width: 220px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 20px 12px; border-right: 1px solid {{t.line}};">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="{{n.href}}" style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; text-decoration: none; background: {{n.bg}}; color: {{n.fg}}; font-weight: {{n.w}};">{{n.label}}</a>
+      </sc-for>
+    </nav>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; padding: 24px 40px; overflow: hidden;">
+      <div style="display: flex; align-items: flex-end; gap: 12px;">
+        <div style="display: flex; flex-direction: column; gap: 4px; flex: 1;">
+          <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Plugins and skills</h2>
+          <span style="color: {{t.muted}};">Skills run with your harness and write findings. Renderers turn data into a component. You pick the tab where each one shows up.</span>
+        </div>
+        <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">New skill</button>
+        <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">New renderer</button>
+        <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Add from folder</button>
+      </div>
+      <div style="flex: 1; min-height: 0; display: flex; gap: 16px;">
+        <div style="width: 540px; flex: none; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; overflow: hidden; align-self: flex-start;">
+          <div style="display: grid; grid-template-columns: 1fr 78px 120px 110px 34px; gap: 8px; padding: 9px 14px; border-bottom: 1px solid {{t.line}}; color: {{t.faint}}; font-size: 12px; font-weight: 600;">
+            <span>Name</span><span>Kind</span><span>Runs</span><span>Shows in</span><span>On</span>
+          </div>
+          <sc-for list="{{plugins}}" as="p" hint-placeholder-count="6">
+            <div style="display: grid; grid-template-columns: 1fr 78px 120px 110px 34px; gap: 8px; align-items: center; padding: 10px 14px; border-bottom: 1px solid {{t.line}}; background: {{p.bg}}; box-shadow: inset 3px 0 0 {{p.bar}};">
+              <span style="display: flex; flex-direction: column; gap: 2px; min-width: 0;"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500;">{{p.name}}</span><span style="color: {{t.faint}}; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{p.hint}}</span></span>
+              <span style="justify-self: start; height: 20px; display: flex; align-items: center; padding: 0 7px; border-radius: 10px; font-size: 11px; font-weight: 600; background: {{p.kindBg}}; color: {{p.kindFg}};">{{p.kind}}</span>
+              <span style="color: {{t.muted}}; font-size: 12px;">{{p.runs}}</span>
+              <span style="font-size: 12px; font-weight: 500;">{{p.tab}}</span>
+              <input type="checkbox" aria-label="Enabled" checked="{{p.on}}" style="margin: 0; accent-color: {{t.green}};">
+            </div>
+          </sc-for>
+        </div>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 16px 18px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; align-self: flex-start;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-family: 'JetBrains Mono', monospace; font-weight: 600;">migration-check</span>
+            <span style="height: 20px; display: flex; align-items: center; padding: 0 7px; border-radius: 10px; font-size: 11px; font-weight: 600; background: {{t.greenSoft}}; color: {{t.green}};">Skill + renderer</span>
+            <span style="flex: 1;"></span>
+            <a href="PluginTab.dc.html" style="color: {{t.green}}; font-size: 12px; font-weight: 600;">See it in a review</a>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <span style="color: {{t.muted}}; font-size: 12px; font-weight: 600;">Skill</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 7px 10px; border-radius: 6px; background: {{t.chrome}};">~/.clusia/plugins/migration-check/SKILL.md</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <span style="color: {{t.muted}}; font-size: 12px; font-weight: 600;">Runs</span>
+            <sc-for list="{{runs}}" as="r" hint-placeholder-count="3">
+              <label style="display: flex; align-items: center; gap: 8px;"><input type="radio" name="runs" checked="{{r.on}}" style="margin: 0; accent-color: {{t.green}};"><span>{{r.label}}</span><sc-if value="{{r.code}}" hint-placeholder-val="{{false}}"><span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 2px 6px; border-radius: 4px; background: {{t.chrome}};">{{r.code}}</span></sc-if></label>
+            </sc-for>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <span style="color: {{t.muted}}; font-size: 12px; font-weight: 600;">Shows in</span>
+            <div role="radiogroup" aria-label="Tab" style="display: flex; flex-wrap: wrap; gap: 6px;">
+              <sc-for list="{{tabs}}" as="tb" hint-placeholder-count="7">
+                <span role="radio" aria-checked="{{tb.on}}" style="height: 26px; display: flex; align-items: center; padding: 0 10px; border-radius: 13px; font-size: 12px; background: {{tb.bg}}; color: {{tb.fg}}; box-shadow: 0 0 0 1px {{tb.ring}}; font-weight: {{tb.w}};">{{tb.label}}</span>
+              </sc-for>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px; margin-top: 2px;"><span style="color: {{t.faint}}; font-size: 12px;">New tab name</span><span style="height: 26px; display: flex; align-items: center; padding: 0 8px; border-radius: 6px; box-shadow: 0 0 0 1px {{t.line}}; font-size: 12px; width: 140px;">Migrations</span><span style="color: {{t.faint}}; font-size: 12px;">Place</span><span style="font-size: 12px;">after Tests</span></div>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <span style="color: {{t.muted}}; font-size: 12px; font-weight: 600;">Renderer</span>
+            <div style="display: flex; align-items: center; gap: 8px;"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 7px 10px; border-radius: 6px; background: {{t.chrome}};">lock-timeline.wasm</span><span style="color: {{t.faint}}; font-size: 12px;">reads the skill's JSON · sandboxed, no network, no files</span></div>
+          </div>
+          <div style="display: flex; gap: 8px; padding-top: 4px;">
+            <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Run on #123 to test</button>
+            <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Open folder</button>
+            <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: transparent; color: {{t.orange}};">Remove</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.12)', orangeSoft: 'rgba(217,87,43,0.12)', sel: '#F1F7F2' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.14)', orangeSoft: 'rgba(240,122,74,0.16)', sel: 'rgba(76,195,95,0.08)' };
+    const t = dark ? D : L;
+    const nav = (label, on, href) => ({ label, href: href || '#', bg: on ? t.surface : 'transparent', fg: on ? t.fg : t.muted, w: on ? 600 : 400 });
+    const kind = (k) => k === 'Skill' ? { kindBg: t.greenSoft, kindFg: t.green } : { kindBg: t.orangeSoft, kindFg: t.orange };
+    const plug = (name, hint, k, runs, tab, on, sel) => ({ name, hint, kind: k, runs, tab, on, bg: sel ? t.sel : 'transparent', bar: sel ? t.green : 'transparent', ...kind(k) });
+    const chip = (label, on) => ({ label, on: on ? 'true' : 'false', bg: on ? t.greenSoft : 'transparent', fg: on ? t.green : t.muted, ring: on ? t.green : t.line, w: on ? 600 : 400 });
+    return {
+      t,
+      nav: [nav('Appearance', false, 'ConfigAppearance.dc.html'), nav('Git server', false, 'ConfigGit.dc.html'), nav('Repositories', false, 'ConfigRepos.dc.html'), nav('Harness', false, 'ConfigHarness.dc.html'), nav('Editor', false, 'ConfigEditor.dc.html'), nav('Notifications', false, 'ConfigNotifications.dc.html'), nav('Plugins & skills', true)],
+      plugins: [
+        plug('house-rules', 'Team checklist for every PR', 'Skill', 'Every review', 'Audits', true),
+        plug('migration-check', 'Locks and rollbacks in SQL', 'Skill', 'Every review', 'New: Migrations', true, true),
+        plug('owasp-rust', 'Security policy for Rust', 'Skill', 'On demand', 'Security', true),
+        plug('lock-timeline', 'Draws migration locks', 'Renderer', 'With its skill', 'New: Migrations', true),
+        plug('bench-chart', 'criterion results as a chart', 'Renderer', 'If bench/ changes', 'Tests', true),
+        plug('api-surface', 'Public API before and after', 'Renderer', 'Every review', 'Diagrams', false),
+      ],
+      runs: [{ label: 'On every review' }, { label: 'Only when files match', code: 'migrations/**/*.sql', on: true }, { label: 'Only when I ask' }],
+      tabs: [chip('Diagrams'), chip('Security'), chip('Diff'), chip('Audits'), chip('Comments'), chip('Tests'), chip('+ New tab', true)],
+    };
+  }
+}
+</script>
+</body>
+</html>

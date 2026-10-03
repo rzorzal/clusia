@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Review comments</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+textarea{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <!-- Title bar -->
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span></span>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; color: {{t.muted}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">#77</span>cache invalidation</span>
+  </div>
+
+  <!-- PR header -->
+  <div style="flex: none; display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px;">
+    <span style="color: {{t.muted}};">rzorzal/clusia</span>
+    <span style="font-family: 'JetBrains Mono', monospace; color: {{t.muted}};">#123</span>
+    <span style="font-size: 17px; font-weight: 600;">feat: auth refresh</span>
+  </div>
+
+  <!-- Section tabs -->
+  <div style="flex: none; display: flex; gap: 4px; padding: 0 20px; border-bottom: 1px solid {{t.line}};">
+    <sc-for list="{{sections}}" as="s" hint-placeholder-count="6">
+      <a href="{{s.href}}" style="height: 36px; padding: 0 12px; display: flex; align-items: center; gap: 6px; text-decoration: none; color: {{s.fg}}; font-weight: {{s.w}}; box-shadow: inset 0 -2px 0 {{s.bar}};">{{s.label}}</a>
+    </sc-for>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <!-- Threads -->
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 16px 28px; overflow: hidden;">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <sc-for list="{{filters}}" as="f" hint-placeholder-count="3">
+          <button style="height: 28px; padding: 0 12px; border: none; border-radius: 14px; background: {{f.bg}}; color: {{f.fg}}; font-weight: {{f.w}};">{{f.label}}</button>
+        </sc-for>
+        <div style="flex: 1;"></div>
+        <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">New thread</button>
+      </div>
+
+      <sc-for list="{{groups}}" as="g" hint-placeholder-count="2">
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <span style="font-family: {{g.font}}; font-size: 12px; color: {{t.muted}}; font-weight: 500;">{{g.title}}</span>
+          <sc-for list="{{g.threads}}" as="th" hint-placeholder-count="2">
+            <div style="display: flex; flex-direction: column; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{th.ring}}; overflow: hidden;">
+              <sc-for list="{{th.posts}}" as="p" hint-placeholder-count="2">
+                <div style="display: flex; gap: 12px; padding: 12px 14px; border-top: 1px solid {{p.sep}};">
+                  <span style="width: 26px; height: 26px; flex: none; border-radius: 13px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; background: {{p.avBg}}; color: {{p.avFg}};">{{p.initial}}</span>
+                  <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;">
+                    <span style="display: flex; align-items: center; gap: 8px;"><b style="font-weight: 600;">{{p.who}}</b><span style="color: {{t.faint}}; font-size: 12px;">{{p.when}}</span>
+                      <sc-if value="{{p.tag}}" hint-placeholder-val="{{false}}"><span style="height: 18px; padding: 0 7px; border-radius: 9px; display: flex; align-items: center; font-size: 11px; font-weight: 600; background: {{p.tagBg}}; color: {{p.tagFg}};">{{p.tag}}</span></sc-if>
+                    </span>
+                    <span style="line-height: 1.5;">{{p.body}}</span>
+                  </div>
+                </div>
+              </sc-for>
+              <div style="display: flex; align-items: center; gap: 12px; padding: 8px 14px 10px 52px; border-top: 1px solid {{t.line}};">
+                <button style="border: none; background: transparent; color: {{t.green}}; font-weight: 600; padding: 0;">Reply</button>
+                <button style="border: none; background: transparent; color: {{t.muted}}; padding: 0;">{{th.second}}</button>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </sc-for>
+    </div>
+
+    <!-- Draft panel -->
+    <div style="width: 300px; flex: none; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-left: 1px solid {{t.line}};">
+      <div style="display: flex; align-items: center; gap: 8px;"><span style="font-weight: 600;">Draft</span><span style="color: {{t.faint}};">4</span></div>
+      <span style="color: {{t.muted}}; line-height: 1.5;">Replies and new threads you write here join the draft. Nothing is posted until you publish.</span>
+      <div style="display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.green}};">
+        <span style="font-size: 11px; color: {{t.green}}; font-weight: 600;">Reply to @mona · refresh.rs:41</span>
+        <span style="line-height: 1.45;">Agree with 30 seconds; the skew we saw on CI was under 10.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div style="height: 48px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 12px 0 20px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+    <span style="color: {{t.faint}};">Draft saved · 4 items</span>
+    <div style="flex: 1;"></div>
+    <a href="Finalize.dc.html" style="height: 34px; padding: 0 16px; border-radius: 6px; display: flex; align-items: center; text-decoration: none; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Finalize review</a>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.14)', orangeSoft: 'rgba(217,87,43,0.12)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.16)', orangeSoft: 'rgba(240,122,74,0.16)' };
+    const t = dark ? D : L;
+    const tab = (label, on, href) => ({ label, href, fg: on ? t.fg : t.muted, w: on ? 600 : 400, bar: on ? t.green : 'transparent' });
+    const chip = (label, on) => ({ label, bg: on ? t.greenSoft : t.surface, fg: on ? t.green : t.muted, w: on ? 600 : 400 });
+    const post = (initial, who, when, body, first, tag, tagKind) => ({
+      initial, who, when, body, sep: first ? 'transparent' : t.line,
+      avBg: who === 'You' ? t.greenSoft : t.chrome, avFg: who === 'You' ? t.green : t.muted,
+      tag, tagBg: tagKind === 'ok' ? t.greenSoft : t.orangeSoft, tagFg: tagKind === 'ok' ? t.green : t.orange,
+    });
+    return {
+      t,
+      sections: [tab('Diagrams', false, ''), tab('Security', false, ''), tab('Diff', false, 'Review.dc.html'), tab('Audits', false, ''), tab('Comments', true, ''), tab('Tests', false, '')],
+      filters: [chip('Open · 3', true), chip('Resolved · 1', false), chip('All', false)],
+      groups: [
+        { title: 'General discussion', font: 'Inter, sans-serif', threads: [
+          { ring: t.line, second: 'Resolve', posts: [
+            post('H', '@hubot', 'reviewed 2h ago', 'Looks good once the lock change lands.', true, 'approved', 'ok'),
+          ] },
+        ] },
+        { title: 'src/auth/refresh.rs · line 41', font: "'JetBrains Mono', monospace", threads: [
+          { ring: t.line, second: 'Resolve', posts: [
+            post('M', '@mona', '3h ago', 'Why one minute? The CLI uses 30 seconds.', true),
+            post('O', '@octo', '2h ago', 'Clock skew on the CI runners. 30 seconds would work too.', false),
+          ] },
+        ] },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

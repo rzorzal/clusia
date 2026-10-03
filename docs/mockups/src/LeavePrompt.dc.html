@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Closing a review with a draft</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; position: relative; overflow: hidden; border-radius: 10px; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; color: {{t.fg}};">
+  <dc-import name="Review" theme="{{theme}}" hint-size="1280px,800px"></dc-import>
+  <div style="position: absolute; inset: 0; background: {{t.scrim}}; display: flex; align-items: center; justify-content: center;">
+    <div role="alertdialog" aria-labelledby="lp-title" style="width: 460px; display: flex; flex-direction: column; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 24px 60px {{t.shadow}}; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 22px 24px 18px;">
+        <h2 id="lp-title" style="margin: 0; font-size: 16px; font-weight: 600;">Close #123 without deciding?</h2>
+        <span style="color: {{t.muted}}; line-height: 1.5;">Your draft has 3 comments and is already saved. If you keep it for later, the tray reminds you about it.</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 14px 24px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+        <button style="height: 34px; padding: 0 12px; border: none; border-radius: 6px; background: transparent; color: {{t.orange}};">Discard</button>
+        <div style="flex: 1;"></div>
+        <button style="height: 34px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Keep for later</button>
+        <button style="height: 34px; padding: 0 16px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Finalize now</button>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const theme = this.props.theme ?? 'light';
+    const dark = theme === 'dark';
+    const L = { chrome: '#F3F5F3', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', scrim: 'rgba(246,247,245,0.55)', shadow: 'rgba(20,30,22,0.18)' };
+    const D = { chrome: '#161A18', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', scrim: 'rgba(8,10,9,0.6)', shadow: 'rgba(0,0,0,0.55)' };
+    return { t: dark ? D : L, theme };
+  }
+}
+</script>
+</body>
+</html>

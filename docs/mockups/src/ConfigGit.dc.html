@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Config git server</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-weight: 600;">Config</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <nav aria-label="Config sections" style="width: 220px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 20px 12px; border-right: 1px solid {{t.line}};">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="{{n.href}}" style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; text-decoration: none; background: {{n.bg}}; color: {{n.fg}}; font-weight: {{n.w}};">{{n.label}}<sc-if value="{{n.later}}" hint-placeholder-val="{{false}}"><span style="margin-left: auto; font-size: 11px; color: {{t.faint}};">{{n.later}}</span></sc-if></a>
+      </sc-for>
+    </nav>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 18px; padding: 24px 40px; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Git server</h2>
+        <span style="color: {{t.muted}};">Where your pull requests live. Clúsia only reads, and writes a review when you press Publish.</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(3, 220px); gap: 10px;">
+        <sc-for list="{{providers}}" as="p" hint-placeholder-count="3">
+          <div style="display: flex; flex-direction: column; gap: 3px; padding: 12px 14px; border-radius: 6px; background: {{p.bg}}; box-shadow: 0 0 0 {{p.ringW}} {{p.ring}}; opacity: {{p.op}};">
+            <span style="font-weight: 600;">{{p.name}}</span><span style="color: {{t.muted}}; font-size: 12px;">{{p.hint}}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; width: 820px;">
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <label for="g-host" style="width: 170px; color: {{t.muted}};">Host</label>
+          <input id="g-host" value="github.com" style="width: 300px; height: 32px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+          <span style="color: {{t.faint}}; font-size: 12px;">Enterprise: your server's address, e.g. github.acme.dev</span>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 16px;">
+          <span style="width: 170px; color: {{t.muted}}; padding-top: 10px;">Sign in with</span>
+          <div style="display: flex; flex-direction: column; gap: 8px; flex: 1;">
+            <label style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 6px; background: {{t.greenSoft}}; box-shadow: 0 0 0 1.5px {{t.green}};">
+              <input type="radio" name="auth" checked="{{yes}}" style="margin: 0; accent-color: {{t.green}};">
+              <span style="display: flex; flex-direction: column; gap: 2px; flex: 1;"><span style="font-weight: 600;">GitHub CLI (gh)</span><span style="color: {{t.muted}}; font-size: 12px;">Signed in as @rzorzal · scopes repo, read:org, workflow</span></span>
+              <span style="display: flex; align-items: center; gap: 6px; color: {{t.green}}; font-size: 12px; font-weight: 600;"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Connected</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+              <input type="radio" name="auth" style="margin: 0; accent-color: {{t.green}};">
+              <span style="display: flex; flex-direction: column; gap: 2px; flex: 1;"><span style="font-weight: 600;">Personal access token</span><span style="color: {{t.muted}}; font-size: 12px;">Kept in the macOS Keychain and never shown again. Needs repo and read:org.</span></span>
+              <button style="height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.chrome}}; font-size: 12px;">Paste a token</button>
+            </label>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <span style="width: 170px; color: {{t.muted}};">API usage</span>
+          <div style="width: 300px; height: 8px; border-radius: 4px; background: {{t.chrome}}; overflow: hidden;"><div style="width: 4%; height: 8px; background: {{t.green}};"></div></div>
+          <span style="color: {{t.muted}}; font-size: 12px; font-variant-numeric: tabular-nums;">188 of 5,000 used this hour · resets at 14:20</span>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; padding-top: 16px; border-top: 1px solid {{t.line}}; width: 820px;">
+        <span style="font-weight: 600;">Syncing</span>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <label for="g-poll" style="width: 170px; color: {{t.muted}};">Check for updates every</label>
+          <input id="g-poll" value="60" style="width: 64px; height: 32px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-variant-numeric: tabular-nums;">
+          <span style="color: {{t.muted}};">seconds · 15 to 3600</span>
+        </div>
+        <label style="display: flex; align-items: center; gap: 16px;"><span style="width: 170px; color: {{t.muted}};">Keep syncing in the background</span><input type="checkbox" checked="{{yes}}" style="margin: 0; accent-color: {{t.green}};"><span style="color: {{t.faint}}; font-size: 12px;">Needed for the tray dot and notifications</span></label>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <span style="width: 170px; color: {{t.muted}};">Last sync</span>
+          <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Online · 32 seconds ago · next in 28 s</span>
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Test connection</button>
+        <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Sync now</button>
+        <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: transparent; color: {{t.orange}};">Remove the stored token</button>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.10)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.12)' };
+    const t = dark ? D : L;
+    const NAV = [['Appearance', 'ConfigAppearance.dc.html'], ['Git server', 'ConfigGit.dc.html'], ['Repositories', 'ConfigRepos.dc.html'], ['Harness', 'ConfigHarness.dc.html'], ['Editor', 'ConfigEditor.dc.html'], ['Notifications', 'ConfigNotifications.dc.html'], ['Plugins & skills', 'ConfigPlugins.dc.html']];
+    const current = 'Git server';
+    const prov = (name, hint, on, later) => ({ name, hint, bg: on ? t.greenSoft : t.surface, ring: on ? t.green : t.line, ringW: on ? '1.5px' : '1px', op: later ? 0.55 : 1 });
+    return {
+      t, yes: true,
+      nav: NAV.map(([label, href, later]) => ({ label, href, later, bg: label === current ? t.surface : 'transparent', fg: label === current ? t.fg : t.muted, w: label === current ? 600 : 400 })),
+      providers: [prov('GitHub', 'github.com and Enterprise', true), prov('GitLab', 'later', false, true), prov('Bitbucket', 'later', false, true)],
+    };
+  }
+}
+</script>
+</body>
+</html>

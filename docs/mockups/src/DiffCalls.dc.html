@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Clúsia Review, calls view</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="position: relative; width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span></span>
+  </div>
+
+  <div style="flex: none; display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px;">
+    <span style="color: {{t.muted}};">rzorzal/clusia</span>
+    <span style="font-family: 'JetBrains Mono', monospace; color: {{t.muted}};">#123</span>
+    <span style="font-size: 17px; font-weight: 600;">feat: auth refresh</span>
+    <span style="color: {{t.faint}}; font-size: 12px;">@octo · <span style="color: {{t.green}};">+120</span> <span style="color: {{t.orange}};">−34</span> · 7 files</span>
+  </div>
+
+  <div style="flex: none; display: flex; align-items: center; gap: 4px; padding: 0 20px; border-bottom: 1px solid {{t.line}};">
+    <sc-for list="{{sections}}" as="s" hint-placeholder-count="6">
+      <a href="{{s.href}}" style="height: 36px; padding: 0 12px; display: flex; align-items: center; text-decoration: none; color: {{s.fg}}; font-weight: {{s.w}}; box-shadow: inset 0 -2px 0 {{s.bar}};">{{s.label}}</a>
+    </sc-for>
+    <div style="flex: 1;"></div>
+    <div style="display: flex; border-radius: 6px; box-shadow: 0 0 0 1px {{t.line}}; overflow: hidden;">
+      <a href="Review.dc.html" style="height: 26px; padding: 0 10px; display: flex; align-items: center; text-decoration: none; background: {{t.surface}}; font-size: 12px; color: {{t.muted}};">Unified</a>
+      <a href="DiffSplit.dc.html" style="height: 26px; padding: 0 10px; display: flex; align-items: center; text-decoration: none; background: {{t.surface}}; font-size: 12px; color: {{t.muted}};">Split</a>
+      <a href="DiffStory.dc.html" style="height: 26px; padding: 0 10px; display: flex; align-items: center; text-decoration: none; background: {{t.surface}}; font-size: 12px; color: {{t.muted}};">Story</a>
+      <span style="height: 26px; padding: 0 10px; display: flex; align-items: center; background: {{t.chrome}}; font-size: 12px; font-weight: 600;">Calls</span>
+    </div>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <!-- Function list -->
+    <nav aria-label="Functions" style="width: 260px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 12px 10px; border-right: 1px solid {{t.line}}; overflow: hidden;">
+      <label style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 10px; margin-bottom: 8px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; color: {{t.faint}};">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="4.2"></circle><path d="M9.2 9.2L12.5 12.5"></path></svg>
+        <input aria-label="Find a function" placeholder="Find a function, even untouched" style="flex: 1; min-width: 0; border: none; outline: none; background: transparent; font-size: 12px;">
+      </label>
+      <sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+        <span style="padding: 8px 8px 4px; color: {{t.faint}}; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;">{{g.title}}</span>
+        <sc-for list="{{g.fns}}" as="f" hint-placeholder-count="3">
+          <a href="#" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; text-decoration: none; background: {{f.bg}};">
+            <span style="flex: 1; min-width: 0; font-family: 'JetBrains Mono', monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: {{f.fg}}; font-weight: {{f.w}};">{{f.name}}</span>
+            <sc-if value="{{f.tag}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 16px; padding: 0 6px; border-radius: 8px; display: flex; align-items: center; font-size: 10px; font-weight: 600; background: {{f.tagBg}}; color: {{f.tagFg}};">{{f.tag}}</span></sc-if>
+          </a>
+        </sc-for>
+      </sc-for>
+    </nav>
+
+    <!-- Call map -->
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden;">
+      <div style="flex: none; display: flex; align-items: center; gap: 6px; padding: 10px 16px; border-bottom: 1px solid {{t.line}}; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+        <a href="#" style="color: {{t.muted}}; text-decoration: none;">auth_middleware</a><span style="color: {{t.faint}};">›</span>
+        <a href="#" style="color: {{t.muted}}; text-decoration: none;">TokenStore::token</a><span style="color: {{t.faint}};">›</span>
+        <span style="font-weight: 600;">TokenStore::refresh</span>
+        <div style="flex: 1;"></div>
+        <span style="font-family: Inter, sans-serif; color: {{t.faint}};">Depth</span>
+        <span style="font-family: Inter, sans-serif; height: 22px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; background: {{t.chrome}};">1 ▾</span>
+      </div>
+      <div style="flex: 1; position: relative; background-color: {{t.surface}}; background-image: radial-gradient({{t.dot}} 1px, transparent 1px); background-size: 20px 20px;">
+        <span style="position: absolute; left: 20px; top: 14px; color: {{t.faint}}; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;">Called by · 3</span>
+        <span style="position: absolute; left: 450px; top: 14px; color: {{t.faint}}; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;">Calls · 5</span>
+
+        <!-- spines and links -->
+        <div style="position: absolute; left: 190px; top: 63px; width: 22px; height: 2px; background: {{t.edge}};"></div>
+        <div style="position: absolute; left: 190px; top: 143px; width: 22px; height: 2px; background: {{t.edge}};"></div>
+        <div style="position: absolute; left: 190px; top: 223px; width: 22px; height: 2px; background: {{t.edge}};"></div>
+        <div style="position: absolute; left: 211px; top: 63px; width: 2px; height: 162px; background: {{t.edge}};"></div>
+        <div style="position: absolute; left: 211px; top: 143px; width: 24px; height: 2px; background: {{t.edge}};"></div>
+        <div style="position: absolute; left: 405px; top: 143px; width: 24px; height: 2px; background: {{t.edge}};"></div>
+        <div style="position: absolute; left: 428px; top: 47px; width: 2px; height: 274px; background: {{t.edge}};"></div>
+        <sc-for list="{{calleeLinks}}" as="cl" hint-placeholder-count="5">
+          <div style="position: absolute; left: 428px; top: {{cl.top}}; width: 22px; height: 2px; background: {{cl.color}};"></div>
+        </sc-for>
+
+        <!-- callers -->
+        <sc-for list="{{callers}}" as="c" hint-placeholder-count="3">
+          <button onClick="{{c.pick}}" aria-label="Show the change in {{c.name}}" style="position: absolute; left: 20px; top: {{c.top}}; width: 170px; height: 52px; box-sizing: border-box; padding: 8px 10px; border: none; border-radius: 8px; text-align: left; background: {{t.bg}}; box-shadow: 0 0 0 1px {{c.ring}}; display: flex; flex-direction: column; gap: 3px; opacity: {{c.op}};">
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;">{{c.name}}</span>
+            <span style="font-size: 11px; color: {{t.faint}};">{{c.meta}}</span>
+          </button>
+        </sc-for>
+
+        <!-- selected -->
+        <button style="position: absolute; left: 235px; top: 100px; width: 170px; height: 88px; box-sizing: border-box; padding: 10px 12px; border: none; border-radius: 8px; text-align: left; background: {{t.greenSoft}}; box-shadow: 0 0 0 2px {{t.green}}; display: flex; flex-direction: column; gap: 4px;">
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600;">TokenStore::refresh</span>
+          <span style="font-size: 11px;"><span style="color: {{t.green}};">+9</span> <span style="color: {{t.orange}};">−2</span> <span style="color: {{t.muted}};">· body changed</span></span>
+          <span style="font-size: 11px; color: {{t.green}}; font-weight: 600;">1 draft comment</span>
+        </button>
+
+        <!-- callees -->
+        <sc-for list="{{callees}}" as="c" hint-placeholder-count="5">
+          <button onClick="{{c.pick}}" aria-label="Show the change in {{c.name}}" style="position: absolute; left: 450px; top: {{c.top}}; width: 170px; height: 44px; box-sizing: border-box; padding: 6px 10px; border: none; border-radius: 8px; text-align: left; background: {{c.bg}}; box-shadow: 0 0 0 {{c.ringW}} {{c.ring}}; display: flex; flex-direction: column; gap: 2px; opacity: {{c.op}};">
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;">{{c.name}}</span>
+            <span style="font-size: 11px; color: {{c.metaFg}};">{{c.meta}}</span>
+          </button>
+        </sc-for>
+
+        <!-- The clicked box opens in place with its change -->
+        <sc-if value="{{hasOpen}}" hint-placeholder-val="{{true}}">
+          <div role="region" aria-label="Change in {{open.name}}" style="position: absolute; left: {{open.left}}; top: {{open.top}}; width: 380px; z-index: 5; display: flex; flex-direction: column; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1.5px {{open.ring}}, 0 14px 36px {{t.shadow}}; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid {{t.line}};">
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{open.name}}</span>
+              <span style="height: 18px; padding: 0 7px; border-radius: 9px; display: flex; align-items: center; font-size: 10px; font-weight: 600; background: {{open.tagBg}}; color: {{open.tagFg}};">{{open.tag}}</span>
+              <button onClick="{{showModal}}" style="height: 24px; padding: 0 8px; border: none; border-radius: 6px; background: {{t.chrome}}; font-size: 11px;">Full view</button>
+              <button onClick="{{close}}" aria-label="Close" style="width: 24px; height: 24px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}};">×</button>
+            </div>
+            <div style="padding: 6px 0; background: {{t.code}}; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; line-height: 20px;">
+              <sc-for list="{{open.lines}}" as="l" hint-placeholder-count="6">
+                <div style="display: flex; background: {{l.bg}};"><span style="width: 34px; flex: none; text-align: right; padding-right: 8px; box-sizing: border-box; color: {{t.faint}};">{{l.n}}</span><span style="width: 14px; flex: none; color: {{l.signFg}};">{{l.sign}}</span><span style="white-space: pre; overflow: hidden;">{{l.code}}</span></div>
+              </sc-for>
+            </div>
+            <span style="padding: 8px 12px; color: {{t.muted}}; font-size: 12px; line-height: 1.45; border-top: 1px solid {{t.line}};">{{open.note}}</span>
+          </div>
+        </sc-if>
+
+        <div style="position: absolute; left: 20px; bottom: 14px; display: flex; gap: 14px; padding: 7px 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-size: 11px; color: {{t.muted}};">
+          <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 3px; background: {{t.greenSoft}}; box-shadow: 0 0 0 1.5px {{t.green}};"></span>Changed</span>
+          <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 3px; box-shadow: 0 0 0 1.5px {{t.orange}};"></span>Signature changed</span>
+          <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 3px; box-shadow: 0 0 0 1px {{t.line}}; opacity: 0.6;"></span>Not touched · click to read</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Detail -->
+    <div style="width: 380px; flex: none; display: flex; flex-direction: column; border-left: 1px solid {{t.line}}; overflow: hidden;">
+      <div style="flex: none; display: flex; flex-direction: column; gap: 6px; padding: 12px 16px; border-bottom: 1px solid {{t.line}};">
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">auth/refresh.rs:38</span>
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.5;">pub async fn <b style="font-weight: 600;">refresh</b>(&amp;self) -&gt; Result&lt;Token, AuthError&gt;</span>
+        <div style="display: flex; gap: 8px;">
+          <button style="height: 26px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.chrome}}; font-size: 12px;">Show body diff</button>
+          <button style="height: 26px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.chrome}}; font-size: 12px;">Open in editor</button>
+          <button style="height: 26px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.chrome}}; font-size: 12px;">Comment</button>
+        </div>
+      </div>
+      <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; overflow: hidden;">
+        <span style="color: {{t.faint}}; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;">Called by · TokenStore::token (not changed)</span>
+        <div style="padding: 8px 0; border-radius: 6px; background: {{t.code}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; line-height: 20px; overflow: hidden;">
+          <sc-for list="{{callerCode}}" as="l" hint-placeholder-count="6">
+            <div style="display: flex; background: {{l.bg}};"><span style="width: 34px; flex: none; text-align: right; padding-right: 10px; box-sizing: border-box; color: {{t.faint}};">{{l.n}}</span><span style="white-space: pre;">{{l.code}}</span></div>
+          </sc-for>
+        </div>
+        <span style="color: {{t.muted}}; font-size: 12px; line-height: 1.45;">Every API request goes through here, so the lock in <span style="font-family: 'JetBrains Mono', monospace;">refresh</span> is on the hot path of the whole client.</span>
+        <span style="color: {{t.faint}}; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; margin-top: 4px;">Also affected · signature changed</span>
+        <div style="display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1.5px {{t.orange}};">
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">TokenStore::new(path<span style="background: {{t.addHl}}; border-radius: 3px;">, client: HttpClient</span>)</span>
+          <span style="color: {{t.muted}}; font-size: 12px;">4 callers outside this PR still compile? <b style="font-weight: 600; color: {{t.green}};">Yes</b> · checked by the agent in the worktree</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 48px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 12px 0 20px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+    <span style="display: flex; align-items: center; gap: 8px; color: {{t.muted}};"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Claude Code · session active</span>
+    <span style="color: {{t.faint}};">Call graph from the worktree · 4 changed, 9 touched by calls</span>
+    <div style="flex: 1;"></div>
+    <a href="Finalize.dc.html" style="height: 34px; padding: 0 16px; border-radius: 6px; display: flex; align-items: center; text-decoration: none; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Finalize review</a>
+  </div>
+
+  <!-- Full view of the same change -->
+  <sc-if value="{{modal}}" hint-placeholder-val="{{false}}">
+    <div style="position: absolute; inset: 0; z-index: 20; background: {{t.scrim}}; display: flex; align-items: center; justify-content: center;">
+      <div role="dialog" aria-labelledby="calls-modal-title" style="width: 760px; display: flex; flex-direction: column; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 24px 60px {{t.shadow}}; overflow: hidden;">
+        <div style="display: flex; align-items: center; gap: 10px; padding: 18px 22px 12px;">
+          <h2 id="calls-modal-title" style="margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600;">{{open.name}}</h2>
+          <span style="height: 18px; padding: 0 7px; border-radius: 9px; display: flex; align-items: center; font-size: 10px; font-weight: 600; background: {{open.tagBg}}; color: {{open.tagFg}};">{{open.tag}}</span>
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">{{open.file}}</span>
+          <div style="flex: 1;"></div>
+          <button onClick="{{hideModal}}" aria-label="Close" style="width: 28px; height: 28px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}};">×</button>
+        </div>
+        <div style="margin: 0 22px; padding: 8px 0; border-radius: 6px; background: {{t.code}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 21px;">
+          <sc-for list="{{open.lines}}" as="l" hint-placeholder-count="6">
+            <div style="display: flex; background: {{l.bg}};"><span style="width: 44px; flex: none; text-align: right; padding-right: 10px; box-sizing: border-box; color: {{t.faint}};">{{l.n}}</span><span style="width: 16px; flex: none; color: {{l.signFg}};">{{l.sign}}</span><span style="white-space: pre;">{{l.code}}</span></div>
+          </sc-for>
+        </div>
+        <span style="padding: 12px 22px 0; color: {{t.muted}}; line-height: 1.5;">{{open.note}}</span>
+        <div style="display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px; margin-top: 12px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+          <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Open in editor</button>
+          <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Comment on this function</button>
+          <button onClick="{{hideModal}}" style="height: 32px; padding: 0 16px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Done</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { open: 'HttpClient::exchange', modal: false };
+  }
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', code: '#F6F7F5', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.12)', orangeSoft: 'rgba(217,87,43,0.12)', sel: '#E9F6EB', dot: '#DDE2DD', edge: '#A4ACA6', addHl: 'rgba(47,158,68,0.24)', callHl: 'rgba(47,158,68,0.10)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', code: '#121514', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.14)', orangeSoft: 'rgba(240,122,74,0.16)', sel: 'rgba(76,195,95,0.12)', dot: '#2A302C', edge: '#59625B', addHl: 'rgba(76,195,95,0.34)', callHl: 'rgba(76,195,95,0.12)' };
+    const t = { ...(dark ? D : L), shadow: dark ? 'rgba(0,0,0,0.5)' : 'rgba(20,30,22,0.16)', scrim: dark ? 'rgba(8,10,9,0.6)' : 'rgba(246,247,245,0.6)', delBg: dark ? 'rgba(240,122,74,0.12)' : '#FCEEE8', addBg: dark ? 'rgba(76,195,95,0.12)' : '#E9F6EB' };
+    const ln = (n, code, kind) => ({
+      n, code,
+      sign: kind === 'add' ? '+' : kind === 'del' ? '−' : '',
+      bg: kind === 'add' ? t.addBg : kind === 'del' ? t.delBg : kind === 'call' ? t.callHl : 'transparent',
+      signFg: kind === 'add' ? t.green : t.orange,
+    });
+    const TAG = {
+      changed: ['changed', t.greenSoft, t.green, t.green],
+      added: ['new', t.greenSoft, t.green, t.green],
+      untouched: ['not changed', t.chrome, t.muted, t.line],
+      external: ['outside this repo', t.chrome, t.muted, t.line],
+    };
+    const DATA = {
+      'TokenStore::token': { kind: 'untouched', file: 'auth/store.rs:21', note: 'Not changed. It calls refresh() on every cache miss, so every API request can wait on the new lock.', lines: [ln(21, 'pub async fn token(&self) -> Result<Token, AuthError> {'), ln(22, '    if let Some(t) = self.cached() {'), ln(23, '        return Ok(t);'), ln(24, '    }'), ln(25, '    self.refresh().await', 'call'), ln(26, '}')] },
+      'tests::refresh_race': { kind: 'added', file: 'tests/refresh.rs:12', note: 'New in this PR: two tasks refresh at once and the endpoint must be called a single time.', lines: [ln(12, '#[tokio::test]', 'add'), ln(13, 'async fn refresh_race() {', 'add'), ln(14, '    let store = store_with(expired_token());', 'add'), ln(15, '    let (a, b) = join!(store.refresh(), store.refresh());', 'add'), ln(16, '    assert_eq!(a?, b?);', 'add'), ln(17, '    assert_eq!(exchange_calls(), 1);', 'add'), ln(18, '}', 'add')] },
+      'cli::auth_status': { kind: 'untouched', file: 'cli/auth.rs:30', note: 'Not changed. Only reads the expiry; it never waits on the lock.', lines: [ln(30, 'pub fn auth_status(store: &TokenStore) -> Status {'), ln(31, '    let token = store.peek();'), ln(32, '    Status::from_expiry(token.expires_at)'), ln(33, '}')] },
+      'TokenStore::load': { kind: 'untouched', file: 'auth/store.rs:40', note: 'Not changed, but refresh() now awaits it (it became async in an earlier PR).', lines: [ln(40, 'pub async fn load(&self) -> Result<Token, AuthError> {'), ln(41, '    let bytes = fs::read(&self.path).await?;'), ln(42, '    Ok(serde_json::from_slice(&bytes)?)'), ln(43, '}')] },
+      'now': { kind: 'untouched', file: 'time.rs:8', note: 'Not changed. Called once more per refresh for the one-minute margin.', lines: [ln(8, 'pub fn now() -> Instant {'), ln(9, '    Instant::now()'), ln(10, '}')] },
+      'Mutex::lock': { kind: 'external', file: 'tokio::sync::Mutex', note: 'From tokio, not in this repository. Waiting callers queue in order; the guard is released at the end of refresh().', lines: [ln('', 'pub async fn lock(&self) -> MutexGuard<\'_, T>')] },
+      'HttpClient::exchange': { kind: 'changed', file: 'client/http.rs:18', note: 'Changed in this PR: retries on 5xx with a short backoff. The security check flagged that there is no retry limit.', lines: [ln(18, 'pub async fn exchange(&self, refresh: &str) -> Result<Token> {'), ln(19, '    let req = self.token_request(refresh);'), ln(20, '    loop {', 'add'), ln(21, '        match self.send(&req).await {', 'add'), ln(22, '            Err(e) if e.is_server() => sleep(BACKOFF).await,', 'add'), ln(23, '            other => return other,', 'add'), ln(20, '    self.send(&req).await', 'del'), ln(24, '        }', 'add')] },
+      'TokenStore::save': { kind: 'changed', file: 'auth/store.rs:88 (was :20)', note: 'Moved and changed: 34 lines only moved; the write now goes to a temp file that is renamed into place.', lines: [ln(88, 'pub fn save(&self, token: &Token) -> Result<()> {'), ln(89, '    let bytes = serde_json::to_vec(token)?;'), ln(21, '    fs::write(&self.path, bytes)?;', 'del'), ln(90, '    write_atomic(&self.path, &bytes)?;', 'add'), ln(91, '    Ok(())'), ln(92, '}')] },
+    };
+    const pick = (name) => () => this.setState({ open: this.state.open === name ? null : name, modal: false });
+    const tab = (label, on, href) => ({ label, href: href || '', fg: on ? t.fg : t.muted, w: on ? 600 : 400, bar: on ? t.green : 'transparent' });
+    const fn = (name, kind, on) => {
+      const tags = { changed: ['changed', t.greenSoft, t.green], signature: ['signature', t.orangeSoft, t.orange], added: ['new', t.greenSoft, t.green], moved: ['moved', t.chrome, t.muted] };
+      const tg = tags[kind];
+      return { name, tag: tg ? tg[0] : '', tagBg: tg ? tg[1] : '', tagFg: tg ? tg[2] : '', bg: on ? t.sel : 'transparent', fg: kind === 'called' ? t.muted : t.fg, w: on ? 600 : 400 };
+    };
+    const callee = (name, meta, kind, top) => ({
+      name, meta, top: top + 'px', pick: pick(name),
+      bg: kind === 'changed' ? t.greenSoft : t.bg,
+      ring: kind === 'changed' ? t.green : t.line, ringW: kind === 'changed' ? '1.5px' : '1px',
+      op: kind === 'untouched' ? 0.62 : 1, metaFg: kind === 'changed' ? t.green : t.faint,
+    });
+    const callees = [
+      callee('TokenStore::load', 'not touched · store.rs:40', 'untouched', 26),
+      callee('now', 'not touched · time.rs:8', 'untouched', 94),
+      callee('Mutex::lock', 'tokio · new call', 'untouched', 162),
+      callee('HttpClient::exchange', '+4 −1 · retries', 'changed', 230),
+      callee('TokenStore::save', 'moved · writes atomically', 'changed', 298),
+    ];
+    const callers = [
+      { name: 'TokenStore::token', meta: 'not touched · every request', ring: t.line, op: 0.75, top: '38px', pick: pick('TokenStore::token') },
+      { name: 'tests::refresh_race', meta: 'new test', ring: t.green, op: 1, top: '118px', pick: pick('tests::refresh_race') },
+      { name: 'cli::auth_status', meta: 'not touched', ring: t.line, op: 0.62, top: '198px', pick: pick('cli::auth_status') },
+    ];
+    const openName = this.state.open;
+    const caller = callers.find((c) => c.name === openName);
+    const calleeHit = callees.find((c) => c.name === openName);
+    const d = openName ? DATA[openName] : null;
+    const tag = d ? TAG[d.kind] : null;
+    const open = d ? {
+      name: openName, file: d.file, note: d.note, lines: d.lines,
+      tag: tag[0], tagBg: tag[1], tagFg: tag[2], ring: tag[3],
+      left: caller ? '20px' : '240px',
+      top: caller ? caller.top : (calleeHit ? calleeHit.top : '26px'),
+    } : { name: '', file: '', note: '', lines: [] };
+    return {
+      t,
+      open, hasOpen: !!d, modal: !!d && this.state.modal,
+      close: () => this.setState({ open: null, modal: false }),
+      showModal: () => this.setState({ modal: true }),
+      hideModal: () => this.setState({ modal: false }),
+      sections: [tab('Diagrams', false, 'Diagrams.dc.html'), tab('Security', false, 'Security.dc.html'), tab('Diff', true), tab('Audits', false, 'Audits.dc.html'), tab('Comments', false, 'Comments.dc.html'), tab('Tests', false, 'Tests.dc.html')],
+      groups: [
+        { title: 'Changed in this PR · 4', fns: [fn('TokenStore::refresh', 'changed', true), fn('TokenStore::new', 'signature'), fn('TokenStore::save', 'moved'), fn('HttpClient::exchange', 'changed')] },
+        { title: 'Added · 1', fns: [fn('tests::refresh_race', 'added')] },
+        { title: 'Called, not changed · 9', fns: [fn('TokenStore::token', 'called'), fn('TokenStore::load', 'called'), fn('auth_middleware', 'called'), fn('ApiClient::send', 'called'), fn('write_atomic', 'called')] },
+      ],
+      callers,
+      callees,
+      calleeLinks: callees.map((c) => ({ top: (parseInt(c.top, 10) + 21) + 'px', color: c.ring === t.green ? t.green : t.edge })),
+      callerCode: [
+        { n: 21, code: 'pub async fn token(&self) -> Result<Token, AuthError> {', bg: 'transparent' },
+        { n: 22, code: '    if let Some(t) = self.cached() {', bg: 'transparent' },
+        { n: 23, code: '        return Ok(t);', bg: 'transparent' },
+        { n: 24, code: '    }', bg: 'transparent' },
+        { n: 25, code: '    self.refresh().await', bg: t.callHl },
+        { n: 26, code: '}', bg: 'transparent' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

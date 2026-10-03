@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Open a pull request</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; position: relative; overflow: hidden; border-radius: 10px; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; color: {{t.fg}};">
+  <dc-import name="Main" theme="{{theme}}" hint-size="1280px,800px"></dc-import>
+  <div style="position: absolute; inset: 0; background: {{t.scrim}}; display: flex; justify-content: center; padding-top: 110px; box-sizing: border-box;">
+    <div role="dialog" aria-labelledby="op-title" style="width: 600px; align-self: flex-start; display: flex; flex-direction: column; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 24px 60px {{t.shadow}}; overflow: hidden;">
+      <h2 id="op-title" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);">Open a pull request</h2>
+      <label style="display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid {{t.line}};">
+        <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="{{t.muted}}" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="4.2"></circle><path d="M9.2 9.2L12.5 12.5"></path></svg>
+        <input aria-label="Pull request" value="rzorzal/site#1" style="flex: 1; border: none; outline: none; background: transparent; font-size: 15px;">
+        <span style="color: {{t.faint}}; font-size: 12px;">URL, owner/repo#n or a title</span>
+      </label>
+      <div style="display: flex; flex-direction: column; padding: 6px 0;">
+        <span style="padding: 8px 18px 4px; color: {{t.faint}}; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;">Matches</span>
+        <sc-for list="{{rows}}" as="r" hint-placeholder-count="5">
+          <a href="Loading.dc.html" style="display: flex; align-items: center; gap: 12px; padding: 9px 18px; text-decoration: none; background: {{r.bg}};">
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}}; width: 116px; flex: none;">{{r.ref}}</span>
+            <span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{r.title}}</span>
+            <span style="color: {{t.faint}}; font-size: 12px;">{{r.why}}</span>
+          </a>
+        </sc-for>
+      </div>
+      <div style="display: flex; align-items: center; gap: 14px; padding: 10px 18px; border-top: 1px solid {{t.line}}; background: {{t.chrome}}; color: {{t.faint}}; font-size: 12px;">
+        <span><b style="font-weight: 600; color: {{t.muted}};">↵</b> open</span>
+        <span><b style="font-weight: 600; color: {{t.muted}};">↑↓</b> choose</span>
+        <span><b style="font-weight: 600; color: {{t.muted}};">esc</b> close</span>
+        <div style="flex: 1;"></div>
+        <span>Any pull request you can read, not only your lists.</span>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const theme = this.props.theme ?? 'light';
+    const dark = theme === 'dark';
+    const L = { chrome: '#F3F5F3', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', sel: '#E9F6EB', scrim: 'rgba(246,247,245,0.55)', shadow: 'rgba(20,30,22,0.18)' };
+    const D = { chrome: '#161A18', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', sel: 'rgba(76,195,95,0.12)', scrim: 'rgba(8,10,9,0.6)', shadow: 'rgba(0,0,0,0.55)' };
+    const t = dark ? D : L;
+    const row = (ref, title, why, on) => ({ ref, title, why, bg: on ? t.sel : 'transparent' });
+    return {
+      t, theme,
+      rows: [
+        row('rzorzal/site#1', 'Dark mode for the docs', 'open · @octo', true),
+        row('rzorzal/site#12', 'Fix the broken RSS link', 'assigned to you', false),
+        row('rzorzal/clusia#123', 'feat: auth refresh', 'in your tabs', false),
+        row('rzorzal/clusia#77', 'fix: cache invalidation', 'saved review', false),
+        row('rzorzal/blog#36', 'Write the M3 post', 'assigned to you', false),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tray popover, next</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 840px; height: 760px; box-sizing: border-box; display: flex; gap: 40px; padding: 24px 32px; background: {{t.desk}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; color: {{t.fg}};">
+  <sc-for list="{{pops}}" as="p" hint-placeholder-count="2">
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <span style="color: {{t.deskInk}}; font-size: 12px; font-weight: 600;">{{p.caption}}</span>
+      <div style="position: relative; width: 360px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 12px; background: {{t.bg}}; box-shadow: 0 12px 32px rgba(0,0,0,0.22), 0 0 0 1px {{t.line}};">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="width: 8px; height: 8px; border-radius: 4px; background: {{t.green}};"></span>
+          <span style="font-size: 16px; font-weight: 600;">Clúsia</span>
+          <span style="flex: 1;"></span>
+          <div role="toolbar" aria-label="Clúsia actions" style="display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 10px; background: {{t.panel}}; box-shadow: inset 0 0 0 1px {{t.line}};">
+            <sc-for list="{{p.tools}}" as="b" hint-placeholder-count="4">
+              <button aria-label="{{b.label}}" title="{{b.label}}" style="width: 32px; height: 32px; border: none; border-radius: 7px; display: flex; align-items: center; justify-content: center; background: {{b.bg}}; color: {{b.fg}}; box-shadow: {{b.shadow}};">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{b.d}}"></path></svg>
+              </button>
+            </sc-for>
+          </div>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 12px;"><span style="color: {{t.faint}};">Last 6 months</span><span style="color: {{p.syncFg}};">{{p.sync}}</span></div>
+        <div style="display: grid; grid-template-columns: repeat(26, 1fr); grid-auto-flow: column; grid-template-rows: repeat(7, 9px); gap: 3px;">
+          <sc-for list="{{cells}}" as="c" hint-placeholder-count="182">
+            <span style="border-radius: 2px; background: {{c}};"></span>
+          </sc-for>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+          <sc-for list="{{counters}}" as="k" hint-placeholder-count="3">
+            <div style="display: flex; align-items: center; justify-content: space-between; height: 44px; padding: 0 10px; border-radius: 8px; background: {{t.panel}};"><span style="font-size: 20px; font-weight: 600;">{{k.v}}</span><span style="color: {{t.muted}};">{{k.l}}</span></div>
+          </sc-for>
+        </div>
+        <div style="height: 26px; display: flex; align-items: center; padding: 0 10px; border-radius: 6px; background: {{t.panel}}; color: {{t.faint}};">Filter by title, repository or #number</div>
+        <div style="display: flex; justify-content: space-between; padding-top: 6px; border-top: 1px solid {{t.line}};"><span style="color: {{t.muted}}; font-weight: 600;">Assigned to me</span><span style="color: {{t.muted}};">Updated ▾</span></div>
+        <sc-for list="{{rows}}" as="r" hint-placeholder-count="3">
+          <div style="display: flex; gap: 10px;">
+            <span style="width: 40px; color: {{t.muted}}; font-variant-numeric: tabular-nums;">{{r.n}}</span>
+            <span style="display: flex; flex-direction: column; gap: 1px; flex: 1;"><span>{{r.title}}</span><span style="color: {{t.faint}}; font-size: 12px;">{{r.meta}}</span></span>
+            <span style="color: {{t.faint}};">›</span>
+          </div>
+        </sc-for>
+        <sc-if value="{{p.menu}}" hint-placeholder-val="{{false}}">
+          <div role="menu" aria-label="Turn off" style="position: absolute; top: 56px; right: 12px; width: 250px; display: flex; flex-direction: column; padding: 6px; border-radius: 10px; background: {{t.menu}}; box-shadow: 0 10px 28px rgba(0,0,0,0.28), 0 0 0 1px {{t.line}};">
+            <sc-for list="{{menu}}" as="m" hint-placeholder-count="3">
+              <button role="menuitem" style="display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 10px; border: none; border-radius: 6px; text-align: left; background: {{m.bg}};">
+                <span style="font-weight: 600; color: {{m.fg}};">{{m.label}}</span><span style="color: {{t.muted}}; font-size: 12px;">{{m.hint}}</span>
+              </button>
+            </sc-for>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+  </sc-for>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":840,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { desk: '#8FA394', deskInk: '#1B1F1C', bg: '#FFFFFF', panel: '#EEF0EE', menu: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#9AA29C', green: '#2F9E44', orange: '#D9572B', hover: '#EEF1EE', raised: '#FFFFFF', raisedShadow: '0 1px 2px rgba(20,30,22,0.16)', heat: ['#ECEEEC', '#C4E3C9', '#8FCB98', '#55B063', '#2F9E44'] };
+    const D = { bg: '#1E1F1E', desk: '#3C4A40', deskInk: '#E9ECE9', panel: '#2B2D2B', menu: '#2B2D2B', line: '#353835', fg: '#E9ECE9', muted: '#A3ACA5', faint: '#6F7871', green: '#4CC35F', orange: '#F07A4A', hover: '#373A37', raised: '#3A3D3A', raisedShadow: '0 1px 2px rgba(0,0,0,0.5)', heat: ['#2E302E', '#1F4A27', '#2A7A3A', '#3AA34E', '#4CC35F'] };
+    const t = dark ? D : L;
+    const ICON = {
+      refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
+      spin: 'M12 3a9 9 0 1 1-9 9',
+      window: 'M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7',
+      gear: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 13a7.5 7.5 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-1.7-1L15 3.5h-4l-.4 2.5a7.6 7.6 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.5 7.5 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7.6 7.6 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.6 7.6 0 0 0 1.7-1l2.4 1 2-3.4z',
+      power: 'M12 3v8M6.3 6.8a8 8 0 1 0 11.4 0',
+    };
+    const tool = (label, d, state) => ({ label, d, bg: state === 'on' ? t.raised : 'transparent', shadow: state === 'on' ? t.raisedShadow : 'none', fg: state === 'danger' ? t.orange : (state === 'on' ? t.fg : t.muted) });
+    let seed = 7;
+    const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+    const cells = Array.from({ length: 182 }, (_, i) => i > 177 ? t.heat[0] : t.heat[Math.floor(rnd() * rnd() * 5.4)]);
+    return {
+      t, cells,
+      pops: [
+        { caption: 'Refreshing now', sync: 'Syncing…', syncFg: t.green, menu: false, tools: [tool('Refresh now', ICON.spin, 'on'), tool('Open window', ICON.window), tool('Config', ICON.gear), tool('Turn off', ICON.power)] },
+        { caption: 'Turn off menu open', sync: 'Synced 32 s ago', syncFg: t.muted, menu: true, tools: [tool('Refresh now', ICON.refresh), tool('Open window', ICON.window), tool('Config', ICON.gear), tool('Turn off', ICON.power, 'danger')] },
+      ],
+      counters: [{ v: 6, l: 'Assigned' }, { v: 1, l: 'Mine' }, { v: 2, l: 'Saved' }],
+      rows: [
+        { n: '#123', title: 'feat: auth refresh', meta: 'clusia · 5m' },
+        { n: '#98', title: 'api pagination for long lists', meta: 'clusia · 1d' },
+        { n: '#36', title: 'Write the M3 post', meta: 'blog · 3d · draft' },
+      ],
+      menu: [
+        { label: 'Close the window', hint: 'The tray and syncing keep running', fg: t.fg, bg: 'transparent' },
+        { label: 'Pause syncing', hint: 'No GitHub calls until you resume', fg: t.fg, bg: 'transparent' },
+        { label: 'Quit Clúsia', hint: 'Stops the daemon, the tray and the window. Drafts are kept.', fg: t.orange, bg: t.hover },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Clúsia Review, story view</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span></span>
+  </div>
+
+  <div style="flex: none; display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px;">
+    <span style="color: {{t.muted}};">rzorzal/clusia</span>
+    <span style="font-family: 'JetBrains Mono', monospace; color: {{t.muted}};">#123</span>
+    <span style="font-size: 17px; font-weight: 600;">feat: auth refresh</span>
+    <span style="color: {{t.faint}}; font-size: 12px;">@octo · <span style="color: {{t.green}};">+120</span> <span style="color: {{t.orange}};">−34</span> · 7 files</span>
+  </div>
+
+  <div style="flex: none; display: flex; align-items: center; gap: 4px; padding: 0 20px; border-bottom: 1px solid {{t.line}};">
+    <sc-for list="{{sections}}" as="s" hint-placeholder-count="6">
+      <a href="{{s.href}}" style="height: 36px; padding: 0 12px; display: flex; align-items: center; text-decoration: none; color: {{s.fg}}; font-weight: {{s.w}}; box-shadow: inset 0 -2px 0 {{s.bar}};">{{s.label}}</a>
+    </sc-for>
+    <div style="flex: 1;"></div>
+    <div style="display: flex; border-radius: 6px; box-shadow: 0 0 0 1px {{t.line}}; overflow: hidden;">
+      <a href="Review.dc.html" style="height: 26px; padding: 0 10px; display: flex; align-items: center; text-decoration: none; background: {{t.surface}}; font-size: 12px; color: {{t.muted}};">Unified</a>
+      <a href="DiffSplit.dc.html" style="height: 26px; padding: 0 10px; display: flex; align-items: center; text-decoration: none; background: {{t.surface}}; font-size: 12px; color: {{t.muted}};">Split</a>
+      <span style="height: 26px; padding: 0 10px; display: flex; align-items: center; background: {{t.chrome}}; font-size: 12px; font-weight: 600;">Story</span>
+      <a href="DiffCalls.dc.html" style="height: 26px; padding: 0 10px; display: flex; align-items: center; text-decoration: none; background: {{t.surface}}; font-size: 12px; color: {{t.muted}};">Calls</a>
+    </div>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <!-- Chapters -->
+    <nav aria-label="Chapters" style="width: 248px; flex: none; display: flex; flex-direction: column; gap: 4px; padding: 14px 10px; border-right: 1px solid {{t.line}};">
+      <div style="display: flex; align-items: center; gap: 8px; padding: 0 8px 8px;">
+        <span style="color: {{t.faint}}; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; flex: 1;">The change in 5 steps</span>
+        <span style="color: {{t.faint}}; font-size: 11px;">1 of 5 read</span>
+      </div>
+      <sc-for list="{{chapters}}" as="c" hint-placeholder-count="5">
+        <a href="#" style="display: flex; gap: 10px; padding: 9px 10px; border-radius: 6px; text-decoration: none; background: {{c.bg}};">
+          <span style="width: 20px; height: 20px; flex: none; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; background: {{c.dotBg}}; color: {{c.dotFg}};">{{c.mark}}</span>
+          <span style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+            <span style="font-weight: {{c.w}}; color: {{c.fg}};">{{c.title}}</span>
+            <span style="color: {{t.faint}}; font-size: 11px;">{{c.meta}}</span>
+          </span>
+        </a>
+      </sc-for>
+      <div style="flex: 1;"></div>
+      <span style="padding: 8px; color: {{t.faint}}; font-size: 11px; line-height: 1.45;">Steps are ordered so each one only needs the ones before it. Written by Claude Code from the commits, the description and the code; every line still links to the real diff.</span>
+    </nav>
+
+    <!-- Story -->
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 16px 24px; overflow: hidden;">
+      <!-- What and behavior -->
+      <div style="display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+        <span style="line-height: 1.5;"><b style="font-weight: 600;">In one sentence:</b> tokens are now refreshed a minute before they expire, and only one request refreshes at a time; the others wait and reuse the new token.</span>
+        <div style="display: grid; grid-template-columns: 56px minmax(0, 1fr); row-gap: 8px; align-items: center; font-size: 12px;">
+          <span style="color: {{t.faint}};">Before</span>
+          <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+            <span style="padding: 3px 8px; border-radius: 4px; background: {{t.chrome}};">request A</span><span style="color: {{t.faint}};">→</span><span style="padding: 3px 8px; border-radius: 4px; background: {{t.chrome}};">exchange</span>
+            <span style="width: 14px;"></span>
+            <span style="padding: 3px 8px; border-radius: 4px; background: {{t.chrome}};">request B</span><span style="color: {{t.faint}};">→</span><span style="padding: 3px 8px; border-radius: 4px; background: {{t.orangeSoft}}; color: {{t.orange}}; font-weight: 600;">exchange again · rejected</span>
+          </div>
+          <span style="color: {{t.faint}};">After</span>
+          <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+            <span style="padding: 3px 8px; border-radius: 4px; background: {{t.chrome}};">request A</span><span style="color: {{t.faint}};">→</span><span style="padding: 3px 8px; border-radius: 4px; background: {{t.greenSoft}}; color: {{t.green}};">lock</span><span style="color: {{t.faint}};">→</span><span style="padding: 3px 8px; border-radius: 4px; background: {{t.chrome}};">exchange</span>
+            <span style="width: 14px;"></span>
+            <span style="padding: 3px 8px; border-radius: 4px; background: {{t.chrome}};">request B</span><span style="color: {{t.faint}};">→</span><span style="padding: 3px 8px; border-radius: 4px; background: {{t.chrome}};">waits</span><span style="color: {{t.faint}};">→</span><span style="padding: 3px 8px; border-radius: 4px; background: {{t.greenSoft}}; color: {{t.green}}; font-weight: 600;">reuses the new token</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Current chapter -->
+      <div style="display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1.5px {{t.green}};">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="color: {{t.green}}; font-weight: 700;">2</span>
+          <span style="font-size: 15px; font-weight: 600; flex: 1;">One refresh at a time</span>
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: {{t.muted}};">refresh.rs:44 · store.rs:12</span>
+        </div>
+        <span style="line-height: 1.5; color: {{t.muted}};">A new lock makes concurrent callers queue behind the first one. From the commit <i>“serialize refreshes so the token is exchanged once”</i>.</span>
+        <div style="padding: 8px 0; border-radius: 6px; background: {{t.code}}; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 21px; overflow: hidden;">
+          <sc-for list="{{excerpt}}" as="l" hint-placeholder-count="4">
+            <div style="display: flex;"><span style="width: 44px; flex: none; text-align: right; padding-right: 12px; box-sizing: border-box; color: {{t.faint}};">{{l.n}}</span><span style="white-space: pre;"><sc-for list="{{l.parts}}" as="p" hint-placeholder-count="1"><span style="background: {{p.bg}}; border-radius: 3px;">{{p.text}}</span></sc-for></span></div>
+          </sc-for>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <sc-for list="{{linked}}" as="k" hint-placeholder-count="3">
+            <div style="display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 6px; background: {{t.bg}};">
+              <span style="height: 18px; padding: 0 7px; border-radius: 9px; display: flex; align-items: center; font-size: 10px; font-weight: 700; background: {{k.tagBg}}; color: {{k.tagFg}};">{{k.tag}}</span>
+              <span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{k.text}}</span>
+              <span style="color: {{t.faint}}; font-size: 12px;">{{k.who}}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Comment on this step</button>
+          <a href="Review.dc.html" style="color: {{t.muted}}; font-size: 12px;">Show the full diff</a>
+          <div style="flex: 1;"></div>
+          <button style="height: 30px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Mark read · next: Safer saves →</button>
+        </div>
+      </div>
+
+      <!-- Next chapter preview: a moved block -->
+      <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; opacity: 0.85;">
+        <span style="color: {{t.faint}}; font-weight: 700;">3</span>
+        <span style="font-weight: 600;">Safer saves</span>
+        <span style="color: {{t.muted}}; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">save() moved from store.rs:20 to :88 and now writes to a temp file first. 34 lines only moved; 6 really changed.</span>
+        <span style="height: 20px; padding: 0 8px; border-radius: 10px; display: flex; align-items: center; font-size: 11px; font-weight: 600; background: {{t.chrome}}; color: {{t.muted}};">moved block</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 48px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 12px 0 20px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+    <span style="display: flex; align-items: center; gap: 8px; color: {{t.muted}};"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Claude Code · session active</span>
+    <span style="color: {{t.faint}};">Draft saved · 4 items · 1 of 5 steps read</span>
+    <div style="flex: 1;"></div>
+    <a href="Finalize.dc.html" style="height: 34px; padding: 0 16px; border-radius: 6px; display: flex; align-items: center; text-decoration: none; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Finalize review</a>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', code: '#F6F7F5', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.12)', orangeSoft: 'rgba(217,87,43,0.12)', sel: '#E9F6EB', addHl: 'rgba(47,158,68,0.24)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', code: '#121514', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.14)', orangeSoft: 'rgba(240,122,74,0.16)', sel: 'rgba(76,195,95,0.12)', addHl: 'rgba(76,195,95,0.34)' };
+    const t = dark ? D : L;
+    const tab = (label, on, href) => ({ label, href: href || '', fg: on ? t.fg : t.muted, w: on ? 600 : 400, bar: on ? t.green : 'transparent' });
+    const ch = (n, title, meta, state) => ({
+      title, meta,
+      mark: state === 'read' ? '✓' : String(n),
+      dotBg: state === 'read' ? t.green : state === 'now' ? t.greenSoft : t.chrome,
+      dotFg: state === 'read' ? t.onGreen : state === 'now' ? t.green : t.muted,
+      bg: state === 'now' ? t.sel : 'transparent',
+      fg: state === 'mech' ? t.muted : t.fg,
+      w: state === 'now' ? 600 : 400,
+    });
+    const seg = (text, hl) => ({ text, bg: hl ? t.addHl : 'transparent' });
+    return {
+      t,
+      sections: [tab('Diagrams', false, 'Diagrams.dc.html'), tab('Security', false, 'Security.dc.html'), tab('Diff', true), tab('Audits', false, 'Audits.dc.html'), tab('Comments', false, 'Comments.dc.html'), tab('Tests', false, 'Tests.dc.html')],
+      chapters: [
+        ch(1, 'Refresh one minute early', 'refresh.rs · 3 lines · 1 thread', 'read'),
+        ch(2, 'One refresh at a time', 'refresh.rs, store.rs · 1 draft comment', 'now'),
+        ch(3, 'Safer saves', 'store.rs · moved block', 'next'),
+        ch(4, 'Tests for the race', 'tests/refresh.rs · new', 'next'),
+        ch(5, 'Small and mechanical', 'renames, imports, changelog · 4 files', 'mech'),
+      ],
+      excerpt: [
+        { n: 12, parts: [seg('    '), seg('refresh_lock: Mutex<()>,', true)] },
+        { n: 43, parts: [seg('    }')] },
+        { n: 44, parts: [seg('    '), seg('let _guard = self.refresh_lock.lock().await;', true)] },
+        { n: 45, parts: [seg('    let fresh = self.client.exchange(&token.refresh).await?;')] },
+      ],
+      linked: [
+        { tag: 'YOUR DRAFT', tagBg: t.greenSoft, tagFg: t.green, text: 'Holding the lock across the network call means a slow exchange blocks every request.', who: 'You' },
+        { tag: 'AUDIT', tagBg: t.orangeSoft, tagFg: t.orange, text: 'The refresh lock is held across a network call (Concurrency)', who: 'Claude Code' },
+        { tag: 'CI', tagBg: t.chrome, tagFg: t.muted, text: 'refresh_race passes on macOS and Linux', who: 'GitHub Actions' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

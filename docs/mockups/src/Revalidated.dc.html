@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Revalidated review</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; color: {{t.muted}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">#123</span>auth refresh</span>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#77</span><span style="font-weight: 600;">cache invalidation</span></span>
+  </div>
+
+  <div style="flex: none; display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px;">
+    <span style="color: {{t.muted}};">rzorzal/clusia</span>
+    <span style="font-family: 'JetBrains Mono', monospace; color: {{t.muted}};">#77</span>
+    <span style="font-size: 17px; font-weight: 600;">fix: cache invalidation</span>
+    <span style="height: 20px; padding: 0 8px; border-radius: 10px; display: flex; align-items: center; align-self: center; font-size: 11px; font-weight: 600; background: {{t.greenSoft}}; color: {{t.green}};">revalidated</span>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 14px; padding: 6px 20px 18px; overflow: hidden;">
+    <div style="display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+      <span style="width: 34px; height: 34px; flex: none; border-radius: 10px; display: flex; align-items: center; justify-content: center; background: {{t.greenSoft}}; color: {{t.green}}; font-size: 16px; font-weight: 700;">↻</span>
+      <div style="display: flex; flex-direction: column; gap: 2px; flex: 1;">
+        <span style="font-weight: 600;">2 new commits since you saved this review. Claude Code checked your 4 comments against them.</span>
+        <span style="color: {{t.muted}};">1 kept · 1 moved · 1 obsolete · 1 new wording suggested. Nothing changes until you accept it.</span>
+      </div>
+      <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">See the new commits</button>
+      <button style="height: 32px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Accept all</button>
+    </div>
+
+    <sc-for list="{{items}}" as="i" hint-placeholder-count="4">
+      <div style="display: grid; grid-template-columns: 150px minmax(0, 1fr) 190px; gap: 16px; align-items: start; padding: 14px 16px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{i.ring}};">
+        <span style="display: flex; flex-direction: column; gap: 6px;">
+          <span style="align-self: flex-start; height: 20px; padding: 0 8px; border-radius: 10px; display: flex; align-items: center; font-size: 11px; font-weight: 600; background: {{i.tagBg}}; color: {{i.tagFg}};">{{i.tag}}</span>
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: {{t.muted}};">{{i.where}}</span>
+        </span>
+        <span style="display: flex; flex-direction: column; gap: 6px; line-height: 1.5;">
+          <span>{{i.body}}</span>
+          <sc-if value="{{i.note}}" hint-placeholder-val="{{false}}"><span style="color: {{t.muted}}; font-size: 12px;">{{i.note}}</span></sc-if>
+          <sc-if value="{{i.suggestion}}" hint-placeholder-val="{{false}}"><span style="padding: 8px 10px; border-radius: 6px; background: {{t.greenSoft}};"><b style="font-weight: 600; color: {{t.green}};">Suggested: </b>{{i.suggestion}}</span></sc-if>
+        </span>
+        <span style="display: flex; justify-content: flex-end; gap: 8px;">
+          <sc-if value="{{i.decide}}" hint-placeholder-val="{{true}}">
+            <button style="height: 30px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-size: 12px;">{{i.reject}}</button>
+            <button style="height: 30px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600; font-size: 12px;">{{i.accept}}</button>
+          </sc-if>
+        </span>
+      </div>
+    </sc-for>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.12)', orangeSoft: 'rgba(217,87,43,0.12)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.14)', orangeSoft: 'rgba(240,122,74,0.16)' };
+    const t = dark ? D : L;
+    return {
+      t,
+      items: [
+        { tag: 'Kept', tagBg: t.chrome, tagFg: t.muted, ring: t.line, where: 'cache.rs:12', body: 'The TTL should come from the config, not a constant.', decide: false },
+        { tag: 'Moved', tagBg: t.greenSoft, tagFg: t.green, ring: t.line, where: 'cache.rs:40 → 44', body: 'Invalidate after the write commits, not before.', note: 'The function gained 4 lines above this one; the comment follows the same code.', decide: true, accept: 'Keep the move', reject: 'Put it back' },
+        { tag: 'Obsolete', tagBg: t.orangeSoft, tagFg: t.orange, ring: t.orange, where: 'cache.rs:71', body: 'evict_all() takes the lock twice.', note: 'evict_all() was removed in "refactor: one eviction path".', decide: true, accept: 'Remove comment', reject: 'Keep and re-anchor' },
+        { tag: 'New wording', tagBg: t.greenSoft, tagFg: t.green, ring: t.line, where: 'cache.rs:90', body: 'Missing a test for concurrent invalidation.', suggestion: 'The new test covers two writers; a test with a reader during invalidation is still missing.', decide: true, accept: 'Use new wording', reject: 'Keep mine' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

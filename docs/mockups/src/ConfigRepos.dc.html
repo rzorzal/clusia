@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Config repositories</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-weight: 600;">Config</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <nav aria-label="Config sections" style="width: 220px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 20px 12px; border-right: 1px solid {{t.line}};">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="{{n.href}}" style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; text-decoration: none; background: {{n.bg}}; color: {{n.fg}}; font-weight: {{n.w}};">{{n.label}}</a>
+      </sc-for>
+    </nav>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 18px; padding: 24px 40px; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Repositories</h2>
+        <span style="color: {{t.muted}};">Clúsia finds your clones in these folders and reviews in a separate worktree. Your own branch is never checked out or changed.</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <span style="font-weight: 600;">Folders to look in</span>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          <sc-for list="{{roots}}" as="r" hint-placeholder-count="4">
+            <span style="height: 30px; padding: 0 8px 0 12px; border-radius: 15px; display: flex; align-items: center; gap: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: 'JetBrains Mono', monospace; font-size: 12px;">{{r.path}}<span style="font-family: Inter, sans-serif; color: {{t.faint}};">{{r.found}}</span><button aria-label="Remove folder" style="border: none; background: transparent; color: {{t.faint}}; padding: 0 2px;">×</button></span>
+          </sc-for>
+          <button style="height: 30px; padding: 0 12px; border: none; border-radius: 15px; background: transparent; box-shadow: 0 0 0 1px {{t.line}}; color: {{t.muted}};">+ Add folder</button>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; overflow: hidden; width: 860px;">
+        <div style="display: grid; grid-template-columns: 220px minmax(0, 1fr) 120px; gap: 12px; padding: 10px 14px; color: {{t.faint}}; font-size: 12px;">
+          <span>Repository</span><span>Local clone</span><span style="text-align: right;">Worktrees</span>
+        </div>
+        <sc-for list="{{repos}}" as="r" hint-placeholder-count="5">
+          <div style="display: grid; grid-template-columns: 220px minmax(0, 1fr) 120px; gap: 12px; align-items: center; padding: 9px 14px; border-top: 1px solid {{t.line}};">
+            <span style="font-weight: 500;">{{r.name}}</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{r.pathFg}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{r.path}}</span>
+            <span style="text-align: right; color: {{t.muted}}; font-variant-numeric: tabular-nums;">{{r.wt}}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display: flex; align-items: center; gap: 16px;">
+        <label for="r-ret" style="width: 220px; color: {{t.muted}};">Remove review worktrees after</label>
+        <input id="r-ret" value="14" style="width: 64px; height: 32px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-variant-numeric: tabular-nums;">
+        <span style="color: {{t.muted}};">days without use · open and saved reviews are always kept</span>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F' };
+    const t = dark ? D : L;
+    const nav = (label, on, href) => ({ label, href: href || '#', bg: on ? t.surface : 'transparent', fg: on ? t.fg : t.muted, w: on ? 600 : 400 });
+    const repo = (name, path, wt, cache) => ({ name, path, wt, pathFg: cache ? t.faint : t.fg });
+    return {
+      t,
+      nav: [nav('Appearance', false, 'ConfigAppearance.dc.html'), nav('Git server', false, 'ConfigGit.dc.html'), nav('Repositories', true), nav('Harness', false, 'ConfigHarness.dc.html'), nav('Editor', false, 'ConfigEditor.dc.html'), nav('Notifications', false, 'ConfigNotifications.dc.html'), nav('Plugins & skills', false, 'ConfigPlugins.dc.html')],
+      roots: [{ path: '~/Repos', found: '12' }, { path: '~/Projects', found: '3' }, { path: '~/src', found: '0' }],
+      repos: [
+        repo('rzorzal/clusia', '~/Repos/clusia', '2'),
+        repo('rzorzal/blog', '~/Repos/blog', '1'),
+        repo('rzorzal/site', '~/Projects/site', '0'),
+        repo('rzorzal/dotfiles', '~/Repos/dotfiles', '0'),
+        repo('octo/demo-app', 'Cloned by Clúsia into its cache (no local clone)', '1', true),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

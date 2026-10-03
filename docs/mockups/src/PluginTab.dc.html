@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Plugin tab in a review</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+textarea,input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <!-- Title bar with review tabs -->
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; text-decoration: none; color: {{t.muted}};">
+      <svg width="16" height="16" viewBox="0 0 64 64" aria-hidden="true"><g transform="rotate(-14 32 34)"><path d="M32 55V63" stroke="{{t.muted}}" stroke-width="4" stroke-linecap="round"></path><path d="M32 3C45 11 53 24 51 37C49 48 41 54 32 56C23 54 15 48 13 37C11 24 19 11 32 3Z" fill="{{t.green}}"></path><g fill="none" stroke="{{t.chrome}}" stroke-width="3.5" stroke-linecap="round"><path d="M21 26c3-4 5 4 8 0s5 4 8 0s5 4 7 0"></path><path d="M22 36c3-4 5 4 8 0s5 4 8 0"></path></g><circle cx="40" cy="45" r="3.6" fill="{{t.orange}}"></circle></g></svg>
+      <span>Home</span>
+    </a>
+    <button style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span>
+      <span aria-label="Close tab" style="display: flex; padding: 2px; color: {{t.muted}};"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"></path></svg></span>
+    </button>
+    <button style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}};">
+      <span style="width: 6px; height: 6px; border-radius: 3px; background: {{t.orange}};"></span>
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">#77</span><span>cache invalidation</span>
+      <span aria-label="Close tab" style="display: flex; padding: 2px;"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"></path></svg></span>
+    </button>
+    <button aria-label="Open a pull request" style="width: 30px; height: 30px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}}; display: flex; align-items: center; justify-content: center;"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M7 2v10M2 7h10"></path></svg></button>
+    <div style="flex: 1;"></div>
+    <button aria-label="Settings" style="width: 32px; height: 32px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}}; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg></button>
+    <button aria-label="Theme: follow the system" style="width: 32px; height: 32px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}}; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8"></circle><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"></path></svg></button>
+  </div>
+
+  <!-- PR header -->
+  <div style="flex: none; display: flex; align-items: center; gap: 16px; padding: 14px 20px 10px;">
+    <div style="display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0;">
+      <div style="display: flex; align-items: baseline; gap: 10px;">
+        <span style="color: {{t.muted}};">rzorzal/clusia</span>
+        <span style="font-family: 'JetBrains Mono', monospace; color: {{t.muted}};">#123</span>
+        <span style="font-size: 17px; font-weight: 600;">feat: auth refresh</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px; color: {{t.faint}}; font-size: 12px;">
+        <span>@octo wants to merge</span>
+        <span style="font-family: 'JetBrains Mono', monospace; padding: 1px 6px; border-radius: 4px; background: {{t.chrome}}; color: {{t.muted}};">octo:auth-refresh → main</span>
+        <span><span style="color: {{t.green}}; font-weight: 600;">+120</span> <span style="color: {{t.orange}}; font-weight: 600;">−34</span> · 7 files</span>
+        <span style="display: flex; align-items: center; gap: 4px; color: {{t.green}};"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.2 2.2L9.5 3.8"></path></svg>Checks passing</span>
+      </div>
+    </div>
+    <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Open in editor</button>
+    <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">View on GitHub</button>
+  </div>
+
+  <!-- Section tabs -->
+  <div style="flex: none; display: flex; gap: 4px; padding: 0 20px; border-bottom: 1px solid {{t.line}};">
+    <sc-for list="{{sections}}" as="s" hint-placeholder-count="7">
+      <button style="height: 36px; padding: 0 12px; border: none; background: transparent; display: flex; align-items: center; gap: 6px; color: {{s.fg}}; font-weight: {{s.w}}; box-shadow: inset 0 -2px 0 {{s.bar}};"><sc-if value="{{s.plugin}}" hint-placeholder-val="{{false}}"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-label="From a plugin"><path d="M6 2h4v2.5a1.5 1.5 0 0 0 3 0V6h1v4h-1.5a1.5 1.5 0 0 0 0 3H14v1H2V10h1.5a1.5 1.5 0 0 0 0-3H2V2h4z"></path></svg></sc-if>{{s.label}}<sc-if value="{{s.count}}" hint-placeholder-val="{{false}}"><span style="min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: {{t.chrome}}; color: {{t.muted}}; font-size: 11px; display: flex; align-items: center; justify-content: center;">{{s.count}}</span></sc-if></button>
+    </sc-for>
+  </div>
+
+  <!-- Body: plugin tab -->
+  <div style="flex: 1; min-height: 0; display: flex; gap: 16px; padding: 16px 20px;">
+    <div style="width: 440px; flex: none; display: flex; flex-direction: column; gap: 12px;">
+      <div style="display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+        <span style="display: flex; flex-direction: column; gap: 2px; flex: 1;"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600;">migration-check</span><span style="color: {{t.faint}}; font-size: 12px;">Your skill · ran by Claude Code 2 min ago · migrations/**/*.sql matched</span></span>
+        <button style="height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.chrome}}; font-size: 12px;">Run again</button>
+        <a href="ConfigPlugins.dc.html" style="color: {{t.muted}}; font-size: 12px;">Edit</a>
+      </div>
+      <span style="color: {{t.muted}}; font-size: 12px; font-weight: 600;">Findings · 2</span>
+      <sc-for list="{{findings}}" as="f" hint-placeholder-count="2">
+        <div style="display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, inset 3px 0 0 {{f.color}};">
+          <div style="display: flex; align-items: center; gap: 8px;"><span style="height: 20px; display: flex; align-items: center; padding: 0 7px; border-radius: 10px; font-size: 11px; font-weight: 600; background: {{f.soft}}; color: {{f.color}};">{{f.level}}</span><span style="font-weight: 600;">{{f.title}}</span></div>
+          <span style="color: {{t.muted}}; line-height: 1.5;">{{f.body}}</span>
+          <div style="display: flex; align-items: center; gap: 8px;"><span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: {{t.faint}}; flex: 1;">{{f.where}}</span><button style="height: 26px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.chrome}}; font-size: 12px;">Open in Diff</button><button style="height: 26px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-size: 12px; font-weight: 600;">Comment</button></div>
+        </div>
+      </sc-for>
+    </div>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; align-self: flex-start;">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="font-weight: 600;">Lock timeline</span>
+        <span style="height: 20px; display: flex; align-items: center; padding: 0 7px; border-radius: 10px; font-size: 11px; font-weight: 600; background: {{t.orangeSoft}}; color: {{t.orange}};">Renderer · lock-timeline</span>
+        <span style="flex: 1;"></span>
+        <span style="color: {{t.faint}}; font-size: 12px;">0042_refresh_tokens.sql · estimated on 2.1M rows</span>
+      </div>
+      <div style="display: grid; grid-template-columns: 210px 1fr 70px; gap: 8px 12px; align-items: center; padding-top: 6px;">
+        <span></span>
+        <div style="display: flex; justify-content: space-between; color: {{t.faint}}; font-size: 11px; font-variant-numeric: tabular-nums;"><span>0 s</span><span>2 s</span><span>4 s</span><span>6 s</span></div>
+        <span></span>
+        <sc-for list="{{steps}}" as="st" hint-placeholder-count="4">
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{st.sql}}</span>
+          <div style="position: relative; height: 22px; border-radius: 4px; background: {{t.chrome}};"><div style="position: absolute; top: 3px; bottom: 3px; left: {{st.left}}; width: {{st.width}}; border-radius: 3px; background: {{st.color}};"></div></div>
+          <span style="font-size: 12px; color: {{st.color}}; font-weight: 600; font-variant-numeric: tabular-nums;">{{st.lock}}</span>
+        </sc-for>
+      </div>
+      <div style="display: flex; gap: 14px; padding-top: 6px; color: {{t.muted}}; font-size: 12px;">
+        <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 2px; background: {{t.orange}};"></span>Blocks writes</span>
+        <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 2px; background: {{t.green}};"></span>No blocking lock</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px; margin-top: 4px; padding: 10px 12px; border-radius: 6px; background: {{t.chrome}};">
+        <span style="flex: 1; color: {{t.muted}};">With <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.fg}};">CREATE INDEX CONCURRENTLY</span> the write block drops from 4.2 s to 0.</span>
+        <button style="height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-size: 12px;">Suggest this change</button>
+      </div>
+      <span style="color: {{t.faint}}; font-size: 11px;">Drawn by a plugin in a sandbox. It sees only the skill's output, never your token or files.</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.14)', orangeSoft: 'rgba(217,87,43,0.12)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.16)', orangeSoft: 'rgba(240,122,74,0.16)' };
+    const t = dark ? D : L;
+    const tab = (label, on, count, plugin) => ({ label, count, plugin, fg: on ? t.fg : t.muted, w: on ? 600 : 400, bar: on ? t.green : 'transparent' });
+    const step = (sql, from, len, blocks, lock) => ({ sql, left: (from / 6 * 100) + '%', width: Math.max(len / 6 * 100, 1.2) + '%', color: blocks ? t.orange : t.green, lock });
+    return {
+      t,
+      sections: [tab('Diagrams', false), tab('Security', false), tab('Diff', false, 7), tab('Audits', false), tab('Comments', false, 5), tab('Tests', false), tab('Migrations', true, 2, true)],
+      findings: [
+        { level: 'High', color: t.orange, soft: t.orangeSoft, title: 'Index blocks writes on a big table', body: 'CREATE INDEX on tokens(user_id) locks the table for about 4 seconds. Refreshes fail while it runs.', where: 'migrations/0042_refresh_tokens.sql:12' },
+        { level: 'Medium', color: t.muted, soft: t.chrome, title: 'No down migration', body: 'Rolling back this release leaves the refresh_tokens table behind. Add a down step or say why not.', where: 'migrations/0042_refresh_tokens.sql' },
+      ],
+      steps: [
+        step('CREATE TABLE refresh_tokens', 0, 0.1, false, '0.1 s'),
+        step('ALTER TABLE tokens ADD …', 0.1, 0.3, true, '0.3 s'),
+        step('CREATE INDEX tokens_user_id', 0.4, 4.2, true, '4.2 s'),
+        step('UPDATE tokens SET rotated…', 4.6, 1.1, false, '1.1 s'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

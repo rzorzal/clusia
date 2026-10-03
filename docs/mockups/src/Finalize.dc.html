@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Finalize review</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+textarea{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; position: relative; overflow: hidden; border-radius: 10px; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; color: {{t.fg}};">
+  <dc-import name="Review" theme="{{theme}}" hint-size="1280px,800px"></dc-import>
+  <div style="position: absolute; inset: 0; background: {{t.scrim}}; display: flex; align-items: center; justify-content: center;">
+    <div role="dialog" aria-labelledby="fz-title" style="width: 680px; max-height: 700px; display: flex; flex-direction: column; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 24px 60px {{t.shadow}}; overflow: hidden;">
+      <div style="display: flex; align-items: baseline; gap: 10px; padding: 22px 24px 6px;">
+        <h2 id="fz-title" style="margin: 0; font-size: 17px; font-weight: 600;">Finalize review</h2>
+        <span style="color: {{t.muted}};">rzorzal/clusia #123 · feat: auth refresh</span>
+      </div>
+      <span style="padding: 0 24px 14px; color: {{t.muted}};">Everything below goes to GitHub as one review. You can still edit any comment.</span>
+
+      <div style="display: flex; flex-direction: column; gap: 8px; padding: 0 24px;">
+        <sc-for list="{{items}}" as="i" hint-placeholder-count="3">
+          <div style="display: flex; gap: 12px; padding: 10px 12px; border-radius: 6px; background: {{t.chrome}}; box-shadow: 0 0 0 1px {{i.ring}};">
+            <span style="flex: none; width: 108px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: {{t.muted}}; padding-top: 2px;">{{i.where}}</span>
+            <span style="flex: 1; min-width: 0; line-height: 1.45;">{{i.body}}</span>
+            <sc-if value="{{i.warn}}" hint-placeholder-val="{{false}}">
+              <span style="flex: none; align-self: flex-start; height: 18px; padding: 0 7px; border-radius: 9px; display: flex; align-items: center; font-size: 10px; font-weight: 600; background: {{t.orangeSoft}}; color: {{t.orange}};">{{i.warn}}</span>
+            </sc-if>
+          </div>
+        </sc-for>
+        <div style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; background: {{t.orangeSoft}}; color: {{t.orange}};">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M7 1.8L12.6 11.8H1.4z"></path><path d="M7 5.6v2.8M7 10.1v.1"></path></svg>
+          <span>1 comment no longer fits the diff. Remove it or re-add it on a current line before publishing.</span>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px; padding: 16px 24px 4px;">
+        <label for="fz-summary" style="font-weight: 600;">Summary</label>
+        <textarea id="fz-summary" rows="3" style="resize: none; padding: 10px 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; line-height: 1.5;">Nice change overall. Two things on the token store before this goes in.</textarea>
+      </div>
+
+      <fieldset style="border: none; margin: 0; padding: 12px 24px 18px; display: flex; flex-direction: column; gap: 8px;">
+        <legend style="font-weight: 600; padding: 0; margin-bottom: 8px;">Verdict</legend>
+        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;">
+          <sc-for list="{{verdicts}}" as="v" hint-placeholder-count="3">
+            <label style="display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 6px; cursor: pointer; background: {{v.bg}}; box-shadow: 0 0 0 {{v.ringW}} {{v.ring}};">
+              <span style="display: flex; align-items: center; gap: 8px; font-weight: 600; color: {{v.fg}};"><input type="radio" name="verdict" checked="{{v.on}}" style="margin: 0; accent-color: {{v.fg}};">{{v.label}}</span>
+              <span style="color: {{t.muted}}; font-size: 12px;">{{v.hint}}</span>
+            </label>
+          </sc-for>
+        </div>
+      </fieldset>
+
+      <div style="display: flex; align-items: center; gap: 8px; padding: 14px 24px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+        <button style="height: 34px; padding: 0 14px; border: none; border-radius: 6px; background: transparent; color: {{t.orange}};">Discard review</button>
+        <div style="flex: 1;"></div>
+        <button style="height: 34px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Save for later</button>
+        <button style="height: 34px; padding: 0 16px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Publish to GitHub</button>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const theme = this.props.theme ?? 'light';
+    const dark = theme === 'dark';
+    const L = { chrome: '#F3F5F3', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.12)', orangeSoft: 'rgba(217,87,43,0.12)', scrim: 'rgba(246,247,245,0.55)', shadow: 'rgba(20,30,22,0.18)' };
+    const D = { chrome: '#161A18', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.14)', orangeSoft: 'rgba(240,122,74,0.16)', scrim: 'rgba(8,10,9,0.6)', shadow: 'rgba(0,0,0,0.55)' };
+    const t = dark ? D : L;
+    const verdict = (label, hint, on, color) => ({ label, hint, on, fg: on ? color : t.fg, bg: on ? (color === t.green ? t.greenSoft : t.orangeSoft) : t.surface, ring: on ? color : t.line, ringW: on ? '1.5px' : '1px' });
+    return {
+      t, theme,
+      items: [
+        { where: 'refresh.rs:44', body: 'Holding the lock across the network call means a slow exchange blocks every request. Could we re-check the expiry after taking the lock instead?', ring: t.line },
+        { where: 'store.rs:88', body: 'save() should write to a temp file and rename, so a crash never leaves half a token.', ring: t.line },
+        { where: 'http.rs:20', body: 'This retry loop needs a cap.', warn: 'obsolete', ring: t.orange },
+      ],
+      verdicts: [
+        verdict('Comment', 'Feedback without a verdict', false, t.green),
+        verdict('Approve', 'Ready to merge', false, t.green),
+        verdict('Request changes', 'Needs another pass', true, t.orange),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

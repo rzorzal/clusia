@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Comment on a diagram box</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+textarea{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; position: relative; overflow: hidden; border-radius: 10px; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; color: {{t.fg}};">
+  <dc-import name="Diagrams" theme="{{theme}}" hint-size="1280px,800px"></dc-import>
+  <div style="position: absolute; inset: 0; background: {{t.scrim}}; display: flex; align-items: center; justify-content: center;">
+    <div role="dialog" aria-labelledby="dn-title" style="width: 620px; display: flex; flex-direction: column; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 24px 60px {{t.shadow}}; overflow: hidden;">
+      <div style="display: flex; align-items: center; gap: 10px; padding: 20px 24px 12px;">
+        <span style="width: 10px; height: 10px; border-radius: 3px; background: {{t.greenSoft}}; box-shadow: 0 0 0 1.5px {{t.green}};"></span>
+        <h2 id="dn-title" style="margin: 0; font-size: 16px; font-weight: 600;">TokenStore::refresh</h2>
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">src/auth/refresh.rs · 38–48</span>
+        <div style="flex: 1;"></div>
+        <button style="height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.chrome}}; font-size: 12px;">Open in diff</button>
+      </div>
+      <div style="margin: 0 24px; padding: 10px 0; border-radius: 6px; background: {{t.code}}; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 21px; overflow: hidden;">
+        <sc-for list="{{lines}}" as="l" hint-placeholder-count="7">
+          <div style="display: flex; background: {{l.bg}};"><span style="width: 40px; flex: none; text-align: right; padding-right: 12px; box-sizing: border-box; color: {{t.faint}};">{{l.n}}</span><span style="white-space: pre;">{{l.code}}</span></div>
+        </sc-for>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px; padding: 16px 24px 8px;">
+        <label for="dn-body" style="font-weight: 600;">Comment</label>
+        <textarea id="dn-body" rows="3" style="resize: none; padding: 10px 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1.5px {{t.green}}; line-height: 1.5;">The diagram shows the lock wrapping the whole exchange. Can the critical section end before the network call?</textarea>
+        <span style="color: {{t.faint}}; font-size: 12px;">Lands in the draft as a comment on lines 44–46, the code this box stands for.</span>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; padding: 14px 24px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+        <button style="height: 32px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Cancel</button>
+        <button style="height: 32px; padding: 0 16px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Add to draft</button>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const theme = this.props.theme ?? 'light';
+    const dark = theme === 'dark';
+    const L = { chrome: '#F3F5F3', surface: '#FFFFFF', code: '#F6F7F5', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', greenSoft: 'rgba(47,158,68,0.12)', addBg: '#E9F6EB', scrim: 'rgba(246,247,245,0.55)', shadow: 'rgba(20,30,22,0.18)' };
+    const D = { chrome: '#161A18', surface: '#1A1E1C', code: '#121514', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', greenSoft: 'rgba(76,195,95,0.14)', addBg: 'rgba(76,195,95,0.12)', scrim: 'rgba(8,10,9,0.6)', shadow: 'rgba(0,0,0,0.55)' };
+    const t = dark ? D : L;
+    const l = (n, code, add) => ({ n, code, bg: add ? t.addBg : 'transparent' });
+    return {
+      t, theme,
+      lines: [
+        l(38, 'pub async fn refresh(&self) -> Result<Token, AuthError> {'),
+        l(39, '    let token = self.load().await?;', true),
+        l(41, '    if token.expires_at > now() + Duration::from_secs(60) {', true),
+        l(42, '        return Ok(token);'),
+        l(44, '    let _guard = self.refresh_lock.lock().await;', true),
+        l(45, '    let fresh = self.client.exchange(&token.refresh).await?;'),
+        l(46, '    self.save(&fresh)?;'),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

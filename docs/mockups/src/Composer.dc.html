@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Writing a comment</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+textarea,input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span></span>
+  </div>
+
+  <div style="flex: none; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid {{t.line}};">
+    <a href="Review.dc.html" style="color: {{t.muted}}; text-decoration: none;">‹ Diff</a>
+    <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500;">src/auth/refresh.rs</span>
+    <span style="color: {{t.faint}};">Commenting on line 44</span>
+  </div>
+
+  <div style="flex: 1; min-height: 0; overflow: hidden; background: {{t.surface}}; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 22px; position: relative;">
+    <sc-for list="{{lines}}" as="l" hint-placeholder-count="4">
+      <div style="display: flex; background: {{l.bg}};">
+        <span style="width: 52px; flex: none; text-align: right; padding-right: 10px; box-sizing: border-box; color: {{t.faint}};">{{l.n}}</span>
+        <span style="width: 18px; flex: none; color: {{t.green}};">{{l.sign}}</span>
+        <span style="white-space: pre;">{{l.code}}</span>
+      </div>
+    </sc-for>
+
+    <!-- Composer -->
+    <div style="margin: 8px 24px 0 70px; display: flex; flex-direction: column; border-radius: 8px; background: {{t.bg}}; box-shadow: 0 0 0 1.5px {{t.green}}; font-family: Inter, sans-serif; font-size: 13px; line-height: 1.5; position: relative;">
+      <div style="display: flex; align-items: center; gap: 2px; padding: 6px 8px; border-bottom: 1px solid {{t.line}};">
+        <button onClick="{{toWrite}}" style="height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: {{writeBg}}; font-weight: {{writeW}};">Write</button>
+        <button onClick="{{toPreview}}" style="height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: {{previewBg}}; font-weight: {{previewW}};">Preview</button>
+        <span style="width: 1px; height: 18px; margin: 0 6px; background: {{t.line}};"></span>
+        <sc-for list="{{tools}}" as="tb" hint-placeholder-count="7">
+          <button aria-label="{{tb.label}}" style="min-width: 28px; height: 28px; padding: 0 6px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}}; font-weight: {{tb.w}}; font-style: {{tb.s}}; font-family: {{tb.f}};">{{tb.icon}}</button>
+        </sc-for>
+        <span style="width: 1px; height: 18px; margin: 0 6px; background: {{t.line}};"></span>
+        <button onClick="{{toggleEmoji}}" aria-label="Emoji" style="height: 28px; padding: 0 8px; border: none; border-radius: 6px; background: {{emojiBg}}; color: {{t.muted}};">☺ Emoji</button>
+        <button onClick="{{toggleGif}}" aria-label="GIF" style="height: 28px; padding: 0 8px; border: none; border-radius: 6px; background: {{gifBg}}; color: {{t.muted}}; font-weight: 700; font-size: 11px;">GIF</button>
+        <button aria-label="Attach an image" style="height: 28px; padding: 0 8px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}};">▣ Image</button>
+        <div style="flex: 1;"></div>
+        <span style="color: {{t.faint}}; font-size: 11px;">Markdown works · paste or drop images</span>
+      </div>
+
+      <sc-if value="{{writing}}" hint-placeholder-val="{{true}}">
+        <div role="textbox" aria-multiline="true" aria-label="Comment" style="min-height: 150px; padding: 10px 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all;">{{markdown}}<span style="display: inline-block; width: 1.5px; height: 14px; vertical-align: -2px; background: {{t.green}};"></span></div>
+      </sc-if>
+      <sc-if value="{{previewing}}" hint-placeholder-val="{{false}}">
+        <div style="display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;">
+          <span><b style="font-weight: 600;">Holding the lock across the network call</b> means a slow exchange blocks every request 🐢</span>
+          <span>Could we:</span>
+          <span style="padding-left: 18px;">1. re-check <code style="font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 1px 4px; border-radius: 4px; background: {{t.chrome}};">expires_at</code> after taking the lock<br>2. release it before <code style="font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 1px 4px; border-radius: 4px; background: {{t.chrome}};">exchange</code>?</span>
+          <span><i>Trace from the race test below</i> 👇</span>
+          <div style="display: flex; gap: 10px;">
+            <div style="width: 220px; height: 120px; border-radius: 6px; background: linear-gradient(135deg, #2c4a3a, #4cc35f); display: flex; align-items: flex-end; padding: 8px; box-sizing: border-box; color: #fff; font-size: 11px; font-weight: 600;">race-trace.png · 1280×720</div>
+            <div style="width: 160px; height: 120px; border-radius: 6px; background: linear-gradient(135deg, #e7743c, #f4c17a); display: flex; align-items: center; justify-content: center; color: #1b1f1c; font-weight: 800; letter-spacing: 0.04em;">GIF · "waiting…"</div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- Attachments -->
+      <div style="display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid {{t.line}};">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 4px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+          <span style="width: 40px; height: 28px; border-radius: 4px; background: linear-gradient(135deg, #2c4a3a, #4cc35f);"></span>
+          <span style="display: flex; flex-direction: column; line-height: 1.2;"><span style="font-size: 12px;">race-trace.png</span><span style="font-size: 11px; color: {{t.green}};">uploaded to GitHub</span></span>
+          <button aria-label="Remove image" style="border: none; background: transparent; color: {{t.faint}};">×</button>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 4px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+          <span style="width: 40px; height: 28px; border-radius: 4px; background: linear-gradient(135deg, #e7743c, #f4c17a);"></span>
+          <span style="display: flex; flex-direction: column; line-height: 1.2;"><span style="font-size: 12px;">waiting.gif</span><span style="font-size: 11px; color: {{t.faint}};">by link · plays inline</span></span>
+          <button aria-label="Remove GIF" style="border: none; background: transparent; color: {{t.faint}};">×</button>
+        </div>
+        <div style="flex: 1;"></div>
+        <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}};">Cancel</button>
+        <button style="height: 30px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Add to draft</button>
+      </div>
+
+      <!-- Emoji picker -->
+      <sc-if value="{{emojiOpen}}" hint-placeholder-val="{{true}}">
+        <div role="dialog" aria-label="Emoji" style="position: absolute; left: 330px; top: 40px; width: 300px; z-index: 5; display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 14px 36px {{t.shadow}};">
+          <input aria-label="Search emoji" placeholder="Search: turtle, ship, eyes…" style="height: 30px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.bg}}; box-shadow: 0 0 0 1px {{t.line}}; font-size: 12px;">
+          <span style="color: {{t.faint}}; font-size: 11px;">Frequently used</span>
+          <div style="display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 2px; font-size: 20px;">
+            <sc-for list="{{emoji}}" as="e" hint-placeholder-count="24">
+              <button aria-label="{{e.name}}" style="height: 32px; border: none; border-radius: 6px; background: {{e.bg}};">{{e.ch}}</button>
+            </sc-for>
+          </div>
+          <span style="color: {{t.faint}}; font-size: 11px;">Twemoji, so they look the same on every Mac</span>
+        </div>
+      </sc-if>
+
+      <!-- GIF picker -->
+      <sc-if value="{{gifOpen}}" hint-placeholder-val="{{false}}">
+        <div role="dialog" aria-label="GIF" style="position: absolute; left: 400px; top: 40px; width: 360px; z-index: 5; display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 14px 36px {{t.shadow}};">
+          <input aria-label="GIF link or search" value="waiting" style="height: 30px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.bg}}; box-shadow: 0 0 0 1px {{t.line}}; font-size: 12px;">
+          <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;">
+            <sc-for list="{{gifs}}" as="g" hint-placeholder-count="6">
+              <button style="height: 70px; border: none; border-radius: 6px; background: {{g.bg}}; color: #1b1f1c; font-weight: 800; font-size: 11px; box-shadow: 0 0 0 {{g.ringW}} {{t.green}};">{{g.label}}</button>
+            </sc-for>
+          </div>
+          <span style="color: {{t.faint}}; font-size: 11px;">Or paste any GIF link. Clúsia fetches it for you; GitHub shows it in the review.</span>
+        </div>
+      </sc-if>
+    </div>
+
+    <div style="margin: 14px 24px 0 70px; display: flex; flex-direction: column;">
+      <sc-for list="{{after}}" as="l" hint-placeholder-count="3">
+        <div style="display: flex; font-family: 'JetBrains Mono', monospace; margin-left: -70px;">
+          <span style="width: 52px; flex: none; text-align: right; padding-right: 10px; box-sizing: border-box; color: {{t.faint}};">{{l.n}}</span>
+          <span style="width: 18px; flex: none;"></span>
+          <span style="white-space: pre;">{{l.code}}</span>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { tab: 'write', picker: 'emoji' };
+  }
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', addBg: '#E9F6EB', sel: '#E9F6EB', shadow: 'rgba(20,30,22,0.18)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', addBg: 'rgba(76,195,95,0.12)', sel: 'rgba(76,195,95,0.14)', shadow: 'rgba(0,0,0,0.5)' };
+    const t = dark ? D : L;
+    const { tab, picker } = this.state;
+    const mono = "'JetBrains Mono', monospace";
+    const tool = (icon, label, w, s, f) => ({ icon, label, w: w || 400, s: s || 'normal', f: f || 'Inter, sans-serif' });
+    const emojiList = [['🐢', 'turtle'], ['👀', 'eyes'], ['🚀', 'rocket'], ['✅', 'check'], ['🤔', 'thinking'], ['🔥', 'fire'], ['👍', 'thumbs up'], ['🎉', 'party'], ['⚠️', 'warning'], ['🐛', 'bug'], ['🔒', 'lock'], ['⏱️', 'stopwatch'], ['💡', 'idea'], ['🙏', 'thanks'], ['😅', 'sweat smile'], ['🧪', 'test tube'], ['📌', 'pin'], ['🧹', 'broom'], ['🌱', 'seedling'], ['🍃', 'leaf'], ['❤️', 'heart'], ['😬', 'grimace'], ['🙌', 'hands'], ['👇', 'point down']];
+    return {
+      t,
+      writing: tab === 'write', previewing: tab === 'preview',
+      writeBg: tab === 'write' ? t.chrome : 'transparent', writeW: tab === 'write' ? 600 : 400,
+      previewBg: tab === 'preview' ? t.chrome : 'transparent', previewW: tab === 'preview' ? 600 : 400,
+      toWrite: () => this.setState({ tab: 'write' }),
+      toPreview: () => this.setState({ tab: 'preview', picker: null }),
+      emojiOpen: picker === 'emoji', gifOpen: picker === 'gif',
+      emojiBg: picker === 'emoji' ? t.sel : 'transparent', gifBg: picker === 'gif' ? t.sel : 'transparent',
+      toggleEmoji: () => this.setState({ picker: picker === 'emoji' ? null : 'emoji', tab: 'write' }),
+      toggleGif: () => this.setState({ picker: picker === 'gif' ? null : 'gif', tab: 'write' }),
+      tools: [tool('B', 'Bold', 700), tool('I', 'Italic', 400, 'italic'), tool('<>', 'Code', 400, 'normal', mono), tool('↗', 'Link'), tool('1.', 'Numbered list'), tool('“', 'Quote'), tool('±', 'Suggest a change', 600)],
+      markdown: '**Holding the lock across the network call** means a slow exchange blocks every request :turtle:\n\nCould we:\n1. re-check `expires_at` after taking the lock\n2. release it before `exchange`?\n\n_Trace from the race test below_ :point_down:\n![race-trace.png](https://github.com/user-attachments/…/race-trace.png)\n![waiting](https://media.giphy.com/…/waiting.gif)',
+      emoji: emojiList.map(([ch, name], i) => ({ ch, name, bg: i === 0 ? t.sel : 'transparent' })),
+      gifs: [
+        { label: 'waiting…', bg: 'linear-gradient(135deg, #e7743c, #f4c17a)', ringW: '2px' },
+        { label: 'LGTM', bg: 'linear-gradient(135deg, #4cc35f, #c7efcf)', ringW: '0' },
+        { label: 'ship it', bg: 'linear-gradient(135deg, #7fb3ff, #d6e6ff)', ringW: '0' },
+        { label: 'hmm', bg: 'linear-gradient(135deg, #c9b98f, #f1e7cc)', ringW: '0' },
+        { label: 'race', bg: 'linear-gradient(135deg, #f07a4a, #ffd0bb)', ringW: '0' },
+        { label: 'nice', bg: 'linear-gradient(135deg, #b8a1ff, #e6dcff)', ringW: '0' },
+      ],
+      lines: [
+        { n: 42, sign: '', code: '            return Ok(token);', bg: 'transparent' },
+        { n: 43, sign: '', code: '        }', bg: 'transparent' },
+        { n: 44, sign: '+', code: '        let _guard = self.refresh_lock.lock().await;', bg: t.addBg },
+      ],
+      after: [
+        { n: 45, code: '        let fresh = self.client.exchange(&token.refresh).await?;' },
+        { n: 46, code: '        self.save(&fresh)?;' },
+        { n: 47, code: '        Ok(fresh)' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

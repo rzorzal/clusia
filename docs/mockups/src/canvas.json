@@ -1,0 +1,916 @@
+{
+  "v": 3,
+  "attachments": {},
+  "boards": {
+    "AgentChat.dc.html": {
+      "h": 800,
+      "page": "agent",
+      "title": "Review with the agent connected · light",
+      "w": 1280,
+      "x": 0,
+      "y": 0
+    },
+    "Audits.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Audits · light",
+      "w": 1280,
+      "x": 4080,
+      "y": 0
+    },
+    "Comments.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Review · Comments · light",
+      "w": 1280,
+      "x": 6800,
+      "y": 0
+    },
+    "Config.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Config · light",
+      "w": 1280,
+      "x": 8160,
+      "y": 0
+    },
+    "ConfigHarness.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Harness · light",
+      "x": 4080,
+      "y": 0
+    },
+    "ConfigPlugins.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Plugins and skills · light",
+      "x": 8160,
+      "y": 0
+    },
+    "ConfigRepos.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Repositories · light",
+      "x": 2720,
+      "y": 0
+    },
+    "Dark-AgentChat.dc.html": {
+      "h": 800,
+      "page": "agent",
+      "title": "Review with the agent connected · dark",
+      "w": 1280,
+      "x": 0,
+      "y": 1200
+    },
+    "Dark-Audits.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Audits · dark",
+      "w": 1280,
+      "x": 4080,
+      "y": 1200
+    },
+    "Dark-Comments.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Review · Comments · dark",
+      "w": 1280,
+      "x": 6800,
+      "y": 1200
+    },
+    "Dark-Config.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Config · dark",
+      "w": 1280,
+      "x": 8160,
+      "y": 1200
+    },
+    "Dark-ConfigHarness.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Harness · dark",
+      "x": 4080,
+      "y": 1200
+    },
+    "Dark-ConfigPlugins.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Plugins and skills · dark",
+      "x": 8160,
+      "y": 1200
+    },
+    "Dark-ConfigRepos.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Repositories · dark",
+      "x": 2720,
+      "y": 1200
+    },
+    "Dark-DiagramNode.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Comment on a diagram box · dark",
+      "w": 1280,
+      "x": 1360,
+      "y": 1200
+    },
+    "Dark-Diagrams.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Diagrams · dark",
+      "w": 1280,
+      "x": 0,
+      "y": 1200,
+      "is_interactive": true
+    },
+    "Dark-Finalize.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Finalize review · dark",
+      "w": 1280,
+      "x": 5440,
+      "y": 1200
+    },
+    "Dark-FirstRun.dc.html": {
+      "h": 800,
+      "page": "states",
+      "title": "First run · dark",
+      "w": 1280,
+      "x": 4080,
+      "y": 1200
+    },
+    "Dark-Home.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Home · dark",
+      "w": 1280,
+      "x": 0,
+      "y": 1200
+    },
+    "Dark-LeavePrompt.dc.html": {
+      "h": 800,
+      "page": "states",
+      "title": "Closing with a draft · dark",
+      "w": 1280,
+      "x": 1360,
+      "y": 1200
+    },
+    "Dark-LoadFailed.dc.html": {
+      "h": 800,
+      "page": "states",
+      "title": "Opening failed · dark",
+      "w": 1280,
+      "x": 0,
+      "y": 1200
+    },
+    "Dark-Loading.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Opening a review · dark",
+      "w": 1280,
+      "x": 2720,
+      "y": 1200
+    },
+    "Dark-OpenPR.dc.html": {
+      "h": 800,
+      "page": "states",
+      "title": "Open a pull request · dark",
+      "w": 1280,
+      "x": 2720,
+      "y": 1200
+    },
+    "Dark-Permission.dc.html": {
+      "h": 800,
+      "page": "agent",
+      "title": "Agent asks for permission · dark",
+      "w": 1280,
+      "x": 1360,
+      "y": 1200
+    },
+    "Dark-Revalidated.dc.html": {
+      "h": 800,
+      "page": "agent",
+      "title": "Saved review revalidated · dark",
+      "w": 1280,
+      "x": 2720,
+      "y": 1200
+    },
+    "Dark-Review.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Review · Diff · dark",
+      "w": 1280,
+      "x": 1360,
+      "y": 1200
+    },
+    "Dark-Security.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Security · dark",
+      "w": 1280,
+      "x": 2720,
+      "y": 1200
+    },
+    "Dark-Tests.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Tests · dark",
+      "w": 1280,
+      "x": 5440,
+      "y": 1200
+    },
+    "Dark-WhatsNew.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "What's new · dark",
+      "w": 1280,
+      "x": 4080,
+      "y": 1200
+    },
+    "DiagramNode.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Comment on a diagram box · light",
+      "w": 1280,
+      "x": 1360,
+      "y": 0
+    },
+    "Diagrams.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Diagrams · light",
+      "w": 1280,
+      "x": 0,
+      "y": 0,
+      "is_interactive": true
+    },
+    "Finalize.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Finalize review · light",
+      "w": 1280,
+      "x": 5440,
+      "y": 0
+    },
+    "FirstRun.dc.html": {
+      "h": 800,
+      "page": "states",
+      "title": "First run · light",
+      "w": 1280,
+      "x": 4080,
+      "y": 0
+    },
+    "LeavePrompt.dc.html": {
+      "h": 800,
+      "page": "states",
+      "title": "Closing with a draft · light",
+      "w": 1280,
+      "x": 1360,
+      "y": 0
+    },
+    "LoadFailed.dc.html": {
+      "h": 800,
+      "page": "states",
+      "title": "Opening failed · light",
+      "w": 1280,
+      "x": 0,
+      "y": 0
+    },
+    "Loading.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Opening a review · light",
+      "w": 1280,
+      "x": 2720,
+      "y": 0
+    },
+    "Main.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Home · light",
+      "w": 1280,
+      "x": 0,
+      "y": 0
+    },
+    "Notifications.dc.html": {
+      "h": 480,
+      "page": "states",
+      "title": "macOS notifications",
+      "w": 960,
+      "x": 5440,
+      "y": 0
+    },
+    "OpenPR.dc.html": {
+      "h": 800,
+      "page": "states",
+      "title": "Open a pull request · light",
+      "w": 1280,
+      "x": 2720,
+      "y": 0
+    },
+    "Permission.dc.html": {
+      "h": 800,
+      "page": "agent",
+      "title": "Agent asks for permission · light",
+      "w": 1280,
+      "x": 1360,
+      "y": 0
+    },
+    "Revalidated.dc.html": {
+      "h": 800,
+      "page": "agent",
+      "title": "Saved review revalidated · light",
+      "w": 1280,
+      "x": 2720,
+      "y": 0
+    },
+    "Review.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "Review · Diff · light",
+      "w": 1280,
+      "x": 1360,
+      "y": 0
+    },
+    "Security.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Security · light",
+      "w": 1280,
+      "x": 2720,
+      "y": 0
+    },
+    "Tests.dc.html": {
+      "h": 800,
+      "page": "sections",
+      "title": "Tests · light",
+      "w": 1280,
+      "x": 5440,
+      "y": 0
+    },
+    "Tray.dc.html": {
+      "h": 644,
+      "page": "core",
+      "title": "Tray popover (built in M4)",
+      "w": 792,
+      "x": 9520,
+      "y": 0
+    },
+    "WhatsNew.dc.html": {
+      "h": 800,
+      "page": "core",
+      "title": "What's new · light",
+      "w": 1280,
+      "x": 4080,
+      "y": 0
+    },
+    "DiffSplit.dc.html": {
+      "x": 10392,
+      "y": 0,
+      "w": 1280,
+      "h": 800,
+      "title": "Review · Diff split · light",
+      "page": "core"
+    },
+    "DiffStory.dc.html": {
+      "x": 11752,
+      "y": 0,
+      "w": 1280,
+      "h": 800,
+      "title": "Review · Diff story (new) · light",
+      "page": "core"
+    },
+    "Dark-DiffSplit.dc.html": {
+      "x": 10392,
+      "y": 1200,
+      "w": 1280,
+      "h": 800,
+      "title": "Review · Diff split · dark",
+      "page": "core"
+    },
+    "Dark-DiffStory.dc.html": {
+      "x": 11752,
+      "y": 1200,
+      "w": 1280,
+      "h": 800,
+      "title": "Review · Diff story (new) · dark",
+      "page": "core"
+    },
+    "DiffCalls.dc.html": {
+      "x": 13112,
+      "y": 0,
+      "w": 1280,
+      "h": 800,
+      "title": "Review · Diff calls (new) · light",
+      "page": "core",
+      "is_interactive": true
+    },
+    "Dark-DiffCalls.dc.html": {
+      "x": 13112,
+      "y": 1200,
+      "w": 1280,
+      "h": 800,
+      "title": "Review · Diff calls (new) · dark",
+      "page": "core",
+      "is_interactive": true
+    },
+    "Diagram-deps.dc.html": {
+      "x": 0,
+      "y": 2400,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Module dependencies · light",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Dark-Diagram-deps.dc.html": {
+      "x": 0,
+      "y": 3600,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Module dependencies · dark",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Diagram-sequence.dc.html": {
+      "x": 1360,
+      "y": 2400,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Sequence · light",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Dark-Diagram-sequence.dc.html": {
+      "x": 1360,
+      "y": 3600,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Sequence · dark",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Diagram-er.dc.html": {
+      "x": 2720,
+      "y": 2400,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Entity–relationship · light",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Dark-Diagram-er.dc.html": {
+      "x": 2720,
+      "y": 3600,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Entity–relationship · dark",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Diagram-usecase.dc.html": {
+      "x": 4080,
+      "y": 2400,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Use cases · light",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Dark-Diagram-usecase.dc.html": {
+      "x": 4080,
+      "y": 3600,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Use cases · dark",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Diagram-dataflow.dc.html": {
+      "x": 5440,
+      "y": 2400,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Data flow · light",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Dark-Diagram-dataflow.dc.html": {
+      "x": 5440,
+      "y": 3600,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Data flow · dark",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Diagram-states.dc.html": {
+      "x": 6800,
+      "y": 2400,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · States · light",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Dark-Diagram-states.dc.html": {
+      "x": 6800,
+      "y": 3600,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · States · dark",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Diagram-classes.dc.html": {
+      "x": 8160,
+      "y": 2400,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Classes · light",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "Dark-Diagram-classes.dc.html": {
+      "x": 8160,
+      "y": 3600,
+      "w": 1280,
+      "h": 800,
+      "title": "Diagram · Classes · dark",
+      "page": "sections",
+      "is_interactive": true
+    },
+    "TestCockpit.dc.html": {
+      "x": 6800,
+      "y": 0,
+      "w": 1280,
+      "h": 800,
+      "title": "QA cockpit · light",
+      "page": "sections"
+    },
+    "Dark-TestCockpit.dc.html": {
+      "x": 6800,
+      "y": 1200,
+      "w": 1280,
+      "h": 800,
+      "title": "QA cockpit · dark",
+      "page": "sections"
+    },
+    "Composer.dc.html": {
+      "x": 14472,
+      "y": 0,
+      "w": 1280,
+      "h": 800,
+      "title": "Writing a comment (rich text, emoji, GIF, image) · light",
+      "page": "core",
+      "is_interactive": true
+    },
+    "Dark-Composer.dc.html": {
+      "x": 14472,
+      "y": 1200,
+      "w": 1280,
+      "h": 800,
+      "title": "Writing a comment · dark",
+      "page": "core",
+      "is_interactive": true
+    },
+    "ConfigAppearance.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Appearance · light",
+      "x": 0,
+      "y": 0
+    },
+    "Dark-ConfigAppearance.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Appearance · dark",
+      "x": 0,
+      "y": 1200
+    },
+    "ConfigGit.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Git server · light",
+      "x": 1360,
+      "y": 0
+    },
+    "Dark-ConfigGit.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Git server · dark",
+      "x": 1360,
+      "y": 1200
+    },
+    "ConfigEditor.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Editor · light",
+      "x": 5440,
+      "y": 0
+    },
+    "Dark-ConfigEditor.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Editor · dark",
+      "x": 5440,
+      "y": 1200
+    },
+    "ConfigNotifications.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Notifications · light",
+      "x": 6800,
+      "y": 0
+    },
+    "Dark-ConfigNotifications.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "config",
+      "title": "Config · Notifications · dark",
+      "x": 6800,
+      "y": 1200
+    },
+    "PluginTab.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "sections",
+      "title": "Plugin tab (skill + renderer) · light",
+      "x": 8160,
+      "y": 0
+    },
+    "Dark-PluginTab.dc.html": {
+      "h": 800,
+      "w": 1280,
+      "page": "sections",
+      "title": "Plugin tab (skill + renderer) · dark",
+      "x": 8160,
+      "y": 1200
+    },
+    "TrayNext.dc.html": {
+      "h": 760,
+      "w": 840,
+      "page": "core",
+      "title": "Tray popover next (toolbar, refresh, turn off) · light",
+      "x": 16300,
+      "y": 0
+    },
+    "Dark-TrayNext.dc.html": {
+      "h": 760,
+      "w": 840,
+      "page": "core",
+      "title": "Tray popover next (toolbar, refresh, turn off) · dark",
+      "x": 16300,
+      "y": 1200
+    }
+  },
+  "createdOnFiles": {
+    "at": "2026-10-03T12:00:00Z",
+    "v": 1
+  },
+  "designSystems": [],
+  "launch": {
+    "page": "core",
+    "view": "canvas"
+  },
+  "notes": {
+    "agDark": {
+      "kind": "title1",
+      "maxW": 4000,
+      "page": "agent",
+      "text": "Agent and harness (SP2) · dark",
+      "w": 240,
+      "x": 0,
+      "y": 900
+    },
+    "agLight": {
+      "kind": "title1",
+      "maxW": 4000,
+      "page": "agent",
+      "text": "Agent and harness (SP2) · light",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    },
+    "cfDark": {
+      "kind": "title1",
+      "maxW": 9440,
+      "page": "config",
+      "text": "Config · dark",
+      "w": 240,
+      "x": 0,
+      "y": 900
+    },
+    "cfLight": {
+      "kind": "title1",
+      "maxW": 9440,
+      "page": "config",
+      "text": "Config · light",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    },
+    "rowDark": {
+      "kind": "title1",
+      "maxW": 8000,
+      "page": "core",
+      "text": "Clúsia window · dark",
+      "w": 240,
+      "x": 0,
+      "y": 900
+    },
+    "rowLight": {
+      "kind": "title1",
+      "maxW": 8000,
+      "page": "core",
+      "text": "Clúsia window · light",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    },
+    "secDark": {
+      "kind": "title1",
+      "maxW": 9440,
+      "page": "sections",
+      "text": "Review sections · dark",
+      "w": 240,
+      "x": 0,
+      "y": 900
+    },
+    "secLight": {
+      "kind": "title1",
+      "maxW": 9440,
+      "page": "sections",
+      "text": "Review sections · light",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    },
+    "stDark": {
+      "kind": "title1",
+      "maxW": 5360,
+      "page": "states",
+      "text": "States and flows · dark",
+      "w": 240,
+      "x": 0,
+      "y": 900
+    },
+    "stLight": {
+      "kind": "title1",
+      "maxW": 6400,
+      "page": "states",
+      "text": "States and flows · light",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    },
+    "diaLight": {
+      "x": 0,
+      "y": 2100,
+      "text": "Diagram types · light",
+      "kind": "title1",
+      "maxW": 9440,
+      "page": "sections"
+    },
+    "diaDark": {
+      "x": 0,
+      "y": 3300,
+      "text": "Diagram types · dark",
+      "kind": "title1",
+      "maxW": 9440,
+      "page": "sections"
+    },
+    "composerRule": {
+      "x": 15832,
+      "y": 0,
+      "w": 340,
+      "maxH": 520,
+      "fill": "green",
+      "size": "m",
+      "page": "core",
+      "text": "Rule: every place where you can comment uses THIS composer.\n\nDiff (Unified, Split, Story, Calls) · replies and new threads in Comments · general notes in the Draft · diagram boxes · Story steps and functions in Calls · editing items in Finalize · suggesting tests (Tests, QA cockpit) · editing agent suggestions (Audits, Security, chat).\n\nWrite / Preview · rich text · emoji · GIF · image · Add to draft."
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "Review.dc.html",
+    "Loading.dc.html",
+    "WhatsNew.dc.html",
+    "Finalize.dc.html",
+    "Comments.dc.html",
+    "Config.dc.html",
+    "Tray.dc.html",
+    "Dark-Home.dc.html",
+    "Dark-Review.dc.html",
+    "Dark-Loading.dc.html",
+    "Dark-WhatsNew.dc.html",
+    "Dark-Finalize.dc.html",
+    "Dark-Comments.dc.html",
+    "Dark-Config.dc.html",
+    "Diagrams.dc.html",
+    "DiagramNode.dc.html",
+    "Security.dc.html",
+    "Audits.dc.html",
+    "Tests.dc.html",
+    "Dark-Diagrams.dc.html",
+    "Dark-DiagramNode.dc.html",
+    "Dark-Security.dc.html",
+    "Dark-Audits.dc.html",
+    "Dark-Tests.dc.html",
+    "AgentChat.dc.html",
+    "Permission.dc.html",
+    "Dark-AgentChat.dc.html",
+    "Dark-Permission.dc.html",
+    "Revalidated.dc.html",
+    "Dark-Revalidated.dc.html",
+    "LoadFailed.dc.html",
+    "Dark-LoadFailed.dc.html",
+    "LeavePrompt.dc.html",
+    "Dark-LeavePrompt.dc.html",
+    "OpenPR.dc.html",
+    "Dark-OpenPR.dc.html",
+    "FirstRun.dc.html",
+    "Dark-FirstRun.dc.html",
+    "Notifications.dc.html",
+    "ConfigHarness.dc.html",
+    "Dark-ConfigHarness.dc.html",
+    "ConfigRepos.dc.html",
+    "Dark-ConfigRepos.dc.html",
+    "ConfigPlugins.dc.html",
+    "Dark-ConfigPlugins.dc.html",
+    "DiffSplit.dc.html",
+    "DiffStory.dc.html",
+    "Dark-DiffSplit.dc.html",
+    "Dark-DiffStory.dc.html",
+    "DiffCalls.dc.html",
+    "Dark-DiffCalls.dc.html",
+    "Diagram-deps.dc.html",
+    "Dark-Diagram-deps.dc.html",
+    "Diagram-sequence.dc.html",
+    "Dark-Diagram-sequence.dc.html",
+    "Diagram-er.dc.html",
+    "Dark-Diagram-er.dc.html",
+    "Diagram-usecase.dc.html",
+    "Dark-Diagram-usecase.dc.html",
+    "Diagram-dataflow.dc.html",
+    "Dark-Diagram-dataflow.dc.html",
+    "Diagram-states.dc.html",
+    "Dark-Diagram-states.dc.html",
+    "Diagram-classes.dc.html",
+    "Dark-Diagram-classes.dc.html",
+    "TestCockpit.dc.html",
+    "Dark-TestCockpit.dc.html",
+    "Composer.dc.html",
+    "Dark-Composer.dc.html",
+    "ConfigAppearance.dc.html",
+    "Dark-ConfigAppearance.dc.html",
+    "ConfigGit.dc.html",
+    "Dark-ConfigGit.dc.html",
+    "ConfigEditor.dc.html",
+    "Dark-ConfigEditor.dc.html",
+    "ConfigNotifications.dc.html",
+    "Dark-ConfigNotifications.dc.html",
+    "PluginTab.dc.html",
+    "Dark-PluginTab.dc.html",
+    "TrayNext.dc.html",
+    "Dark-TrayNext.dc.html"
+  ],
+  "pages": [
+    {
+      "id": "core",
+      "name": "Core screens"
+    },
+    {
+      "id": "sections",
+      "name": "Review sections"
+    },
+    {
+      "id": "agent",
+      "name": "Agent and harness"
+    },
+    {
+      "id": "states",
+      "name": "States and flows"
+    },
+    {
+      "id": "config",
+      "name": "Config"
+    }
+  ],
+  "title": "Clúsia Mockups"
+}

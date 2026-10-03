@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Config appearance</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-weight: 600;">Config</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <nav aria-label="Config sections" style="width: 220px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 20px 12px; border-right: 1px solid {{t.line}};">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="{{n.href}}" style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; text-decoration: none; background: {{n.bg}}; color: {{n.fg}}; font-weight: {{n.w}};">{{n.label}}<sc-if value="{{n.later}}" hint-placeholder-val="{{false}}"><span style="margin-left: auto; font-size: 11px; color: {{t.faint}};">{{n.later}}</span></sc-if></a>
+      </sc-for>
+    </nav>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 22px; padding: 24px 40px; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Appearance</h2>
+        <span style="color: {{t.muted}};">How Clúsia looks. The menu bar popover always follows macOS.</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px;">
+        <span style="font-weight: 600;">Theme</span>
+        <div style="display: grid; grid-template-columns: repeat(3, 200px); gap: 14px;">
+          <sc-for list="{{themes}}" as="th" hint-placeholder-count="3">
+            <label style="display: flex; flex-direction: column; gap: 8px; cursor: pointer;">
+              <span style="height: 112px; border-radius: 8px; overflow: hidden; display: flex; box-shadow: 0 0 0 {{th.ringW}} {{th.ring}};">
+                <span style="flex: 1; background: {{th.left}}; display: flex; flex-direction: column; gap: 6px; padding: 12px;"><span style="height: 8px; width: 60%; border-radius: 4px; background: {{th.leftInk}};"></span><span style="height: 6px; width: 80%; border-radius: 3px; background: {{th.leftInk}}; opacity: 0.5;"></span><span style="height: 18px; width: 50%; border-radius: 4px; background: #2F9E44; margin-top: auto;"></span></span>
+                <span style="flex: 1; background: {{th.right}}; display: flex; flex-direction: column; gap: 6px; padding: 12px;"><span style="height: 8px; width: 60%; border-radius: 4px; background: {{th.rightInk}};"></span><span style="height: 6px; width: 80%; border-radius: 3px; background: {{th.rightInk}}; opacity: 0.5;"></span><span style="height: 18px; width: 50%; border-radius: 4px; background: #4CC35F; margin-top: auto;"></span></span>
+              </span>
+              <span style="display: flex; align-items: center; gap: 8px;"><input type="radio" name="theme" checked="{{th.on}}" style="margin: 0; accent-color: {{t.green}};"><span style="font-weight: 600;">{{th.label}}</span><span style="color: {{t.faint}}; font-size: 12px;">{{th.hint}}</span></span>
+            </label>
+          </sc-for>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 12px; padding-top: 18px; border-top: 1px solid {{t.line}};">
+        <span style="font-weight: 600;">Reading code</span>
+        <sc-for list="{{segs}}" as="sg" hint-placeholder-count="3">
+          <div style="display: flex; align-items: center; gap: 16px;">
+            <span style="width: 190px; color: {{t.muted}};">{{sg.label}}</span>
+            <div role="radiogroup" aria-label="{{sg.label}}" style="display: flex; padding: 3px; gap: 3px; border-radius: 8px; background: {{t.chrome}};">
+              <sc-for list="{{sg.options}}" as="o" hint-placeholder-count="3">
+                <button role="radio" aria-checked="{{o.on}}" style="height: 28px; padding: 0 14px; border: none; border-radius: 6px; background: {{o.bg}}; box-shadow: {{o.shadow}}; font-weight: {{o.w}};">{{o.label}}</button>
+              </sc-for>
+            </div>
+            <span style="color: {{t.faint}}; font-size: 12px;">{{sg.hint}}</span>
+          </div>
+        </sc-for>
+        <sc-for list="{{toggles}}" as="tg" hint-placeholder-count="3">
+          <label style="display: flex; align-items: center; gap: 16px;">
+            <span style="width: 190px; color: {{t.muted}};">{{tg.label}}</span>
+            <input type="checkbox" checked="{{tg.on}}" style="margin: 0; accent-color: {{t.green}};">
+            <span style="color: {{t.faint}}; font-size: 12px;">{{tg.hint}}</span>
+          </label>
+        </sc-for>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px; padding-top: 18px; border-top: 1px solid {{t.line}};">
+        <span style="font-weight: 600;">Preview</span>
+        <div style="width: 640px; padding: 8px 0; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 22px;">
+          <div style="display: flex;"><span style="width: 40px; text-align: right; padding-right: 10px; color: {{t.faint}};">43</span><span style="white-space: pre;">    }</span></div>
+          <div style="display: flex; background: {{t.addBg}};"><span style="width: 40px; text-align: right; padding-right: 10px; color: {{t.faint}};">44</span><span style="white-space: pre;">    let _guard = self.refresh_lock.lock().await;</span></div>
+          <div style="display: flex;"><span style="width: 40px; text-align: right; padding-right: 10px; color: {{t.faint}};">45</span><span style="white-space: pre;">    let fresh = self.client.exchange(&amp;token.refresh).await?;</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', addBg: '#E9F6EB', seg: '#FFFFFF', segShadow: '0 1px 2px rgba(20,30,22,0.12)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', addBg: 'rgba(76,195,95,0.12)', seg: '#2A302C', segShadow: '0 1px 2px rgba(0,0,0,0.4)' };
+    const t = dark ? D : L;
+    const NAV = [['Appearance', 'ConfigAppearance.dc.html'], ['Git server', 'ConfigGit.dc.html'], ['Repositories', 'ConfigRepos.dc.html'], ['Harness', 'ConfigHarness.dc.html'], ['Editor', 'ConfigEditor.dc.html'], ['Notifications', 'ConfigNotifications.dc.html'], ['Plugins & skills', 'ConfigPlugins.dc.html']];
+    const current = 'Appearance';
+    const opt = (label, on) => ({ label, on: on ? 'true' : 'false', bg: on ? t.seg : 'transparent', shadow: on ? t.segShadow : 'none', w: on ? 600 : 400 });
+    const theme = (label, hint, on, l, r) => ({ label, hint, on, ring: on ? t.green : t.line, ringW: on ? '2px' : '1px', left: l[0], leftInk: l[1], right: r[0], rightInk: r[1] });
+    const light = ['#F6F7F5', '#1B1F1C'], darkp = ['#121514', '#E9ECE9'];
+    return {
+      t,
+      nav: NAV.map(([label, href, later]) => ({ label, href, later, bg: label === current ? t.surface : 'transparent', fg: label === current ? t.fg : t.muted, w: label === current ? 600 : 400 })),
+      themes: [theme('Light', '', false, light, light), theme('Dark', '', false, darkp, darkp), theme('System', 'follows macOS, Auto too', true, light, darkp)],
+      segs: [
+        { label: 'Code size', hint: 'Diffs, Story and Calls', options: [opt('12', false), opt('13', true), opt('14', false), opt('16', false)] },
+        { label: 'Density', hint: 'Space between rows and panels', options: [opt('Comfortable', true), opt('Compact', false)] },
+        { label: 'Open the Diff as', hint: 'You can switch per review', options: [opt('Unified', true), opt('Split', false), opt('Story', false), opt('Calls', false)] },
+      ],
+      toggles: [
+        { label: 'Hide whitespace-only changes', on: true, hint: 'They still count for the review' },
+        { label: 'Wrap long lines', on: false, hint: 'Otherwise scroll sideways' },
+        { label: 'Reduce motion', on: false, hint: 'Also follows the macOS setting' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Config editor</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-weight: 600;">Config</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <nav aria-label="Config sections" style="width: 220px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 20px 12px; border-right: 1px solid {{t.line}};">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="{{n.href}}" style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; text-decoration: none; background: {{n.bg}}; color: {{n.fg}}; font-weight: {{n.w}};">{{n.label}}<sc-if value="{{n.later}}" hint-placeholder-val="{{false}}"><span style="margin-left: auto; font-size: 11px; color: {{t.faint}};">{{n.later}}</span></sc-if></a>
+      </sc-for>
+    </nav>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 20px; padding: 24px 40px; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Editor</h2>
+        <span style="color: {{t.muted}};">"Open in editor" on any line of a diff, a call or a finding opens the file at that line, in the review's worktree.</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(4, 200px); gap: 10px;">
+        <sc-for list="{{editors}}" as="e" hint-placeholder-count="4">
+          <label style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 6px; background: {{e.bg}}; box-shadow: 0 0 0 {{e.ringW}} {{e.ring}}; cursor: pointer;">
+            <input type="radio" name="editor" checked="{{e.on}}" style="margin: 0; accent-color: {{t.green}};">
+            <span style="display: flex; flex-direction: column; gap: 2px;"><span style="font-weight: 600;">{{e.name}}</span><span style="color: {{e.statusColor}}; font-size: 12px;">{{e.status}}</span></span>
+          </label>
+        </sc-for>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; width: 860px;">
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <label for="e-cmd" style="width: 150px; color: {{t.muted}};">Command</label>
+          <input id="e-cmd" value="zed {path}:{line}" style="flex: 1; height: 32px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+        </div>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <span style="width: 150px; color: {{t.muted}};">Placeholders</span>
+          <div style="display: flex; gap: 6px;">
+            <sc-for list="{{holes}}" as="h" hint-placeholder-count="4">
+              <span title="{{h.hint}}" style="height: 24px; display: flex; align-items: center; padding: 0 8px; border-radius: 5px; background: {{t.chrome}}; font-family: 'JetBrains Mono', monospace; font-size: 12px;">{{h.name}}</span>
+            </sc-for>
+          </div>
+          <span style="color: {{t.faint}}; font-size: 12px;">Arguments are passed as-is, never through a shell</span>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 16px;">
+          <span style="width: 150px; color: {{t.muted}}; padding-top: 10px;">Will run</span>
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; white-space: pre;">zed ~/.clusia/worktrees/rzorzal-clusia-61/crates/clusiad/src/sync.rs:44</span>
+            <span style="color: {{t.faint}}; font-size: 12px;">Example: rzorzal/clusia#61, sync.rs line 44</span>
+          </div>
+        </div>
+        <label style="display: flex; align-items: center; gap: 16px;"><span style="width: 150px; color: {{t.muted}};">Open the folder too</span><input type="checkbox" checked="{{yes}}" style="margin: 0; accent-color: {{t.green}};"><span style="color: {{t.faint}}; font-size: 12px;">First time per review, so the editor sees the whole project</span></label>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; padding-top: 16px; border-top: 1px solid {{t.line}}; width: 860px;">
+        <span style="font-weight: 600;">Where the files come from</span>
+        <span style="color: {{t.muted}};">Clúsia never checks out branches in your clone. It keeps a separate worktree per review, built from refs/clusia/*.</span>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <span style="width: 150px; color: {{t.muted}};">Worktrees</span>
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">~/.clusia/worktrees</span>
+          <span style="color: {{t.faint}}; font-size: 12px;">3 reviews · 412 MB · removed 7 days after a review closes</span>
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Test: open the example</button>
+        <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Reset to default</button>
+        <span style="display: flex; align-items: center; gap: 6px; color: {{t.green}}; font-size: 12px; margin-left: 8px;"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Opened Zed in 0.4 s</span>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', greenSoft: 'rgba(47,158,68,0.10)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', greenSoft: 'rgba(76,195,95,0.12)' };
+    const t = dark ? D : L;
+    const NAV = [['Appearance', 'ConfigAppearance.dc.html'], ['Git server', 'ConfigGit.dc.html'], ['Repositories', 'ConfigRepos.dc.html'], ['Harness', 'ConfigHarness.dc.html'], ['Editor', 'ConfigEditor.dc.html'], ['Notifications', 'ConfigNotifications.dc.html'], ['Plugins & skills', 'ConfigPlugins.dc.html']];
+    const current = 'Editor';
+    const ed = (name, status, on, found) => ({ name, status, on, bg: on ? t.greenSoft : t.surface, ring: on ? t.green : t.line, ringW: on ? '1.5px' : '1px', statusColor: found ? t.muted : t.faint });
+    return {
+      t, yes: true,
+      nav: NAV.map(([label, href, later]) => ({ label, href, later, bg: label === current ? t.surface : 'transparent', fg: label === current ? t.fg : t.muted, w: label === current ? 600 : 400 })),
+      editors: [ed('Zed', 'Found in /Applications', true, true), ed('VS Code', 'Found · code', false, true), ed('Cursor', 'Not installed', false, false), ed('Custom', 'Any command', false, true)],
+      holes: [{ name: '{path}', hint: 'Absolute file path' }, { name: '{line}', hint: 'Line number' }, { name: '{column}', hint: 'Column, 1 if unknown' }, { name: '{root}', hint: 'Worktree folder' }],
+    };
+  }
+}
+</script>
+</body>
+</html>

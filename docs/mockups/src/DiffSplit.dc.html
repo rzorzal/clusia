@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Clúsia Review, split diff</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+textarea,input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <!-- Title bar with review tabs -->
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; text-decoration: none; color: {{t.muted}};">
+      <svg width="16" height="16" viewBox="0 0 64 64" aria-hidden="true"><g transform="rotate(-14 32 34)"><path d="M32 55V63" stroke="{{t.muted}}" stroke-width="4" stroke-linecap="round"></path><path d="M32 3C45 11 53 24 51 37C49 48 41 54 32 56C23 54 15 48 13 37C11 24 19 11 32 3Z" fill="{{t.green}}"></path><g fill="none" stroke="{{t.chrome}}" stroke-width="3.5" stroke-linecap="round"><path d="M21 26c3-4 5 4 8 0s5 4 8 0s5 4 7 0"></path><path d="M22 36c3-4 5 4 8 0s5 4 8 0"></path></g><circle cx="40" cy="45" r="3.6" fill="{{t.orange}}"></circle></g></svg>
+      <span>Home</span>
+    </a>
+    <button style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span>
+      <span aria-label="Close tab" style="display: flex; padding: 2px; color: {{t.muted}};"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"></path></svg></span>
+    </button>
+    <button style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}};">
+      <span style="width: 6px; height: 6px; border-radius: 3px; background: {{t.orange}};"></span>
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">#77</span><span>cache invalidation</span>
+      <span aria-label="Close tab" style="display: flex; padding: 2px;"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"></path></svg></span>
+    </button>
+    <button aria-label="Open a pull request" style="width: 30px; height: 30px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}}; display: flex; align-items: center; justify-content: center;"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M7 2v10M2 7h10"></path></svg></button>
+    <div style="flex: 1;"></div>
+    <button aria-label="Settings" style="width: 32px; height: 32px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}}; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg></button>
+    <button aria-label="Theme: follow the system" style="width: 32px; height: 32px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}}; display: flex; align-items: center; justify-content: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8"></circle><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"></path></svg></button>
+  </div>
+
+  <!-- PR header -->
+  <div style="flex: none; display: flex; align-items: center; gap: 16px; padding: 14px 20px 10px;">
+    <div style="display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0;">
+      <div style="display: flex; align-items: baseline; gap: 10px;">
+        <span style="color: {{t.muted}};">rzorzal/clusia</span>
+        <span style="font-family: 'JetBrains Mono', monospace; color: {{t.muted}};">#123</span>
+        <span style="font-size: 17px; font-weight: 600;">feat: auth refresh</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px; color: {{t.faint}}; font-size: 12px;">
+        <span>@octo wants to merge</span>
+        <span style="font-family: 'JetBrains Mono', monospace; padding: 1px 6px; border-radius: 4px; background: {{t.chrome}}; color: {{t.muted}};">octo:auth-refresh → main</span>
+        <span><span style="color: {{t.green}}; font-weight: 600;">+120</span> <span style="color: {{t.orange}}; font-weight: 600;">−34</span> · 7 files</span>
+        <span style="display: flex; align-items: center; gap: 4px; color: {{t.green}};"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.2 2.2L9.5 3.8"></path></svg>Checks passing</span>
+      </div>
+    </div>
+    <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Open in editor</button>
+    <button style="height: 32px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">View on GitHub</button>
+  </div>
+
+  <!-- Section tabs -->
+  <div style="flex: none; display: flex; gap: 4px; padding: 0 20px; border-bottom: 1px solid {{t.line}};">
+    <sc-for list="{{sections}}" as="s" hint-placeholder-count="6">
+      <button style="height: 36px; padding: 0 12px; border: none; background: transparent; display: flex; align-items: center; gap: 6px; color: {{s.fg}}; font-weight: {{s.w}}; box-shadow: inset 0 -2px 0 {{s.bar}};">{{s.label}}<sc-if value="{{s.count}}" hint-placeholder-val="{{false}}"><span style="min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: {{t.chrome}}; color: {{t.muted}}; font-size: 11px; display: flex; align-items: center; justify-content: center;">{{s.count}}</span></sc-if></button>
+    </sc-for>
+  </div>
+
+  <!-- Body -->
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <!-- File tree -->
+    <div style="width: 236px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 12px 10px; border-right: 1px solid {{t.line}}; overflow: hidden;">
+      <span style="padding: 0 8px 6px; color: {{t.faint}}; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;">Files · 7</span>
+      <sc-for list="{{files}}" as="f" hint-placeholder-count="7">
+        <button style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: none; border-radius: 6px; text-align: left; background: {{f.bg}};">
+          <span style="flex: 1; min-width: 0; font-family: 'JetBrains Mono', monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: {{f.fg}};">{{f.name}}</span>
+          <span style="font-size: 11px; color: {{t.green}}; font-variant-numeric: tabular-nums;">+{{f.add}}</span>
+          <span style="font-size: 11px; color: {{t.orange}}; font-variant-numeric: tabular-nums;">−{{f.del}}</span>
+        </button>
+      </sc-for>
+    </div>
+
+    <!-- Diff -->
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden;">
+      <div style="flex: none; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid {{t.line}};">
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500;">src/auth/refresh.rs</span>
+        <span style="font-size: 12px;"><span style="color: {{t.green}};">+9</span> <span style="color: {{t.orange}};">−2</span></span>
+        <div style="flex: 1;"></div>
+        <div style="display: flex; border-radius: 6px; box-shadow: 0 0 0 1px {{t.line}}; overflow: hidden;">
+          <a href="Review.dc.html" style="height: 26px; padding: 0 10px; display: flex; align-items: center; text-decoration: none; background: {{t.surface}}; font-size: 12px; color: {{t.muted}};">Unified</a>
+          <span style="height: 26px; padding: 0 10px; display: flex; align-items: center; background: {{t.chrome}}; font-size: 12px; font-weight: 600;">Split</span>
+          <a href="DiffStory.dc.html" style="height: 26px; padding: 0 10px; display: flex; align-items: center; gap: 6px; text-decoration: none; background: {{t.surface}}; font-size: 12px; color: {{t.muted}};">Story</a>
+          <a href="DiffCalls.dc.html" style="height: 26px; padding: 0 10px; display: flex; align-items: center; text-decoration: none; background: {{t.surface}}; font-size: 12px; color: {{t.muted}};">Calls</a>
+        </div>
+      </div>
+      <div style="flex: 1; min-height: 0; overflow: hidden; background: {{t.surface}}; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 22px;">
+        <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); font-family: Inter, sans-serif; font-size: 11px; color: {{t.faint}}; border-bottom: 1px solid {{t.line}};">
+          <span style="padding: 4px 12px; border-right: 1px solid {{t.line}};">Before · main @ 9b1c0e2</span>
+          <span style="padding: 4px 12px;">After · octo:auth-refresh @ 3f2a1c4</span>
+        </div>
+        <sc-for list="{{rows}}" as="r" hint-placeholder-count="14">
+          <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);">
+            <div style="display: flex; min-width: 0; background: {{r.l.bg}}; border-right: 1px solid {{t.line}};">
+              <span style="width: 40px; flex: none; text-align: right; padding-right: 8px; box-sizing: border-box; color: {{t.faint}};">{{r.l.n}}</span>
+              <span style="width: 14px; flex: none; color: {{t.orange}};">{{r.l.sign}}</span>
+              <span style="white-space: pre; overflow: hidden; color: {{r.l.fg}};"><sc-for list="{{r.l.parts}}" as="p" hint-placeholder-count="1"><span style="background: {{p.bg}}; border-radius: 3px;">{{p.text}}</span></sc-for></span>
+            </div>
+            <div style="display: flex; min-width: 0; background: {{r.r.bg}};">
+              <span style="width: 40px; flex: none; text-align: right; padding-right: 8px; box-sizing: border-box; color: {{t.faint}};">{{r.r.n}}</span>
+              <span style="width: 14px; flex: none; color: {{t.green}};">{{r.r.sign}}</span>
+              <span style="white-space: pre; overflow: hidden; color: {{r.r.fg}};"><sc-for list="{{r.r.parts}}" as="p" hint-placeholder-count="1"><span style="background: {{p.bg}}; border-radius: 3px;">{{p.text}}</span></sc-for></span>
+            </div>
+          </div>
+          <sc-if value="{{r.draft}}" hint-placeholder-val="{{false}}">
+            <div style="margin: 6px 16px 8px calc(50% + 54px); padding: 12px 14px; border-radius: 6px; background: {{t.bg}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: Inter, sans-serif; font-size: 13px; line-height: 1.5; display: flex; flex-direction: column; gap: 8px;">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="height: 20px; padding: 0 8px; border-radius: 10px; display: flex; align-items: center; font-size: 11px; font-weight: 600; background: {{t.greenSoft}}; color: {{t.green}};">Draft</span>
+                <span style="color: {{t.muted}};">You · line 44</span>
+                <div style="flex: 1;"></div>
+                <button style="border: none; background: transparent; color: {{t.muted}}; font-size: 12px;">Edit</button>
+                <button style="border: none; background: transparent; color: {{t.muted}}; font-size: 12px;">Remove</button>
+              </div>
+              <span>Holding the lock across the network call means a slow exchange blocks every request. Could we re-check the expiry after taking the lock instead, and drop it before <code style="font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 1px 4px; border-radius: 4px; background: {{t.chrome}};">exchange</code>?</span>
+            </div>
+          </sc-if>
+          <sc-if value="{{r.thread}}" hint-placeholder-val="{{false}}">
+            <div style="margin: 6px 16px 8px calc(50% + 54px); padding: 10px 14px; border-radius: 6px; background: {{t.bg}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: Inter, sans-serif; font-size: 13px; line-height: 1.5; display: flex; align-items: center; gap: 10px;">
+              <span style="width: 22px; height: 22px; border-radius: 11px; background: {{t.chrome}}; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: {{t.muted}};">M</span>
+              <span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><b style="font-weight: 600;">@mona</b> <span style="color: {{t.muted}};">Why one minute? The CLI uses 30 seconds.</span></span>
+              <span style="color: {{t.faint}}; font-size: 12px;">2 replies</span>
+              <button style="border: none; background: transparent; color: {{t.green}}; font-size: 12px; font-weight: 600;">Reply</button>
+            </div>
+          </sc-if>
+        </sc-for>
+      </div>
+    </div>
+
+    <!-- Right panel -->
+    <div style="width: 300px; flex: none; display: flex; flex-direction: column; border-left: 1px solid {{t.line}}; background: {{t.bg}};">
+      <div style="flex: none; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px 16px; border-bottom: 1px solid {{t.line}};">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-weight: 600;">Agent</span>
+          <span style="height: 18px; padding: 0 7px; border-radius: 9px; display: flex; align-items: center; font-size: 11px; background: {{t.chrome}}; color: {{t.muted}};">not set up</span>
+          <div style="flex: 1;"></div>
+          <button aria-label="Collapse panel" style="border: none; background: transparent; color: {{t.faint}};">›</button>
+        </div>
+        <span style="color: {{t.muted}}; line-height: 1.5;">Connect Claude Code, Codex or your own command to talk through this pull request. Your draft works without it.</span>
+        <a href="Config.dc.html" style="align-self: flex-start; height: 30px; padding: 0 12px; border-radius: 6px; display: flex; align-items: center; text-decoration: none; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Set up a harness</a>
+      </div>
+      <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; overflow: hidden;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-weight: 600;">Draft</span>
+          <span style="color: {{t.faint}};">3</span>
+          <div style="flex: 1;"></div>
+          <button style="border: none; background: transparent; color: {{t.green}}; font-size: 12px; font-weight: 600;">+ General note</button>
+        </div>
+        <sc-for list="{{draft}}" as="d" hint-placeholder-count="3">
+          <div style="display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{d.ring}};">
+            <span style="display: flex; align-items: center; gap: 6px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: {{t.muted}};">{{d.where}}<sc-if value="{{d.tag}}" hint-placeholder-val="{{false}}"><span style="font-family: Inter, sans-serif; height: 16px; padding: 0 6px; border-radius: 8px; display: flex; align-items: center; font-size: 10px; font-weight: 600; background: {{d.tagBg}}; color: {{d.tagFg}};">{{d.tag}}</span></sc-if></span>
+            <span style="line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">{{d.body}}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div style="height: 48px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 12px 0 20px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+    <span style="display: flex; align-items: center; gap: 8px; color: {{t.muted}};"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.faint}};"></span>Agent not connected</span>
+    <span style="color: {{t.faint}};">Draft saved · 3 items</span>
+    <div style="flex: 1;"></div>
+    <a href="Finalize.dc.html" style="height: 34px; padding: 0 16px; border-radius: 6px; display: flex; align-items: center; text-decoration: none; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Finalize review</a>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.14)', orangeSoft: 'rgba(217,87,43,0.12)', addBg: '#E9F6EB', delBg: '#FCEEE8', hunkBg: '#F1F4F1', sel: '#E9F6EB' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.16)', orangeSoft: 'rgba(240,122,74,0.16)', addBg: 'rgba(76,195,95,0.12)', delBg: 'rgba(240,122,74,0.12)', hunkBg: '#1F2421', sel: 'rgba(76,195,95,0.12)' };
+    const t = dark ? D : L;
+    const tab = (label, on, count) => ({ label, count, fg: on ? t.fg : t.muted, w: on ? 600 : 400, bar: on ? t.green : 'transparent' });
+    const file = (name, add, del, on) => ({ name, add, del, bg: on ? t.sel : 'transparent', fg: on ? t.fg : t.muted });
+    const line = (kind, old, nw, code, extra) => {
+      const base = { old, new: nw, code };
+      if (kind === 'add') return { ...base, sign: '+', bg: t.addBg, fg: t.fg, signFg: t.green, ...extra };
+      if (kind === 'del') return { ...base, sign: '−', bg: t.delBg, fg: t.fg, signFg: t.orange, ...extra };
+      if (kind === 'hunk') return { ...base, sign: '', bg: t.hunkBg, fg: t.muted, signFg: t.muted, ...extra };
+      return { ...base, sign: '', bg: 'transparent', fg: t.fg, signFg: t.muted, ...extra };
+    };
+    return {
+      t,
+      sections: [tab('Diagrams', false), tab('Security', false), tab('Diff', true, 7), tab('Audits', false), tab('Comments', false, 5), tab('Tests', false)],
+      files: [
+        file('src/auth/refresh.rs', 9, 2, true),
+        file('src/auth/store.rs', 41, 12, false),
+        file('src/auth/mod.rs', 3, 1, false),
+        file('src/client/http.rs', 28, 9, false),
+        file('src/config.rs', 6, 0, false),
+        file('tests/refresh.rs', 30, 0, false),
+        file('CHANGELOG.md', 3, 10, false),
+      ],
+      rows: (() => {
+        const delHl = dark ? 'rgba(240,122,74,0.38)' : 'rgba(217,87,43,0.26)';
+        const addHl = dark ? 'rgba(76,195,95,0.38)' : 'rgba(47,158,68,0.26)';
+        const seg = (text, hl) => ({ text, bg: hl || 'transparent' });
+        const empty = { n: '', sign: '', bg: t.hunkBg, fg: t.fg, parts: [] };
+        const ctx = (n, code) => ({ n, sign: '', bg: 'transparent', fg: t.fg, parts: [seg(code)] });
+        const del = (n, parts) => ({ n, sign: '−', bg: t.delBg, fg: t.fg, parts });
+        const add = (n, parts) => ({ n, sign: '+', bg: t.addBg, fg: t.fg, parts });
+        const same = (a, b, code) => ({ l: ctx(a, code), r: ctx(b, code) });
+        return [
+          { l: { n: '', sign: '', bg: t.hunkBg, fg: t.muted, parts: [seg('@@ -38,9 @@ impl TokenStore {')] }, r: { n: '', sign: '', bg: t.hunkBg, fg: t.muted, parts: [seg('@@ +38,14 @@ impl TokenStore {')] } },
+          same(38, 38, '    pub async fn refresh(&self) -> Result<Token, AuthError> {'),
+          { l: del(39, [seg('        let token = self.load()'), seg('?', delHl), seg(';')]), r: add(39, [seg('        let token = self.load()'), seg('.await?', addHl), seg(';')]) },
+          { l: empty, r: add(40, [seg('        // Refresh one minute early so a request never races the expiry.', addHl)]) },
+          { l: del(40, [seg('        if token.expires_at > now() {')]), r: add(41, [seg('        if token.expires_at > now()'), seg(' + Duration::from_secs(60)', addHl), seg(' {')]), thread: true },
+          same(41, 42, '            return Ok(token);'),
+          same(42, 43, '        }'),
+          { l: empty, r: add(44, [seg('        let _guard = self.refresh_lock.lock().await;', addHl)]), draft: true },
+          same(43, 45, '        let fresh = self.client.exchange(&token.refresh).await?;'),
+          same(44, 46, '        self.save(&fresh)?;'),
+          same(45, 47, '        Ok(fresh)'),
+          same(46, 48, '    }'),
+        ];
+      })(),
+      draft: [
+        { where: 'refresh.rs:44', body: 'Holding the lock across the network call means a slow exchange blocks every request.', ring: t.line },
+        { where: 'store.rs:88', tag: 'moved from 81', tagBg: t.greenSoft, tagFg: t.green, body: 'save() should write to a temp file and rename, so a crash never leaves half a token.', ring: t.line },
+        { where: 'http.rs:20', tag: 'obsolete', tagBg: t.orangeSoft, tagFg: t.orange, body: 'This retry loop is gone in the new version. Remove or re-add this comment before publishing.', ring: t.orange },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

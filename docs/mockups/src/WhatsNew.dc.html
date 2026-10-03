@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What's new</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; position: relative; overflow: hidden; border-radius: 10px; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; color: {{t.fg}};">
+  <dc-import name="Review" theme="{{theme}}" hint-size="1280px,800px"></dc-import>
+  <div style="position: absolute; inset: 0; background: {{t.scrim}}; display: flex; align-items: center; justify-content: center;">
+    <div role="dialog" aria-labelledby="wn-title" style="width: 560px; display: flex; flex-direction: column; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 24px 60px {{t.shadow}}; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; gap: 4px; padding: 22px 24px 14px;">
+        <h2 id="wn-title" style="margin: 0; font-size: 17px; font-weight: 600;">What's new in #123</h2>
+        <span style="color: {{t.muted}};">Since you last looked, yesterday at 18:40.</span>
+      </div>
+      <div style="display: flex; flex-direction: column;">
+        <sc-for list="{{items}}" as="i" hint-placeholder-count="5">
+          <a href="Review.dc.html" style="display: flex; align-items: center; gap: 14px; padding: 12px 24px; text-decoration: none; border-top: 1px solid {{t.line}};">
+            <span style="width: 30px; height: 30px; flex: none; border-radius: 8px; display: flex; align-items: center; justify-content: center; background: {{i.iconBg}}; color: {{i.iconFg}}; font-size: 14px; font-weight: 700;">{{i.icon}}</span>
+            <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+              <span style="font-weight: 500;">{{i.what}}</span>
+              <span style="color: {{t.faint}}; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{i.detail}}</span>
+            </span>
+            <span style="flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 12px;">
+              <span style="color: {{t.muted}};">{{i.who}}</span>
+              <span style="color: {{t.faint}};">{{i.source}}</span>
+            </span>
+          </a>
+        </sc-for>
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px; padding: 14px 24px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+        <span style="color: {{t.faint}}; font-size: 12px;">Click a row to go there.</span>
+        <div style="flex: 1;"></div>
+        <button style="height: 32px; padding: 0 16px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Got it</button>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const theme = this.props.theme ?? 'light';
+    const dark = theme === 'dark';
+    const L = { chrome: '#F3F5F3', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.12)', orangeSoft: 'rgba(217,87,43,0.12)', grey: '#EEF1EE', scrim: 'rgba(246,247,245,0.55)', shadow: 'rgba(20,30,22,0.18)' };
+    const D = { chrome: '#161A18', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.14)', orangeSoft: 'rgba(240,122,74,0.16)', grey: '#232825', scrim: 'rgba(8,10,9,0.6)', shadow: 'rgba(0,0,0,0.55)' };
+    const t = dark ? D : L;
+    return {
+      t, theme,
+      items: [
+        { icon: '◆', iconBg: t.greenSoft, iconFg: t.green, what: '2 new commits', detail: 'fix: re-check the expiry under the lock · test: refresh races', who: '@octo', source: 'GitHub' },
+        { icon: '“', iconBg: t.grey, iconFg: t.muted, what: '3 new comments', detail: 'Why one minute? The CLI uses 30 seconds.', who: '@mona, @hubot', source: 'GitHub' },
+        { icon: '✓', iconBg: t.greenSoft, iconFg: t.green, what: 'Checks passed', detail: 'build · clippy · test (macOS)', who: '', source: 'GitHub Actions' },
+        { icon: '↻', iconBg: t.orangeSoft, iconFg: t.orange, what: 'Your draft followed the code: 1 moved, 1 obsolete', detail: 'store.rs:81 → 88 · http.rs:20 no longer in the diff', who: '', source: 'Clúsia' },
+        { icon: '✎', iconBg: t.grey, iconFg: t.muted, what: 'Note added', detail: 'Ask about the token cache size', who: 'You', source: 'CLI' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

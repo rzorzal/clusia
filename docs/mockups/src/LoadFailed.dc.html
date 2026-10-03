@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Opening a review failed</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}}; position: relative;">
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; color: {{t.muted}};">Home</span>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="width: 6px; height: 6px; border-radius: 3px; background: {{t.orange}};"></span><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#98</span><span style="font-weight: 600;">api pagination</span></span>
+  </div>
+  <div style="flex: 1; display: flex; align-items: center; justify-content: center;">
+    <div style="width: 560px; display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 30px 36px 26px; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 18px 50px {{t.shadow}};">
+      <svg width="260" height="120" viewBox="0 0 260 120" aria-label="Loading steps, one failed">
+        <path d="M18 112H242" stroke="{{t.line}}" stroke-width="2" stroke-linecap="round"></path>
+        <path d="M50 112V50" stroke="{{t.muted}}" stroke-width="2.5" stroke-linecap="round"></path>
+        <path d="M50 10C62 18 68 31 66 41C64 49 57 52 50 54C43 52 36 49 34 41C32 31 38 18 50 10Z" fill="{{t.green}}"></path>
+        <path d="M103 112V66" stroke="{{t.muted}}" stroke-width="2.5" stroke-linecap="round"></path>
+        <path d="M103 32C113 39 118 49 116 57C115 63 109 66 103 68C97 66 91 63 90 57C88 49 93 39 103 32Z" fill="{{t.orange}}"></path>
+        <path d="M156 112V100" stroke="{{t.line}}" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="3 4"></path>
+        <path d="M209 112V100" stroke="{{t.line}}" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="3 4"></path>
+      </svg>
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center;">
+        <span style="font-size: 16px; font-weight: 600;">Couldn't get the branch for #98</span>
+        <span style="color: {{t.muted}}; line-height: 1.5;">GitHub no longer has this pull request's head. It may have been force-pushed away or the fork deleted.</span>
+      </div>
+      <div style="align-self: stretch; display: flex; flex-direction: column; gap: 6px;">
+        <span style="color: {{t.faint}}; font-size: 12px;">What git said</span>
+        <div style="padding: 10px 12px; border-radius: 6px; background: {{t.code}}; box-shadow: inset 2px 0 0 {{t.orange}}; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap;">fatal: couldn't find remote ref refs/pull/98/head</div>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button style="height: 34px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Open from cache</button>
+        <button style="height: 34px; padding: 0 16px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Try again</button>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', code: '#F6F7F5', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', shadow: 'rgba(20,30,22,0.14)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', code: '#121514', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', shadow: 'rgba(0,0,0,0.5)' };
+    return { t: dark ? D : L };
+  }
+}
+</script>
+</body>
+</html>

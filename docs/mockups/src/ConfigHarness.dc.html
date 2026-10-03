@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Config harness</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-weight: 600;">Config</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <nav aria-label="Config sections" style="width: 220px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 20px 12px; border-right: 1px solid {{t.line}};">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="{{n.href}}" style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; text-decoration: none; background: {{n.bg}}; color: {{n.fg}}; font-weight: {{n.w}};">{{n.label}}</a>
+      </sc-for>
+    </nav>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 18px; padding: 24px 40px; overflow: hidden;">
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Harness</h2>
+        <span style="color: {{t.muted}};">The AI tool you already use. Clúsia starts one session per review and keeps its memory separate from your other work.</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; width: 760px;">
+        <sc-for list="{{kinds}}" as="k" hint-placeholder-count="3">
+          <label style="display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-radius: 6px; cursor: pointer; background: {{k.bg}}; box-shadow: 0 0 0 {{k.ringW}} {{k.ring}};">
+            <span style="display: flex; align-items: center; gap: 8px; font-weight: 600;"><input type="radio" name="kind" checked="{{k.on}}" style="margin: 0; accent-color: {{t.green}};">{{k.name}}</span>
+            <span style="color: {{t.muted}}; font-size: 12px;">{{k.hint}}</span>
+          </label>
+        </sc-for>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; width: 760px;">
+        <sc-for list="{{fields}}" as="f" hint-placeholder-count="4">
+          <div style="display: flex; align-items: center; gap: 16px;">
+            <label for="{{f.id}}" style="width: 170px; flex: none; color: {{t.muted}};">{{f.label}}</label>
+            <input id="{{f.id}}" value="{{f.value}}" style="flex: 1; height: 32px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: {{f.font}}; font-size: 12px;">
+            <span style="width: 180px; flex: none; color: {{t.faint}}; font-size: 12px;">{{f.hint}}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display: flex; align-items: center; gap: 12px; width: 760px; padding: 12px 14px; border-radius: 6px; background: {{t.greenSoft}};">
+        <span style="width: 22px; height: 22px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; background: {{t.green}}; color: {{t.onGreen}};">✓</span>
+        <span style="flex: 1; display: flex; flex-direction: column; gap: 2px;"><span style="font-weight: 600;">Claude Code 2.4 answered in 1.8 s</span><span style="color: {{t.muted}}; font-size: 12px;">Found at /opt/homebrew/bin/claude · structured output works · permission requests reach Clúsia</span></span>
+        <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Test again</button>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px; width: 760px;">
+        <span style="font-weight: 600;">What the agent may do without asking</span>
+        <sc-for list="{{perms}}" as="p" hint-placeholder-count="3">
+          <label style="display: flex; align-items: center; gap: 10px;"><input type="checkbox" checked="{{p.on}}" style="margin: 0; accent-color: {{t.green}};"><span>{{p.label}}</span></label>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', greenSoft: 'rgba(47,158,68,0.10)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', greenSoft: 'rgba(76,195,95,0.12)' };
+    const t = dark ? D : L;
+    const nav = (label, on, href) => ({ label, href: href || '#', bg: on ? t.surface : 'transparent', fg: on ? t.fg : t.muted, w: on ? 600 : 400 });
+    const kind = (name, hint, on) => ({ name, hint, on, bg: on ? t.greenSoft : t.surface, ring: on ? t.green : t.line, ringW: on ? '1.5px' : '1px' });
+    const mono = "'JetBrains Mono', monospace";
+    const sans = 'Inter, sans-serif';
+    return {
+      t,
+      nav: [nav('Appearance', false, 'ConfigAppearance.dc.html'), nav('Git server', false, 'ConfigGit.dc.html'), nav('Repositories', false, 'ConfigRepos.dc.html'), nav('Harness', true), nav('Editor', false, 'ConfigEditor.dc.html'), nav('Notifications', false, 'ConfigNotifications.dc.html'), nav('Plugins & skills', false, 'ConfigPlugins.dc.html')],
+      kinds: [kind('Claude Code', 'claude, with your settings', true), kind('Codex', 'codex CLI', false), kind('Custom command', 'any tool that speaks JSON', false)],
+      fields: [
+        { id: 'h-bin', label: 'Program', value: '/opt/homebrew/bin/claude', hint: 'Found on your PATH', font: mono },
+        { id: 'h-args', label: 'Extra arguments', value: '--model claude-opus-5-5', hint: 'Passed to every session', font: mono },
+        { id: 'h-idle', label: 'End idle sessions after', value: '30 minutes', hint: 'They resume when you reopen', font: sans },
+        { id: 'h-perm', label: 'Deny unanswered requests after', value: '2 minutes', hint: 'You get a notification', font: sans },
+      ],
+      perms: [
+        { label: 'Read files in the review worktree', on: true },
+        { label: 'Search the code and the pull request on GitHub', on: true },
+        { label: 'Run commands in the worktree (tests, builds)', on: false },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent permission request</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; position: relative; overflow: hidden; border-radius: 10px; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; color: {{t.fg}};">
+  <dc-import name="AgentChat" theme="{{theme}}" hint-size="1280px,800px"></dc-import>
+  <div style="position: absolute; inset: 0; background: {{t.scrim}}; display: flex; align-items: center; justify-content: center;">
+    <div role="alertdialog" aria-labelledby="pm-title" style="width: 540px; display: flex; flex-direction: column; border-radius: 10px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}, 0 24px 60px {{t.shadow}}; overflow: hidden;">
+      <div style="display: flex; gap: 14px; padding: 22px 24px 8px;">
+        <span style="width: 36px; height: 36px; flex: none; border-radius: 10px; display: flex; align-items: center; justify-content: center; background: {{t.orangeSoft}}; color: {{t.orange}};"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"></rect><path d="M6 8V5.5a3 3 0 0 1 6 0V8"></path></svg></span>
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <h2 id="pm-title" style="margin: 0; font-size: 16px; font-weight: 600;">Claude Code wants to run a command</h2>
+          <span style="color: {{t.muted}}; line-height: 1.5;">“To check that two refreshes at once don't exchange the token twice.”</span>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 12px 24px;">
+        <div style="padding: 10px 12px; border-radius: 6px; background: {{t.code}}; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6;">cargo test -p clusia-auth refresh_race -- --nocapture</div>
+        <span style="color: {{t.faint}}; font-size: 12px; font-family: 'JetBrains Mono', monospace;">in worktrees/rzorzal~clusia~123 · no network · reads and writes only the worktree</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 0 24px 16px; color: {{t.muted}}; font-size: 12px;">
+        <div style="flex: 1; height: 4px; border-radius: 2px; background: {{t.chrome}}; overflow: hidden;"><div style="width: 62%; height: 4px; background: {{t.orange}};"></div></div>
+        <span>Denied automatically in 1:52</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 14px 24px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+        <button style="height: 34px; padding: 0 14px; border: none; border-radius: 6px; background: transparent; color: {{t.orange}};">Deny</button>
+        <div style="flex: 1;"></div>
+        <button style="height: 34px; padding: 0 14px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Allow for this review</button>
+        <button style="height: 34px; padding: 0 16px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Allow once</button>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const theme = this.props.theme ?? 'light';
+    const dark = theme === 'dark';
+    const L = { chrome: '#F3F5F3', surface: '#FFFFFF', code: '#F6F7F5', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', orangeSoft: 'rgba(217,87,43,0.12)', scrim: 'rgba(246,247,245,0.55)', shadow: 'rgba(20,30,22,0.18)' };
+    const D = { chrome: '#161A18', surface: '#1A1E1C', code: '#121514', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', orangeSoft: 'rgba(240,122,74,0.16)', scrim: 'rgba(8,10,9,0.6)', shadow: 'rgba(0,0,0,0.55)' };
+    return { t: dark ? D : L, theme };
+  }
+}
+</script>
+</body>
+</html>

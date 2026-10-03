@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Review diagrams</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <!-- Title bar -->
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span></span>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; color: {{t.muted}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">#77</span>cache invalidation</span>
+  </div>
+
+  <!-- PR header -->
+  <div style="flex: none; display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px;">
+    <span style="color: {{t.muted}};">rzorzal/clusia</span>
+    <span style="font-family: 'JetBrains Mono', monospace; color: {{t.muted}};">#123</span>
+    <span style="font-size: 17px; font-weight: 600;">feat: auth refresh</span>
+    <span style="color: {{t.faint}}; font-size: 12px;">@octo · <span style="color: {{t.green}};">+120</span> <span style="color: {{t.orange}};">−34</span> · 7 files</span>
+  </div>
+
+  <!-- Section tabs -->
+  <div style="flex: none; display: flex; gap: 4px; padding: 0 20px; border-bottom: 1px solid {{t.line}};">
+    <sc-for list="{{sections}}" as="s" hint-placeholder-count="6">
+      <a href="{{s.href}}" style="height: 36px; padding: 0 12px; display: flex; align-items: center; gap: 6px; text-decoration: none; color: {{s.fg}}; font-weight: {{s.w}}; box-shadow: inset 0 -2px 0 {{s.bar}};">{{s.label}}</a>
+    </sc-for>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <!-- Diagram list -->
+    <div style="width: 236px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 12px 10px; border-right: 1px solid {{t.line}};">
+      <span style="padding: 0 8px 6px; color: {{t.faint}}; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;">Diagrams · 8</span>
+      <sc-for list="{{diagrams}}" as="d" hint-placeholder-count="8">
+        <button onClick="{{d.pick}}" style="display: flex; flex-direction: column; gap: 1px; padding: 7px 10px; border: none; border-radius: 6px; text-align: left; background: {{d.bg}};">
+          <span style="color: {{d.fg}}; font-weight: {{d.w}};">{{d.name}}</span>
+          <span style="color: {{t.faint}}; font-size: 11px;">{{d.meta}}</span>
+        </button>
+      </sc-for>
+      <div style="flex: 1;"></div>
+      <div style="display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 6px; background: {{t.chrome}};">
+        <span style="color: {{t.muted}}; font-size: 12px; line-height: 1.45;">Drawn by Claude Code from commit 3f2a1c. When the PR changes, ask for new diagrams; the old ones stay with their commit.</span>
+        <button style="height: 28px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Redraw for the new commit</button>
+      </div>
+    </div>
+
+    <!-- Diagram canvas -->
+    <div style="flex: 1; min-width: 0; position: relative; background-color: {{t.surface}}; background-image: radial-gradient({{t.dot}} 1px, transparent 1px); background-size: 20px 20px; overflow: hidden;">
+      <div style="position: absolute; left: 20px; top: 16px; display: flex; align-items: center; gap: 10px;">
+        <span style="font-weight: 600;">{{scene.title}}</span>
+        <span style="height: 20px; padding: 0 8px; border-radius: 10px; display: flex; align-items: center; font-size: 11px; background: {{t.chrome}}; color: {{t.muted}};">{{scene.kind}}</span>
+        <span style="color: {{t.faint}};">{{scene.hint}}</span>
+      </div>
+      <div style="position: absolute; right: 16px; top: 12px; display: flex; gap: 4px; border-radius: 6px; box-shadow: 0 0 0 1px {{t.line}}; background: {{t.surface}};">
+        <button aria-label="Zoom out" style="width: 30px; height: 28px; border: none; background: transparent; color: {{t.muted}};">−</button>
+        <span style="display: flex; align-items: center; color: {{t.muted}}; font-size: 12px;">100%</span>
+        <button aria-label="Zoom in" style="width: 30px; height: 28px; border: none; background: transparent; color: {{t.muted}};">+</button>
+      </div>
+
+      <!-- frames (system boundaries, lifeline bars) -->
+      <sc-for list="{{scene.frames}}" as="f" hint-placeholder-count="1">
+        <div style="position: absolute; left: {{f.x}}px; top: {{f.y}}px; width: {{f.w}}px; height: {{f.h}}px; box-sizing: border-box; border-radius: {{f.r}}px; border: {{f.border}}; background: {{f.bg}};"></div>
+      </sc-for>
+      <!-- connector segments -->
+      <sc-for list="{{scene.lines}}" as="l" hint-placeholder-count="6">
+        <div style="position: absolute; left: {{l.x}}px; top: {{l.y}}px; width: {{l.w}}px; height: {{l.h}}px; background: {{l.c}}; opacity: {{l.op}};"></div>
+      </sc-for>
+      <!-- arrow heads -->
+      <sc-for list="{{scene.arrows}}" as="a" hint-placeholder-count="4">
+        <div style="position: absolute; left: {{a.x}}px; top: {{a.y}}px; width: 0; height: 0; border-left: {{a.bl}}; border-right: {{a.br}}; border-top: {{a.bt}}; border-bottom: {{a.bb}};"></div>
+      </sc-for>
+      <!-- labels -->
+      <sc-for list="{{scene.labels}}" as="lb" hint-placeholder-count="4">
+        <span style="position: absolute; left: {{lb.x}}px; top: {{lb.y}}px; color: {{lb.c}}; font-size: {{lb.size}}px; font-weight: {{lb.w}}; font-family: {{lb.font}}; white-space: nowrap;">{{lb.text}}</span>
+      </sc-for>
+      <!-- boxes -->
+      <sc-for list="{{scene.boxes}}" as="b" hint-placeholder-count="5">
+        <button style="position: absolute; left: {{b.x}}px; top: {{b.y}}px; width: {{b.w}}px; min-height: {{b.h}}px; box-sizing: border-box; padding: 0; border: none; border-radius: {{b.r}}; text-align: {{b.align}}; background: {{b.bg}}; box-shadow: 0 0 0 {{b.ringW}} {{b.ring}}; outline: {{b.outline}}; outline-offset: 3px; display: flex; flex-direction: column; justify-content: {{b.justify}}; overflow: hidden; opacity: {{b.op}};">
+          <span style="padding: {{b.pad}}; display: flex; flex-direction: column; gap: 3px; width: 100%; box-sizing: border-box;">
+            <span style="font-weight: 600; font-family: {{b.titleFont}}; font-size: {{b.titleSize}}px;">{{b.title}}</span>
+            <sc-if value="{{b.sub}}" hint-placeholder-val="{{false}}"><span style="font-size: 11px; color: {{b.subC}}; font-weight: {{b.subW}};">{{b.sub}}</span></sc-if>
+          </span>
+          <sc-for list="{{b.rows}}" as="r" hint-placeholder-count="0">
+            <span style="display: block; width: 100%; box-sizing: border-box; padding: 4px 12px; border-top: 1px solid {{r.sep}}; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: {{r.c}}; font-weight: {{r.w}}; text-align: left;">{{r.text}}</span>
+          </sc-for>
+        </button>
+      </sc-for>
+
+      <!-- legend -->
+      <div style="position: absolute; left: 20px; bottom: 16px; display: flex; gap: 16px; padding: 8px 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-size: 12px; color: {{t.muted}};">
+        <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 12px; height: 12px; border-radius: 3px; background: {{t.greenSoft}}; box-shadow: 0 0 0 1.5px {{t.green}};"></span>Changed</span>
+        <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 12px; height: 12px; border-radius: 3px; outline: 1.5px dashed {{t.green}};"></span>New</span>
+        <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 12px; height: 12px; border-radius: 3px; background: {{t.orangeSoft}}; box-shadow: 0 0 0 1.5px {{t.orange}};"></span>Risk</span>
+        <span style="display: flex; align-items: center; gap: 6px;"><span style="width: 12px; height: 12px; border-radius: 3px; box-shadow: 0 0 0 1px {{t.line}};"></span>Unchanged</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div style="height: 48px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 12px 0 20px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+    <span style="display: flex; align-items: center; gap: 8px; color: {{t.muted}};"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Claude Code · session active</span>
+    <span style="color: {{t.faint}};">Draft saved · 3 items</span>
+    <div style="flex: 1;"></div>
+    <a href="Finalize.dc.html" style="height: 34px; padding: 0 16px; border-radius: 6px; display: flex; align-items: center; text-decoration: none; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Finalize review</a>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"view":{"editor":"enum","options":["flow","deps","sequence","er","usecase","dataflow","states","classes"],"default":"flow"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { view: null };
+  }
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.10)', orangeSoft: 'rgba(217,87,43,0.10)', dot: '#DDE2DD', edge: '#A4ACA6', sel: '#E9F6EB' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.12)', orangeSoft: 'rgba(240,122,74,0.12)', dot: '#2A302C', edge: '#59625B', sel: 'rgba(76,195,95,0.12)' };
+    const t = dark ? D : L;
+    const view = this.state.view ?? this.props.view ?? 'flow';
+    const mono = "'JetBrains Mono', monospace";
+    const sans = 'Inter, sans-serif';
+
+    // ---- scene primitives -------------------------------------------------
+    const H = (x, y, w, c, op) => ({ x, y, w, h: 2, c: c || t.edge, op: op ?? 1 });
+    const V = (x, y, h, c, op) => ({ x, y, w: 2, h, c: c || t.edge, op: op ?? 1 });
+    const solid = (c) => '8px solid ' + c;
+    const side = '5px solid transparent';
+    const arrow = (x, y, dir, c) => {
+      const col = c || t.edge;
+      if (dir === 'right') return { x, y, bl: solid(col), br: '0', bt: side, bb: side };
+      if (dir === 'left') return { x, y, bl: '0', br: solid(col), bt: side, bb: side };
+      if (dir === 'down') return { x, y, bl: side, br: side, bt: solid(col), bb: '0' };
+      return { x, y, bl: side, br: side, bt: '0', bb: solid(col) };
+    };
+    const lab = (x, y, text, c, opts) => ({ x, y, text, c: c || t.faint, size: (opts && opts.size) || 11, w: (opts && opts.w) || 400, font: (opts && opts.mono) ? mono : sans });
+    const STYLE = {
+      plain: { bg: t.bg, ring: t.line, ringW: '1px', outline: 'none' },
+      changed: { bg: t.greenSoft, ring: t.green, ringW: '1.5px', outline: 'none' },
+      added: { bg: t.bg, ring: t.green, ringW: '1.5px', outline: '1.5px dashed ' + t.green },
+      risk: { bg: t.orangeSoft, ring: t.orange, ringW: '1.5px', outline: 'none' },
+      store: { bg: t.chrome, ring: t.line, ringW: '1px', outline: 'none' },
+      actor: { bg: t.surface, ring: t.edge, ringW: '1px', outline: 'none' },
+    };
+    const box = (x, y, w, h, title, sub, kind, opts) => {
+      const s = STYLE[kind || 'plain'];
+      const o = opts || {};
+      return {
+        x, y, w, h, title, sub: sub || '', ...s,
+        r: o.r || '8px', align: o.center ? 'center' : 'left', justify: o.center ? 'center' : 'flex-start',
+        pad: o.pad || '10px 12px', titleFont: o.mono ? mono : sans, titleSize: o.titleSize || 13,
+        subC: kind === 'risk' ? t.orange : kind === 'changed' || kind === 'added' ? t.green : t.muted,
+        subW: kind === 'risk' || kind === 'changed' || kind === 'added' ? 600 : 400,
+        rows: o.rows || [], op: o.op ?? 1,
+      };
+    };
+    const row = (text, kind, sep) => ({ text, c: kind === 'new' ? t.green : kind === 'changed' ? t.green : kind === 'risk' ? t.orange : kind === 'key' ? t.fg : t.muted, w: kind === 'key' || kind === 'new' || kind === 'changed' ? 600 : 400, sep: sep === false ? 'transparent' : t.line });
+
+    // ---- the eight diagrams -----------------------------------------------
+    const scenes = {
+      flow: {
+        title: 'Token refresh flow', kind: 'Flow', hint: 'Click a box to comment on its code',
+        frames: [],
+        boxes: [
+          box(40, 108, 192, 88, 'HTTP client', 'client/http.rs'),
+          box(330, 108, 200, 88, 'TokenStore::refresh', '+9 −2 · 1 draft comment', 'changed'),
+          box(630, 108, 200, 88, 'OAuth token endpoint', 'github.com · external'),
+          box(330, 296, 200, 74, 'refresh_lock', 'Mutex<()> · new', 'added'),
+          box(630, 296, 200, 74, 'TokenStore::save', 'Risk: not atomic', 'risk'),
+        ],
+        lines: [H(232, 151, 96), H(532, 151, 96), V(429, 196, 96, t.green), V(729, 196, 96)],
+        arrows: [arrow(322, 147, 'right'), arrow(622, 147, 'right'), arrow(425, 286, 'down', t.green), arrow(725, 286, 'down')],
+        labels: [lab(248, 128, 'token()', t.faint, { mono: true }), lab(548, 128, 'exchange()', t.faint, { mono: true }), lab(440, 232, 'new', t.green)],
+      },
+      deps: {
+        title: 'Module dependencies', kind: 'Graph', hint: 'Arrows point to the module being used',
+        frames: [],
+        boxes: [
+          box(60, 80, 180, 60, 'cli', 'unchanged'),
+          box(420, 80, 200, 60, 'clusiad::handlers', 'unchanged'),
+          box(240, 240, 200, 70, 'auth', '+53 −13 · 3 files', 'changed'),
+          box(600, 240, 200, 70, 'client', '+28 −9 · retries', 'changed'),
+          box(240, 420, 200, 60, 'config', '+6 · token margin', 'changed'),
+          box(600, 420, 200, 60, 'tracing', 'external crate'),
+        ],
+        lines: [V(150, 140, 135), H(150, 275, 82), V(520, 140, 60), H(340, 200, 362), V(340, 200, 32), V(700, 200, 32), H(440, 275, 152, t.green), V(340, 310, 102), V(700, 310, 102)],
+        arrows: [arrow(232, 271, 'right'), arrow(336, 230, 'down'), arrow(696, 230, 'down'), arrow(592, 271, 'right', t.green), arrow(336, 410, 'down'), arrow(696, 410, 'down')],
+        labels: [lab(458, 252, 'new dependency', t.green, { w: 600 }), lab(352, 360, 'reads refresh margin'), lab(712, 360, 'logs requests')],
+      },
+      sequence: {
+        title: 'Refresh call, step by step', kind: 'Sequence', hint: 'Two requests arrive while the token is about to expire',
+        frames: [{ x: 424, y: 140, w: 14, h: 290, r: 2, border: '1.5px solid ' + t.green, bg: t.greenSoft }],
+        boxes: [
+          box(30, 64, 130, 40, 'Request A', '', 'actor', { center: true, pad: '10px 8px' }),
+          box(190, 64, 130, 40, 'Request B', '', 'actor', { center: true, pad: '10px 8px' }),
+          box(366, 64, 130, 40, 'TokenStore', '', 'changed', { center: true, pad: '10px 8px' }),
+          box(546, 64, 130, 40, 'refresh_lock', '', 'added', { center: true, pad: '10px 8px' }),
+          box(726, 64, 150, 40, 'OAuth endpoint', '', 'plain', { center: true, pad: '10px 8px' }),
+        ],
+        lines: [
+          V(95, 104, 340, t.line), V(255, 104, 340, t.line), V(430, 104, 340, t.line), V(610, 104, 340, t.line), V(800, 104, 340, t.line),
+          H(95, 150, 329), H(438, 185, 172, t.green), H(255, 220, 169), H(438, 255, 172, t.orange), H(438, 290, 362),
+          H(438, 325, 362, t.edge, 0.6), H(95, 360, 329, t.edge, 0.6), H(255, 405, 169, t.green),
+        ],
+        arrows: [arrow(416, 146, 'right'), arrow(602, 181, 'right', t.green), arrow(416, 216, 'right'), arrow(602, 251, 'right', t.orange), arrow(792, 286, 'right'), arrow(438, 321, 'left'), arrow(95, 356, 'left'), arrow(255, 401, 'left', t.green)],
+        labels: [
+          lab(180, 132, 'token()', t.muted, { mono: true }), lab(470, 167, 'lock()', t.green, { mono: true }), lab(300, 202, 'token()', t.muted, { mono: true }),
+          lab(458, 237, 'lock() · waits for A', t.orange, { mono: true }), lab(560, 272, 'exchange(refresh)', t.muted, { mono: true }),
+          lab(560, 307, 'new token', t.faint, { mono: true }), lab(190, 342, 'Ok(token)', t.faint, { mono: true }),
+          lab(272, 387, 'Ok(same token) · no second exchange', t.green, { mono: true, w: 600 }),
+        ],
+      },
+      er: {
+        title: 'Token data model', kind: 'Entity–relationship', hint: 'What is stored and how it relates',
+        frames: [],
+        boxes: [
+          box(40, 80, 220, 40, 'Account', '', 'plain', { pad: '9px 12px', rows: [row('id  PK', 'key'), row('login'), row('host')] }),
+          box(370, 80, 250, 40, 'Token', 'changed', 'changed', { pad: '9px 12px', rows: [row('id  PK', 'key'), row('access_token'), row('refresh_token'), row('expires_at'), row('account_id  FK', 'key'), row('refreshed_at  · new', 'new')] }),
+          box(730, 80, 230, 40, 'RefreshAttempt', 'new table', 'added', { pad: '9px 12px', rows: [row('id  PK', 'key'), row('token_id  FK', 'key'), row('started_at'), row('outcome')] }),
+          box(370, 400, 250, 40, 'TokenFile', 'risk: permissions', 'risk', { pad: '9px 12px', rows: [row('path'), row('mode  0644 → 0600', 'risk'), row('written_at')] }),
+        ],
+        lines: [H(260, 140, 110), H(620, 140, 110, t.green), V(495, 262, 138)],
+        arrows: [],
+        labels: [lab(268, 120, '1', t.muted, { w: 600 }), lab(346, 120, '0..N', t.muted, { w: 600 }), lab(628, 120, '1', t.green, { w: 600 }), lab(700, 120, '0..N', t.green, { w: 600 }), lab(505, 268, '1', t.muted, { w: 600 }), lab(505, 380, '1', t.muted, { w: 600 }), lab(282, 150, 'has'), lab(645, 150, 'records'), lab(505, 322, 'saved as')],
+      },
+      usecase: {
+        title: 'What people can do', kind: 'Use cases', hint: 'Actors on the sides, Clúsia in the middle',
+        frames: [{ x: 300, y: 60, w: 450, h: 430, r: 12, border: '1.5px solid ' + t.line, bg: 'transparent' }],
+        boxes: [
+          box(60, 150, 140, 54, '«actor»  Reviewer', '', 'actor', { center: true, r: '27px' }),
+          box(850, 190, 150, 54, '«actor»  Agent', 'Claude Code', 'actor', { center: true, r: '27px' }),
+          box(850, 280, 150, 54, '«system»  GitHub', '', 'actor', { center: true }),
+          box(320, 100, 190, 52, 'Open a review', '', 'plain', { center: true, r: '26px' }),
+          box(540, 100, 190, 52, "See what's new", '', 'plain', { center: true, r: '26px' }),
+          box(320, 190, 190, 52, 'Comment on code', '', 'plain', { center: true, r: '26px' }),
+          box(540, 190, 190, 52, 'Ask the agent', '', 'plain', { center: true, r: '26px' }),
+          box(320, 280, 190, 52, 'Publish the review', '', 'plain', { center: true, r: '26px' }),
+          box(540, 280, 190, 52, 'Keep the GitHub token fresh', 'this PR', 'changed', { center: true, r: '26px' }),
+          box(430, 380, 190, 52, 'Re-check after new commits', '', 'plain', { center: true, r: '26px' }),
+        ],
+        lines: [H(218, 126, 102), H(200, 176, 20), V(218, 126, 182), H(218, 216, 102), H(218, 306, 102), H(730, 216, 120), H(620, 406, 230), V(848, 334, 74), H(730, 306, 120)],
+        arrows: [],
+        labels: [lab(312, 70, 'Clúsia', t.muted, { w: 600, size: 12 })],
+      },
+      dataflow: {
+        title: 'Where the token goes', kind: 'Data flow', hint: 'Circles transform data, open boxes store it',
+        frames: [],
+        boxes: [
+          box(30, 230, 170, 60, 'API client', 'external', 'actor', { center: true }),
+          box(290, 190, 140, 140, '1  Refresh', 'margin 60 s', 'changed', { center: true, r: '50%' }),
+          box(560, 190, 140, 140, '2  Exchange', 'retries', 'changed', { center: true, r: '50%' }),
+          box(820, 230, 170, 60, 'GitHub OAuth', 'external', 'actor', { center: true }),
+          box(330, 440, 330, 44, 'D1  |  Token file', 'written atomically', 'store', { pad: '6px 12px' }),
+        ],
+        lines: [H(200, 255, 82), H(430, 255, 122), H(700, 248, 112), H(708, 278, 112, t.edge), V(630, 330, 102, t.green), V(360, 338, 102)],
+        arrows: [arrow(282, 251, 'right'), arrow(552, 251, 'right'), arrow(812, 244, 'right'), arrow(700, 274, 'left'), arrow(626, 432, 'down', t.green), arrow(356, 330, 'up')],
+        labels: [lab(210, 232, 'token request'), lab(448, 232, 'refresh token'), lab(714, 226, 'grant request'), lab(714, 288, 'access + refresh token'), lab(642, 380, 'write (temp file + rename)', t.green, { w: 600 }), lab(372, 380, 'read')],
+      },
+      states: {
+        title: 'Token life cycle', kind: 'States', hint: 'Each arrow is the event that moves the token on',
+        frames: [{ x: 36, y: 258, w: 18, h: 18, r: 9, border: '0', bg: t.fg }],
+        boxes: [
+          box(90, 240, 160, 56, 'Fresh', '', 'plain', { center: true, r: '28px' }),
+          box(330, 240, 170, 56, 'Expiring', 'within 60 s · new', 'added', { center: true, r: '28px' }),
+          box(580, 240, 170, 56, 'Refreshing', 'one caller, others wait', 'changed', { center: true, r: '28px' }),
+          box(580, 420, 170, 56, 'Failed', 'retries: max 3', 'risk', { center: true, r: '28px' }),
+        ],
+        lines: [H(54, 266, 30), H(250, 266, 72), H(500, 266, 72), V(664, 170, 70), H(170, 170, 496), V(170, 170, 62), V(664, 296, 116, t.orange), H(414, 446, 166, t.orange), V(414, 304, 144, t.orange)],
+        arrows: [arrow(82, 262, 'right'), arrow(322, 262, 'right'), arrow(572, 262, 'right'), arrow(166, 232, 'down'), arrow(660, 412, 'down', t.orange), arrow(410, 296, 'up', t.orange)],
+        labels: [lab(258, 246, 'time passes'), lab(508, 246, 'first caller locks'), lab(330, 150, 'new token saved', t.muted), lab(676, 350, 'exchange failed', t.orange), lab(426, 454, 'retry', t.orange)],
+      },
+      classes: {
+        title: 'Types involved', kind: 'Classes', hint: 'Fields on top, methods below',
+        frames: [],
+        boxes: [
+          box(30, 90, 230, 40, 'Token', '', 'plain', { mono: true, pad: '9px 12px', rows: [row('access: String'), row('refresh: String', '', true), row('expires_at: Instant', '', false), row('is_fresh(margin) · new', 'new')] }),
+          box(350, 70, 300, 40, 'TokenStore', '', 'changed', { mono: true, pad: '9px 12px', rows: [row('path: PathBuf'), row('client: HttpClient · new', 'new', false), row('refresh_lock: Mutex<()> · new', 'new', false), row('token() -> Token'), row('refresh() · changed', 'changed', false), row('save(&Token) · changed', 'changed', false), row('load() -> Token', '', false)] }),
+          box(740, 90, 240, 40, 'HttpClient', '', 'changed', { mono: true, pad: '9px 12px', rows: [row('base: Url'), row('retries: u8 · new', 'new', false), row('exchange(&str) · changed', 'changed'), row('send(&Request)', '', false)] }),
+        ],
+        lines: [H(260, 150, 90), H(650, 150, 90)],
+        arrows: [arrow(260, 146, 'left'), arrow(732, 146, 'right')],
+        labels: [lab(280, 130, 'returns'), lab(664, 130, 'owns 1')],
+      },
+    };
+    const names = {
+      flow: ['Token refresh flow', 'Flow · 5 boxes'],
+      deps: ['Module dependencies', 'Graph · 6 modules'],
+      sequence: ['Refresh call, step by step', 'Sequence · 8 messages'],
+      er: ['Token data model', 'Entity–relationship · 4'],
+      usecase: ['What people can do', 'Use cases · 7'],
+      dataflow: ['Where the token goes', 'Data flow · 2 processes'],
+      states: ['Token life cycle', 'States · 4'],
+      classes: ['Types involved', 'Classes · 3'],
+    };
+    const tab = (label, on, href) => ({ label, href: href || '', fg: on ? t.fg : t.muted, w: on ? 600 : 400, bar: on ? t.green : 'transparent' });
+    return {
+      t,
+      scene: scenes[view] || scenes.flow,
+      sections: [tab('Diagrams', true), tab('Security', false, 'Security.dc.html'), tab('Diff', false, 'Review.dc.html'), tab('Audits', false, 'Audits.dc.html'), tab('Comments', false, 'Comments.dc.html'), tab('Tests', false, 'Tests.dc.html')],
+      diagrams: Object.keys(names).map((k) => ({
+        name: names[k][0], meta: names[k][1],
+        bg: k === view ? t.sel : 'transparent', fg: k === view ? t.fg : t.muted, w: k === view ? 600 : 400,
+        pick: () => this.setState({ view: k }),
+      })),
+    };
+  }
+}
+</script>
+</body>
+</html>

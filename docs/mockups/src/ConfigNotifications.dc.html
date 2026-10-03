@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Config notifications</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+input,select{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-weight: 600;">Config</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <nav aria-label="Config sections" style="width: 220px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 20px 12px; border-right: 1px solid {{t.line}};">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="{{n.href}}" style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; text-decoration: none; background: {{n.bg}}; color: {{n.fg}}; font-weight: {{n.w}};">{{n.label}}<sc-if value="{{n.later}}" hint-placeholder-val="{{false}}"><span style="margin-left: auto; font-size: 11px; color: {{t.faint}};">{{n.later}}</span></sc-if></a>
+      </sc-for>
+    </nav>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 18px; padding: 24px 40px; overflow: hidden;">
+      <div style="display: flex; align-items: flex-end; gap: 16px;">
+        <div style="display: flex; flex-direction: column; gap: 4px; flex: 1;">
+          <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Notifications</h2>
+          <span style="color: {{t.muted}};">What reaches you, and where. The tray dot always shows the total.</span>
+        </div>
+        <button style="height: 30px; padding: 0 12px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">Send a test notification</button>
+      </div>
+      <div style="border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; overflow: hidden; width: 940px;">
+        <div style="display: grid; grid-template-columns: 1fr 90px 90px 90px; padding: 9px 14px; border-bottom: 1px solid {{t.line}}; color: {{t.faint}}; font-size: 12px; font-weight: 600;">
+          <span>Event</span><span style="text-align: center;">Tray</span><span style="text-align: center;">macOS</span><span style="text-align: center;">Sound</span>
+        </div>
+        <sc-for list="{{events}}" as="ev" hint-placeholder-count="7">
+          <div style="display: grid; grid-template-columns: 1fr 90px 90px 90px; align-items: center; padding: 9px 14px; border-bottom: 1px solid {{t.line}};">
+            <span style="display: flex; flex-direction: column; gap: 2px;"><span style="font-weight: 500;">{{ev.name}}</span><span style="color: {{t.faint}}; font-size: 12px;">{{ev.hint}}</span></span>
+            <span style="text-align: center;"><input type="checkbox" aria-label="Tray" checked="{{ev.tray}}" style="accent-color: {{t.green}};"></span>
+            <span style="text-align: center;"><input type="checkbox" aria-label="macOS" checked="{{ev.mac}}" style="accent-color: {{t.green}};"></span>
+            <span style="text-align: center;"><input type="checkbox" aria-label="Sound" checked="{{ev.sound}}" style="accent-color: {{t.green}};"></span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; width: 940px;">
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <label for="n-sound" style="width: 170px; color: {{t.muted}};">Sound</label>
+          <select id="n-sound" style="height: 32px; width: 180px; padding: 0 8px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><option>Leaf (Clúsia)</option><option>Glass</option><option>Pop</option><option>Tink</option></select>
+          <button aria-label="Play the sound" style="height: 32px; width: 32px; border: none; border-radius: 6px; background: {{t.chrome}};">▶</button>
+        </div>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <span style="width: 170px; color: {{t.muted}};">Do not disturb</span>
+          <input type="checkbox" checked="{{yes}}" style="margin: 0; accent-color: {{t.green}};">
+          <span>from</span>
+          <input value="19:00" aria-label="From" style="width: 64px; height: 30px; padding: 0 8px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-variant-numeric: tabular-nums;">
+          <span>to</span>
+          <input value="09:00" aria-label="To" style="width: 64px; height: 30px; padding: 0 8px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-variant-numeric: tabular-nums;">
+          <div role="group" aria-label="Days" style="display: flex; gap: 4px;">
+            <sc-for list="{{days}}" as="d" hint-placeholder-count="7">
+              <span style="width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 13px; font-size: 12px; background: {{d.bg}}; color: {{d.fg}}; font-weight: 600;">{{d.l}}</span>
+            </sc-for>
+          </div>
+        </div>
+        <label style="display: flex; align-items: center; gap: 16px;"><span style="width: 170px; color: {{t.muted}};">Follow macOS Focus</span><input type="checkbox" checked="{{yes}}" style="margin: 0; accent-color: {{t.green}};"><span style="color: {{t.faint}}; font-size: 12px;">Silent while a Focus is on; the tray still counts</span></label>
+        <label style="display: flex; align-items: center; gap: 16px;"><span style="width: 170px; color: {{t.muted}};">Group bursts</span><input type="checkbox" checked="{{yes}}" style="margin: 0; accent-color: {{t.green}};"><span style="color: {{t.faint}}; font-size: 12px;">Several events within 2 minutes become one notification</span></label>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <span style="width: 170px; color: {{t.muted}};">macOS permission</span>
+          <span style="display: flex; align-items: center; gap: 6px; color: {{t.green}};"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Allowed</span>
+          <a href="#" style="color: {{t.muted}}; font-size: 12px;">Open System Settings</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F' };
+    const t = dark ? D : L;
+    const NAV = [['Appearance', 'ConfigAppearance.dc.html'], ['Git server', 'ConfigGit.dc.html'], ['Repositories', 'ConfigRepos.dc.html'], ['Harness', 'ConfigHarness.dc.html'], ['Editor', 'ConfigEditor.dc.html'], ['Notifications', 'ConfigNotifications.dc.html'], ['Plugins & skills', 'ConfigPlugins.dc.html']];
+    const current = 'Notifications';
+    const ev = (name, hint, tray, mac, sound) => ({ name, hint, tray, mac, sound });
+    return {
+      t, yes: true,
+      nav: NAV.map(([label, href, later]) => ({ label, href, later, bg: label === current ? t.surface : 'transparent', fg: label === current ? t.fg : t.muted, w: label === current ? 600 : 400 })),
+      events: [
+        ev('Review requested from you', 'Someone added you as a reviewer', true, true, true),
+        ev('New commits on a PR you reviewed', 'Your review may be out of date', true, true, false),
+        ev('Reply to your comment', 'In a thread you started or joined', true, true, false),
+        ev('Mentioned', '@rzorzal in a PR or comment', true, true, true),
+        ev('Agent finished a review', 'Harness pre-review is ready to read', true, true, false),
+        ev('Checks failed on your PR', 'CI on pull requests you opened', true, false, false),
+        ev('Sync problem', 'Token expired, offline, rate limit', true, true, false),
+      ],
+      days: ['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((l, i) => ({ l, bg: i < 5 ? t.green : t.chrome, fg: i < 5 ? t.onGreen : t.muted })),
+    };
+  }
+}
+</script>
+</body>
+</html>

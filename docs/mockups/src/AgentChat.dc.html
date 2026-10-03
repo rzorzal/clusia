@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Review with the agent</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+textarea{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{t.muted}};">#123</span><span style="font-weight: 600;">auth refresh</span></span>
+  </div>
+
+  <div style="flex: none; display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px;">
+    <span style="color: {{t.muted}};">rzorzal/clusia</span>
+    <span style="font-family: 'JetBrains Mono', monospace; color: {{t.muted}};">#123</span>
+    <span style="font-size: 17px; font-weight: 600;">feat: auth refresh</span>
+  </div>
+
+  <div style="flex: none; display: flex; gap: 4px; padding: 0 20px; border-bottom: 1px solid {{t.line}};">
+    <sc-for list="{{sections}}" as="s" hint-placeholder-count="6">
+      <a href="{{s.href}}" style="height: 36px; padding: 0 12px; display: flex; align-items: center; gap: 6px; text-decoration: none; color: {{s.fg}}; font-weight: {{s.w}}; box-shadow: inset 0 -2px 0 {{s.bar}};">{{s.label}}</a>
+    </sc-for>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <!-- Diff (narrowed) -->
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden;">
+      <div style="flex: none; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid {{t.line}};">
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500;">src/auth/refresh.rs</span>
+      </div>
+      <div style="flex: 1; overflow: hidden; background: {{t.surface}}; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 22px;">
+        <sc-for list="{{lines}}" as="l" hint-placeholder-count="12">
+          <div style="display: flex; background: {{l.bg}}; box-shadow: inset 2px 0 0 {{l.mark}};">
+            <span style="width: 44px; flex: none; text-align: right; padding-right: 10px; box-sizing: border-box; color: {{t.faint}};">{{l.n}}</span>
+            <span style="width: 16px; flex: none; color: {{l.signFg}};">{{l.sign}}</span>
+            <span style="white-space: pre;">{{l.code}}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <!-- Agent panel -->
+    <div style="width: 420px; flex: none; display: flex; flex-direction: column; border-left: 1px solid {{t.line}}; background: {{t.bg}};">
+      <div style="flex: none; display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid {{t.line}};">
+        <span style="width: 8px; height: 8px; border-radius: 4px; background: {{t.green}};"></span>
+        <span style="font-weight: 600;">Claude Code</span>
+        <span style="color: {{t.faint}}; font-size: 12px;">session resumed · knows this review</span>
+        <div style="flex: 1;"></div>
+        <button style="border: none; background: transparent; color: {{t.muted}}; font-size: 12px;">Stop</button>
+      </div>
+      <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; overflow: hidden;">
+        <div style="align-self: flex-end; max-width: 300px; padding: 9px 12px; border-radius: 10px 10px 2px 10px; background: {{t.greenSoft}}; line-height: 1.5;">Is the new lock needed at all, or would re-checking the expiry be enough?</div>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <sc-for list="{{tools}}" as="tl" hint-placeholder-count="2">
+            <span style="align-self: flex-start; display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 12px; background: {{t.chrome}}; color: {{t.muted}}; font-size: 12px;"><span style="color: {{t.green}};">✓</span>{{tl.label}}</span>
+          </sc-for>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 8px; line-height: 1.55;">
+          <span>The lock is needed: two requests that both see an expired token would otherwise exchange the same refresh token twice, and GitHub rejects the second one.</span>
+          <span>What's not needed is holding it during the network call. Re-check the expiry right after taking the lock; most callers will find a fresh token and leave at once.</span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1.5px {{t.green}};">
+          <span style="display: flex; align-items: center; gap: 8px;"><span style="height: 18px; padding: 0 7px; border-radius: 9px; display: flex; align-items: center; font-size: 11px; font-weight: 600; background: {{t.greenSoft}}; color: {{t.green}};">Suggested comment</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: {{t.muted}};">refresh.rs:44</span></span>
+          <span style="line-height: 1.5;">Re-check <code style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">expires_at</code> after taking the lock, so callers that waited reuse the token the first one fetched.</span>
+          <div style="display: flex; gap: 8px;">
+            <button style="height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600; font-size: 12px;">Accept into draft</button>
+            <button style="height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-size: 12px;">Edit</button>
+            <button style="height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: transparent; color: {{t.muted}}; font-size: 12px;">Dismiss</button>
+          </div>
+        </div>
+      </div>
+      <div style="flex: none; display: flex; flex-direction: column; gap: 8px; padding: 12px 16px 14px; border-top: 1px solid {{t.line}};">
+        <div style="display: flex; align-items: flex-end; gap: 8px; padding: 8px 8px 8px 12px; border-radius: 8px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+          <textarea aria-label="Message the agent" rows="2" placeholder="Ask about this pull request, or paste a diagram request…" style="flex: 1; resize: none; border: none; outline: none; background: transparent; line-height: 1.5;"></textarea>
+          <button aria-label="Send" style="width: 32px; height: 32px; border: none; border-radius: 6px; background: {{t.green}}; color: {{t.onGreen}}; display: flex; align-items: center; justify-content: center;"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 12V2M3 6l4-4 4 4"></path></svg></button>
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px; color: {{t.faint}}; font-size: 12px;">
+          <span>Draft · 4 items · 1 suggestion waiting</span>
+          <div style="flex: 1;"></div>
+          <span>Can read the worktree · asks before running commands</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 48px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 12px 0 20px; border-top: 1px solid {{t.line}}; background: {{t.chrome}};">
+    <span style="display: flex; align-items: center; gap: 8px; color: {{t.muted}};"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Claude Code · thinking…</span>
+    <span style="color: {{t.faint}};">Draft saved · 4 items</span>
+    <div style="flex: 1;"></div>
+    <a href="Finalize.dc.html" style="height: 34px; padding: 0 16px; border-radius: 6px; display: flex; align-items: center; text-decoration: none; background: {{t.green}}; color: {{t.onGreen}}; font-weight: 600;">Finalize review</a>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', onGreen: '#FFFFFF', orange: '#D9572B', greenSoft: 'rgba(47,158,68,0.12)', addBg: '#E9F6EB', delBg: '#FCEEE8' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', onGreen: '#0C1A0F', orange: '#F07A4A', greenSoft: 'rgba(76,195,95,0.14)', addBg: 'rgba(76,195,95,0.12)', delBg: 'rgba(240,122,74,0.12)' };
+    const t = dark ? D : L;
+    const tab = (label, on, href) => ({ label, href: href || '', fg: on ? t.fg : t.muted, w: on ? 600 : 400, bar: on ? t.green : 'transparent' });
+    const l = (n, code, kind, mark) => ({ n, code, sign: kind === 'add' ? '+' : kind === 'del' ? '−' : '', bg: kind === 'add' ? t.addBg : kind === 'del' ? t.delBg : 'transparent', signFg: kind === 'add' ? t.green : t.orange, mark: mark ? t.green : 'transparent' });
+    return {
+      t,
+      sections: [tab('Diagrams', false, 'Diagrams.dc.html'), tab('Security', false, 'Security.dc.html'), tab('Diff', true, 'Review.dc.html'), tab('Audits', false, 'Audits.dc.html'), tab('Comments', false, 'Comments.dc.html'), tab('Tests', false, 'Tests.dc.html')],
+      lines: [
+        l(38, 'pub async fn refresh(&self) -> Result<Token, AuthError> {'),
+        l(39, '    let token = self.load().await?;', 'add'),
+        l(40, '    // Refresh one minute early.', 'add'),
+        l(41, '    if token.expires_at > now() + Duration::from_secs(60) {', 'add'),
+        l(42, '        return Ok(token);'),
+        l(43, '    }'),
+        l(44, '    let _guard = self.refresh_lock.lock().await;', 'add', true),
+        l(45, '    let fresh = self.client.exchange(&token.refresh).await?;', '', true),
+        l(46, '    self.save(&fresh)?;', '', true),
+        l(47, '    Ok(fresh)'),
+        l(48, '}'),
+      ],
+      tools: [{ label: 'Read src/auth/store.rs and client/http.rs' }, { label: 'Searched for refresh_lock · 3 uses' }],
+    };
+  }
+}
+</script>
+</body>
+</html>

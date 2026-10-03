@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Clúsia Config</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:inherit}a:hover{opacity:.8}
+button{font:inherit;color:inherit;cursor:pointer}
+input{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.bg}}; color: {{t.fg}}; font-family: Inter, -apple-system, system-ui, sans-serif; font-size: 13px; border-radius: 10px; overflow: hidden; border: 1px solid {{t.line}};">
+
+  <!-- Title bar -->
+  <div style="height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; background: {{t.chrome}}; border-bottom: 1px solid {{t.line}};">
+    <div style="display: flex; gap: 8px; margin-right: 14px;">
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #ff5f57;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #febc2e;"></span>
+      <span style="width: 12px; height: 12px; border-radius: 6px; background: #28c840;"></span>
+    </div>
+    <a href="Main.dc.html" style="height: 30px; display: flex; align-items: center; padding: 0 12px; text-decoration: none; color: {{t.muted}};">Home</a>
+    <span style="height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-weight: 600;">Config</span>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex;">
+    <!-- Section nav -->
+    <nav aria-label="Config sections" style="width: 220px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 20px 12px; border-right: 1px solid {{t.line}};">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="#" style="display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; text-decoration: none; background: {{n.bg}}; color: {{n.fg}}; font-weight: {{n.w}};">{{n.label}}<sc-if value="{{n.later}}" hint-placeholder-val="{{false}}"><span style="margin-left: auto; font-size: 11px; color: {{t.faint}};">{{n.later}}</span></sc-if></a>
+      </sc-for>
+    </nav>
+
+    <!-- Content -->
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 22px; padding: 24px 40px; overflow: hidden;">
+      <section style="display: flex; flex-direction: column; gap: 10px;">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Appearance</h2>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <span style="width: 160px; color: {{t.muted}};">Theme</span>
+          <div role="radiogroup" aria-label="Theme" style="display: flex; padding: 3px; gap: 3px; border-radius: 8px; background: {{t.chrome}};">
+            <sc-for list="{{themes}}" as="th" hint-placeholder-count="3">
+              <button role="radio" aria-checked="{{th.on}}" style="height: 28px; padding: 0 14px; border: none; border-radius: 6px; background: {{th.bg}}; box-shadow: {{th.shadow}}; font-weight: {{th.w}};">{{th.label}}</button>
+            </sc-for>
+          </div>
+          <span style="color: {{t.faint}};">Follows macOS, including Auto.</span>
+        </div>
+      </section>
+
+      <section style="display: flex; flex-direction: column; gap: 12px; padding-top: 18px; border-top: 1px solid {{t.line}};">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Git server</h2>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <label for="cfg-host" style="width: 160px; color: {{t.muted}};">GitHub host</label>
+          <input id="cfg-host" value="github.com" style="width: 280px; height: 32px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+          <span style="color: {{t.faint}};">Use your Enterprise address if you have one.</span>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 16px;">
+          <span style="width: 160px; color: {{t.muted}}; padding-top: 10px;">Sign in with</span>
+          <div style="display: flex; flex-direction: column; gap: 8px; width: 520px;">
+            <label style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 6px; background: {{t.greenSoft}}; box-shadow: 0 0 0 1.5px {{t.green}};">
+              <input type="radio" name="auth" checked="{{yes}}" style="margin: 0; accent-color: {{t.green}};">
+              <span style="display: flex; flex-direction: column; gap: 2px; flex: 1;"><span style="font-weight: 600;">GitHub CLI (gh)</span><span style="color: {{t.muted}}; font-size: 12px;">Signed in as @rzorzal · scopes repo, read:org</span></span>
+              <span style="display: flex; align-items: center; gap: 6px; color: {{t.green}}; font-size: 12px; font-weight: 600;"><span style="width: 7px; height: 7px; border-radius: 4px; background: {{t.green}};"></span>Connected</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}};">
+              <input type="radio" name="auth" style="margin: 0; accent-color: {{t.green}};">
+              <span style="display: flex; flex-direction: column; gap: 2px; flex: 1;"><span style="font-weight: 600;">Personal access token</span><span style="color: {{t.muted}}; font-size: 12px;">Stored in the macOS Keychain, never shown again.</span></span>
+            </label>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <label for="cfg-poll" style="width: 160px; color: {{t.muted}};">Check for updates every</label>
+          <input id="cfg-poll" value="60" style="width: 64px; height: 32px; padding: 0 10px; border: none; border-radius: 6px; background: {{t.surface}}; box-shadow: 0 0 0 1px {{t.line}}; font-variant-numeric: tabular-nums;">
+          <span style="color: {{t.muted}};">seconds</span>
+        </div>
+      </section>
+
+      <section style="display: flex; flex-direction: column; gap: 12px; padding-top: 18px; border-top: 1px solid {{t.line}};">
+        <h2 style="margin: 0; font-size: 15px; font-weight: 600;">Editor</h2>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <span style="width: 160px; color: {{t.muted}};">Open files in</span>
+          <div role="radiogroup" aria-label="Editor" style="display: flex; padding: 3px; gap: 3px; border-radius: 8px; background: {{t.chrome}};">
+            <sc-for list="{{editors}}" as="e" hint-placeholder-count="4">
+              <button role="radio" aria-checked="{{e.on}}" style="height: 28px; padding: 0 14px; border: none; border-radius: 6px; background: {{e.bg}}; box-shadow: {{e.shadow}}; font-weight: {{e.w}};">{{e.label}}</button>
+            </sc-for>
+          </div>
+        </div>
+      </section>
+
+      <section style="display: flex; flex-direction: column; gap: 10px; padding-top: 18px; border-top: 1px solid {{t.line}};">
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <h2 style="margin: 0; font-size: 15px; font-weight: 600; flex: 1;">Notifications</h2>
+          <label style="display: flex; align-items: center; gap: 8px; color: {{t.muted}};"><input type="checkbox" style="margin: 0; accent-color: {{t.green}};">Do not disturb</label>
+        </div>
+        <div style="display: grid; grid-template-columns: minmax(0, 1fr) 90px 90px 90px; row-gap: 2px; width: 680px;">
+          <span style="color: {{t.faint}}; font-size: 12px; padding: 4px 0;">When</span>
+          <span style="color: {{t.faint}}; font-size: 12px; padding: 4px 0; text-align: center;">Tray dot</span>
+          <span style="color: {{t.faint}}; font-size: 12px; padding: 4px 0; text-align: center;">macOS</span>
+          <span style="color: {{t.faint}}; font-size: 12px; padding: 4px 0; text-align: center;">Sound</span>
+          <sc-for list="{{events}}" as="ev" hint-placeholder-count="4">
+            <span style="padding: 7px 0; border-top: 1px solid {{t.line}};">{{ev.label}}</span>
+            <span style="padding: 7px 0; border-top: 1px solid {{t.line}}; display: flex; justify-content: center;"><input type="checkbox" checked="{{ev.tray}}" aria-label="Tray dot" style="margin: 0; accent-color: {{t.green}};"></span>
+            <span style="padding: 7px 0; border-top: 1px solid {{t.line}}; display: flex; justify-content: center;"><input type="checkbox" checked="{{ev.mac}}" aria-label="macOS notification" style="margin: 0; accent-color: {{t.green}};"></span>
+            <span style="padding: 7px 0; border-top: 1px solid {{t.line}}; display: flex; justify-content: center;"><input type="checkbox" checked="{{ev.sound}}" aria-label="Sound" style="margin: 0; accent-color: {{t.green}};"></span>
+          </sc-for>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const L = { bg: '#F6F7F5', chrome: '#EEF1EE', surface: '#FFFFFF', line: '#E2E6E2', fg: '#1B1F1C', muted: '#5D665F', faint: '#8A938C', green: '#2F9E44', greenSoft: 'rgba(47,158,68,0.10)', seg: '#FFFFFF', segShadow: '0 1px 2px rgba(20,30,22,0.12)' };
+    const D = { bg: '#121514', chrome: '#181C1A', surface: '#1A1E1C', line: '#2A302C', fg: '#E9ECE9', muted: '#9AA49C', faint: '#6B746D', green: '#4CC35F', greenSoft: 'rgba(76,195,95,0.12)', seg: '#2A302C', segShadow: '0 1px 2px rgba(0,0,0,0.4)' };
+    const t = dark ? D : L;
+    const seg = (label, on) => ({ label, on: on ? 'true' : 'false', bg: on ? t.seg : 'transparent', shadow: on ? t.segShadow : 'none', w: on ? 600 : 400 });
+    const nav = (label, on, later) => ({ label, later, bg: on ? t.surface : 'transparent', fg: on ? t.fg : t.muted, w: on ? 600 : 400 });
+    return {
+      t, yes: true,
+      nav: [nav('Appearance', true), nav('Git server', false), nav('Repositories', false), nav('Harness', false, 'SP2'), nav('Editor', false), nav('Notifications', false), nav('Plugins & skills', false, 'later')],
+      themes: [seg('Light', false), seg('Dark', false), seg('System', true)],
+      editors: [seg('Zed', false), seg('VS Code', true), seg('Cursor', false), seg('Custom', false)],
+      events: [
+        { label: 'Someone asks for your review', tray: true, mac: true, sound: true },
+        { label: 'New commits on a PR you reviewed', tray: true, mac: false, sound: false },
+        { label: 'A saved review went out of date', tray: true, mac: true, sound: false },
+        { label: 'Checks changed', tray: true, mac: false, sound: false },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>
