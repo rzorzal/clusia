@@ -300,12 +300,14 @@ name = "clusiad"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clusia-analytics",
  "clusia-core",
  "clusia-git",
  "clusia-platform",
  "clusia-protocol",
  "clusia-provider",
  "clusia-store",
+ "libc",
  "serde_json",
  "tempfile",
  "thiserror",
