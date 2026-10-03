@@ -19,7 +19,10 @@ pub enum PrRefError {
 }
 
 fn valid_owner(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 39 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !s.is_empty()
+        && s.len() <= 39
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn valid_repo(s: &str) -> bool {
@@ -54,9 +57,19 @@ impl PrRef {
         format!("{}/{}", self.owner, self.repo)
     }
 
-    /// File-system key `owner__repo__number`. Unambiguous because GitHub owners cannot contain `_`.
+    /// File-system key `owner~repo~number`. `~` cannot appear in owners or repo names.
     pub fn file_key(&self) -> String {
-        format!("{}__{}__{}", self.owner, self.repo, self.number)
+        format!("{}~{}~{}", self.owner, self.repo, self.number)
+    }
+
+    /// Inverse of [`PrRef::file_key`].
+    pub fn from_file_key(key: &str) -> Option<PrRef> {
+        let mut parts = key.split('~');
+        let (owner, repo, number) = (parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() {
+            return None;
+        }
+        PrRef::new(owner, repo, number.parse().ok()?).ok()
     }
 }
 
@@ -180,7 +193,6 @@ mod tests {
             "acme/widgets",
             "acme/widgets#0",
             "acme/widgets#x",
-            "ac_me/widgets#1",
             "acme/wid/gets#1",
             "acme/..#1",
             "https://github.com/acme/widgets/issues/7",
@@ -195,7 +207,22 @@ mod tests {
         let p = pr("acme/widgets#7");
         assert_eq!(p.to_string(), "acme/widgets#7");
         assert_eq!(p.slug(), "acme/widgets");
-        assert_eq!(p.file_key(), "acme__widgets__7");
+        assert_eq!(p.file_key(), "acme~widgets~7");
+    }
+
+    #[test]
+    fn owners_may_contain_underscores() {
+        assert_eq!(pr("octo_corp/widgets#3").owner, "octo_corp");
+    }
+
+    #[test]
+    fn file_key_round_trips() {
+        for s in ["acme/widgets#7", "octo_corp/my.repo-x#12"] {
+            let p = pr(s);
+            assert_eq!(PrRef::from_file_key(&p.file_key()), Some(p));
+        }
+        assert_eq!(PrRef::from_file_key("acme__widgets__7"), None);
+        assert_eq!(PrRef::from_file_key("a~b~0"), None);
     }
 
     #[test]

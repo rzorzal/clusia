@@ -599,7 +599,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/search/issues"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
-                json!({ "items": [issue(7, "acme/widgets"), issue(8, "bad_owner/widgets")] }),
+                json!({ "items": [issue(7, "acme/widgets"), issue(8, "bad.owner/widgets")] }),
             ))
             .mount(&server)
             .await;

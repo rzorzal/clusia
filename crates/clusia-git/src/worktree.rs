@@ -274,7 +274,7 @@ mod tests {
     async fn ensure_worktree_creates_detached_and_leaves_user_tree() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         assert!(wt.join("feature.txt").exists());
         assert_eq!(sh(&wt, &["rev-parse", "HEAD"]), sha);
@@ -292,7 +292,7 @@ mod tests {
     async fn ensure_worktree_moves_to_new_sha_and_keeps_clusia_dir() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         std::fs::create_dir_all(wt.join(".clusia")).unwrap();
         std::fs::write(wt.join(".clusia/review.md"), "notes\n").unwrap();
@@ -345,7 +345,7 @@ mod tests {
     async fn ensure_worktree_recreates_when_repo_changes() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         std::fs::create_dir_all(wt.join(".clusia")).unwrap();
         std::fs::write(wt.join(".clusia/review.md"), "notes\n").unwrap();
@@ -375,7 +375,7 @@ mod tests {
     async fn ensure_worktree_recovers_from_deleted_owner() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         std::fs::create_dir_all(wt.join(".clusia")).unwrap();
         std::fs::write(wt.join(".clusia/review.md"), "notes\n").unwrap();
@@ -399,7 +399,7 @@ mod tests {
     async fn remove_worktree_cleans_up() {
         let f = fixture();
         let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
-        let wt = f.root.join("worktrees/acme__widgets__1");
+        let wt = f.root.join("worktrees/acme~widgets~1");
         ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
         remove_worktree(&f.clone, &wt).await.unwrap();
         assert!(!wt.exists());
