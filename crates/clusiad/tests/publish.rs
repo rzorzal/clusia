@@ -259,3 +259,81 @@ async fn reviewer_cannot_close() {
     );
     w.daemon.stop().await;
 }
+
+fn stored_review(w: &common::review_world::World) -> clusia_core::Review {
+    match clusia_store::load_review(&w.daemon.paths, &pr7()).unwrap() {
+        clusia_store::ReviewLoad::Found(r) => r,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn obsolete_comments_block_publishing() {
+    let w = world().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": 45, "html_url": REVIEW_URL })),
+        )
+        .expect(0)
+        .mount(&w.server)
+        .await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    let mut review = stored_review(&w);
+    for item in review.draft.items.iter_mut().take(2) {
+        item.status = clusia_core::ItemStatus::Obsolete {
+            reason: "the commented lines changed".into(),
+        };
+    }
+    clusia_store::save_review(&w.daemon.paths, &review).unwrap();
+
+    match c.request(publish(Verdict::Comment, "")).await {
+        Err(ClientError::Server(e)) => {
+            assert_eq!(e.code, ErrorCode::BadRequest);
+            assert_eq!(
+                e.message,
+                "2 comment(s) are obsolete; remove or re-add them before publishing"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let after = stored_review(&w);
+    assert_eq!(
+        (after.state, after.draft.items.len()),
+        (ReviewState::Active, 3)
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn publish_of_an_interrupted_publish_asks_to_reopen() {
+    let w = world().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": 46, "html_url": REVIEW_URL })),
+        )
+        .expect(0)
+        .mount(&w.server)
+        .await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    let mut review = stored_review(&w);
+    review.state = ReviewState::Publishing;
+    clusia_store::save_review(&w.daemon.paths, &review).unwrap();
+
+    match c.request(publish(Verdict::Comment, "")).await {
+        Err(ClientError::Server(e)) => {
+            assert_eq!(e.code, ErrorCode::InvalidState);
+            assert_eq!(
+                e.message,
+                "a publish is in progress or was interrupted; open the review again"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    w.daemon.stop().await;
+}

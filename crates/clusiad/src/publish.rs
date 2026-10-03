@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clusia_core::{
-    ActivityKind, PrRef, Review, ReviewEvent, ReviewState, Role, Verdict, plan_publish,
+    ActivityKind, ItemStatus, PrRef, Review, ReviewEvent, ReviewState, Role, Verdict, plan_publish,
 };
 use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, PublishResult, Reply};
@@ -66,10 +66,25 @@ pub(crate) async fn publish(
         Ok(r) => r,
         Err(out) => return out,
     };
+    if review.state == ReviewState::Publishing {
+        return invalid_state("a publish is in progress or was interrupted; open the review again");
+    }
     if review.state == ReviewState::Outdated {
         return conflict(
             "the pull request changed since you saved this review; open it again to check the moved comments",
         );
+    }
+    let obsolete = review
+        .draft
+        .items
+        .iter()
+        .filter(|i| matches!(i.status, ItemStatus::Obsolete { .. }))
+        .count();
+    if obsolete > 0 {
+        return Outcome::Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!("{obsolete} comment(s) are obsolete; remove or re-add them before publishing"),
+        ));
     }
     let detail = match gh.get_pr(pr).await {
         Ok(d) => d,
