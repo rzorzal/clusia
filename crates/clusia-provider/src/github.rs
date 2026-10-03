@@ -92,6 +92,18 @@ struct UserRef {
 
 const MAX_PAGES: usize = 30;
 
+/// Whether a pagination link points back into the API (same origin, under the API path).
+fn same_api(api: &reqwest::Url, next: &str) -> bool {
+    let Ok(next) = reqwest::Url::parse(next) else {
+        return false;
+    };
+    let prefix = format!("{}/", api.path().trim_end_matches('/'));
+    next.scheme() == api.scheme()
+        && next.host() == api.host()
+        && next.port_or_known_default() == api.port_or_known_default()
+        && next.path().starts_with(&prefix)
+}
+
 fn next_link(headers: &header::HeaderMap) -> Option<String> {
     headers
         .get(header::LINK)?
@@ -327,7 +339,8 @@ impl GitHub {
             let Some(next) = next_link(&headers) else {
                 break;
             };
-            if !next.starts_with(&self.api) {
+            let api = reqwest::Url::parse(&self.api).ok();
+            if !api.is_some_and(|api| same_api(&api, &next)) {
                 tracing::warn!(path, "ignoring pagination link to a different host");
                 break;
             }
@@ -1221,20 +1234,45 @@ mod tests {
     #[tokio::test]
     async fn foreign_next_link_is_not_followed() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/acme/widgets/pulls/7/files"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("link", "<http://evil.example/x?page=2>; rel=\"next\"")
-                    .set_body_json(json!([
-                        { "filename": "a.rs", "status": "modified", "additions": 1, "deletions": 1 }
-                    ])),
-            )
-            .mount(&server)
-            .await;
-        let files = gh(&server).get_files(&pr7()).await.unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        let base = server.uri();
+        let port = base.rsplit(':').next().unwrap().to_string();
+        for link in [
+            "http://evil.example/x?page=2".to_string(),
+            // String-prefix look-alikes of the API base.
+            format!("{base}.evil.example/x?page=2"),
+            format!("{base}@evil.example/x?page=2"),
+            format!("https://127.0.0.1:{port}/x?page=2"),
+        ] {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/acme/widgets/pulls/7/files"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("link", format!("<{link}>; rel=\"next\"").as_str())
+                        .set_body_json(json!([
+                            { "filename": "a.rs", "status": "modified", "additions": 1, "deletions": 1 }
+                        ])),
+                )
+                .mount(&server)
+                .await;
+            let files = gh(&server).get_files(&pr7()).await.unwrap();
+            assert_eq!(files.len(), 1, "{link}");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1, "{link}");
+        }
+    }
+
+    #[test]
+    fn same_api_requires_matching_origin_and_path() {
+        let api = reqwest::Url::parse("https://ghe.example/api/v3").unwrap();
+        let ok = |s: &str| same_api(&api, s);
+        assert!(ok("https://ghe.example/api/v3/repos/a/b/pulls?page=2"));
+        assert!(!ok("https://ghe.example/api/v30/repos?page=2"));
+        assert!(!ok("https://ghe.example/other?page=2"));
+        assert!(!ok("http://ghe.example/api/v3/repos?page=2"));
+        assert!(!ok("https://ghe.example:8443/api/v3/repos?page=2"));
+        assert!(!ok("https://ghe.example.evil.com/api/v3/repos?page=2"));
+        assert!(!ok("https://ghe.example@evil.example/api/v3/repos?page=2"));
+        assert!(!ok("not a url"));
     }
 
     fn payload() -> clusia_core::ReviewPayload {
