@@ -97,7 +97,14 @@ async fn discard_worktree(repo: &Path, path: &Path) -> Result<(), GitError> {
             .is_ok(),
         None => false,
     };
-    if !removed && tokio::fs::try_exists(path).await? {
+    if removed {
+        // `worktree remove` already dropped the registration; pruning would also touch the
+        // user's own stale entries.
+        return Ok(());
+    }
+    // Fallback: the registration could not be removed, so delete the directory by hand and
+    // let git forget the now-missing worktree.
+    if tokio::fs::try_exists(path).await? {
         tokio::fs::remove_dir_all(path).await?;
     }
     if let Some(old) = &old_repo {
@@ -144,12 +151,18 @@ async fn exclude_clusia_dir(worktree: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Removes Clúsia's worktree at `path` from `repo`. Never runs `git worktree prune`: that would
+/// also drop the user's own stale worktree entries. A registration whose directory is already
+/// gone is removed by path instead.
 pub async fn remove_worktree(repo: &Path, path: &Path) -> Result<(), GitError> {
+    let target = path.to_string_lossy();
     if path.exists() {
-        let target = path.to_string_lossy();
         git(repo, &["worktree", "remove", "--force", &target]).await?;
+    } else {
+        // Not registered at all is fine: there is nothing left to remove.
+        let _ = git(repo, &["worktree", "remove", "--force", &target]).await;
     }
-    git(repo, &["worktree", "prune"]).await.map(|_| ())
+    Ok(())
 }
 
 /// Blob-less clone used when the user has no local clone of the repository.
@@ -408,6 +421,40 @@ mod tests {
         assert!(!wt.exists());
         assert_eq!(sh(&f.clone, &["worktree", "list"]).lines().count(), 1);
         remove_worktree(&f.clone, &wt).await.unwrap(); // idempotent
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_leaves_the_users_other_worktrees_alone() {
+        let f = fixture();
+        let sha = fetch_pr(&f.clone, "origin", 1).await.unwrap();
+        // The user's own worktree whose directory they deleted: `git worktree prune` would drop it.
+        let theirs = f.root.join("their-wt");
+        sh(
+            &f.clone,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                theirs.to_str().unwrap(),
+            ],
+        );
+        std::fs::remove_dir_all(&theirs).unwrap();
+        let listed = |f: &Fixture| sh(&f.clone, &["worktree", "list"]);
+
+        let wt = f.root.join("worktrees/acme~widgets~1");
+        ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
+        remove_worktree(&f.clone, &wt).await.unwrap();
+        assert!(!wt.exists());
+        assert!(!listed(&f).contains("acme~widgets~1"), "{}", listed(&f));
+        assert!(listed(&f).contains("their-wt"), "{}", listed(&f));
+
+        // Our directory already gone (removed by hand): only our registration is dropped.
+        ensure_worktree(&f.clone, &wt, &sha).await.unwrap();
+        std::fs::remove_dir_all(&wt).unwrap();
+        remove_worktree(&f.clone, &wt).await.unwrap();
+        assert!(!listed(&f).contains("acme~widgets~1"), "{}", listed(&f));
+        assert!(listed(&f).contains("their-wt"), "{}", listed(&f));
     }
 
     #[tokio::test]
