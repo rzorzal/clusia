@@ -68,8 +68,12 @@ pub fn list_reviews(paths: &Paths) -> io::Result<Vec<Review>> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let ReviewLoad::Found(review) = load_file(&path)? {
-            reviews.push(review);
+        match load_file(&path) {
+            Ok(ReviewLoad::Found(review)) => reviews.push(review),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, file = %path.display(), "could not read review file; skipping")
+            }
         }
     }
     reviews.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
