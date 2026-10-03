@@ -71,6 +71,7 @@ fn online() -> SyncStatus {
         last_sync_unix: Some(1),
         next_sync_unix: None,
         message: None,
+        paused: false,
     }
 }
 

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Instant;
 
 use clusia_core::{Config, FileDiff, Paths, PrRef, PrSummary};
@@ -40,6 +40,8 @@ pub(crate) struct Shared {
     pub sync: RwLock<SyncStatus>,
     /// Wakes the sync loop early (e.g. after a new token is stored).
     pub sync_now: Notify,
+    /// Background syncing is paused (`PauseSync`). In memory only.
+    pub paused: AtomicBool,
     /// Reused while host and token are unchanged, so ETag caching survives between syncs.
     pub client: Mutex<Option<Arc<GitHub>>>,
     pub worktree_lock: Mutex<()>,
@@ -76,6 +78,7 @@ impl Shared {
             prs: RwLock::new(PrLists::default()),
             sync: RwLock::new(SyncStatus::default()),
             sync_now: Notify::new(),
+            paused: AtomicBool::new(false),
             client: Mutex::new(None),
             worktree_lock: Mutex::new(()),
             touched: std::sync::Mutex::new(HashSet::new()),

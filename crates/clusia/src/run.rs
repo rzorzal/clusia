@@ -403,6 +403,7 @@ mod tests {
             last_sync_unix: None,
             next_sync_unix: next,
             message: message.map(str::to_string),
+            paused: false,
         }
     }
 

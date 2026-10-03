@@ -27,8 +27,13 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             clients: shared.clients.load(Ordering::SeqCst),
             socket: shared.paths.socket().display().to_string(),
         })),
-        // Subscribing is tracked per connection; shutdown is triggered after the reply is sent.
-        Command::Shutdown | Command::Subscribe { .. } => Outcome::Ok(Reply::Ack),
+        // Shutdown is triggered after the reply is sent; clients hear `Stopping` first.
+        Command::Shutdown => {
+            shared.publish(topics::SYNC, Event::Stopping);
+            Outcome::Ok(Reply::Ack)
+        }
+        // Subscribing is tracked per connection.
+        Command::Subscribe { .. } => Outcome::Ok(Reply::Ack),
         Command::GetConfig => Outcome::Ok(Reply::Config(shared.config.read().await.clone())),
         Command::GetConfigValue { key } => match get_value(&*shared.config.read().await, &key) {
             Ok(value) => Outcome::Ok(Reply::Value(value)),
@@ -50,6 +55,8 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             Outcome::Ok(Reply::Sync(status))
         }
         Command::GetSyncStatus => Outcome::Ok(Reply::Sync(shared.sync.read().await.clone())),
+        Command::PauseSync => Outcome::Ok(Reply::Sync(sync::set_paused(shared, true).await)),
+        Command::ResumeSync => Outcome::Ok(Reply::Sync(sync::set_paused(shared, false).await)),
         Command::GetPr { pr } => match sync::github_client(shared).await {
             Ok(Some(gh)) => match gh.get_pr(&pr).await {
                 Ok(detail) => Outcome::Ok(Reply::Pr(detail)),

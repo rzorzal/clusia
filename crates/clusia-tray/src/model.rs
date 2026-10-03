@@ -695,6 +695,7 @@ mod tests {
             last_sync_unix: Some(NOW - 30),
             next_sync_unix: Some(NOW + 30),
             message: None,
+            paused: false,
         })
     }
 
@@ -906,6 +907,7 @@ mod tests {
             last_sync_unix: None,
             next_sync_unix: next,
             message: None,
+            paused: false,
         };
         assert_eq!(
             status_line(None, NOW).unwrap().text,

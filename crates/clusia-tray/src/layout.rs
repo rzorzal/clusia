@@ -465,6 +465,7 @@ mod tests {
             last_sync_unix: Some(NOW),
             next_sync_unix: None,
             message: None,
+            paused: false,
         }
     }
 
@@ -508,6 +509,7 @@ mod tests {
                 last_sync_unix: Some(NOW),
                 next_sync_unix: None,
                 message: None,
+                paused: false,
             }),
             lists_loaded: true,
             ..Snapshot::default()
