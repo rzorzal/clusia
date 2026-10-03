@@ -302,6 +302,8 @@ version = "0.1.0"
 dependencies = [
  "clusia-core",
  "clusia-protocol",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 
