@@ -11,7 +11,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSGraphicsContext, NSImage};
 use objc2_foundation::{NSData, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
-const PLAIN: &[u8] = include_bytes!("../../assets/status@2x.png");
+const PLAIN: &[u8] = include_bytes!("../../assets/status-wide@2x.png");
 const NEWS: &[u8] = include_bytes!("../../assets/status-new@2x.png");
 
 /// Fixed status item length (pt): wide enough for the 21 pt dot variant, so the item never
@@ -35,7 +35,7 @@ pub fn status_image(news: bool) -> Retained<NSImage> {
     IMAGES.with(|cell| {
         let (plain, with_dot) = cell.get_or_init(|| {
             (
-                load(PLAIN, NSSize::new(18.0, 18.0)),
+                load(PLAIN, NSSize::new(21.0, 18.0)),
                 load(NEWS, NSSize::new(21.0, 18.0)),
             )
         });
