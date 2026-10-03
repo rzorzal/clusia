@@ -10,7 +10,7 @@ use clusia_protocol::{
 use serde_json::json;
 
 use crate::cli::{AuthCommand, Command, ConfigCommand, DaemonCommand};
-use crate::spawn;
+use crate::{review, spawn};
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
 pub struct Output {
@@ -78,11 +78,14 @@ pub async fn run(paths: &Paths, home: Option<&Path>, command: Command) -> Result
         Command::Sync => sync(paths, home).await,
         Command::Auth(cmd) => auth(paths, home, cmd).await,
         Command::Worktree { pr } => worktree(paths, home, &pr).await,
+        Command::Open { pr } => review::open(paths, home, &pr).await,
+        Command::Review(cmd) => review::run(paths, home, cmd).await,
+        Command::Activity => review::activity(paths, home).await,
     }
 }
 
 /// Connects to the daemon, starting it when needed (spec §3.1).
-async fn connect(paths: &Paths, home: Option<&Path>) -> Result<Client, CliError> {
+pub(crate) async fn connect(paths: &Paths, home: Option<&Path>) -> Result<Client, CliError> {
     let (client, started) = launcher::ensure_daemon(paths, home, "clusia").await?;
     if started {
         eprintln!("clusia: started the Clúsia daemon");
@@ -90,11 +93,11 @@ async fn connect(paths: &Paths, home: Option<&Path>) -> Result<Client, CliError>
     Ok(client)
 }
 
-fn unexpected(reply: Reply) -> CliError {
+pub(crate) fn unexpected(reply: Reply) -> CliError {
     CliError::Other(format!("unexpected reply from the daemon: {reply:?}"))
 }
 
-pub fn uptime(secs: u64) -> String {
+pub(crate) fn uptime(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
     if h > 0 {
         format!("{h}h {m}m")

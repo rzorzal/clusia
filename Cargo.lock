@@ -212,6 +212,7 @@ dependencies = [
  "clap",
  "clusia-core",
  "clusia-protocol",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

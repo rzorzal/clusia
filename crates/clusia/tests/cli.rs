@@ -337,3 +337,227 @@ fn too_long_home_fails_before_running() {
         assert!(stderr(&o).contains("at most 103"), "{}", stderr(&o));
     }
 }
+
+mod review_flow {
+    use super::*;
+    use serde_json::json;
+    use std::path::{Path, PathBuf};
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// origin.git with main, plus PR #7 whose feature.txt is "one\ntwo\nthree\n". Returns (origin, base, head).
+    fn origin(root: &Path) -> (PathBuf, String, String) {
+        let origin = root.join("origin.git");
+        let seed = root.join("seed");
+        git(
+            root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                origin.to_str().unwrap(),
+            ],
+        );
+        git(root, &["init", "-q", "-b", "main", seed.to_str().unwrap()]);
+        std::fs::write(seed.join("README.md"), "hi\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "init"]);
+        git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&seed, &["push", "-q", "origin", "main"]);
+        let base = git(&seed, &["rev-parse", "HEAD"]);
+        git(&seed, &["checkout", "-q", "-b", "feature"]);
+        let head = advance(root, "one\ntwo\nthree\n");
+        (origin, base, head)
+    }
+
+    fn advance(root: &Path, content: &str) -> String {
+        let seed = root.join("seed");
+        std::fs::write(seed.join("feature.txt"), content).unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "change"]);
+        git(
+            &seed,
+            &["push", "-q", "-f", "origin", "feature:refs/pull/7/head"],
+        );
+        git(&seed, &["rev-parse", "HEAD"])
+    }
+
+    async fn mount(server: &MockServer, head: &str, base: &str, clone_url: &str) {
+        let ok = |body: serde_json::Value| ResponseTemplate::new(200).set_body_json(body);
+        let p = "/repos/acme/widgets";
+        Mock::given(method("GET")).and(path(format!("{p}/pulls/7"))).respond_with(ok(json!({
+            "number": 7, "title": "Add feature", "html_url": "https://github.com/acme/widgets/pull/7",
+            "user": { "login": "maria" }, "updated_at": "2026-10-01T12:00:00Z",
+            "additions": 3, "deletions": 0, "changed_files": 1,
+            "base": { "ref": "main", "sha": base, "repo": { "clone_url": clone_url } },
+            "head": { "ref": "feature", "sha": head, "repo": null }
+        }))).mount(server).await;
+        Mock::given(method("GET")).and(path(format!("{p}/pulls/7/files"))).respond_with(ok(json!([
+            { "filename": "feature.txt", "status": "added", "additions": 3, "deletions": 0, "patch": "@@ -0,0 +1,4 @@\n+zero\n+one\n+two\n+three" }
+        ]))).mount(server).await;
+        for list in [
+            "pulls/7/comments",
+            "issues/7/comments",
+            "pulls/7/reviews",
+            "pulls/7/commits",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("{p}/{list}")))
+                .respond_with(ok(json!([])))
+                .mount(server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path(format!("{p}/commits/{head}/check-runs")))
+            .respond_with(ok(json!({ "total_count": 0, "check_runs": [] })))
+            .mount(server)
+            .await;
+        // `sync` polls the search API; an empty inbox is enough to go online.
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(ok(json!({ "items": [] })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ok(json!({ "login": "me" })))
+            .mount(server)
+            .await;
+    }
+
+    #[test]
+    fn open_comment_relocate_publish() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let (origin, base, head) = origin(tmp.path());
+        let clone_url = origin.to_str().unwrap().to_string();
+        let server = rt.block_on(async {
+            let s = MockServer::start().await;
+            mount(&s, &head, &base, &clone_url).await;
+            s
+        });
+        let h = Home::new();
+        let roots = tmp.path().join("roots");
+        std::fs::create_dir_all(&roots).unwrap();
+        let api = server.uri();
+        let run = |args: &[&str]| h.clusia_github(&api, Some("tok"), args, None);
+
+        let o = run(&[
+            "config",
+            "set",
+            "repositories.roots",
+            &format!("[\"{}\"]", roots.display()),
+        ]);
+        assert!(o.status.success(), "{}", stderr(&o));
+
+        let o = run(&["open", "acme/widgets#7"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert!(
+            stdout(&o).contains("acme/widgets#7 · Add feature (@maria)"),
+            "{}",
+            stdout(&o)
+        );
+        assert!(stdout(&o).contains("worktree: "), "{}", stdout(&o));
+        assert!(stderr(&o).contains("✓ branch"), "stderr={:?}", stderr(&o));
+
+        let o = run(&[
+            "review",
+            "comment",
+            "acme/widgets#7",
+            "feature.txt:2",
+            "rename this",
+        ]);
+        assert_eq!(stdout(&o), "i1 added", "{}", stderr(&o));
+        assert_eq!(
+            run(&["review", "comment", "acme/widgets#7", "feature.txt:40", "x"])
+                .status
+                .code(),
+            Some(1)
+        );
+        assert!(run(&["review", "close", "acme/widgets#7"]).status.success());
+
+        // A new commit lands above the commented line.
+        let new_head = advance(tmp.path(), "zero\none\ntwo\nthree\n");
+        rt.block_on(async {
+            server.reset().await;
+            mount(&server, &new_head, &base, &clone_url).await;
+        });
+        assert!(run(&["sync"]).status.success());
+        let status = stdout(&run(&["review", "status", "acme/widgets#7"]));
+        assert!(status.contains("outdated"), "{status}");
+        assert!(
+            status.contains("feature.txt:3 (right)  rename this [moved from feature.txt:2]"),
+            "{status}"
+        );
+
+        assert!(run(&["open", "acme/widgets#7"]).status.success());
+        rt.block_on(async {
+            Mock::given(method("POST"))
+                .and(path("/repos/acme/widgets/pulls/7/reviews"))
+                .and(body_partial_json(json!({
+                    "commit_id": new_head, "event": "REQUEST_CHANGES", "body": "Please rename.",
+                    "comments": [{ "path": "feature.txt", "line": 3, "side": "RIGHT", "body": "rename this" }]
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": 1, "html_url": "https://github.com/acme/widgets/pull/7#pullrequestreview-1" })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        });
+        let o = run(&[
+            "review",
+            "publish",
+            "acme/widgets#7",
+            "--verdict",
+            "request-changes",
+            "--summary",
+            "Please rename.",
+        ]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert_eq!(
+            stdout(&o),
+            "Published review: https://github.com/acme/widgets/pull/7#pullrequestreview-1"
+        );
+        assert_eq!(stdout(&run(&["review", "status"])), "No saved reviews");
+        assert!(stdout(&run(&["activity"])).contains("Reviews published: 1 this week · 1 total"));
+    }
+
+    #[test]
+    fn bad_location_fails_before_the_daemon() {
+        let h = Home::new();
+        let o = h.clusia(&["review", "comment", "acme/widgets#7", "nocolon", "x"]);
+        assert_eq!(o.status.code(), Some(1));
+        assert!(stderr(&o).contains("path:line"), "{}", stderr(&o));
+        assert_eq!(
+            h.clusia(&["daemon", "status"]).status.code(),
+            Some(3),
+            "no daemon was started"
+        );
+    }
+}

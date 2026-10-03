@@ -108,6 +108,11 @@ impl Client {
         }
     }
 
+    /// Events that arrived while waiting for earlier responses (never blocks).
+    pub fn take_events(&mut self) -> Vec<(String, Event)> {
+        self.events.drain(..).collect()
+    }
+
     pub async fn next_event(&mut self) -> Result<(String, Event), ClientError> {
         if let Some(e) = self.events.pop_front() {
             return Ok(e);
@@ -221,6 +226,34 @@ mod tests {
             Err(ClientError::Server(e)) => assert_eq!(e.code, ErrorCode::UnknownConfigKey),
             other => panic!("expected server error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn take_events_drains_the_buffer() {
+        let (_d, path) = fake_daemon(welcome(), |id, _| {
+            vec![
+                ServerMessage::Event {
+                    topic: topics::CONFIG.into(),
+                    event: Event::ConfigChanged {
+                        key: "k".into(),
+                        value: "v".into(),
+                    },
+                },
+                ServerMessage::Response {
+                    id,
+                    result: Outcome::Ok(Reply::Ack),
+                },
+            ]
+        })
+        .await;
+        let mut c = Client::connect(&path, "t").await.unwrap();
+        c.request(Command::Subscribe {
+            topics: vec![topics::CONFIG.into()],
+        })
+        .await
+        .unwrap();
+        assert_eq!(c.take_events().len(), 1);
+        assert!(c.take_events().is_empty());
     }
 
     #[tokio::test]
