@@ -14,7 +14,7 @@ Clúsia is a macOS app for reviewing pull requests carefully, with your own AI t
 - **Your harness, your models.** Claude Code, Codex or a command of your own helps with diagrams, security notes, audits and tests (coming in the next sub-projects). Nothing is sent anywhere you did not choose.
 - **Always at hand.** A menu bar popover shows what is waiting for you, which saved reviews went stale and how your review activity looks over the last weeks.
 
-> **Status:** early development, not ready for daily use yet. The daemon, the GitHub sync, the review engine and the CLI work today. The menu bar tray is being built, and the main window comes next. Progress is tracked on the [project board](https://github.com/users/rzorzal/projects/1).
+> **Status:** early development, not ready for daily use yet. The daemon, the GitHub sync, the review engine, the CLI and the menu bar tray work today. The main window comes next. Progress is tracked on the [project board](https://github.com/users/rzorzal/projects/1).
 
 ## The name and the mark
 
@@ -38,6 +38,8 @@ Clúsia is a Rust workspace with four programs that talk over a local Unix socke
 | `clusia-tray` | The menu bar icon and popover (native AppKit). The daemon starts it, and it exits when the daemon stops. |
 | `clusia-app` | The main window (Bevy). Coming in a later milestone. |
 | `clusia` | The command-line interface. |
+
+<p align="center"><img src="docs/assets/sp1-m4-popover.png" alt="The Clúsia menu bar popover in light and dark mode: activity heatmap, counters, search, repository chips and paginated pull request lists" width="640"></p>
 
 Your own clone is never checked out or branched: Clúsia only adds refs under `refs/clusia/` and works in separate worktrees. Your GitHub token comes from `gh` or the macOS Keychain and never appears in logs or output.
 
