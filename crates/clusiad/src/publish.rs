@@ -76,6 +76,7 @@ pub(crate) async fn publish(
         Err(e) => return provider_error(e),
     };
     if detail.head_sha != review.head_sha {
+        shared.touch(pr);
         let checkout = {
             let _serialized = shared.worktree_lock.lock().await;
             worktrees::checkout(shared, pr, &detail).await

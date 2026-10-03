@@ -121,6 +121,7 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
             return provider_error(e);
         }
     };
+    shared.touch(pr);
     let checkout = {
         let _serialized = shared.worktree_lock.lock().await;
         worktrees::checkout(shared, pr, &detail).await

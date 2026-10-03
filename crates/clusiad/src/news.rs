@@ -8,7 +8,7 @@ use clusia_core::{
     Activity, ActivityKind, CommitInfo, PrConversation, PrRef, ReviewEvent, ReviewState,
 };
 use clusia_git::{pin_commit, reviewed_ref};
-use clusia_protocol::{Event, NewsItem, NewsKind, Outcome, Reply, topics};
+use clusia_protocol::{Event, NewsItem, NewsKind, Outcome, Reply, SyncState, topics};
 use clusia_store::{list_reviews, read_activity};
 
 use crate::handlers::{no_token, provider_error};
@@ -218,22 +218,20 @@ pub(crate) async fn whats_new(shared: &Shared, pr: &PrRef) -> Outcome {
 }
 
 pub(crate) async fn mark_seen(shared: &Shared, pr: &PrRef) -> Outcome {
-    let head = match load_existing(shared, pr) {
-        Ok(r) => r.head_sha,
-        Err(out) => return out,
-    };
-    let label = match github_client(shared).await {
-        Ok(Some(gh)) => gh
-            .get_checks(pr, &head)
-            .await
-            .ok()
-            .map(|c| c.label().to_string()),
-        _ => None,
-    };
+    let gh = github_client(shared).await.unwrap_or_default();
     let _guard = lock(shared, pr).await;
     let mut review = match load_existing(shared, pr) {
         Ok(r) => r,
         Err(out) => return out,
+    };
+    // Read under the lock, so the label belongs to the head we store it for.
+    let label = match gh {
+        Some(gh) => gh
+            .get_checks(pr, &review.head_sha)
+            .await
+            .ok()
+            .map(|c| c.label().to_string()),
+        None => None,
     };
     review.last_seen_at = Some(now_unix());
     if label.is_some() {
@@ -247,6 +245,10 @@ pub(crate) async fn mark_seen(shared: &Shared, pr: &PrRef) -> Outcome {
 
 /// Relocates saved reviews whose pull request moved (spec §6.6, SP1: deterministic).
 pub(crate) async fn check_saved_reviews(shared: &Shared) {
+    // The sync status says whether GitHub is reachable; polling every PR while offline only logs noise.
+    if shared.sync.read().await.state != SyncState::Online {
+        return;
+    }
     let Ok(Some(gh)) = github_client(shared).await else {
         return;
     };
@@ -289,6 +291,7 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
         {
             continue;
         }
+        shared.touch(&pr);
         let checkout = {
             let _serialized = shared.worktree_lock.lock().await;
             worktrees::checkout(shared, &pr, &detail).await
@@ -310,7 +313,9 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             tracing::warn!(pr = %pr, "cannot save a re-anchored review");
             continue;
         }
-        let _ = pin_commit(&repo, &reviewed_ref(pr.number), &review.head_sha).await;
+        if let Err(e) = pin_commit(&repo, &reviewed_ref(pr.number), &review.head_sha).await {
+            tracing::warn!(error = %e, pr = %pr, "cannot pin the new head of a saved review");
+        }
         let note = format!("{} moved, {} obsolete", report.moved, report.obsolete);
         record(
             shared,

@@ -1,6 +1,6 @@
 //! State shared by every connection and the sync loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -42,6 +42,8 @@ pub(crate) struct Shared {
     /// Reused while host and token are unchanged, so ETag caching survives between syncs.
     pub client: Mutex<Option<Arc<GitHub>>>,
     pub worktree_lock: Mutex<()>,
+    /// File keys of pull requests checked out since the daemon started; retention leaves them alone.
+    pub touched: std::sync::Mutex<HashSet<String>>,
     /// One mutex per PR serialises review mutations.
     pub review_locks: std::sync::Mutex<HashMap<PrRef, Arc<tokio::sync::Mutex<()>>>>,
     /// Parsed files per PR, keyed by the head SHA they were fetched for.
@@ -74,11 +76,27 @@ impl Shared {
             sync_now: Notify::new(),
             client: Mutex::new(None),
             worktree_lock: Mutex::new(()),
+            touched: std::sync::Mutex::new(HashSet::new()),
             review_locks: std::sync::Mutex::new(HashMap::new()),
             files_cache: Mutex::new(HashMap::new()),
             sync_lock: Mutex::new(()),
             first_sync_done,
         }
+    }
+
+    /// Marks `pr`'s worktree as in use this session. Call before checking it out.
+    pub fn touch(&self, pr: &PrRef) {
+        self.touched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(pr.file_key());
+    }
+
+    pub fn is_touched(&self, key: &str) -> bool {
+        self.touched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(key)
     }
 
     pub fn trigger_shutdown(&self) {

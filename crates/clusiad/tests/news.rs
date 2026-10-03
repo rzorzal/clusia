@@ -70,6 +70,15 @@ async fn saved_review_goes_outdated_and_relocates() {
     let new_head = advance_pr(w.tmp.path(), 7, "feature.txt", "zero\none\ntwo\nthree\n");
     w.server.reset().await;
     mount_pr(&w.server, &PrMock::new(&new_head, &w.base, &w.origin)).await;
+    // The check only runs while GitHub is reachable, so the PR lists must sync too.
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/search/issues"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({ "total_count": 0, "items": [] })),
+        )
+        .mount(&w.server)
+        .await;
     c.request(Command::SyncNow).await.unwrap();
 
     match c.request(Command::GetReview { pr: pr7() }).await.unwrap() {
