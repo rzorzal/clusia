@@ -221,6 +221,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "clusia-analytics"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+]
+
+[[package]]
 name = "clusia-core"
 version = "0.1.0"
 dependencies = [
