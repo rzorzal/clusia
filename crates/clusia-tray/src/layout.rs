@@ -190,11 +190,10 @@ pub fn layout(view: &TrayView) -> Layout {
     let heat: Vec<u8> = if view.heat.is_empty() {
         vec![0; days]
     } else {
-        let mut h = view.heat[view.heat.len().saturating_sub(days)..].to_vec();
+        let recent = &view.heat[view.heat.len().saturating_sub(days)..];
         // Short history: pad the oldest days so the newest stays in the last column.
-        while h.len() < days {
-            h.insert(0, 0);
-        }
+        let mut h = vec![0; days - recent.len()];
+        h.extend_from_slice(recent);
         h
     };
     let cell = (inner - (WEEKS as f64 - 1.0) * GAP) / WEEKS as f64;
@@ -598,6 +597,23 @@ mod tests {
         assert!((cells[0].x - PAD).abs() < 0.01, "first x {}", cells[0].x);
         let right = cells.iter().map(|r| r.x + r.w).fold(0.0, f64::max);
         assert!((right - (WIDTH - PAD)).abs() <= 0.5, "right edge {right}");
+    }
+
+    #[test]
+    fn short_history_ends_in_the_last_column() {
+        let mut v = view(1, false, false);
+        v.heat = vec![1, 2, 3];
+        let levels: Vec<u8> = layout(&v)
+            .shapes
+            .iter()
+            .filter_map(|s| match s {
+                Shape::Cell { level, .. } => Some(*level),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(levels.len(), 182);
+        assert_eq!(levels[179..], [1, 2, 3]);
+        assert!(levels[..179].iter().all(|l| *l == 0));
     }
 
     #[test]
