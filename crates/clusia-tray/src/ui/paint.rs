@@ -6,12 +6,13 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBezierPath, NSColor, NSEvent, NSFont, NSFontAttributeName, NSFontWeightRegular,
-    NSFontWeightSemibold, NSForegroundColorAttributeName, NSLineBreakMode, NSMutableParagraphStyle,
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBezierPath, NSColor, NSEvent,
+    NSFont, NSFontAttributeName, NSFontWeightRegular, NSFontWeightSemibold,
+    NSForegroundColorAttributeName, NSLineBreakMode, NSMutableParagraphStyle,
     NSParagraphStyleAttributeName, NSStringDrawingOptions, NSStringNSExtendedStringDrawing,
     NSTextAlignment, NSView,
 };
-use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSArray, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
 use crate::actions::Action;
 use crate::layout::{Ink, Layout, Rect, Shape, Style, WIDTH};
@@ -96,13 +97,23 @@ fn srgb((r, g, b): (f64, f64, f64), alpha: f64) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, alpha)
 }
 
+/// Whether the appearance being drawn right now best matches DarkAqua.
+fn drawing_dark() -> bool {
+    // SAFETY: the appearance names are immutable NSString statics.
+    let (aqua, dark) = unsafe { (NSAppearanceNameAqua, NSAppearanceNameDarkAqua) };
+    let names = NSArray::from_slice(&[aqua, dark]);
+    NSAppearance::currentDrawingAppearance()
+        .bestMatchFromAppearancesWithNames(&names)
+        .is_some_and(|best| &*best == dark)
+}
+
 fn color(ink: Ink) -> Retained<NSColor> {
     match ink {
         Ink::Primary => NSColor::labelColor(),
         Ink::Secondary => NSColor::secondaryLabelColor(),
         Ink::Tertiary => NSColor::tertiaryLabelColor(),
-        Ink::Green => srgb(theme::GREEN, 1.0),
-        Ink::Orange => srgb(theme::ORANGE, 1.0),
+        Ink::Green => srgb(theme::green(drawing_dark()), 1.0),
+        Ink::Orange => srgb(theme::orange(drawing_dark()), 1.0),
     }
 }
 
@@ -124,7 +135,7 @@ fn paint(shape: &Shape) {
                 NSColor::quaternaryLabelColor()
             } else {
                 srgb(
-                    theme::GREEN,
+                    theme::green(drawing_dark()),
                     theme::HEAT_ALPHA[usize::from((*level).min(4))],
                 )
             };
