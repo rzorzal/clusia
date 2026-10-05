@@ -1,9 +1,6 @@
 //! A headless app for unit tests: MinimalPlugins, no window, no GPU, no daemon. Asks are
 //! recorded in `Asks::recorded`. Each task that adds a logic plugin registers it in `app`.
 
-// Helpers are used by later tasks' tests.
-#![allow(dead_code)]
-
 use bevy::input::ButtonInput;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;

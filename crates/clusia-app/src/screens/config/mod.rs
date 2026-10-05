@@ -3,7 +3,10 @@
 //! field, and the page rebuilds from the saved config.
 
 pub mod appearance;
+pub mod editor;
 pub mod git;
+pub mod notifications;
+mod placeholders;
 pub mod repos;
 
 use std::collections::HashMap;
@@ -31,8 +34,10 @@ pub enum PageView {
     Appearance(appearance::AppearanceView),
     Git(git::GitView),
     Repos(repos::ReposView),
-    /// Sections whose pages arrive in the next task.
-    Soon(Section),
+    Editor(editor::EditorView),
+    Notifications(notifications::NotificationsView),
+    Harness,
+    Plugins,
 }
 
 pub fn page_view(
@@ -46,7 +51,10 @@ pub fn page_view(
         Section::Appearance => PageView::Appearance(appearance::view(snap)),
         Section::GitServer => PageView::Git(git::view(snap, rejected, now)),
         Section::Repositories => PageView::Repos(repos::view(snap, rejected, paths)),
-        other => PageView::Soon(other),
+        Section::Editor => PageView::Editor(editor::view(snap, rejected, paths)),
+        Section::Notifications => PageView::Notifications(notifications::view(snap, rejected)),
+        Section::Harness => PageView::Harness,
+        Section::Plugins => PageView::Plugins,
     }
 }
 
@@ -266,9 +274,10 @@ fn rebuild_config(
                 PageView::Appearance(v) => appearance::build(c, fonts, v),
                 PageView::Git(v) => git::build(c, fonts, v),
                 PageView::Repos(v) => repos::build(c, fonts, v),
-                PageView::Soon(s) => {
-                    page_header(c, fonts, s.label(), "This page arrives in the next task.")
-                }
+                PageView::Editor(v) => editor::build(c, fonts, v),
+                PageView::Notifications(v) => notifications::build(c, fonts, v),
+                PageView::Harness => placeholders::harness(c, fonts),
+                PageView::Plugins => placeholders::plugins(c, fonts),
             });
         });
         part.built = Some(view.clone());
@@ -578,6 +587,85 @@ mod tests {
                     value: r#"["~/Repos","~/Projects","~/code"]"#.into()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn custom_editor_writes_a_template_first() {
+        let mut app = config_app(Section::Editor);
+        let custom = testing::find::<editor::ChooseCustom>(&mut app, |_| true);
+        testing::activate(&mut app, custom);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [
+                Ask::SetConfig {
+                    key: "editor.custom_command".into(),
+                    value: editor::DEFAULT_CUSTOM.into()
+                },
+                Ask::SetConfig {
+                    key: "editor.kind".into(),
+                    value: "custom".into()
+                },
+            ]
+        );
+        testing::set_config_locally(&mut app, "editor.custom_command", "nvim +{line} {path}");
+        testing::settle(&mut app);
+        let custom = testing::find::<editor::ChooseCustom>(&mut app, |_| true);
+        testing::activate(&mut app, custom);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "editor.kind".into(),
+                value: "custom".into()
+            }],
+            "an existing command is kept"
+        );
+    }
+
+    #[test]
+    fn editor_test_button_opens_the_config_file() {
+        let mut app = config_app(Section::Editor);
+        let test = testing::find::<Sends>(&mut app, |s| matches!(s.0, Ask::OpenInEditor { .. }));
+        testing::activate(&mut app, test);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::OpenInEditor {
+                path: "/tmp/clusia-test-home/config.toml".into(),
+                line: Some(1)
+            }]
+        );
+    }
+
+    #[test]
+    fn do_not_disturb_toggles() {
+        let mut app = config_app(Section::Notifications);
+        let dnd = testing::find::<SetValue>(&mut app, |s| s.key == "notifications.do_not_disturb");
+        testing::activate(&mut app, dnd);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "notifications.do_not_disturb".into(),
+                value: "true".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn every_section_has_a_page() {
+        let mut app = config_app(Section::Appearance);
+        for section in Section::ALL {
+            app.world_mut().resource_mut::<Nav>().open_section(section);
+            testing::settle(&mut app);
+            testing::find::<PageOf>(&mut app, |p| p.0 == section);
+        }
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::Harness);
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::count::<ConfigField>(&mut app),
+            0,
+            "Harness has no live settings yet"
         );
     }
 }
