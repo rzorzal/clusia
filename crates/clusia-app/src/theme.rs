@@ -33,6 +33,10 @@ pub enum Swatch {
     Knob,
     /// Heatmap level 0–4 (higher values clamp to 4).
     Heat(u8),
+    /// Theme previews: fixed light (`false`) or dark (`true`) colors, whatever the current theme.
+    PreviewBg(bool),
+    PreviewInk(bool),
+    PreviewGreen(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,6 +82,27 @@ impl Tokens {
             Swatch::Hover => self.hover,
             Swatch::Selected => self.selected,
             Swatch::Knob => self.knob,
+            Swatch::PreviewBg(dark) => {
+                if dark {
+                    DARK.bg
+                } else {
+                    LIGHT.bg
+                }
+            }
+            Swatch::PreviewInk(dark) => {
+                if dark {
+                    DARK.fg
+                } else {
+                    LIGHT.fg
+                }
+            }
+            Swatch::PreviewGreen(dark) => {
+                if dark {
+                    DARK.green
+                } else {
+                    LIGHT.green
+                }
+            }
             Swatch::Heat(level) => self.heat[usize::from(level.min(4))],
         }
     }
@@ -227,6 +252,14 @@ fn update_theme(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_ignore_the_current_theme() {
+        assert_eq!(LIGHT.get(Swatch::PreviewBg(true)), DARK.bg);
+        assert_eq!(DARK.get(Swatch::PreviewBg(false)), LIGHT.bg);
+        assert_eq!(DARK.get(Swatch::PreviewGreen(false)), LIGHT.green);
+        assert_eq!(LIGHT.get(Swatch::PreviewInk(true)), DARK.fg);
+    }
 
     #[test]
     fn tokens_match_the_mockups() {

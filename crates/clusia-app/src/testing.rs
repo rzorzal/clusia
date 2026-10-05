@@ -17,6 +17,7 @@ use crate::bridge::{Ask, Asks, Connection, Model, ShowRequested, Toasts};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::nav::NavPlugin;
+use crate::screens::config::ConfigPlugin;
 use crate::screens::home::HomePlugin;
 use crate::snapshot::{self, Snapshot};
 use crate::theme::{LIGHT, Theme, ThemePlugin};
@@ -45,7 +46,7 @@ pub fn app(snapshot: Snapshot) -> App {
         })
         .init_resource::<Asks>()
         .init_resource::<Toasts>()
-        .add_plugins((ThemePlugin, KitPlugin, NavPlugin, HomePlugin));
+        .add_plugins((ThemePlugin, KitPlugin, NavPlugin, HomePlugin, ConfigPlugin));
     app.update();
     app
 }

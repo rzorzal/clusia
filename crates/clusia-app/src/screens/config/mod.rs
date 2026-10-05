@@ -1,0 +1,583 @@
+//! Config (spec §8, mockups `Config*.png`): the section list on the left and one page per
+//! section. Every control writes one config key through the daemon. A refusal shows under its
+//! field, and the page rebuilds from the saved config.
+
+pub mod appearance;
+pub mod git;
+pub mod repos;
+
+use std::collections::HashMap;
+
+use bevy::ecs::hierarchy::ChildSpawnerCommands;
+use bevy::input_focus::tab_navigation::TabIndex;
+use bevy::picking::hover::Hovered;
+use bevy::prelude::*;
+use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
+use clusia_core::Paths;
+
+use crate::app::AppPaths;
+use crate::bridge::{Ask, Asks, Model, set_config};
+use crate::clock::Clock;
+use crate::fonts::UiFonts;
+use crate::nav::{ConfigScreen, Nav, NavSystems, Screen, Section};
+use crate::snapshot::Snapshot;
+use crate::theme::Swatch;
+use crate::ui::kit::{
+    FieldCommitted, Fill, HoverFill, Stroke, Type, segment, segments, text, text_field,
+};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageView {
+    Appearance(appearance::AppearanceView),
+    Git(git::GitView),
+    Repos(repos::ReposView),
+    /// Sections whose pages arrive in the next task.
+    Soon(Section),
+}
+
+pub fn page_view(
+    section: Section,
+    snap: &Snapshot,
+    rejected: &HashMap<String, String>,
+    paths: &Paths,
+    now: i64,
+) -> PageView {
+    match section {
+        Section::Appearance => PageView::Appearance(appearance::view(snap)),
+        Section::GitServer => PageView::Git(git::view(snap, rejected, now)),
+        Section::Repositories => PageView::Repos(repos::view(snap, rejected, paths)),
+        other => PageView::Soon(other),
+    }
+}
+
+/// Writes `key = value` when activated.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct SetValue {
+    pub key: &'static str,
+    pub value: String,
+}
+
+/// Sends an `Ask` when activated.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct Sends(pub Ask);
+
+/// A text field bound to a config key (written on Enter or blur).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigField(pub &'static str);
+
+/// The daemon's refusal for this key, under its field.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldError(pub &'static str);
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigNavItem(pub Section);
+
+/// The page container, tagged with its section.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageOf(pub Section);
+
+#[derive(Component)]
+struct NavPart {
+    built: Option<Section>,
+}
+
+#[derive(Component)]
+struct PagePart {
+    built: Option<PageView>,
+}
+
+pub struct ConfigPlugin;
+
+impl Plugin for ConfigPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (
+                build_config,
+                commit_fields,
+                repos::commit_roots,
+                rebuild_config,
+            )
+                .chain()
+                .after(NavSystems),
+        );
+    }
+}
+
+/// The bundle that makes a button write `key = value`.
+pub fn setter(key: &'static str, value: impl Into<String>) -> impl Bundle {
+    (
+        SetValue {
+            key,
+            value: value.into(),
+        },
+        observe(on_set),
+    )
+}
+
+/// The bundle that makes a button send `ask`.
+pub fn sends(ask: Ask) -> impl Bundle {
+    (Sends(ask), observe(on_send))
+}
+
+fn on_set(
+    activate: On<Activate>,
+    setters: Query<&SetValue>,
+    mut asks: ResMut<Asks>,
+    mut model: ResMut<Model>,
+) {
+    if let Ok(s) = setters.get(activate.entity) {
+        set_config(&mut asks, &mut model, s.key, s.value.clone());
+    }
+}
+
+fn on_send(activate: On<Activate>, senders: Query<&Sends>, mut asks: ResMut<Asks>) {
+    if let Ok(Sends(ask)) = senders.get(activate.entity) {
+        asks.send(ask.clone());
+    }
+}
+
+fn on_nav(activate: On<Activate>, items: Query<&ConfigNavItem>, mut nav: ResMut<Nav>) {
+    if let Ok(ConfigNavItem(section)) = items.get(activate.entity) {
+        nav.open_section(*section);
+    }
+}
+
+fn commit_fields(
+    mut commits: MessageReader<FieldCommitted>,
+    fields: Query<&ConfigField>,
+    mut asks: ResMut<Asks>,
+    mut model: ResMut<Model>,
+) {
+    for c in commits.read() {
+        if let Ok(ConfigField(key)) = fields.get(c.entity) {
+            set_config(&mut asks, &mut model, key, c.value.trim());
+        }
+    }
+}
+
+fn build_config(mut commands: Commands, screens: Query<Entity, Added<ConfigScreen>>) {
+    for screen in &screens {
+        commands.entity(screen).with_children(|p| {
+            p.spawn((
+                Node {
+                    width: px(220),
+                    flex_shrink: 0.0,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(2),
+                    padding: UiRect::axes(px(12), px(20)),
+                    border: UiRect::right(px(1)),
+                    ..default()
+                },
+                BorderColor::default(),
+                Stroke(Swatch::Line),
+                NavPart { built: None },
+            ));
+            p.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    min_width: px(0),
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::axes(px(40), px(24)),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+                ScrollArea,
+                PagePart { built: None },
+            ));
+        });
+    }
+}
+
+fn refill(commands: &mut Commands, entity: Entity, build: impl FnOnce(&mut ChildSpawnerCommands)) {
+    commands.entity(entity).despawn_related::<Children>();
+    commands.entity(entity).with_children(build);
+}
+
+fn rebuild_config(
+    mut commands: Commands,
+    nav: Res<Nav>,
+    model: Res<Model>,
+    paths: Res<AppPaths>,
+    clock: Res<Clock>,
+    fonts: Res<UiFonts>,
+    mut navs: Query<(Entity, &mut NavPart)>,
+    mut pages: Query<(Entity, &mut PagePart)>,
+) {
+    let Screen::Config(section) = nav.screen else {
+        return;
+    };
+    let fonts = &*fonts;
+    for (e, mut part) in &mut navs {
+        if part.built == Some(section) {
+            continue;
+        }
+        refill(&mut commands, e, |p| {
+            for s in Section::ALL {
+                let on = s == section;
+                p.spawn((
+                    Node {
+                        padding: UiRect::axes(px(10), px(8)),
+                        border_radius: BorderRadius::all(px(6)),
+                        ..default()
+                    },
+                    WidgetButton,
+                    Hovered::default(),
+                    TabIndex(0),
+                    BackgroundColor::default(),
+                    Fill(if on { Swatch::Surface } else { Swatch::Clear }),
+                    HoverFill(if on { Swatch::Surface } else { Swatch::Hover }),
+                    ConfigNavItem(s),
+                    observe(on_nav),
+                ))
+                .with_children(|i| {
+                    i.spawn(text(
+                        fonts,
+                        s.label(),
+                        if on { Type::STRONG } else { Type::MUTED },
+                    ));
+                });
+            }
+        });
+        part.built = Some(section);
+    }
+    let view = page_view(
+        section,
+        &model.snapshot,
+        &model.rejected,
+        &paths.0,
+        clock.now(),
+    );
+    for (e, mut part) in &mut pages {
+        if part.built.as_ref() == Some(&view) {
+            continue;
+        }
+        refill(&mut commands, e, |p| {
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(18),
+                    max_width: px(900),
+                    ..default()
+                },
+                PageOf(section),
+            ))
+            .with_children(|c| match &view {
+                PageView::Appearance(v) => appearance::build(c, fonts, v),
+                PageView::Git(v) => git::build(c, fonts, v),
+                PageView::Repos(v) => repos::build(c, fonts, v),
+                PageView::Soon(s) => {
+                    page_header(c, fonts, s.label(), "This page arrives in the next task.")
+                }
+            });
+        });
+        part.built = Some(view.clone());
+    }
+}
+
+pub fn page_header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, title: &str, subtitle: &str) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: px(4),
+        ..default()
+    })
+    .with_children(|c| {
+        c.spawn(text(fonts, title.to_string(), Type::HEADING));
+        c.spawn(text(fonts, subtitle.to_string(), Type::MUTED));
+    });
+}
+
+pub fn heading(p: &mut ChildSpawnerCommands, fonts: &UiFonts, title: &str) {
+    p.spawn(Node {
+        padding: UiRect::top(px(8)),
+        ..default()
+    })
+    .with_children(|c| {
+        c.spawn(text(fonts, title.to_string(), Type::STRONG));
+    });
+}
+
+/// `label` (190 px) · control · hint, with the refusal for `error_key` underneath.
+pub fn row(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    label: &str,
+    control: impl FnOnce(&mut ChildSpawnerCommands),
+    hint: &str,
+    error: Option<(&'static str, &str)>,
+) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: px(4),
+        ..default()
+    })
+    .with_children(|c| {
+        c.spawn(Node {
+            column_gap: px(16),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|r| {
+            r.spawn((
+                Node {
+                    width: px(190),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                children![text(fonts, label.to_string(), Type::MUTED)],
+            ));
+            control(r);
+            if !hint.is_empty() {
+                r.spawn(text(fonts, hint.to_string(), Type::META));
+            }
+        });
+        if let Some((key, message)) = error {
+            c.spawn((
+                Node {
+                    margin: UiRect::left(px(206)),
+                    ..default()
+                },
+                FieldError(key),
+                children![text(
+                    fonts,
+                    message.to_string(),
+                    Type::BODY.ink(Swatch::Orange)
+                )],
+            ));
+        }
+    });
+}
+
+/// A text field bound to `key`.
+pub fn field_row(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    label: &str,
+    key: &'static str,
+    value: &str,
+    width: f32,
+    hint: &str,
+    error: &Option<String>,
+) {
+    row(
+        p,
+        fonts,
+        label,
+        |r| {
+            r.spawn((text_field(fonts, value, width, false), ConfigField(key)));
+        },
+        hint,
+        error.as_deref().map(|m| (key, m)),
+    );
+}
+
+/// A segmented control writing `key`; `options` are `(label, value)`.
+pub fn segment_row(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    label: &str,
+    key: &'static str,
+    options: &[(&str, &str)],
+    current: &str,
+    hint: &str,
+) {
+    row(
+        p,
+        fonts,
+        label,
+        |r| {
+            r.spawn(segments()).with_children(|s| {
+                for (text_label, value) in options {
+                    s.spawn((
+                        segment(fonts, text_label, *value == current),
+                        setter(key, *value),
+                    ));
+                }
+            });
+        },
+        hint,
+        None,
+    );
+}
+
+/// A selectable card (provider, sign-in source, editor). The caller adds a `setter` and fills
+/// it.
+pub fn option_card(selected: bool, width: f32) -> impl Bundle {
+    (
+        Node {
+            width: px(width),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            padding: UiRect::axes(px(14), px(12)),
+            border: px(if selected { 2 } else { 1 }).all(),
+            border_radius: BorderRadius::all(px(6)),
+            ..default()
+        },
+        WidgetButton,
+        Hovered::default(),
+        TabIndex(0),
+        BackgroundColor::default(),
+        Fill(if selected {
+            Swatch::GreenSoft
+        } else {
+            Swatch::Surface
+        }),
+        HoverFill(if selected {
+            Swatch::GreenSoft
+        } else {
+            Swatch::Hover
+        }),
+        BorderColor::default(),
+        Stroke(if selected {
+            Swatch::Green
+        } else {
+            Swatch::Line
+        }),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::Toasts;
+    use crate::fixture;
+    use crate::testing::{self, NOW};
+    use crate::ui::kit::Field;
+    use clusia_protocol::WindowTarget;
+
+    fn config_app(section: Section) -> App {
+        let mut app = testing::app(fixture::demo(NOW));
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Config);
+        app.world_mut().resource_mut::<Nav>().open_section(section);
+        testing::settle(&mut app);
+        app
+    }
+
+    fn field_value(app: &mut App, key: &str) -> String {
+        let e = testing::find::<ConfigField>(app, |f| f.0 == key);
+        app.world().get::<Field>(e).unwrap().committed.clone()
+    }
+
+    #[test]
+    fn section_list_switches_pages() {
+        let mut app = config_app(Section::Appearance);
+        assert_eq!(testing::count::<ConfigNavItem>(&mut app), 7);
+        testing::find::<PageOf>(&mut app, |p| p.0 == Section::Appearance);
+        let git = testing::find::<ConfigNavItem>(&mut app, |i| i.0 == Section::GitServer);
+        testing::activate(&mut app, git);
+        testing::settle(&mut app);
+        assert_eq!(
+            app.world().resource::<Nav>().screen,
+            Screen::Config(Section::GitServer)
+        );
+        testing::find::<PageOf>(&mut app, |p| p.0 == Section::GitServer);
+        assert_eq!(testing::count::<PageOf>(&mut app), 1);
+    }
+
+    #[test]
+    fn appearance_controls_write_their_keys() {
+        let mut app = config_app(Section::Appearance);
+        let dark = testing::find::<SetValue>(&mut app, |s| {
+            s.key == "appearance.theme" && s.value == "dark"
+        });
+        testing::activate(&mut app, dark);
+        let size = testing::find::<SetValue>(&mut app, |s| {
+            s.key == "appearance.code_size" && s.value == "16"
+        });
+        testing::activate(&mut app, size);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [
+                Ask::SetConfig {
+                    key: "appearance.theme".into(),
+                    value: "dark".into()
+                },
+                Ask::SetConfig {
+                    key: "appearance.code_size".into(),
+                    value: "16".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejected_poll_interval_shows_the_message() {
+        let mut app = config_app(Section::GitServer);
+        let poll = testing::find::<ConfigField>(&mut app, |f| f.0 == "github.poll_interval_secs");
+        app.world_mut().write_message(FieldCommitted {
+            entity: poll,
+            value: " 5 ".into(),
+        });
+        app.update();
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "github.poll_interval_secs".into(),
+                value: "5".into()
+            }]
+        );
+        app.world_mut().resource_mut::<Model>().rejected.insert(
+            "github.poll_interval_secs".into(),
+            "github.poll_interval_secs must be between 15 and 3600, got 5".into(),
+        );
+        testing::settle(&mut app);
+        testing::find::<FieldError>(&mut app, |e| e.0 == "github.poll_interval_secs");
+        assert_eq!(
+            field_value(&mut app, "github.poll_interval_secs"),
+            "60",
+            "the field shows the saved value again"
+        );
+    }
+
+    #[test]
+    fn git_page_without_auth() {
+        let mut snap = fixture::demo(NOW);
+        snap.auth = None;
+        let mut app = testing::app(snap);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Config);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::GitServer);
+        testing::settle(&mut app);
+        let paste = testing::find::<git::PasteToken>(&mut app, |_| true);
+        testing::activate(&mut app, paste);
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "no clipboard: nothing sent"
+        );
+        assert_eq!(app.world().resource::<Toasts>().0.len(), 1);
+        let sync = testing::find::<Sends>(&mut app, |s| s.0 == Ask::SyncNow);
+        testing::activate(&mut app, sync);
+        assert_eq!(testing::recorded(&mut app), [Ask::SyncNow]);
+    }
+
+    #[test]
+    fn roots_add_and_remove() {
+        let mut app = config_app(Section::Repositories);
+        let add = testing::find::<repos::AddRoot>(&mut app, |_| true);
+        app.world_mut().write_message(FieldCommitted {
+            entity: add,
+            value: "~/work".into(),
+        });
+        app.update();
+        let remove = testing::find::<repos::RemoveRoot>(&mut app, |r| r.0 == "~/src");
+        testing::activate(&mut app, remove);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [
+                Ask::SetConfig {
+                    key: "repositories.roots".into(),
+                    value: r#"["~/Repos","~/Projects","~/src","~/code","~/work"]"#.into()
+                },
+                Ask::SetConfig {
+                    key: "repositories.roots".into(),
+                    value: r#"["~/Repos","~/Projects","~/code"]"#.into()
+                },
+            ]
+        );
+    }
+}
