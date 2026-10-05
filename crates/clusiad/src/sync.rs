@@ -306,6 +306,7 @@ mod tests {
             secrets: Arc::new(clusia_platform::MemoryStore::default()),
             background_sync: true,
             tray_program: None,
+            spawner: Arc::new(crate::spawner::RecordingSpawner::default()),
         };
         let shared = Arc::new(Shared::new(
             clusia_core::Paths::new(dir.path()),

@@ -114,6 +114,7 @@ mod tests {
             secrets: Arc::new(MemoryStore::default()),
             background_sync: false,
             tray_program: None,
+            spawner: Arc::new(crate::spawner::RecordingSpawner::default()),
         };
         let shared = Shared::new(Paths::new(dir.path()), Config::default(), options);
         (dir, shared)

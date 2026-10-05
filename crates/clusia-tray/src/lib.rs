@@ -3,7 +3,7 @@
 pub mod actions;
 pub mod data;
 pub mod fixture;
-pub mod heatmap;
+pub use clusia_view::heatmap;
 pub mod layout;
 pub mod model;
 pub mod theme;

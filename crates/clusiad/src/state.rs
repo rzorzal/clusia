@@ -13,6 +13,7 @@ use clusia_provider::GitHub;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
 use crate::options::DaemonOptions;
+use crate::spawner::Spawner;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct PrLists {
@@ -36,6 +37,9 @@ pub(crate) struct Shared {
     pub secrets: Arc<dyn SecretStore>,
     pub background_sync: bool,
     pub tray_program: Option<PathBuf>,
+    pub spawner: Arc<dyn Spawner>,
+    /// Connections subscribed to the `window` topic (open windows).
+    pub window_listeners: AtomicUsize,
     pub prs: RwLock<PrLists>,
     pub sync: RwLock<SyncStatus>,
     /// Wakes the sync loop early (e.g. after a new token is stored).
@@ -75,6 +79,8 @@ impl Shared {
             secrets: options.secrets,
             background_sync: options.background_sync,
             tray_program: options.tray_program,
+            spawner: options.spawner,
+            window_listeners: AtomicUsize::new(0),
             prs: RwLock::new(PrLists::default()),
             sync: RwLock::new(SyncStatus::default()),
             sync_now: Notify::new(),

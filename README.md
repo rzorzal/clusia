@@ -36,7 +36,7 @@ Clúsia is a Rust workspace with four programs that talk over a local Unix socke
 |---|---|
 | `clusiad` | The background service. It syncs with GitHub, manages worktrees, keeps review drafts and publishes reviews. It is the only part that holds state or secrets. |
 | `clusia-tray` | The menu bar icon and popover (native AppKit). The daemon starts it, and it exits when the daemon stops. |
-| `clusia-app` | The main window (Bevy). Coming in a later milestone. |
+| `clusia-app` | The main window (Bevy): Home and Config today, reviews next. Opening it starts the daemon if needed, and a second launch brings the open window forward. |
 | `clusia` | The command-line interface. |
 
 <p align="center"><img src="docs/assets/sp1-m4-popover.png" alt="The Clúsia menu bar popover in light and dark mode: activity heatmap, counters, search, repository chips and paginated pull request lists" width="640"></p>
@@ -57,6 +57,14 @@ target/debug/clusia review publish owner/repo#123 --verdict request-changes
 ```
 
 Every `clusia` command starts the daemon when it is not running.
+
+The window:
+
+```sh
+target/debug/clusia-app                # Home, live from the daemon
+target/debug/clusia-app --config       # Config
+target/debug/clusia-app --demo --dark  # demo data, no daemon, nothing saved
+```
 
 ## Development
 

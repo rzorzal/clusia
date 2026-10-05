@@ -93,6 +93,14 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         } => publish::publish(shared, client, &pr, verdict, &summary).await,
         Command::GetWhatsNew { pr } => news::whats_new(shared, &pr).await,
         Command::MarkSeen { pr } => news::mark_seen(shared, &pr).await,
+        Command::OpenWindow { target } => {
+            let listeners = shared.window_listeners.load(Ordering::SeqCst);
+            if listeners > 0 {
+                shared.publish(topics::WINDOW, Event::WindowRequested { target });
+            }
+            Outcome::Ok(Reply::Delivered(listeners))
+        }
+        Command::OpenInEditor { path, line } => open_in_editor(shared, &path, line).await,
         Command::GetActivity => activity::summary(shared).await,
     }
 }
@@ -103,6 +111,39 @@ fn key_error(e: ConfigKeyError) -> Outcome {
         ConfigKeyError::Invalid { .. } => ErrorCode::InvalidConfigValue,
     };
     Outcome::Err(ProtocolError::new(code, e.to_string()))
+}
+
+async fn open_in_editor(shared: &Shared, path: &str, line: Option<u32>) -> Outcome {
+    let bad = |message: String| Outcome::Err(ProtocolError::new(ErrorCode::BadRequest, message));
+    let file = match std::fs::canonicalize(path) {
+        Ok(f) => f,
+        Err(e) => return bad(format!("cannot open {path}: {e}")),
+    };
+    let root = std::fs::canonicalize(shared.paths.root())
+        .unwrap_or_else(|_| shared.paths.root().to_path_buf());
+    if !file.starts_with(&root) || !file.is_file() {
+        return bad(format!(
+            "only files inside {} can be opened in the editor",
+            root.display()
+        ));
+    }
+    let editor = shared.config.read().await.editor.clone();
+    let argv = match clusia_core::editor_argv(&editor, &file.to_string_lossy(), line) {
+        Ok(argv) => argv,
+        Err(e) => {
+            return Outcome::Err(ProtocolError::new(
+                ErrorCode::InvalidConfigValue,
+                e.to_string(),
+            ));
+        }
+    };
+    match shared.spawner.spawn(&argv) {
+        Ok(()) => Outcome::Ok(Reply::Ack),
+        Err(e) => Outcome::Err(ProtocolError::new(
+            ErrorCode::Internal,
+            format!("could not start {}: {e}", argv[0]),
+        )),
+    }
 }
 
 async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome {

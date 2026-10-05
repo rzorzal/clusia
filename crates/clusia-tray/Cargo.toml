@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 clusia-core.workspace = true
 clusia-protocol.workspace = true
+clusia-view.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 objc2.workspace = true

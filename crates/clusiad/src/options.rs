@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use clusia_platform::{Keychain, MemoryStore, SecretStore};
 
+use crate::spawner::{ProcessSpawner, Spawner};
+
 pub struct DaemonOptions {
     /// GitHub API base URL override. Env: `CLUSIA_GITHUB_API`.
     pub github_api: Option<String>,
@@ -18,6 +20,8 @@ pub struct DaemonOptions {
     /// The menu bar tray to spawn and supervise. Env: `CLUSIA_TRAY_BIN` (`none` disables);
     /// default: `clusia-tray` next to this executable, when present.
     pub tray_program: Option<PathBuf>,
+    /// Starts the editor for `OpenInEditor`.
+    pub spawner: Arc<dyn Spawner>,
 }
 
 impl DaemonOptions {
@@ -38,6 +42,7 @@ impl DaemonOptions {
             secrets,
             background_sync: true,
             tray_program: tray_program_from(var("CLUSIA_TRAY_BIN"), std::env::current_exe().ok()),
+            spawner: Arc::new(ProcessSpawner),
         }
     }
 }

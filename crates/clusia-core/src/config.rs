@@ -16,10 +16,44 @@ pub struct Config {
     pub lists: Lists,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
     pub theme: Theme,
+    /// Code font size in points: one of `CODE_SIZES`.
+    pub code_size: u8,
+    pub density: Density,
+    /// How the Diff opens; each review can still switch.
+    pub diff_view: DiffView,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: Theme::System,
+            code_size: 13,
+            density: Density::Comfortable,
+            diff_view: DiffView::Unified,
+        }
+    }
+}
+
+pub const CODE_SIZES: [u8; 4] = [12, 13, 14, 16];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Density {
+    #[default]
+    Comfortable,
+    Compact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffView {
+    #[default]
+    Unified,
+    Split,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -108,6 +142,8 @@ pub struct Notifications {
 pub struct Lists {
     pub assigned_sort: ListSort,
     pub saved_sort: ListSort,
+    /// The window's "Mine" list (the tray does not show it).
+    pub mine_sort: ListSort,
     /// Case-insensitive text matched against title, repository and #number, in both lists.
     pub filter: String,
     /// Only this repository (`owner/repo`); empty shows all.
@@ -180,6 +216,11 @@ impl Lists {
                     self.saved_sort = s;
                 }
             }
+            "lists.mine_sort" => {
+                if let Some(s) = ListSort::parse(value) {
+                    self.mine_sort = s;
+                }
+            }
             "lists.filter" => self.filter = value.to_string(),
             "lists.repository" => self.repository = value.to_string(),
             _ => {}
@@ -218,6 +259,12 @@ impl Config {
         if !repo.is_empty() && !owner_repo {
             return Err("lists.repository must be empty or owner/repo".into());
         }
+        let size = self.appearance.code_size;
+        if !CODE_SIZES.contains(&size) {
+            return Err(format!(
+                "appearance.code_size must be one of 12, 13, 14, 16, got {size}"
+            ));
+        }
         Ok(())
     }
 }
@@ -230,6 +277,10 @@ mod tests {
     fn defaults_match_spec() {
         let c = Config::default();
         assert_eq!(c.appearance.theme, Theme::System);
+        assert_eq!(c.appearance.code_size, 13);
+        assert_eq!(c.appearance.density, Density::Comfortable);
+        assert_eq!(c.appearance.diff_view, DiffView::Unified);
+        assert_eq!(c.lists.mine_sort, ListSort::Updated);
         assert_eq!(c.github.host, "github.com");
         assert_eq!(c.github.auth, AuthSource::GhCli);
         assert_eq!(c.github.poll_interval_secs, 60);
@@ -242,6 +293,40 @@ mod tests {
         assert_eq!(c.editor.custom_command, "");
         assert!(!c.notifications.do_not_disturb);
         assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn appearance_wire_names_and_code_size_rule() {
+        let c: Config = serde_json::from_str(
+            r#"{"appearance":{"code_size":16,"density":"compact","diff_view":"split"}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.appearance.code_size, 16);
+        assert_eq!(c.appearance.density, Density::Compact);
+        assert_eq!(c.appearance.diff_view, DiffView::Split);
+        assert_eq!(
+            c.appearance.theme,
+            Theme::System,
+            "missing keys keep defaults"
+        );
+        assert_eq!(c.validate(), Ok(()));
+        let mut bad = Config::default();
+        bad.appearance.code_size = 15;
+        assert_eq!(
+            bad.validate().unwrap_err(),
+            "appearance.code_size must be one of 12, 13, 14, 16, got 15"
+        );
+    }
+
+    #[test]
+    fn mine_sort_applies() {
+        let mut l = Lists::default();
+        assert!(l.apply("lists.mine_sort", "number"));
+        assert_eq!(l.mine_sort, ListSort::Number);
+        assert!(
+            !l.apply("lists.mine_sort", "sideways"),
+            "unknown values are ignored"
+        );
     }
 
     #[test]
@@ -335,6 +420,7 @@ mod tests {
             Lists {
                 assigned_sort: ListSort::Number,
                 saved_sort: ListSort::Updated,
+                mine_sort: ListSort::Updated,
                 filter: "auth".into(),
                 repository: "rzorzal/clusia".into(),
             }

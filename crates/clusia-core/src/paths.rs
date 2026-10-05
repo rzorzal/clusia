@@ -80,6 +80,11 @@ impl Paths {
         self.root.join("config.toml")
     }
 
+    /// Held by the open window (`clusia-app`), so a second launch hands over instead.
+    pub fn app_lock(&self) -> PathBuf {
+        self.root.join("app.lock")
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.root.join("clusiad.sock")
     }
@@ -93,6 +98,12 @@ impl Paths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_lock_lives_in_the_root() {
+        let p = Paths::new("/tmp/clusia-home");
+        assert_eq!(p.app_lock(), PathBuf::from("/tmp/clusia-home/app.lock"));
+    }
 
     #[test]
     fn new_puts_everything_under_root() {

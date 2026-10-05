@@ -1,14 +1,15 @@
 //! The tray's view model: everything the popover shows, computed without AppKit (spec §7.3).
 
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use clusia_core::time::parse_rfc3339;
-use clusia_core::{ActivitySummary, ListSort, Lists, PrRef, PrSummary, ReviewState};
+use clusia_core::{ActivitySummary, ListSort, Lists, PrSummary, ReviewState};
 use clusia_protocol::{ReviewSummary, SyncState, SyncStatus};
+use clusia_view::heatmap;
+use clusia_view::lists::{self, Entry, is_saved};
+pub use clusia_view::status::{StatusLine, Tone, format_age, status_line, week_label};
 
 use crate::actions::Action;
-use crate::heatmap;
 
 /// Rows per page of each list.
 pub const PAGE_SIZE: usize = 4;
@@ -57,23 +58,11 @@ impl Default for Snapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tone {
-    Neutral,
-    Warning,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Counter {
     pub value: usize,
     pub label: &'static str,
     pub action: Option<Action>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusLine {
-    pub text: String,
-    pub tone: Tone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,9 +189,9 @@ impl TrayModel {
         self.adopt(&snapshot.lists);
         self.snapshot = snapshot;
         for id in [ListId::Assigned, ListId::Saved] {
-            let last = self.filtered(id).len().div_ceil(PAGE_SIZE).max(1) - 1;
+            let total = self.filtered(id).len();
             if let Some(p) = self.pages.get_mut(&id) {
-                *p = (*p).min(last);
+                *p = lists::clamp_page(*p, total, PAGE_SIZE);
             }
         }
     }
@@ -302,9 +291,8 @@ impl TrayModel {
     /// Moves a list by `delta` pages, staying within its first and last page.
     pub fn page(&mut self, id: ListId, delta: i8) {
         let total = self.filtered(id).len();
-        let last = total.div_ceil(PAGE_SIZE).max(1) - 1;
-        let current = self.pages.get(&id).copied().unwrap_or(0).min(last);
-        let next = current.saturating_add_signed(isize::from(delta)).min(last);
+        let current = self.pages.get(&id).copied().unwrap_or(0);
+        let next = lists::step_page(current, isize::from(delta), total, PAGE_SIZE);
         self.pages.insert(id, next);
     }
 
@@ -379,7 +367,7 @@ impl TrayModel {
 
     fn filtered(&self, id: ListId) -> Vec<Entry<'_>> {
         let s = &self.snapshot;
-        let (mut v, sort): (Vec<Entry>, ListSort) = match id {
+        let (v, sort): (Vec<Entry>, ListSort) = match id {
             ListId::Assigned => (
                 s.assigned.iter().map(Entry::Pr).collect(),
                 self.prefs.assigned_sort,
@@ -393,16 +381,14 @@ impl TrayModel {
                 self.prefs.saved_sort,
             ),
         };
-        v.retain(|e| matches(e, &self.prefs.filter, &self.prefs.repository));
-        sort_entries(&mut v, sort);
-        v
+        lists::narrow(v, &self.prefs.filter, &self.prefs.repository, sort)
     }
 
     fn section(&self, id: ListId, now: i64, web: &str) -> Section {
         let entries = self.filtered(id);
         let total = entries.len();
-        let pages = total.div_ceil(PAGE_SIZE).max(1);
-        let page = self.pages.get(&id).copied().unwrap_or(0).min(pages - 1);
+        let pages = lists::page_count(total, PAGE_SIZE);
+        let page = lists::clamp_page(self.pages.get(&id).copied().unwrap_or(0), total, PAGE_SIZE);
         let rows = entries
             .iter()
             .skip(page * PAGE_SIZE)
@@ -435,50 +421,20 @@ impl TrayModel {
 
     fn chips(&self) -> Vec<Chip> {
         let s = &self.snapshot;
-        let mut repos: Vec<(String, String)> = s
-            .assigned
-            .iter()
-            .map(|p| &p.pr)
-            .chain(
-                s.reviews
-                    .iter()
-                    .filter(|r| is_saved(r.state))
-                    .map(|r| &r.pr),
-            )
-            .map(|pr| (pr.repo.clone(), format!("{}/{}", pr.owner, pr.repo)))
-            .collect();
-        repos.sort();
-        repos.dedup_by(|a, b| a.1 == b.1);
-        if repos.len() < 2 && self.prefs.repository.is_empty() {
-            return Vec::new();
-        }
-        // Same short name under two owners: show the full name for both.
-        let labels: Vec<String> = repos
-            .iter()
-            .map(|(short, full)| {
-                if repos.iter().filter(|(s, _)| s == short).count() > 1 {
-                    full.clone()
-                } else {
-                    short.clone()
-                }
-            })
-            .collect();
-        let mut chips = vec![Chip {
-            label: "All".into(),
-            selected: self.prefs.repository.is_empty(),
-            action: Action::Repository(None),
-        }];
-        chips.extend(
-            repos
-                .into_iter()
-                .zip(labels)
-                .map(|((_, full), label)| Chip {
-                    selected: self.prefs.repository == full,
-                    action: Action::Repository(Some(full)),
-                    label,
-                }),
+        let refs = s.assigned.iter().map(|p| &p.pr).chain(
+            s.reviews
+                .iter()
+                .filter(|r| is_saved(r.state))
+                .map(|r| &r.pr),
         );
-        chips
+        lists::repo_chips(refs, &self.prefs.repository)
+            .into_iter()
+            .map(|c| Chip {
+                label: c.label,
+                selected: c.selected,
+                action: Action::Repository(c.repo),
+            })
+            .collect()
     }
 
     fn pr_row(&self, p: &PrSummary, now: i64) -> Row {
@@ -503,13 +459,6 @@ impl TrayModel {
     }
 }
 
-fn is_saved(state: ReviewState) -> bool {
-    matches!(
-        state,
-        ReviewState::Saved | ReviewState::Outdated | ReviewState::Revalidated
-    )
-}
-
 fn lists_fields(l: &Lists) -> Vec<(String, String)> {
     vec![
         (
@@ -520,61 +469,6 @@ fn lists_fields(l: &Lists) -> Vec<(String, String)> {
         ("lists.filter".into(), l.filter.clone()),
         ("lists.repository".into(), l.repository.clone()),
     ]
-}
-
-/// A list entry, unified so both lists share filtering and sorting.
-enum Entry<'a> {
-    Pr(&'a PrSummary),
-    Review(&'a ReviewSummary),
-}
-
-impl Entry<'_> {
-    fn pr(&self) -> &PrRef {
-        match self {
-            Entry::Pr(p) => &p.pr,
-            Entry::Review(r) => &r.pr,
-        }
-    }
-    fn title(&self) -> &str {
-        match self {
-            Entry::Pr(p) => &p.title,
-            Entry::Review(r) => &r.title,
-        }
-    }
-    fn updated(&self) -> i64 {
-        match self {
-            Entry::Pr(p) => parse_rfc3339(&p.updated_at).unwrap_or(0),
-            Entry::Review(r) => r.updated_at,
-        }
-    }
-}
-
-fn matches(e: &Entry, query: &str, repo: &str) -> bool {
-    let pr = e.pr();
-    let full = format!("{}/{}", pr.owner, pr.repo);
-    if !repo.is_empty() && full != repo {
-        return false;
-    }
-    let q = query.trim().to_lowercase();
-    if q.is_empty() {
-        return true;
-    }
-    let number = q.strip_prefix('#').unwrap_or(&q);
-    e.title().to_lowercase().contains(&q)
-        || full.to_lowercase().contains(&q)
-        || pr.number.to_string() == number
-}
-
-fn sort_entries(v: &mut [Entry], sort: ListSort) {
-    match sort {
-        ListSort::Updated => v.sort_by_key(|e| Reverse(e.updated())),
-        ListSort::Oldest => v.sort_by_key(|e| e.updated()),
-        ListSort::Repository => v.sort_by(|a, b| {
-            let key = |e: &Entry| format!("{}/{}", e.pr().owner, e.pr().repo);
-            key(a).cmp(&key(b)).then(b.updated().cmp(&a.updated()))
-        }),
-        ListSort::Number => v.sort_by_key(|e| Reverse(e.pr().number)),
-    }
 }
 
 fn review_row(r: &ReviewSummary, web: &str, now: i64) -> Row {
@@ -611,14 +505,6 @@ fn review_row(r: &ReviewSummary, web: &str, now: i64) -> Row {
     }
 }
 
-pub fn week_label(published: u32) -> String {
-    if published == 1 {
-        "1 review this week".into()
-    } else {
-        format!("{published} reviews this week")
-    }
-}
-
 /// "Syncing…" during a refresh, "Syncing paused", "Synced 2m ago", or nothing.
 pub fn sync_caption(sync: Option<&SyncStatus>, refreshing: bool, now: i64) -> Option<StatusLine> {
     let line = |text: String, tone| Some(StatusLine { text, tone });
@@ -637,50 +523,6 @@ pub fn sync_caption(sync: Option<&SyncStatus>, refreshing: bool, now: i64) -> Op
             line(format!("Synced {} ago", format_age(now, t)), Tone::Neutral)
         }
         _ => None,
-    }
-}
-
-pub fn status_line(sync: Option<&SyncStatus>, now: i64) -> Option<StatusLine> {
-    let line = |text: &str, tone| {
-        Some(StatusLine {
-            text: text.to_string(),
-            tone,
-        })
-    };
-    let Some(s) = sync else {
-        return line("Connecting to GitHub…", Tone::Neutral);
-    };
-    match s.state {
-        SyncState::Online => None,
-        SyncState::NotYet => line("Syncing with GitHub…", Tone::Neutral),
-        SyncState::Offline => line("Offline — showing the last synced lists", Tone::Warning),
-        SyncState::RateLimited => {
-            let mins = s
-                .next_sync_unix
-                .map(|t| ((t - now).max(0) + 59) / 60)
-                .unwrap_or(1)
-                .max(1);
-            Some(StatusLine {
-                text: format!("GitHub rate limit — next sync in {mins} min"),
-                tone: Tone::Warning,
-            })
-        }
-        SyncState::Unauthorized => line(
-            "Not signed in to GitHub — run: clusia auth login",
-            Tone::Warning,
-        ),
-    }
-}
-
-/// Compact age: `now`, `5m`, `2h`, `3d`, `4w`.
-pub fn format_age(now: i64, then: i64) -> String {
-    let s = (now - then).max(0);
-    match s {
-        0..60 => "now".into(),
-        60..3600 => format!("{}m", s / 60),
-        3600..86_400 => format!("{}h", s / 3600),
-        86_400..604_800 => format!("{}d", s / 86_400),
-        _ => format!("{}w", s / 604_800),
     }
 }
 
@@ -1007,70 +849,6 @@ mod tests {
         assert_eq!(week_label(12), "12 reviews this week");
     }
 
-    #[test]
-    fn status_lines() {
-        let s = |state, next: Option<i64>| SyncStatus {
-            state,
-            last_sync_unix: None,
-            next_sync_unix: next,
-            message: None,
-            paused: false,
-        };
-        assert_eq!(
-            status_line(None, NOW).unwrap().text,
-            "Connecting to GitHub…"
-        );
-        assert_eq!(status_line(Some(&s(SyncState::Online, None)), NOW), None);
-        assert_eq!(
-            status_line(Some(&s(SyncState::NotYet, None)), NOW)
-                .unwrap()
-                .text,
-            "Syncing with GitHub…"
-        );
-        let off = status_line(Some(&s(SyncState::Offline, None)), NOW).unwrap();
-        assert_eq!(
-            (off.text.as_str(), off.tone),
-            ("Offline — showing the last synced lists", Tone::Warning)
-        );
-        assert_eq!(
-            status_line(Some(&s(SyncState::RateLimited, Some(NOW + 61))), NOW)
-                .unwrap()
-                .text,
-            "GitHub rate limit — next sync in 2 min"
-        );
-        assert_eq!(
-            status_line(Some(&s(SyncState::RateLimited, None)), NOW)
-                .unwrap()
-                .text,
-            "GitHub rate limit — next sync in 1 min"
-        );
-        let auth = status_line(Some(&s(SyncState::Unauthorized, None)), NOW).unwrap();
-        assert_eq!(
-            (auth.text.as_str(), auth.tone),
-            (
-                "Not signed in to GitHub — run: clusia auth login",
-                Tone::Warning
-            )
-        );
-    }
-
-    #[test]
-    fn ages() {
-        assert_eq!(
-            format_age(NOW, NOW + 30),
-            "now",
-            "clock skew is not negative"
-        );
-        assert_eq!(format_age(NOW, NOW - 59), "now");
-        assert_eq!(format_age(NOW, NOW - 60), "1m");
-        assert_eq!(format_age(NOW, NOW - 3599), "59m");
-        assert_eq!(format_age(NOW, NOW - 3600), "1h");
-        assert_eq!(format_age(NOW, NOW - 86_399), "23h");
-        assert_eq!(format_age(NOW, NOW - 86_400), "1d");
-        assert_eq!(format_age(NOW, NOW - 6 * 86_400), "6d");
-        assert_eq!(format_age(NOW, NOW - 21 * 86_400), "3w");
-    }
-
     fn many(n: u64) -> Vec<PrSummary> {
         (1..=n).map(|i| pr(i, NOW - i as i64 * 60)).collect()
     }
@@ -1274,6 +1052,7 @@ mod tests {
         first.lists = Lists {
             assigned_sort: ListSort::Oldest,
             saved_sort: ListSort::Updated,
+            mine_sort: ListSort::Updated,
             filter: "change 2".into(),
             repository: String::new(),
         };
