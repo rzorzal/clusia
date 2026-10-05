@@ -17,6 +17,7 @@ use crate::bridge::{Ask, Asks, Connection, Model, ShowRequested, Toasts};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::nav::NavPlugin;
+use crate::screens::home::HomePlugin;
 use crate::snapshot::{self, Snapshot};
 use crate::theme::{LIGHT, Theme, ThemePlugin};
 use crate::ui::kit::KitPlugin;
@@ -44,7 +45,7 @@ pub fn app(snapshot: Snapshot) -> App {
         })
         .init_resource::<Asks>()
         .init_resource::<Toasts>()
-        .add_plugins((ThemePlugin, KitPlugin, NavPlugin));
+        .add_plugins((ThemePlugin, KitPlugin, NavPlugin, HomePlugin));
     app.update();
     app
 }
@@ -78,4 +79,11 @@ pub fn set_config_locally(app: &mut App, key: &str, value: &str) {
     let mut model = app.world_mut().resource_mut::<Model>();
     snapshot::apply_config_locally(&mut model.snapshot.config, key, value).unwrap();
     app.update();
+}
+
+/// Runs frames until rebuilt screens have settled.
+pub fn settle(app: &mut App) {
+    for _ in 0..3 {
+        app.update();
+    }
 }

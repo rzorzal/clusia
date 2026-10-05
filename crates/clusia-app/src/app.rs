@@ -64,6 +64,7 @@ pub fn run(launch: Launch) {
         crate::theme::ThemePlugin,
         crate::ui::kit::KitPlugin,
         crate::nav::NavPlugin,
+        crate::screens::home::HomePlugin,
     ))
     .insert_resource(if launch.screenshot.is_some() {
         WinitSettings::continuous()
