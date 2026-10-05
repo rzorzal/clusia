@@ -2,8 +2,11 @@
 //! colors: screens name a `Swatch` and the kit resolves it against the current `Tokens`.
 
 use bevy::prelude::*;
+use bevy::window::{PrimaryWindow, WindowTheme, WindowThemeChanged};
 use clusia_core::Density;
 use clusia_core::config::Theme as ThemeChoice;
+
+use crate::bridge::Model;
 
 /// A named color role. Screens use these, never `Color`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -160,6 +163,64 @@ pub fn is_dark(choice: ThemeChoice, system_dark: bool) -> bool {
         ThemeChoice::Light => false,
         ThemeChoice::Dark => true,
         ThemeChoice::System => system_dark,
+    }
+}
+
+/// macOS is in dark mode (including Auto at night).
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SystemDark(pub bool);
+
+pub struct ThemePlugin;
+
+impl Plugin for ThemePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SystemDark>()
+            .add_systems(PreUpdate, (follow_system, update_theme).chain());
+    }
+}
+
+/// Seeds from the window's theme once winit reports it, then follows `WindowThemeChanged`.
+fn follow_system(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut changes: MessageReader<WindowThemeChanged>,
+    mut system: ResMut<SystemDark>,
+    mut seeded: Local<bool>,
+) {
+    let mut dark = None;
+    if !*seeded
+        && let Ok(w) = windows.single()
+        && let Some(theme) = w.window_theme
+    {
+        dark = Some(theme == WindowTheme::Dark);
+        *seeded = true;
+    }
+    for change in changes.read() {
+        dark = Some(change.theme == WindowTheme::Dark);
+        *seeded = true;
+    }
+    if let Some(dark) = dark
+        && system.0 != dark
+    {
+        system.0 = dark;
+    }
+}
+
+fn update_theme(
+    model: Res<Model>,
+    system: Res<SystemDark>,
+    mut theme: ResMut<Theme>,
+    clear: Option<ResMut<ClearColor>>,
+) {
+    if !(model.is_changed() || system.is_changed()) {
+        return;
+    }
+    let a = &model.snapshot.config.appearance;
+    let next = Theme::new(is_dark(a.theme, system.0), a.code_size, a.density);
+    if *theme != next {
+        *theme = next;
+        if let Some(mut clear) = clear {
+            clear.0 = next.tokens.bg;
+        }
     }
 }
 

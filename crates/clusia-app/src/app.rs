@@ -57,7 +57,12 @@ pub fn run(launch: Launch) {
                 ..default()
             }),
     )
-    .add_plugins((TabNavigationPlugin, FontsPlugin))
+    .add_plugins((
+        TabNavigationPlugin,
+        FontsPlugin,
+        crate::theme::ThemePlugin,
+        crate::ui::kit::KitPlugin,
+    ))
     .insert_resource(if launch.screenshot.is_some() {
         WinitSettings::continuous()
     } else {

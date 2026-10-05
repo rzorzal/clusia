@@ -11,6 +11,10 @@ pub mod fonts;
 pub mod instance;
 pub mod snapshot;
 pub mod theme;
+pub mod ui;
+
+#[cfg(test)]
+pub(crate) mod testing;
 
 /// How the window introduces itself to the daemon.
 pub const CLIENT_NAME: &str = "clusia-app";
