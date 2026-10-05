@@ -30,6 +30,20 @@ pub enum ProviderError {
     Decode(String),
     #[error("GitHub refused the request: {0}")]
     GraphQl(String),
+    /// A GraphQL write answered without the object it should have returned (named in `.0`).
+    #[error("GitHub refused the request: {0} came back empty")]
+    EmptyPayload(String),
+}
+
+impl ProviderError {
+    /// GitHub may have done what was asked even though the answer was lost, unreadable or
+    /// empty: the caller cannot tell whether the write happened.
+    pub fn is_ambiguous(&self) -> bool {
+        matches!(
+            self,
+            Self::Offline(_) | Self::Decode(_) | Self::EmptyPayload(_)
+        )
+    }
 }
 
 pub fn api_base_for_host(host: &str) -> String {
@@ -768,6 +782,30 @@ fn summary_from_issue(item: IssueItem) -> Result<PrSummary, ProviderError> {
 mod tests {
     use super::*;
     use crate::auth::TokenOrigin;
+
+    #[test]
+    fn ambiguous_errors_are_the_ones_github_may_have_acted_on() {
+        let ambiguous = [
+            ProviderError::Offline("reset".into()),
+            ProviderError::Decode("bad json".into()),
+            ProviderError::EmptyPayload("the pending review".into()),
+        ];
+        assert!(ambiguous.iter().all(ProviderError::is_ambiguous));
+        let certain = [
+            ProviderError::Unauthorized,
+            ProviderError::RateLimited {
+                retry_after_secs: 1,
+            },
+            ProviderError::NotFound("x".into()),
+            ProviderError::Http {
+                status: 500,
+                message: "boom".into(),
+            },
+            // A refusal whose text merely reads like an empty payload is still a refusal.
+            ProviderError::GraphQl("the pending review came back empty".into()),
+        ];
+        assert!(!certain.iter().any(ProviderError::is_ambiguous));
+    }
     use serde_json::json;
     use wiremock::matchers::{header as h, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};

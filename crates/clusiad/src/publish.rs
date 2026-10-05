@@ -86,15 +86,6 @@ impl SubmitFailure {
     }
 }
 
-/// The request may have reached GitHub even though its answer was lost or unreadable.
-fn ambiguous(e: &ProviderError) -> bool {
-    match e {
-        ProviderError::Offline(_) | ProviderError::Decode(_) => true,
-        ProviderError::GraphQl(message) => message.ends_with("came back empty"),
-        _ => false,
-    }
-}
-
 /// Deletes a pending review we started; `true` when it may still be on GitHub.
 async fn discard_pending(gh: &GitHub, pr: &PrRef, review_id: &str) -> bool {
     match gh.delete_pending_review(review_id).await {
@@ -150,7 +141,7 @@ async fn submit_review(
     {
         Ok(pending) => pending,
         Err(error) => {
-            let leftover = ambiguous(&error) && discard_orphan(gh, pr).await;
+            let leftover = error.is_ambiguous() && discard_orphan(gh, pr).await;
             return Err(SubmitFailure {
                 error,
                 maybe_posted: false,
@@ -166,7 +157,7 @@ async fn submit_review(
         {
             Ok(published) => return Ok(published),
             Err(error) => {
-                let unsure = ambiguous(&error);
+                let unsure = error.is_ambiguous();
                 (error, unsure)
             }
         },

@@ -196,7 +196,7 @@ fn object<T: serde::de::DeserializeOwned>(
     for key in path {
         at = at.get(key).unwrap_or(&Value::Null);
         if at.is_null() {
-            return Err(ProviderError::GraphQl(format!("{what} came back empty")));
+            return Err(ProviderError::EmptyPayload(what.to_string()));
         }
     }
     decode(at.clone())
@@ -778,13 +778,19 @@ mod tests {
         )
         .await;
         let client = gh(&server);
-        assert!(matches!(
-            client.start_review("PR_7", "h1", &[]).await,
-            Err(ProviderError::GraphQl(_))
-        ));
+        let start = client.start_review("PR_7", "h1", &[]).await.unwrap_err();
+        assert_eq!(
+            start,
+            ProviderError::EmptyPayload("the pending review".into())
+        );
+        assert_eq!(
+            start.to_string(),
+            "GitHub refused the request: the pending review came back empty"
+        );
+        assert!(start.is_ambiguous(), "GitHub may have acted anyway");
         assert!(matches!(
             client.submit_review("PRR_1", "COMMENT", "x").await,
-            Err(ProviderError::GraphQl(_))
+            Err(ProviderError::EmptyPayload(_))
         ));
     }
 

@@ -568,6 +568,16 @@ async fn answer(w: &World, body_contains: &str, data: serde_json::Value) {
 /// The start answers with a payload the daemon cannot read; the pending-review check sees
 /// nothing, but a later read of the pull request shows `PRR_orphan` when `orphan` is set.
 async fn ambiguous_start(w: &World, orphan: bool) {
+    ambiguous_start_answering(
+        w,
+        orphan,
+        json!({ "addPullRequestReview": { "pullRequestReview": { "id": 1 } } }),
+    )
+    .await;
+}
+
+/// Like [`ambiguous_start`], with the start answering `start` (HTTP 200).
+async fn ambiguous_start_answering(w: &World, orphan: bool, start: serde_json::Value) {
     w.server.reset().await;
     let mut mock = PrMock::new(&w.head, &w.base, &w.origin);
     if orphan {
@@ -587,12 +597,7 @@ async fn ambiguous_start(w: &World, orphan: bool) {
         .up_to_n_times(1)
         .mount(&w.server)
         .await;
-    answer(
-        w,
-        "addPullRequestReview(",
-        json!({ "addPullRequestReview": { "pullRequestReview": { "id": 1 } } }),
-    )
-    .await;
+    answer(w, "addPullRequestReview(", start).await;
 }
 
 #[tokio::test]
@@ -737,6 +742,35 @@ async fn reply_failure_with_a_failed_delete_warns_about_the_leftover() {
     assert_eq!(ops(&writes(&w).await), ["start", "reply", "delete"]);
     assert_eq!(
         (stored(&w).state, stored(&w).draft.items.len()),
+        (ReviewState::Saved, 2)
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn empty_start_payload_deletes_the_orphan_pending_review() {
+    let w = world().await;
+    ambiguous_start_answering(
+        &w,
+        true,
+        json!({ "addPullRequestReview": { "pullRequestReview": null } }),
+    )
+    .await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    reply_to(&mut c, "PRRT_a", "Agreed.").await;
+
+    let e = server_error(c.request(publish(Verdict::Comment, "")).await);
+    assert_eq!(e.code, ErrorCode::Upstream);
+    assert!(e.message.contains("came back empty"), "{}", e.message);
+    assert!(!e.message.contains(LEFTOVER), "{}", e.message);
+    let sent = writes(&w).await;
+    assert_eq!(ops(&sent), ["start", "delete"]);
+    assert!(sent[1].1.contains("PRR_orphan"), "{}", sent[1].1);
+    let review = stored(&w);
+    assert_eq!(
+        (review.state, review.draft.items.len()),
         (ReviewState::Saved, 2)
     );
     w.daemon.stop().await;
