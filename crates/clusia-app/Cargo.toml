@@ -1,0 +1,29 @@
+[package]
+name = "clusia-app"
+description = "Clúsia window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+clusia-core.workspace = true
+clusia-protocol.workspace = true
+clusia-view.workspace = true
+bevy.workspace = true
+crossbeam-channel.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+clusiad.workspace = true
+clusia-platform.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
