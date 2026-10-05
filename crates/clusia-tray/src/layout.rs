@@ -9,7 +9,9 @@ const PAD: f64 = 16.0;
 const GAP: f64 = 3.0;
 const WEEKS: usize = 26;
 const ROW_H: f64 = 34.0;
-const GLYPH_HIT: f64 = 28.0;
+pub const TOOL_BUTTON: f64 = 32.0;
+const TOOL_GAP: f64 = 2.0;
+const TOOL_PAD: f64 = 3.0;
 const COUNTER_H: f64 = 44.0;
 const SEARCH_H: f64 = 24.0;
 const CHIP_H: f64 = 22.0;
@@ -88,6 +90,14 @@ pub enum Shape {
     Divider {
         rect: Rect,
     },
+    /// The rounded background of the header toolbar.
+    Group {
+        rect: Rect,
+    },
+    /// A raised (active) toolbar button.
+    Raised {
+        rect: Rect,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -139,24 +149,52 @@ pub fn layout(view: &TrayView) -> Layout {
     let inner = WIDTH - 2.0 * PAD;
     let mut y = PAD;
 
-    // Header: brand dot, name, ⤢ (window installed) and ⚙, with 28 pt hit boxes.
+    // Header: brand dot and name; a right-aligned toolbar of 32 pt buttons.
     l.shapes.push(Shape::Dot {
-        rect: Rect::new(PAD, y + 6.0, 8.0, 8.0),
+        rect: Rect::new(PAD, y + 9.0, 8.0, 8.0),
         ink: Ink::Green,
     });
     l.shapes.push(text(
-        Rect::new(PAD + 14.0, y, 160.0, 20.0),
+        Rect::new(PAD + 14.0, y + 3.0, 140.0, 20.0),
         "Clúsia",
         Style::Title,
         Ink::Primary,
     ));
-    let gear = Rect::new(WIDTH - PAD - GLYPH_HIT + 6.0, y - 6.0, GLYPH_HIT, GLYPH_HIT);
-    glyph_button(&mut l, gear, "⚙︎", Action::OpenConfig);
+    let mut tools: Vec<(&str, Action)> = vec![("↻", Action::Refresh)];
     if view.show_home {
-        let home = Rect::new(gear.x - GLYPH_HIT, gear.y, GLYPH_HIT, GLYPH_HIT);
-        glyph_button(&mut l, home, "⤢", Action::OpenHome);
+        tools.push(("⤢", Action::OpenHome));
     }
-    y += 30.0;
+    tools.push(("⚙︎", Action::OpenConfig));
+    tools.push(("⏻", Action::TurnOff));
+    let n = tools.len() as f64;
+    let group_w = 2.0 * TOOL_PAD + n * TOOL_BUTTON + (n - 1.0) * TOOL_GAP;
+    let group = Rect::new(
+        WIDTH - PAD - group_w,
+        y - 4.0,
+        group_w,
+        TOOL_BUTTON + 2.0 * TOOL_PAD,
+    );
+    l.shapes.push(Shape::Group { rect: group });
+    for (i, (glyph, action)) in tools.into_iter().enumerate() {
+        let r = Rect::new(
+            group.x + TOOL_PAD + i as f64 * (TOOL_BUTTON + TOOL_GAP),
+            group.y + TOOL_PAD,
+            TOOL_BUTTON,
+            TOOL_BUTTON,
+        );
+        let active = view.syncing && action == Action::Refresh;
+        if active {
+            l.shapes.push(Shape::Raised { rect: r });
+        }
+        l.shapes.push(text(
+            Rect::new(r.x, r.y + 5.0, r.w, r.h - 5.0),
+            glyph,
+            Style::Glyph,
+            if active { Ink::Green } else { Ink::Secondary },
+        ));
+        l.hits.push((r, action));
+    }
+    y += group.h + 4.0;
 
     if let Some(s) = &view.status {
         l.shapes.push(text(
@@ -168,19 +206,29 @@ pub fn layout(view: &TrayView) -> Layout {
         y += 24.0;
     }
 
-    // Caption over the heatmap.
+    // Caption over the heatmap: range and weekly count on the left, sync state on the right.
+    let left = if view.week_label.is_empty() {
+        "Last 6 months".to_string()
+    } else {
+        format!("Last 6 months · {}", view.week_label)
+    };
     l.shapes.push(text(
-        Rect::new(PAD, y, inner / 2.0, 16.0),
-        "Last 6 months",
+        Rect::new(PAD, y, inner * 0.62, 16.0),
+        &left,
         Style::Meta,
         Ink::Tertiary,
     ));
-    if !view.week_label.is_empty() {
+    if let Some(c) = &view.sync_caption {
+        let ink = if view.syncing {
+            Ink::Green
+        } else {
+            tone_ink(c.tone)
+        };
         l.shapes.push(right_text(
-            Rect::new(PAD + inner / 2.0, y, inner / 2.0, 16.0),
-            &view.week_label,
+            Rect::new(PAD + inner * 0.62, y, inner * 0.38, 16.0),
+            &c.text,
             Style::Meta,
-            Ink::Secondary,
+            ink,
         ));
     }
     y += 18.0;
@@ -314,17 +362,6 @@ pub fn layout(view: &TrayView) -> Layout {
     l
 }
 
-/// A header glyph centered in its square hit box.
-fn glyph_button(l: &mut Layout, r: Rect, glyph: &str, action: Action) {
-    l.shapes.push(text(
-        Rect::new(r.x, r.y + 3.0, r.w, r.h - 3.0),
-        glyph,
-        Style::Glyph,
-        Ink::Secondary,
-    ));
-    l.hits.push((r, action));
-}
-
 fn row_shapes(l: &mut Layout, row: &Row, y: f64) {
     let inner = WIDTH - 2.0 * PAD;
     l.hits.push((
@@ -433,7 +470,7 @@ pub fn search_placeholder(r: Rect) -> Vec<Shape> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ListId, Snapshot, TrayModel};
+    use crate::model::{ListId, Snapshot, StatusLine, Tone, TrayModel};
     use clusia_core::{ActivitySummary, DayCount, PrRef, PrSummary, ReviewState};
     use clusia_protocol::{ReviewSummary, SyncState, SyncStatus};
 
@@ -465,6 +502,7 @@ mod tests {
             last_sync_unix: Some(NOW),
             next_sync_unix: None,
             message: None,
+            paused: false,
         }
     }
 
@@ -508,6 +546,7 @@ mod tests {
                 last_sync_unix: Some(NOW),
                 next_sync_unix: None,
                 message: None,
+                paused: false,
             }),
             lists_loaded: true,
             ..Snapshot::default()
@@ -556,7 +595,9 @@ mod tests {
             | Shape::Panel { rect }
             | Shape::Dot { rect, .. }
             | Shape::Pill { rect, .. }
-            | Shape::Divider { rect } => *rect,
+            | Shape::Divider { rect }
+            | Shape::Group { rect }
+            | Shape::Raised { rect } => *rect,
         }
     }
 
@@ -566,7 +607,7 @@ mod tests {
         assert!(v.status.is_some());
         assert_eq!(v.chips.len(), 4, "All + 3 repositories");
         let l = layout(&v);
-        assert!(l.height <= 720.0, "height {}", l.height);
+        assert!(l.height <= 730.0, "height {}", l.height);
         for s in &l.shapes {
             let r = shape_rect(s);
             assert!(
@@ -633,30 +674,84 @@ mod tests {
     }
 
     #[test]
-    fn glyphs_are_bigger() {
+    fn toolbar_buttons_in_order() {
         let l = layout(&view(1, true, false));
-        let gear = l
+        let tools: Vec<(Rect, Action)> = l
+            .hits
+            .iter()
+            .filter(|(r, _)| r.y < 40.0)
+            .filter(|(_, a)| {
+                matches!(
+                    a,
+                    Action::Refresh | Action::OpenHome | Action::OpenConfig | Action::TurnOff
+                )
+            })
+            .cloned()
+            .collect();
+        let actions: Vec<&Action> = tools.iter().map(|(_, a)| a).collect();
+        assert_eq!(
+            actions,
+            [
+                &Action::Refresh,
+                &Action::OpenHome,
+                &Action::OpenConfig,
+                &Action::TurnOff
+            ]
+        );
+        for (r, a) in &tools {
+            assert!(r.w >= 28.0 && r.h >= 28.0, "{a:?} {r:?}");
+        }
+        assert!(
+            tools.windows(2).all(|w| w[0].0.x < w[1].0.x),
+            "left to right"
+        );
+        let group = l
             .shapes
             .iter()
             .find_map(|s| match s {
-                Shape::Text {
-                    rect, text, style, ..
-                } if text == "⚙︎" => Some((*rect, *style)),
+                Shape::Group { rect } => Some(*rect),
                 _ => None,
             })
-            .expect("a gear");
-        assert_eq!(gear.1, Style::Glyph);
-        let (x, y) = center(gear.0);
-        let hit = l
-            .hits
+            .expect("a toolbar group");
+        assert!(
+            (group.x + group.w - (WIDTH - PAD)).abs() < 0.5,
+            "right aligned"
+        );
+        for glyph in ["↻", "⤢", "⚙︎", "⏻"] {
+            let r = text_rect(&l, glyph);
+            assert!(
+                group.contains(r.x + r.w / 2.0, r.y + r.h / 2.0),
+                "{glyph} inside"
+            );
+        }
+        let without = layout(&view(1, false, false));
+        assert!(!without.hits.iter().any(|(_, a)| *a == Action::OpenHome));
+        assert!(without.hits.iter().any(|(_, a)| *a == Action::TurnOff));
+    }
+
+    #[test]
+    fn syncing_raises_refresh_and_captions_say_so() {
+        let mut v = view(1, true, false);
+        v.syncing = true;
+        v.sync_caption = Some(StatusLine {
+            text: "Syncing…".into(),
+            tone: Tone::Neutral,
+        });
+        let l = layout(&v);
+        assert!(l.shapes.iter().any(|s| matches!(s, Shape::Raised { .. })));
+        assert!(texts(&l).contains(&"Syncing…"));
+        let refresh = l
+            .shapes
             .iter()
-            .find(|(r, a)| *a == Action::OpenConfig && r.contains(x, y))
-            .expect("the gear is a button")
-            .0;
-        assert!(hit.w >= 28.0 && hit.h >= 28.0, "{hit:?}");
-        let home = text_rect(&l, "⤢");
-        let (x, y) = center(home);
-        assert_eq!(l.hit(x, y), Some(&Action::OpenHome));
+            .find_map(|s| match s {
+                Shape::Text { text, ink, .. } if text == "↻" => Some(*ink),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(refresh, Ink::Green);
+        assert!(
+            texts(&layout(&view(1, true, false))).contains(&"Last 6 months · 12 reviews this week")
+        );
     }
 
     #[test]
@@ -745,15 +840,6 @@ mod tests {
             Some(&v.sections[0].rows[1].action)
         );
         assert_eq!(l.hit(1.0, 1.0), None, "the corner is not a button");
-    }
-
-    #[test]
-    fn gear_always_home_only_with_the_window() {
-        let without = layout(&view(1, false, false));
-        assert!(without.hits.iter().any(|(_, a)| *a == Action::OpenConfig));
-        assert!(!without.hits.iter().any(|(_, a)| *a == Action::OpenHome));
-        let with = layout(&view(1, true, false));
-        assert!(with.hits.iter().any(|(_, a)| *a == Action::OpenHome));
     }
 
     #[test]

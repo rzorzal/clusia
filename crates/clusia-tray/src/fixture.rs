@@ -108,6 +108,7 @@ pub fn demo(now: i64) -> Vec<Snapshot> {
             last_sync_unix: Some(now - 60),
             next_sync_unix: Some(now),
             message: None,
+            paused: false,
         }),
         host: "github.com".into(),
         lists_loaded: true,

@@ -79,6 +79,9 @@ pub enum Command {
     /// Sync with GitHub now and return the resulting status.
     SyncNow,
     GetSyncStatus,
+    /// Stop background syncing until `ResumeSync` (not persisted across daemon restarts).
+    PauseSync,
+    ResumeSync,
     AuthStatus,
     /// Store a personal access token in the Keychain for the configured host.
     SetToken {
@@ -222,6 +225,9 @@ pub struct SyncStatus {
     pub last_sync_unix: Option<i64>,
     pub next_sync_unix: Option<i64>,
     pub message: Option<String>,
+    /// Background syncing is paused (`PauseSync`); `SyncNow` still syncs once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -319,6 +325,8 @@ pub enum Event {
         moved: usize,
         obsolete: usize,
     },
+    /// The daemon is shutting down on request (`Shutdown`); clients should close.
+    Stopping,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,6 +435,59 @@ pub struct PublishResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_messages_wire_format() {
+        let pause = ClientMessage::Request {
+            id: 4,
+            cmd: Command::PauseSync,
+        };
+        assert_eq!(
+            wire(&pause),
+            r#"{"type":"request","id":4,"cmd":"pause_sync"}"#
+        );
+        let resume = ClientMessage::Request {
+            id: 5,
+            cmd: Command::ResumeSync,
+        };
+        assert_eq!(
+            wire(&resume),
+            r#"{"type":"request","id":5,"cmd":"resume_sync"}"#
+        );
+        let stopping = ServerMessage::Event {
+            topic: topics::SYNC.into(),
+            event: Event::Stopping,
+        };
+        assert_eq!(
+            wire(&stopping),
+            r#"{"type":"event","topic":"sync","event":"stopping"}"#
+        );
+        let paused = SyncStatus {
+            paused: true,
+            ..SyncStatus::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&paused).unwrap(),
+            r#"{"state":"not_yet","last_sync_unix":null,"next_sync_unix":null,"message":null,"paused":true}"#
+        );
+        round_trip(Command::PauseSync);
+        round_trip(Command::ResumeSync);
+        round_trip(Event::Stopping);
+        round_trip(paused);
+    }
+
+    #[test]
+    fn paused_flag_is_omitted_when_false() {
+        assert_eq!(
+            serde_json::to_string(&SyncStatus::default()).unwrap(),
+            r#"{"state":"not_yet","last_sync_unix":null,"next_sync_unix":null,"message":null}"#
+        );
+        let old: SyncStatus = serde_json::from_str(
+            r#"{"state":"online","last_sync_unix":1,"next_sync_unix":2,"message":null}"#,
+        )
+        .unwrap();
+        assert!(!old.paused, "old daemons are never paused");
+    }
 
     fn wire<T: Serialize>(m: &T) -> String {
         serde_json::to_string(m).unwrap()
@@ -678,6 +739,7 @@ mod tests {
                 last_sync_unix: Some(100),
                 next_sync_unix: Some(160),
                 message: Some("rate limit".into()),
+                paused: false,
             })),
         };
         assert_eq!(

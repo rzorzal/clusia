@@ -1,6 +1,7 @@
 //! Keeping the PR lists in sync with GitHub (spec §5.1).
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clusia_core::PrFilter;
@@ -76,6 +77,7 @@ pub(crate) fn status_for_error(
         last_sync_unix: last,
         next_sync_unix: next,
         message: Some(e.to_string()),
+        paused: false,
     }
 }
 
@@ -100,12 +102,44 @@ async fn store_lists(shared: &Shared, lists: PrLists) {
 }
 
 async fn set_status(shared: &Shared, status: SyncStatus) {
+    let paused = shared.paused.load(Ordering::SeqCst);
+    let status = SyncStatus {
+        paused,
+        next_sync_unix: if paused { None } else { status.next_sync_unix },
+        ..status
+    };
     let mut current = shared.sync.write().await;
-    let changed = current.state != status.state || current.message != status.message;
+    let changed = current.state != status.state
+        || current.message != status.message
+        || current.paused != status.paused;
     *current = status.clone();
     if changed {
         shared.publish(topics::SYNC, Event::SyncChanged(status));
     }
+}
+
+/// Pauses or resumes background syncing and returns the new status. Resuming syncs at once.
+pub(crate) async fn set_paused(shared: &Shared, paused: bool) -> SyncStatus {
+    shared.paused.store(paused, Ordering::SeqCst);
+    let status = {
+        let mut current = shared.sync.write().await;
+        let mut next = current.clone();
+        next.paused = paused;
+        if paused {
+            next.next_sync_unix = None;
+        }
+        let changed =
+            next.paused != current.paused || next.next_sync_unix != current.next_sync_unix;
+        *current = next.clone();
+        if changed {
+            shared.publish(topics::SYNC, Event::SyncChanged(next.clone()));
+        }
+        next
+    };
+    if !paused {
+        shared.sync_now.notify_one();
+    }
+    status
 }
 
 /// One sync with GitHub. The cached lists are only replaced on success.
@@ -114,7 +148,10 @@ pub(crate) async fn sync_once(shared: &Shared) -> SyncStatus {
     let _guard = shared.sync_lock.lock().await;
     let status = sync_locked(shared).await;
     shared.first_sync_done.send_replace(true);
-    status
+    SyncStatus {
+        paused: shared.paused.load(Ordering::SeqCst),
+        ..status
+    }
 }
 
 /// Returns once the first sync has finished, or after `FIRST_SYNC_WAIT`. Without the
@@ -157,6 +194,7 @@ async fn sync_locked(shared: &Shared) -> SyncStatus {
                 last_sync_unix: Some(now),
                 next_sync_unix: Some(now + poll as i64),
                 message: None,
+                paused: false,
             }
         }
         Ok(None) => SyncStatus {
@@ -164,6 +202,7 @@ async fn sync_locked(shared: &Shared) -> SyncStatus {
             last_sync_unix: last,
             next_sync_unix: None,
             message: Some(NO_TOKEN.to_string()),
+            paused: false,
         },
         Err(e) => status_for_error(&e, last, now, poll),
     };
@@ -176,6 +215,19 @@ pub(crate) async fn run_loop(shared: Arc<Shared>) {
     loop {
         if *shutdown.borrow_and_update() {
             return;
+        }
+        if shared.paused.load(Ordering::SeqCst) {
+            // No GitHub calls while paused; `ResumeSync` wakes the loop (as does any notify,
+            // after which the flag is checked again).
+            tokio::select! {
+                _ = shared.sync_now.notified() => {}
+                changed = shutdown.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
+            continue;
         }
         let status = sync_once(&shared).await;
         crate::news::check_saved_reviews(&shared).await;
@@ -230,5 +282,65 @@ mod tests {
         );
         assert_eq!((s.state, s.next_sync_unix), (SyncState::Offline, Some(120)));
         assert!(s.message.unwrap().contains("502"));
+    }
+
+    #[tokio::test]
+    async fn paused_loop_makes_no_requests_until_resumed() {
+        use std::sync::Arc;
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(path("/search/issues"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"total_count":0,"incomplete_results":false,"items":[]}"#),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let options = crate::options::DaemonOptions {
+            github_api: Some(server.uri()),
+            github_token: Some("test-token".into()),
+            gh_program: "/nonexistent/gh".into(),
+            secrets: Arc::new(clusia_platform::MemoryStore::default()),
+            background_sync: true,
+            tray_program: None,
+        };
+        let shared = Arc::new(Shared::new(
+            clusia_core::Paths::new(dir.path()),
+            clusia_core::Config::default(),
+            options,
+        ));
+        let hits = || async { server.received_requests().await.unwrap_or_default().len() };
+        let looping = tokio::spawn(run_loop(shared.clone()));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while hits().await == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the first sync runs"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let paused = set_paused(&shared, true).await;
+        assert!(paused.paused);
+        assert_eq!(paused.next_sync_unix, None, "paused: no countdown");
+        tokio::time::sleep(Duration::from_millis(200)).await; // let the running sync finish
+        assert_eq!(shared.sync.read().await.next_sync_unix, None);
+        let before = hits().await;
+        shared.sync_now.notify_one(); // e.g. a new token was stored
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(hits().await, before, "paused: no requests");
+        assert!(!set_paused(&shared, false).await.paused);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while hits().await == before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "resume syncs at once"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        shared.trigger_shutdown();
+        looping.await.unwrap();
     }
 }

@@ -154,6 +154,19 @@ fn paint(shape: &Shape) {
             color(*ink).colorWithAlphaComponent(0.18).setFill();
             rounded(*rect, rect.h / 2.0);
         }
+        Shape::Group { rect } => {
+            NSColor::quaternaryLabelColor().setFill();
+            rounded(*rect, 9.0);
+            NSColor::separatorColor().setStroke();
+            let path =
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(ns_rect(*rect), 9.0, 9.0);
+            path.setLineWidth(1.0);
+            path.stroke();
+        }
+        Shape::Raised { rect } => {
+            NSColor::controlBackgroundColor().setFill();
+            rounded(*rect, 7.0);
+        }
         Shape::Divider { rect } => {
             NSColor::separatorColor().setFill();
             NSBezierPath::fillRect(ns_rect(*rect));

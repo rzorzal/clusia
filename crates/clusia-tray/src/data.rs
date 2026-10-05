@@ -18,6 +18,8 @@ pub enum Update {
     Snapshot(Box<Snapshot>),
     /// The daemon rejected a config write for this key.
     WriteFailed(String),
+    /// The `SyncNow` asked for by the UI finished (whatever its outcome).
+    Refreshed,
     /// The tray must exit. `failure` asks for a non-zero status, so the daemon's supervisor
     /// restarts the tray; a clean exit means the daemon (or the UI) is gone.
     Quit {
@@ -76,8 +78,19 @@ fn refresh_for(event: Event, snap: &mut Snapshot) -> Refresh {
     }
 }
 
-/// Config writes queued by the UI: `(key, value)`, sent as `SetConfigValue`.
-pub type Writes = UnboundedReceiver<(String, String)>;
+/// What the UI asks the data loop to send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outgoing {
+    /// `SetConfigValue`.
+    Config(String, String),
+    SyncNow,
+    PauseSync,
+    ResumeSync,
+    Shutdown,
+}
+
+/// The UI's requests for the daemon.
+pub type Writes = UnboundedReceiver<Outgoing>;
 
 /// Why a session ended.
 struct Stop {
@@ -187,11 +200,37 @@ async fn session(
                 Ok((_, event)) => refresh_for(event, &mut snap),
                 Err(e) => return Err(stop_for(e)),
             },
-            write = writes.recv() => {
-                let Some((key, value)) = write else {
+            out = writes.recv() => {
+                let Some(out) = out else {
                     return Err(Stop::clean("the tray UI is gone"));
                 };
-                write_config(&mut client, send, key, value).await?;
+                match out {
+                    Outgoing::Config(key, value) => write_config(&mut client, send, key, value).await?,
+                    Outgoing::SyncNow => {
+                        if let Reply::Sync(status) = request(&mut client, Command::SyncNow).await? {
+                            snap.sync = Some(status);
+                        }
+                        send(Update::Snapshot(Box::new(snap.clone())));
+                        send(Update::Refreshed);
+                        last = snap.clone();
+                    }
+                    Outgoing::PauseSync | Outgoing::ResumeSync => {
+                        let cmd = if out == Outgoing::PauseSync {
+                            Command::PauseSync
+                        } else {
+                            Command::ResumeSync
+                        };
+                        if let Reply::Sync(status) = request(&mut client, cmd).await? {
+                            snap.sync = Some(status);
+                            send(Update::Snapshot(Box::new(snap.clone())));
+                            last = snap.clone();
+                        }
+                    }
+                    Outgoing::Shutdown => {
+                        // The daemon replies, then closes every connection: the loop ends cleanly.
+                        request(&mut client, Command::Shutdown).await?;
+                    }
+                }
                 continue;
             }
         };

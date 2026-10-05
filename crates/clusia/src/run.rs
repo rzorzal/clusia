@@ -194,6 +194,9 @@ fn sync_line_at(s: &SyncStatus, now: i64) -> String {
     if let Some(next) = s.next_sync_unix {
         line.push_str(&format!(" · next sync in {}s", (next - now).max(0)));
     }
+    if s.paused {
+        line.push_str(" · paused");
+    }
     line
 }
 
@@ -403,6 +406,7 @@ mod tests {
             last_sync_unix: None,
             next_sync_unix: next,
             message: message.map(str::to_string),
+            paused: false,
         }
     }
 
@@ -434,6 +438,13 @@ mod tests {
             sync_line_at(&status(SyncState::Offline, None, Some(90)), 100),
             "sync: offline · next sync in 0s"
         );
+    }
+
+    #[test]
+    fn sync_line_says_paused() {
+        let mut s = status(SyncState::Online, None, None);
+        s.paused = true;
+        assert_eq!(sync_line_at(&s, 100), "sync: online · paused");
     }
 
     #[test]

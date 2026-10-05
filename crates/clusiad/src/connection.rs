@@ -5,10 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use clusia_protocol::{
-    ClientMessage, CodecError, Command, ErrorCode, MessageReader, Outcome, PROTOCOL_VERSION,
+    ClientMessage, CodecError, Command, ErrorCode, Event, MessageReader, Outcome, PROTOCOL_VERSION,
     ProtocolError, ServerMessage, write_message,
 };
 use tokio::net::UnixStream;
+use tokio::net::unix::OwnedWriteHalf;
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::task::JoinHandle;
 
@@ -37,6 +39,28 @@ fn id_of(line: &[u8]) -> u64 {
         .ok()
         .and_then(|v| v.get("id")?.as_u64())
         .unwrap_or(0)
+}
+
+/// Writes every subscribed event already queued for this client. Used before a response and
+/// before closing on shutdown, so a final event such as `Stopping` is never dropped.
+async fn drain_events(
+    events: &mut Receiver<(String, Event)>,
+    topics: &HashSet<String>,
+    w: &mut OwnedWriteHalf,
+) -> Result<(), CodecError> {
+    loop {
+        match events.try_recv() {
+            Ok((topic, event)) => {
+                if topics.contains(&topic) {
+                    write_message(w, &ServerMessage::Event { topic, event }).await?;
+                }
+            }
+            Err(TryRecvError::Lagged(missed)) => {
+                tracing::warn!(missed, "client too slow; events dropped");
+            }
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return Ok(()),
+        }
+    }
 }
 
 async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecError> {
@@ -88,7 +112,7 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
     let mut pending: Option<(u64, bool, JoinHandle<Outcome>)> = None;
     loop {
         if pending.is_none() && *shutdown.borrow_and_update() {
-            return Ok(());
+            return drain_events(&mut events, &topics, &mut w).await;
         }
         tokio::select! {
             line = reader.next_line(), if pending.is_none() => {
@@ -121,17 +145,7 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                     Outcome::Err(ProtocolError::new(ErrorCode::Internal, "the request failed inside the daemon"))
                 });
                 // Events published while the request ran go out before its response.
-                loop {
-                    match events.try_recv() {
-                        Ok((topic, event)) => {
-                            if topics.contains(&topic) {
-                                write_message(&mut w, &ServerMessage::Event { topic, event }).await?;
-                            }
-                        }
-                        Err(TryRecvError::Lagged(missed)) => tracing::warn!(missed, "client too slow; events dropped"),
-                        Err(TryRecvError::Empty | TryRecvError::Closed) => break,
-                    }
-                }
+                drain_events(&mut events, &topics, &mut w).await?;
                 write_message(&mut w, &ServerMessage::Response { id, result }).await?;
                 if stop {
                     shared.trigger_shutdown();
@@ -151,6 +165,7 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                 if changed.is_err() {
                     return Ok(());
                 }
+                return drain_events(&mut events, &topics, &mut w).await;
             }
         }
     }
