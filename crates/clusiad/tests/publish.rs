@@ -27,6 +27,7 @@ async fn comment_on_line_2(c: &mut clusia_protocol::Client) {
     });
     c.request(Command::AddDraftItem {
         pr: pr7(),
+        thread: None,
         kind: DraftKind::LineComment,
         anchor,
         body: "rename".into(),
@@ -59,7 +60,8 @@ async fn publishes_one_review_and_cleans_up() {
         reply,
         Reply::Published(PublishResult {
             url: Some(REVIEW_URL.into()),
-            closed: false
+            closed: false,
+            unresolved: vec![],
         })
     );
     let started = graphql_requests(&w.server, "addPullRequestReview(").await;
@@ -240,7 +242,8 @@ async fn author_cannot_approve_but_can_close() {
         reply,
         Reply::Published(PublishResult {
             url: Some(REVIEW_URL.into()),
-            closed: true
+            closed: true,
+            unresolved: vec![],
         })
     );
     w.daemon.stop().await;

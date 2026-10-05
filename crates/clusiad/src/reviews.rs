@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use clusia_core::{
     Activity, ActivityKind, Anchor, DraftKind, FileDiff, PrRef, Review, ReviewEvent, ReviewState,
-    Role, Side, can_comment,
+    Role, Side, ThreadRef, can_comment,
 };
 use clusia_git::{
     base_pin_ref, pin_commit, remove_worktree, repo_of_worktree, reviewed_ref, unpin,
@@ -174,8 +174,16 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
     relocate::refresh_base(&repo, &remote, pr, &detail.base_ref).await;
 
     step(shared, pr, LoadStepKind::Pr, StepStatus::Running, None);
-    let files = match gh.get_files(pr).await {
-        Ok(f) => Arc::new(f),
+    let (files, conversation, checks) = tokio::join!(
+        gh.get_files(pr),
+        gh.get_conversation(pr),
+        gh.get_checks(pr, &detail.head_sha),
+    );
+    let checks = checks
+        .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the checks"))
+        .ok();
+    let (files, conversation) = match files.and_then(|f| Ok((f, conversation?))) {
+        Ok((f, c)) => (Arc::new(f), c),
         Err(e) => {
             step(
                 shared,
@@ -277,14 +285,16 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         Some(login) if login.eq_ignore_ascii_case(&detail.summary.author) => Role::Author,
         _ => Role::Reviewer,
     };
-    let files = files.iter().map(FileSummary::from).collect();
     Outcome::Ok(Reply::Review(Box::new(ReviewView {
         review,
         pr: detail,
-        files,
+        files: files.iter().map(FileSummary::from).collect(),
         role,
         worktree: Some(info.path),
         viewer,
+        checks,
+        conversation: Some(conversation),
+        diff: files.to_vec(),
     })))
 }
 
@@ -419,6 +429,7 @@ pub(crate) async fn add_item(
     pr: &PrRef,
     kind: DraftKind,
     anchor: Option<AnchorInput>,
+    thread: Option<ThreadRef>,
     body: &str,
 ) -> Outcome {
     let _guard = lock(shared, pr).await;
@@ -440,7 +451,7 @@ pub(crate) async fn add_item(
         None => None,
     };
     let now = now_unix();
-    let item = match review.draft.add(kind, anchor, None, body, now) {
+    let item = match review.draft.add(kind, anchor, thread, body, now) {
         Ok(item) => item.clone(),
         Err(e) => return bad_request(e.to_string()),
     };

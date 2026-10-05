@@ -76,7 +76,8 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             kind,
             anchor,
             body,
-        } => reviews::add_item(shared, client, &pr, kind, anchor, &body).await,
+            thread,
+        } => reviews::add_item(shared, client, &pr, kind, anchor, thread, &body).await,
         Command::UpdateDraftItem { pr, id, body } => {
             reviews::update_item(shared, &pr, &id, &body).await
         }
