@@ -29,6 +29,21 @@ pub enum DraftKind {
     LineComment,
     /// Goes into the review body.
     General,
+    /// A reply to someone else's review thread, posted inside the review.
+    Reply,
+    /// Marks a review thread to resolve after the review is submitted. No text.
+    Resolve,
+}
+
+/// The GitHub review thread a reply or resolve points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadRef {
+    /// GraphQL node id (`PRRT_…`).
+    pub id: String,
+    /// Display context: who started the thread and where.
+    pub author: String,
+    pub path: Option<String>,
+    pub line: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +69,9 @@ pub struct DraftItem {
     pub kind: DraftKind,
     pub origin: Origin,
     pub anchor: Option<Anchor>,
+    /// Replies and resolves only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<ThreadRef>,
     pub body: String,
     pub status: ItemStatus,
     /// Agent-originated items only count once the human accepts them.
@@ -73,6 +91,14 @@ pub enum DraftError {
     InvalidRange { start: u32, end: u32 },
     #[error("there is no draft item {0}")]
     NoSuchItem(String),
+    #[error("a reply or resolve needs a thread")]
+    MissingThread,
+    #[error("only replies and resolves point at a thread")]
+    UnexpectedThread,
+    #[error("this thread is already marked to resolve")]
+    AlreadyResolving,
+    #[error("a resolve has no text to edit")]
+    NotEditable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -89,21 +115,44 @@ impl Draft {
     }
 
     /// Adds a human-written item and returns it.
+    ///
+    /// Line comments need an anchor, replies and resolves a thread; a resolve has no text and
+    /// is accepted once per thread.
     pub fn add(
         &mut self,
         kind: DraftKind,
         anchor: Option<Anchor>,
+        thread: Option<ThreadRef>,
         body: &str,
         now: i64,
     ) -> Result<&DraftItem, DraftError> {
-        let body = body.trim();
-        if body.is_empty() {
+        let body = if kind == DraftKind::Resolve {
+            ""
+        } else {
+            body.trim()
+        };
+        if kind != DraftKind::Resolve && body.is_empty() {
             return Err(DraftError::EmptyBody);
         }
-        match (kind, &anchor) {
-            (DraftKind::LineComment, None) => return Err(DraftError::MissingAnchor),
-            (DraftKind::General, Some(_)) => return Err(DraftError::UnexpectedAnchor),
+        match (kind, &anchor, &thread) {
+            (DraftKind::LineComment, None, _) => return Err(DraftError::MissingAnchor),
+            (DraftKind::LineComment | DraftKind::General, _, Some(_)) => {
+                return Err(DraftError::UnexpectedThread);
+            }
+            (DraftKind::General | DraftKind::Reply | DraftKind::Resolve, Some(_), _) => {
+                return Err(DraftError::UnexpectedAnchor);
+            }
+            (DraftKind::Reply | DraftKind::Resolve, _, None) => {
+                return Err(DraftError::MissingThread);
+            }
             _ => {}
+        }
+        if let (DraftKind::Resolve, Some(t)) = (kind, &thread)
+            && self.items.iter().any(|i| {
+                i.kind == DraftKind::Resolve && i.thread.as_ref().is_some_and(|x| x.id == t.id)
+            })
+        {
+            return Err(DraftError::AlreadyResolving);
         }
         if let Some(a) = &anchor {
             let start = a.start_line.unwrap_or(a.line);
@@ -117,6 +166,7 @@ impl Draft {
             kind,
             origin: Origin::Human,
             anchor,
+            thread,
             body: body.to_string(),
             status: ItemStatus::Ok,
             accepted: true,
@@ -129,16 +179,20 @@ impl Draft {
         self.items.iter().find(|i| i.id == id)
     }
 
+    /// Replaces an item's text. A resolve has none to edit.
     pub fn update_body(&mut self, id: &str, body: &str) -> Result<(), DraftError> {
-        let body = body.trim();
-        if body.is_empty() {
-            return Err(DraftError::EmptyBody);
-        }
         let item = self
             .items
             .iter_mut()
             .find(|i| i.id == id)
             .ok_or_else(|| DraftError::NoSuchItem(id.to_string()))?;
+        if item.kind == DraftKind::Resolve {
+            return Err(DraftError::NotEditable);
+        }
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(DraftError::EmptyBody);
+        }
         item.body = body.to_string();
         Ok(())
     }
@@ -181,6 +235,7 @@ mod tests {
             .add(
                 DraftKind::LineComment,
                 Some(anchor(3, None)),
+                None,
                 "  nit: rename  ",
                 10,
             )
@@ -192,7 +247,7 @@ mod tests {
         );
         assert_eq!(first.status, ItemStatus::Ok);
         assert_eq!(
-            d.add(DraftKind::General, None, "overall fine", 11)
+            d.add(DraftKind::General, None, None, "overall fine", 11)
                 .unwrap()
                 .id,
             "i2"
@@ -204,25 +259,32 @@ mod tests {
     fn add_validates() {
         let mut d = Draft::default();
         assert_eq!(
-            d.add(DraftKind::General, None, "   ", 1).unwrap_err(),
+            d.add(DraftKind::General, None, None, "   ", 1).unwrap_err(),
             DraftError::EmptyBody
         );
         assert_eq!(
-            d.add(DraftKind::LineComment, None, "x", 1).unwrap_err(),
+            d.add(DraftKind::LineComment, None, None, "x", 1)
+                .unwrap_err(),
             DraftError::MissingAnchor
         );
         assert_eq!(
-            d.add(DraftKind::General, Some(anchor(1, None)), "x", 1)
+            d.add(DraftKind::General, Some(anchor(1, None)), None, "x", 1)
                 .unwrap_err(),
             DraftError::UnexpectedAnchor
         );
         assert_eq!(
-            d.add(DraftKind::LineComment, Some(anchor(3, Some(5))), "x", 1)
-                .unwrap_err(),
+            d.add(
+                DraftKind::LineComment,
+                Some(anchor(3, Some(5))),
+                None,
+                "x",
+                1
+            )
+            .unwrap_err(),
             DraftError::InvalidRange { start: 5, end: 3 }
         );
         assert!(
-            d.add(DraftKind::LineComment, Some(anchor(0, None)), "x", 1)
+            d.add(DraftKind::LineComment, Some(anchor(0, None)), None, "x", 1)
                 .is_err()
         );
         assert!(d.is_empty());
@@ -231,9 +293,12 @@ mod tests {
     #[test]
     fn ids_are_never_reused_after_removal() {
         let mut d = Draft::default();
-        d.add(DraftKind::General, None, "a", 1).unwrap();
+        d.add(DraftKind::General, None, None, "a", 1).unwrap();
         d.remove("i1").unwrap();
-        assert_eq!(d.add(DraftKind::General, None, "b", 1).unwrap().id, "i2");
+        assert_eq!(
+            d.add(DraftKind::General, None, None, "b", 1).unwrap().id,
+            "i2"
+        );
         assert_eq!(
             d.remove("i9").unwrap_err(),
             DraftError::NoSuchItem("i9".into())
@@ -243,8 +308,8 @@ mod tests {
     #[test]
     fn update_and_publishable() {
         let mut d = Draft::default();
-        d.add(DraftKind::General, None, "a", 1).unwrap();
-        d.add(DraftKind::General, None, "b", 1).unwrap();
+        d.add(DraftKind::General, None, None, "a", 1).unwrap();
+        d.add(DraftKind::General, None, None, "b", 1).unwrap();
         d.update_body("i1", " edited ").unwrap();
         assert_eq!(d.get("i1").unwrap().body, "edited");
         assert_eq!(d.update_body("i1", " ").unwrap_err(), DraftError::EmptyBody);
@@ -255,12 +320,158 @@ mod tests {
         assert_eq!(ids, vec!["i1"]);
     }
 
+    fn thread(id: &str) -> ThreadRef {
+        ThreadRef {
+            id: id.into(),
+            author: "mona".into(),
+            path: Some("src/a.rs".into()),
+            line: Some(41),
+        }
+    }
+
+    #[test]
+    fn replies_and_resolves_point_at_a_thread() {
+        let mut d = Draft::default();
+        let reply = d
+            .add(
+                DraftKind::Reply,
+                None,
+                Some(thread("PRRT_1")),
+                " Agreed. ",
+                5,
+            )
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (reply.body.as_str(), reply.thread, reply.anchor),
+            ("Agreed.", Some(thread("PRRT_1")), None)
+        );
+        let resolve = d
+            .add(
+                DraftKind::Resolve,
+                None,
+                Some(thread("PRRT_1")),
+                "ignored",
+                6,
+            )
+            .unwrap()
+            .clone();
+        assert_eq!((resolve.id.as_str(), resolve.body.as_str()), ("i2", ""));
+        assert_eq!(
+            d.add(DraftKind::Resolve, None, Some(thread("PRRT_2")), "", 7)
+                .unwrap()
+                .id,
+            "i3"
+        );
+    }
+
+    #[test]
+    fn reply_and_resolve_rules() {
+        let mut d = Draft::default();
+        assert_eq!(
+            d.add(DraftKind::Reply, None, None, "x", 1).unwrap_err(),
+            DraftError::MissingThread
+        );
+        assert_eq!(
+            d.add(DraftKind::Resolve, None, None, "", 1).unwrap_err(),
+            DraftError::MissingThread
+        );
+        assert_eq!(
+            d.add(DraftKind::Reply, None, Some(thread("PRRT_1")), "  ", 1)
+                .unwrap_err(),
+            DraftError::EmptyBody
+        );
+        assert_eq!(
+            d.add(
+                DraftKind::Reply,
+                Some(anchor(3, None)),
+                Some(thread("PRRT_1")),
+                "x",
+                1
+            )
+            .unwrap_err(),
+            DraftError::UnexpectedAnchor
+        );
+        assert_eq!(
+            d.add(
+                DraftKind::LineComment,
+                Some(anchor(3, None)),
+                Some(thread("PRRT_1")),
+                "x",
+                1
+            )
+            .unwrap_err(),
+            DraftError::UnexpectedThread
+        );
+        assert_eq!(
+            d.add(DraftKind::General, None, Some(thread("PRRT_1")), "x", 1)
+                .unwrap_err(),
+            DraftError::UnexpectedThread
+        );
+        assert!(d.is_empty());
+        d.add(DraftKind::Resolve, None, Some(thread("PRRT_1")), "", 1)
+            .unwrap();
+        assert_eq!(
+            d.add(DraftKind::Resolve, None, Some(thread("PRRT_1")), "", 2)
+                .unwrap_err(),
+            DraftError::AlreadyResolving
+        );
+        d.add(
+            DraftKind::Reply,
+            None,
+            Some(thread("PRRT_1")),
+            "and a reply",
+            3,
+        )
+        .unwrap();
+        assert_eq!(d.items.len(), 2, "a reply next to a resolve is fine");
+    }
+
+    #[test]
+    fn a_resolve_has_no_text_to_edit() {
+        let mut d = Draft::default();
+        d.add(DraftKind::Resolve, None, Some(thread("PRRT_1")), "", 1)
+            .unwrap();
+        assert_eq!(
+            d.update_body("i1", "text").unwrap_err(),
+            DraftError::NotEditable
+        );
+        assert_eq!(
+            d.update_body("i1", "").unwrap_err(),
+            DraftError::NotEditable
+        );
+        assert_eq!(
+            d.update_body("i9", "text").unwrap_err(),
+            DraftError::NoSuchItem("i9".into())
+        );
+        d.remove("i1").unwrap();
+        assert!(d.is_empty(), "a resolve is undone by removing it");
+    }
+
+    #[test]
+    fn old_review_files_have_no_thread() {
+        let json = r#"{"id":"i1","kind":"general","origin":"human","anchor":null,"body":"b",
+            "status":{"status":"ok"},"accepted":true,"created_at":1}"#;
+        let item: DraftItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.thread, None);
+        let back = serde_json::to_string(&item).unwrap();
+        assert!(!back.contains("thread"), "{back}");
+    }
+
     #[test]
     fn wire_names() {
         assert_eq!(serde_json::to_string(&Side::Right).unwrap(), r#""right""#);
         assert_eq!(
             serde_json::to_string(&DraftKind::LineComment).unwrap(),
             r#""line_comment""#
+        );
+        assert_eq!(
+            serde_json::to_string(&[DraftKind::Reply, DraftKind::Resolve]).unwrap(),
+            r#"["reply","resolve"]"#
+        );
+        assert_eq!(
+            serde_json::to_string(&thread("PRRT_1")).unwrap(),
+            r#"{"id":"PRRT_1","author":"mona","path":"src/a.rs","line":41}"#
         );
         assert_eq!(
             serde_json::to_string(&ItemStatus::Moved {

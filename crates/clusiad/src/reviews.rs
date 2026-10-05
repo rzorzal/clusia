@@ -440,7 +440,7 @@ pub(crate) async fn add_item(
         None => None,
     };
     let now = now_unix();
-    let item = match review.draft.add(kind, anchor, body, now) {
+    let item = match review.draft.add(kind, anchor, None, body, now) {
         Ok(item) => item.clone(),
         Err(e) => return bad_request(e.to_string()),
     };

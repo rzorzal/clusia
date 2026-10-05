@@ -433,6 +433,7 @@ mod tests {
                     submitted_at: Some("2000-01-01T00:50:00Z".into()),
                     url: "r4".into(),
                 }],
+                review_threads: vec![],
             },
             checks_label: Some("passed".into()),
             last_checks: Some("pending".into()),

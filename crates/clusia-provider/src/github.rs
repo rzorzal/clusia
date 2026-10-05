@@ -510,6 +510,7 @@ impl GitHub {
                     url: r.html_url,
                 })
                 .collect(),
+            review_threads: Vec::new(),
         })
     }
 
@@ -746,6 +747,8 @@ impl GitHub {
             deletions: p.deletions,
             changed_files: p.changed_files,
             clone_url,
+            closed: false,
+            merged: false,
         })
     }
 }

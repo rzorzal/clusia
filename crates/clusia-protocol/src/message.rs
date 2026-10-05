@@ -899,6 +899,8 @@ mod tests {
             deletions: 2,
             changed_files: 3,
             clone_url: "https://github.com/acme/widgets.git".into(),
+            closed: false,
+            merged: false,
         };
         for reply in [
             Reply::Prs(vec![summary()]),

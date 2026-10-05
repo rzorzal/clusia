@@ -423,7 +423,8 @@ index 777..888 100644
                 side: *side,
                 commit: commit.into(),
             };
-            d.add(DraftKind::LineComment, Some(a), "c", 1).unwrap();
+            d.add(DraftKind::LineComment, Some(a), None, "c", 1)
+                .unwrap();
         }
         d
     }
@@ -437,7 +438,7 @@ index 777..888 100644
             ("gone.rs", 1, None, Side::Right),
             ("old/name.rs", 5, Some(4), Side::Right),
         ]);
-        d.add(DraftKind::General, None, "overall", 1).unwrap();
+        d.add(DraftKind::General, None, None, "overall", 1).unwrap();
         let report = relocate(
             &mut d,
             &DiffMap::parse(DIFF),

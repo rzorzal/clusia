@@ -99,6 +99,7 @@ async fn reopen_relocates_comments_after_new_commits() {
         .add(
             clusia_core::DraftKind::LineComment,
             Some(anchor),
+            None,
             "check this",
             1,
         )

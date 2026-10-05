@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::draft::Side;
+use crate::pr::PrDetail;
+use crate::review::Role;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileDiff {
@@ -81,11 +83,56 @@ impl ChecksSummary {
     }
 }
 
+/// One comment of a review thread (GraphQL).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadPost {
+    pub database_id: Option<u64>,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub url: String,
+}
+
+/// A review thread as GitHub's GraphQL API reports it: what replies and resolves point at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewThread {
+    /// GraphQL node id (`PRRT_…`).
+    pub id: String,
+    pub is_resolved: bool,
+    pub is_outdated: bool,
+    pub path: String,
+    /// `None` when the thread is outdated.
+    pub line: Option<u32>,
+    /// First line of a multi-line thread; `None` for single-line threads.
+    pub start_line: Option<u32>,
+    pub side: Side,
+    pub viewer_can_reply: bool,
+    pub viewer_can_resolve: bool,
+    pub comments: Vec<ThreadPost>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PrConversation {
+    /// Review comments as REST lists them (kept for the CLI).
     pub threads: Vec<ThreadComment>,
     pub comments: Vec<IssueComment>,
     pub reviews: Vec<ReviewInfo>,
+    /// The same review comments grouped in threads, with node ids and resolved state.
+    #[serde(default)]
+    pub review_threads: Vec<ReviewThread>,
+}
+
+/// What a successful open fetched, kept on disk for "Open from cache".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewCache {
+    pub pr: PrDetail,
+    pub files: Vec<FileDiff>,
+    pub conversation: PrConversation,
+    pub checks: Option<ChecksSummary>,
+    pub role: Role,
+    pub viewer: Option<String>,
+    pub worktree: Option<String>,
+    pub fetched_at: i64,
 }
 
 #[cfg(test)]
@@ -104,5 +151,38 @@ mod tests {
         assert_eq!(c(3, 2, 0, 1).label(), "pending");
         assert_eq!(c(3, 2, 1, 0).label(), "failed");
         assert_eq!(c(2, 2, 0, 0).label(), "passed");
+    }
+
+    #[test]
+    fn conversations_without_review_threads_still_load() {
+        let json = r#"{"threads":[],"comments":[],"reviews":[]}"#;
+        let c: PrConversation = serde_json::from_str(json).unwrap();
+        assert!(c.review_threads.is_empty());
+    }
+
+    #[test]
+    fn review_thread_wire_shape() {
+        let t = ReviewThread {
+            id: "PRRT_1".into(),
+            is_resolved: false,
+            is_outdated: false,
+            path: "src/auth/refresh.rs".into(),
+            line: Some(41),
+            start_line: None,
+            side: Side::Right,
+            viewer_can_reply: true,
+            viewer_can_resolve: true,
+            comments: vec![ThreadPost {
+                database_id: Some(7),
+                author: "mona".into(),
+                body: "Why one minute?".into(),
+                created_at: "2026-10-01T10:00:00Z".into(),
+                url: "https://github.com/rzorzal/clusia/pull/123#discussion_r7".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&t).unwrap(),
+            r#"{"id":"PRRT_1","is_resolved":false,"is_outdated":false,"path":"src/auth/refresh.rs","line":41,"start_line":null,"side":"right","viewer_can_reply":true,"viewer_can_resolve":true,"comments":[{"database_id":7,"author":"mona","body":"Why one minute?","created_at":"2026-10-01T10:00:00Z","url":"https://github.com/rzorzal/clusia/pull/123#discussion_r7"}]}"#
+        );
     }
 }
