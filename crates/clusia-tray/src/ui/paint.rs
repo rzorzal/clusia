@@ -6,9 +6,10 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBezierPath, NSColor, NSEvent,
-    NSFont, NSFontAttributeName, NSFontWeightRegular, NSFontWeightSemibold,
-    NSForegroundColorAttributeName, NSLineBreakMode, NSMutableParagraphStyle,
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBezierPath, NSColor,
+    NSCompositingOperation, NSEvent, NSFont, NSFontAttributeName, NSFontWeightMedium,
+    NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage,
+    NSImageSymbolConfiguration, NSLineBreakMode, NSMutableParagraphStyle,
     NSParagraphStyleAttributeName, NSStringDrawingOptions, NSStringNSExtendedStringDrawing,
     NSTextAlignment, NSView,
 };
@@ -24,8 +25,8 @@ pub type ClickHandler = Box<dyn Fn(Action)>;
 pub struct ContentIvars {
     layout: RefCell<Layout>,
     on_click: RefCell<Option<ClickHandler>>,
-    /// Paint a window background (offscreen renders have no vibrancy behind them).
-    opaque: Cell<bool>,
+    /// Offscreen renders only: a solid color standing in for the wallpaper behind the glass.
+    backdrop: Cell<Option<(f64, f64, f64)>>,
 }
 
 define_class!(
@@ -48,10 +49,14 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            if self.ivars().opaque.get() {
-                NSColor::windowBackgroundColor().setFill();
+            if let Some(rgb) = self.ivars().backdrop.get() {
+                srgb(rgb, 1.0).setFill();
                 NSBezierPath::fillRect(self.bounds());
             }
+            NSColor::windowBackgroundColor()
+                .colorWithAlphaComponent(theme::BASE_ALPHA)
+                .setFill();
+            NSBezierPath::fillRect(self.bounds());
             for shape in &self.ivars().layout.borrow().shapes {
                 paint(shape);
             }
@@ -69,11 +74,10 @@ define_class!(
 );
 
 impl ContentView {
-    pub fn new(mtm: MainThreadMarker, opaque: bool) -> Retained<Self> {
+    pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ContentIvars::default());
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
-        view.ivars().opaque.set(opaque);
         view
     }
 
@@ -82,6 +86,10 @@ impl ContentView {
         *self.ivars().layout.borrow_mut() = layout;
         self.setFrameSize(size);
         self.setNeedsDisplay(true);
+    }
+
+    pub fn set_backdrop(&self, rgb: Option<(f64, f64, f64)>) {
+        self.ivars().backdrop.set(rgb);
     }
 
     pub fn on_click(&self, handler: ClickHandler) {
@@ -111,10 +119,17 @@ fn color(ink: Ink) -> Retained<NSColor> {
     match ink {
         Ink::Primary => NSColor::labelColor(),
         Ink::Secondary => NSColor::secondaryLabelColor(),
-        Ink::Tertiary => NSColor::tertiaryLabelColor(),
+        Ink::Disabled => {
+            NSColor::secondaryLabelColor().colorWithAlphaComponent(theme::DISABLED_ALPHA)
+        }
         Ink::Green => srgb(theme::green(drawing_dark()), 1.0),
         Ink::Orange => srgb(theme::orange(drawing_dark()), 1.0),
     }
+}
+
+fn fill_color() -> Retained<NSColor> {
+    let (rgb, alpha) = theme::fill(drawing_dark());
+    srgb(rgb, alpha)
 }
 
 fn rounded(r: Rect, radius: f64) {
@@ -132,7 +147,7 @@ fn paint(shape: &Shape) {
         } => draw_text(*rect, text, *style, *ink, *right),
         Shape::Cell { rect, level } => {
             let c = if *level == 0 {
-                NSColor::quaternaryLabelColor()
+                fill_color()
             } else {
                 srgb(
                     theme::green(drawing_dark()),
@@ -143,7 +158,7 @@ fn paint(shape: &Shape) {
             rounded(*rect, 2.0);
         }
         Shape::Panel { rect } => {
-            NSColor::quaternaryLabelColor().setFill();
+            fill_color().setFill();
             rounded(*rect, 6.0);
         }
         Shape::Dot { rect, ink } => {
@@ -155,7 +170,7 @@ fn paint(shape: &Shape) {
             rounded(*rect, rect.h / 2.0);
         }
         Shape::Group { rect } => {
-            NSColor::quaternaryLabelColor().setFill();
+            fill_color().setFill();
             rounded(*rect, 9.0);
             NSColor::separatorColor().setStroke();
             let path =
@@ -167,10 +182,51 @@ fn paint(shape: &Shape) {
             NSColor::controlBackgroundColor().setFill();
             rounded(*rect, 7.0);
         }
+        Shape::Symbol { rect, name, ink } => draw_symbol(*rect, name, *ink),
         Shape::Divider { rect } => {
             NSColor::separatorColor().setFill();
             NSBezierPath::fillRect(ns_rect(*rect));
         }
+    }
+}
+
+fn draw_symbol(r: Rect, name: &str, ink: Ink) {
+    let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str(name),
+        None,
+    ) else {
+        return;
+    };
+    // SAFETY: the weight constant is an immutable CGFloat static.
+    let weight = unsafe { NSFontWeightMedium };
+    let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(
+        theme::SYMBOL_POINT_SIZE,
+        weight,
+    )
+    .configurationByApplyingConfiguration(
+        &NSImageSymbolConfiguration::configurationWithHierarchicalColor(&color(ink)),
+    );
+    let Some(image) = image.imageWithSymbolConfiguration(&config) else {
+        return;
+    };
+    let size = image.size();
+    let target = NSRect::new(
+        NSPoint::new(
+            r.x + (r.w - size.width) / 2.0,
+            r.y + (r.h - size.height) / 2.0,
+        ),
+        size,
+    );
+    // SAFETY: `hints` is None; called while drawing in the flipped content view.
+    unsafe {
+        image.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
+            target,
+            NSRect::ZERO,
+            NSCompositingOperation::SourceOver,
+            1.0,
+            true,
+            None,
+        );
     }
 }
 
@@ -185,7 +241,6 @@ fn font(style: Style) -> Retained<NSFont> {
         Style::Meta | Style::CounterLabel => NSFont::systemFontOfSize_weight(11.0, regular),
         Style::CounterValue => NSFont::monospacedDigitSystemFontOfSize_weight(20.0, semibold),
         Style::Badge => NSFont::systemFontOfSize_weight(10.0, semibold),
-        Style::Glyph => NSFont::systemFontOfSize_weight(18.0, regular),
         Style::Chevron => NSFont::systemFontOfSize_weight(13.0, regular),
     }
 }
@@ -195,7 +250,7 @@ fn draw_text(r: Rect, text: &str, style: Style, ink: Ink, right: bool) {
     para.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     para.setAlignment(if right {
         NSTextAlignment::Right
-    } else if matches!(style, Style::Badge | Style::Glyph | Style::Chevron) {
+    } else if matches!(style, Style::Badge | Style::Chevron) {
         NSTextAlignment::Center
     } else {
         NSTextAlignment::Left

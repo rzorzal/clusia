@@ -44,3 +44,25 @@ fn renders_the_status_icon_with_and_without_the_dot() {
         assert!(w >= h, "width {w}");
     }
 }
+
+#[test]
+fn renders_over_a_backdrop() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("popover.png");
+    let o = Command::new(env!("CARGO_BIN_EXE_clusia-tray"))
+        .args(["--render"])
+        .arg(&out)
+        .args(["--backdrop", "#1E3A5F"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let (w, _) = png_size(&std::fs::read(&out).unwrap());
+    assert!(w == 360 || w == 720, "width {w}");
+    let bad = Command::new(env!("CARGO_BIN_EXE_clusia-tray"))
+        .args(["--render"])
+        .arg(&out)
+        .args(["--backdrop", "nope"])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+}
