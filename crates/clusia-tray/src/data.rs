@@ -210,8 +210,8 @@ async fn session(
                         if let Reply::Sync(status) = request(&mut client, Command::SyncNow).await? {
                             snap.sync = Some(status);
                         }
-                        send(Update::Refreshed);
                         send(Update::Snapshot(Box::new(snap.clone())));
+                        send(Update::Refreshed);
                         last = snap.clone();
                     }
                     Outgoing::PauseSync | Outgoing::ResumeSync => {

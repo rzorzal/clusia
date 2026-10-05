@@ -43,24 +43,30 @@ async fn pause_and_resume_change_the_status() {
 #[tokio::test]
 async fn shutdown_publishes_stopping() {
     let d = TestDaemon::start().await;
-    let mut watcher = d.client().await;
-    watcher
-        .request(Command::Subscribe {
+    let mut watchers = Vec::new();
+    for _ in 0..4 {
+        let mut w = d.client().await;
+        w.request(Command::Subscribe {
             topics: vec![topics::SYNC.into()],
         })
         .await
         .unwrap();
+        watchers.push(w);
+    }
     let mut c = d.client().await;
     assert_eq!(c.request(Command::Shutdown).await.unwrap(), Reply::Ack);
-    let mut saw_stopping = false;
-    while let Ok(Ok((_, event))) =
-        tokio::time::timeout(Duration::from_secs(5), watcher.next_event()).await
-    {
-        if event == Event::Stopping {
-            saw_stopping = true;
-            break;
+    // Every subscribed connection gets `Stopping` before its connection closes.
+    for watcher in &mut watchers {
+        let mut saw_stopping = false;
+        while let Ok(Ok((_, event))) =
+            tokio::time::timeout(Duration::from_secs(5), watcher.next_event()).await
+        {
+            if event == Event::Stopping {
+                saw_stopping = true;
+                break;
+            }
         }
+        assert!(saw_stopping, "a subscriber missed Stopping");
     }
-    assert!(saw_stopping);
     d.wait().await;
 }

@@ -147,6 +147,8 @@ fn fake_failing(fail: &'static [&'static str]) -> Fake {
                     }
                     let response = ServerMessage::Response { id, result: reply(&cmd, fail) };
                     if write_message(&mut w, &response).await.is_err() { return; }
+                    // Like the real daemon: reply to Shutdown, then close the connection.
+                    if matches!(cmd, Command::Shutdown) { return; }
                 }
                 p = rx.recv() => match p {
                     Some(Push::Event(topic, event)) => {
@@ -351,11 +353,16 @@ async fn refresh_runs_sync_now_and_reports_done() {
     snapshot(&rx);
     fake.clear();
     writes.send(data::Outgoing::SyncNow).unwrap();
+    // The fresh snapshot goes out before `Refreshed`, so the caption never shows a stale age.
+    let mut snapshots = 0;
     loop {
-        if next(&rx) == Update::Refreshed {
-            break;
+        match next(&rx) {
+            Update::Refreshed => break,
+            Update::Snapshot(_) => snapshots += 1,
+            _ => {}
         }
     }
+    assert_eq!(snapshots, 1, "a snapshot precedes Refreshed");
     assert!(fake.requests().contains(&"SyncNow".to_string()));
 }
 
@@ -393,7 +400,13 @@ async fn pause_resume_and_quit_are_sent() {
         assert!(std::time::Instant::now() < deadline, "{r:?}");
         std::thread::sleep(Duration::from_millis(20));
     }
-    drop(rx);
+    // The daemon closes after replying: the session ends cleanly (no supervisor restart).
+    loop {
+        if let Update::Quit { failure, .. } = next(&rx) {
+            assert!(!failure, "a requested shutdown is a clean exit");
+            break;
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

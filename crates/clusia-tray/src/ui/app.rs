@@ -239,8 +239,9 @@ define_class!(
                 match action {
                     Action::Refresh => {
                         UI.with_borrow_mut(|ui| {
-                            if let Some(ui) = ui {
-                                ui.model.refresh_started();
+                            if let Some(ui) = ui
+                                && ui.model.refresh_started()
+                            {
                                 ui.send(Outgoing::SyncNow);
                                 ui.render(mtm);
                             }
@@ -259,19 +260,6 @@ define_class!(
                         if let Some((Some(rect), paused, content)) = anchor {
                             show_turn_off_menu(mtm, &delegate, &content, rect, paused);
                         }
-                        return;
-                    }
-                    Action::PauseSync | Action::ResumeSync | Action::Quit => {
-                        // Reached only through the menu (selectors below); kept for completeness.
-                        UI.with_borrow(|ui| {
-                            if let Some(ui) = ui {
-                                ui.send(match action {
-                                    Action::PauseSync => Outgoing::PauseSync,
-                                    Action::ResumeSync => Outgoing::ResumeSync,
-                                    _ => Outgoing::Shutdown,
-                                });
-                            }
-                        });
                         return;
                     }
                     _ => {}

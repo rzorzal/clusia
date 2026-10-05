@@ -749,12 +749,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(refresh, Ink::Green);
-        let caption = texts(&layout(&view(1, true, false)))
-            .into_iter()
-            .find(|t| t.starts_with("Last 6 months"))
-            .unwrap()
-            .to_string();
-        assert!(caption.contains("reviews this week") || caption == "Last 6 months");
+        assert!(
+            texts(&layout(&view(1, true, false))).contains(&"Last 6 months · 12 reviews this week")
+        );
     }
 
     #[test]

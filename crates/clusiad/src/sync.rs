@@ -102,8 +102,10 @@ async fn store_lists(shared: &Shared, lists: PrLists) {
 }
 
 async fn set_status(shared: &Shared, status: SyncStatus) {
+    let paused = shared.paused.load(Ordering::SeqCst);
     let status = SyncStatus {
-        paused: shared.paused.load(Ordering::SeqCst),
+        paused,
+        next_sync_unix: if paused { None } else { status.next_sync_unix },
         ..status
     };
     let mut current = shared.sync.write().await;
@@ -119,12 +121,25 @@ async fn set_status(shared: &Shared, status: SyncStatus) {
 /// Pauses or resumes background syncing and returns the new status. Resuming syncs at once.
 pub(crate) async fn set_paused(shared: &Shared, paused: bool) -> SyncStatus {
     shared.paused.store(paused, Ordering::SeqCst);
-    let current = shared.sync.read().await.clone();
-    set_status(shared, current).await;
+    let status = {
+        let mut current = shared.sync.write().await;
+        let mut next = current.clone();
+        next.paused = paused;
+        if paused {
+            next.next_sync_unix = None;
+        }
+        let changed =
+            next.paused != current.paused || next.next_sync_unix != current.next_sync_unix;
+        *current = next.clone();
+        if changed {
+            shared.publish(topics::SYNC, Event::SyncChanged(next.clone()));
+        }
+        next
+    };
     if !paused {
         shared.sync_now.notify_one();
     }
-    shared.sync.read().await.clone()
+    status
 }
 
 /// One sync with GitHub. The cached lists are only replaced on success.
@@ -307,8 +322,11 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(set_paused(&shared, true).await.paused);
+        let paused = set_paused(&shared, true).await;
+        assert!(paused.paused);
+        assert_eq!(paused.next_sync_unix, None, "paused: no countdown");
         tokio::time::sleep(Duration::from_millis(200)).await; // let the running sync finish
+        assert_eq!(shared.sync.read().await.next_sync_unix, None);
         let before = hits().await;
         shared.sync_now.notify_one(); // e.g. a new token was stored
         tokio::time::sleep(Duration::from_millis(300)).await;

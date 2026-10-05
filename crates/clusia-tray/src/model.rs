@@ -160,8 +160,9 @@ impl TrayModel {
         }
     }
 
-    pub fn refresh_started(&mut self) {
-        self.refreshing = true;
+    /// Returns whether a refresh began; one already running makes this a no-op (a double click).
+    pub fn refresh_started(&mut self) -> bool {
+        !std::mem::replace(&mut self.refreshing, true)
     }
 
     pub fn refresh_done(&mut self) {
@@ -791,12 +792,17 @@ mod tests {
         let mut m = TrayModel::new(true);
         m.apply(snap(many(1)));
         assert!(!m.view(NOW).syncing);
-        m.refresh_started();
+        assert!(m.refresh_started());
+        assert!(
+            !m.refresh_started(),
+            "already refreshing: a second click is ignored"
+        );
         assert!(m.view(NOW).syncing);
         m.apply(snap(many(1)));
         assert!(m.view(NOW).syncing, "snapshots alone do not end it");
         m.refresh_done();
         assert!(!m.view(NOW).syncing);
+        assert!(m.refresh_started(), "can start again once done");
     }
 
     #[test]
