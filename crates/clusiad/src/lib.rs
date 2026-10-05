@@ -10,6 +10,7 @@ mod relocate;
 mod retention;
 mod reviews;
 mod server;
+mod spawner;
 mod state;
 mod sync;
 mod tray;
@@ -17,5 +18,6 @@ mod worktrees;
 
 pub use options::DaemonOptions;
 pub use server::{Daemon, ShutdownHandle, StartError};
+pub use spawner::{ProcessSpawner, RecordingSpawner, Spawner};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

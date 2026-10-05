@@ -12,6 +12,8 @@ pub mod topics {
     pub const PRS: &str = "prs";
     pub const SYNC: &str = "sync";
     pub const REVIEWS: &str = "reviews";
+    /// Window requests from other launches (`OpenWindow`).
+    pub const WINDOW: &str = "window";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,6 +143,17 @@ pub enum Command {
     },
     ListReviews,
     GetActivity,
+    /// Ask an open window to show `target`; replies `Delivered(n)` with the number of windows
+    /// that heard it (0: none is listening).
+    OpenWindow {
+        target: WindowTarget,
+    },
+    /// Open `path` at `line` in the configured editor. Only files inside the Clúsia home.
+    OpenInEditor {
+        path: String,
+        #[serde(default)]
+        line: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,6 +185,7 @@ pub enum Reply {
     WhatsNew(Vec<NewsItem>),
     Reviews(Vec<ReviewSummary>),
     Activity(ActivitySummary),
+    Delivered(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +339,9 @@ pub enum Event {
         moved: usize,
         obsolete: usize,
     },
+    WindowRequested {
+        target: WindowTarget,
+    },
     /// The daemon is shutting down on request (`Shutdown`); clients should close.
     Stopping,
 }
@@ -430,6 +447,15 @@ pub struct ReviewSummary {
 pub struct PublishResult {
     pub url: Option<String>,
     pub closed: bool,
+}
+
+/// What the window should show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowTarget {
+    Home,
+    Config,
+    Review { pr: PrRef },
 }
 
 #[cfg(test)]
@@ -686,6 +712,70 @@ mod tests {
                 result: Outcome::Err(ProtocolError::new(code, "m")),
             });
         }
+    }
+
+    #[test]
+    fn m5_messages_wire_format() {
+        let open = |id, target| ClientMessage::Request {
+            id,
+            cmd: Command::OpenWindow { target },
+        };
+        assert_eq!(
+            wire(&open(1, WindowTarget::Home)),
+            r#"{"type":"request","id":1,"cmd":{"open_window":{"target":"home"}}}"#
+        );
+        assert_eq!(
+            wire(&open(2, WindowTarget::Review { pr: acme7() })),
+            r#"{"type":"request","id":2,"cmd":{"open_window":{"target":{"review":{"pr":"acme/widgets#7"}}}}}"#
+        );
+        let editor = ClientMessage::Request {
+            id: 3,
+            cmd: Command::OpenInEditor {
+                path: "/w/src/lib.rs".into(),
+                line: Some(12),
+            },
+        };
+        assert_eq!(
+            wire(&editor),
+            r#"{"type":"request","id":3,"cmd":{"open_in_editor":{"path":"/w/src/lib.rs","line":12}}}"#
+        );
+        let delivered = ServerMessage::Response {
+            id: 1,
+            result: Outcome::Ok(Reply::Delivered(1)),
+        };
+        assert_eq!(
+            wire(&delivered),
+            r#"{"type":"response","id":1,"result":{"ok":{"delivered":1}}}"#
+        );
+        let event = ServerMessage::Event {
+            topic: topics::WINDOW.into(),
+            event: Event::WindowRequested {
+                target: WindowTarget::Config,
+            },
+        };
+        assert_eq!(
+            wire(&event),
+            r#"{"type":"event","topic":"window","event":{"window_requested":{"target":"config"}}}"#
+        );
+    }
+
+    #[test]
+    fn m5_messages_round_trip() {
+        for target in [
+            WindowTarget::Home,
+            WindowTarget::Config,
+            WindowTarget::Review { pr: acme7() },
+        ] {
+            round_trip(Command::OpenWindow {
+                target: target.clone(),
+            });
+            round_trip(Event::WindowRequested { target });
+        }
+        round_trip(Command::OpenInEditor {
+            path: "/w/x".into(),
+            line: None,
+        });
+        round_trip(Reply::Delivered(0));
     }
 
     fn acme7() -> clusia_core::PrRef {

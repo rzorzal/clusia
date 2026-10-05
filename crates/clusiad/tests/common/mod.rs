@@ -22,6 +22,7 @@ pub fn test_options() -> DaemonOptions {
         secrets: Arc::new(MemoryStore::default()),
         background_sync: false,
         tray_program: None,
+        spawner: Arc::new(clusiad::RecordingSpawner::default()),
     }
 }
 

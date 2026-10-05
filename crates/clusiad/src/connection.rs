@@ -33,6 +33,15 @@ fn bad_request(id: u64, message: impl Into<String>) -> ServerMessage {
     }
 }
 
+/// Counts its connection in `Shared::window_listeners` while it lives.
+struct WindowListener(Arc<Shared>);
+
+impl Drop for WindowListener {
+    fn drop(&mut self) {
+        self.0.window_listeners.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Best-effort request id from a line that failed to parse, so the client can match the error.
 fn id_of(line: &[u8]) -> u64 {
     serde_json::from_slice::<serde_json::Value>(line)
@@ -107,6 +116,7 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
     let mut events = shared.events.subscribe();
     let mut shutdown = shared.shutdown.subscribe();
     let mut topics: HashSet<String> = HashSet::new();
+    let mut window: Option<WindowListener> = None;
     // The request being handled: (id, whether it is Shutdown, the handler task). Requests stay
     // sequential (the next line is read only once it is answered), but events keep flowing.
     let mut pending: Option<(u64, bool, JoinHandle<Outcome>)> = None;
@@ -131,6 +141,10 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                 };
                 if let Command::Subscribe { topics: wanted } = &cmd {
                     topics.extend(wanted.iter().cloned());
+                    if window.is_none() && topics.contains(clusia_protocol::topics::WINDOW) {
+                        shared.window_listeners.fetch_add(1, Ordering::SeqCst);
+                        window = Some(WindowListener(shared.clone()));
+                    }
                 }
                 let stop = matches!(cmd, Command::Shutdown);
                 let task_shared = shared.clone();
