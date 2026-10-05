@@ -185,4 +185,75 @@ mod tests {
             r#"{"id":"PRRT_1","is_resolved":false,"is_outdated":false,"path":"src/auth/refresh.rs","line":41,"start_line":null,"side":"right","viewer_can_reply":true,"viewer_can_resolve":true,"comments":[{"database_id":7,"author":"mona","body":"Why one minute?","created_at":"2026-10-01T10:00:00Z","url":"https://github.com/rzorzal/clusia/pull/123#discussion_r7"}]}"#
         );
     }
+
+    #[test]
+    fn review_cache_round_trips() {
+        let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
+        let cache = ReviewCache {
+            pr: PrDetail {
+                summary: crate::PrSummary {
+                    pr: pr.clone(),
+                    title: "Fix cache".into(),
+                    author: "maria".into(),
+                    url: "https://github.com/acme/widgets/pull/7".into(),
+                    draft: false,
+                    updated_at: "2026-10-01T12:00:00Z".into(),
+                    comments: 1,
+                },
+                base_ref: "main".into(),
+                head_ref: "fix".into(),
+                base_sha: "b".repeat(40),
+                head_sha: "h".repeat(40),
+                additions: 1,
+                deletions: 0,
+                changed_files: 1,
+                clone_url: "https://github.com/acme/widgets.git".into(),
+                closed: true,
+                merged: true,
+            },
+            files: vec![FileDiff {
+                path: "src/a.rs".into(),
+                previous_path: Some("src/old.rs".into()),
+                status: "renamed".into(),
+                additions: 1,
+                deletions: 0,
+                patch: None,
+            }],
+            conversation: PrConversation {
+                threads: vec![],
+                comments: vec![IssueComment {
+                    id: 3,
+                    author: "mona".into(),
+                    body: "Looks good".into(),
+                    created_at: "2026-10-01T10:00:00Z".into(),
+                    url: "https://github.com/acme/widgets/pull/7#issuecomment-3".into(),
+                }],
+                reviews: vec![],
+                review_threads: vec![ReviewThread {
+                    id: "PRRT_1".into(),
+                    is_resolved: true,
+                    is_outdated: false,
+                    path: "src/a.rs".into(),
+                    line: Some(1),
+                    start_line: None,
+                    side: Side::Right,
+                    viewer_can_reply: true,
+                    viewer_can_resolve: false,
+                    comments: vec![],
+                }],
+            },
+            checks: Some(ChecksSummary {
+                total: 2,
+                passed: 1,
+                failed: 1,
+                pending: 0,
+            }),
+            role: Role::Author,
+            viewer: Some("maria".into()),
+            worktree: None,
+            fetched_at: 1_700_000_000,
+        };
+        let json = serde_json::to_string(&cache).unwrap();
+        assert_eq!(serde_json::from_str::<ReviewCache>(&json).unwrap(), cache);
+    }
 }

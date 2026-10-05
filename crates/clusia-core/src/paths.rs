@@ -64,6 +64,13 @@ impl Paths {
         self.reviews_dir().join(format!("{}.json", pr.file_key()))
     }
 
+    /// What the last successful open fetched for `pr`, for "Open from cache".
+    pub fn review_cache_file(&self, pr: &crate::PrRef) -> PathBuf {
+        self.root
+            .join("cache/reviews")
+            .join(format!("{}.json", pr.file_key()))
+    }
+
     pub fn activity_file(&self) -> PathBuf {
         self.root.join("activity.jsonl")
     }
@@ -179,5 +186,15 @@ mod tests {
         let p = Paths::resolve(Some("rel/home".into()), Some("/Users/me".into())).unwrap();
         assert!(p.root().is_absolute());
         assert!(p.root().ends_with("rel/home"));
+    }
+
+    #[test]
+    fn review_cache_file_lives_under_cache() {
+        let p = Paths::new("/tmp/c");
+        let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
+        assert_eq!(
+            p.review_cache_file(&pr),
+            PathBuf::from("/tmp/c/cache/reviews/acme~widgets~7.json")
+        );
     }
 }

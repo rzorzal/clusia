@@ -13,7 +13,8 @@ use clusia_provider::{GitHub, ProviderError, PublishedReview};
 
 use crate::handlers::{no_token, provider_error};
 use crate::reviews::{
-    announce, cleanup_checkout, files_for, invalid_state, load_existing, lock, record, save,
+    announce, cleanup_checkout, drop_cache, files_for, invalid_state, load_existing, lock, record,
+    save,
 };
 use crate::state::Shared;
 use crate::sync::{github_client, now_unix};
@@ -48,6 +49,7 @@ fn finish_published(
     if let Err(e) = clusia_store::delete_review(&shared.paths, pr) {
         tracing::warn!(error = %e, pr = %pr, "published, but cannot delete the review file");
     }
+    drop_cache(shared, pr);
     record(shared, ActivityKind::ReviewPublished, pr, client, url, None);
 }
 

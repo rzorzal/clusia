@@ -102,6 +102,10 @@ pub enum Command {
     GetReview {
         pr: PrRef,
     },
+    /// The review as the last successful open saw it, without network ("Open from cache").
+    GetCachedReview {
+        pr: PrRef,
+    },
     /// Leave: saved if the draft has content, otherwise forgotten.
     CloseReview {
         pr: PrRef,
@@ -181,6 +185,7 @@ pub enum Reply {
     Worktree(WorktreeInfo),
     Review(Box<ReviewView>),
     ReviewFile(Box<Review>),
+    Cached(Box<CachedReview>),
     Diff(Vec<FileDiff>),
     Conversation(PrConversation),
     DraftItem(DraftItem),
@@ -396,6 +401,13 @@ pub struct ReviewView {
     /// The files with their patches, exactly as fetched while opening.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diff: Vec<FileDiff>,
+}
+
+/// A review view rebuilt from the cache, and when its GitHub data was fetched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedReview {
+    pub view: ReviewView,
+    pub fetched_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1261,5 +1273,37 @@ mod tests {
             r#"[{"additions":1,"deletions":0,"patch":"@@ -1 +1 @@\n-a\n+b","path":"a.rs","previous_path":null,"status":"modified"}]"#
         );
         round_trip(Reply::Review(Box::new(full)));
+    }
+
+    #[test]
+    fn cached_review_wire_format() {
+        let get = ClientMessage::Request {
+            id: 5,
+            cmd: Command::GetCachedReview { pr: acme7() },
+        };
+        assert_eq!(
+            wire(&get),
+            r#"{"type":"request","id":5,"cmd":{"get_cached_review":{"pr":"acme/widgets#7"}}}"#
+        );
+        let cached = ServerMessage::Response {
+            id: 5,
+            result: Outcome::Ok(Reply::Cached(Box::new(CachedReview {
+                view: view(),
+                fetched_at: 9,
+            }))),
+        };
+        let text = wire(&cached);
+        assert!(
+            text.starts_with(
+                r#"{"type":"response","id":5,"result":{"ok":{"cached":{"view":{"review":{"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(r#""viewer":"octo"},"fetched_at":9}}}}"#),
+            "{text}"
+        );
+        round_trip(cached);
+        round_trip(Command::GetCachedReview { pr: acme7() });
     }
 }

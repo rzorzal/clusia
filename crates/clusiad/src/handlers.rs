@@ -71,6 +71,7 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::PrepareWorktree { pr } => worktrees::prepare(shared, &pr).await,
         Command::OpenReview { pr } => reviews::open(shared, client, &pr).await,
         Command::GetReview { pr } => reviews::get(shared, &pr).await,
+        Command::GetCachedReview { pr } => reviews::cached(shared, &pr).await,
         Command::AddDraftItem {
             pr,
             kind,
