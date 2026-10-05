@@ -9,6 +9,7 @@ pub mod clock;
 pub mod fixture;
 pub mod fonts;
 pub mod instance;
+pub mod nav;
 pub mod snapshot;
 pub mod theme;
 pub mod ui;

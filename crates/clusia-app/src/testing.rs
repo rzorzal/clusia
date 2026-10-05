@@ -8,7 +8,7 @@ use bevy::input::ButtonInput;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
-use bevy::window::WindowThemeChanged;
+use bevy::window::{RequestRedraw, WindowThemeChanged};
 use clusia_core::{Density, Paths};
 use clusia_protocol::WindowTarget;
 
@@ -16,6 +16,7 @@ use crate::app::{AppPaths, StartTarget};
 use crate::bridge::{Ask, Asks, Connection, Model, ShowRequested, Toasts};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
+use crate::nav::NavPlugin;
 use crate::snapshot::{self, Snapshot};
 use crate::theme::{LIGHT, Theme, ThemePlugin};
 use crate::ui::kit::KitPlugin;
@@ -29,6 +30,7 @@ pub fn app(snapshot: Snapshot) -> App {
         .init_resource::<InputFocus>()
         .add_message::<WindowThemeChanged>()
         .add_message::<ShowRequested>()
+        .add_message::<RequestRedraw>()
         .insert_resource(UiFonts::default())
         .insert_resource(Clock(Some(NOW)))
         .insert_resource(AppPaths(Paths::new("/tmp/clusia-test-home")))
@@ -42,7 +44,7 @@ pub fn app(snapshot: Snapshot) -> App {
         })
         .init_resource::<Asks>()
         .init_resource::<Toasts>()
-        .add_plugins((ThemePlugin, KitPlugin));
+        .add_plugins((ThemePlugin, KitPlugin, NavPlugin));
     app.update();
     app
 }

@@ -57,11 +57,13 @@ pub fn run(launch: Launch) {
                 ..default()
             }),
     )
+    .insert_resource(StartTarget(launch.target.clone()))
     .add_plugins((
         TabNavigationPlugin,
         FontsPlugin,
         crate::theme::ThemePlugin,
         crate::ui::kit::KitPlugin,
+        crate::nav::NavPlugin,
     ))
     .insert_resource(if launch.screenshot.is_some() {
         WinitSettings::continuous()
@@ -69,7 +71,6 @@ pub fn run(launch: Launch) {
         WinitSettings::desktop_app()
     })
     .insert_resource(AppPaths(launch.paths.clone()))
-    .insert_resource(StartTarget(launch.target.clone()))
     .insert_resource(Clock::default())
     .insert_resource(Theme::new(false, 13, Density::Comfortable))
     .insert_resource(ClearColor(LIGHT.bg))
