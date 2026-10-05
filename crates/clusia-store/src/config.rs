@@ -199,6 +199,20 @@ mod tests {
     }
 
     #[test]
+    fn new_appearance_and_list_keys_round_trip() {
+        let c = Config::default();
+        assert_eq!(get_value(&c, "appearance.code_size").unwrap(), "13");
+        let c = set_value(&c, "appearance.code_size", "16").unwrap();
+        assert_eq!(c.appearance.code_size, 16);
+        assert!(set_value(&c, "appearance.code_size", "15").is_err());
+        let c = set_value(&c, "appearance.density", "compact").unwrap();
+        assert_eq!(get_value(&c, "appearance.density").unwrap(), "compact");
+        assert!(set_value(&c, "appearance.diff_view", "sideways").is_err());
+        let c = set_value(&c, "lists.mine_sort", "oldest").unwrap();
+        assert_eq!(get_value(&c, "lists.mine_sort").unwrap(), "oldest");
+    }
+
+    #[test]
     fn missing_file_gives_fresh_defaults_without_writing() {
         let (_d, p) = paths();
         assert_eq!(load_config(&p).unwrap(), Loaded::Fresh(Config::default()));

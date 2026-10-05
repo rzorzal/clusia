@@ -1052,6 +1052,7 @@ mod tests {
         first.lists = Lists {
             assigned_sort: ListSort::Oldest,
             saved_sort: ListSort::Updated,
+            mine_sort: ListSort::Updated,
             filter: "change 2".into(),
             repository: String::new(),
         };
