@@ -1,4 +1,5 @@
 //! GitHub REST v3: PR lists, PR detail and the current user, with conditional requests.
+//! Review threads and review writes use GraphQL (`graphql.rs`).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -27,6 +28,8 @@ pub enum ProviderError {
     Http { status: u16, message: String },
     #[error("unexpected response from GitHub: {0}")]
     Decode(String),
+    #[error("GitHub refused the request: {0}")]
+    GraphQl(String),
 }
 
 pub fn api_base_for_host(host: &str) -> String {
@@ -51,9 +54,11 @@ pub struct Viewer {
 }
 
 pub struct GitHub {
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     api: String,
-    token: Token,
+    /// GraphQL endpoint derived from `api`.
+    pub(crate) graphql: String,
+    pub(crate) token: Token,
     /// Full URL → (ETag, body) for conditional requests.
     cache: Mutex<HashMap<String, CacheEntry>>,
 }
@@ -66,7 +71,7 @@ fn now_secs() -> u64 {
 }
 
 /// Seconds to wait when the response is a rate-limit rejection.
-fn rate_limit_wait(status: StatusCode, headers: &header::HeaderMap) -> Option<u64> {
+pub(crate) fn rate_limit_wait(status: StatusCode, headers: &header::HeaderMap) -> Option<u64> {
     if status != StatusCode::FORBIDDEN && status != StatusCode::TOO_MANY_REQUESTS {
         return None;
     }
@@ -90,7 +95,7 @@ struct UserRef {
     login: String,
 }
 
-const MAX_PAGES: usize = 30;
+pub(crate) const MAX_PAGES: usize = 30;
 
 /// Whether a pagination link points back into the API (same origin, under the API path).
 fn same_api(api: &reqwest::Url, next: &str) -> bool {
@@ -237,6 +242,11 @@ struct PullResponse {
     comments: u64,
     #[serde(default)]
     review_comments: u64,
+    /// `open` or `closed`.
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    merged: bool,
     additions: u64,
     deletions: u64,
     changed_files: u64,
@@ -257,7 +267,9 @@ struct RepoInfo {
     clone_url: String,
 }
 
-fn decode<T: serde::de::DeserializeOwned>(body: serde_json::Value) -> Result<T, ProviderError> {
+pub(crate) fn decode<T: serde::de::DeserializeOwned>(
+    body: serde_json::Value,
+) -> Result<T, ProviderError> {
     serde_json::from_value(body).map_err(|e| ProviderError::Decode(e.to_string()))
 }
 
@@ -267,14 +279,8 @@ pub struct PublishedReview {
     pub url: String,
 }
 
-#[derive(Deserialize)]
-struct RawPublished {
-    id: u64,
-    html_url: String,
-}
-
 /// `message` plus the details of `errors[]` (strings or `{ "message": … }` objects).
-fn error_message(body: &serde_json::Value) -> String {
+pub(crate) fn error_message(body: &serde_json::Value) -> String {
     let message = body
         .get("message")
         .and_then(|m| m.as_str())
@@ -308,9 +314,11 @@ impl GitHub {
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
+        let api = api_base.trim_end_matches('/').to_string();
         Ok(Self {
             http,
-            api: api_base.trim_end_matches('/').to_string(),
+            graphql: crate::graphql::graphql_url(&api),
+            api,
             token,
             cache: Mutex::new(HashMap::new()),
         })
@@ -403,21 +411,6 @@ impl GitHub {
         Ok(parsed)
     }
 
-    pub async fn create_review(
-        &self,
-        pr: &PrRef,
-        payload: &clusia_core::ReviewPayload,
-    ) -> Result<PublishedReview, ProviderError> {
-        let body =
-            serde_json::to_value(payload).map_err(|e| ProviderError::Decode(e.to_string()))?;
-        let path = format!("{}/pulls/{}/reviews", Self::repo_path(pr), pr.number);
-        let raw: RawPublished = decode(self.send(reqwest::Method::POST, &path, &body).await?)?;
-        Ok(PublishedReview {
-            id: raw.id,
-            url: raw.html_url,
-        })
-    }
-
     pub async fn close_pr(&self, pr: &PrRef) -> Result<(), ProviderError> {
         let path = format!("{}/pulls/{}", Self::repo_path(pr), pr.number);
         self.send(
@@ -469,6 +462,7 @@ impl GitHub {
             self.get_paginated(&format!("{base}/pulls/{}/reviews", pr.number))
                 .await?,
         )?;
+        let review_threads = self.review_threads(pr).await?;
         Ok(PrConversation {
             threads: threads
                 .into_iter()
@@ -510,7 +504,7 @@ impl GitHub {
                     url: r.html_url,
                 })
                 .collect(),
-            review_threads: Vec::new(),
+            review_threads,
         })
     }
 
@@ -747,8 +741,8 @@ impl GitHub {
             deletions: p.deletions,
             changed_files: p.changed_files,
             clone_url,
-            closed: false,
-            merged: false,
+            closed: p.state == "closed",
+            merged: p.merged,
         })
     }
 }
@@ -960,6 +954,7 @@ mod tests {
                 "number": 7, "title": "Fix cache", "html_url": "https://github.com/acme/widgets/pull/7",
                 "user": { "login": "maria" }, "draft": true, "updated_at": "2026-10-01T12:00:00Z",
                 "comments": 2, "review_comments": 5, "additions": 120, "deletions": 34, "changed_files": 7,
+                "state": "open", "merged": false,
                 "base": { "ref": "main", "sha": "aaa", "repo": { "clone_url": "https://github.com/acme/widgets.git" } },
                 "head": { "ref": "fix-cache", "sha": "bbb", "repo": null }
             })))
@@ -978,6 +973,25 @@ mod tests {
         assert_eq!(d.summary.comments, 7);
         assert!(d.summary.draft);
         assert_eq!(d.clone_url, "https://github.com/acme/widgets.git");
+        assert_eq!((d.closed, d.merged), (false, false));
+    }
+
+    #[tokio::test]
+    async fn get_pr_reads_closed_and_merged() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "number": 7, "title": "Fix cache", "html_url": "https://github.com/acme/widgets/pull/7",
+                "user": { "login": "maria" }, "updated_at": "2026-10-01T12:00:00Z",
+                "additions": 1, "deletions": 0, "changed_files": 1, "state": "closed", "merged": true,
+                "base": { "ref": "main", "sha": "aaa", "repo": { "clone_url": "https://github.com/acme/widgets.git" } },
+                "head": { "ref": "fix-cache", "sha": "bbb", "repo": null }
+            })))
+            .mount(&server)
+            .await;
+        let d = gh(&server).get_pr(&pr7()).await.unwrap();
+        assert_eq!((d.closed, d.merged), (true, true));
     }
 
     #[tokio::test]
@@ -1137,6 +1151,23 @@ mod tests {
                 { "id": 5, "user": { "login": "ana" }, "state": "APPROVED", "body": "", "submitted_at": "2026-10-01T12:30:00Z", "html_url": "u5" },
                 { "id": 6, "user": { "login": "me" }, "state": "PENDING", "body": "", "html_url": "u6" }
             ]))).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(wiremock::matchers::body_string_contains("reviewThreads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "repository": { "pullRequest": { "reviewThreads": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [{
+                    "id": "PRRT_1", "isResolved": false, "isOutdated": false, "path": "a.rs", "line": 3,
+                    "startLine": null, "diffSide": "RIGHT", "viewerCanReply": true, "viewerCanResolve": false,
+                    "comments": { "nodes": [
+                        { "databaseId": 1, "author": { "login": "joao" }, "body": "why?", "createdAt": "2026-10-01T10:00:00Z", "url": "u1" },
+                        { "databaseId": 2, "author": { "login": "maria" }, "body": "because", "createdAt": "2026-10-01T11:00:00Z", "url": "u2" }
+                    ] }
+                }]
+            } } } } })))
+            .expect(1)
+            .mount(&server)
+            .await;
         let c = gh(&server).get_conversation(&pr7()).await.unwrap();
         assert_eq!(c.threads.len(), 2);
         assert_eq!(
@@ -1150,6 +1181,9 @@ mod tests {
         assert_eq!(c.comments[0].author, "ana");
         assert_eq!(c.reviews.len(), 1, "pending reviews are dropped");
         assert_eq!(c.reviews[0].state, "APPROVED");
+        assert_eq!(c.review_threads.len(), 1);
+        assert_eq!(c.review_threads[0].id, "PRRT_1");
+        assert_eq!(c.review_threads[0].comments[1].author, "maria");
     }
 
     #[tokio::test]
@@ -1278,57 +1312,17 @@ mod tests {
         assert!(!ok("not a url"));
     }
 
-    fn payload() -> clusia_core::ReviewPayload {
-        clusia_core::ReviewPayload {
-            commit_id: "h1".into(),
-            event: "REQUEST_CHANGES".into(),
-            body: "Please fix".into(),
-            comments: vec![clusia_core::ReviewComment {
-                path: "a.rs".into(),
-                body: "nit".into(),
-                line: 3,
-                side: "RIGHT".into(),
-                start_line: None,
-                start_side: None,
-            }],
-        }
-    }
-
-    #[tokio::test]
-    async fn create_review_posts_the_payload() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/repos/acme/widgets/pulls/7/reviews"))
-            .and(h("authorization", "Bearer tok123"))
-            .and(wiremock::matchers::body_json(json!({
-                "commit_id": "h1", "event": "REQUEST_CHANGES", "body": "Please fix",
-                "comments": [{ "path": "a.rs", "body": "nit", "line": 3, "side": "RIGHT" }]
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": 42, "html_url": "https://github.com/acme/widgets/pull/7#pullrequestreview-42" })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let published = gh(&server).create_review(&pr7(), &payload()).await.unwrap();
-        assert_eq!(
-            published,
-            PublishedReview {
-                id: 42,
-                url: "https://github.com/acme/widgets/pull/7#pullrequestreview-42".into()
-            }
-        );
-    }
-
     #[tokio::test]
     async fn validation_errors_carry_github_details() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
+        Mock::given(method("PATCH"))
             .respond_with(ResponseTemplate::new(422).set_body_json(json!({
                 "message": "Unprocessable Entity",
                 "errors": ["Line could not be resolved", { "message": "pull_request_review_thread.line must be part of the diff" }]
             })))
             .mount(&server)
             .await;
-        match gh(&server).create_review(&pr7(), &payload()).await {
+        match gh(&server).close_pr(&pr7()).await {
             Err(ProviderError::Http {
                 status: 422,
                 message,

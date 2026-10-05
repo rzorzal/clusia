@@ -176,7 +176,9 @@ pub(crate) fn provider_error(e: ProviderError) -> Outcome {
         ProviderError::RateLimited { .. } => ErrorCode::RateLimited,
         ProviderError::NotFound(_) => ErrorCode::NotFound,
         ProviderError::Offline(_) => ErrorCode::Offline,
-        ProviderError::Http { .. } | ProviderError::Decode(_) => ErrorCode::Upstream,
+        ProviderError::Http { .. } | ProviderError::Decode(_) | ProviderError::GraphQl(_) => {
+            ErrorCode::Upstream
+        }
     };
     Outcome::Err(ProtocolError::new(code, e.to_string()))
 }

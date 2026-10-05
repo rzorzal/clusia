@@ -3,10 +3,10 @@ mod common;
 use clusia_core::{ActivityKind, DraftKind, ReviewState, Side, Verdict};
 use clusia_protocol::{AnchorInput, ClientError, Command, ErrorCode, PublishResult, Reply};
 use common::git_fixture::advance_pr;
-use common::github_mock::{PrMock, mount_pr};
+use common::github_mock::{PrMock, graphql_error, graphql_requests, mount_pr, mount_publish};
 use common::review_world::{open, pr7, world};
 use serde_json::json;
-use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
 use wiremock::{Mock, ResponseTemplate};
 
 const REVIEW_URL: &str = "https://github.com/acme/widgets/pull/7#pullrequestreview-42";
@@ -46,18 +46,7 @@ fn publish(verdict: Verdict, summary: &str) -> Command {
 #[tokio::test]
 async fn publishes_one_review_and_cleans_up() {
     let w = world().await;
-    Mock::given(method("POST"))
-        .and(path("/repos/acme/widgets/pulls/7/reviews"))
-        .and(body_partial_json(json!({
-            "commit_id": w.head, "event": "REQUEST_CHANGES", "body": "Please rename.",
-            "comments": [{ "path": "feature.txt", "line": 2, "side": "RIGHT", "body": "rename" }]
-        })))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "id": 42, "html_url": REVIEW_URL })),
-        )
-        .expect(1)
-        .mount(&w.server)
-        .await;
+    mount_publish(&w.server, REVIEW_URL).await;
     let mut c = w.daemon.client().await;
     let worktree = std::path::PathBuf::from(open(&mut c).await.worktree.unwrap());
     comment_on_line_2(&mut c).await;
@@ -73,6 +62,25 @@ async fn publishes_one_review_and_cleans_up() {
             closed: false
         })
     );
+    let started = graphql_requests(&w.server, "addPullRequestReview(").await;
+    assert_eq!(started.len(), 1, "one pending review");
+    assert_eq!(
+        started[0]["variables"]["input"],
+        json!({
+            "pullRequestId": "PR_7", "commitOID": w.head,
+            "threads": [{ "path": "feature.txt", "line": 2, "side": "RIGHT", "body": "rename" }]
+        })
+    );
+    let submitted = graphql_requests(&w.server, "submitPullRequestReview").await;
+    assert_eq!(
+        submitted[0]["variables"]["input"],
+        json!({ "pullRequestReviewId": "PRR_1", "event": "REQUEST_CHANGES", "body": "Please rename." })
+    );
+    assert!(
+        graphql_requests(&w.server, "deletePullRequestReview")
+            .await
+            .is_empty()
+    );
     assert!(!w.daemon.paths.review_file(&pr7()).exists());
     assert!(!worktree.exists());
     let (activity, _) = clusia_store::read_activity(&w.daemon.paths).unwrap();
@@ -87,12 +95,13 @@ async fn publishes_one_review_and_cleans_up() {
 #[tokio::test]
 async fn failed_publish_keeps_the_draft() {
     let w = world().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(422).set_body_json(
-            json!({ "message": "Unprocessable Entity", "errors": ["Line could not be resolved"] }),
-        ))
-        .mount(&w.server)
-        .await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    graphql_error(
+        &w.server,
+        "addPullRequestReview(",
+        "Line could not be resolved",
+    )
+    .await;
     let mut c = w.daemon.client().await;
     open(&mut c).await;
     comment_on_line_2(&mut c).await;
@@ -107,6 +116,47 @@ async fn failed_publish_keeps_the_draft() {
         }
         other => panic!("{other:?}"),
     }
+    match c.request(Command::GetReview { pr: pr7() }).await.unwrap() {
+        Reply::ReviewFile(r) => assert_eq!((r.state, r.draft.items.len()), (ReviewState::Saved, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        graphql_requests(&w.server, "submitPullRequestReview")
+            .await
+            .is_empty()
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn failed_submit_deletes_the_pending_review() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    graphql_error(
+        &w.server,
+        "submitPullRequestReview",
+        "Review body is too long",
+    )
+    .await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    match c.request(publish(Verdict::Comment, "")).await {
+        Err(ClientError::Server(e)) => {
+            assert_eq!(e.code, ErrorCode::Upstream);
+            assert!(
+                e.message.contains("Review body is too long"),
+                "{}",
+                e.message
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let deleted = graphql_requests(&w.server, "deletePullRequestReview").await;
+    assert_eq!(
+        deleted[0]["variables"]["input"],
+        json!({ "pullRequestReviewId": "PRR_1" })
+    );
     match c.request(Command::GetReview { pr: pr7() }).await.unwrap() {
         Reply::ReviewFile(r) => assert_eq!((r.state, r.draft.items.len()), (ReviewState::Saved, 1)),
         other => panic!("{other:?}"),
@@ -154,16 +204,21 @@ async fn author_cannot_approve_but_can_close() {
     mock.viewer = "maria".into();
     mount_pr(&w.server, &mock).await;
     Mock::given(method("POST"))
-        .and(path("/repos/acme/widgets/pulls/7/reviews"))
-        .and(body_partial_json(
-            json!({ "event": "COMMENT", "body": "Superseded by #8" }),
-        ))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "id": 43, "html_url": REVIEW_URL })),
-        )
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .and(body_partial_json(json!({
+            "variables": { "input": { "event": "COMMENT", "body": "Superseded by #8" } }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {
+            "submitPullRequestReview": { "pullRequestReview": {
+                "id": "PRR_1", "databaseId": 43, "url": REVIEW_URL, "state": "COMMENTED"
+            } }
+        } })))
         .expect(1)
+        .with_priority(1)
         .mount(&w.server)
         .await;
+    mount_publish(&w.server, REVIEW_URL).await;
     Mock::given(method("PATCH"))
         .and(path("/repos/acme/widgets/pulls/7"))
         .and(body_partial_json(json!({ "state": "closed" })))
@@ -214,14 +269,7 @@ async fn posted_but_close_failed_returns_upstream_with_url_and_forgets_draft() {
     let mut mock = PrMock::new(&w.head, &w.base, &w.origin);
     mock.viewer = "maria".into();
     mount_pr(&w.server, &mock).await;
-    Mock::given(method("POST"))
-        .and(path("/repos/acme/widgets/pulls/7/reviews"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "id": 43, "html_url": REVIEW_URL })),
-        )
-        .expect(1)
-        .mount(&w.server)
-        .await;
+    mount_publish(&w.server, REVIEW_URL).await;
     Mock::given(method("PATCH"))
         .and(path("/repos/acme/widgets/pulls/7"))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "message": "boom" })))
@@ -236,6 +284,12 @@ async fn posted_but_close_failed_returns_upstream_with_url_and_forgets_draft() {
         }
         other => panic!("{other:?}"),
     }
+    assert_eq!(
+        graphql_requests(&w.server, "submitPullRequestReview")
+            .await
+            .len(),
+        1
+    );
     assert!(!w.daemon.paths.review_file(&pr7()).exists());
     assert_eq!(
         code(c.request(Command::GetReview { pr: pr7() }).await),
@@ -247,21 +301,24 @@ async fn posted_but_close_failed_returns_upstream_with_url_and_forgets_draft() {
 #[tokio::test]
 async fn reviewer_cannot_close() {
     let w = world().await;
-    Mock::given(method("POST"))
-        .and(path("/repos/acme/widgets/pulls/7/reviews"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "id": 44, "html_url": REVIEW_URL })),
-        )
-        .expect(0)
-        .mount(&w.server)
-        .await;
+    mount_publish(&w.server, REVIEW_URL).await;
     let mut c = w.daemon.client().await;
     open(&mut c).await;
     assert_eq!(
         code(c.request(publish(Verdict::ClosePr, "nope")).await),
         ErrorCode::BadRequest
     );
+    no_review_written(&w).await;
     w.daemon.stop().await;
+}
+
+async fn no_review_written(w: &common::review_world::World) {
+    for op in ["addPullRequestReview(", "submitPullRequestReview"] {
+        assert!(
+            graphql_requests(&w.server, op).await.is_empty(),
+            "{op} was sent"
+        );
+    }
 }
 
 fn stored_review(w: &common::review_world::World) -> clusia_core::Review {
@@ -274,13 +331,7 @@ fn stored_review(w: &common::review_world::World) -> clusia_core::Review {
 #[tokio::test]
 async fn obsolete_comments_block_publishing() {
     let w = world().await;
-    Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "id": 45, "html_url": REVIEW_URL })),
-        )
-        .expect(0)
-        .mount(&w.server)
-        .await;
+    mount_publish(&w.server, REVIEW_URL).await;
     let mut c = w.daemon.client().await;
     open(&mut c).await;
     comment_on_line_2(&mut c).await;
@@ -309,19 +360,14 @@ async fn obsolete_comments_block_publishing() {
         (after.state, after.draft.items.len()),
         (ReviewState::Active, 3)
     );
+    no_review_written(&w).await;
     w.daemon.stop().await;
 }
 
 #[tokio::test]
 async fn publish_of_an_interrupted_publish_asks_to_reopen() {
     let w = world().await;
-    Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "id": 46, "html_url": REVIEW_URL })),
-        )
-        .expect(0)
-        .mount(&w.server)
-        .await;
+    mount_publish(&w.server, REVIEW_URL).await;
     let mut c = w.daemon.client().await;
     open(&mut c).await;
     comment_on_line_2(&mut c).await;
@@ -339,5 +385,6 @@ async fn publish_of_an_interrupted_publish_asks_to_reopen() {
         }
         other => panic!("{other:?}"),
     }
+    no_review_written(&w).await;
     w.daemon.stop().await;
 }

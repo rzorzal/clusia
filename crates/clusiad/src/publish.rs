@@ -1,13 +1,15 @@
-//! Publishing a draft as one GitHub review (spec §6.4).
+//! Publishing a draft as one GitHub review (spec §6.4): a pending review with the line
+//! comments, then submitted with the verdict and body (GraphQL).
 
 use std::path::PathBuf;
 
 use clusia_core::{
-    ActivityKind, ItemStatus, PrRef, Review, ReviewEvent, ReviewState, Role, Verdict, plan_publish,
+    ActivityKind, ItemStatus, PrRef, Review, ReviewEvent, ReviewPayload, ReviewState, Role,
+    Verdict, plan_publish,
 };
 use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, PublishResult, Reply};
-use clusia_provider::ProviderError;
+use clusia_provider::{GitHub, ProviderError, PublishedReview};
 
 use crate::handlers::{no_token, provider_error};
 use crate::reviews::{
@@ -47,6 +49,38 @@ fn finish_published(
         tracing::warn!(error = %e, pr = %pr, "published, but cannot delete the review file");
     }
     record(shared, ActivityKind::ReviewPublished, pr, client, url, None);
+}
+
+/// Where posting the review failed: nothing exists on GitHub after a `Start` failure; a
+/// `Submit` failure may have posted the review (offline / unreadable answer).
+enum PostFailure {
+    Start(ProviderError),
+    Submit(ProviderError),
+}
+
+/// Starts a pending review holding the line comments and submits it with the verdict and
+/// body. A failed submit deletes the pending review (best effort) so the next try is clean.
+async fn post_review(
+    gh: &GitHub,
+    pr_node_id: &str,
+    payload: &ReviewPayload,
+) -> Result<PublishedReview, PostFailure> {
+    let pending = gh
+        .start_review(pr_node_id, &payload.commit_id, &payload.comments)
+        .await
+        .map_err(PostFailure::Start)?;
+    match gh
+        .submit_review(&pending.id, &payload.event, &payload.body)
+        .await
+    {
+        Ok(published) => Ok(published),
+        Err(e) => {
+            if let Err(cleanup) = gh.delete_pending_review(&pending.id).await {
+                tracing::warn!(error = %cleanup, "cannot delete the pending review after a failed submit");
+            }
+            Err(PostFailure::Submit(e))
+        }
+    }
 }
 
 pub(crate) async fn publish(
@@ -147,6 +181,13 @@ pub(crate) async fn publish(
         Ok(p) => p,
         Err(e) => return Outcome::Err(ProtocolError::new(ErrorCode::BadRequest, e.to_string())),
     };
+    let node = match &plan.review {
+        Some(_) => match gh.pr_node(pr).await {
+            Ok(node) => Some(node),
+            Err(e) => return provider_error(e),
+        },
+        None => None,
+    };
     if let Err(e) = review.apply(ReviewEvent::Finalize, now_unix()) {
         return invalid_state(e.to_string());
     }
@@ -155,8 +196,8 @@ pub(crate) async fn publish(
     }
 
     let mut url = None;
-    if let Some(payload) = &plan.review {
-        match gh.create_review(pr, payload).await {
+    if let (Some(payload), Some(node)) = (&plan.review, &node) {
+        match post_review(&gh, &node.id, payload).await {
             Ok(published) => {
                 // Persist the terminal state before any further network call, so a crash
                 // during the close cannot leave a `publishing` file that invites a re-post.
@@ -167,15 +208,15 @@ pub(crate) async fn publish(
                 fail_publish(shared, &mut review);
                 announce(shared, &review);
                 return match e {
-                    ProviderError::Offline(_) | ProviderError::Decode(_) => {
-                        Outcome::Err(ProtocolError::new(
-                            ErrorCode::Upstream,
-                            format!(
-                                "the review may have been posted; check the pull request on GitHub before publishing again ({e})"
-                            ),
-                        ))
-                    }
-                    e => provider_error(e),
+                    PostFailure::Submit(
+                        e @ (ProviderError::Offline(_) | ProviderError::Decode(_)),
+                    ) => Outcome::Err(ProtocolError::new(
+                        ErrorCode::Upstream,
+                        format!(
+                            "the review may have been posted; check the pull request on GitHub before publishing again ({e})"
+                        ),
+                    )),
+                    PostFailure::Start(e) | PostFailure::Submit(e) => provider_error(e),
                 };
             }
         }
