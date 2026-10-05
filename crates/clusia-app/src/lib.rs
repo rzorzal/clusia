@@ -4,9 +4,12 @@
 
 pub mod app;
 pub mod args;
+pub mod bridge;
 pub mod clock;
+pub mod fixture;
 pub mod fonts;
 pub mod instance;
+pub mod snapshot;
 pub mod theme;
 
 /// How the window introduces itself to the daemon.

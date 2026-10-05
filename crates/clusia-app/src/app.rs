@@ -68,6 +68,11 @@ pub fn run(launch: Launch) {
     .insert_resource(Clock::default())
     .insert_resource(Theme::new(false, 13, Density::Comfortable))
     .insert_resource(ClearColor(LIGHT.bg))
+    .add_plugins(crate::bridge::BridgePlugin {
+        mode: launch.mode.clone(),
+        paths: launch.paths.clone(),
+        home: launch.home.clone(),
+    })
     .add_systems(Startup, |mut commands: Commands| {
         commands.spawn(Camera2d);
     });
