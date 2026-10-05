@@ -48,7 +48,6 @@ pub enum Style {
     CounterValue,
     CounterLabel,
     Badge,
-    Glyph,
     /// Row and page chevrons.
     Chevron,
 }
@@ -57,7 +56,8 @@ pub enum Style {
 pub enum Ink {
     Primary,
     Secondary,
-    Tertiary,
+    /// A secondary ink dimmed for inert controls (still legible on the popover).
+    Disabled,
     Green,
     Orange,
 }
@@ -97,6 +97,12 @@ pub enum Shape {
     /// A raised (active) toolbar button.
     Raised {
         rect: Rect,
+    },
+    /// An SF Symbol centered in `rect`.
+    Symbol {
+        rect: Rect,
+        name: &'static str,
+        ink: Ink,
     },
 }
 
@@ -160,12 +166,12 @@ pub fn layout(view: &TrayView) -> Layout {
         Style::Title,
         Ink::Primary,
     ));
-    let mut tools: Vec<(&str, Action)> = vec![("↻", Action::Refresh)];
+    let mut tools: Vec<(&'static str, Action)> = vec![("arrow.clockwise", Action::Refresh)];
     if view.show_home {
-        tools.push(("⤢", Action::OpenHome));
+        tools.push(("arrow.up.left.and.arrow.down.right", Action::OpenHome));
     }
-    tools.push(("⚙︎", Action::OpenConfig));
-    tools.push(("⏻", Action::TurnOff));
+    tools.push(("gearshape", Action::OpenConfig));
+    tools.push(("power", Action::TurnOff));
     let n = tools.len() as f64;
     let group_w = 2.0 * TOOL_PAD + n * TOOL_BUTTON + (n - 1.0) * TOOL_GAP;
     let group = Rect::new(
@@ -175,7 +181,7 @@ pub fn layout(view: &TrayView) -> Layout {
         TOOL_BUTTON + 2.0 * TOOL_PAD,
     );
     l.shapes.push(Shape::Group { rect: group });
-    for (i, (glyph, action)) in tools.into_iter().enumerate() {
+    for (i, (name, action)) in tools.into_iter().enumerate() {
         let r = Rect::new(
             group.x + TOOL_PAD + i as f64 * (TOOL_BUTTON + TOOL_GAP),
             group.y + TOOL_PAD,
@@ -186,12 +192,11 @@ pub fn layout(view: &TrayView) -> Layout {
         if active {
             l.shapes.push(Shape::Raised { rect: r });
         }
-        l.shapes.push(text(
-            Rect::new(r.x, r.y + 5.0, r.w, r.h - 5.0),
-            glyph,
-            Style::Glyph,
-            if active { Ink::Green } else { Ink::Secondary },
-        ));
+        l.shapes.push(Shape::Symbol {
+            rect: r,
+            name,
+            ink: if active { Ink::Green } else { Ink::Secondary },
+        });
         l.hits.push((r, action));
     }
     y += group.h + 4.0;
@@ -216,7 +221,7 @@ pub fn layout(view: &TrayView) -> Layout {
         Rect::new(PAD, y, inner * 0.62, 16.0),
         &left,
         Style::Meta,
-        Ink::Tertiary,
+        Ink::Secondary,
     ));
     if let Some(c) = &view.sync_caption {
         let ink = if view.syncing {
@@ -344,7 +349,7 @@ pub fn layout(view: &TrayView) -> Layout {
                 Rect::new(PAD + 12.0, y, inner - 12.0, 16.0),
                 section.empty,
                 Style::Meta,
-                Ink::Tertiary,
+                Ink::Secondary,
             ));
             y += 26.0;
         }
@@ -398,7 +403,7 @@ fn row_shapes(l: &mut Layout, row: &Row, y: f64) {
         Rect::new(tx, y + 18.0, right - tx, 14.0),
         &row.meta,
         Style::Meta,
-        Ink::Tertiary,
+        Ink::Secondary,
     ));
     if let Some(b) = &row.badge {
         let pill = Rect::new(right - badge_w, y + 2.0, badge_w, 16.0);
@@ -417,7 +422,7 @@ fn row_shapes(l: &mut Layout, row: &Row, y: f64) {
         Rect::new(WIDTH - PAD - 10.0, y + 8.0, 10.0, 18.0),
         "›",
         Style::Chevron,
-        Ink::Tertiary,
+        Ink::Secondary,
     ));
 }
 
@@ -436,7 +441,7 @@ fn page_row(l: &mut Layout, section: &Section, y: f64) {
             if enabled {
                 Ink::Secondary
             } else {
-                Ink::Tertiary
+                Ink::Disabled
             },
         ));
         if enabled {
@@ -462,7 +467,7 @@ pub fn search_placeholder(r: Rect) -> Vec<Shape> {
             Rect::new(r.x + 10.0, r.y + 5.0, r.w - 20.0, 14.0),
             SEARCH_PLACEHOLDER,
             Style::Meta,
-            Ink::Tertiary,
+            Ink::Secondary,
         ),
     ]
 }
@@ -584,6 +589,16 @@ mod tests {
             .unwrap_or_else(|| panic!("no text {needle:?}"))
     }
 
+    fn symbol_rect(l: &Layout, needle: &str) -> Rect {
+        l.shapes
+            .iter()
+            .find_map(|s| match s {
+                Shape::Symbol { rect, name, .. } if *name == needle => Some(*rect),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no symbol {needle:?}"))
+    }
+
     fn center(r: Rect) -> (f64, f64) {
         (r.x + r.w / 2.0, r.y + r.h / 2.0)
     }
@@ -597,7 +612,8 @@ mod tests {
             | Shape::Pill { rect, .. }
             | Shape::Divider { rect }
             | Shape::Group { rect }
-            | Shape::Raised { rect } => *rect,
+            | Shape::Raised { rect }
+            | Shape::Symbol { rect, .. } => *rect,
         }
     }
 
@@ -717,16 +733,25 @@ mod tests {
             (group.x + group.w - (WIDTH - PAD)).abs() < 0.5,
             "right aligned"
         );
-        for glyph in ["↻", "⤢", "⚙︎", "⏻"] {
-            let r = text_rect(&l, glyph);
+        for name in [
+            "arrow.clockwise",
+            "arrow.up.left.and.arrow.down.right",
+            "gearshape",
+            "power",
+        ] {
+            let r = symbol_rect(&l, name);
             assert!(
                 group.contains(r.x + r.w / 2.0, r.y + r.h / 2.0),
-                "{glyph} inside"
+                "{name} inside"
             );
         }
         let without = layout(&view(1, false, false));
         assert!(!without.hits.iter().any(|(_, a)| *a == Action::OpenHome));
         assert!(without.hits.iter().any(|(_, a)| *a == Action::TurnOff));
+        assert!(!without.shapes.iter().any(|s| matches!(
+            s,
+            Shape::Symbol { name, .. } if *name == "arrow.up.left.and.arrow.down.right"
+        )));
     }
 
     #[test]
@@ -744,7 +769,7 @@ mod tests {
             .shapes
             .iter()
             .find_map(|s| match s {
-                Shape::Text { text, ink, .. } if text == "↻" => Some(*ink),
+                Shape::Symbol { name, ink, .. } if *name == "arrow.clockwise" => Some(*ink),
                 _ => None,
             })
             .unwrap();

@@ -205,7 +205,7 @@ define_class!(
                 }
             }
             let model = TrayModel::new(app_bin.is_some());
-            let content = ContentView::new(mtm, false);
+            let content = ContentView::new(mtm);
             let first = layout(&model.view(now()));
             let size = NSSize::new(WIDTH, first.height);
             content.set_layout(first);

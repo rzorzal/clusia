@@ -16,13 +16,15 @@ pub fn render_png(
     mtm: MainThreadMarker,
     mut layout: Layout,
     dark: bool,
+    backdrop: Option<(f64, f64, f64)>,
     out: &Path,
 ) -> Result<(), String> {
     // No native search field offscreen: paint its placeholder in the reserved row.
     if let Some(r) = layout.search {
         layout.shapes.extend(search_placeholder(r));
     }
-    let view = ContentView::new(mtm, true);
+    let view = ContentView::new(mtm);
+    view.set_backdrop(backdrop);
     view.set_layout(layout);
     // SAFETY: the appearance names are immutable NSString statics.
     let name = unsafe {

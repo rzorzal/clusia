@@ -25,6 +25,22 @@ struct Args {
     /// With --render: use the dark appearance.
     #[arg(long)]
     dark: bool,
+    /// With --render: fill the bitmap with this color first, simulating the wallpaper behind the glass.
+    #[arg(long, value_name = "#RRGGBB", value_parser = parse_hex, hide = true)]
+    backdrop: Option<(f64, f64, f64)>,
+}
+
+fn parse_hex(s: &str) -> Result<(f64, f64, f64), String> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() != 6 || !hex.is_ascii() {
+        return Err(format!("expected #RRGGBB, got {s:?}"));
+    }
+    let byte = |i: usize| {
+        u8::from_str_radix(&hex[i..i + 2], 16)
+            .map(|v| f64::from(v) / 255.0)
+            .map_err(|e| format!("bad hex color {s:?}: {e}"))
+    };
+    Ok((byte(0)?, byte(2)?, byte(4)?))
 }
 
 fn now() -> i64 {
@@ -63,7 +79,13 @@ fn main() -> ExitCode {
         for snapshot in fixture::demo(now) {
             model.apply(snapshot);
         }
-        return match ui::render::render_png(mtm, layout::layout(&model.view(now)), args.dark, out) {
+        return match ui::render::render_png(
+            mtm,
+            layout::layout(&model.view(now)),
+            args.dark,
+            args.backdrop,
+            out,
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("clusia-tray: {e}");
