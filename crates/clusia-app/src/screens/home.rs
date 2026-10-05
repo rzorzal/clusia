@@ -12,7 +12,7 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
-use clusia_core::time::parse_rfc3339;
+use clusia_core::time::{days_from_civil, parse_rfc3339};
 use clusia_core::{DayCount, ListSort, PrRef, ReviewState};
 use clusia_protocol::{ReviewSummary, SyncState, SyncStatus, WindowTarget};
 use clusia_view::heatmap::levels;
@@ -32,7 +32,7 @@ use crate::ui::kit::{
     text_field,
 };
 
-pub const PAGE_SIZE: usize = 6;
+pub const PAGE_SIZE: usize = 4;
 pub const WEEKS: usize = 26;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -163,10 +163,10 @@ pub fn home_view(snap: &Snapshot, state: &HomeState, now: i64) -> HomeView {
     let days = WEEKS * 7;
     let (heat, months) = match &snap.activity {
         Some(a) => {
-            let recent = &a.heatmap[a.heatmap.len().saturating_sub(days)..];
-            let pad = days - recent.len();
+            let (recent, pad) = week_aligned(&a.heatmap);
             let mut heat = vec![0; pad];
             heat.extend(levels(recent));
+            heat.resize(days, 0); // the rest of today's week
             (heat, month_labels(recent, pad))
         }
         None => (vec![0; days], Vec::new()),
@@ -354,6 +354,28 @@ fn row(e: &Entry, now: i64) -> RowView {
     }
 }
 
+/// 0 = Sunday … 6 = Saturday, from a `YYYY-MM-DD` date.
+fn weekday(date: &str) -> Option<usize> {
+    let n = |r: std::ops::Range<usize>| date.get(r)?.parse::<u32>().ok();
+    let day = days_from_civil(i64::from(n(0..4)?), n(5..7)?, n(8..10)?);
+    Some((day + 4).rem_euclid(7) as usize) // 1970-01-01 was a Thursday
+}
+
+/// The days to show and how many blank cells precede them, so that every grid column is one
+/// Sunday-to-Saturday week: the last column is the current week, and with a short history the
+/// first column starts blank until the oldest day's weekday.
+fn week_aligned(days: &[DayCount]) -> (&[DayCount], usize) {
+    let Some(today) = days.last().and_then(|d| weekday(&d.date)) else {
+        return (&days[days.len().saturating_sub(WEEKS * 7)..], 0);
+    };
+    let want = (WEEKS - 1) * 7 + today + 1;
+    if days.len() >= want {
+        return (&days[days.len() - want..], 0);
+    }
+    let pad = days.first().and_then(|d| weekday(&d.date)).unwrap_or(0);
+    (days, pad)
+}
+
 /// Where each month starts, by week column. A first label that would crowd the second one
 /// (fewer than 3 columns apart) is dropped.
 fn month_labels(days: &[DayCount], pad: usize) -> Vec<(usize, &'static str)> {
@@ -363,11 +385,9 @@ fn month_labels(days: &[DayCount], pad: usize) -> Vec<(usize, &'static str)> {
     let mut marks: Vec<(usize, &'static str)> = Vec::new();
     let mut last = None;
     for col in 0..WEEKS {
-        let i = col * 7;
-        if i < pad {
-            continue;
-        }
-        let Some(day) = days.get(i - pad) else { break };
+        let Some(day) = days.get((col * 7).saturating_sub(pad)) else {
+            break;
+        };
         let Some(month) = day
             .date
             .get(5..7)
@@ -466,18 +486,23 @@ fn seed_query(
 
 fn build_home(
     mut commands: Commands,
-    screens: Query<Entity, Added<HomeScreen>>,
+    mut screens: Query<(Entity, &mut Node), Added<HomeScreen>>,
     fonts: Res<UiFonts>,
     state: Res<HomeState>,
 ) {
-    for screen in &screens {
+    for (screen, mut node) in &mut screens {
+        // A column with a bounded height, so the scroll area inside is bounded too.
+        node.flex_direction = FlexDirection::Column;
         commands.entity(screen).with_children(|p| {
             p.spawn((
                 Node {
                     width: percent(100),
+                    height: percent(100),
+                    min_height: px(0),
+                    flex_grow: 1.0,
                     flex_direction: FlexDirection::Column,
-                    row_gap: px(20),
-                    padding: UiRect::axes(px(40), px(24)),
+                    row_gap: px(16),
+                    padding: UiRect::axes(px(40), px(20)),
                     overflow: Overflow::scroll_y(),
                     ..default()
                 },
@@ -508,8 +533,8 @@ fn build_home(
                         card(Node {
                             flex_grow: 1.0,
                             flex_direction: FlexDirection::Column,
-                            row_gap: px(10),
-                            padding: px(18).all(),
+                            row_gap: px(8),
+                            padding: px(16).all(),
                             ..default()
                         }),
                         HeatPart::default(),
@@ -766,10 +791,10 @@ fn heatmap(
     p.spawn(Node {
         display: Display::Grid,
         grid_template_columns: RepeatedGridTrack::flex(WEEKS as u16, 1.0),
-        grid_template_rows: RepeatedGridTrack::px(7, 11.0),
+        grid_template_rows: RepeatedGridTrack::px(7, 9.0),
         grid_auto_flow: GridAutoFlow::Column,
         column_gap: px(4),
-        row_gap: px(4),
+        row_gap: px(3),
         ..default()
     })
     .with_children(|g| {
@@ -1073,7 +1098,7 @@ mod tests {
         };
         assert_eq!(
             (assigned.total, assigned.rows.len(), assigned.pages),
-            (7, 6, 2)
+            (7, 4, 2)
         );
         assert_eq!(assigned.rows[0].number, "#123");
         assert_eq!(assigned.rows[0].meta, "clusia · @octo · 5m");
@@ -1156,6 +1181,83 @@ mod tests {
         }
     }
 
+    fn run(end: &str, len: usize) -> Vec<DayCount> {
+        let (y, m, d) = (
+            end[0..4].parse().unwrap(),
+            end[5..7].parse().unwrap(),
+            end[8..10].parse().unwrap(),
+        );
+        let last = days_from_civil(y, m, d);
+        (0..len as i64)
+            .map(|i| {
+                let (y, m, d) = clusia_core::time::civil_from_days(last - (len as i64 - 1) + i);
+                DayCount {
+                    date: format!("{y:04}-{m:02}-{d:02}"),
+                    count: 1,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn heatmap_columns_are_sunday_to_saturday_weeks() {
+        assert_eq!(weekday("1970-01-01"), Some(4));
+        assert_eq!(weekday("2026-09-20"), Some(0), "a Sunday");
+        // Today is a Wednesday (2026-09-23), with a long history and with a short one.
+        for len in [400, 182, 100, 20, 3, 1] {
+            let days = run("2026-09-23", len);
+            let (shown, pad) = week_aligned(&days);
+            assert!(pad + shown.len() <= WEEKS * 7, "len {len}");
+            for (i, day) in shown.iter().enumerate() {
+                assert_eq!(
+                    (pad + i) % 7,
+                    weekday(&day.date).unwrap(),
+                    "{} in row {} (len {len})",
+                    day.date,
+                    (pad + i) % 7
+                );
+            }
+        }
+        let long = run("2026-09-23", 400);
+        let (shown, pad) = week_aligned(&long);
+        assert_eq!((shown.len(), pad), ((WEEKS - 1) * 7 + 4, 0));
+        assert_eq!(
+            shown[0].date, "2026-03-29",
+            "the first column starts on a Sunday"
+        );
+    }
+
+    #[test]
+    fn heat_keeps_every_cell_and_month_labels_follow_the_columns() {
+        let mut snap = fixture::demo(NOW);
+        let a = snap.activity.as_mut().unwrap();
+        a.heatmap = run("2026-09-23", 20); // 2026-09-04 (Fri) to 09-23
+        let v = view(&snap, &HomeState::default());
+        assert_eq!(v.heat.len(), WEEKS * 7);
+        assert_eq!(
+            &v.heat[..5],
+            [0; 5],
+            "Sunday to Thursday are before the history"
+        );
+        assert!(v.heat[5] > 0, "Friday 09-04 is row 5 of the first column");
+        assert_eq!(v.months, [(0, "Sep")]);
+    }
+
+    #[test]
+    fn home_scroll_area_is_bounded_by_the_window() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::settle(&mut app);
+        let screen = testing::find::<HomeScreen>(&mut app, |_| true);
+        let node = app.world().get::<Node>(screen).unwrap();
+        assert_eq!(node.flex_direction, FlexDirection::Column);
+        let scroll = testing::find::<ScrollArea>(&mut app, |_| true);
+        let node = app.world().get::<Node>(scroll).unwrap();
+        assert_eq!(node.overflow, Overflow::scroll_y());
+        assert_eq!(node.height, percent(100));
+        assert_eq!(node.min_height, px(0));
+        assert_eq!(node.flex_grow, 1.0);
+    }
+
     #[test]
     fn long_ages() {
         assert_eq!(long_age(30), "1 minute");
@@ -1170,7 +1272,7 @@ mod tests {
     fn home_builds_rows_and_opens_reviews() {
         let mut app = testing::app(fixture::demo(NOW));
         testing::settle(&mut app);
-        assert_eq!(testing::count::<HomeRow>(&mut app), 6 + 3 + 2);
+        assert_eq!(testing::count::<HomeRow>(&mut app), 4 + 3 + 2);
         let row = testing::find::<HomeRow>(&mut app, |r| r.0.number == 123);
         testing::activate(&mut app, row);
         assert_eq!(
@@ -1207,7 +1309,7 @@ mod tests {
         testing::settle(&mut app);
         assert_eq!(
             testing::count::<HomeRow>(&mut app),
-            1 + 3 + 2,
+            3 + 3 + 2,
             "page 2 of Assigned"
         );
     }

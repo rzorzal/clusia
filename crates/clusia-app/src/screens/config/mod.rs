@@ -12,9 +12,11 @@ pub mod repos;
 use std::collections::HashMap;
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
+use bevy::input_focus::InputFocus;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::Paths;
 
@@ -26,7 +28,7 @@ use crate::nav::{ConfigScreen, Nav, NavSystems, Screen, Section};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
-    FieldCommitted, Fill, HoverFill, Stroke, Type, segment, segments, text, text_field,
+    Field, FieldCommitted, Fill, HoverFill, Stroke, Type, segment, segments, text, text_field,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,11 +47,10 @@ pub fn page_view(
     snap: &Snapshot,
     rejected: &HashMap<String, String>,
     paths: &Paths,
-    now: i64,
 ) -> PageView {
     match section {
         Section::Appearance => PageView::Appearance(appearance::view(snap)),
-        Section::GitServer => PageView::Git(git::view(snap, rejected, now)),
+        Section::GitServer => PageView::Git(git::view(snap, rejected)),
         Section::Repositories => PageView::Repos(repos::view(snap, rejected, paths)),
         Section::Editor => PageView::Editor(editor::view(snap, rejected, paths)),
         Section::Notifications => PageView::Notifications(notifications::view(snap, rejected)),
@@ -105,6 +106,7 @@ impl Plugin for ConfigPlugin {
                 commit_fields,
                 repos::commit_roots,
                 rebuild_config,
+                git::refresh_last_sync,
             )
                 .chain()
                 .after(NavSystems),
@@ -211,6 +213,8 @@ fn rebuild_config(
     fonts: Res<UiFonts>,
     mut navs: Query<(Entity, &mut NavPart)>,
     mut pages: Query<(Entity, &mut PagePart)>,
+    focus: Res<InputFocus>,
+    fields: Query<(&Field, &EditableText)>,
 ) {
     let Screen::Config(section) = nav.screen else {
         return;
@@ -249,15 +253,23 @@ fn rebuild_config(
         });
         part.built = Some(section);
     }
-    let view = page_view(
-        section,
-        &model.snapshot,
-        &model.rejected,
-        &paths.0,
-        clock.now(),
-    );
+    let view = page_view(section, &model.snapshot, &model.rejected, &paths.0);
+    // Half-typed input survives: a rebuild of the same page waits until the focused field is
+    // committed (or reverted) so the field entity is not despawned under the cursor.
+    let typing = focus
+        .get()
+        .and_then(|e| fields.get(e).ok())
+        .is_some_and(|(f, t)| t.value().to_string() != f.committed);
     for (e, mut part) in &mut pages {
         if part.built.as_ref() == Some(&view) {
+            continue;
+        }
+        if typing
+            && part
+                .built
+                .as_ref()
+                .is_some_and(|b| std::mem::discriminant(b) == std::mem::discriminant(&view))
+        {
             continue;
         }
         refill(&mut commands, e, |p| {
@@ -272,7 +284,12 @@ fn rebuild_config(
             ))
             .with_children(|c| match &view {
                 PageView::Appearance(v) => appearance::build(c, fonts, v),
-                PageView::Git(v) => git::build(c, fonts, v),
+                PageView::Git(v) => git::build(
+                    c,
+                    fonts,
+                    v,
+                    &git::last_sync(model.snapshot.sync.as_ref(), clock.now()),
+                ),
                 PageView::Repos(v) => repos::build(c, fonts, v),
                 PageView::Editor(v) => editor::build(c, fonts, v),
                 PageView::Notifications(v) => notifications::build(c, fonts, v),
@@ -470,6 +487,59 @@ mod tests {
     }
 
     #[test]
+    fn a_dirty_focused_field_survives_page_updates() {
+        let mut app = config_app(Section::GitServer);
+        let poll = testing::find::<ConfigField>(&mut app, |f| f.0 == "github.poll_interval_secs");
+        app.world_mut()
+            .entity_mut(poll)
+            .insert(EditableText::new("9"));
+        *app.world_mut().resource_mut::<InputFocus>() = InputFocus::from_entity(poll);
+        // Both a sync tick and a config change arrive while the user is typing.
+        {
+            let mut model = app.world_mut().resource_mut::<Model>();
+            model.snapshot.sync.as_mut().unwrap().last_sync_unix = Some(NOW - 5);
+            model.snapshot.config.github.host = "github.example.dev".into();
+        }
+        testing::settle(&mut app);
+        let text = app
+            .world()
+            .get::<EditableText>(poll)
+            .unwrap()
+            .value()
+            .to_string();
+        assert_eq!(text, "9", "the field entity was kept with its text");
+        // Once the field is committed the page catches up.
+        app.world_mut().resource_mut::<InputFocus>().clear();
+        app.world_mut().entity_mut(poll).insert(Field {
+            committed: "9".into(),
+        });
+        testing::settle(&mut app);
+        assert_eq!(field_value(&mut app, "github.host"), "github.example.dev");
+    }
+
+    #[test]
+    fn last_sync_updates_without_a_rebuild() {
+        let mut app = config_app(Section::GitServer);
+        let host = testing::find::<ConfigField>(&mut app, |f| f.0 == "github.host");
+        let line = |app: &mut App| {
+            let e = testing::find::<git::LastSyncText>(app, |_| true);
+            app.world().get::<Text>(e).unwrap().0.clone()
+        };
+        assert_eq!(line(&mut app), "Online · synced 1m ago");
+        app.world_mut()
+            .resource_mut::<Model>()
+            .snapshot
+            .sync
+            .as_mut()
+            .unwrap()
+            .last_sync_unix = Some(NOW - 5);
+        testing::settle(&mut app);
+        assert_eq!(line(&mut app), "Online · synced just now");
+        let still = testing::find::<ConfigField>(&mut app, |f| f.0 == "github.host");
+        assert_eq!(still, host, "the page was not rebuilt");
+    }
+
+    #[test]
     fn section_list_switches_pages() {
         let mut app = config_app(Section::Appearance);
         assert_eq!(testing::count::<ConfigNavItem>(&mut app), 7);
@@ -624,16 +694,36 @@ mod tests {
 
     #[test]
     fn editor_test_button_opens_the_config_file() {
-        let mut app = config_app(Section::Editor);
-        let test = testing::find::<Sends>(&mut app, |s| matches!(s.0, Ask::OpenInEditor { .. }));
+        let home = std::env::temp_dir().join(format!("clusia-app-test-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut app = testing::app(fixture::demo(NOW));
+        app.insert_resource(AppPaths(Paths::new(&home)));
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Config);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::Editor);
+        testing::settle(&mut app);
+        let test = testing::find::<editor::TestOpen>(&mut app, |_| true);
+        // No config.toml yet: a toast, no ask.
+        testing::activate(&mut app, test);
+        assert!(testing::recorded(&mut app).is_empty());
+        let toasts = &app.world().resource::<Toasts>().0;
+        assert_eq!(toasts.len(), 1);
+        assert!(toasts[0].text.contains("has not been written yet"));
+        // Once it exists, the ask goes out.
+        let file = home.join("config.toml");
+        std::fs::write(&file, "").unwrap();
         testing::activate(&mut app, test);
         assert_eq!(
             testing::recorded(&mut app),
             [Ask::OpenInEditor {
-                path: "/tmp/clusia-test-home/config.toml".into(),
+                path: file.display().to_string(),
                 line: Some(1)
             }]
         );
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

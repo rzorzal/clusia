@@ -20,6 +20,23 @@ use crate::ui::kit::{Type, Variant, button, text};
 #[derive(Component, Debug)]
 pub struct PasteToken;
 
+/// The "Last sync" value; kept current without rebuilding the page.
+#[derive(Component, Debug)]
+pub struct LastSyncText;
+
+pub fn refresh_last_sync(
+    model: Res<crate::bridge::Model>,
+    clock: Res<crate::clock::Clock>,
+    mut texts: Query<&mut Text, With<LastSyncText>>,
+) {
+    for mut t in &mut texts {
+        let now = last_sync(model.snapshot.sync.as_ref(), clock.now());
+        if t.0 != now {
+            t.0 = now;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitView {
     pub host: String,
@@ -33,10 +50,9 @@ pub struct GitView {
     pub problem: Option<String>,
     pub poll: String,
     pub poll_error: Option<String>,
-    pub last_sync: String,
 }
 
-pub fn view(snap: &Snapshot, rejected: &HashMap<String, String>, now: i64) -> GitView {
+pub fn view(snap: &Snapshot, rejected: &HashMap<String, String>) -> GitView {
     let g = &snap.config.github;
     let auth = snap.auth.as_ref();
     GitView {
@@ -50,11 +66,17 @@ pub fn view(snap: &Snapshot, rejected: &HashMap<String, String>, now: i64) -> Gi
         problem: auth.and_then(|a| a.error.clone()),
         poll: g.poll_interval_secs.to_string(),
         poll_error: rejected.get("github.poll_interval_secs").cloned(),
-        last_sync: last_sync(snap.sync.as_ref(), now),
     }
 }
 
-fn last_sync(sync: Option<&SyncStatus>, now: i64) -> String {
+/// The text beside "Last sync". It lives outside `GitView` (it changes with the clock), so
+/// a rebuild never hangs on it: `refresh_last_sync` rewrites just this text.
+pub fn last_sync(sync: Option<&SyncStatus>, now: i64) -> String {
+    if let Some(s) = sync
+        && s.state == SyncState::Unauthorized
+    {
+        return "Not signed in to GitHub — use a sign-in option above".to_string();
+    }
     if let Some(s) = sync
         && s.state == SyncState::Online
     {
@@ -96,7 +118,7 @@ pub fn token_from_clipboard(text: &str) -> Result<Secret, &'static str> {
     Ok(Secret::from(token))
 }
 
-pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &GitView) {
+pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &GitView, last_sync: &str) {
     page_header(
         p,
         fonts,
@@ -195,7 +217,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &GitView) {
         fonts,
         "Last sync",
         |r| {
-            r.spawn(text(fonts, v.last_sync.clone(), Type::BODY));
+            r.spawn((text(fonts, last_sync.to_string(), Type::BODY), LastSyncText));
         },
         "",
         None,
@@ -262,7 +284,7 @@ mod tests {
             "github.host".to_string(),
             "github.host must not be empty".to_string(),
         );
-        let v = view(&snap, &rejected, NOW);
+        let v = view(&snap, &rejected);
         assert_eq!(v.host, "github.com");
         assert_eq!(
             v.host_error.as_deref(),
@@ -270,7 +292,7 @@ mod tests {
         );
         assert_eq!(v.auth, AuthSource::GhCli);
         assert_eq!(v.poll, "60");
-        assert_eq!(v.last_sync, "Online · synced 1m ago");
+        assert_eq!(last_sync(snap.sync.as_ref(), NOW), "Online · synced 1m ago");
         assert_eq!(
             signed_in_line(&v, TokenSource::GhCli).as_deref(),
             Some("Signed in as @rzorzal · scopes repo, read:org")
@@ -291,12 +313,12 @@ mod tests {
             state: SyncState::Unauthorized,
             ..SyncStatus::default()
         });
-        let v = view(&snap, &HashMap::new(), NOW);
+        let v = view(&snap, &HashMap::new());
         assert_eq!(v.source, None);
         assert_eq!(v.problem.as_deref(), Some("no GitHub token"));
         assert_eq!(
-            v.last_sync,
-            "Not signed in to GitHub — run: clusia auth login"
+            last_sync(snap.sync.as_ref(), NOW),
+            "Not signed in to GitHub — use a sign-in option above"
         );
         assert_eq!(signed_in_line(&v, TokenSource::GhCli), None);
     }

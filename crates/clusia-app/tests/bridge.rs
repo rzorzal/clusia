@@ -156,3 +156,30 @@ async fn lost_connection_then_reconnect() {
     snapshot_where(&link, |_| true);
     d.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn asks_while_disconnected_are_answered() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    d.stop().await;
+    next(&link, |t| matches!(t, Tell::Lost(_)));
+    link.ask
+        .send(Ask::SetConfig {
+            key: "appearance.theme".into(),
+            value: "dark".into(),
+        })
+        .unwrap();
+    match next(&link, |t| matches!(t, Tell::Rejected { .. })) {
+        Tell::Rejected { key, message } => {
+            assert_eq!(key, "appearance.theme");
+            assert!(message.contains("not saved"), "{message}");
+        }
+        _ => unreachable!(),
+    }
+    link.ask.send(Ask::SyncNow).unwrap();
+    match next(&link, |t| matches!(t, Tell::Notice { .. })) {
+        Tell::Notice { warning, text } => assert!(warning && text.contains("reconnecting")),
+        _ => unreachable!(),
+    }
+}

@@ -217,7 +217,7 @@ struct BannerSlot {
 
 #[derive(Component)]
 struct ScreenRoot {
-    built: Option<Screen>,
+    built: Option<(Screen, String)>,
 }
 
 #[derive(Component)]
@@ -359,6 +359,7 @@ fn show(
     for ShowRequested(target) in requests.read() {
         nav.go(target);
         if let Ok(mut window) = windows.single_mut() {
+            window.set_minimized(false);
             window.focused = true;
         }
     }
@@ -536,8 +537,14 @@ fn rebuild_screen(
         Screen::Config(_) => Screen::Config(Section::Appearance),
         other => other.clone(),
     };
+    // The review placeholder shows the PR title, which may arrive after the tab opens.
+    let title = match &nav.screen {
+        Screen::Review(pr) => pr_title(&model.snapshot, pr).unwrap_or("").to_string(),
+        _ => String::new(),
+    };
+    let key = (kind, title);
     for (entity, mut root) in &mut roots {
-        if root.built.as_ref() == Some(&kind) {
+        if root.built.as_ref() == Some(&key) {
             continue;
         }
         commands.entity(entity).despawn_related::<Children>();
@@ -561,7 +568,7 @@ fn rebuild_screen(
                         .with_children(|r| review_placeholder(r, &fonts, &model.snapshot, pr));
                 }
             });
-        root.built = Some(kind.clone());
+        root.built = Some(key.clone());
     }
 }
 
@@ -578,7 +585,7 @@ fn review_placeholder(p: &mut ChildSpawnerCommands, fonts: &UiFonts, snap: &Snap
         c.spawn(text(fonts, format!("{pr} {title}").trim_end().to_string(), Type::TITLE));
         c.spawn(text(
             fonts,
-            "The review screen arrives in the next update. The tab, the tray and `clusia open` already bring you here.",
+            "The review screen arrives in the next update. The tab and the tray already bring you here.",
             Type::MUTED,
         ));
         c.spawn(text(
@@ -704,6 +711,30 @@ mod tests {
     }
 
     #[test]
+    fn review_placeholder_picks_up_a_late_title() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let target = pr("acme/widgets#5");
+        app.world_mut()
+            .write_message(ShowRequested(WindowTarget::Review { pr: target.clone() }));
+        testing::settle(&mut app);
+        let has = |app: &mut App, needle: &str| {
+            let mut q = app.world_mut().query::<&Text>();
+            q.iter(app.world()).any(|t| t.0.contains(needle))
+        };
+        assert!(!has(&mut app, "widgets#5 Late title"));
+        let mut late = app.world().resource::<Model>().snapshot.assigned[0].clone();
+        late.pr = target;
+        late.title = "Late title".into();
+        app.world_mut()
+            .resource_mut::<Model>()
+            .snapshot
+            .assigned
+            .push(late);
+        testing::settle(&mut app);
+        assert!(has(&mut app, "widgets#5 Late title"));
+    }
+
+    #[test]
     fn top_bar_names_tabs_from_the_lists() {
         let snap = fixture::demo(NOW);
         let mut nav = Nav::new(&WindowTarget::Home);
@@ -754,6 +785,15 @@ mod tests {
             Screen::Review(pr("rzorzal/clusia#123"))
         );
         assert!(app.world().get::<Window>(window).unwrap().focused);
+        assert_eq!(
+            app.world_mut()
+                .get_mut::<Window>(window)
+                .unwrap()
+                .internal
+                .take_minimize_request(),
+            Some(false),
+            "a minimized window is restored"
+        );
         assert_eq!(testing::count::<ReviewScreen>(&mut app), 1);
         let close = testing::find::<CloseTab>(&mut app, |_| true);
         testing::activate(&mut app, close);

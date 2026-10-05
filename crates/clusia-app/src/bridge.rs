@@ -125,7 +125,14 @@ async fn run(
             match asks.recv().await {
                 None => return,
                 Some(Ask::Reconnect) => break,
-                Some(_) => {}
+                Some(Ask::SetConfig { key, .. }) => teller.send(Tell::Rejected {
+                    key,
+                    message: "Not connected to clusiad — not saved".into(),
+                }),
+                Some(_) => teller.send(Tell::Notice {
+                    text: "Not connected to clusiad — try again after reconnecting".into(),
+                    warning: true,
+                }),
             }
         }
     }

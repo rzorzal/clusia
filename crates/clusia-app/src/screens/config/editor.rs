@@ -8,8 +8,8 @@ use bevy::ui_widgets::{Activate, observe};
 use clusia_core::config::EditorKind;
 use clusia_core::{Paths, editor_argv};
 
-use super::{field_row, option_card, page_header, row, sends, setter};
-use crate::bridge::{Ask, Asks, Model, set_config};
+use super::{field_row, option_card, page_header, row, setter};
+use crate::bridge::{Ask, Asks, Model, TOAST_SECS, Toast, Toasts, set_config};
 use crate::fonts::UiFonts;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
@@ -146,11 +146,39 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &EditorView) {
     );
     p.spawn((
         button(fonts, "Test: open config.toml", Variant::Primary),
-        sends(Ask::OpenInEditor {
-            path: v.test_path.clone(),
-            line: Some(1),
-        }),
+        TestOpen(v.test_path.clone()),
+        observe(on_test_open),
     ));
+}
+
+/// The test button: the file to open.
+#[derive(Component, Debug)]
+pub struct TestOpen(pub String);
+
+/// The daemon writes `config.toml` on the first change, so before that there is nothing to
+/// open: say so instead of sending an ask the daemon would refuse.
+fn on_test_open(
+    activate: On<Activate>,
+    tests: Query<&TestOpen>,
+    mut asks: ResMut<Asks>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+) {
+    let Ok(TestOpen(path)) = tests.get(activate.entity) else {
+        return;
+    };
+    if std::path::Path::new(path).exists() {
+        asks.send(Ask::OpenInEditor {
+            path: path.clone(),
+            line: Some(1),
+        });
+    } else {
+        toasts.0.push(Toast {
+            text: "config.toml has not been written yet — change any setting first".into(),
+            warning: true,
+            until: time.elapsed_secs_f64() + TOAST_SECS,
+        });
+    }
 }
 
 fn on_custom(_activate: On<Activate>, mut asks: ResMut<Asks>, mut model: ResMut<Model>) {

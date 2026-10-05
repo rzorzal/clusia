@@ -89,7 +89,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &AppearanceView) 
             Density::Comfortable => "comfortable",
             Density::Compact => "compact",
         },
-        "Space between rows and panels",
+        "Applies from the review screen",
     );
     segment_row(
         p,
@@ -132,7 +132,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &AppearanceView) 
                     ..default()
                 },
                 if added {
-                    Swatch::GreenSoft
+                    Swatch::AddedBg
                 } else {
                     Swatch::Clear
                 },

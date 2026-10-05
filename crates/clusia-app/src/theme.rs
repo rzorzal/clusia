@@ -25,6 +25,8 @@ pub enum Swatch {
     GreenHover,
     OnGreen,
     GreenSoft,
+    /// A softer added-line tint (diff and code previews).
+    AddedBg,
     Orange,
     OrangeSoft,
     Hover,
@@ -53,6 +55,7 @@ pub struct Tokens {
     pub green_hover: Color,
     pub on_green: Color,
     pub green_soft: Color,
+    pub added_bg: Color,
     pub orange: Color,
     pub orange_soft: Color,
     pub hover: Color,
@@ -77,6 +80,7 @@ impl Tokens {
             Swatch::GreenHover => self.green_hover,
             Swatch::OnGreen => self.on_green,
             Swatch::GreenSoft => self.green_soft,
+            Swatch::AddedBg => self.added_bg,
             Swatch::Orange => self.orange,
             Swatch::OrangeSoft => self.orange_soft,
             Swatch::Hover => self.hover,
@@ -121,6 +125,7 @@ pub const LIGHT: Tokens = Tokens {
     green_hover: Color::srgb_u8(0x2A, 0x8D, 0x3D),
     on_green: Color::srgb_u8(0xFF, 0xFF, 0xFF),
     green_soft: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x24),
+    added_bg: Color::srgb_u8(0xE9, 0xF6, 0xEB),
     orange: Color::srgb_u8(0xD9, 0x57, 0x2B),
     orange_soft: Color::srgba_u8(0xD9, 0x57, 0x2B, 0x1F),
     hover: Color::srgb_u8(0xF1, 0xF4, 0xF1),
@@ -148,6 +153,7 @@ pub const DARK: Tokens = Tokens {
     green_hover: Color::srgb_u8(0x5C, 0xCF, 0x6E),
     on_green: Color::srgb_u8(0x0C, 0x1A, 0x0F),
     green_soft: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x29),
+    added_bg: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x1F),
     orange: Color::srgb_u8(0xF0, 0x7A, 0x4A),
     orange_soft: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x29),
     hover: Color::srgb_u8(0x22, 0x27, 0x24),
@@ -259,6 +265,13 @@ mod tests {
         assert_eq!(DARK.get(Swatch::PreviewBg(false)), LIGHT.bg);
         assert_eq!(DARK.get(Swatch::PreviewGreen(false)), LIGHT.green);
         assert_eq!(LIGHT.get(Swatch::PreviewInk(true)), DARK.fg);
+    }
+
+    #[test]
+    fn added_lines_are_softer_than_green_soft() {
+        assert_eq!(LIGHT.added_bg, Color::srgb_u8(0xE9, 0xF6, 0xEB));
+        assert_eq!(DARK.added_bg, Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x1F));
+        assert_eq!(DARK.get(Swatch::AddedBg), DARK.added_bg);
     }
 
     #[test]
