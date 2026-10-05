@@ -18,6 +18,7 @@ clusia-platform = { path = "crates/clusia-platform" }
 clusia-provider = { path = "crates/clusia-provider" }
 clusia-git = { path = "crates/clusia-git" }
 clusia-analytics = { path = "crates/clusia-analytics" }
+clusia-view = { path = "crates/clusia-view" }
 security-framework = "3.7.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

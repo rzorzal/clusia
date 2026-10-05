@@ -312,6 +312,7 @@ dependencies = [
  "clap",
  "clusia-core",
  "clusia-protocol",
+ "clusia-view",
  "dispatch2",
  "objc2",
  "objc2-app-kit",
@@ -320,6 +321,14 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "clusia-view"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "clusia-protocol",
 ]
 
 [[package]]
