@@ -1578,6 +1578,10 @@ mod tests {
             line: 44,
         };
         let set = |app: &mut App, text: &str| {
+            // Closed first: the diff draws the line editor, and its text area is what counts.
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            tabs.0.get_mut(&pr).unwrap().ui.editor = None;
+            testing::settle(app);
             app.world_mut()
                 .resource_mut::<ReviewTabs>()
                 .0

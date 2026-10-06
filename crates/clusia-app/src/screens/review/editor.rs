@@ -38,6 +38,11 @@ pub struct EditorSubmit(pub PrRef);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct EditorCancel(pub PrRef);
 
+/// What the text area was drawn for. Its text is copied back only into an editor with the same
+/// target, so opening another editor (an item's body, say) is not overwritten by the old area.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AreaTarget(EditTarget);
+
 /// Draws `editor` for `pr`: the text area, the daemon's refusal (orange) and the buttons.
 pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor, pr: &PrRef) {
     p.spawn(card(Node {
@@ -50,6 +55,7 @@ pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor
         c.spawn((
             text_area(fonts, &editor.text, 4.0, EDITOR_AREA),
             EditorArea(pr.clone()),
+            AreaTarget(editor.target.clone()),
         ));
         if let Some(error) = &editor.error {
             c.spawn(text(fonts, error.clone(), Type::BODY.ink(Swatch::Orange)));
@@ -247,16 +253,16 @@ fn on_cancel(activate: On<Activate>, buttons: Query<&EditorCancel>, mut tabs: Re
 /// the text area before any `FocusLost` could read it) draws it again with what was typed.
 /// Writes only when the text differs, so `ReviewTabs` is not changed every frame.
 pub(crate) fn sync_editor_text(
-    areas: Query<(&EditorArea, &EditableText)>,
+    areas: Query<(&EditorArea, &AreaTarget, &EditableText)>,
     mut tabs: ResMut<ReviewTabs>,
 ) {
-    for (EditorArea(pr), editable) in &areas {
+    for (EditorArea(pr), AreaTarget(target), editable) in &areas {
         let value = editable.value().to_string();
         let differs = tabs
             .0
             .get(pr)
             .and_then(|t| t.ui.editor.as_ref())
-            .is_some_and(|e| e.text != value);
+            .is_some_and(|e| e.target == *target && e.text != value);
         if differs && let Some(editor) = tabs.0.get_mut(pr).and_then(|t| t.ui.editor.as_mut()) {
             editor.text = value;
         }
@@ -266,20 +272,19 @@ pub(crate) fn sync_editor_text(
 /// Remembers what was typed when the text area loses focus, so a rebuild keeps it.
 fn keep_text_on_blur(
     lost: On<FocusLost>,
-    areas: Query<(&EditorArea, &EditableText)>,
+    areas: Query<(&EditorArea, &AreaTarget, &EditableText)>,
     mut tabs: ResMut<ReviewTabs>,
 ) {
-    let Ok((EditorArea(pr), editable)) = areas.get(lost.entity) else {
+    let Ok((EditorArea(pr), AreaTarget(target), editable)) = areas.get(lost.entity) else {
         return;
     };
     let value = editable.value().to_string();
-    let same = tabs
+    let stale = tabs
         .0
         .get(pr)
         .and_then(|t| t.ui.editor.as_ref())
-        .map(|e| &e.text)
-        == Some(&value);
-    if !same && let Some(editor) = tabs.0.get_mut(pr).and_then(|t| t.ui.editor.as_mut()) {
+        .is_none_or(|e| e.target != *target || e.text == value);
+    if !stale && let Some(editor) = tabs.0.get_mut(pr).and_then(|t| t.ui.editor.as_mut()) {
         editor.text = value;
     }
 }

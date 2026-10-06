@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use crate::nav::NavSystems;
 use crate::review_state::open_new_tabs;
 
+pub mod diff;
 pub mod editor;
 pub mod loading;
 pub mod shell;
@@ -26,6 +27,7 @@ impl Plugin for ReviewPlugin {
         app.configure_sets(Update, ReviewSystems.after(NavSystems).after(open_new_tabs))
             .add_plugins((
                 shell::ShellPlugin,
+                diff::DiffPlugin,
                 editor::EditorPlugin,
                 loading::LoadingPlugin,
                 whats_new::WhatsNewPlugin,
