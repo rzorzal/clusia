@@ -108,10 +108,10 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::GetActivity => activity::summary(shared).await,
         Command::GiphyKeyStatus => giphy::key_status(shared),
         Command::FetchMedia { url } => media::fetch(shared, &url).await,
-        Command::SearchGifs { .. }
-        | Command::SetGiphyKey { .. }
-        | Command::ClearGiphyKey
-        | Command::FirstRunStatus => Outcome::Err(ProtocolError::new(
+        Command::SearchGifs { query, offset } => giphy::search(shared, &query, offset).await,
+        Command::SetGiphyKey { key } => giphy::set_key(shared, key.expose()).await,
+        Command::ClearGiphyKey => giphy::clear_key(shared).await,
+        Command::FirstRunStatus => Outcome::Err(ProtocolError::new(
             ErrorCode::BadRequest,
             "this daemon does not support that yet",
         )),

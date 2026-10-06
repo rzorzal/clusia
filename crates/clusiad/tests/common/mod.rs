@@ -25,6 +25,7 @@ pub fn test_options() -> DaemonOptions {
         spawner: Arc::new(clusiad::RecordingSpawner::default()),
         media_extra_hosts: Vec::new(),
         media_allow_local: false,
+        giphy_api: Some("http://127.0.0.1:9".into()),
     }
 }
 

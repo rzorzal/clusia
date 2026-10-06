@@ -40,6 +40,7 @@ pub(crate) struct Shared {
     pub spawner: Arc<dyn Spawner>,
     pub media_extra_hosts: Vec<String>,
     pub media_allow_local: bool,
+    pub giphy_api: String,
     /// Connections subscribed to the `window` topic (open windows).
     pub window_listeners: AtomicUsize,
     pub prs: RwLock<PrLists>,
@@ -84,6 +85,9 @@ impl Shared {
             spawner: options.spawner,
             media_extra_hosts: options.media_extra_hosts,
             media_allow_local: options.media_allow_local,
+            giphy_api: options
+                .giphy_api
+                .unwrap_or_else(|| "https://api.giphy.com".to_string()),
             window_listeners: AtomicUsize::new(0),
             prs: RwLock::new(PrLists::default()),
             sync: RwLock::new(SyncStatus::default()),
