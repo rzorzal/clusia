@@ -5,5 +5,6 @@ pub mod emoji;
 pub mod kit;
 pub mod leaf;
 pub mod markdown;
+pub mod media;
 pub mod modal;
 pub mod text_area;

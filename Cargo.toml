@@ -41,6 +41,7 @@ objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
 dispatch2 = "0.3.1"
 bevy = { version = "=0.19.1", default-features = false, features = ["default_app", "std", "bevy_winit", "multi_threaded", "ui_api", "ui_bevy_render", "ui_picking", "bevy_picking", "bevy_ui_widgets", "png", "system_clipboard", "default_font"] }
+image = { version = "0.25.10", default-features = false, features = ["gif", "png", "jpeg"] }
 crossbeam-channel = "0.5.17"
 tree-sitter = "0.27.0"
 tree-sitter-highlight = "0.27.0"

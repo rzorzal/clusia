@@ -3,8 +3,9 @@
 //! - `Tell`s go to Bevy over a crossbeam channel, and every one wakes the reactive event loop;
 //! - `Ask`s come back over a tokio channel.
 //!
-//! `OpenReview`, `OpenCached` and `Publish` run on a second, short-lived connection (a task on
-//! the same runtime), so the main one keeps streaming `LoadStep` events while they wait.
+//! `OpenReview`, `OpenCached`, `Publish` and `FetchMedia` run on a second, short-lived connection
+//! (a task on the same runtime), so the main one keeps streaming `LoadStep` events while they
+//! wait.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -18,8 +19,8 @@ use clusia_core::{
     Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
 };
 use clusia_protocol::{
-    AnchorInput, Client, ClientError, Command, ErrorCode, Event, LoadStep, LoadStepKind, NewsItem,
-    PublishResult, Reply, ReviewView, Secret, StepStatus, WindowTarget, topics,
+    AnchorInput, Client, ClientError, Command, ErrorCode, Event, LoadStep, LoadStepKind, MediaFile,
+    NewsItem, PublishResult, Reply, ReviewView, Secret, StepStatus, WindowTarget, topics,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -29,6 +30,7 @@ use crate::clock::Clock;
 use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
 use crate::snapshot::{self, Refresh, Snapshot};
+use crate::ui::media::MediaCache;
 
 /// Events arriving within this window share one refresh.
 pub const COALESCE: Duration = Duration::from_millis(100);
@@ -85,6 +87,8 @@ pub enum Ask {
     /// Leave the review (saved when the draft has items): `Left`.
     CloseReview(PrRef),
     Discard(PrRef),
+    /// Worker connection: `Tell::Media` with this URL.
+    FetchMedia(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,6 +162,11 @@ pub enum Tell {
     },
     /// The review was closed or discarded on the daemon.
     Left(PrRef),
+    /// The daemon's answer to `FetchMedia`: the file in its media cache, or why there is none.
+    Media {
+        url: String,
+        file: Result<MediaFile, String>,
+    },
 }
 
 /// The ends Bevy keeps, and the connection thread.
@@ -303,6 +312,10 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
             pr: pr.clone(),
             code: ErrorCode::Offline,
             message: "Not connected to clusiad — nothing was published".into(),
+        }),
+        Ask::FetchMedia(url) => teller.send(Tell::Media {
+            url: url.clone(),
+            file: Err("Not connected to clusiad".into()),
         }),
         _ => return false,
     }
@@ -550,7 +563,7 @@ async fn answer(
             open_set(open).insert(pr.clone());
             spawn_worker(paths, teller, open, ask);
         }
-        Ask::Publish { .. } => spawn_worker(paths, teller, open, ask),
+        Ask::Publish { .. } | Ask::FetchMedia(_) => spawn_worker(paths, teller, open, ask),
         Ask::LoadConversation(pr) => match client
             .request(Command::GetConversation { pr: pr.clone() })
             .await
@@ -667,6 +680,7 @@ async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
             teller.send(tell);
         }
         Ask::OpenCached(pr) => open_cached(&socket, &teller, pr).await,
+        Ask::FetchMedia(url) => teller.send(fetch_media(&socket, url).await),
         Ask::Publish {
             pr,
             verdict,
@@ -765,6 +779,22 @@ async fn open_cached(socket: &Path, teller: &Teller, pr: PrRef) {
             warning: true,
         }),
     }
+}
+
+/// `Media`: the daemon's cached file for `url`, or the reason it has none.
+async fn fetch_media(socket: &Path, url: String) -> Tell {
+    let file = match worker(socket).await {
+        Err(message) => Err(message),
+        Ok(mut client) => match client
+            .request(Command::FetchMedia { url: url.clone() })
+            .await
+        {
+            Ok(Reply::Media(file)) => Ok(file),
+            Ok(_) => Err("clusiad sent an unexpected reply".into()),
+            Err(e) => Err(message_of(e)),
+        },
+    };
+    Tell::Media { url, file }
 }
 
 /// `Published` or `PublishFailed`.
@@ -984,6 +1014,7 @@ pub(crate) fn pump(
     mut show: MessageWriter<ShowRequested>,
     mut exit: MessageWriter<AppExit>,
     mut reviews: MessageWriter<ReviewEvent>,
+    mut media: ResMut<MediaCache>,
     time: Res<Time>,
 ) {
     let Some(inbox) = inbox else { return };
@@ -1017,6 +1048,7 @@ pub(crate) fn pump(
                 warning: true,
                 until: time.elapsed_secs_f64() + TOAST_SECS,
             }),
+            Tell::Media { url, file } => media.arrive(url, file),
             _ => {} // the other review tells were applied above
         }
     }
@@ -1121,6 +1153,10 @@ pub(crate) fn demo_answers(
                 pr,
             }),
             Ask::CloseReview(pr) | Ask::Discard(pr) => tells.push(Tell::Left(pr)),
+            Ask::FetchMedia(url) => tells.push(Tell::Media {
+                url,
+                file: Err("Pictures are not loaded in demo mode".into()),
+            }),
             _ => toasts.0.push(Toast {
                 text: "Demo mode: nothing is sent to the daemon".into(),
                 warning: false,
@@ -1238,6 +1274,45 @@ mod tests {
             Ok(Tell::OpenFailed { pr: failed, cache: false, .. }) if failed == pr
         ));
         assert!(open_set(&open).is_empty(), "the failed PR is forgotten");
+    }
+
+    #[tokio::test]
+    async fn a_media_fetch_without_a_daemon_says_why() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let url = "https://github.com/user-attachments/assets/1.png".to_string();
+        let socket = PathBuf::from("/nonexistent/clusia-test/clusiad.sock");
+        work(
+            socket,
+            teller,
+            OpenSet::default(),
+            Ask::FetchMedia(url.clone()),
+        )
+        .await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Tell::Media { url: asked, file: Err(message) }) if asked == url && message.contains("cannot reach clusiad")
+        ));
+    }
+
+    #[test]
+    fn offline_media_asks_fail_at_once() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        assert!(offline(
+            &Ask::FetchMedia("https://github.com/a.png".into()),
+            &teller
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Tell::Media { file: Err(message), .. }) if message == "Not connected to clusiad"
+        ));
     }
 
     #[test]

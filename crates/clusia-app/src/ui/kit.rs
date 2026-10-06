@@ -483,6 +483,7 @@ impl Plugin for KitPlugin {
             crate::ui::text_area::TextAreaPlugin,
             crate::ui::leaf::LeafPlugin,
             crate::ui::markdown::MarkdownPlugin,
+            crate::ui::media::MediaPlugin,
         ))
         .add_message::<FieldCommitted>()
         .add_observer(commit_on_blur)
