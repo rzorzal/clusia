@@ -8,17 +8,20 @@ use bevy::prelude::*;
 use bevy::text::{EditableText, FontCx, LayoutCx, TextEdit};
 use bevy::ui_widgets::Activate;
 use bevy::window::{RequestRedraw, WindowThemeChanged};
-use clusia_core::{Density, Paths};
+use clusia_core::{Density, Paths, PrRef};
 use clusia_protocol::WindowTarget;
 
 use crate::app::{AppPaths, StartTarget};
 use crate::bridge::{self, Ask, Asks, Connection, Model, Outbox, ShowRequested, Tell, Toasts};
 use crate::clock::Clock;
+use crate::fixture;
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, NavPlugin};
+use crate::platform_open::OpenUrls;
 use crate::review_state::{Phase, Ready, ReviewStatePlugin, ReviewTabs, Tab};
 use crate::screens::config::ConfigPlugin;
 use crate::screens::home::HomePlugin;
+use crate::screens::review::ReviewPlugin;
 use crate::snapshot::{self, Snapshot};
 use crate::theme::{LIGHT, Theme, ThemePlugin};
 use crate::ui::kit::KitPlugin;
@@ -51,7 +54,9 @@ pub fn app(snapshot: Snapshot) -> App {
         .insert_resource(outbox)
         .add_systems(PreUpdate, bridge::pump)
         .add_plugins((ThemePlugin, KitPlugin, NavPlugin, HomePlugin, ConfigPlugin))
-        .add_plugins(ReviewStatePlugin);
+        .add_plugins(ReviewStatePlugin)
+        .add_plugins(ReviewPlugin)
+        .init_resource::<OpenUrls>();
     app.update();
     app
 }
@@ -147,4 +152,25 @@ pub fn ready(app: &App, pr: &clusia_core::PrRef) -> Ready {
         Phase::Ready(r) => *r,
         other => panic!("not ready: {other:?}"),
     }
+}
+
+/// Shows `rzorzal/clusia#123` and opens it with `fixture::demo_review` (its What's new rows
+/// only when `news`), settles, and drops the asks recorded on the way.
+pub fn open_ready(app: &mut App, news: bool) -> PrRef {
+    let pr: PrRef = "rzorzal/clusia#123".parse().expect("valid ref");
+    app.world_mut()
+        .write_message(ShowRequested(WindowTarget::Review { pr: pr.clone() }));
+    app.update();
+    let (view, items) = fixture::demo_review(NOW);
+    tell(
+        app,
+        Tell::Opened {
+            pr: pr.clone(),
+            view: Box::new(view),
+            news: if news { items } else { Vec::new() },
+        },
+    );
+    settle(app);
+    recorded(app);
+    pr
 }
