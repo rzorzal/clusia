@@ -91,6 +91,30 @@ pub enum Ask {
     FetchMedia(String),
 }
 
+/// Why the daemon has no file for a picture, and whether asking again later can help.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaError {
+    /// The connection or the daemon's network failed; the picture itself was not turned down.
+    pub transient: bool,
+    pub message: String,
+}
+
+impl MediaError {
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            transient: true,
+            message: message.into(),
+        }
+    }
+
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self {
+            transient: false,
+            message: message.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tell {
     Snapshot(Box<Snapshot>),
@@ -165,7 +189,7 @@ pub enum Tell {
     /// The daemon's answer to `FetchMedia`: the file in its media cache, or why there is none.
     Media {
         url: String,
-        file: Result<MediaFile, String>,
+        file: Result<MediaFile, MediaError>,
     },
 }
 
@@ -315,7 +339,7 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
         }),
         Ask::FetchMedia(url) => teller.send(Tell::Media {
             url: url.clone(),
-            file: Err("Not connected to clusiad".into()),
+            file: Err(MediaError::transient("Not connected to clusiad")),
         }),
         _ => return false,
     }
@@ -784,17 +808,29 @@ async fn open_cached(socket: &Path, teller: &Teller, pr: PrRef) {
 /// `Media`: the daemon's cached file for `url`, or the reason it has none.
 async fn fetch_media(socket: &Path, url: String) -> Tell {
     let file = match worker(socket).await {
-        Err(message) => Err(message),
+        Err(message) => Err(MediaError::transient(message)),
         Ok(mut client) => match client
             .request(Command::FetchMedia { url: url.clone() })
             .await
         {
             Ok(Reply::Media(file)) => Ok(file),
-            Ok(_) => Err("clusiad sent an unexpected reply".into()),
-            Err(e) => Err(message_of(e)),
+            Ok(_) => Err(MediaError::transient("clusiad sent an unexpected reply")),
+            Err(e) => Err(media_error(e)),
         },
     };
     Tell::Media { url, file }
+}
+
+/// Only the daemon's error code says whether asking again can help; every other failure is the
+/// connection.
+fn media_error(e: ClientError) -> MediaError {
+    match e {
+        ClientError::Server(e) => MediaError {
+            transient: matches!(e.code, ErrorCode::Offline | ErrorCode::Internal),
+            message: e.message,
+        },
+        e => MediaError::transient(lost(e)),
+    }
 }
 
 /// `Published` or `PublishFailed`.
@@ -1158,7 +1194,7 @@ pub(crate) fn demo_answers(
             Ask::CloseReview(pr) | Ask::Discard(pr) => tells.push(Tell::Left(pr)),
             Ask::FetchMedia(url) => tells.push(Tell::Media {
                 url,
-                file: Err("Pictures are not loaded in demo mode".into()),
+                file: Err(MediaError::refused("Pictures are not loaded in demo mode")),
             }),
             _ => toasts.0.push(Toast {
                 text: "Demo mode: nothing is sent to the daemon".into(),
@@ -1297,8 +1333,26 @@ mod tests {
         .await;
         assert!(matches!(
             rx.try_recv(),
-            Ok(Tell::Media { url: asked, file: Err(message) }) if asked == url && message.contains("cannot reach clusiad")
+            Ok(Tell::Media { url: asked, file: Err(e) }) if asked == url && e.transient && e.message.contains("cannot reach clusiad")
         ));
+    }
+
+    #[test]
+    fn only_offline_and_internal_daemon_errors_are_transient() {
+        let class = |code| {
+            media_error(ClientError::Server(clusia_protocol::ProtocolError {
+                code,
+                message: "m".into(),
+            }))
+            .transient
+        };
+        assert!(class(ErrorCode::Offline));
+        assert!(class(ErrorCode::Internal));
+        assert!(!class(ErrorCode::Refused));
+        assert!(!class(ErrorCode::BadRequest));
+        assert!(!class(ErrorCode::NotFound));
+        assert!(!class(ErrorCode::NotConfigured));
+        assert!(media_error(ClientError::Closed).transient);
     }
 
     #[test]
@@ -1314,7 +1368,7 @@ mod tests {
         ));
         assert!(matches!(
             rx.try_recv(),
-            Ok(Tell::Media { file: Err(message), .. }) if message == "Not connected to clusiad"
+            Ok(Tell::Media { file: Err(e), .. }) if e.transient && e.message == "Not connected to clusiad"
         ));
     }
 

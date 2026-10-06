@@ -19,7 +19,7 @@ use image::{
     AnimationDecoder, DynamicImage, ImageDecoder, ImageError, ImageFormat, ImageReader, Limits,
 };
 
-use crate::bridge::{Ask, Asks};
+use crate::bridge::{Ask, Asks, MediaError};
 use crate::fonts::UiFonts;
 use crate::ui::kit::{Type, text};
 use crate::ui::markdown::{MdImage, link_chip};
@@ -57,20 +57,20 @@ pub enum MediaState {
 pub struct MediaCache {
     pub by_url: HashMap<String, MediaState>,
     /// Answers waiting to be decoded.
-    arrived: Vec<(String, Result<MediaFile, String>)>,
+    arrived: Vec<(String, Result<MediaFile, MediaError>)>,
     /// URLs whose cached file was gone and have been asked for again.
     retried: HashSet<String>,
 }
 
 impl MediaCache {
     /// Queues the daemon's answer for `url`.
-    pub fn arrive(&mut self, url: String, file: Result<MediaFile, String>) {
+    pub fn arrive(&mut self, url: String, file: Result<MediaFile, MediaError>) {
         self.arrived.push((url, file));
     }
 
-    /// Forgets only the pictures that failed with transport errors, so their slots ask again.
-    /// Called when the daemon comes back: the failure may have been the connection. Keeps refusals
-    /// cached since the daemon would refuse again.
+    /// Forgets the pictures that failed for a reason that may have passed (the connection, the
+    /// daemon's network), so their slots ask again. Refused pictures stay cached: asking again
+    /// would get the same answer.
     pub fn retry_failed(&mut self) {
         self.by_url
             .retain(|_, state| !matches!(state, MediaState::Failed(_)));
@@ -241,13 +241,6 @@ fn decode_gif(bytes: &[u8], images: &mut Assets<Image>) -> Result<MediaState, St
     }))
 }
 
-/// Distinguishes transport errors (not connected, timeout, lost worker connection) from
-/// permanent refusals (daemon policy, decode limits). A file that has vanished from the
-/// daemon's cache is asked for once more.
-fn is_transport_error(message: &str) -> bool {
-    message.contains("connected") || message.contains("lost") || message.contains("timeout")
-}
-
 fn decode_arrived(
     mut cache: ResMut<MediaCache>,
     mut images: ResMut<Assets<Image>>,
@@ -255,8 +248,8 @@ fn decode_arrived(
 ) {
     for (url, answer) in std::mem::take(&mut cache.arrived) {
         let state = match answer {
-            Err(reason) if is_transport_error(&reason) => MediaState::Failed(reason),
-            Err(reason) => MediaState::Refused(reason),
+            Err(e) if e.transient => MediaState::Failed(e.message),
+            Err(e) => MediaState::Refused(e.message),
             Ok(file) => match decode(&file, &mut images) {
                 Ok(state) => state,
                 Err(e)
@@ -317,10 +310,7 @@ fn fill_slots(
                 e.insert((ImageNode::new(gif.frames[0].clone()), GifAnim::new(&gif)));
                 size_slot(&mut e, Some(gif.size));
             }
-            MediaState::Refused(reason) => {
-                e.with_children(|p| link_chip(p, &fonts, &slot.0, &reason, false));
-            }
-            MediaState::Failed(reason) => {
+            MediaState::Refused(reason) | MediaState::Failed(reason) => {
                 e.with_children(|p| link_chip(p, &fonts, &slot.0, &reason, false));
             }
         }
@@ -486,7 +476,7 @@ mod tests {
         }
     }
 
-    fn deliver(app: &mut App, url: &str, answer: Result<MediaFile, String>) {
+    fn deliver(app: &mut App, url: &str, answer: Result<MediaFile, MediaError>) {
         testing::tell(
             app,
             Tell::Media {
@@ -569,7 +559,7 @@ mod tests {
         deliver(
             &mut app,
             URL,
-            Err("Images from this site are not allowed".into()),
+            Err(MediaError::refused("Images from this site are not allowed")),
         );
         assert!(
             app.world().get::<ImageNode>(e).is_none(),
@@ -594,7 +584,11 @@ mod tests {
     fn a_failed_fetch_is_a_chip_too() {
         let mut app = app();
         slot(&mut app, URL);
-        deliver(&mut app, URL, Err("Not connected to clusiad".into()));
+        deliver(
+            &mut app,
+            URL,
+            Err(MediaError::transient("Not connected to clusiad")),
+        );
         assert!(
             texts(&mut app).contains(&"Not connected to clusiad — open in browser".to_string())
         );
@@ -726,7 +720,11 @@ mod tests {
         let mut app = app();
         slot(&mut app, URL);
         testing::recorded(&mut app);
-        deliver(&mut app, URL, Err("Not connected to clusiad".into()));
+        deliver(
+            &mut app,
+            URL,
+            Err(MediaError::transient("Not connected to clusiad")),
+        );
         assert!(testing::recorded(&mut app).is_empty());
         testing::tell(&mut app, Tell::Lost("gone".into()));
         testing::tell(&mut app, Tell::Snapshot(Box::default()));
@@ -737,6 +735,40 @@ mod tests {
             "one new ask"
         );
         assert!(texts(&mut app).contains(&"Loading image…".to_string()));
+    }
+
+    #[test]
+    fn a_failure_coded_offline_or_a_worker_failure_is_retried_once() {
+        for message in ["The network is down", "cannot reach clusiad: no socket"] {
+            let mut app = app();
+            slot(&mut app, URL);
+            testing::recorded(&mut app);
+            deliver(&mut app, URL, Err(MediaError::transient(message)));
+            testing::tell(&mut app, Tell::Lost("gone".into()));
+            testing::tell(&mut app, Tell::Snapshot(Box::default()));
+            testing::settle(&mut app);
+            assert_eq!(
+                testing::recorded(&mut app),
+                [Ask::FetchMedia(URL.to_string())],
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_with_reconnect_words_in_it_stays_cached() {
+        let mut app = app();
+        slot(&mut app, URL);
+        testing::recorded(&mut app);
+        deliver(
+            &mut app,
+            URL,
+            Err(MediaError::refused("lost connected timeout")),
+        );
+        testing::tell(&mut app, Tell::Lost("gone".into()));
+        testing::tell(&mut app, Tell::Snapshot(Box::default()));
+        testing::settle(&mut app);
+        assert!(testing::recorded(&mut app).is_empty());
     }
 
     #[test]
@@ -1028,7 +1060,11 @@ mod tests {
     #[test]
     fn media_tells_reach_the_cache() {
         let mut app = app();
-        deliver(&mut app, URL, Err("Not connected to clusiad".into()));
+        deliver(
+            &mut app,
+            URL,
+            Err(MediaError::transient("Not connected to clusiad")),
+        );
         assert_eq!(
             app.world().resource::<MediaCache>().by_url[URL],
             MediaState::Failed("Not connected to clusiad".into())
@@ -1043,7 +1079,7 @@ mod tests {
         deliver(
             &mut app,
             URL,
-            Err("Images from this site are not allowed".into()),
+            Err(MediaError::refused("Images from this site are not allowed")),
         );
         assert!(testing::recorded(&mut app).is_empty());
         testing::tell(&mut app, Tell::Lost("gone".into()));
