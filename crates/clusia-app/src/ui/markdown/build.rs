@@ -93,6 +93,8 @@ pub fn is_external(url: &str) -> bool {
     let host = rest
         .split(['/', '?', '#'])
         .next()
+        // Userinfo comes before the last '@'; anything before it must not pass for the host.
+        .and_then(|authority| authority.rsplit('@').next())
         .and_then(|authority| authority.split(':').next())
         .unwrap_or("");
     !clusia_core::media::allowed_host(host, &[])
@@ -240,6 +242,13 @@ impl Line {
     }
 
     fn finish(mut self) -> Vec<Inline> {
+        if self.cut && self.out.is_empty() {
+            self.out.push(Inline::Word {
+                text: "…".into(),
+                style: Style::default(),
+                space_after: false,
+            });
+        }
         if self.cut
             && let Some(
                 Inline::Word {
@@ -278,7 +287,13 @@ pub fn copy_button(fonts: &UiFonts, source: &str) -> impl Bundle {
 
 /// A small chip that opens `url` in the browser, standing in for media that cannot be shown:
 /// `reason — open in browser`.
-pub fn link_chip(p: &mut ChildSpawnerCommands, fonts: &UiFonts, url: &str, reason: &str) {
+pub fn link_chip(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    url: &str,
+    reason: &str,
+    space_after: bool,
+) {
     let mut chip = p.spawn((
         Text::new(format!("{reason} — open in browser")),
         font(fonts, Type::META.ink(Swatch::Green)),
@@ -289,6 +304,7 @@ pub fn link_chip(p: &mut ChildSpawnerCommands, fonts: &UiFonts, url: &str, reaso
             padding: UiRect::axes(px(8), px(4)),
             border: px(1).all(),
             border_radius: BorderRadius::all(px(6)),
+            margin: space_margin(Type::META.size, space_after),
             max_width: percent(100),
             ..default()
         },
@@ -551,7 +567,8 @@ fn suggestion(c: &mut ChildSpawnerCommands, fonts: &UiFonts, source: &str, opts:
             ("−", Swatch::RemovedBg, removed),
             ("+", Swatch::AddedBg, source),
         ] {
-            for line in body.lines() {
+            let all: Vec<&str> = body.lines().collect();
+            for line in all.iter().take(MAX_CODE_LINES) {
                 s.spawn((
                     Node {
                         column_gap: px(8),
@@ -566,6 +583,19 @@ fn suggestion(c: &mut ChildSpawnerCommands, fonts: &UiFonts, source: &str, opts:
                     row.spawn(text(fonts, sign, Type::MONO.size(opts.code_size)));
                     row.spawn(code_line(fonts, opts.code_size, spans_for(line, &[], None)));
                 });
+            }
+            if all.len() > MAX_CODE_LINES {
+                s.spawn((
+                    Node {
+                        padding: UiRect::axes(px(12), px(2)),
+                        ..default()
+                    },
+                    text(
+                        fonts,
+                        format!("… {} more lines", all.len() - MAX_CODE_LINES),
+                        Type::META,
+                    ),
+                ));
             }
         }
     });
@@ -753,7 +783,7 @@ fn inlines(
                     url, space_after, ..
                 } => {
                     if is_external(url) && !opts.load_external {
-                        link_chip(row, fonts, url, "Image from another site");
+                        link_chip(row, fonts, url, "Image from another site", *space_after);
                     } else {
                         row.spawn((
                             Node {
@@ -1210,6 +1240,33 @@ mod tests {
         assert!(is_external("http://github.com/a.png"), "https only");
         assert!(!is_external("https://camo.githubusercontent.com/abc"));
         assert!(is_external("https://github.com.evil.example/a.png"));
+        assert!(is_external("https://github.com:x@evil.example/a.png"));
+        assert!(!is_external("https://user@github.com:443/a.png"));
+    }
+
+    #[test]
+    fn a_chip_keeps_the_space_after_it() {
+        let mut app = fresh();
+        let image = |space_after| Inline::Image {
+            url: "https://example.com/x.png".into(),
+            alt: "alt".into(),
+            space_after,
+        };
+        let root = render(
+            &mut app,
+            vec![Block::Paragraph(vec![image(true), image(false)])],
+        );
+        let mut q = app.world_mut().query::<(Entity, &MdLink, &Node)>();
+        let margins: Vec<Val> = q
+            .iter(app.world())
+            .filter(|(e, ..)| is_under(app.world(), *e, root))
+            .map(|(.., n)| n.margin.right)
+            .collect();
+        assert_eq!(
+            margins,
+            [px(3), px(0)],
+            "the chip's own text size sets the gap"
+        );
     }
 
     #[test]
@@ -1302,6 +1359,34 @@ mod tests {
         assert_eq!(fills(&mut app, Swatch::AddedBg), 1);
         assert!(texts(&app, root).contains(&"Suggested change".to_string()));
 
+        let long = (1..=250).map(|n| format!("new {n}")).collect::<Vec<_>>();
+        let base = (1..=250).map(|n| format!("old {n}")).collect::<Vec<_>>();
+        let capped = render_with(
+            &mut app,
+            vec![Block::Suggestion(long.join("\n"))],
+            RenderOpts {
+                suggestion_base: Some(base.join("\n")),
+                ..RenderOpts::default()
+            },
+        );
+        let mut spans = app.world_mut().query::<(Entity, &TextSpan)>();
+        let all: Vec<String> = spans
+            .iter(app.world())
+            .filter(|(e, _)| is_under(app.world(), *e, capped))
+            .map(|(_, t)| t.0.clone())
+            .collect();
+        let footers = texts(&app, capped)
+            .iter()
+            .filter(|t| t.as_str() == "… 50 more lines")
+            .count();
+        assert_eq!(footers, 2, "one footer per side");
+        for last in ["new 200", "old 200"] {
+            assert!(all.iter().any(|t| t == last), "{last} shown");
+        }
+        for beyond in ["new 201", "old 201"] {
+            assert!(!all.iter().any(|t| t == beyond), "{beyond} cut");
+        }
+
         let mut alone = fresh();
         render(&mut alone, vec![Block::Suggestion("let a = 2;".into())]);
         assert_eq!(
@@ -1363,6 +1448,28 @@ mod tests {
         )])];
         let flat = line_inlines(&linked, 20);
         assert!(matches!(&flat[0], Inline::Word { style, .. } if style.link.is_none()));
+    }
+
+    #[test]
+    fn a_zero_width_line_still_says_there_is_more() {
+        let blocks = [Block::Paragraph(vec![word("one", false)])];
+        let cut = line_inlines(&blocks, 0);
+        assert!(matches!(&cut[..], [Inline::Word { text, .. }] if text == "…"));
+        assert!(line_inlines(&[Block::Rule], 0).is_empty());
+    }
+
+    #[test]
+    fn a_tree_at_the_parser_depth_cap_builds() {
+        let quotes = format!("{}deep", "> ".repeat(100));
+        let lists = (0..100)
+            .map(|d| format!("{}- item", "  ".repeat(d)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for source in [quotes, lists] {
+            let mut app = fresh();
+            let root = render(&mut app, parse(&source));
+            assert!(!texts(&app, root).is_empty());
+        }
     }
 
     #[test]
