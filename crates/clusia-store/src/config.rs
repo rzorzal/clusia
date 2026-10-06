@@ -192,6 +192,19 @@ mod tests {
     use super::*;
     use clusia_core::config::Theme;
 
+    #[test]
+    fn recent_emoji_are_set_as_a_list() {
+        let c = Config::default();
+        let set = set_value(&c, "composer.recent_emoji", r#"["🐢","🚀"]"#).unwrap();
+        assert_eq!(set.composer.recent_emoji, ["🐢", "🚀"]);
+        assert_eq!(
+            get_value(&set, "composer.recent_emoji").as_deref(),
+            Ok(r#"["🐢", "🚀"]"#)
+        );
+        let many = format!("[{}]", vec![r#""x""#; 17].join(","));
+        assert!(set_value(&c, "composer.recent_emoji", &many).is_err());
+    }
+
     fn paths() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
         let p = Paths::new(dir.path());

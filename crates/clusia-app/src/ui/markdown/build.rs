@@ -84,20 +84,19 @@ pub struct MdBody;
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
 pub struct CopiedText(pub Vec<String>);
 
+/// The host of an `https://` URL: after the last `@` of the authority (what comes before is
+/// userinfo and must not pass for the host) and without a port.
+pub fn https_host(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or("");
+    Some(host.split(':').next().unwrap_or(""))
+}
+
 /// Whether the image at `url` lives outside GitHub and Giphy (and so is a link unless the
 /// user turned external images on).
 pub fn is_external(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else {
-        return true;
-    };
-    let host = rest
-        .split(['/', '?', '#'])
-        .next()
-        // Userinfo comes before the last '@'; anything before it must not pass for the host.
-        .and_then(|authority| authority.rsplit('@').next())
-        .and_then(|authority| authority.split(':').next())
-        .unwrap_or("");
-    !clusia_core::media::allowed_host(host, &[])
+    !https_host(url).is_some_and(|host| clusia_core::media::allowed_host(host, &[]))
 }
 
 /// Draws `blocks` as one column inside `p`.

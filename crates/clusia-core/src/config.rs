@@ -15,6 +15,7 @@ pub struct Config {
     pub notifications: Notifications,
     pub lists: Lists,
     pub media: Media,
+    pub composer: Composer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +162,17 @@ pub struct Lists {
 
 pub const MAX_FILTER_CHARS: usize = 200;
 
+/// How many emoji the composer remembers as recently used.
+pub const MAX_RECENT_EMOJI: usize = 16;
+
+/// What the comment composer remembers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Composer {
+    /// The emoji picked last, newest first (at most `MAX_RECENT_EMOJI`).
+    pub recent_emoji: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ListSort {
@@ -261,6 +273,11 @@ impl Config {
                 "lists.filter must be at most {MAX_FILTER_CHARS} characters"
             ));
         }
+        if self.composer.recent_emoji.len() > MAX_RECENT_EMOJI {
+            return Err(format!(
+                "composer.recent_emoji must hold at most {MAX_RECENT_EMOJI} emoji"
+            ));
+        }
         let repo = &self.lists.repository;
         let owner_repo = repo.split_once('/').is_some_and(|(owner, name)| {
             !owner.is_empty() && !name.is_empty() && !name.contains('/')
@@ -281,6 +298,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_remembers_at_most_sixteen_emoji() {
+        let mut c = Config::default();
+        assert!(c.composer.recent_emoji.is_empty());
+        c.composer.recent_emoji = (0..MAX_RECENT_EMOJI).map(|i| i.to_string()).collect();
+        assert_eq!(c.validate(), Ok(()));
+        c.composer.recent_emoji.push("🐢".into());
+        assert!(c.validate().unwrap_err().contains("recent_emoji"));
+    }
 
     #[test]
     fn defaults_match_spec() {

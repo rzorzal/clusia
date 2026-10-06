@@ -19,8 +19,9 @@ use clusia_core::{
     Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
 };
 use clusia_protocol::{
-    AnchorInput, Client, ClientError, Command, ErrorCode, Event, LoadStep, LoadStepKind, MediaFile,
-    NewsItem, PublishResult, Reply, ReviewView, Secret, StepStatus, WindowTarget, topics,
+    AnchorInput, Client, ClientError, Command, ErrorCode, Event, GifPage, LoadStep, LoadStepKind,
+    MediaFile, NewsItem, PublishResult, Reply, ReviewView, Secret, StepStatus, WindowTarget,
+    topics,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -89,7 +90,16 @@ pub enum Ask {
     Discard(PrRef),
     /// Worker connection: `Tell::Media` with this URL.
     FetchMedia(String),
+    /// Giphy search (empty query: trending), answered by `Tell::Gifs`.
+    SearchGifs {
+        query: String,
+        offset: u32,
+    },
 }
+
+/// A `Tell::Gifs` on its way to the GIF popover.
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct GifsArrived(pub Result<GifPage, (ErrorCode, String)>);
 
 /// Why the daemon has no file for a picture, and whether asking again later can help.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +128,8 @@ impl MediaError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tell {
     Snapshot(Box<Snapshot>),
+    /// The answer to the last `Ask::SearchGifs`: a page, or the daemon's error code and message.
+    Gifs(Result<GifPage, (ErrorCode, String)>),
     /// A config write was refused: the key and the daemon's message.
     Rejected {
         key: String,
@@ -341,6 +353,10 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
             url: url.clone(),
             file: Err(MediaError::transient("Not connected to clusiad")),
         }),
+        Ask::SearchGifs { .. } => teller.send(Tell::Gifs(Err((
+            ErrorCode::Offline,
+            "Not connected to clusiad".into(),
+        )))),
         _ => return false,
     }
     true
@@ -602,6 +618,20 @@ async fn answer(
             }),
             Err(e) => return Err(lost(e)),
         },
+        Ask::SearchGifs { query, offset } => {
+            match client.request(Command::SearchGifs { query, offset }).await {
+                Ok(Reply::Gifs(page)) => teller.send(Tell::Gifs(Ok(page))),
+                Ok(_) => {}
+                Err(ClientError::Server(e)) => teller.send(Tell::Gifs(Err((e.code, e.message)))),
+                Err(e) => {
+                    teller.send(Tell::Gifs(Err((
+                        ErrorCode::Offline,
+                        "Not connected to clusiad".into(),
+                    ))));
+                    return Err(lost(e));
+                }
+            }
+        }
         Ask::MarkSeen(pr) => {
             request(client, Command::MarkSeen { pr }).await?;
         }
@@ -996,6 +1026,7 @@ impl Plugin for BridgePlugin {
         app.init_resource::<Model>()
             .init_resource::<Toasts>()
             .add_message::<ShowRequested>()
+            .add_message::<GifsArrived>()
             .add_systems(PreUpdate, pump);
         match self.mode {
             Mode::Live => {
@@ -1051,6 +1082,7 @@ pub(crate) fn pump(
     mut exit: MessageWriter<AppExit>,
     mut reviews: MessageWriter<ReviewEvent>,
     mut media: ResMut<MediaCache>,
+    mut gifs: MessageWriter<GifsArrived>,
     time: Res<Time>,
 ) {
     let Some(inbox) = inbox else { return };
@@ -1066,6 +1098,9 @@ pub(crate) fn pump(
                 }
                 model.snapshot = *s;
                 model.connection = Connection::Live;
+            }
+            Tell::Gifs(answer) => {
+                gifs.write(GifsArrived(answer));
             }
             Tell::Rejected { key, message } => {
                 model.rejected.insert(key, message);
@@ -1192,6 +1227,10 @@ pub(crate) fn demo_answers(
                 pr,
             }),
             Ask::CloseReview(pr) | Ask::Discard(pr) => tells.push(Tell::Left(pr)),
+            Ask::SearchGifs { .. } => tells.push(Tell::Gifs(Err((
+                ErrorCode::NotConfigured,
+                "Demo mode has no Giphy key".into(),
+            )))),
             Ask::FetchMedia(url) => tells.push(Tell::Media {
                 url,
                 file: Err(MediaError::refused("Pictures are not loaded in demo mode")),
@@ -1295,6 +1334,27 @@ fn demo_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_gif_searches_fail_at_once() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let ask = Ask::SearchGifs {
+            query: "turtle".into(),
+            offset: 0,
+        };
+        assert!(offline(&ask, &teller));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Tell::Gifs(Err((
+                ErrorCode::Offline,
+                "Not connected to clusiad".into()
+            ))))
+        );
+    }
 
     #[tokio::test]
     async fn a_failed_open_is_no_longer_followed() {

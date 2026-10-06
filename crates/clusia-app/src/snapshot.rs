@@ -107,6 +107,13 @@ mod tests {
     use clusia_core::config::Theme as ThemeChoice;
     use clusia_protocol::SyncState;
 
+    #[test]
+    fn recent_emoji_apply_locally_as_json() {
+        let mut c = Config::default();
+        apply_config_locally(&mut c, "composer.recent_emoji", r#"["🐢","🚀"]"#).unwrap();
+        assert_eq!(c.composer.recent_emoji, ["🐢", "🚀"]);
+    }
+
     fn sync(state: SyncState) -> SyncStatus {
         SyncStatus {
             state,

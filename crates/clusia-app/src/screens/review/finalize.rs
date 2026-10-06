@@ -762,6 +762,7 @@ fn on_save(
     mut tickets: ResMut<Tickets>,
     mut asks: ResMut<Asks>,
     mut edits: ResMut<FinalizeEdits>,
+    mut modes: ResMut<ExtraModes>,
 ) {
     let Ok(SaveButton(pr)) = buttons.get(activate.entity) else {
         return;
@@ -777,6 +778,7 @@ fn on_save(
     }
     asks.send(Ask::CloseReview(pr.clone()));
     edits.0.retain(|(p, _), _| p != pr);
+    modes.forget(pr);
     close_tab(pr, &mut tabs, &mut nav);
 }
 
@@ -810,12 +812,14 @@ fn on_discard(
     mut nav: ResMut<Nav>,
     mut asks: ResMut<Asks>,
     mut edits: ResMut<FinalizeEdits>,
+    mut modes: ResMut<ExtraModes>,
 ) {
     let Ok(DiscardButton(pr)) = buttons.get(activate.entity) else {
         return;
     };
     asks.send(Ask::Discard(pr.clone()));
     edits.0.retain(|(p, _), _| p != pr);
+    modes.forget(pr);
     close_tab(pr, &mut tabs, &mut nav);
 }
 
@@ -849,6 +853,7 @@ fn outcomes(
     mut nav: ResMut<Nav>,
     mut toasts: ResMut<Toasts>,
     mut edits: ResMut<FinalizeEdits>,
+    mut modes: ResMut<ExtraModes>,
     mut asks: ResMut<Asks>,
     time: Res<Time>,
 ) {
@@ -881,6 +886,7 @@ fn outcomes(
                     ),
                 }
                 edits.0.retain(|(p, _), _| p != pr);
+                modes.forget(pr);
                 close_tab(pr, &mut tabs, &mut nav);
                 nav.go(&WindowTarget::Home);
             }
@@ -908,6 +914,7 @@ fn outcomes(
             },
             ReviewEvent::Left(pr) => {
                 edits.0.retain(|(p, _), _| p != pr);
+                modes.forget(pr);
                 close_tab(pr, &mut tabs, &mut nav);
             }
         }
@@ -1173,6 +1180,41 @@ mod tests {
         testing::settle(&mut app);
         assert!(!app.world().resource::<ReviewTabs>().0.contains_key(&pr));
         assert_eq!(app.world().resource::<Nav>().screen, Screen::Home);
+    }
+
+    #[test]
+    fn leaving_a_review_forgets_its_composer_modes() {
+        use crate::ui::composer::{ComposerKey, ComposerMode, ExtraModes, Slot, mode_of, set_mode};
+        let mut app = finalize_app(true);
+        let pr = fixture::demo_pr();
+        let summary = ComposerKey(pr.clone(), Slot::FinalizeSummary);
+        let other = ComposerKey("rzorzal/other#7".parse().unwrap(), Slot::FinalizeSummary);
+        {
+            let world = app.world_mut();
+            let mut extra = world.remove_resource::<ExtraModes>().unwrap();
+            let mut tabs = world.remove_resource::<ReviewTabs>().unwrap();
+            set_mode(&summary, ComposerMode::Preview, &mut tabs, &mut extra);
+            set_mode(&other, ComposerMode::Preview, &mut tabs, &mut extra);
+            world.insert_resource(extra);
+            world.insert_resource(tabs);
+        }
+        let mode = |app: &App, key: &ComposerKey| {
+            mode_of(
+                key,
+                app.world().resource::<ReviewTabs>(),
+                app.world().resource::<ExtraModes>(),
+            )
+        };
+        assert_eq!(mode(&app, &summary), ComposerMode::Preview);
+        let discard = testing::find::<DiscardButton>(&mut app, |_| true);
+        testing::activate(&mut app, discard);
+        testing::settle(&mut app);
+        assert_eq!(mode(&app, &summary), ComposerMode::Write, "forgotten");
+        assert_eq!(
+            mode(&app, &other),
+            ComposerMode::Preview,
+            "another review's modes stay"
+        );
     }
 
     #[test]

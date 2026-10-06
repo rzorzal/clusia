@@ -15,6 +15,7 @@ use crate::fonts::UiFonts;
 use crate::theme::Swatch;
 use crate::ui::composer::{ComposerKey, on_toolbar_button};
 use crate::ui::kit::{Clickable, Fill, HoverFill, Type, text};
+use crate::ui::markdown::build::https_host;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
@@ -193,7 +194,7 @@ impl Chip {
 
     /// The line under the name.
     pub fn note(&self) -> &'static str {
-        let host = self.url.split('/').nth(2).unwrap_or("");
+        let host = https_host(&self.url).unwrap_or("");
         if self.gif {
             "by link · plays inline"
         } else if host == "github.com" || host.ends_with(".githubusercontent.com") {
@@ -212,10 +213,7 @@ impl Chip {
 fn is_gif(url: &str) -> bool {
     let no_query = url.split(['?', '#']).next().unwrap_or("");
     no_query.to_ascii_lowercase().ends_with(".gif")
-        || url
-            .split('/')
-            .nth(2)
-            .is_some_and(|h| h.starts_with("media") && h.ends_with("giphy.com"))
+        || https_host(url).is_some_and(|h| h.starts_with("media") && h.ends_with("giphy.com"))
 }
 
 fn attr(tag: &str, name: &str) -> Option<String> {
@@ -293,6 +291,28 @@ pub fn remove_chip(text: &str, raw: &str) -> String {
         end
     };
     format!("{}{}", &text[..at], &text[end..])
+}
+
+/// Where a cursor at `cursor` in `old` belongs in `new`, the text `old` became when a chip was
+/// taken out: text after the chip moves back by its length, a cursor inside it lands where it
+/// was.
+pub fn cursor_after_removal(old: &str, new: &str, cursor: usize) -> usize {
+    let at = old
+        .bytes()
+        .zip(new.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let removed = old.len().saturating_sub(new.len());
+    let moved = if cursor <= at {
+        cursor
+    } else {
+        cursor.saturating_sub(removed).max(at)
+    };
+    let moved = moved.min(new.len());
+    (0..=moved)
+        .rev()
+        .find(|i| new.is_char_boundary(*i))
+        .unwrap_or(0)
 }
 
 /// One toolbar button (26 px).
@@ -500,5 +520,41 @@ mod tests {
             gif: false,
         };
         assert_eq!(bare.label(), "pic.png");
+    }
+
+    #[test]
+    fn chip_hosts_ignore_userinfo_and_ports() {
+        let note = |u: &str| chips_in(&format!("![x]({u})"))[0].note();
+        assert_eq!(
+            note("https://github.com:443/user-attachments/assets/a1"),
+            "uploaded to GitHub"
+        );
+        assert_eq!(
+            note("https://octo@github.com/user-attachments/assets/a1"),
+            "uploaded to GitHub"
+        );
+        assert_eq!(
+            note("https://octo:pw@objects.githubusercontent.com:8443/a.png"),
+            "uploaded to GitHub"
+        );
+        assert_eq!(note("https://github.com@evil.example/a.png"), "image link");
+        let gif = |u: &str| chips_in(&format!("![x]({u})"))[0].gif;
+        assert!(gif("https://octo@media2.giphy.com:443/media/x/giphy"));
+        assert!(!gif("https://media2.giphy.com@evil.example/media/x/giphy"));
+    }
+
+    #[test]
+    fn the_cursor_keeps_its_place_when_a_chip_goes() {
+        let old = "![a](https://x.example/1.png) tail";
+        let new = remove_chip(old, "![a](https://x.example/1.png)");
+        assert_eq!(new, " tail");
+        assert_eq!(cursor_after_removal(old, &new, old.len()), new.len());
+        assert_eq!(cursor_after_removal(old, &new, 0), 0);
+        assert_eq!(cursor_after_removal(old, &new, 5), 0, "inside the chip");
+        let old = "é\n![i](https://x.example/i.png)\nü";
+        let new = remove_chip(old, "![i](https://x.example/i.png)");
+        assert_eq!(new, "é\nü");
+        assert_eq!(cursor_after_removal(old, &new, old.len()), new.len());
+        assert_eq!(cursor_after_removal(old, &new, 3), 3, "before the chip");
     }
 }

@@ -26,18 +26,21 @@ use crate::review_state::{EditTarget, Phase, ReviewTabs};
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{Fill, HoverFill, Ink, Stroke, Type, panel, segment, segments, text};
 use crate::ui::markdown::MdImage;
-use crate::ui::markdown::build::{RenderOpts, markdown};
+use crate::ui::markdown::build::{RenderOpts, is_external, markdown};
 use crate::ui::markdown::parse::parse;
 use crate::ui::text_area::{TextArea, TextSubmitted, growing_text_area, text_area};
 
+mod emoji_picker;
+mod gif_picker;
+pub mod popover;
 pub mod toolbar;
 
 #[cfg(test)]
 pub(crate) mod testkit;
 
 use toolbar::{
-    Chip, ToolbarAction, ToolbarFor, action_buttons, chips_in, insert_suggestion, remove_chip,
-    tool_button,
+    Chip, ToolbarAction, ToolbarFor, action_buttons, chips_in, cursor_after_removal,
+    insert_suggestion, remove_chip, tool_button,
 };
 
 /// Write shows the text area, Preview the rendered comment.
@@ -104,6 +107,8 @@ pub struct ComposerModeButton {
 pub struct PreviewBody {
     pub key: ComposerKey,
     rendered: Option<String>,
+    /// The text as of the previous frame.
+    seen: Option<String>,
     pending: Option<f64>,
 }
 
@@ -124,6 +129,13 @@ pub struct ChipRemove {
 /// Modes of composers that are not an editor (Finalize items and summary).
 #[derive(Resource, Debug, Default)]
 pub struct ExtraModes(Vec<(ComposerKey, ComposerMode)>);
+
+impl ExtraModes {
+    /// Forgets every mode of `pr`'s Finalize fields.
+    pub fn forget(&mut self, pr: &PrRef) {
+        self.0.retain(|(k, _)| &k.0 != pr);
+    }
+}
 
 /// How long a changed text waits before the preview is drawn again.
 pub const PREVIEW_DEBOUNCE: f64 = 0.12;
@@ -236,16 +248,19 @@ fn source_for(tabs: &ReviewTabs, key: &ComposerKey) -> Option<String> {
 
 /// Whether to draw the preview now, and when the text last changed (the debounce clock).
 ///
-/// The first drawing is immediate; later changes wait for `PREVIEW_DEBOUNCE` of quiet.
+/// The first drawing is immediate; later changes wait for `PREVIEW_DEBOUNCE` of quiet, so every
+/// change since the previous frame (`seen`) starts the wait over.
 pub fn preview_due(
     rendered: Option<&str>,
     text: &str,
+    seen: Option<&str>,
     pending: Option<f64>,
     now: f64,
 ) -> (bool, Option<f64>) {
     match (rendered, pending) {
         (Some(r), _) if r == text => (false, None),
         (None, _) => (true, None),
+        (Some(_), _) if seen != Some(text) => (false, Some(now)),
         (Some(_), None) => (false, Some(now)),
         (Some(_), Some(since)) if now - since >= PREVIEW_DEBOUNCE => (true, None),
         (Some(_), Some(since)) => (false, Some(since)),
@@ -309,6 +324,7 @@ pub fn composer<B: Bundle>(
             PreviewBody {
                 key: key.clone(),
                 rendered: None,
+                seen: None,
                 pending: None,
             },
         ));
@@ -368,6 +384,14 @@ fn toolbar_row(
         })
         .insert((BackgroundColor::default(), Fill(Swatch::Line)));
         action_buttons(t, fonts, key, view.compact, view.suggest);
+        t.spawn(Node {
+            width: px(1),
+            height: px(18),
+            margin: UiRect::horizontal(px(6)),
+            ..default()
+        })
+        .insert((BackgroundColor::default(), Fill(Swatch::Line)));
+        popover::popover_buttons(t, fonts, key);
         if !view.compact {
             t.spawn(Node {
                 flex_grow: 1.0,
@@ -386,23 +410,28 @@ pub struct ComposerPlugin;
 
 impl Plugin for ComposerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ExtraModes>()
-            .init_resource::<FontCx>()
-            .init_resource::<LayoutCx>()
-            .add_message::<TextSubmitted>()
-            .add_message::<FileDragAndDrop>()
-            .add_systems(
-                Update,
-                (
-                    sync_modes,
-                    style_mode_buttons,
-                    fill_previews,
-                    fill_chips,
-                    submit_from_preview,
-                    hint_dropped_files,
-                )
-                    .chain(),
-            );
+        app.add_plugins((
+            popover::PopoverPlugin,
+            emoji_picker::EmojiPickerPlugin,
+            gif_picker::GifPickerPlugin,
+        ))
+        .init_resource::<ExtraModes>()
+        .init_resource::<FontCx>()
+        .init_resource::<LayoutCx>()
+        .add_message::<TextSubmitted>()
+        .add_message::<FileDragAndDrop>()
+        .add_systems(
+            Update,
+            (
+                sync_modes,
+                style_mode_buttons,
+                fill_previews,
+                fill_chips,
+                submit_from_preview,
+                hint_dropped_files,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -536,8 +565,9 @@ fn fill_previews(
     let now = time.elapsed_secs_f64();
     for (entity, mut body) in &mut previews {
         if mode_of(&body.key, &tabs, &extra) != ComposerMode::Preview {
-            if body.rendered.is_some() {
+            if body.rendered.is_some() || body.seen.is_some() {
                 body.rendered = None;
+                body.seen = None;
                 body.pending = None;
             }
             continue;
@@ -546,7 +576,16 @@ fn fill_previews(
             continue;
         };
         let text = editable.value().to_string();
-        let (draw, pending) = preview_due(body.rendered.as_deref(), &text, body.pending, now);
+        let (draw, pending) = preview_due(
+            body.rendered.as_deref(),
+            &text,
+            body.seen.as_deref(),
+            body.pending,
+            now,
+        );
+        if body.seen.as_deref() != Some(&text) {
+            body.seen = Some(text.clone());
+        }
         if body.pending != pending {
             body.pending = pending;
         }
@@ -615,11 +654,7 @@ fn fill_chips(
 }
 
 fn chip_node(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &ComposerKey, chip: &Chip) {
-    let known_host = chip
-        .url
-        .split('/')
-        .nth(2)
-        .is_some_and(|h| clusia_core::media::allowed_host(h, &[]));
+    let known_host = !is_external(&chip.url);
     p.spawn((
         panel(
             Node {
@@ -696,11 +731,7 @@ fn on_chip_remove(
     if let Some((_, mut editable)) = areas.iter_mut().find(|(a, _)| a.0 == button.key) {
         let (text, sel) = read_area(&editable);
         let new = remove_chip(&text, &button.raw);
-        let at = sel.start.min(new.len());
-        let at = (0..=at)
-            .rev()
-            .find(|i| new.is_char_boundary(*i))
-            .unwrap_or(0);
+        let at = cursor_after_removal(&text, &new, sel.start);
         write_area(&mut editable, &mut fonts, &mut layout, &new, at..at);
     }
 }
@@ -725,12 +756,13 @@ fn submit_from_preview(
         .filter(|(_, c)| mode_of(&c.0, &tabs, &extra) == ComposerMode::Preview)
         .map(|(e, c)| (e, &c.0))
         .collect();
+    let modal_open = tabs.0.values().any(|t| t.ui.modal.is_some());
     let focused = focus
         .get()
         .and_then(|f| parents.iter_ancestors(f).find(|a| composers.contains(*a)));
     let chosen = match (focused, previewing.as_slice()) {
         (Some(root), _) => previewing.iter().find(|(e, _)| *e == root),
-        (None, [only]) => Some(only),
+        (None, [only]) if !modal_open => Some(only),
         _ => None,
     };
     let Some((_, key)) = chosen else { return };
@@ -1015,18 +1047,149 @@ mod tests {
     #[test]
     fn previews_wait_for_quiet_after_the_first_drawing() {
         assert_eq!(
-            preview_due(None, "a", None, 1.0),
+            preview_due(None, "a", None, None, 1.0),
             (true, None),
             "first: at once"
         );
-        assert_eq!(preview_due(Some("a"), "a", Some(1.0), 2.0), (false, None));
-        assert_eq!(preview_due(Some("a"), "ab", None, 1.0), (false, Some(1.0)));
         assert_eq!(
-            preview_due(Some("a"), "ab", Some(1.0), 1.1),
+            preview_due(Some("a"), "a", Some("a"), Some(1.0), 2.0),
+            (false, None)
+        );
+        assert_eq!(
+            preview_due(Some("a"), "ab", Some("a"), None, 1.0),
+            (false, Some(1.0))
+        );
+        assert_eq!(
+            preview_due(Some("a"), "ab", Some("ab"), Some(1.0), 1.1),
             (false, Some(1.0)),
             "not yet"
         );
-        assert_eq!(preview_due(Some("a"), "ab", Some(1.0), 1.13), (true, None));
+        assert_eq!(
+            preview_due(Some("a"), "ab", Some("ab"), Some(1.0), 1.13),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn a_text_that_keeps_changing_is_not_drawn_until_it_is_quiet() {
+        assert_eq!(
+            preview_due(Some("a"), "abc", Some("ab"), Some(1.0), 1.2),
+            (false, Some(1.2)),
+            "changed again: the clock starts over"
+        );
+        assert_eq!(
+            preview_due(Some("a"), "abc", Some("abc"), Some(1.2), 1.31),
+            (false, Some(1.2))
+        );
+        assert_eq!(
+            preview_due(Some("a"), "abc", Some("abc"), Some(1.2), 1.33),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn the_preview_waits_while_the_text_keeps_changing() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (_, area) = open(&mut app, EditTarget::General, "one");
+        let preview = mode_button(&mut app, ComposerMode::Preview);
+        testing::activate(&mut app, preview);
+        testing::settle(&mut app);
+        let body = testing::find::<PreviewBody>(&mut app, |_| true);
+        let drawn = |app: &App| {
+            app.world()
+                .get::<PreviewBody>(body)
+                .unwrap()
+                .rendered
+                .clone()
+        };
+        assert_eq!(drawn(&app).as_deref(), Some("one"));
+        for more in [" two", " three", " four"] {
+            testing::type_into(&mut app, area, more);
+            // A change on every frame never leaves 120 ms of quiet, however long it goes on.
+            std::thread::sleep(std::time::Duration::from_millis(70));
+            app.update();
+            assert_eq!(
+                drawn(&app).as_deref(),
+                Some("one"),
+                "still waiting after {more:?}"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        app.update();
+        assert_eq!(drawn(&app).as_deref(), Some("one two three four"));
+    }
+
+    #[test]
+    fn cmd_enter_ignores_a_preview_behind_a_modal() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (pr, area) = open(&mut app, EditTarget::General, "Ask about the cache");
+        let preview = mode_button(&mut app, ComposerMode::Preview);
+        testing::activate(&mut app, preview);
+        testing::settle(&mut app);
+        assert_eq!(app.world().resource::<InputFocus>().get(), None);
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .modal = Some(crate::review_state::Modal::Finalize);
+        {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(KeyCode::SuperLeft);
+            keys.press(KeyCode::Enter);
+        }
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        testing::settle(&mut app);
+        assert!(
+            !testing::recorded(&mut app)
+                .iter()
+                .any(|a| matches!(a, Ask::AddItem { .. })),
+            "nothing is sent for a composer the modal hides"
+        );
+        assert_eq!(value(&app, area), "Ask about the cache");
+    }
+
+    #[test]
+    fn chips_know_hosts_with_userinfo_and_ports() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (_, area) = open(&mut app, EditTarget::General, "");
+        testing::type_into(
+            &mut app,
+            area,
+            "![a](https://octo@github.com:443/user-attachments/assets/a1)\n![b](https://github.com@evil.example/b.png)",
+        );
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<ChipRemove>(&mut app), 2);
+        assert_eq!(
+            testing::count::<MdImage>(&mut app),
+            1,
+            "only the GitHub one gets a thumbnail"
+        );
+    }
+
+    #[test]
+    fn removing_a_chip_before_the_cursor_moves_the_cursor_back() {
+        let mut app = testing::app(fixture::demo(NOW));
+        with_fonts(&mut app);
+        let (_, area) = open(&mut app, EditTarget::General, "");
+        testing::type_into(
+            &mut app,
+            area,
+            "![a](https://github.com/user-attachments/assets/a1) then more",
+        );
+        testing::settle(&mut app);
+        let end = value(&app, area).len();
+        select(&mut app, area, end - 4..end - 4);
+        let remove = testing::find::<ChipRemove>(&mut app, |_| true);
+        testing::activate(&mut app, remove);
+        testing::settle(&mut app);
+        let (text, sel) = read_area(app.world().get::<EditableText>(area).unwrap());
+        assert_eq!(text, " then more");
+        assert_eq!(&text[sel.start..], "more", "the cursor stays before `more`");
     }
 
     #[test]
