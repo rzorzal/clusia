@@ -10,6 +10,7 @@ pub mod fixture;
 pub mod fonts;
 pub mod instance;
 pub mod nav;
+pub mod review_state;
 pub mod screens;
 pub mod snapshot;
 pub mod theme;

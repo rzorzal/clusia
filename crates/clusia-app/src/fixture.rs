@@ -1,8 +1,15 @@
 //! Demo data for `--demo` and screenshots: only `rzorzal` repositories and generic people.
 
 use clusia_core::time::civil_from_days;
-use clusia_core::{ActivitySummary, Config, DayCount, PrRef, PrSummary, ReviewState};
-use clusia_protocol::{AuthInfo, ReviewSummary, SyncState, SyncStatus, TokenSource};
+use clusia_core::{
+    ActivitySummary, Anchor, ChecksSummary, Config, DayCount, Draft, DraftItem, DraftKind,
+    FileDiff, IssueComment, ItemStatus, Origin, PrConversation, PrDetail, PrRef, PrSummary, Review,
+    ReviewInfo, ReviewState, ReviewThread, Role, Side, ThreadPost,
+};
+use clusia_protocol::{
+    AuthInfo, FileSummary, NewsItem, NewsKind, ReviewSummary, ReviewView, SyncState, SyncStatus,
+    TokenSource,
+};
 
 use crate::snapshot::Snapshot;
 
@@ -117,6 +124,532 @@ pub fn demo(now: i64) -> Snapshot {
     }
 }
 
+/// The review every demo scene shows (mockup `Review.png`).
+pub fn demo_pr() -> PrRef {
+    PrRef::new("rzorzal", "clusia", 123).expect("valid demo ref")
+}
+
+const BASE_SHA: &str = "4f2a9c1e8d7b6a5f4e3d2c1b0a9f8e7d6c5b4a39";
+const HEAD_SHA: &str = "9be1d07c3a2f4e5d6c7b8a9f0e1d2c3b4a5f6e7d";
+
+/// `rzorzal/clusia#123 feat: auth refresh` by `octo`, opened by `rzorzal` as a reviewer: seven
+/// files (+120 −34) with real patches in `view.diff`, checks passing, a conversation (one open
+/// thread on `src/auth/refresh.rs:41`, one resolved thread, hubot's approval, two comments),
+/// a draft of three items (ok, moved, obsolete), and the What's new rows of `WhatsNew.png`.
+pub fn demo_review(now: i64) -> (ReviewView, Vec<NewsItem>) {
+    let pr = demo_pr();
+    let diff = demo_diff();
+    let title = "feat: auth refresh";
+    let detail = PrDetail {
+        summary: PrSummary {
+            pr: pr.clone(),
+            title: title.into(),
+            author: "octo".into(),
+            url: "https://github.com/rzorzal/clusia/pull/123".into(),
+            draft: false,
+            updated_at: rfc3339(now - 300),
+            comments: 5,
+        },
+        base_ref: "main".into(),
+        head_ref: "octo:auth-refresh".into(),
+        base_sha: BASE_SHA.into(),
+        head_sha: HEAD_SHA.into(),
+        additions: diff.iter().map(|f| f.additions).sum(),
+        deletions: diff.iter().map(|f| f.deletions).sum(),
+        changed_files: diff.len() as u64,
+        clone_url: "https://github.com/rzorzal/clusia.git".into(),
+        closed: false,
+        merged: false,
+    };
+    let mut review = Review::new(
+        pr.clone(),
+        title.into(),
+        BASE_SHA.into(),
+        HEAD_SHA.into(),
+        now - 2 * 86_400,
+    );
+    review.updated_at = now - 600;
+    review.last_seen_at = Some(now - 20 * 3600);
+    review.last_checks = Some("pending".into());
+    review.draft = demo_draft(now);
+    let view = ReviewView {
+        review,
+        pr: detail,
+        files: diff.iter().map(FileSummary::from).collect(),
+        role: Role::Reviewer,
+        worktree: Some("~/.clusia/worktrees/rzorzal/clusia/123".into()),
+        viewer: Some("rzorzal".into()),
+        checks: Some(ChecksSummary {
+            total: 3,
+            passed: 3,
+            failed: 0,
+            pending: 0,
+        }),
+        conversation: Some(demo_conversation(now)),
+        diff,
+    };
+    (view, demo_news(now))
+}
+
+fn demo_draft(now: i64) -> Draft {
+    let item = |id: &str, path: &str, line: u32, body: &str, status: ItemStatus| DraftItem {
+        id: id.into(),
+        kind: DraftKind::LineComment,
+        origin: Origin::Human,
+        anchor: Some(Anchor {
+            path: path.into(),
+            line,
+            start_line: None,
+            side: Side::Right,
+            commit: HEAD_SHA.into(),
+        }),
+        body: body.into(),
+        status,
+        accepted: true,
+        created_at: now - 3600,
+        thread: None,
+    };
+    Draft {
+        items: vec![
+            item(
+                "i1",
+                "src/auth/refresh.rs",
+                44,
+                "Holding the lock across the network call means a slow exchange blocks every \
+                 request. Could we re-check the expiry after taking the lock instead, and drop \
+                 it before `exchange`?",
+                ItemStatus::Ok,
+            ),
+            item(
+                "i2",
+                "src/auth/store.rs",
+                88,
+                "save() should write to a temp file and rename, so a crash never leaves half a \
+                 token on disk.",
+                ItemStatus::Moved {
+                    from_path: "src/auth/store.rs".into(),
+                    from_line: 81,
+                },
+            ),
+            item(
+                "i3",
+                "src/client/http.rs",
+                20,
+                "This retry loop is gone in the new version. Remove or re-add this comment on \
+                 the new code.",
+                ItemStatus::Obsolete {
+                    reason: "the line changed".into(),
+                },
+            ),
+        ],
+        next_id: 3,
+    }
+}
+
+fn demo_conversation(now: i64) -> PrConversation {
+    let url = |id: u64| format!("https://github.com/rzorzal/clusia/pull/123#discussion_r{id}");
+    let post = |id: u64, author: &str, body: &str, age: i64| ThreadPost {
+        database_id: Some(id),
+        author: author.into(),
+        body: body.into(),
+        created_at: rfc3339(now - age),
+        url: url(id),
+    };
+    PrConversation {
+        threads: Vec::new(),
+        comments: vec![
+            IssueComment {
+                id: 2001,
+                author: "joao".into(),
+                body: "Tested against the staging token server: the refresh works.".into(),
+                created_at: rfc3339(now - 5 * 3600),
+                url: "https://github.com/rzorzal/clusia/pull/123#issuecomment-2001".into(),
+            },
+            IssueComment {
+                id: 2002,
+                author: "octo".into(),
+                body: "Thanks! Rebased on main.".into(),
+                created_at: rfc3339(now - 4 * 3600),
+                url: "https://github.com/rzorzal/clusia/pull/123#issuecomment-2002".into(),
+            },
+        ],
+        reviews: vec![ReviewInfo {
+            id: 3001,
+            author: "hubot".into(),
+            state: "APPROVED".into(),
+            body: "Looks good once the lock change lands.".into(),
+            submitted_at: Some(rfc3339(now - 3 * 3600)),
+            url: "https://github.com/rzorzal/clusia/pull/123#pullrequestreview-3001".into(),
+        }],
+        review_threads: vec![
+            ReviewThread {
+                id: "PRRT_demo_refresh_41".into(),
+                is_resolved: false,
+                is_outdated: false,
+                path: "src/auth/refresh.rs".into(),
+                line: Some(41),
+                start_line: None,
+                side: Side::Right,
+                viewer_can_reply: true,
+                viewer_can_resolve: true,
+                comments: vec![
+                    post(
+                        1001,
+                        "mona",
+                        "Why one minute? The CLI uses 30 seconds.",
+                        6 * 3600,
+                    ),
+                    post(
+                        1002,
+                        "octo",
+                        "Clock skew on the CI runners. 30 seconds would work too.",
+                        2 * 3600,
+                    ),
+                    post(
+                        1005,
+                        "hubot",
+                        "A minute is safer while the runners drift.",
+                        3600,
+                    ),
+                ],
+            },
+            ReviewThread {
+                id: "PRRT_demo_mod_3".into(),
+                is_resolved: true,
+                is_outdated: false,
+                path: "src/auth/mod.rs".into(),
+                line: Some(3),
+                start_line: None,
+                side: Side::Right,
+                viewer_can_reply: true,
+                viewer_can_resolve: true,
+                comments: vec![
+                    post(1003, "ana", "Does the store need to be public?", 26 * 3600),
+                    post(1004, "octo", "No: it is pub(crate) now.", 25 * 3600),
+                ],
+            },
+        ],
+    }
+}
+
+/// The rows of `WhatsNew.png` ("Since you last looked, yesterday …").
+fn demo_news(now: i64) -> Vec<NewsItem> {
+    let item = |kind, source: &str, who: Option<&str>, age: i64, summary: &str| NewsItem {
+        kind,
+        source: source.into(),
+        who: who.map(String::from),
+        at: now - age,
+        summary: summary.into(),
+        url: None,
+    };
+    vec![
+        item(
+            NewsKind::Commits,
+            "GitHub",
+            Some("octo"),
+            8 * 3600,
+            "2 new commits: fix: re-check the expiry under the lock · test: refresh races",
+        ),
+        item(
+            NewsKind::Comment,
+            "GitHub",
+            Some("mona, hubot"),
+            6 * 3600,
+            "3 new comments: Why one minute? The CLI uses 30 seconds.",
+        ),
+        item(
+            NewsKind::Checks,
+            "GitHub Actions",
+            None,
+            5 * 3600,
+            "Checks passed: build · clippy · test (macOS)",
+        ),
+        item(
+            NewsKind::Moved,
+            "Clúsia",
+            None,
+            4 * 3600,
+            "Your draft followed the code: 1 moved, 1 obsolete — store.rs:81 → 88 · http.rs:20 \
+             no longer in the diff",
+        ),
+        item(
+            NewsKind::Local,
+            "You via CLI",
+            None,
+            3600,
+            "Note added: Ask about the token cache size",
+        ),
+    ]
+}
+
+/// One file of the demo diff; the counts come from the patch.
+fn file(path: &str, status: &str, lines: &[&str]) -> FileDiff {
+    let patch = format!("{}\n", lines.join("\n"));
+    let count = |marker: char| {
+        lines
+            .iter()
+            .filter(|l| l.starts_with(marker) && !l.starts_with("@@"))
+            .count() as u64
+    };
+    FileDiff {
+        path: path.into(),
+        previous_path: None,
+        status: status.into(),
+        additions: count('+'),
+        deletions: count('-'),
+        patch: Some(patch),
+    }
+}
+
+fn demo_diff() -> Vec<FileDiff> {
+    vec![
+        file(
+            "src/auth/refresh.rs",
+            "modified",
+            &[
+                "@@ -38,9 +38,11 @@ impl TokenStore {",
+                "     pub async fn refresh(&self) -> Result<Token, AuthError> {",
+                "-        let token = self.load()?;",
+                "-        if token.expires_at > now() {",
+                "+        let token = self.load().await?;",
+                "+        // Refresh one minute early so a request never races the expiry.",
+                "+        if token.expires_at > now() + Duration::from_secs(60) {",
+                "             return Ok(token);",
+                "         }",
+                "+        let _guard = self.refresh_lock.lock().await;",
+                "         let fresh = self.client.exchange(&token.refresh).await?;",
+                "         self.save(&fresh)?;",
+                "         Ok(fresh)",
+                "     }",
+                "@@ -60,4 +62,9 @@ impl TokenStore {",
+                "     fn expired(&self, token: &Token) -> bool {",
+                "         token.expires_at <= now()",
+                "     }",
+                "+",
+                "+    /// Drops the cached token so the next call refreshes it.",
+                "+    pub fn invalidate(&self) {",
+                "+        self.cache.lock().take();",
+                "+    }",
+                " }",
+            ],
+        ),
+        file(
+            "src/auth/store.rs",
+            "modified",
+            &[
+                "@@ -70,22 +70,51 @@ impl TokenStore {",
+                "     pub fn new(path: PathBuf) -> Self {",
+                "         Self { path, cache: Mutex::new(None) }",
+                "     }",
+                " ",
+                "-    pub fn load(&self) -> Result<Token, AuthError> {",
+                "-        let data = fs::read(&self.path).map_err(AuthError::Read)?;",
+                "-        serde_json::from_slice(&data).map_err(AuthError::Decode)",
+                "-    }",
+                "-",
+                "-    pub fn save(&self, token: &Token) -> Result<(), AuthError> {",
+                "-        let data = serde_json::to_vec(token).map_err(AuthError::Encode)?;",
+                "-        let mut file = File::create(&self.path).map_err(AuthError::Write)?;",
+                "-        file.write_all(&data).map_err(AuthError::Write)?;",
+                "-        Ok(())",
+                "-    }",
+                "-",
+                "+    /// Reads the token, from memory when it is still cached.",
+                "+    pub fn load(&self) -> Result<Token, AuthError> {",
+                "+        if let Some(token) = self.cache.lock().clone() {",
+                "+            return Ok(token);",
+                "+        }",
+                "+        let data = fs::read(&self.path).map_err(AuthError::Read)?;",
+                "+        let token: Token = serde_json::from_slice(&data).map_err(AuthError::Decode)?;",
+                "+        *self.cache.lock() = Some(token.clone());",
+                "+        Ok(token)",
+                "+    }",
+                "+",
+                "+    /// Writes the token and updates the cache.",
+                "+    pub fn save(&self, token: &Token) -> Result<(), AuthError> {",
+                "+        let data = serde_json::to_vec_pretty(token).map_err(AuthError::Encode)?;",
+                "+        fs::write(&self.path, data).map_err(AuthError::Write)?;",
+                "+        *self.cache.lock() = Some(token.clone());",
+                "+        Ok(())",
+                "+    }",
+                "+",
+                "+    /// Removes the stored token and forgets the cached one.",
+                "+    pub fn clear(&self) -> Result<(), AuthError> {",
+                "+        match fs::remove_file(&self.path) {",
+                "+            Ok(()) => {}",
+                "+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}",
+                "+            Err(e) => return Err(AuthError::Write(e)),",
+                "+        }",
+                "+        self.cache.lock().take();",
+                "+        Ok(())",
+                "+    }",
+                "+",
+                "+    /// Whether a token file exists, without reading it.",
+                "+    pub fn exists(&self) -> bool {",
+                "+        self.path.is_file()",
+                "+    }",
+                "+",
+                "+    /// The token's expiry, if one is stored.",
+                "+    pub fn expires_at(&self) -> Option<Instant> {",
+                "+        self.load().ok().map(|t| t.expires_at)",
+                "+    }",
+                "+",
+                "+    // Callers hold the refresh lock while they save.",
+                "     pub fn path(&self) -> &Path {",
+                "         &self.path",
+                "     }",
+                " }",
+                " ",
+                " #[cfg(test)]",
+            ],
+        ),
+        file(
+            "src/auth/mod.rs",
+            "modified",
+            &[
+                "@@ -1,6 +1,8 @@",
+                " //! Authentication: tokens, their storage and refresh.",
+                " ",
+                "-pub mod store;",
+                "+pub(crate) mod store;",
+                "+mod lock;",
+                " pub mod refresh;",
+                "+",
+                " pub use refresh::Refresher;",
+                " pub use store::TokenStore;",
+            ],
+        ),
+        file(
+            "src/client/http.rs",
+            "modified",
+            &[
+                "@@ -12,15 +12,34 @@ impl HttpClient {",
+                "     pub async fn send(&self, request: Request) -> Result<Response, HttpError> {",
+                "         let token = self.auth.refresh().await?;",
+                "         let request = request.bearer(&token.access);",
+                "-        let mut attempt = 0;",
+                "-        loop {",
+                "-            match self.inner.execute(request.clone()).await {",
+                "-                Ok(response) => return Ok(response),",
+                "-                Err(e) if attempt < 3 => attempt += 1,",
+                "-                Err(e) => return Err(HttpError::Send(e)),",
+                "-            }",
+                "-            sleep(Duration::from_millis(200 * attempt)).await;",
+                "-        }",
+                "+        let response = self",
+                "+            .inner",
+                "+            .execute(request.clone())",
+                "+            .await",
+                "+            .map_err(HttpError::Send)?;",
+                "+        if response.status() != StatusCode::UNAUTHORIZED {",
+                "+            return Ok(response);",
+                "+        }",
+                "+        // The token was revoked early: refresh once and retry.",
+                "+        self.auth.invalidate();",
+                "+        let token = self.auth.refresh().await?;",
+                "+        let retry = request.bearer(&token.access);",
+                "+        let response = self",
+                "+            .inner",
+                "+            .execute(retry)",
+                "+            .await",
+                "+            .map_err(HttpError::Send)?;",
+                "+        if response.status() == StatusCode::UNAUTHORIZED {",
+                "+            return Err(HttpError::Unauthorized);",
+                "+        }",
+                "+        Ok(response)",
+                "     }",
+                " ",
+                "+    /// The base URL every request is relative to.",
+                "+    #[must_use]",
+                "+    pub fn base(&self) -> &Url {",
+                "+        &self.base",
+                "+    }",
+                "+",
+                "+    /// Headers sent with every request.",
+                "     fn headers(&self) -> HeaderMap {",
+            ],
+        ),
+        file(
+            "src/config.rs",
+            "modified",
+            &[
+                "@@ -20,4 +20,10 @@ impl Default for Config {",
+                " pub struct Config {",
+                "     pub api: Url,",
+                "     pub timeout: Duration,",
+                "+    /// Refresh this long before the token expires.",
+                "+    #[serde(default = \"default_refresh_margin\")]",
+                "+    pub refresh_margin: Duration,",
+                "+    /// Where the token is stored.",
+                "+    pub token_path: PathBuf,",
+                "+    pub user_agent: String,",
+                " }",
+            ],
+        ),
+        file(
+            "tests/refresh.rs",
+            "added",
+            &[
+                "@@ -0,0 +1,30 @@",
+                "+use std::time::Duration;",
+                "+",
+                "+use auth::{Token, TokenStore};",
+                "+",
+                "+mod common;",
+                "+",
+                "+#[tokio::test]",
+                "+async fn refreshes_one_minute_early() {",
+                "+    let server = common::token_server().await;",
+                "+    let store = TokenStore::new(server.dir().join(\"token.json\"));",
+                "+    store.save(&Token::expiring_in(Duration::from_secs(30))).unwrap();",
+                "+    let token = server.client(&store).refresh().await.unwrap();",
+                "+    assert_eq!(server.exchanges(), 1);",
+                "+    assert!(token.expires_at > Token::now() + Duration::from_secs(60));",
+                "+}",
+                "+",
+                "+#[tokio::test]",
+                "+async fn concurrent_refreshes_exchange_once() {",
+                "+    let server = common::token_server().await;",
+                "+    let store = TokenStore::new(server.dir().join(\"token.json\"));",
+                "+    store.save(&Token::expired()).unwrap();",
+                "+    let client = server.client(&store);",
+                "+    let (a, b) = tokio::join!(client.refresh(), client.refresh());",
+                "+    assert_eq!(a.unwrap(), b.unwrap());",
+                "+    assert_eq!(server.exchanges(), 1);",
+                "+}",
+                "+",
+                "+// A revoked token is refreshed once by the HTTP client, then the request",
+                "+// is sent again; see `client::http` for the retry.",
+                "+// Clock skew on CI runners is why the margin is one minute.",
+            ],
+        ),
+        file(
+            "CHANGELOG.md",
+            "modified",
+            &[
+                "@@ -1,14 +1,7 @@",
+                " # Changelog",
+                " ",
+                " ## Unreleased",
+                "-",
+                "-## 0.4.0",
+                "-",
+                "-- Token store keeps the token in memory.",
+                "-- `clusia auth status` shows the token source.",
+                "-",
+                "-## 0.3.0",
+                "-",
+                "-- First release with GitHub sign-in.",
+                "-- Pull request lists in the tray.",
+                "+",
+                "+- Tokens refresh one minute before they expire, under a lock.",
+                "+- Older entries moved to `docs/HISTORY.md`.",
+                " ",
+            ],
+        ),
+    ]
+}
+
 fn rfc3339(unix: i64) -> String {
     let (y, m, d) = civil_from_days(unix.div_euclid(86_400));
     let s = unix.rem_euclid(86_400);
@@ -152,6 +685,7 @@ fn heat(now: i64) -> Vec<DayCount> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::NOW;
 
     #[test]
     fn demo_uses_only_generic_data() {
@@ -171,5 +705,125 @@ mod tests {
         assert_eq!(s.activity.as_ref().unwrap().heatmap.len(), 182);
         assert!(s.lists_loaded);
         assert_eq!(s.config, Config::default());
+    }
+
+    #[test]
+    fn demo_review_matches_the_mockup() {
+        let (view, news) = demo_review(NOW);
+        assert_eq!(view.review.pr, demo_pr());
+        assert_eq!(view.pr.summary.title, "feat: auth refresh");
+        assert_eq!(view.pr.summary.author, "octo");
+        assert_eq!(
+            (view.pr.head_ref.as_str(), view.pr.base_ref.as_str()),
+            ("octo:auth-refresh", "main")
+        );
+        assert_eq!(
+            (view.pr.additions, view.pr.deletions, view.pr.changed_files),
+            (120, 34, 7)
+        );
+        let stats: Vec<(&str, u64, u64)> = view
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.additions, f.deletions))
+            .collect();
+        assert_eq!(
+            stats,
+            [
+                ("src/auth/refresh.rs", 9, 2),
+                ("src/auth/store.rs", 41, 12),
+                ("src/auth/mod.rs", 3, 1),
+                ("src/client/http.rs", 28, 9),
+                ("src/config.rs", 6, 0),
+                ("tests/refresh.rs", 30, 0),
+                ("CHANGELOG.md", 3, 10),
+            ]
+        );
+        assert_eq!(view.checks.unwrap().label(), "passed");
+        assert_eq!(view.role, Role::Reviewer);
+        let conversation = view.conversation.as_ref().unwrap();
+        let open: Vec<&ReviewThread> = conversation
+            .review_threads
+            .iter()
+            .filter(|t| !t.is_resolved)
+            .collect();
+        assert_eq!(open.len(), 1);
+        assert_eq!(
+            (open[0].path.as_str(), open[0].line),
+            ("src/auth/refresh.rs", Some(41))
+        );
+        assert_eq!(open[0].comments[0].author, "mona");
+        assert_eq!(
+            open[0].comments[0].body,
+            "Why one minute? The CLI uses 30 seconds."
+        );
+        assert_eq!(
+            conversation.review_threads.len()
+                + conversation.comments.len()
+                + conversation
+                    .reviews
+                    .iter()
+                    .filter(|r| !r.body.is_empty())
+                    .count(),
+            5,
+            "the Comments tab count of the mockup"
+        );
+        assert_eq!(
+            conversation.reviews[0].body,
+            "Looks good once the lock change lands."
+        );
+        let items: Vec<(String, u32, &ItemStatus)> = view
+            .review
+            .draft
+            .items
+            .iter()
+            .map(|i| {
+                let a = i.anchor.as_ref().unwrap();
+                (a.path.clone(), a.line, &i.status)
+            })
+            .collect();
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            (items[0].0.as_str(), items[0].1),
+            ("src/auth/refresh.rs", 44)
+        );
+        assert!(matches!(
+            items[1].2,
+            ItemStatus::Moved { from_line: 81, .. }
+        ));
+        assert!(matches!(items[2].2, ItemStatus::Obsolete { .. }));
+        assert_eq!(news.len(), 5);
+        assert!(
+            news.iter()
+                .all(|n| n.at > view.review.last_seen_at.unwrap())
+        );
+    }
+
+    #[test]
+    fn demo_patches_agree_with_their_counts_and_anchors() {
+        use clusia_core::can_comment;
+        use clusia_view::diff::{RowKind, parse_patch};
+
+        let (view, _) = demo_review(NOW);
+        for f in &view.diff {
+            let rows = parse_patch(f.patch.as_deref().unwrap());
+            let count = |kind| rows.iter().filter(|r| r.kind == kind).count() as u64;
+            assert_eq!(
+                (count(RowKind::Added), count(RowKind::Removed)),
+                (f.additions, f.deletions),
+                "{}",
+                f.path
+            );
+        }
+        let patch = |path: &str| {
+            view.diff
+                .iter()
+                .find(|f| f.path == path)
+                .and_then(|f| f.patch.clone())
+                .unwrap()
+        };
+        assert!(can_comment(&patch("src/auth/refresh.rs"), Side::Right, 44));
+        assert!(can_comment(&patch("src/auth/refresh.rs"), Side::Right, 41));
+        assert!(can_comment(&patch("src/auth/store.rs"), Side::Right, 88));
+        assert!(can_comment(&patch("src/auth/mod.rs"), Side::Right, 3));
     }
 }

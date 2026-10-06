@@ -24,6 +24,7 @@ libc.workspace = true
 clusiad.workspace = true
 clusia-platform.workspace = true
 tempfile.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true

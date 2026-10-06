@@ -64,6 +64,7 @@ pub fn run(launch: Launch) {
         crate::theme::ThemePlugin,
         crate::ui::kit::KitPlugin,
         crate::nav::NavPlugin,
+        crate::review_state::ReviewStatePlugin,
         crate::screens::home::HomePlugin,
         crate::screens::config::ConfigPlugin,
     ))

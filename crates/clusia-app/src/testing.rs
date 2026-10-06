@@ -10,10 +10,11 @@ use clusia_core::{Density, Paths};
 use clusia_protocol::WindowTarget;
 
 use crate::app::{AppPaths, StartTarget};
-use crate::bridge::{Ask, Asks, Connection, Model, ShowRequested, Toasts};
+use crate::bridge::{self, Ask, Asks, Connection, Model, Outbox, ShowRequested, Tell, Toasts};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
-use crate::nav::NavPlugin;
+use crate::nav::{Nav, NavPlugin};
+use crate::review_state::{Phase, Ready, ReviewStatePlugin, ReviewTabs, Tab};
 use crate::screens::config::ConfigPlugin;
 use crate::screens::home::HomePlugin;
 use crate::snapshot::{self, Snapshot};
@@ -23,6 +24,7 @@ use crate::ui::kit::KitPlugin;
 pub const NOW: i64 = 1_790_000_000;
 
 pub fn app(snapshot: Snapshot) -> App {
+    let (inbox, outbox) = bridge::local_link();
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .init_resource::<ButtonInput<KeyCode>>()
@@ -43,7 +45,11 @@ pub fn app(snapshot: Snapshot) -> App {
         })
         .init_resource::<Asks>()
         .init_resource::<Toasts>()
-        .add_plugins((ThemePlugin, KitPlugin, NavPlugin, HomePlugin, ConfigPlugin));
+        .insert_resource(inbox)
+        .insert_resource(outbox)
+        .add_systems(PreUpdate, bridge::pump)
+        .add_plugins((ThemePlugin, KitPlugin, NavPlugin, HomePlugin, ConfigPlugin))
+        .add_plugins(ReviewStatePlugin);
     app.update();
     app
 }
@@ -83,5 +89,47 @@ pub fn set_config_locally(app: &mut App, key: &str, value: &str) {
 pub fn settle(app: &mut App) {
     for _ in 0..3 {
         app.update();
+    }
+}
+
+/// Delivers `tell` as the bridge would (through `pump`) and runs a frame.
+pub fn tell(app: &mut App, tell: Tell) {
+    let _ = app.world().resource::<Outbox>().0.send(tell);
+    app.update();
+}
+
+/// The demo app with the demo review open and ready (`fixture::demo_review` without its
+/// What's new rows, so no modal opens), and no recorded asks.
+pub fn demo_review_app() -> App {
+    let mut app = app(crate::fixture::demo(NOW));
+    let pr = crate::fixture::demo_pr();
+    app.world_mut()
+        .resource_mut::<Nav>()
+        .go(&WindowTarget::Review { pr: pr.clone() });
+    app.update();
+    let (view, _) = crate::fixture::demo_review(NOW);
+    tell(
+        &mut app,
+        Tell::Opened {
+            pr,
+            view: Box::new(view),
+            news: Vec::new(),
+        },
+    );
+    settle(&mut app);
+    recorded(&mut app);
+    app
+}
+
+/// A copy of the tab of `pr`.
+pub fn tab(app: &App, pr: &clusia_core::PrRef) -> Tab {
+    app.world().resource::<ReviewTabs>().0[pr].clone()
+}
+
+/// The ready review of `pr` (panics when it is not ready).
+pub fn ready(app: &App, pr: &clusia_core::PrRef) -> Ready {
+    match tab(app, pr).phase {
+        Phase::Ready(r) => *r,
+        other => panic!("not ready: {other:?}"),
     }
 }

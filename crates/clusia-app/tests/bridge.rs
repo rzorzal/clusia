@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use clusia_app::bridge::{self, Ask, Link, Tell};
 use clusia_app::snapshot::Snapshot;
-use clusia_core::Config;
 use clusia_core::config::Theme as ThemeChoice;
-use clusia_protocol::{Command, Reply, WindowTarget};
+use clusia_core::{Config, DraftKind, PrRef, Verdict};
+use clusia_protocol::{Command, LoadStepKind, Reply, StepStatus, WindowTarget};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// The next tell matching `want`, within 10 s (others are skipped).
 fn next(link: &Link, want: impl Fn(&Tell) -> bool) -> Tell {
@@ -182,4 +184,118 @@ async fn asks_while_disconnected_are_answered() {
         Tell::Notice { warning, text } => assert!(warning && text.contains("reconnecting")),
         _ => unreachable!(),
     }
+}
+
+fn pr7() -> PrRef {
+    "rzorzal/clusia#7".parse().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn load_steps_stream_while_opening() {
+    let server = MockServer::start().await;
+    let slow = Duration::from_millis(1500);
+    Mock::given(method("GET"))
+        .and(path("/repos/rzorzal/clusia/pulls/7"))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(serde_json::json!({ "message": "Not Found" }))
+                .set_delay(slow),
+        )
+        .mount(&server)
+        .await;
+    let d = common::Daemon::start_with_github(server.uri()).await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    let asked = Instant::now();
+    link.ask.send(Ask::OpenReview(pr7())).unwrap();
+    let first = next(&link, |t| {
+        matches!(
+            t,
+            Tell::Step(_) | Tell::Opened { .. } | Tell::OpenFailed { .. }
+        )
+    });
+    match &first {
+        Tell::Step(s) => {
+            assert_eq!(
+                (&s.pr, s.step, s.status),
+                (&pr7(), LoadStepKind::Repo, StepStatus::Running)
+            );
+        }
+        other => panic!("a step comes first, got {other:?}"),
+    }
+    assert!(
+        asked.elapsed() < slow,
+        "the step arrived while GitHub was still answering ({:?})",
+        asked.elapsed()
+    );
+    match next(&link, |t| matches!(t, Tell::OpenFailed { .. })) {
+        Tell::OpenFailed { pr, message, cache } => {
+            assert_eq!(pr, pr7());
+            assert!(!message.is_empty());
+            assert!(!cache, "nothing cached yet");
+        }
+        _ => unreachable!(),
+    }
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draft_writes_answer_with_their_ticket() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask
+        .send(Ask::AddItem {
+            pr: pr7(),
+            kind: DraftKind::General,
+            anchor: None,
+            thread: None,
+            body: "Looks good".into(),
+            ticket: 41,
+        })
+        .unwrap();
+    match next(&link, |t| {
+        matches!(t, Tell::Refused { .. } | Tell::Saved { .. })
+    }) {
+        Tell::Refused {
+            pr,
+            ticket,
+            message,
+        } => {
+            assert_eq!((pr, ticket), (pr7(), 41));
+            assert!(!message.is_empty(), "the daemon's message");
+        }
+        other => panic!("no review is open for #7: {other:?}"),
+    }
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publish_failure_and_leaving_reach_the_window() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask
+        .send(Ask::Publish {
+            pr: pr7(),
+            verdict: Verdict::Comment,
+            summary: String::new(),
+        })
+        .unwrap();
+    match next(&link, |t| {
+        matches!(t, Tell::PublishFailed { .. } | Tell::Published { .. })
+    }) {
+        Tell::PublishFailed { pr, message, .. } => {
+            assert_eq!(pr, pr7());
+            assert!(!message.is_empty());
+        }
+        other => panic!("nothing to publish: {other:?}"),
+    }
+    link.ask.send(Ask::CloseReview(pr7())).unwrap();
+    assert_eq!(
+        next(&link, |t| matches!(t, Tell::Left(_))),
+        Tell::Left(pr7()),
+        "the tab closes even when the daemon had nothing open"
+    );
+    d.stop().await;
 }
