@@ -1279,24 +1279,30 @@ fn below(
                     if !t.expanded
                         && let Some(first) = t.posts.first()
                     {
+                        // The words lay out on one line far wider than the card, so the clip
+                        // cuts the preview where the card ends instead of wrapping its tail
+                        // out of sight.
                         line.with_children(|l| {
-                            markdown_line(l, fonts, &parse(&first.body), Type::BODY, opts, 120);
+                            l.spawn(Node {
+                                width: px(1200),
+                                flex_shrink: 0.0,
+                                ..default()
+                            })
+                            .with_children(|w| {
+                                markdown_line(w, fonts, &parse(&first.body), Type::BODY, opts, 120);
+                            });
                         });
                     }
-                    let replies = match t.replies {
-                        0 => String::new(),
-                        1 => "1 reply".to_string(),
-                        n => format!("{n} replies"),
+                    // The count rides on the toggle's label, which never shrinks: only the
+                    // preview gives way when the card is narrow.
+                    let toggle = if t.expanded { "Collapse" } else { "Expand" };
+                    let toggle = match t.replies {
+                        0 => toggle.to_string(),
+                        1 => format!("{toggle} · 1 reply"),
+                        n => format!("{toggle} · {n} replies"),
                     };
-                    if !replies.is_empty() {
-                        h.spawn(text(fonts, replies, Type::META));
-                    }
                     h.spawn((
-                        button(
-                            fonts,
-                            if t.expanded { "Collapse" } else { "Expand" },
-                            Variant::Ghost,
-                        ),
+                        button(fonts, &toggle, Variant::Ghost),
                         ThreadToggle {
                             pr: pr.clone(),
                             id: t.thread.id.clone(),
@@ -2306,6 +2312,19 @@ mod tests {
         testing::settle(&mut app);
         assert!(testing::tab(&app, &pr).ui.expanded.is_empty());
         assert!(!testing::shows(&mut app, last), "collapsed again");
+    }
+
+    #[test]
+    fn the_reply_count_of_a_collapsed_thread_never_wraps_or_shrinks() {
+        let mut app = review_app();
+        let mut q = app.world_mut().query::<(&Text, &TextLayout, &ChildOf)>();
+        let (_, layout, parent) = q
+            .iter(app.world())
+            .find(|(t, _, _)| t.0 == "Expand · 2 replies")
+            .expect("the count is part of the toggle's label");
+        assert_eq!(layout.linebreak, LineBreak::NoWrap);
+        let button = app.world().get::<Node>(parent.parent()).unwrap();
+        assert_eq!(button.flex_shrink, 0.0, "only the preview gives way");
     }
 
     #[test]

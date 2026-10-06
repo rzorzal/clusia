@@ -24,7 +24,7 @@ use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason, sync_editor_text};
 use crate::snapshot::Snapshot;
-use crate::theme::Swatch;
+use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, disabled_button, panel,
     text,
@@ -877,8 +877,10 @@ fn rebuild_right(
     model: Res<Model>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
+    theme: Res<Theme>,
     mut panels: Query<(Entity, &mut RightPanel)>,
 ) {
+    let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
     for (entity, mut right) in &mut panels {
         let Some((v, _)) = current_view(&tabs, &model, &right.pr, clock.now()) else {
             continue;
@@ -901,7 +903,7 @@ fn rebuild_right(
         let pr = right.pr.clone();
         let editor = general.cloned();
         refill(&mut commands, entity, |p| {
-            right_region(p, &fonts, &pr, &want, editor.as_ref())
+            right_region(p, &fonts, &pr, &want, editor.as_ref(), &opts)
         });
         right.built = Some(want);
     }
@@ -913,6 +915,7 @@ fn right_region(
     pr: &PrRef,
     v: &RightView,
     editor: Option<&Editor>,
+    opts: &RenderOpts,
 ) {
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
@@ -1013,7 +1016,7 @@ fn right_region(
                     ));
                 }
                 for card in &v.cards {
-                    draft_card_node(list, fonts, pr, card, v.read_only);
+                    draft_card_node(list, fonts, pr, card, v.read_only, opts);
                 }
             });
     });
@@ -1025,6 +1028,7 @@ fn draft_card_node(
     pr: &PrRef,
     card: &DraftCard,
     read_only: bool,
+    opts: &RenderOpts,
 ) {
     p.spawn((
         Node {
@@ -1103,14 +1107,7 @@ fn draft_card_node(
             }
         });
         if !card.body.is_empty() {
-            markdown_line(
-                c,
-                fonts,
-                &parse(&card.body),
-                Type::BODY,
-                &RenderOpts::default(),
-                80,
-            );
+            markdown_line(c, fonts, &parse(&card.body), Type::BODY, opts, 80);
         }
     });
 }

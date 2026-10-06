@@ -202,7 +202,10 @@ pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
         HoverFill(hover),
         BorderColor::default(),
         Stroke(stroke),
-        children![text(fonts, label.to_string(), Type::STRONG.ink(ink))],
+        children![(
+            text(fonts, label.to_string(), Type::STRONG.ink(ink)),
+            TextLayout::no_wrap(),
+        )],
     )
 }
 

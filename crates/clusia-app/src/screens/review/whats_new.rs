@@ -13,7 +13,7 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
 use clusia_core::PrRef;
 use clusia_protocol::{NewsItem, NewsKind};
 
-use crate::bridge::{Ask, Asks};
+use crate::bridge::{Ask, Asks, Model};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, Screen};
@@ -21,7 +21,7 @@ use crate::review_state::{Modal, Phase, Ready, ReviewSection, ReviewTabs};
 use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::shell::ModalFor;
-use crate::theme::Swatch;
+use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, button, panel, text,
 };
@@ -187,6 +187,8 @@ fn show_whats_new(
     tabs: Res<ReviewTabs>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
+    theme: Res<Theme>,
+    model: Res<Model>,
     open: Query<&ModalFor>,
 ) {
     let Screen::Review(pr) = &nav.screen else {
@@ -204,6 +206,7 @@ fn show_whats_new(
         return;
     }
     let view = whats_new_view(ready, clock.now());
+    let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
     commands
         .spawn((
             modal_root(),
@@ -214,11 +217,17 @@ fn show_whats_new(
         ))
         .with_children(|root| {
             root.spawn(modal_card(560.0))
-                .with_children(|card| dialog(card, &fonts, pr, &view));
+                .with_children(|card| dialog(card, &fonts, pr, &view, &opts));
         });
 }
 
-fn dialog(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &WhatsNewView) {
+fn dialog(
+    c: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    v: &WhatsNewView,
+    opts: &RenderOpts,
+) {
     c.spawn(Node {
         flex_direction: FlexDirection::Column,
         row_gap: px(4),
@@ -235,7 +244,7 @@ fn dialog(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &WhatsNe
         h.spawn(text(fonts, v.since.clone(), Type::MUTED));
     });
     for row in &v.rows {
-        news_row_node(c, fonts, pr, row);
+        news_row_node(c, fonts, pr, row, opts);
     }
     c.spawn((
         panel(
@@ -265,7 +274,13 @@ fn dialog(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &WhatsNe
     });
 }
 
-fn news_row_node(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row: &NewsRow) {
+fn news_row_node(
+    c: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    row: &NewsRow,
+    opts: &RenderOpts,
+) {
     let (fill, ink) = row.tone.swatches();
     c.spawn((
         Node {
@@ -325,14 +340,7 @@ fn news_row_node(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row:
         .with_children(|t| {
             t.spawn(text(fonts, row.what.clone(), Type::BODY.size(13.0)));
             if !row.detail.is_empty() {
-                markdown_line(
-                    t,
-                    fonts,
-                    &parse(&row.detail),
-                    Type::META,
-                    &RenderOpts::default(),
-                    140,
-                );
+                markdown_line(t, fonts, &parse(&row.detail), Type::META, opts, 140);
             }
         });
         r.spawn(Node {
