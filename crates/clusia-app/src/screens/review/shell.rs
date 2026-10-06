@@ -8,7 +8,7 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
+use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::{DraftItem, DraftKind, ItemStatus, PrRef};
 use clusia_protocol::ReviewView;
 
@@ -157,12 +157,20 @@ pub struct DraftCardButton {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeButton(pub PrRef);
 
-/// **Remove** on a draft card (the only way out for an obsolete item outside the diff).
+/// The remove × on a draft card (the only way out for an obsolete item outside the diff).
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct DraftCardRemove {
     pub pr: PrRef,
     pub id: String,
 }
+
+/// A draft card's location and badge: they shrink and are cut so the remove × stays in the card.
+#[derive(Component, Debug)]
+pub struct DraftCardPlace;
+
+/// The scrolling list of draft cards under the Draft heading.
+#[derive(Component, Debug)]
+pub struct DraftList;
 
 #[derive(Component)]
 struct ShellTop {
@@ -551,8 +559,9 @@ fn shell_frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
                     width: px(300),
                     flex_shrink: 0.0,
                     flex_direction: FlexDirection::Column,
+                    min_height: px(0),
                     border: UiRect::left(px(1)),
-                    overflow: Overflow::scroll_y(),
+                    overflow: Overflow::clip(),
                     ..default()
                 },
                 BorderColor::default(),
@@ -915,6 +924,7 @@ fn right_region(
 ) {
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
+        flex_shrink: 0.0,
         row_gap: px(10),
         padding: px(16).all(),
         border: UiRect::bottom(px(1)),
@@ -945,14 +955,20 @@ fn right_region(
     });
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
+        flex_grow: 1.0,
+        min_height: px(0),
         row_gap: px(8),
-        padding: px(16).all(),
+        padding: UiRect {
+            bottom: px(0),
+            ..px(16).all()
+        },
         ..default()
     })
     .with_children(|draft| {
         draft
             .spawn(Node {
                 column_gap: px(8),
+                flex_shrink: 0.0,
                 align_items: AlignItems::Center,
                 ..default()
             })
@@ -978,19 +994,36 @@ fn right_region(
                 Type::META,
             ));
         }
-        if let Some(editor) = editor {
-            editor_box(draft, fonts, editor, pr);
-        }
-        if v.cards.is_empty() && editor.is_none() {
-            draft.spawn(text(
-                fonts,
-                "Click a line in the diff to comment on it.",
-                Type::META,
-            ));
-        }
-        for card in &v.cards {
-            draft_card_node(draft, fonts, pr, card, v.read_only);
-        }
+        draft
+            .spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    flex_grow: 1.0,
+                    // About one card, so a short window still shows (and scrolls) the list.
+                    min_height: px(96),
+                    row_gap: px(8),
+                    padding: UiRect::bottom(px(16)),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+                ScrollArea,
+                DraftList,
+            ))
+            .with_children(|list| {
+                if let Some(editor) = editor {
+                    editor_box(list, fonts, editor, pr);
+                }
+                if v.cards.is_empty() && editor.is_none() {
+                    list.spawn(text(
+                        fonts,
+                        "Click a line in the diff to comment on it.",
+                        Type::META,
+                    ));
+                }
+                for card in &v.cards {
+                    draft_card_node(list, fonts, pr, card, v.read_only);
+                }
+            });
     });
 }
 
@@ -1004,6 +1037,7 @@ fn draft_card_node(
     p.spawn((
         Node {
             flex_direction: FlexDirection::Column,
+            flex_shrink: 0.0,
             row_gap: px(4),
             padding: UiRect::axes(px(12), px(10)),
             border: px(1).all(),
@@ -1036,24 +1070,44 @@ fn draft_card_node(
             ..default()
         })
         .with_children(|h| {
-            h.spawn(text(fonts, card.title.clone(), Type::MONO));
-            if let Some((label, tone)) = &card.badge {
-                h.spawn(badge(fonts, label, *tone));
-            }
-            if !read_only {
-                h.spawn(Node {
+            h.spawn((
+                Node {
                     flex_grow: 1.0,
+                    min_width: px(0),
+                    column_gap: px(8),
+                    align_items: AlignItems::Center,
+                    overflow: Overflow::clip_x(),
                     ..default()
-                });
-                // A button inside the card's button: its click stops here.
+                },
+                DraftCardPlace,
+            ))
+            .with_children(|place| {
+                place.spawn((
+                    text(fonts, card.title.clone(), Type::MONO),
+                    TextLayout::no_wrap(),
+                ));
+                if let Some((label, tone)) = &card.badge {
+                    place.spawn(badge(fonts, label, *tone));
+                }
+            });
+            if !read_only {
+                // A button inside the card's button: its click stops here. A compact × so the
+                // location and the whole badge fit at the panel width.
                 h.spawn((
-                    button(fonts, "Remove", Variant::Ghost),
+                    button(fonts, "×", Variant::Ghost),
                     DraftCardRemove {
                         pr: pr.clone(),
                         id: card.id.clone(),
                     },
                     observe(on_card_remove),
-                ));
+                ))
+                .entry::<Node>()
+                .and_modify(|mut node| {
+                    node.width = px(24);
+                    node.height = px(24);
+                    node.padding = UiRect::ZERO;
+                    node.align_self = AlignSelf::Center;
+                });
             }
         });
         if !card.body.is_empty() {
@@ -1808,5 +1862,53 @@ mod tests {
             0,
             "cached copy"
         );
+    }
+
+    fn node(app: &App, e: Entity) -> Node {
+        app.world().get::<Node>(e).unwrap().clone()
+    }
+
+    #[test]
+    fn draft_card_headers_shrink_the_place_not_the_remove_button() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        let remove = testing::find::<DraftCardRemove>(&mut app, |_| true);
+        let n = node(&app, remove);
+        assert_eq!(n.flex_shrink, 0.0, "Remove keeps its size");
+        assert_eq!((n.width, n.height), (px(24), px(24)), "a compact ×");
+        assert!(app.world().get::<Clickable>(remove).is_some());
+        let mut labels = app.world_mut().query::<(&Text, &ChildOf)>();
+        let label = labels
+            .iter(app.world())
+            .find(|(_, parent)| parent.parent() == remove)
+            .map(|(t, _)| t.0.clone());
+        assert_eq!(label.as_deref(), Some("×"));
+        let place = testing::find::<DraftCardPlace>(&mut app, |_| true);
+        let n = node(&app, place);
+        assert_eq!(n.min_width, px(0), "the place may shrink below its text");
+        assert_eq!(n.overflow, Overflow::clip_x(), "and is cut at the edge");
+        let row = app.world().get::<ChildOf>(remove).unwrap().parent();
+        assert_eq!(app.world().get::<ChildOf>(place).unwrap().parent(), row);
+        let mut texts = app.world_mut().query::<(&Text, &TextLayout, &ChildOf)>();
+        let (_, layout, _) = texts
+            .iter(app.world())
+            .find(|(_, _, parent)| parent.parent() == place)
+            .expect("the location text");
+        assert_eq!(layout.linebreak, LineBreak::NoWrap, "one line");
+    }
+
+    #[test]
+    fn the_draft_list_scrolls_inside_the_right_panel() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        let list = testing::find::<DraftList>(&mut app, |_| true);
+        assert!(app.world().get::<ScrollArea>(list).is_some());
+        let n = node(&app, list);
+        assert_eq!(n.overflow, Overflow::scroll_y());
+        assert_eq!(n.flex_grow, 1.0, "bounded by the panel");
+        assert_eq!(n.min_height, px(96), "but never shorter than a card");
+        let card = testing::find::<DraftCardButton>(&mut app, |_| true);
+        assert_eq!(app.world().get::<ChildOf>(card).unwrap().parent(), list);
+        assert_eq!(node(&app, card).flex_shrink, 0.0, "cards keep their height");
     }
 }

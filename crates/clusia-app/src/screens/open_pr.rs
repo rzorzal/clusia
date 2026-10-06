@@ -92,6 +92,10 @@ pub fn palette_matches(snap: &Snapshot, nav: &Nav, query: &str) -> Vec<PaletteRo
 #[derive(Component, Debug)]
 pub struct PaletteRoot;
 
+/// The hint beside the palette field; it keeps one line and the field gives way.
+#[derive(Component, Debug)]
+pub struct PaletteHint;
+
 #[derive(Component, Debug)]
 pub struct PaletteField;
 
@@ -170,16 +174,28 @@ fn palette_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, query: &str) {
         Stroke(Swatch::Line),
     ))
     .with_children(|row| {
+        // The field's width is replaced below: it takes what the hint leaves.
         row.spawn((
-            text_field(fonts, query, 380.0, false),
+            text_field(fonts, query, 0.0, false),
             PaletteField,
             AutoFocus,
-        ));
-        row.spawn(Node {
-            flex_grow: 1.0,
-            ..default()
+        ))
+        .entry::<Node>()
+        .and_modify(|mut node| {
+            node.width = Val::Auto;
+            node.min_width = px(0);
+            node.flex_grow = 1.0;
+            node.flex_shrink = 1.0;
         });
-        row.spawn(text(fonts, "URL, owner/repo#n or a title", Type::META));
+        row.spawn((
+            text(fonts, "URL, owner/repo#n or a title", Type::META),
+            TextLayout::no_wrap(),
+            Node {
+                flex_shrink: 0.0,
+                ..default()
+            },
+            PaletteHint,
+        ));
     });
     p.spawn(Node {
         padding: UiRect::new(px(18), px(18), px(10), px(4)),
@@ -505,5 +521,31 @@ mod tests {
             Screen::Review(pr("rzorzal/clusia#98"))
         );
         assert!(!app.world().resource::<Palette>().open);
+    }
+
+    #[test]
+    fn the_hint_stays_on_one_line_and_the_field_takes_the_rest() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let plus = testing::find::<NewTabButton>(&mut app, |_| true);
+        testing::activate(&mut app, plus);
+        testing::settle(&mut app);
+        let hint = testing::find::<PaletteHint>(&mut app, |_| true);
+        assert_eq!(
+            app.world().get::<Text>(hint).unwrap().0,
+            "URL, owner/repo#n or a title"
+        );
+        assert_eq!(
+            app.world().get::<TextLayout>(hint).unwrap().linebreak,
+            LineBreak::NoWrap
+        );
+        assert_eq!(app.world().get::<Node>(hint).unwrap().flex_shrink, 0.0);
+        let field = testing::find::<PaletteField>(&mut app, |_| true);
+        let node = app.world().get::<Node>(field).unwrap();
+        assert_eq!(
+            (node.flex_grow, node.flex_shrink),
+            (1.0, 1.0),
+            "the field gives way"
+        );
+        assert_eq!(node.min_width, px(0));
     }
 }

@@ -28,7 +28,7 @@ use crate::ui::kit::{
     text,
 };
 use crate::ui::modal::{escape_pressed, modal_card, modal_root};
-use crate::ui::text_area::text_area;
+use crate::ui::text_area::growing_text_area;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FinalizeItem {
@@ -394,7 +394,7 @@ fn card_content(
                         .get(&(pr.clone(), item.id.clone()))
                         .unwrap_or(&item.body);
                     row.spawn((
-                        text_area(fonts, value, 2.0, index as u64 + 1),
+                        growing_text_area(fonts, value, 1.0, 6.0, index as u64 + 1),
                         FinalizeItemArea {
                             pr: pr.clone(),
                             id: item.id.clone(),
@@ -437,7 +437,10 @@ fn card_content(
             });
         }
         c.spawn(text(fonts, "Summary", Type::STRONG));
-        c.spawn((text_area(fonts, summary, 3.0, 0), SummaryArea(pr.clone())));
+        c.spawn((
+            growing_text_area(fonts, summary, 3.0, 6.0, 0),
+            SummaryArea(pr.clone()),
+        ));
         c.spawn(text(fonts, "Verdict", Type::STRONG));
         c.spawn(Node {
             column_gap: px(8),
@@ -880,6 +883,7 @@ mod tests {
     use crate::fixture;
     use crate::nav::Screen;
     use crate::testing::{self, NOW};
+    use crate::ui::text_area::Grow;
     use clusia_core::Role;
     use clusia_protocol::PublishResult;
 
@@ -1375,6 +1379,16 @@ mod tests {
             0,
             "nothing is removed from the cached copy"
         );
+    }
+
+    #[test]
+    fn item_and_summary_areas_grow() {
+        let mut app = finalize_app(false);
+        let item = testing::find::<FinalizeItemArea>(&mut app, |a| a.index == 0);
+        let summary = testing::find::<SummaryArea>(&mut app, |_| true);
+        let grow = |e| *app.world().get::<Grow>(e).expect("a growing area");
+        assert_eq!(grow(item), Grow { min: 1.0, max: 6.0 });
+        assert_eq!(grow(summary), Grow { min: 3.0, max: 6.0 });
     }
 
     #[test]

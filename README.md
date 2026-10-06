@@ -39,6 +39,8 @@ Clúsia is a Rust workspace with four programs that talk over a local Unix socke
 | `clusia-app` | The main window (Bevy): Home, Config and the review screen (diff in Unified or Split with syntax colors, comments, finalize). Opening it starts the daemon if needed, and a second launch brings the open window forward. |
 | `clusia` | The command-line interface. |
 
+<p align="center"><img src="docs/assets/sp1-m5b-review-light.png" alt="The Clúsia review screen: PR header, sections, a syntax-highlighted diff with a thread and a draft comment, and the draft panel" width="720"></p>
+
 <p align="center"><img src="docs/assets/sp1-m4-popover.png" alt="The Clúsia menu bar popover in light and dark mode: activity heatmap, counters, search, repository chips and paginated pull request lists" width="640"></p>
 
 Your own clone is never checked out or branched: Clúsia only adds refs under `refs/clusia/` and works in separate worktrees. Your GitHub token comes from `gh` or the macOS Keychain and never appears in logs or output.

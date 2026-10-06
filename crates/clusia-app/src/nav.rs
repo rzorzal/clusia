@@ -440,11 +440,14 @@ fn rebuild_top_bar(
                     TabTarget::Config => {}
                 }
             }
+            // Buttons sit at the top of their row; this one is centered like the tabs.
             p.spawn((
                 button(&fonts, "+", Variant::Ghost),
                 NewTabButton,
                 observe(on_new_tab),
-            ));
+            ))
+            .entry::<Node>()
+            .and_modify(|mut node| node.align_self = AlignSelf::Center);
             p.spawn(Node {
                 flex_grow: 1.0,
                 ..default()
@@ -803,5 +806,19 @@ mod tests {
         app.update();
         app.update();
         assert_eq!(testing::count::<ToastCard>(&mut app), 1, "expired ones go");
+    }
+
+    #[test]
+    fn the_new_tab_button_matches_the_tabs_and_is_centered() {
+        let mut app = testing::app(fixture::demo(testing::NOW));
+        let plus = testing::find::<NewTabButton>(&mut app, |_| true);
+        let home = testing::find::<TabTarget>(&mut app, |t| *t == TabTarget::Home);
+        let node = |e| app.world().get::<Node>(e).unwrap().clone();
+        assert_eq!(node(plus).height, node(home).height, "as tall as a tab");
+        assert_eq!(
+            node(plus).align_self,
+            AlignSelf::Center,
+            "centered in the bar"
+        );
     }
 }
