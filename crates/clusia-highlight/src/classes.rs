@@ -43,11 +43,15 @@ impl Class {
     }
 }
 
-/// Capture names the highlighter recognizes. tree-sitter-highlight matches a query capture to
-/// the entry sharing the most leading dot-separated parts, so `function.method.call` lands on
-/// `function.method`. Captures that match nothing produce no event and stay in the enclosing
-/// class: `none`, `spell` and `embedded` are left out on purpose, since a markdown code block
-/// marks its content `@none` around the injected language's own highlights.
+/// Capture names the highlighter recognizes. tree-sitter-highlight's `configure` matches a
+/// capture to an entry when every part of the entry is among the capture's dot-separated parts
+/// (in any position); the entry with the most parts wins and a tie goes to the first one. So
+/// `function.method.call` lands on `function.method`, and `keyword.function` needs its own
+/// entry: otherwise `function` (listed before `keyword`) would win the one-part tie. Whatever a
+/// capture lands on must have the same `class_for` as the capture itself (tested). Captures that
+/// match nothing produce no event and stay in the enclosing class: `none`, `spell` and
+/// `embedded` are left out on purpose, since a markdown code block marks its content `@none`
+/// around the injected language's own highlights.
 pub(crate) const NAMES: &[&str] = &[
     "attribute",
     "boolean",
@@ -68,6 +72,7 @@ pub(crate) const NAMES: &[&str] = &[
     "function.method",
     "include",
     "keyword",
+    "keyword.function",
     "label",
     "markup.heading",
     "markup.link",

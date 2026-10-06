@@ -286,6 +286,19 @@ mod tests {
     }
 
     #[test]
+    fn function_keywords_are_keywords() {
+        // `@keyword.function` must not resolve to the recognized name `function`.
+        assert_eq!(class_of("a.kt", "fun main() {}", 0, "fun"), Class::Keyword);
+        assert_eq!(
+            class_of("a.swift", "func f() {}", 0, "func"),
+            Class::Keyword
+        );
+        let deinit = "class A { deinit {} }";
+        assert_eq!(class_of("a.swift", deinit, 0, "deinit"), Class::Keyword);
+        assert_eq!(class_of("a.rs", "fn main() {}", 0, "fn"), Class::Keyword);
+    }
+
+    #[test]
     fn injections_are_highlighted() {
         let md = "# T\n\n```rust\nfn main() {}\n```\n";
         assert_eq!(class_of("a.md", md, 3, "fn"), Class::Keyword);

@@ -325,6 +325,8 @@ pub fn language_for(path: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classes::{Class, class_for};
+    use tree_sitter::CaptureQuantifier;
 
     #[test]
     fn languages_from_paths() {
@@ -388,6 +390,46 @@ mod tests {
     fn every_language_builds_its_configuration() {
         for name in LANGUAGES {
             assert!(config(name).is_some(), "{name}");
+        }
+    }
+
+    /// The recognized name tree-sitter-highlight's `configure` picks for a capture: every part
+    /// of the name must be among the capture's parts; the most parts win, the first a tie.
+    fn recognized(capture: &str) -> Option<&'static str> {
+        let parts: Vec<&str> = capture.split('.').collect();
+        let mut best = None;
+        let mut best_len = 0;
+        for name in NAMES {
+            let len = name.split('.').count();
+            if name.split('.').all(|p| parts.contains(&p)) && len > best_len {
+                best = Some(*name);
+                best_len = len;
+            }
+        }
+        best
+    }
+
+    /// Every capture of a language's highlights patterns (locals and injections captures are
+    /// never emitted as highlights) resolves to the class `class_for` gives it.
+    #[test]
+    fn recognized_names_agree_with_class_for() {
+        for name in LANGUAGES {
+            let s = spec_for(name).unwrap();
+            let highlights_start = s.injections.len() + s.locals.len();
+            let query = &config(name).unwrap().query;
+            for pattern in 0..query.pattern_count() {
+                if query.start_byte_for_pattern(pattern) < highlights_start {
+                    continue;
+                }
+                for (i, q) in query.capture_quantifiers(pattern).iter().enumerate() {
+                    if *q == CaptureQuantifier::Zero {
+                        continue;
+                    }
+                    let capture = query.capture_names()[i];
+                    let resolved = recognized(capture).map_or(Class::Plain, class_for);
+                    assert_eq!(resolved, class_for(capture), "{name}: @{capture}");
+                }
+            }
         }
     }
 }
