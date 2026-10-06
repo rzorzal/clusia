@@ -1,4 +1,4 @@
-//! Config › Notifications: Do not disturb. Per-event choices, sounds and schedules.
+//! Config › Notifications: the Do not disturb toggle.
 
 use std::collections::HashMap;
 

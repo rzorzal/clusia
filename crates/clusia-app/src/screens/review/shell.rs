@@ -94,8 +94,8 @@ pub struct ShellView {
     pub closed: Option<String>,
 }
 
-/// The center region of a ready review. The section's filler despawns its children and fills
-/// it when the section changes via `fill_placeholders`.
+/// The center region of a ready review. Each section has its own filler: Diff and Comments
+/// have dedicated fillers, others use `fill_placeholders`.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct SectionBody {
     pub pr: PrRef,
