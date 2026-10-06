@@ -2,10 +2,12 @@
 
 pub mod activity;
 pub mod atomic;
+pub mod cache;
 pub mod config;
 pub mod reviews;
 
 pub use activity::{append_activity, read_activity};
+pub use cache::{delete_review_cache, load_review_cache, save_review_cache};
 pub use config::{ConfigKeyError, Loaded, get_value, load_config, save_config, set_value};
 pub use reviews::{ReviewLoad, delete_review, list_reviews, load_review, save_review};
 

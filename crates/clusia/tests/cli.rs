@@ -345,8 +345,22 @@ mod review_flow {
     use super::*;
     use serde_json::json;
     use std::path::{Path, PathBuf};
-    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Answers GraphQL requests whose body contains `contains` (and whose `input` includes
+    /// `input`, when given) with `data`.
+    fn graphql(contains: &str, input: Option<serde_json::Value>, data: serde_json::Value) -> Mock {
+        let mut mock = Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains(contains));
+        if let Some(input) = input {
+            mock = mock.and(body_partial_json(
+                json!({ "variables": { "input": input } }),
+            ));
+        }
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": data })))
+    }
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
@@ -453,6 +467,24 @@ mod review_flow {
             .respond_with(ok(json!({ "login": "me" })))
             .mount(server)
             .await;
+        graphql(
+            "headRefOid",
+            None,
+            json!({ "repository": { "pullRequest": {
+                "id": "PR_7", "headRefOid": head, "reviews": { "nodes": [] }
+            } } }),
+        )
+        .mount(server)
+        .await;
+        graphql(
+            "reviewThreads",
+            None,
+            json!({ "repository": { "pullRequest": { "reviewThreads": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": []
+            } } } }),
+        )
+        .mount(server)
+        .await;
     }
 
     #[test]
@@ -551,16 +583,32 @@ mod review_flow {
 
         assert!(run(&["open", "acme/widgets#7"]).status.success());
         rt.block_on(async {
-            Mock::given(method("POST"))
-                .and(path("/repos/acme/widgets/pulls/7/reviews"))
-                .and(body_partial_json(json!({
-                    "commit_id": new_head, "event": "REQUEST_CHANGES", "body": "Please rename.",
-                    "comments": [{ "path": "feature.txt", "line": 3, "side": "RIGHT", "body": "rename this" }]
-                })))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": 1, "html_url": "https://github.com/acme/widgets/pull/7#pullrequestreview-1" })))
-                .expect(1)
-                .mount(&server)
-                .await;
+            let url = "https://github.com/acme/widgets/pull/7#pullrequestreview-1";
+            graphql(
+                "addPullRequestReview(",
+                Some(json!({
+                    "commitOID": new_head,
+                    "threads": [{ "path": "feature.txt", "line": 3, "side": "RIGHT", "body": "rename this" }]
+                })),
+                json!({ "addPullRequestReview": { "pullRequestReview": {
+                    "id": "PRR_1", "databaseId": 1, "url": url, "state": "PENDING"
+                } } }),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+            graphql(
+                "submitPullRequestReview",
+                Some(json!({
+                    "pullRequestReviewId": "PRR_1", "event": "REQUEST_CHANGES", "body": "Please rename."
+                })),
+                json!({ "submitPullRequestReview": { "pullRequestReview": {
+                    "id": "PRR_1", "databaseId": 1, "url": url, "state": "CHANGES_REQUESTED"
+                } } }),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
         });
         let o = run(&[
             "review",

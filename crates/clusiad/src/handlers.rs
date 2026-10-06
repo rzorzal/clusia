@@ -71,12 +71,14 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::PrepareWorktree { pr } => worktrees::prepare(shared, &pr).await,
         Command::OpenReview { pr } => reviews::open(shared, client, &pr).await,
         Command::GetReview { pr } => reviews::get(shared, &pr).await,
+        Command::GetCachedReview { pr } => reviews::cached(shared, &pr).await,
         Command::AddDraftItem {
             pr,
             kind,
             anchor,
             body,
-        } => reviews::add_item(shared, client, &pr, kind, anchor, &body).await,
+            thread,
+        } => reviews::add_item(shared, client, &pr, kind, anchor, thread, &body).await,
         Command::UpdateDraftItem { pr, id, body } => {
             reviews::update_item(shared, &pr, &id, &body).await
         }
@@ -176,7 +178,10 @@ pub(crate) fn provider_error(e: ProviderError) -> Outcome {
         ProviderError::RateLimited { .. } => ErrorCode::RateLimited,
         ProviderError::NotFound(_) => ErrorCode::NotFound,
         ProviderError::Offline(_) => ErrorCode::Offline,
-        ProviderError::Http { .. } | ProviderError::Decode(_) => ErrorCode::Upstream,
+        ProviderError::Http { .. }
+        | ProviderError::Decode(_)
+        | ProviderError::GraphQl(_)
+        | ProviderError::EmptyPayload(_) => ErrorCode::Upstream,
     };
     Outcome::Err(ProtocolError::new(code, e.to_string()))
 }

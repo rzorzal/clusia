@@ -9,11 +9,21 @@ use std::process::Command;
 #[ignore = "opens a window"]
 fn demo_screenshots() {
     let dir = tempfile::tempdir().unwrap();
-    let shots: [(&str, &[&str]); 4] = [
+    let shots: [(&str, &[&str]); 14] = [
         ("home-light", &["--demo"]),
         ("home-dark", &["--demo", "--dark"]),
         ("config-light", &["--demo", "--config"]),
         ("config-dark", &["--demo", "--dark", "--config"]),
+        ("review-light", &["--demo", "--scene", "diff"]),
+        ("review-dark", &["--demo", "--dark", "--scene", "diff"]),
+        ("split", &["--demo", "--scene", "split"]),
+        ("comments", &["--demo", "--scene", "comments"]),
+        ("finalize", &["--demo", "--scene", "finalize"]),
+        ("whats-new", &["--demo", "--scene", "whats-new"]),
+        ("loading", &["--demo", "--scene", "loading"]),
+        ("load-failed", &["--demo", "--scene", "failed"]),
+        ("leave", &["--demo", "--scene", "leave"]),
+        ("palette", &["--demo", "--scene", "palette"]),
     ];
     for (name, args) in shots {
         let out = dir.path().join(format!("{name}.png"));

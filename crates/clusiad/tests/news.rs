@@ -59,6 +59,7 @@ async fn saved_review_goes_outdated_and_relocates() {
     });
     c.request(Command::AddDraftItem {
         pr: pr7(),
+        thread: None,
         kind: DraftKind::LineComment,
         anchor,
         body: "x".into(),
@@ -174,6 +175,7 @@ async fn base_only_move_keeps_a_saved_review_saved() {
     ] {
         c.request(Command::AddDraftItem {
             pr: pr7(),
+            thread: None,
             kind: DraftKind::LineComment,
             anchor: Some(clusia_protocol::AnchorInput {
                 path: path.into(),

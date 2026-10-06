@@ -11,6 +11,7 @@ license.workspace = true
 clusia-core.workspace = true
 clusia-protocol.workspace = true
 clusia-view.workspace = true
+clusia-highlight.workspace = true
 bevy.workspace = true
 crossbeam-channel.workspace = true
 tokio.workspace = true
@@ -24,6 +25,7 @@ libc.workspace = true
 clusiad.workspace = true
 clusia-platform.workspace = true
 tempfile.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true

@@ -14,7 +14,7 @@ Clúsia is a macOS app for reviewing pull requests carefully, with your own AI t
 - **Your harness, your models.** Claude Code, Codex or a command of your own helps with diagrams, security notes, audits and tests (coming in the next sub-projects). Nothing is sent anywhere you did not choose.
 - **Always at hand.** A menu bar popover shows what is waiting for you, which saved reviews went stale and how your review activity looks over the last weeks.
 
-> **Status:** early development, not ready for daily use yet. The daemon, the GitHub sync, the review engine, the CLI and the menu bar tray work today. The main window comes next. Progress is tracked on the [project board](https://github.com/users/rzorzal/projects/1).
+> **Status:** early development, not ready for daily use yet. The daemon, the GitHub sync, the review engine, the CLI, the menu bar tray and the main window work today: open a pull request, read its diff, comment on lines, reply to and resolve threads, and publish one GitHub review. The agent and the harness come next. Progress is tracked on the [project board](https://github.com/users/rzorzal/projects/1).
 
 ## The name and the mark
 
@@ -36,7 +36,7 @@ Clúsia is a Rust workspace with four programs that talk over a local Unix socke
 |---|---|
 | `clusiad` | The background service. It syncs with GitHub, manages worktrees, keeps review drafts and publishes reviews. It is the only part that holds state or secrets. |
 | `clusia-tray` | The menu bar icon and popover (native AppKit). The daemon starts it, and it exits when the daemon stops. |
-| `clusia-app` | The main window (Bevy): Home and Config today, reviews next. Opening it starts the daemon if needed, and a second launch brings the open window forward. |
+| `clusia-app` | The main window (Bevy): Home, Config and the review screen (diff in Unified or Split with syntax colors, comments, finalize). Opening it starts the daemon if needed, and a second launch brings the open window forward. |
 | `clusia` | The command-line interface. |
 
 <p align="center"><img src="docs/assets/sp1-m4-popover.png" alt="The Clúsia menu bar popover in light and dark mode: activity heatmap, counters, search, repository chips and paginated pull request lists" width="640"></p>
@@ -61,10 +61,14 @@ Every `clusia` command starts the daemon when it is not running.
 The window:
 
 ```sh
-target/debug/clusia-app                # Home, live from the daemon
-target/debug/clusia-app --config       # Config
-target/debug/clusia-app --demo --dark  # demo data, no daemon, nothing saved
+target/debug/clusia-app                                    # Home, live from the daemon
+target/debug/clusia-app --review owner/repo#123            # open a review
+target/debug/clusia-app --config                           # Config
+target/debug/clusia-app --demo --dark                      # demo data, no daemon, nothing saved
+target/debug/clusia-app --demo --review rzorzal/clusia#123 # the demo review
 ```
+
+In a review, click a line to comment (Shift-click for a range), reply to or resolve threads under Comments, then **Finalize review**: everything goes to GitHub as one review, and nothing is posted before you publish. Closing a tab or the window with an unpublished draft asks first; the tray reminds you about reviews kept for later.
 
 ## Development
 

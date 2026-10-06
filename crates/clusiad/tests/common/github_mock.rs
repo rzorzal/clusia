@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use serde_json::{Value, json};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// What the mocked GitHub says about acme/widgets#7.
@@ -17,6 +17,10 @@ pub struct PrMock {
     pub files: Value,
     /// The `/commits` response (GitHub shape).
     pub commits: Value,
+    /// GraphQL `reviewThreads.nodes` (GitHub shape).
+    pub threads: Value,
+    /// The viewer's pending review on GitHub: (node id, url).
+    pub pending: Option<(String, String)>,
 }
 
 impl PrMock {
@@ -30,6 +34,8 @@ impl PrMock {
             clone_url: clone_url.into(),
             files: json!([{ "filename": "feature.txt", "status": "added", "additions": 1, "deletions": 0, "patch": "@@ -0,0 +1,3 @@\n+one\n+two\n+three" }]),
             commits: json!([]),
+            threads: json!([]),
+            pending: None,
         }
     }
 }
@@ -89,4 +95,103 @@ pub async fn mount_pr(server: &MockServer, pr: &PrMock) {
         .respond_with(ok(json!({ "login": pr.viewer })))
         .mount(server)
         .await;
+    let pending: Vec<Value> = pr
+        .pending
+        .iter()
+        .map(|(id, url)| json!({ "id": id, "url": url, "viewerDidAuthor": true }))
+        .collect();
+    graphql(
+        server,
+        "headRefOid",
+        json!({ "repository": { "pullRequest": {
+            "id": "PR_7", "headRefOid": pr.head, "reviews": { "nodes": pending }
+        } } }),
+    )
+    .await;
+    graphql(
+        server,
+        "reviewThreads",
+        json!({ "repository": { "pullRequest": { "reviewThreads": {
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "nodes": pr.threads
+        } } } }),
+    )
+    .await;
+}
+
+/// Answers GraphQL requests whose body contains `contains` with `data`.
+pub async fn graphql(server: &MockServer, contains: &str, data: Value) {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains(contains))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": data })))
+        .mount(server)
+        .await;
+}
+
+/// A GraphQL refusal (HTTP 200 with `errors`) for requests whose body contains `contains`,
+/// winning over the default answers.
+pub async fn graphql_error(server: &MockServer, contains: &str, message: &str) {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains(contains))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "data": null, "errors": [{ "message": message }] })),
+        )
+        .with_priority(1)
+        .mount(server)
+        .await;
+}
+
+/// Successful answers to every review write. `addPullRequestReview(` (with the parenthesis)
+/// does not match `addPullRequestReviewThreadReply`.
+pub async fn mount_publish(server: &MockServer, review_url: &str) {
+    graphql(
+        server,
+        "addPullRequestReview(",
+        json!({ "addPullRequestReview": { "pullRequestReview": {
+            "id": "PRR_1", "databaseId": 42, "url": review_url, "state": "PENDING"
+        } } }),
+    )
+    .await;
+    graphql(
+        server,
+        "addPullRequestReviewThreadReply",
+        json!({ "addPullRequestReviewThreadReply": { "comment": { "id": "PRRC_1" } } }),
+    )
+    .await;
+    graphql(
+        server,
+        "submitPullRequestReview",
+        json!({ "submitPullRequestReview": { "pullRequestReview": {
+            "id": "PRR_1", "databaseId": 42, "url": review_url, "state": "COMMENTED"
+        } } }),
+    )
+    .await;
+    graphql(
+        server,
+        "resolveReviewThread",
+        json!({ "resolveReviewThread": { "thread": { "id": "PRRT_1", "isResolved": true } } }),
+    )
+    .await;
+    graphql(
+        server,
+        "deletePullRequestReview",
+        json!({ "deletePullRequestReview": { "pullRequestReview": { "id": "PRR_1" } } }),
+    )
+    .await;
+}
+
+/// The GraphQL request bodies the server received whose text contains `contains`.
+pub async fn graphql_requests(server: &MockServer, contains: &str) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/graphql")
+        .filter(|r| String::from_utf8_lossy(&r.body).contains(contains))
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect()
 }

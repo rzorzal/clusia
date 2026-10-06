@@ -17,14 +17,18 @@ pub use config::{CODE_SIZES, Config, Density, DiffView, ListSort, Lists};
 pub use diffmap::{
     DiffMap, FileChange, Hunk, LineMap, Relocation, can_comment, commentable_lines, relocate,
 };
-pub use draft::{Anchor, Draft, DraftError, DraftItem, DraftKind, ItemStatus, Origin, Side};
+pub use draft::{
+    Anchor, Draft, DraftError, DraftItem, DraftKind, ItemStatus, Origin, Side, ThreadRef,
+};
 pub use editor::{EditorError, editor_argv};
 pub use paths::{Paths, PathsError};
 pub use pr::{PrDetail, PrFilter, PrRef, PrRefError, PrSummary};
 pub use prdata::{
-    ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, ReviewInfo, ThreadComment,
+    ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, ReviewCache, ReviewInfo,
+    ReviewThread, ThreadComment, ThreadPost,
 };
 pub use publish::{
-    DEFAULT_BODY, PublishError, PublishPlan, ReviewComment, ReviewPayload, plan_publish,
+    DEFAULT_BODY, PublishError, PublishPlan, ReplyPayload, ReviewComment, ReviewPayload,
+    plan_publish,
 };
 pub use review::{InvalidTransition, Review, ReviewEvent, ReviewState, Role, Verdict};

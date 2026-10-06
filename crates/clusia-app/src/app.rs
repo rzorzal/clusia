@@ -1,6 +1,7 @@
 //! Builds and runs the Bevy app. Later tasks register their plugins in `run`.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use bevy::input_focus::tab_navigation::TabNavigationPlugin;
 use bevy::log::LogPlugin;
@@ -11,6 +12,8 @@ use bevy::winit::WinitSettings;
 use clusia_core::{Density, Paths};
 use clusia_protocol::WindowTarget;
 
+use crate::args::Scene;
+use crate::bridge::BridgeSlot;
 use crate::clock::Clock;
 use crate::fonts::FontsPlugin;
 use crate::theme::{LIGHT, Theme};
@@ -31,6 +34,8 @@ pub struct Launch {
     pub target: WindowTarget,
     pub mode: Mode,
     pub screenshot: Option<PathBuf>,
+    /// `--demo --scene`: stage the demo review (screenshots).
+    pub scene: Option<Scene>,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -46,7 +51,11 @@ struct ScreenshotPlan {
     after_frames: u32,
 }
 
+/// How long the window waits, once closed, for the bridge to deliver what is still queued.
+const BRIDGE_EXIT_WAIT: Duration = Duration::from_secs(3);
+
 pub fn run(launch: Launch) {
+    let bridge = BridgeSlot::default();
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -54,6 +63,8 @@ pub fn run(launch: Launch) {
             .disable::<LogPlugin>()
             .set(WindowPlugin {
                 primary_window: Some(window()),
+                // The window asks before closing review tabs with a draft (`screens::review::leave`).
+                close_when_requested: false,
                 ..default()
             }),
     )
@@ -64,8 +75,11 @@ pub fn run(launch: Launch) {
         crate::theme::ThemePlugin,
         crate::ui::kit::KitPlugin,
         crate::nav::NavPlugin,
+        crate::review_state::ReviewStatePlugin,
         crate::screens::home::HomePlugin,
         crate::screens::config::ConfigPlugin,
+        crate::screens::review::ReviewPlugin,
+        crate::screens::open_pr::OpenPrPlugin,
     ))
     .insert_resource(if launch.screenshot.is_some() {
         WinitSettings::continuous()
@@ -80,10 +94,14 @@ pub fn run(launch: Launch) {
         mode: launch.mode.clone(),
         paths: launch.paths.clone(),
         home: launch.home.clone(),
+        thread: bridge.clone(),
     })
     .add_systems(Startup, |mut commands: Commands| {
         commands.spawn(Camera2d);
     });
+    if let Some(scene) = launch.scene {
+        app.add_plugins(crate::scenes::ScenePlugin(scene));
+    }
     if let Some(path) = &launch.screenshot {
         app.insert_resource(ScreenshotPlan {
             path: path.clone(),
@@ -92,6 +110,14 @@ pub fn run(launch: Launch) {
         .add_systems(Update, take_screenshot);
     }
     app.run();
+    // Leaving the window sends `CloseReview` / `Discard` for its tabs and exits in the same
+    // frame. The app (and its `Asks` sender) is gone now, so the bridge answers what is queued
+    // and ends; wait for it, so those choices reach the daemon before the process exits.
+    if let Some(thread) = bridge.take()
+        && !thread.finish(BRIDGE_EXIT_WAIT)
+    {
+        tracing::warn!("clusiad did not answer the last requests before the window closed");
+    }
 }
 
 fn window() -> Window {

@@ -2,7 +2,6 @@
 //! around it: the top bar, the connection banner and the toasts.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::events::{Pointer, Press};
@@ -199,6 +198,14 @@ pub struct ReviewScreen(pub PrRef);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CloseTab(pub PrRef);
 
+/// The `+` after the review tabs: opens the palette.
+#[derive(Component, Debug)]
+pub struct NewTabButton;
+
+/// A review tab's × was pressed; `screens::review::leave` decides whether to ask first.
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct TabCloseRequested(pub PrRef);
+
 #[derive(Component, Debug)]
 pub struct RetryButton;
 
@@ -217,7 +224,7 @@ struct BannerSlot {
 
 #[derive(Component)]
 struct ScreenRoot {
-    built: Option<(Screen, String)>,
+    built: Option<Screen>,
 }
 
 #[derive(Component)]
@@ -239,6 +246,7 @@ impl Plugin for NavPlugin {
             .map(|s| s.0.clone())
             .unwrap_or(WindowTarget::Home);
         app.insert_resource(Nav::new(&start))
+            .add_message::<TabCloseRequested>()
             .add_systems(Startup, (load_leaf, spawn_chrome))
             .add_systems(
                 Update,
@@ -432,6 +440,11 @@ fn rebuild_top_bar(
                     TabTarget::Config => {}
                 }
             }
+            p.spawn((
+                button(&fonts, "+", Variant::Ghost),
+                NewTabButton,
+                observe(on_new_tab),
+            ));
             p.spawn(Node {
                 flex_grow: 1.0,
                 ..default()
@@ -462,10 +475,21 @@ fn on_tab(activate: On<Activate>, tabs: Query<&TabTarget>, mut nav: ResMut<Nav>)
     nav.go(&target);
 }
 
-fn on_close(activate: On<Activate>, close: Query<&CloseTab>, mut nav: ResMut<Nav>) {
+fn on_close(
+    activate: On<Activate>,
+    close: Query<&CloseTab>,
+    mut out: MessageWriter<TabCloseRequested>,
+) {
     if let Ok(CloseTab(pr)) = close.get(activate.entity) {
-        nav.close_review(pr);
+        out.write(TabCloseRequested(pr.clone()));
     }
+}
+
+fn on_new_tab(_activate: On<Activate>, mut palette: ResMut<crate::screens::open_pr::Palette>) {
+    *palette = crate::screens::open_pr::Palette {
+        open: true,
+        ..Default::default()
+    };
 }
 
 fn rebuild_banner(
@@ -528,8 +552,6 @@ fn on_retry(_activate: On<Activate>, mut asks: ResMut<Asks>, mut model: ResMut<M
 fn rebuild_screen(
     mut commands: Commands,
     nav: Res<Nav>,
-    model: Res<Model>,
-    fonts: Res<UiFonts>,
     mut roots: Query<(Entity, &mut ScreenRoot)>,
 ) {
     // Config sections switch inside `ConfigScreen`; here only the kind of screen matters.
@@ -537,14 +559,8 @@ fn rebuild_screen(
         Screen::Config(_) => Screen::Config(Section::Appearance),
         other => other.clone(),
     };
-    // The review placeholder shows the PR title, which may arrive after the tab opens.
-    let title = match &nav.screen {
-        Screen::Review(pr) => pr_title(&model.snapshot, pr).unwrap_or("").to_string(),
-        _ => String::new(),
-    };
-    let key = (kind, title);
     for (entity, mut root) in &mut roots {
-        if root.built.as_ref() == Some(&key) {
+        if root.built.as_ref() == Some(&kind) {
             continue;
         }
         commands.entity(entity).despawn_related::<Children>();
@@ -554,6 +570,7 @@ fn rebuild_screen(
             min_height: px(0),
             ..default()
         };
+        // The review plugin fills `ReviewScreen` according to the tab's phase.
         commands
             .entity(entity)
             .with_children(|p| match &nav.screen {
@@ -564,39 +581,11 @@ fn rebuild_screen(
                     p.spawn((fill, ConfigScreen));
                 }
                 Screen::Review(pr) => {
-                    p.spawn((fill, ReviewScreen(pr.clone())))
-                        .with_children(|r| review_placeholder(r, &fonts, &model.snapshot, pr));
+                    p.spawn((fill, ReviewScreen(pr.clone())));
                 }
             });
-        root.built = Some(key.clone());
+        root.built = Some(kind.clone());
     }
-}
-
-/// M5a: the review screen itself arrives in M5b; the tab already works.
-fn review_placeholder(p: &mut ChildSpawnerCommands, fonts: &UiFonts, snap: &Snapshot, pr: &PrRef) {
-    let title = pr_title(snap, pr).unwrap_or("");
-    p.spawn(Node {
-        flex_direction: FlexDirection::Column,
-        row_gap: px(10),
-        padding: UiRect::axes(px(40), px(32)),
-        ..default()
-    })
-    .with_children(|c| {
-        c.spawn(text(fonts, format!("{pr} {title}").trim_end().to_string(), Type::TITLE));
-        c.spawn(text(
-            fonts,
-            "The review screen arrives in the next update. The tab and the tray already bring you here.",
-            Type::MUTED,
-        ));
-        c.spawn(text(
-            fonts,
-            format!(
-                "https://{}/{}/{}/pull/{}",
-                snap.config.github.host, pr.owner, pr.repo, pr.number
-            ),
-            Type::MONO,
-        ));
-    });
 }
 
 fn expire_toasts(
@@ -708,30 +697,6 @@ mod tests {
         assert_eq!(nav.screen, Screen::Home);
         assert!(nav.reviews.is_empty());
         nav.close_review(&pr("rzorzal/clusia#9")); // unknown: no-op
-    }
-
-    #[test]
-    fn review_placeholder_picks_up_a_late_title() {
-        let mut app = testing::app(fixture::demo(NOW));
-        let target = pr("acme/widgets#5");
-        app.world_mut()
-            .write_message(ShowRequested(WindowTarget::Review { pr: target.clone() }));
-        testing::settle(&mut app);
-        let has = |app: &mut App, needle: &str| {
-            let mut q = app.world_mut().query::<&Text>();
-            q.iter(app.world()).any(|t| t.0.contains(needle))
-        };
-        assert!(!has(&mut app, "widgets#5 Late title"));
-        let mut late = app.world().resource::<Model>().snapshot.assigned[0].clone();
-        late.pr = target;
-        late.title = "Late title".into();
-        app.world_mut()
-            .resource_mut::<Model>()
-            .snapshot
-            .assigned
-            .push(late);
-        testing::settle(&mut app);
-        assert!(has(&mut app, "widgets#5 Late title"));
     }
 
     #[test]

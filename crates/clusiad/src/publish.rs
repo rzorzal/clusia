@@ -1,17 +1,20 @@
-//! Publishing a draft as one GitHub review (spec §6.4).
+//! Publishing a draft as one GitHub review (spec §6.4), through GraphQL:
+//! a pending review with the line comments, the replies inside it, the submit, then the resolves.
 
 use std::path::PathBuf;
 
 use clusia_core::{
-    ActivityKind, ItemStatus, PrRef, Review, ReviewEvent, ReviewState, Role, Verdict, plan_publish,
+    ActivityKind, ItemStatus, PrRef, ReplyPayload, Review, ReviewEvent, ReviewPayload, ReviewState,
+    Role, Verdict, plan_publish,
 };
 use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, PublishResult, Reply};
-use clusia_provider::ProviderError;
+use clusia_provider::{GitHub, ProviderError, PublishedReview};
 
 use crate::handlers::{no_token, provider_error};
 use crate::reviews::{
-    announce, cleanup_checkout, files_for, invalid_state, load_existing, lock, record, save,
+    announce, cleanup_checkout, drop_cache, files_for, invalid_state, load_existing, lock, record,
+    save,
 };
 use crate::state::Shared;
 use crate::sync::{github_client, now_unix};
@@ -46,7 +49,146 @@ fn finish_published(
     if let Err(e) = clusia_store::delete_review(&shared.paths, pr) {
         tracing::warn!(error = %e, pr = %pr, "published, but cannot delete the review file");
     }
+    drop_cache(shared, pr);
     record(shared, ActivityKind::ReviewPublished, pr, client, url, None);
+}
+
+/// Appended when a cleanup failed and GitHub may still hold our pending review.
+const LEFTOVER: &str =
+    "a pending review may remain on GitHub; discard it there before publishing again";
+
+/// Why the review did not reach GitHub.
+struct SubmitFailure {
+    error: ProviderError,
+    /// The submit was sent, its answer was lost and the pending review could not be
+    /// deleted: GitHub may have the review anyway.
+    maybe_posted: bool,
+    /// A pending review we started may still be on GitHub (its cleanup failed).
+    leftover: bool,
+}
+
+impl SubmitFailure {
+    fn into_outcome(self) -> Outcome {
+        let Self {
+            error,
+            maybe_posted,
+            leftover,
+        } = self;
+        let message = match (maybe_posted, leftover) {
+            (true, true) => format!(
+                "the review may have been posted; check the pull request on GitHub before publishing again ({error}); if it was not, {LEFTOVER}"
+            ),
+            (true, false) => format!(
+                "the review may have been posted; check the pull request on GitHub before publishing again ({error})"
+            ),
+            (false, true) => format!("{error}; {LEFTOVER}"),
+            (false, false) => return provider_error(error),
+        };
+        Outcome::Err(ProtocolError::new(ErrorCode::Upstream, message))
+    }
+}
+
+/// Deletes a pending review we started; `true` when it may still be on GitHub.
+async fn discard_pending(gh: &GitHub, pr: &PrRef, review_id: &str) -> bool {
+    match gh.delete_pending_review(review_id).await {
+        Ok(()) => false,
+        Err(e) => {
+            tracing::warn!(error = %e, pr = %pr, "cannot delete the pending review");
+            true
+        }
+    }
+}
+
+/// After an ambiguous start, GitHub may hold a pending review we never heard of. None existed
+/// before (publishing checks first), so one there now is ours: delete it. Returns `true`
+/// when a pending review may remain.
+async fn discard_orphan(gh: &GitHub, pr: &PrRef) -> bool {
+    match gh.pr_node(pr).await {
+        Ok(node) => match node.pending {
+            Some(pending) => discard_pending(gh, pr, &pending.id).await,
+            None => false,
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, pr = %pr, "cannot check for a pending review after a failed start");
+            true
+        }
+    }
+}
+
+/// Adds every reply to the pending review, stopping at the first refusal.
+async fn reply_all(
+    gh: &GitHub,
+    review_id: &str,
+    replies: &[ReplyPayload],
+) -> Result<(), ProviderError> {
+    for reply in replies {
+        gh.reply_in_review(review_id, &reply.thread, &reply.body)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Pending review with the line comments → each reply → submit. Any failure once the
+/// pending review exists deletes it (best effort), so GitHub keeps nothing half-done.
+async fn submit_review(
+    gh: &GitHub,
+    pr: &PrRef,
+    pr_node: &str,
+    payload: &ReviewPayload,
+    replies: &[ReplyPayload],
+) -> Result<PublishedReview, SubmitFailure> {
+    let pending = match gh
+        .start_review(pr_node, &payload.commit_id, &payload.comments)
+        .await
+    {
+        Ok(pending) => pending,
+        Err(error) => {
+            let leftover = error.is_ambiguous() && discard_orphan(gh, pr).await;
+            return Err(SubmitFailure {
+                error,
+                maybe_posted: false,
+                leftover,
+            });
+        }
+    };
+    let (error, unsure) = match reply_all(gh, &pending.id, replies).await {
+        Err(error) => (error, false),
+        Ok(()) => match gh
+            .submit_review(&pending.id, &payload.event, &payload.body)
+            .await
+        {
+            Ok(published) => return Ok(published),
+            Err(error) => {
+                let unsure = error.is_ambiguous();
+                (error, unsure)
+            }
+        },
+    };
+    // A submitted review is no longer pending: when the delete works, nothing was posted.
+    let leftover = discard_pending(gh, pr, &pending.id).await;
+    Err(SubmitFailure {
+        error,
+        maybe_posted: unsure && leftover,
+        leftover,
+    })
+}
+
+/// Resolves every marked thread; returns the ids GitHub left open and the last error.
+async fn resolve_threads(
+    gh: &GitHub,
+    pr: &PrRef,
+    threads: &[String],
+) -> (Vec<String>, Option<ProviderError>) {
+    let mut unresolved = Vec::new();
+    let mut last_error = None;
+    for thread in threads {
+        if let Err(e) = gh.resolve_thread(thread).await {
+            tracing::warn!(error = %e, pr = %pr, thread = %thread, "cannot resolve a review thread");
+            unresolved.push(thread.clone());
+            last_error = Some(e);
+        }
+    }
+    (unresolved, last_error)
 }
 
 pub(crate) async fn publish(
@@ -147,6 +289,24 @@ pub(crate) async fn publish(
         Ok(p) => p,
         Err(e) => return Outcome::Err(ProtocolError::new(ErrorCode::BadRequest, e.to_string())),
     };
+    // GitHub allows one pending review per user and pull request. One started on github.com
+    // may hold comments written there: never reuse or delete it; ask the user to finish it.
+    // The pull request's node is bound to the review it carries: no review, no node.
+    let posting = match &plan.review {
+        Some(payload) => match gh.pr_node(pr).await {
+            Ok(node) => {
+                if let Some(pending) = node.pending {
+                    return invalid_state(format!(
+                        "You already have a pending review on GitHub for this pull request. Submit or discard it there, then publish again: {}",
+                        pending.url
+                    ));
+                }
+                Some((payload, node.id))
+            }
+            Err(e) => return provider_error(e),
+        },
+        None => None,
+    };
     if let Err(e) = review.apply(ReviewEvent::Finalize, now_unix()) {
         return invalid_state(e.to_string());
     }
@@ -155,57 +315,60 @@ pub(crate) async fn publish(
     }
 
     let mut url = None;
-    if let Some(payload) = &plan.review {
-        match gh.create_review(pr, payload).await {
+    let mut posted = false;
+    if let Some((payload, pr_node)) = posting {
+        match submit_review(&gh, pr, &pr_node, payload, &plan.replies).await {
             Ok(published) => {
-                // Persist the terminal state before any further network call, so a crash
-                // during the close cannot leave a `publishing` file that invites a re-post.
+                // Persist the terminal state before any further network call, so a crash while
+                // resolving or closing cannot leave a `publishing` file that invites a re-post.
                 finish_published(shared, &mut review, pr, client, Some(published.url.clone()));
                 url = Some(published.url);
+                posted = true;
             }
-            Err(e) => {
+            Err(failure) => {
                 fail_publish(shared, &mut review);
                 announce(shared, &review);
-                return match e {
-                    ProviderError::Offline(_) | ProviderError::Decode(_) => {
-                        Outcome::Err(ProtocolError::new(
-                            ErrorCode::Upstream,
-                            format!(
-                                "the review may have been posted; check the pull request on GitHub before publishing again ({e})"
-                            ),
-                        ))
-                    }
-                    e => provider_error(e),
-                };
+                return failure.into_outcome();
             }
         }
+    }
+    let (unresolved, resolve_error) = resolve_threads(&gh, pr, &plan.resolves).await;
+    if !posted && !plan.resolves.is_empty() {
+        // Resolve-only: it counts as published once GitHub took at least one resolve.
+        if unresolved.len() == plan.resolves.len() {
+            fail_publish(shared, &mut review);
+            announce(shared, &review);
+            let reason = resolve_error.map(|e| e.to_string()).unwrap_or_default();
+            return Outcome::Err(ProtocolError::new(
+                ErrorCode::Upstream,
+                format!("no thread could be resolved on GitHub: {reason}"),
+            ));
+        }
+        finish_published(shared, &mut review, pr, client, None);
+        posted = true;
     }
     let mut close_error = None;
     if plan.close
         && let Err(e) = gh.close_pr(pr).await
     {
-        if url.is_none() {
+        if !posted {
             fail_publish(shared, &mut review);
             announce(shared, &review);
             return provider_error(e);
         }
         close_error = Some(e);
     }
-    if url.is_none() {
+    if !posted {
         finish_published(shared, &mut review, pr, client, None);
     }
     cleanup_checkout(shared, pr).await;
     shared.files_cache.lock().await.remove(pr);
     announce(shared, &review);
-    if let Some(e) = close_error {
-        let message = format!(
-            "review published ({}), but closing the pull request failed: {e}",
-            url.unwrap_or_default()
-        );
-        return Outcome::Err(ProtocolError::new(ErrorCode::Upstream, message));
-    }
+    // The review is published either way; a failed close is reported, not raised.
     Outcome::Ok(Reply::Published(PublishResult {
         url,
-        closed: plan.close,
+        closed: plan.close && close_error.is_none(),
+        unresolved,
+        close_error: close_error.map(|e| e.to_string()),
     }))
 }

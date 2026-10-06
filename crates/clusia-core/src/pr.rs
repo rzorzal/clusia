@@ -151,6 +151,11 @@ pub struct PrDetail {
     pub changed_files: u64,
     /// Clone URL of the base repository.
     pub clone_url: String,
+    /// Closed without merging, or merged.
+    #[serde(default)]
+    pub closed: bool,
+    #[serde(default)]
+    pub merged: bool,
 }
 
 #[cfg(test)]
@@ -228,6 +233,16 @@ mod tests {
     #[test]
     fn file_key_is_unambiguous() {
         assert_ne!(pr("a-b/c#1").file_key(), pr("a/b-c#1").file_key());
+    }
+
+    #[test]
+    fn pr_detail_without_state_is_open() {
+        let json = r#"{"summary":{"pr":"acme/widgets#7","title":"t","author":"maria","url":"u",
+            "draft":false,"updated_at":"2026-10-01T12:00:00Z","comments":0},"base_ref":"main",
+            "head_ref":"fix","base_sha":"a","head_sha":"b","additions":1,"deletions":0,
+            "changed_files":1,"clone_url":"c"}"#;
+        let d: PrDetail = serde_json::from_str(json).unwrap();
+        assert_eq!((d.closed, d.merged), (false, false));
     }
 
     #[test]

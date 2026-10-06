@@ -151,8 +151,16 @@ pub(crate) async fn open(
 }
 
 fn item_line(item: &clusia_core::DraftItem) -> String {
-    let location = match &item.anchor {
-        Some(a) => {
+    let location = match (&item.anchor, &item.thread) {
+        (_, Some(t)) if item.kind == DraftKind::Resolve => {
+            format!("resolve thread by @{}", t.author)
+        }
+        (_, Some(t)) => match (&t.path, t.line) {
+            (Some(path), Some(line)) => format!("reply to @{} · {path}:{line}", t.author),
+            (Some(path), None) => format!("reply to @{} · {path}", t.author),
+            _ => format!("reply to @{}", t.author),
+        },
+        (Some(a), None) => {
             let range = match a.start_line {
                 Some(s) => format!("{s}-{}", a.line),
                 None => a.line.to_string(),
@@ -163,7 +171,7 @@ fn item_line(item: &clusia_core::DraftItem) -> String {
             };
             format!("{}:{range} ({side})", a.path)
         }
-        None => "(general)".to_string(),
+        (None, None) => "(general)".to_string(),
     };
     let suffix = match &item.status {
         ItemStatus::Ok => String::new(),
@@ -174,6 +182,8 @@ fn item_line(item: &clusia_core::DraftItem) -> String {
         ItemStatus::Obsolete { reason } => format!(" [obsolete: {reason}]"),
     };
     format!("  {}  {location}  {}{suffix}", item.id, item.body)
+        .trim_end()
+        .to_string()
 }
 
 fn state_name<T: serde::Serialize>(value: &T) -> String {
@@ -265,6 +275,7 @@ pub(crate) async fn run(
                         kind: DraftKind::LineComment,
                         anchor,
                         body,
+                        thread: None,
                     })
                     .await?,
             )
@@ -276,6 +287,7 @@ pub(crate) async fn run(
                     kind: DraftKind::General,
                     anchor: None,
                     body,
+                    thread: None,
                 })
                 .await?,
         ),
@@ -325,6 +337,16 @@ pub(crate) async fn run(
                     }
                     if p.closed {
                         lines.push("Closed the pull request".into());
+                    }
+                    if let Some(e) = &p.close_error {
+                        lines.push(format!("Could not close the pull request: {e}"));
+                    }
+                    if !p.unresolved.is_empty() {
+                        lines.push(format!(
+                            "Could not resolve {} thread(s); they stay open: {}",
+                            p.unresolved.len(),
+                            p.unresolved.join(", ")
+                        ));
                     }
                     Ok(Output {
                         human: lines.join("\n"),
@@ -428,6 +450,35 @@ mod tests {
         for bad in ["nocolon", "a.rs:", "a.rs:x", "a.rs:0", "a.rs:5-3", ":3"] {
             assert!(parse_location(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn item_lines_name_replies_and_resolves() {
+        let mut draft = clusia_core::Draft::default();
+        let thread = clusia_core::ThreadRef {
+            id: "PRRT_1".into(),
+            author: "mona".into(),
+            path: Some("src/auth/refresh.rs".into()),
+            line: Some(41),
+        };
+        draft
+            .add(DraftKind::Reply, None, Some(thread.clone()), "Agreed.", 1)
+            .unwrap();
+        draft
+            .add(DraftKind::Resolve, None, Some(thread), "", 1)
+            .unwrap();
+        draft
+            .add(DraftKind::General, None, None, "Nice.", 1)
+            .unwrap();
+        let lines: Vec<String> = draft.items.iter().map(item_line).collect();
+        assert_eq!(
+            lines,
+            [
+                "  i1  reply to @mona · src/auth/refresh.rs:41  Agreed.",
+                "  i2  resolve thread by @mona",
+                "  i3  (general)  Nice.",
+            ]
+        );
     }
 
     #[test]

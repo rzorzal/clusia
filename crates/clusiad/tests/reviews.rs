@@ -99,6 +99,7 @@ async fn reopen_relocates_comments_after_new_commits() {
         .add(
             clusia_core::DraftKind::LineComment,
             Some(anchor),
+            None,
             "check this",
             1,
         )
@@ -177,6 +178,7 @@ async fn relocated_comment_outside_the_new_diff_is_obsolete() {
     for line in [1, 3] {
         c.request(Command::AddDraftItem {
             pr: pr7(),
+            thread: None,
             kind: clusia_core::DraftKind::LineComment,
             anchor: Some(clusia_protocol::AnchorInput {
                 path: "feature.txt".into(),
@@ -237,6 +239,7 @@ async fn left_comments_are_obsolete_when_the_base_cannot_be_fetched() {
     open(&mut c).await;
     c.request(Command::AddDraftItem {
         pr: pr7(),
+        thread: None,
         kind: clusia_core::DraftKind::LineComment,
         anchor: Some(clusia_protocol::AnchorInput {
             path: "README.md".into(),

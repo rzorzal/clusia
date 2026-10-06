@@ -2,22 +2,32 @@
 //! thread with its own current-thread tokio runtime:
 //! - `Tell`s go to Bevy over a crossbeam channel, and every one wakes the reactive event loop;
 //! - `Ask`s come back over a tokio channel.
+//!
+//! `OpenReview`, `OpenCached` and `Publish` run on a second, short-lived connection (a task on
+//! the same runtime), so the main one keeps streaming `LoadStep` events while they wait.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bevy::prelude::*;
+use bevy::window::RequestRedraw;
 use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
-use clusia_core::{Paths, PrFilter};
-use clusia_protocol::{Client, ClientError, Command, Reply, Secret, WindowTarget, topics};
+use clusia_core::{
+    Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
+};
+use clusia_protocol::{
+    AnchorInput, Client, ClientError, Command, ErrorCode, Event, LoadStep, LoadStepKind, NewsItem,
+    PublishResult, Reply, ReviewView, Secret, StepStatus, WindowTarget, topics,
+};
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::app::Mode;
 use crate::clock::Clock;
 use crate::fixture;
+use crate::review_state::{self, ReviewEvent, ReviewTabs};
 use crate::snapshot::{self, Refresh, Snapshot};
 
 /// Events arriving within this window share one refresh.
@@ -40,6 +50,41 @@ pub enum Ask {
     },
     /// After `Tell::Lost`: connect again.
     Reconnect,
+    /// Worker connection: the cache first (`CachedAvailable`), then `OpenReview` and
+    /// `GetWhatsNew` (`Opened` or `OpenFailed`).
+    OpenReview(PrRef),
+    /// Worker connection: the cached copy (`OpenedFromCache`).
+    OpenCached(PrRef),
+    LoadConversation(PrRef),
+    MarkSeen(PrRef),
+    /// Answered by `Saved` or `Refused` with the same ticket.
+    AddItem {
+        pr: PrRef,
+        kind: DraftKind,
+        anchor: Option<AnchorInput>,
+        thread: Option<ThreadRef>,
+        body: String,
+        ticket: u64,
+    },
+    UpdateItem {
+        pr: PrRef,
+        id: String,
+        body: String,
+        ticket: u64,
+    },
+    RemoveItem {
+        pr: PrRef,
+        id: String,
+    },
+    /// Worker connection: `Published` or `PublishFailed`.
+    Publish {
+        pr: PrRef,
+        verdict: Verdict,
+        summary: String,
+    },
+    /// Leave the review (saved when the draft has items): `Left`.
+    CloseReview(PrRef),
+    Discard(PrRef),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,12 +106,99 @@ pub enum Tell {
     Lost(String),
     /// The daemon is stopping on request (the tray's Quit): the window closes too.
     Quit,
+    /// A `LoadStep` event, live while a review opens.
+    Step(LoadStep),
+    /// The cached copy, shown dimmed while the fresh one loads.
+    CachedAvailable {
+        pr: PrRef,
+        view: Box<ReviewView>,
+        fetched_at: i64,
+    },
+    Opened {
+        pr: PrRef,
+        view: Box<ReviewView>,
+        news: Vec<NewsItem>,
+    },
+    OpenedFromCache {
+        pr: PrRef,
+        view: Box<ReviewView>,
+        fetched_at: i64,
+    },
+    /// `cache`: the daemon has a cached copy of this review.
+    OpenFailed {
+        pr: PrRef,
+        message: String,
+        cache: bool,
+    },
+    /// The stored review changed (draft items, state) for a review this window has open.
+    ReviewFile(Box<Review>),
+    Conversation {
+        pr: PrRef,
+        conversation: PrConversation,
+    },
+    /// A draft write with this ticket was saved.
+    Saved {
+        pr: PrRef,
+        ticket: u64,
+    },
+    /// A draft write with this ticket was refused; the editor keeps its text.
+    Refused {
+        pr: PrRef,
+        ticket: u64,
+        message: String,
+    },
+    Published {
+        pr: PrRef,
+        result: PublishResult,
+    },
+    PublishFailed {
+        pr: PrRef,
+        code: ErrorCode,
+        message: String,
+    },
+    /// The review was closed or discarded on the daemon.
+    Left(PrRef),
 }
 
-/// The ends Bevy keeps.
+/// The ends Bevy keeps, and the connection thread.
 pub struct Link {
     pub tell: Receiver<Tell>,
     pub ask: UnboundedSender<Ask>,
+    pub thread: BridgeThread,
+}
+
+/// The connection thread. It ends once every `Ask` sender is gone and the asks already queued
+/// are answered (the channel hands them out before it reports closed).
+pub struct BridgeThread(std::thread::JoinHandle<()>);
+
+impl BridgeThread {
+    /// Waits up to `within` for the thread to end; `false` when it is still running.
+    pub fn finish(self, within: Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while !self.0.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = self.0.join();
+        true
+    }
+}
+
+/// Where `connect` leaves the bridge thread, so `app::run` can wait for it after the window
+/// closed (leave choices sent on the way out must reach the daemon).
+#[derive(Clone, Default)]
+pub struct BridgeSlot(Arc<Mutex<Option<BridgeThread>>>);
+
+impl BridgeSlot {
+    pub fn take(&self) -> Option<BridgeThread> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
+    fn put(&self, thread: BridgeThread) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(thread);
+    }
 }
 
 /// Starts the connection thread; `wake` runs after every `Tell`.
@@ -77,7 +209,7 @@ pub fn spawn(paths: Paths, home: Option<PathBuf>, wake: impl Fn() + Send + Sync 
         tx: tell_tx,
         wake: Arc::new(wake),
     };
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("clusia-bridge".into())
         .spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
@@ -92,6 +224,7 @@ pub fn spawn(paths: Paths, home: Option<PathBuf>, wake: impl Fn() + Send + Sync 
     Link {
         tell: tell_rx,
         ask: ask_tx,
+        thread: BridgeThread(thread),
     }
 }
 
@@ -109,6 +242,15 @@ impl Teller {
     }
 }
 
+/// The reviews this window has open on the daemon: their `ReviewChanged` / `ReviewOutdated`
+/// events refetch the review file. Kept across reconnects, and shared with the workers so a
+/// failed open forgets its PR.
+type OpenSet = Arc<Mutex<HashSet<PrRef>>>;
+
+fn open_set(open: &OpenSet) -> std::sync::MutexGuard<'_, HashSet<PrRef>> {
+    open.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Sessions until Bevy drops its `Ask` sender; after a lost session, waits for `Reconnect`.
 async fn run(
     paths: Paths,
@@ -116,8 +258,9 @@ async fn run(
     teller: Teller,
     mut asks: UnboundedReceiver<Ask>,
 ) {
+    let open = OpenSet::default();
     loop {
-        match session(&paths, home.as_deref(), &teller, &mut asks).await {
+        match session(&paths, home.as_deref(), &teller, &open, &mut asks).await {
             Ok(()) => return,
             Err(reason) => teller.send(Tell::Lost(reason)),
         }
@@ -129,6 +272,7 @@ async fn run(
                     key,
                     message: "Not connected to clusiad — not saved".into(),
                 }),
+                Some(ask) if offline(&ask, &teller) => {}
                 Some(_) => teller.send(Tell::Notice {
                     text: "Not connected to clusiad — try again after reconnecting".into(),
                     warning: true,
@@ -138,11 +282,39 @@ async fn run(
     }
 }
 
+/// Answers a review ask while disconnected so its screen never waits: editors keep their text,
+/// opening fails, publishing fails. `false` for the other asks.
+fn offline(ask: &Ask, teller: &Teller) -> bool {
+    const NOT_CONNECTED: &str = "Not connected to clusiad — not saved";
+    match ask {
+        Ask::AddItem { pr, ticket, .. } | Ask::UpdateItem { pr, ticket, .. } => {
+            teller.send(Tell::Refused {
+                pr: pr.clone(),
+                ticket: *ticket,
+                message: NOT_CONNECTED.into(),
+            });
+        }
+        Ask::OpenReview(pr) => teller.send(Tell::OpenFailed {
+            pr: pr.clone(),
+            message: "Not connected to clusiad".into(),
+            cache: false,
+        }),
+        Ask::Publish { pr, .. } => teller.send(Tell::PublishFailed {
+            pr: pr.clone(),
+            code: ErrorCode::Offline,
+            message: "Not connected to clusiad — nothing was published".into(),
+        }),
+        _ => return false,
+    }
+    true
+}
+
 /// `Ok(())` when the UI is gone; `Err(reason)` when the daemon is.
 async fn session(
     paths: &Paths,
     home: Option<&Path>,
     teller: &Teller,
+    open: &OpenSet,
     asks: &mut UnboundedReceiver<Ask>,
 ) -> Result<(), String> {
     let (mut client, _) = clusia_protocol::launcher::ensure_daemon(paths, home, crate::CLIENT_NAME)
@@ -170,6 +342,11 @@ async fn session(
         snap.sync = Some(s);
     }
     teller.send(Tell::Snapshot(Box::new(snap.clone())));
+    // The daemon may have restarted while this window was away: its open reviews read again.
+    let reopened: Vec<PrRef> = open_set(open).iter().cloned().collect();
+    for pr in reopened {
+        refetch(&mut client, &pr, teller).await?;
+    }
     let lists = Refresh {
         lists: true,
         ..Refresh::default()
@@ -181,18 +358,22 @@ async fn session(
         let mut todo = tokio::select! {
             event = client.next_event() => {
                 let (_, event) = event.map_err(lost)?;
+                follow(&mut client, open, &event, teller).await?;
                 take(&mut snap, event, teller)
             }
             ask = asks.recv() => {
                 let Some(ask) = ask else { return Ok(()) };
-                answer(&mut client, &mut snap, teller, ask).await?;
+                answer(&mut client, &mut snap, teller, paths, open, ask).await?;
                 Refresh::default()
             }
         };
         let deadline = tokio::time::Instant::now() + COALESCE;
         while todo.any() {
             match tokio::time::timeout_at(deadline, client.next_event()).await {
-                Ok(Ok((_, event))) => todo.merge(take(&mut snap, event, teller)),
+                Ok(Ok((_, event))) => {
+                    follow(&mut client, open, &event, teller).await?;
+                    todo.merge(take(&mut snap, event, teller));
+                }
                 Ok(Err(e)) => return Err(lost(e)),
                 Err(_) => break,
             }
@@ -205,8 +386,38 @@ async fn session(
     }
 }
 
-fn take(snap: &mut Snapshot, event: clusia_protocol::Event, teller: &Teller) -> Refresh {
-    if event == clusia_protocol::Event::Stopping {
+/// Review events for the open tabs: load steps go to Bevy as they come; a changed or outdated
+/// review that is open here is fetched again.
+async fn follow(
+    client: &mut Client,
+    open: &OpenSet,
+    event: &Event,
+    teller: &Teller,
+) -> Result<(), String> {
+    match event {
+        Event::LoadStep(step) => teller.send(Tell::Step(step.clone())),
+        Event::ReviewChanged { pr, .. } | Event::ReviewOutdated { pr, .. }
+            if open_set(open).contains(pr) =>
+        {
+            refetch(client, pr, teller).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// `GetReview` → `Tell::ReviewFile` (a refusal is only logged).
+async fn refetch(client: &mut Client, pr: &PrRef, teller: &Teller) -> Result<(), String> {
+    if let Some(Reply::ReviewFile(review)) =
+        request(client, Command::GetReview { pr: pr.clone() }).await?
+    {
+        teller.send(Tell::ReviewFile(review));
+    }
+    Ok(())
+}
+
+fn take(snap: &mut Snapshot, event: Event, teller: &Teller) -> Refresh {
+    if event == Event::Stopping {
         teller.send(Tell::Quit);
         return Refresh::default();
     }
@@ -285,6 +496,8 @@ async fn answer(
     client: &mut Client,
     snap: &mut Snapshot,
     teller: &Teller,
+    paths: &Paths,
+    open: &OpenSet,
     ask: Ask,
 ) -> Result<(), String> {
     let auth = Refresh {
@@ -333,8 +546,266 @@ async fn answer(
             notify(client, teller, Command::OpenInEditor { path, line }, "").await?;
         }
         Ask::Reconnect => {}
+        Ask::OpenReview(ref pr) | Ask::OpenCached(ref pr) => {
+            open_set(open).insert(pr.clone());
+            spawn_worker(paths, teller, open, ask);
+        }
+        Ask::Publish { .. } => spawn_worker(paths, teller, open, ask),
+        Ask::LoadConversation(pr) => match client
+            .request(Command::GetConversation { pr: pr.clone() })
+            .await
+        {
+            Ok(Reply::Conversation(conversation)) => {
+                teller.send(Tell::Conversation { pr, conversation });
+            }
+            Ok(_) => {}
+            Err(ClientError::Server(e)) => teller.send(Tell::Notice {
+                text: e.message,
+                warning: true,
+            }),
+            Err(e) => return Err(lost(e)),
+        },
+        Ask::MarkSeen(pr) => {
+            request(client, Command::MarkSeen { pr }).await?;
+        }
+        Ask::AddItem {
+            pr,
+            kind,
+            anchor,
+            thread,
+            body,
+            ticket,
+        } => {
+            let cmd = Command::AddDraftItem {
+                pr: pr.clone(),
+                kind,
+                anchor,
+                body,
+                thread,
+            };
+            draft_write(client, teller, cmd, pr, ticket).await?;
+        }
+        Ask::UpdateItem {
+            pr,
+            id,
+            body,
+            ticket,
+        } => {
+            let cmd = Command::UpdateDraftItem {
+                pr: pr.clone(),
+                id,
+                body,
+            };
+            draft_write(client, teller, cmd, pr, ticket).await?;
+        }
+        Ask::RemoveItem { pr, id } => {
+            notify(client, teller, Command::RemoveDraftItem { pr, id }, "").await?;
+        }
+        Ask::CloseReview(pr) => {
+            open_set(open).remove(&pr);
+            // The tab closes whatever the daemon says; a refusal is only reported.
+            notify(client, teller, Command::CloseReview { pr: pr.clone() }, "").await?;
+            teller.send(Tell::Left(pr));
+        }
+        Ask::Discard(pr) => match client
+            .request(Command::DiscardReview { pr: pr.clone() })
+            .await
+        {
+            Ok(_) => {
+                let left = Tell::Left(pr);
+                forget_finished(open, &left);
+                teller.send(left);
+            }
+            Err(ClientError::Server(e)) => teller.send(Tell::Notice {
+                text: e.message,
+                warning: true,
+            }),
+            Err(e) => return Err(lost(e)),
+        },
     }
     Ok(())
+}
+
+/// `AddDraftItem` / `UpdateDraftItem`: `Saved` or `Refused` with the editor's ticket.
+async fn draft_write(
+    client: &mut Client,
+    teller: &Teller,
+    cmd: Command,
+    pr: PrRef,
+    ticket: u64,
+) -> Result<(), String> {
+    match client.request(cmd).await {
+        Ok(_) => teller.send(Tell::Saved { pr, ticket }),
+        Err(ClientError::Server(e)) => teller.send(Tell::Refused {
+            pr,
+            ticket,
+            message: e.message,
+        }),
+        Err(e) => return Err(lost(e)),
+    }
+    Ok(())
+}
+
+/// Runs a long request on its own connection, so this one keeps reading events.
+fn spawn_worker(paths: &Paths, teller: &Teller, open: &OpenSet, ask: Ask) {
+    tokio::spawn(work(paths.socket(), teller.clone(), open.clone(), ask));
+}
+
+/// Stops following a review that is no longer open on the daemon: it failed to open, was
+/// published (its file is gone), or was left.
+fn forget_finished(open: &OpenSet, tell: &Tell) {
+    if let Tell::OpenFailed { pr, .. } | Tell::Published { pr, .. } | Tell::Left(pr) = tell {
+        open_set(open).remove(pr);
+    }
+}
+
+async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
+    match ask {
+        Ask::OpenReview(pr) => {
+            let tell = open_review(&socket, &teller, pr).await;
+            forget_finished(&open, &tell);
+            teller.send(tell);
+        }
+        Ask::OpenCached(pr) => open_cached(&socket, &teller, pr).await,
+        Ask::Publish {
+            pr,
+            verdict,
+            summary,
+        } => {
+            let tell = publish(&socket, pr, verdict, summary).await;
+            forget_finished(&open, &tell);
+            teller.send(tell);
+        }
+        _ => {}
+    }
+}
+
+async fn worker(socket: &Path) -> Result<Client, String> {
+    Client::connect(socket, crate::CLIENT_NAME)
+        .await
+        .map_err(|e| format!("cannot reach clusiad: {e}"))
+}
+
+fn message_of(e: ClientError) -> String {
+    match e {
+        ClientError::Server(e) => e.message,
+        e => lost(e),
+    }
+}
+
+/// Sends `CachedAvailable` when there is a cached copy; gives back `Opened` or `OpenFailed`.
+async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
+    let mut client = match worker(socket).await {
+        Ok(c) => c,
+        Err(message) => {
+            return Tell::OpenFailed {
+                pr,
+                message,
+                cache: false,
+            };
+        }
+    };
+    let mut cache = false;
+    if let Ok(Reply::Cached(cached)) = client
+        .request(Command::GetCachedReview { pr: pr.clone() })
+        .await
+    {
+        cache = true;
+        let cached = *cached;
+        teller.send(Tell::CachedAvailable {
+            pr: pr.clone(),
+            view: Box::new(cached.view),
+            fetched_at: cached.fetched_at,
+        });
+    }
+    match client.request(Command::OpenReview { pr: pr.clone() }).await {
+        Ok(Reply::Review(view)) => {
+            let news = match client
+                .request(Command::GetWhatsNew { pr: pr.clone() })
+                .await
+            {
+                Ok(Reply::WhatsNew(news)) => news,
+                _ => Vec::new(),
+            };
+            Tell::Opened { pr, view, news }
+        }
+        Ok(_) => Tell::OpenFailed {
+            pr,
+            message: "clusiad sent an unexpected reply".into(),
+            cache,
+        },
+        Err(e) => Tell::OpenFailed {
+            pr,
+            message: message_of(e),
+            cache,
+        },
+    }
+}
+
+async fn open_cached(socket: &Path, teller: &Teller, pr: PrRef) {
+    let reply = match worker(socket).await {
+        Ok(mut client) => client
+            .request(Command::GetCachedReview { pr: pr.clone() })
+            .await
+            .map_err(message_of),
+        Err(message) => Err(message),
+    };
+    match reply {
+        Ok(Reply::Cached(cached)) => {
+            let cached = *cached;
+            teller.send(Tell::OpenedFromCache {
+                pr,
+                view: Box::new(cached.view),
+                fetched_at: cached.fetched_at,
+            });
+        }
+        Ok(_) => {}
+        Err(text) => teller.send(Tell::Notice {
+            text,
+            warning: true,
+        }),
+    }
+}
+
+/// `Published` or `PublishFailed`.
+async fn publish(socket: &Path, pr: PrRef, verdict: Verdict, summary: String) -> Tell {
+    let mut client = match worker(socket).await {
+        Ok(c) => c,
+        Err(message) => {
+            return Tell::PublishFailed {
+                pr,
+                code: ErrorCode::Offline,
+                message,
+            };
+        }
+    };
+    let cmd = Command::Publish {
+        pr: pr.clone(),
+        verdict,
+        summary,
+    };
+    match client.request(cmd).await {
+        Ok(Reply::Published(result)) => Tell::Published { pr, result },
+        Ok(_) => Tell::PublishFailed {
+            pr,
+            code: ErrorCode::Internal,
+            message: "clusiad sent an unexpected reply".into(),
+        },
+        Err(ClientError::Server(e)) => Tell::PublishFailed {
+            pr,
+            code: e.code,
+            message: e.message,
+        },
+        Err(e) => Tell::PublishFailed {
+            pr,
+            code: ErrorCode::Offline,
+            message: format!(
+                "Lost clusiad while publishing ({}). The review may have been posted — check \
+                 GitHub before publishing again.",
+                lost(e)
+            ),
+        },
+    }
 }
 
 /// Sends `cmd`. A refusal becomes a warning notice, and success shows `ok` (when not empty).
@@ -433,13 +904,25 @@ pub struct Toasts(pub Vec<Toast>);
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct ShowRequested(pub WindowTarget);
 
+/// Where `pump` reads tells from: the bridge thread, or `Outbox` (demo mode and tests).
 #[derive(Resource)]
-struct Inbox(Receiver<Tell>);
+pub(crate) struct Inbox(Receiver<Tell>);
+
+/// Tells produced inside the app (demo answers, tests); `pump` applies them next frame.
+#[derive(Resource, Clone)]
+pub(crate) struct Outbox(pub Sender<Tell>);
+
+pub(crate) fn local_link() -> (Inbox, Outbox) {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    (Inbox(rx), Outbox(tx))
+}
 
 pub struct BridgePlugin {
     pub mode: Mode,
     pub paths: Paths,
     pub home: Option<PathBuf>,
+    /// Receives the connection thread in live mode.
+    pub thread: BridgeSlot,
 }
 
 impl Plugin for BridgePlugin {
@@ -451,12 +934,16 @@ impl Plugin for BridgePlugin {
         match self.mode {
             Mode::Live => {
                 let (paths, home) = (self.paths.clone(), self.home.clone());
+                let slot = self.thread.clone();
                 app.add_systems(Startup, move |world: &mut World| {
-                    connect(world, paths.clone(), home.clone());
+                    connect(world, paths.clone(), home.clone(), &slot);
                 });
             }
             Mode::Demo { dark } => {
+                let (inbox, outbox) = local_link();
                 app.init_resource::<Asks>()
+                    .insert_resource(inbox)
+                    .insert_resource(outbox)
                     .add_systems(
                         Startup,
                         move |mut model: ResMut<Model>, clock: Res<Clock>| {
@@ -474,7 +961,7 @@ impl Plugin for BridgePlugin {
     }
 }
 
-fn connect(world: &mut World, paths: Paths, home: Option<PathBuf>) {
+fn connect(world: &mut World, paths: Paths, home: Option<PathBuf>, slot: &BridgeSlot) {
     let proxy = world
         .get_resource::<EventLoopProxyWrapper>()
         .map(|p| (**p).clone());
@@ -485,18 +972,26 @@ fn connect(world: &mut World, paths: Paths, home: Option<PathBuf>) {
     });
     world.insert_resource(Inbox(link.tell));
     world.insert_resource(Asks::live(link.ask));
+    slot.put(link.thread);
 }
 
-fn pump(
+pub(crate) fn pump(
     inbox: Option<Res<Inbox>>,
     mut model: ResMut<Model>,
     mut toasts: ResMut<Toasts>,
+    mut tabs: ResMut<ReviewTabs>,
+    mut asks: ResMut<Asks>,
     mut show: MessageWriter<ShowRequested>,
     mut exit: MessageWriter<AppExit>,
+    mut reviews: MessageWriter<ReviewEvent>,
     time: Res<Time>,
 ) {
     let Some(inbox) = inbox else { return };
     for tell in inbox.0.try_iter() {
+        let mut events = Vec::new();
+        let rest = review_state::apply(&mut tabs, &mut asks, tell, &mut events);
+        reviews.write_batch(events);
+        let Some(tell) = rest else { continue };
         match tell {
             Tell::Snapshot(s) => {
                 model.snapshot = *s;
@@ -517,21 +1012,34 @@ fn pump(
             Tell::Quit => {
                 exit.write(AppExit::Success);
             }
+            Tell::Refused { message, .. } => toasts.0.push(Toast {
+                text: message,
+                warning: true,
+                until: time.elapsed_secs_f64() + TOAST_SECS,
+            }),
+            _ => {} // the other review tells were applied above
         }
     }
 }
 
-/// Demo mode: config writes apply locally (refusals show like the daemon's); other asks only
-/// say they were not sent.
-fn demo_answers(
+/// Demo mode: config writes apply locally (refusals show like the daemon's); the review asks
+/// are answered from `fixture::demo_review` through `Outbox`, so they go through `pump` like
+/// the daemon's answers; other asks only say they were not sent.
+pub(crate) fn demo_answers(
     mut asks: ResMut<Asks>,
     mut model: ResMut<Model>,
     mut toasts: ResMut<Toasts>,
+    tabs: Res<ReviewTabs>,
+    outbox: Res<Outbox>,
+    clock: Res<Clock>,
     time: Res<Time>,
+    mut redraw: MessageWriter<RequestRedraw>,
 ) {
     if asks.recorded.is_empty() {
         return;
     }
+    let now = clock.now();
+    let mut tells = Vec::new();
     for ask in std::mem::take(&mut asks.recorded) {
         match ask {
             Ask::SetConfig { key, value } => {
@@ -541,11 +1049,226 @@ fn demo_answers(
                     model.rejected.insert(key, message);
                 }
             }
+            Ask::OpenReview(pr) => tells.extend(demo_open(pr, now)),
+            Ask::OpenCached(pr) if pr == fixture::demo_pr() => {
+                tells.push(Tell::OpenedFromCache {
+                    pr,
+                    view: Box::new(fixture::demo_review(now).0),
+                    fetched_at: now - 3600,
+                });
+            }
+            Ask::LoadConversation(pr) if pr == fixture::demo_pr() => {
+                if let Some(conversation) = fixture::demo_review(now).0.conversation {
+                    tells.push(Tell::Conversation { pr, conversation });
+                }
+            }
+            Ask::MarkSeen(_) => {}
+            Ask::AddItem {
+                pr,
+                kind,
+                anchor,
+                thread,
+                body,
+                ticket,
+            } => tells.extend(demo_edit(&tabs, &pr, ticket, |review| {
+                let anchor = anchor.map(|a| Anchor {
+                    commit: match a.side {
+                        Side::Right => review.head_sha.clone(),
+                        Side::Left => review.base_sha.clone(),
+                    },
+                    path: a.path,
+                    line: a.line,
+                    start_line: a.start_line,
+                    side: a.side,
+                });
+                review
+                    .draft
+                    .add(kind, anchor, thread, &body, now)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })),
+            Ask::UpdateItem {
+                pr,
+                id,
+                body,
+                ticket,
+            } => tells.extend(demo_edit(&tabs, &pr, ticket, |review| {
+                review
+                    .draft
+                    .update_body(&id, &body)
+                    .map_err(|e| e.to_string())
+            })),
+            Ask::RemoveItem { pr, id } => {
+                let review = tabs.0.get(&pr).and_then(|t| t.ready()).map(|r| {
+                    let mut review = r.view.review.clone();
+                    let _ = review.draft.remove(&id);
+                    review
+                });
+                if let Some(review) = review {
+                    tells.push(Tell::ReviewFile(Box::new(review)));
+                }
+            }
+            Ask::Publish { pr, verdict, .. } => tells.push(Tell::Published {
+                result: PublishResult {
+                    url: Some(format!(
+                        "https://github.com/{}/{}/pull/{}#pullrequestreview-1",
+                        pr.owner, pr.repo, pr.number
+                    )),
+                    closed: verdict == Verdict::ClosePr,
+                    unresolved: Vec::new(),
+                    close_error: None,
+                },
+                pr,
+            }),
+            Ask::CloseReview(pr) | Ask::Discard(pr) => tells.push(Tell::Left(pr)),
             _ => toasts.0.push(Toast {
                 text: "Demo mode: nothing is sent to the daemon".into(),
                 warning: false,
                 until: time.elapsed_secs_f64() + TOAST_SECS,
             }),
         }
+    }
+    if !tells.is_empty() {
+        for tell in tells {
+            let _ = outbox.0.send(tell);
+        }
+        redraw.write(RequestRedraw);
+    }
+}
+
+/// The demo review opens at once (every step done, no harness); any other PR fails at the
+/// repository step, which shows the failure screen.
+fn demo_open(pr: PrRef, now: i64) -> Vec<Tell> {
+    let step = |step, status, message: &str| {
+        Tell::Step(LoadStep {
+            pr: pr.clone(),
+            step,
+            status,
+            message: Some(message.to_string()),
+        })
+    };
+    if pr != fixture::demo_pr() {
+        return vec![
+            step(
+                LoadStepKind::Repo,
+                StepStatus::Failed,
+                "Demo mode has no copy of this repository",
+            ),
+            Tell::OpenFailed {
+                message: format!(
+                    "Demo mode only has {} — nothing is fetched from GitHub.",
+                    fixture::demo_pr()
+                ),
+                pr,
+                cache: false,
+            },
+        ];
+    }
+    let (view, news) = fixture::demo_review(now);
+    vec![
+        step(LoadStepKind::Repo, StepStatus::Done, "~/Repos/clusia"),
+        step(
+            LoadStepKind::Branch,
+            StepStatus::Done,
+            view.worktree.as_deref().unwrap_or(""),
+        ),
+        step(LoadStepKind::Pr, StepStatus::Done, "7 files"),
+        step(
+            LoadStepKind::Agent,
+            StepStatus::Skipped,
+            "no harness set up",
+        ),
+        Tell::Opened {
+            pr,
+            view: Box::new(view),
+            news,
+        },
+    ]
+}
+
+/// A draft write on the demo review: `ReviewFile` + `Saved`, or `Refused` with the message.
+fn demo_edit(
+    tabs: &ReviewTabs,
+    pr: &PrRef,
+    ticket: u64,
+    edit: impl FnOnce(&mut Review) -> Result<(), String>,
+) -> Vec<Tell> {
+    let Some(ready) = tabs.0.get(pr).and_then(|t| t.ready()) else {
+        return vec![Tell::Refused {
+            pr: pr.clone(),
+            ticket,
+            message: "This review is not open".into(),
+        }];
+    };
+    let mut review = ready.view.review.clone();
+    match edit(&mut review) {
+        Ok(()) => vec![
+            Tell::ReviewFile(Box::new(review)),
+            Tell::Saved {
+                pr: pr.clone(),
+                ticket,
+            },
+        ],
+        Err(message) => vec![Tell::Refused {
+            pr: pr.clone(),
+            ticket,
+            message,
+        }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_open_is_no_longer_followed() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let pr = fixture::demo_pr();
+        let open = OpenSet::default();
+        open_set(&open).insert(pr.clone());
+        let socket = PathBuf::from("/nonexistent/clusia-test/clusiad.sock");
+        work(socket, teller, open.clone(), Ask::OpenReview(pr.clone())).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Tell::OpenFailed { pr: failed, cache: false, .. }) if failed == pr
+        ));
+        assert!(open_set(&open).is_empty(), "the failed PR is forgotten");
+    }
+
+    #[test]
+    fn published_and_left_reviews_are_no_longer_followed() {
+        let pr = fixture::demo_pr();
+        let open = OpenSet::default();
+        open_set(&open).insert(pr.clone());
+        forget_finished(
+            &open,
+            &Tell::PublishFailed {
+                pr: pr.clone(),
+                code: ErrorCode::Upstream,
+                message: "boom".into(),
+            },
+        );
+        assert!(open_set(&open).contains(&pr), "a failed publish stays open");
+        forget_finished(
+            &open,
+            &Tell::Published {
+                pr: pr.clone(),
+                result: PublishResult {
+                    url: None,
+                    closed: false,
+                    unresolved: vec![],
+                    close_error: None,
+                },
+            },
+        );
+        assert!(open_set(&open).is_empty(), "the published review is gone");
+        open_set(&open).insert(pr.clone());
+        forget_finished(&open, &Tell::Left(pr));
+        assert!(open_set(&open).is_empty());
     }
 }

@@ -21,11 +21,20 @@ impl Daemon {
         Self::start_in(tempfile::tempdir().unwrap()).await
     }
 
+    /// A daemon with a token that talks to `api` (a wiremock server).
+    pub async fn start_with_github(api: String) -> Self {
+        Self::start_with(tempfile::tempdir().unwrap(), api, Some("test-token".into())).await
+    }
+
     pub async fn start_in(dir: tempfile::TempDir) -> Self {
+        Self::start_with(dir, "http://127.0.0.1:9".into(), None).await
+    }
+
+    async fn start_with(dir: tempfile::TempDir, api: String, token: Option<String>) -> Self {
         let paths = Paths::new(dir.path());
         let options = DaemonOptions {
-            github_api: Some("http://127.0.0.1:9".into()),
-            github_token: None,
+            github_api: Some(api),
+            github_token: token,
             gh_program: "/nonexistent/gh".into(),
             secrets: Arc::new(MemoryStore::default()),
             background_sync: false,

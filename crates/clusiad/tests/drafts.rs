@@ -24,6 +24,7 @@ fn line(path: &str, line: u32) -> Option<AnchorInput> {
 fn add(pr_line: Option<AnchorInput>, kind: DraftKind, body: &str) -> Command {
     Command::AddDraftItem {
         pr: pr7(),
+        thread: None,
         kind,
         anchor: pr_line,
         body: body.into(),

@@ -4,18 +4,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clusia_core::{
-    Activity, ActivityKind, Anchor, DraftKind, FileDiff, PrRef, Review, ReviewEvent, ReviewState,
-    Role, Side, can_comment,
+    Activity, ActivityKind, Anchor, DraftKind, FileDiff, PrRef, Review, ReviewCache, ReviewEvent,
+    ReviewState, Role, Side, ThreadRef, can_comment,
 };
 use clusia_git::{
     base_pin_ref, pin_commit, remove_worktree, repo_of_worktree, reviewed_ref, unpin,
 };
 use clusia_protocol::{
-    AnchorInput, ErrorCode, Event, FileSummary, LoadStep, LoadStepKind, Outcome, ProtocolError,
-    Reply, ReviewSummary, ReviewView, StepStatus, topics,
+    AnchorInput, CachedReview, ErrorCode, Event, FileSummary, LoadStep, LoadStepKind, Outcome,
+    ProtocolError, Reply, ReviewSummary, ReviewView, StepStatus, topics,
 };
 use clusia_store::{
-    ReviewLoad, append_activity, delete_review, list_reviews, load_review, save_review,
+    ReviewLoad, append_activity, delete_review, delete_review_cache, list_reviews, load_review,
+    load_review_cache, save_review, save_review_cache,
 };
 
 use crate::handlers::{no_token, provider_error};
@@ -174,8 +175,16 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
     relocate::refresh_base(&repo, &remote, pr, &detail.base_ref).await;
 
     step(shared, pr, LoadStepKind::Pr, StepStatus::Running, None);
-    let files = match gh.get_files(pr).await {
-        Ok(f) => Arc::new(f),
+    let (files, conversation, checks) = tokio::join!(
+        gh.get_files(pr),
+        gh.get_conversation(pr),
+        gh.get_checks(pr, &detail.head_sha),
+    );
+    let checks = checks
+        .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the checks"))
+        .ok();
+    let (files, conversation) = match files.and_then(|f| Ok((f, conversation?))) {
+        Ok((f, c)) => (Arc::new(f), c),
         Err(e) => {
             step(
                 shared,
@@ -277,15 +286,70 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         Some(login) if login.eq_ignore_ascii_case(&detail.summary.author) => Role::Author,
         _ => Role::Reviewer,
     };
-    let files = files.iter().map(FileSummary::from).collect();
-    Outcome::Ok(Reply::Review(Box::new(ReviewView {
-        review,
+    let cache = ReviewCache {
         pr: detail,
-        files,
+        files: files.to_vec(),
+        conversation,
+        checks,
         role,
-        worktree: Some(info.path),
         viewer,
+        worktree: Some(info.path),
+        fetched_at: now,
+    };
+    if let Err(e) = save_review_cache(&shared.paths, pr, &cache) {
+        tracing::warn!(error = %e, pr = %pr, "cannot write the review cache");
+    }
+    Outcome::Ok(Reply::Review(Box::new(view_of(review, cache))))
+}
+
+/// The view the window shows, from a review and what GitHub said about its pull request.
+fn view_of(review: Review, cache: ReviewCache) -> ReviewView {
+    ReviewView {
+        review,
+        pr: cache.pr,
+        files: cache.files.iter().map(FileSummary::from).collect(),
+        role: cache.role,
+        worktree: cache.worktree,
+        viewer: cache.viewer,
+        checks: cache.checks,
+        conversation: Some(cache.conversation),
+        diff: cache.files,
+    }
+}
+
+/// The review as the last successful open saw it; never touches the network.
+pub(crate) async fn cached(shared: &Shared, pr: &PrRef) -> Outcome {
+    let not_found = || {
+        Outcome::Err(ProtocolError::new(
+            ErrorCode::NotFound,
+            format!("no cached copy of {pr}"),
+        ))
+    };
+    let cache = match load_review_cache(&shared.paths, pr) {
+        Ok(Some(c)) => c,
+        Ok(None) => return not_found(),
+        Err(e) => {
+            tracing::warn!(error = %e, pr = %pr, "cannot read the review cache");
+            return not_found();
+        }
+    };
+    let review = match load_stored(shared, pr) {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found(),
+        Err(out) => return out,
+    };
+    let fetched_at = cache.fetched_at;
+    Outcome::Ok(Reply::Cached(Box::new(CachedReview {
+        view: view_of(review, cache),
+        fetched_at,
     })))
+}
+
+/// Forgets the cached copy of `pr` (best effort): its review is gone.
+pub(crate) fn drop_cache(shared: &Shared, pr: &PrRef) {
+    if let Err(e) = delete_review_cache(&shared.paths, pr) {
+        tracing::warn!(error = %e, pr = %pr, "cannot delete the review cache");
+    }
 }
 
 /// Loads the stored review; `Ok(None)` when there is none (or it was quarantined).
@@ -419,6 +483,7 @@ pub(crate) async fn add_item(
     pr: &PrRef,
     kind: DraftKind,
     anchor: Option<AnchorInput>,
+    thread: Option<ThreadRef>,
     body: &str,
 ) -> Outcome {
     let _guard = lock(shared, pr).await;
@@ -440,7 +505,7 @@ pub(crate) async fn add_item(
         None => None,
     };
     let now = now_unix();
-    let item = match review.draft.add(kind, anchor, body, now) {
+    let item = match review.draft.add(kind, anchor, thread, body, now) {
         Ok(item) => item.clone(),
         Err(e) => return bad_request(e.to_string()),
     };
@@ -519,6 +584,7 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
                 format!("could not delete the review file: {e}"),
             ));
         }
+        drop_cache(shared, pr);
         return Outcome::Ok(Reply::Ack);
     }
     if let Err(e) = review.apply(ReviewEvent::Leave, now_unix()) {
@@ -562,6 +628,7 @@ pub(crate) async fn discard(shared: &Shared, client: &str, pr: &PrRef) -> Outcom
             format!("could not delete the review file: {e}"),
         ));
     }
+    drop_cache(shared, pr);
     cleanup_checkout(shared, pr).await;
     record(
         shared,

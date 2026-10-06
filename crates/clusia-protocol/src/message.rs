@@ -1,8 +1,8 @@
 //! Every message that crosses the socket.
 
 use clusia_core::{
-    ActivitySummary, Config, DraftItem, DraftKind, FileDiff, PrConversation, PrDetail, PrFilter,
-    PrRef, PrSummary, Review, ReviewState, Role, Side, Verdict,
+    ActivitySummary, ChecksSummary, Config, DraftItem, DraftKind, FileDiff, PrConversation,
+    PrDetail, PrFilter, PrRef, PrSummary, Review, ReviewState, Role, Side, ThreadRef, Verdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +102,10 @@ pub enum Command {
     GetReview {
         pr: PrRef,
     },
+    /// The review as the last successful open saw it, without network ("Open from cache").
+    GetCachedReview {
+        pr: PrRef,
+    },
     /// Leave: saved if the draft has content, otherwise forgotten.
     CloseReview {
         pr: PrRef,
@@ -120,6 +124,9 @@ pub enum Command {
         kind: DraftKind,
         anchor: Option<AnchorInput>,
         body: String,
+        /// The review thread a `reply` or `resolve` points at.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<ThreadRef>,
     },
     UpdateDraftItem {
         pr: PrRef,
@@ -178,6 +185,7 @@ pub enum Reply {
     Worktree(WorktreeInfo),
     Review(Box<ReviewView>),
     ReviewFile(Box<Review>),
+    Cached(Box<CachedReview>),
     Diff(Vec<FileDiff>),
     Conversation(PrConversation),
     DraftItem(DraftItem),
@@ -384,6 +392,22 @@ pub struct ReviewView {
     pub role: Role,
     pub worktree: Option<String>,
     pub viewer: Option<String>,
+    /// Checks on the head commit; `None` when GitHub could not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<ChecksSummary>,
+    /// Comments, reviews and review threads, read while opening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<PrConversation>,
+    /// The files with their patches, exactly as fetched while opening.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diff: Vec<FileDiff>,
+}
+
+/// A review view rebuilt from the cache, and when its GitHub data was fetched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedReview {
+    pub view: ReviewView,
+    pub fetched_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -447,6 +471,12 @@ pub struct ReviewSummary {
 pub struct PublishResult {
     pub url: Option<String>,
     pub closed: bool,
+    /// Review threads marked to resolve that GitHub left open.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<String>,
+    /// The review was published but closing the pull request failed (`closed` is false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_error: Option<String>,
 }
 
 /// What the window should show.
@@ -899,6 +929,8 @@ mod tests {
             deletions: 2,
             changed_files: 3,
             clone_url: "https://github.com/acme/widgets.git".into(),
+            closed: false,
+            merged: false,
         };
         for reply in [
             Reply::Prs(vec![summary()]),
@@ -995,6 +1027,7 @@ mod tests {
                     side: clusia_core::Side::Right,
                 }),
                 body: "nit".into(),
+                thread: None,
             },
         };
         assert_eq!(
@@ -1085,6 +1118,8 @@ mod tests {
             Reply::Published(PublishResult {
                 url: Some("u".into()),
                 closed: false,
+                unresolved: vec![],
+                close_error: None,
             }),
             Reply::WhatsNew(vec![NewsItem {
                 kind: NewsKind::Commits,
@@ -1127,5 +1162,164 @@ mod tests {
                 items: 1,
             },
         });
+    }
+
+    fn view() -> ReviewView {
+        let review = clusia_core::Review::new(acme7(), "Fix".into(), "b".into(), "h".into(), 1);
+        ReviewView {
+            review,
+            pr: clusia_core::PrDetail {
+                summary: summary(),
+                base_ref: "main".into(),
+                head_ref: "fix".into(),
+                base_sha: "b".into(),
+                head_sha: "h".into(),
+                additions: 1,
+                deletions: 0,
+                changed_files: 1,
+                clone_url: "https://github.com/acme/widgets.git".into(),
+                closed: false,
+                merged: false,
+            },
+            files: vec![],
+            role: Role::Reviewer,
+            worktree: None,
+            viewer: Some("octo".into()),
+            checks: None,
+            conversation: None,
+            diff: vec![],
+        }
+    }
+
+    #[test]
+    fn m5b_messages_wire_format() {
+        let reply = ClientMessage::Request {
+            id: 4,
+            cmd: Command::AddDraftItem {
+                pr: acme7(),
+                kind: DraftKind::Reply,
+                anchor: None,
+                body: "Agreed.".into(),
+                thread: Some(ThreadRef {
+                    id: "PRRT_1".into(),
+                    author: "mona".into(),
+                    path: Some("src/a.rs".into()),
+                    line: Some(41),
+                }),
+            },
+        };
+        assert_eq!(
+            wire(&reply),
+            r#"{"type":"request","id":4,"cmd":{"add_draft_item":{"pr":"acme/widgets#7","kind":"reply","anchor":null,"body":"Agreed.","thread":{"id":"PRRT_1","author":"mona","path":"src/a.rs","line":41}}}}"#
+        );
+        let old: Command = serde_json::from_str(
+            r#"{"add_draft_item":{"pr":"acme/widgets#7","kind":"general","anchor":null,"body":"x"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(old, Command::AddDraftItem { thread: None, .. }));
+
+        let published = PublishResult {
+            url: Some("u".into()),
+            closed: false,
+            unresolved: vec!["PRRT_2".into()],
+            close_error: None,
+        };
+        assert_eq!(
+            wire(&published),
+            r#"{"url":"u","closed":false,"unresolved":["PRRT_2"]}"#
+        );
+        let all_resolved = PublishResult {
+            unresolved: vec![],
+            ..published
+        };
+        assert_eq!(wire(&all_resolved), r#"{"url":"u","closed":false}"#);
+        let old: PublishResult = serde_json::from_str(r#"{"url":null,"closed":true}"#).unwrap();
+        assert!(old.unresolved.is_empty());
+        assert_eq!(old.close_error, None);
+        let close_failed = PublishResult {
+            url: Some("u".into()),
+            closed: false,
+            unresolved: vec!["PRRT_2".into()],
+            close_error: Some("GitHub said no".into()),
+        };
+        assert_eq!(
+            wire(&close_failed),
+            r#"{"url":"u","closed":false,"unresolved":["PRRT_2"],"close_error":"GitHub said no"}"#
+        );
+    }
+
+    #[test]
+    fn review_view_new_fields_are_optional_on_the_wire() {
+        let bare = serde_json::to_value(view()).unwrap();
+        for key in ["checks", "conversation", "diff"] {
+            assert!(bare.get(key).is_none(), "{key} is omitted when empty");
+        }
+        let back: ReviewView = serde_json::from_value(bare).unwrap();
+        assert_eq!(back, view());
+
+        let full = ReviewView {
+            checks: Some(clusia_core::ChecksSummary {
+                total: 2,
+                passed: 2,
+                failed: 0,
+                pending: 0,
+            }),
+            conversation: Some(PrConversation::default()),
+            diff: vec![FileDiff {
+                path: "a.rs".into(),
+                previous_path: None,
+                status: "modified".into(),
+                additions: 1,
+                deletions: 0,
+                patch: Some("@@ -1 +1 @@\n-a\n+b".into()),
+            }],
+            ..view()
+        };
+        let v = serde_json::to_value(&full).unwrap();
+        assert_eq!(
+            v["checks"].to_string(),
+            r#"{"failed":0,"passed":2,"pending":0,"total":2}"#
+        );
+        assert_eq!(
+            v["conversation"].to_string(),
+            r#"{"comments":[],"review_threads":[],"reviews":[],"threads":[]}"#
+        );
+        assert_eq!(
+            v["diff"].to_string(),
+            r#"[{"additions":1,"deletions":0,"patch":"@@ -1 +1 @@\n-a\n+b","path":"a.rs","previous_path":null,"status":"modified"}]"#
+        );
+        round_trip(Reply::Review(Box::new(full)));
+    }
+
+    #[test]
+    fn cached_review_wire_format() {
+        let get = ClientMessage::Request {
+            id: 5,
+            cmd: Command::GetCachedReview { pr: acme7() },
+        };
+        assert_eq!(
+            wire(&get),
+            r#"{"type":"request","id":5,"cmd":{"get_cached_review":{"pr":"acme/widgets#7"}}}"#
+        );
+        let cached = ServerMessage::Response {
+            id: 5,
+            result: Outcome::Ok(Reply::Cached(Box::new(CachedReview {
+                view: view(),
+                fetched_at: 9,
+            }))),
+        };
+        let text = wire(&cached);
+        assert!(
+            text.starts_with(
+                r#"{"type":"response","id":5,"result":{"ok":{"cached":{"view":{"review":{"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(r#""viewer":"octo"},"fetched_at":9}}}}"#),
+            "{text}"
+        );
+        round_trip(cached);
+        round_trip(Command::GetCachedReview { pr: acme7() });
     }
 }
