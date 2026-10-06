@@ -382,6 +382,25 @@ mod tests {
     }
 
     #[test]
+    fn the_media_toggle_is_settable_and_readable() {
+        let c = Config::default();
+        assert_eq!(
+            get_value(&c, "media.load_external_images").unwrap(),
+            "false"
+        );
+        let on = set_value(&c, "media.load_external_images", "true").unwrap();
+        assert!(on.media.load_external_images);
+        assert_eq!(
+            get_value(&on, "media.load_external_images").unwrap(),
+            "true"
+        );
+        assert!(matches!(
+            set_value(&c, "media.load_external_images", "maybe"),
+            Err(ConfigKeyError::Invalid { .. })
+        ));
+    }
+
+    #[test]
     fn set_value_rejects_wrong_types_and_rule_violations() {
         let c = Config::default();
         assert!(matches!(

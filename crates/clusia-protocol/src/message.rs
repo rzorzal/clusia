@@ -1,8 +1,9 @@
 //! Every message that crosses the socket.
 
 use clusia_core::{
-    ActivitySummary, ChecksSummary, Config, DraftItem, DraftKind, FileDiff, PrConversation,
-    PrDetail, PrFilter, PrRef, PrSummary, Review, ReviewState, Role, Side, ThreadRef, Verdict,
+    ActivitySummary, ChecksSummary, Config, DraftItem, DraftKind, FileDiff, MediaKind,
+    PrConversation, PrDetail, PrFilter, PrRef, PrSummary, Review, ReviewState, Role, Side,
+    ThreadRef, Verdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -161,6 +162,24 @@ pub enum Command {
         #[serde(default)]
         line: Option<u32>,
     },
+    /// Download an image or GIF into the media cache and answer with its local file.
+    FetchMedia {
+        url: String,
+    },
+    /// Giphy search (`query` empty: trending), 24 results from `offset`.
+    SearchGifs {
+        query: String,
+        offset: u32,
+    },
+    /// Store the Giphy API key in the Keychain.
+    SetGiphyKey {
+        key: Secret,
+    },
+    ClearGiphyKey,
+    /// Whether a Giphy key is stored (the key itself never leaves the daemon).
+    GiphyKeyStatus,
+    /// What the first-run screen needs: the GitHub login, repository folders and agent CLIs.
+    FirstRunStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -194,6 +213,10 @@ pub enum Reply {
     Reviews(Vec<ReviewSummary>),
     Activity(ActivitySummary),
     Delivered(usize),
+    Media(MediaFile),
+    Gifs(GifPage),
+    FirstRun(FirstRun),
+    GiphyKeyStatus(GiphyKeyStatus),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +345,10 @@ pub enum ErrorCode {
     Conflict,
     /// E.g. no open review.
     InvalidState,
+    /// The request was understood but is not allowed (a host or file type media never loads).
+    Refused,
+    /// A needed setting is missing (e.g. no Giphy key).
+    NotConfigured,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -350,6 +377,8 @@ pub enum Event {
     WindowRequested {
         target: WindowTarget,
     },
+    /// The Giphy key was set or removed (topic `config`).
+    GiphyKeyChanged,
     /// The daemon is shutting down on request (`Shutdown`); clients should close.
     Stopping,
 }
@@ -477,6 +506,77 @@ pub struct PublishResult {
     /// The review was published but closing the pull request failed (`closed` is false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_error: Option<String>,
+}
+
+/// A downloaded image in the daemon's media cache. The window reads `path` and nothing else
+/// in that directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaFile {
+    pub path: String,
+    pub kind: MediaKind,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GifItem {
+    pub id: String,
+    pub title: String,
+    /// The small animated rendition for the picker grid.
+    pub preview_url: String,
+    /// The rendition inserted into the comment.
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GifPage {
+    pub items: Vec<GifItem>,
+    /// Where the next page starts; `None` at the end.
+    pub next_offset: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GiphyKeyStatus {
+    pub configured: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GithubLogin {
+    SignedIn { login: String, scopes: Vec<String> },
+    SignedOut,
+    Error { message: String },
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoFolder {
+    pub path: String,
+    pub exists: bool,
+    /// Repositories found up to two levels down.
+    pub repos: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessKind {
+    ClaudeCode,
+    Codex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Harness {
+    pub kind: HarnessKind,
+    pub path: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstRun {
+    pub github: GithubLogin,
+    pub folders: Vec<RepoFolder>,
+    pub harnesses: Vec<Harness>,
 }
 
 /// What the window should show.
@@ -1321,5 +1421,168 @@ mod tests {
         );
         round_trip(cached);
         round_trip(Command::GetCachedReview { pr: acme7() });
+    }
+
+    #[test]
+    fn m5c_messages_wire_format() {
+        let req = |id, cmd| wire(&ClientMessage::Request { id, cmd });
+        assert_eq!(
+            req(
+                1,
+                Command::FetchMedia {
+                    url: "https://github.com/user-attachments/assets/a1".into()
+                }
+            ),
+            r#"{"type":"request","id":1,"cmd":{"fetch_media":{"url":"https://github.com/user-attachments/assets/a1"}}}"#
+        );
+        assert_eq!(
+            req(
+                2,
+                Command::SearchGifs {
+                    query: "cat".into(),
+                    offset: 24
+                }
+            ),
+            r#"{"type":"request","id":2,"cmd":{"search_gifs":{"query":"cat","offset":24}}}"#
+        );
+        assert_eq!(
+            req(3, Command::SetGiphyKey { key: "gk_x".into() }),
+            r#"{"type":"request","id":3,"cmd":{"set_giphy_key":{"key":"gk_x"}}}"#
+        );
+        assert_eq!(
+            req(4, Command::ClearGiphyKey),
+            r#"{"type":"request","id":4,"cmd":"clear_giphy_key"}"#
+        );
+        assert_eq!(
+            req(8, Command::GiphyKeyStatus),
+            r#"{"type":"request","id":8,"cmd":"giphy_key_status"}"#
+        );
+        assert_eq!(
+            wire(&ServerMessage::Response {
+                id: 8,
+                result: Outcome::Ok(Reply::GiphyKeyStatus(GiphyKeyStatus { configured: true })),
+            }),
+            r#"{"type":"response","id":8,"result":{"ok":{"giphy_key_status":{"configured":true}}}}"#
+        );
+        assert_eq!(
+            req(5, Command::FirstRunStatus),
+            r#"{"type":"request","id":5,"cmd":"first_run_status"}"#
+        );
+        let reply = |reply| {
+            wire(&ServerMessage::Response {
+                id: 6,
+                result: Outcome::Ok(reply),
+            })
+        };
+        assert_eq!(
+            reply(Reply::Media(MediaFile {
+                path: "/h/cache/media/ab.png".into(),
+                kind: MediaKind::Png,
+                bytes: 67
+            })),
+            r#"{"type":"response","id":6,"result":{"ok":{"media":{"path":"/h/cache/media/ab.png","kind":"png","bytes":67}}}}"#
+        );
+        assert_eq!(
+            reply(Reply::Gifs(GifPage {
+                items: vec![GifItem {
+                    id: "g1".into(),
+                    title: "Happy cat".into(),
+                    preview_url: "https://media0.giphy.com/p.gif".into(),
+                    url: "https://media0.giphy.com/d.gif".into(),
+                    width: 200,
+                    height: 150
+                }],
+                next_offset: Some(24)
+            })),
+            r#"{"type":"response","id":6,"result":{"ok":{"gifs":{"items":[{"id":"g1","title":"Happy cat","preview_url":"https://media0.giphy.com/p.gif","url":"https://media0.giphy.com/d.gif","width":200,"height":150}],"next_offset":24}}}}"#
+        );
+        assert_eq!(
+            reply(Reply::FirstRun(FirstRun {
+                github: GithubLogin::SignedIn {
+                    login: "octo".into(),
+                    scopes: vec!["repo".into()]
+                },
+                folders: vec![RepoFolder {
+                    path: "~/Repos".into(),
+                    exists: true,
+                    repos: 3
+                }],
+                harnesses: vec![Harness {
+                    kind: HarnessKind::ClaudeCode,
+                    path: Some("/opt/homebrew/bin/claude".into()),
+                    version: Some("2.0.1".into())
+                }]
+            })),
+            r#"{"type":"response","id":6,"result":{"ok":{"first_run":{"github":{"state":"signed_in","login":"octo","scopes":["repo"]},"folders":[{"path":"~/Repos","exists":true,"repos":3}],"harnesses":[{"kind":"claude_code","path":"/opt/homebrew/bin/claude","version":"2.0.1"}]}}}}"#
+        );
+        for (github, text) in [
+            (GithubLogin::SignedOut, r#"{"state":"signed_out"}"#),
+            (GithubLogin::Unknown, r#"{"state":"unknown"}"#),
+            (
+                GithubLogin::Error {
+                    message: "boom".into(),
+                },
+                r#"{"state":"error","message":"boom"}"#,
+            ),
+        ] {
+            assert_eq!(wire(&github), text);
+        }
+        assert_eq!(
+            wire(&ServerMessage::Response {
+                id: 7,
+                result: Outcome::Err(ProtocolError::new(ErrorCode::Refused, "svg is not shown")),
+            }),
+            r#"{"type":"response","id":7,"result":{"err":{"code":"refused","message":"svg is not shown"}}}"#
+        );
+        assert_eq!(wire(&ErrorCode::NotConfigured), r#""not_configured""#);
+        assert_eq!(
+            wire(&ServerMessage::Event {
+                topic: topics::CONFIG.into(),
+                event: Event::GiphyKeyChanged
+            }),
+            r#"{"type":"event","topic":"config","event":"giphy_key_changed"}"#
+        );
+    }
+
+    #[test]
+    fn m5c_messages_round_trip() {
+        round_trip(Command::FetchMedia { url: "u".into() });
+        round_trip(Command::SearchGifs {
+            query: String::new(),
+            offset: 0,
+        });
+        round_trip(Command::SetGiphyKey { key: "k".into() });
+        round_trip(Command::ClearGiphyKey);
+        round_trip(Command::FirstRunStatus);
+        round_trip(Command::GiphyKeyStatus);
+        round_trip(Reply::GiphyKeyStatus(GiphyKeyStatus { configured: false }));
+        round_trip(Reply::Media(MediaFile {
+            path: "p".into(),
+            kind: MediaKind::Gif,
+            bytes: 1,
+        }));
+        round_trip(Reply::Gifs(GifPage {
+            items: vec![],
+            next_offset: None,
+        }));
+        round_trip(Reply::FirstRun(FirstRun {
+            github: GithubLogin::Unknown,
+            folders: vec![],
+            harnesses: vec![Harness {
+                kind: HarnessKind::Codex,
+                path: None,
+                version: None,
+            }],
+        }));
+        round_trip(Event::GiphyKeyChanged);
+    }
+
+    #[test]
+    fn the_giphy_key_never_shows_in_debug() {
+        let msg = Command::SetGiphyKey {
+            key: "gk_supersecret".into(),
+        };
+        let dbg = format!("{msg:?}");
+        assert!(!dbg.contains("supersecret"), "{dbg}");
     }
 }

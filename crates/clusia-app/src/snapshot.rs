@@ -69,8 +69,9 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         }
         Event::ReviewOutdated { .. } => r.reviews = true,
         Event::WindowRequested { target } => return (r, Some(target)),
-        // `Stopping` is handled by the bridge before `apply` (it closes the window).
-        Event::LoadStep(_) | Event::Stopping => {}
+        // `Stopping` is handled by the bridge before `apply` (it closes the window). A Giphy key
+        // change carries nothing to apply: the pages that show it ask for its state themselves.
+        Event::LoadStep(_) | Event::GiphyKeyChanged | Event::Stopping => {}
     }
     (r, None)
 }

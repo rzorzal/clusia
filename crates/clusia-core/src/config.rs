@@ -14,6 +14,7 @@ pub struct Config {
     pub editor: Editor,
     pub notifications: Notifications,
     pub lists: Lists,
+    pub media: Media,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +135,14 @@ pub enum EditorKind {
 #[serde(default)]
 pub struct Notifications {
     pub do_not_disturb: bool,
+}
+
+/// Images and GIFs in comments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Media {
+    /// Show images hosted outside GitHub and Giphy; off, they appear as links.
+    pub load_external_images: bool,
 }
 
 /// How the pull request lists (tray and Home) are ordered, filtered and narrowed.
@@ -292,6 +301,7 @@ mod tests {
         assert_eq!(c.editor.kind, EditorKind::VsCode);
         assert_eq!(c.editor.custom_command, "");
         assert!(!c.notifications.do_not_disturb);
+        assert!(!c.media.load_external_images);
         assert_eq!(c.validate(), Ok(()));
     }
 
@@ -442,5 +452,14 @@ mod tests {
         }
         c.lists.repository = "rzorzal/clusia".into();
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn media_section_defaults_and_round_trips() {
+        let c: Config = serde_json::from_str(r#"{"media":{"load_external_images":true}}"#).unwrap();
+        assert!(c.media.load_external_images);
+        let none: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(none.media, Media::default());
+        assert_eq!(c.validate(), Ok(()));
     }
 }

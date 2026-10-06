@@ -2,6 +2,7 @@
 
 mod activity;
 mod connection;
+mod giphy;
 mod handlers;
 mod news;
 mod options;
