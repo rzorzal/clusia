@@ -605,6 +605,8 @@ struct BodyKey {
     more: usize,
     code_size: f32,
     error: Option<String>,
+    /// The editor waits for the daemon (**Saving…**).
+    saving: bool,
 }
 
 #[derive(Component)]
@@ -797,6 +799,7 @@ fn rebuild_diff(
             more: v.more,
             code_size: v.code_size,
             error: v.editor_error.clone(),
+            saving: editor.as_ref().is_some_and(|e| e.ticket.is_some()),
         };
         if part.built.as_ref() == Some(&key) {
             continue;
@@ -2139,6 +2142,52 @@ mod tests {
         assert_eq!(
             last_toast(&app),
             Some(("Not connected to clusiad — not sent".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn a_waiting_comment_shows_saving() {
+        let mut app = review_app();
+        comment_on_44(&mut app, "Drop the guard before the exchange.");
+        testing::settle(&mut app);
+        assert!(has_text(&mut app, "Saving…"));
+        assert_eq!(testing::count::<EditorSubmit>(&mut app), 0);
+    }
+
+    #[test]
+    fn a_lost_daemon_frees_the_waiting_comment() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        let body = "Drop the guard before the exchange.";
+        comment_on_44(&mut app, body);
+        testing::tell(&mut app, Tell::Lost("clusiad closed the connection".into()));
+        testing::settle(&mut app);
+        let editor = testing::tab(&app, &pr).ui.editor.expect("the editor stays");
+        assert_eq!(
+            (editor.text.as_str(), editor.ticket, editor.error.as_deref()),
+            (body, None, Some(crate::review_state::LOST_WHILE_SAVING))
+        );
+        assert!(
+            unsent(Some(&editor)),
+            "closing the tab or the window protects it again"
+        );
+        assert!(has_text(&mut app, crate::review_state::LOST_WHILE_SAVING));
+        let snapshot = app
+            .world()
+            .resource::<crate::bridge::Model>()
+            .snapshot
+            .clone();
+        testing::tell(&mut app, Tell::Snapshot(Box::new(snapshot)));
+        testing::settle(&mut app);
+        let submit = testing::find::<EditorSubmit>(&mut app, |_| true);
+        testing::activate(&mut app, submit);
+        let asks = testing::recorded(&mut app);
+        assert!(
+            matches!(
+                asks.as_slice(),
+                [Ask::AddItem { body: sent, ticket, .. }] if sent == body && *ticket > 0
+            ),
+            "sent again after reconnecting: {asks:?}"
         );
     }
 }

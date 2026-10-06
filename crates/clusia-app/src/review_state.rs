@@ -17,6 +17,10 @@ use crate::nav::{Nav, NavSystems};
 /// Diff lines shown at first and added by each *Show more*.
 pub const SHOW_STEP: usize = 500;
 
+/// Under an editor whose write was in flight when the connection dropped.
+pub const LOST_WHILE_SAVING: &str =
+    "Lost the connection to clusiad — your text is kept; check the draft after reconnecting";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ReviewSection {
     Diagrams,
@@ -434,6 +438,16 @@ pub(crate) fn apply(
         Tell::Left(pr) => {
             not_busy(tabs, &pr);
             events.push(ReviewEvent::Left(pr));
+        }
+        // A write in flight on the dropped connection never gets its answer: its editor takes
+        // submits again (and counts as unsent) instead of waiting forever. `pump` shows the loss.
+        Tell::Lost(reason) => {
+            for editor in tabs.0.values_mut().filter_map(|t| t.ui.editor.as_mut()) {
+                if editor.ticket.take().is_some() {
+                    editor.error = Some(LOST_WHILE_SAVING.into());
+                }
+            }
+            return Some(Tell::Lost(reason));
         }
         other => return Some(other),
     }

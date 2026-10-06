@@ -305,7 +305,8 @@ pub struct UndoResolve {
 #[derive(Component)]
 struct ListPart {
     pr: PrRef,
-    built: Option<(CommentsView, Option<String>)>,
+    /// The view, the editor's error and whether it waits for the daemon (**Saving…**).
+    built: Option<(CommentsView, Option<String>, bool)>,
 }
 
 pub struct CommentsPlugin;
@@ -386,7 +387,8 @@ fn rebuild_comments(
         };
         let v = comments_view(ready, &tab.ui, clock.now());
         let error = tab.ui.editor.as_ref().and_then(|e| e.error.clone());
-        let key = (v, error);
+        let saving = tab.ui.editor.as_ref().is_some_and(|e| e.ticket.is_some());
+        let key = (v, error, saving);
         if part.built.as_ref() == Some(&key) {
             continue;
         }
@@ -1266,5 +1268,24 @@ mod tests {
                 .iter()
                 .all(|t| t.warning && t.text == crate::screens::review::editor::CACHED_COPY)
         );
+    }
+
+    #[test]
+    fn a_waiting_reply_shows_saving() {
+        let mut app = comments_app();
+        let reply = testing::find::<CommentReply>(&mut app, |r| r.thread.author == "mona");
+        testing::activate(&mut app, reply);
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |_| true);
+        testing::type_into(&mut app, area, "Agreed, will do.");
+        let submit =
+            testing::find::<crate::screens::review::editor::EditorSubmit>(&mut app, |_| true);
+        testing::activate(&mut app, submit);
+        testing::settle(&mut app);
+        assert!(matches!(
+            testing::recorded(&mut app).as_slice(),
+            [Ask::AddItem { .. }]
+        ));
+        assert!(has_text(&mut app, "Saving…"));
     }
 }
