@@ -25,6 +25,7 @@ use crate::screens::open_pr::OpenPrPlugin;
 use crate::screens::review::ReviewPlugin;
 use crate::snapshot::{self, Snapshot};
 use crate::theme::{LIGHT, Theme, ThemePlugin};
+use crate::ui::emoji::EmojiPlugin;
 use crate::ui::kit::KitPlugin;
 
 pub const NOW: i64 = 1_790_000_000;
@@ -32,7 +33,8 @@ pub const NOW: i64 = 1_790_000_000;
 pub fn app(snapshot: Snapshot) -> App {
     let (inbox, outbox) = bridge::local_link();
     let mut app = App::new();
-    app.add_plugins(MinimalPlugins)
+    app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+        .init_asset::<Image>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<InputFocus>()
         .add_message::<WindowThemeChanged>()
@@ -54,7 +56,14 @@ pub fn app(snapshot: Snapshot) -> App {
         .insert_resource(inbox)
         .insert_resource(outbox)
         .add_systems(PreUpdate, bridge::pump)
-        .add_plugins((ThemePlugin, KitPlugin, NavPlugin, HomePlugin, ConfigPlugin))
+        .add_plugins((
+            ThemePlugin,
+            KitPlugin,
+            EmojiPlugin,
+            NavPlugin,
+            HomePlugin,
+            ConfigPlugin,
+        ))
         .add_plugins(ReviewStatePlugin)
         .add_plugins(ReviewPlugin)
         .add_plugins(OpenPrPlugin)

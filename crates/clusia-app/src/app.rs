@@ -91,6 +91,7 @@ pub fn run(launch: Launch) {
         FontsPlugin,
         crate::theme::ThemePlugin,
         crate::ui::kit::KitPlugin,
+        crate::ui::emoji::EmojiPlugin,
         crate::nav::NavPlugin,
         crate::review_state::ReviewStatePlugin,
         crate::screens::home::HomePlugin,

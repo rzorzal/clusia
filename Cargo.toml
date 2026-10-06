@@ -69,3 +69,6 @@ tree-sitter-md = "0.5.3"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+
+[profile.dev.package."*"]
+opt-level = 2
