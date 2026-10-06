@@ -160,10 +160,45 @@ pub enum Tell {
     Left(PrRef),
 }
 
-/// The ends Bevy keeps.
+/// The ends Bevy keeps, and the connection thread.
 pub struct Link {
     pub tell: Receiver<Tell>,
     pub ask: UnboundedSender<Ask>,
+    pub thread: BridgeThread,
+}
+
+/// The connection thread. It ends once every `Ask` sender is gone and the asks already queued
+/// are answered (the channel hands them out before it reports closed).
+pub struct BridgeThread(std::thread::JoinHandle<()>);
+
+impl BridgeThread {
+    /// Waits up to `within` for the thread to end; `false` when it is still running.
+    pub fn finish(self, within: Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while !self.0.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = self.0.join();
+        true
+    }
+}
+
+/// Where `connect` leaves the bridge thread, so `app::run` can wait for it after the window
+/// closed (leave choices sent on the way out must reach the daemon).
+#[derive(Clone, Default)]
+pub struct BridgeSlot(Arc<Mutex<Option<BridgeThread>>>);
+
+impl BridgeSlot {
+    pub fn take(&self) -> Option<BridgeThread> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
+    fn put(&self, thread: BridgeThread) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(thread);
+    }
 }
 
 /// Starts the connection thread; `wake` runs after every `Tell`.
@@ -174,7 +209,7 @@ pub fn spawn(paths: Paths, home: Option<PathBuf>, wake: impl Fn() + Send + Sync 
         tx: tell_tx,
         wake: Arc::new(wake),
     };
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("clusia-bridge".into())
         .spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
@@ -189,6 +224,7 @@ pub fn spawn(paths: Paths, home: Option<PathBuf>, wake: impl Fn() + Send + Sync 
     Link {
         tell: tell_rx,
         ask: ask_tx,
+        thread: BridgeThread(thread),
     }
 }
 
@@ -576,8 +612,9 @@ async fn answer(
             .await
         {
             Ok(_) => {
-                open_set(open).remove(&pr);
-                teller.send(Tell::Left(pr));
+                let left = Tell::Left(pr);
+                forget_finished(open, &left);
+                teller.send(left);
             }
             Err(ClientError::Server(e)) => teller.send(Tell::Notice {
                 text: e.message,
@@ -614,14 +651,19 @@ fn spawn_worker(paths: &Paths, teller: &Teller, open: &OpenSet, ask: Ask) {
     tokio::spawn(work(paths.socket(), teller.clone(), open.clone(), ask));
 }
 
+/// Stops following a review that is no longer open on the daemon: it failed to open, was
+/// published (its file is gone), or was left.
+fn forget_finished(open: &OpenSet, tell: &Tell) {
+    if let Tell::OpenFailed { pr, .. } | Tell::Published { pr, .. } | Tell::Left(pr) = tell {
+        open_set(open).remove(pr);
+    }
+}
+
 async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
     match ask {
         Ask::OpenReview(pr) => {
             let tell = open_review(&socket, &teller, pr).await;
-            // Nothing is open on the daemon, so there are no changes to follow.
-            if let Tell::OpenFailed { pr, .. } = &tell {
-                open_set(&open).remove(pr);
-            }
+            forget_finished(&open, &tell);
             teller.send(tell);
         }
         Ask::OpenCached(pr) => open_cached(&socket, &teller, pr).await,
@@ -629,7 +671,11 @@ async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
             pr,
             verdict,
             summary,
-        } => publish(&socket, &teller, pr, verdict, summary).await,
+        } => {
+            let tell = publish(&socket, pr, verdict, summary).await;
+            forget_finished(&open, &tell);
+            teller.send(tell);
+        }
         _ => {}
     }
 }
@@ -721,15 +767,16 @@ async fn open_cached(socket: &Path, teller: &Teller, pr: PrRef) {
     }
 }
 
-async fn publish(socket: &Path, teller: &Teller, pr: PrRef, verdict: Verdict, summary: String) {
+/// `Published` or `PublishFailed`.
+async fn publish(socket: &Path, pr: PrRef, verdict: Verdict, summary: String) -> Tell {
     let mut client = match worker(socket).await {
         Ok(c) => c,
         Err(message) => {
-            return teller.send(Tell::PublishFailed {
+            return Tell::PublishFailed {
                 pr,
                 code: ErrorCode::Offline,
                 message,
-            });
+            };
         }
     };
     let cmd = Command::Publish {
@@ -737,7 +784,7 @@ async fn publish(socket: &Path, teller: &Teller, pr: PrRef, verdict: Verdict, su
         verdict,
         summary,
     };
-    let tell = match client.request(cmd).await {
+    match client.request(cmd).await {
         Ok(Reply::Published(result)) => Tell::Published { pr, result },
         Ok(_) => Tell::PublishFailed {
             pr,
@@ -758,8 +805,7 @@ async fn publish(socket: &Path, teller: &Teller, pr: PrRef, verdict: Verdict, su
                 lost(e)
             ),
         },
-    };
-    teller.send(tell);
+    }
 }
 
 /// Sends `cmd`. A refusal becomes a warning notice, and success shows `ok` (when not empty).
@@ -875,6 +921,8 @@ pub struct BridgePlugin {
     pub mode: Mode,
     pub paths: Paths,
     pub home: Option<PathBuf>,
+    /// Receives the connection thread in live mode.
+    pub thread: BridgeSlot,
 }
 
 impl Plugin for BridgePlugin {
@@ -886,8 +934,9 @@ impl Plugin for BridgePlugin {
         match self.mode {
             Mode::Live => {
                 let (paths, home) = (self.paths.clone(), self.home.clone());
+                let slot = self.thread.clone();
                 app.add_systems(Startup, move |world: &mut World| {
-                    connect(world, paths.clone(), home.clone());
+                    connect(world, paths.clone(), home.clone(), &slot);
                 });
             }
             Mode::Demo { dark } => {
@@ -912,7 +961,7 @@ impl Plugin for BridgePlugin {
     }
 }
 
-fn connect(world: &mut World, paths: Paths, home: Option<PathBuf>) {
+fn connect(world: &mut World, paths: Paths, home: Option<PathBuf>, slot: &BridgeSlot) {
     let proxy = world
         .get_resource::<EventLoopProxyWrapper>()
         .map(|p| (**p).clone());
@@ -923,6 +972,7 @@ fn connect(world: &mut World, paths: Paths, home: Option<PathBuf>) {
     });
     world.insert_resource(Inbox(link.tell));
     world.insert_resource(Asks::live(link.ask));
+    slot.put(link.thread);
 }
 
 pub(crate) fn pump(
@@ -1188,5 +1238,37 @@ mod tests {
             Ok(Tell::OpenFailed { pr: failed, cache: false, .. }) if failed == pr
         ));
         assert!(open_set(&open).is_empty(), "the failed PR is forgotten");
+    }
+
+    #[test]
+    fn published_and_left_reviews_are_no_longer_followed() {
+        let pr = fixture::demo_pr();
+        let open = OpenSet::default();
+        open_set(&open).insert(pr.clone());
+        forget_finished(
+            &open,
+            &Tell::PublishFailed {
+                pr: pr.clone(),
+                code: ErrorCode::Upstream,
+                message: "boom".into(),
+            },
+        );
+        assert!(open_set(&open).contains(&pr), "a failed publish stays open");
+        forget_finished(
+            &open,
+            &Tell::Published {
+                pr: pr.clone(),
+                result: PublishResult {
+                    url: None,
+                    closed: false,
+                    unresolved: vec![],
+                    close_error: None,
+                },
+            },
+        );
+        assert!(open_set(&open).is_empty(), "the published review is gone");
+        open_set(&open).insert(pr.clone());
+        forget_finished(&open, &Tell::Left(pr));
+        assert!(open_set(&open).is_empty());
     }
 }

@@ -10,7 +10,7 @@ use clusia_app::bridge::{self, Ask, Link, Tell};
 use clusia_app::fixture;
 use clusia_app::snapshot::Snapshot;
 use clusia_core::config::Theme as ThemeChoice;
-use clusia_core::{Config, DraftKind, PrRef, Review, ReviewCache, Verdict};
+use clusia_core::{Config, DraftKind, PrRef, Review, ReviewCache, ReviewState, Verdict};
 use clusia_protocol::{Command, LoadStepKind, Reply, StepStatus, WindowTarget};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -383,5 +383,47 @@ async fn open_reviews_follow_changes_across_reconnects() {
         5,
         "still followed after the reconnect"
     );
+    d.stop().await;
+}
+
+/// Writes the demo review (active, with its draft items) as `rzorzal/clusia#number`.
+fn seed_active_review(dir: &std::path::Path, number: u64) -> PrRef {
+    let paths = clusia_core::Paths::new(dir);
+    let mut review = fixture::demo_review(1_790_000_000).0.review;
+    review.pr = format!("rzorzal/clusia#{number}").parse().unwrap();
+    assert_eq!(review.state, ReviewState::Active);
+    assert!(!review.draft.items.is_empty());
+    let file = paths.review_file(&review.pr);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, serde_json::to_vec(&review).unwrap()).unwrap();
+    review.pr
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leave_choices_reach_the_daemon_before_the_window_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (
+        seed_active_review(dir.path(), 123),
+        seed_active_review(dir.path(), 124),
+    );
+    let d = common::Daemon::start_in(dir).await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    let Link { tell, ask, thread } = link;
+    // The window closes with both tabs kept for later: the asks are queued, then the window's
+    // world (and its `Asks` sender) goes away at once.
+    ask.send(Ask::CloseReview(a.clone())).unwrap();
+    ask.send(Ask::CloseReview(b.clone())).unwrap();
+    drop(ask);
+    let finished = tokio::task::spawn_blocking(move || thread.finish(Duration::from_secs(3)))
+        .await
+        .unwrap();
+    assert!(finished, "the bridge answered what was queued, then ended");
+    for pr in [a, b] {
+        let file = std::fs::read(d.paths.review_file(&pr)).unwrap();
+        let review: Review = serde_json::from_slice(&file).unwrap();
+        assert_eq!(review.state, ReviewState::Saved, "{pr}");
+    }
+    drop(tell);
     d.stop().await;
 }
