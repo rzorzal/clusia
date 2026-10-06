@@ -482,6 +482,7 @@ impl Plugin for KitPlugin {
         app.add_plugins((
             crate::ui::text_area::TextAreaPlugin,
             crate::ui::leaf::LeafPlugin,
+            crate::ui::markdown::MarkdownPlugin,
         ))
         .add_message::<FieldCommitted>()
         .add_observer(commit_on_blur)

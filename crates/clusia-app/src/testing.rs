@@ -67,7 +67,8 @@ pub fn app(snapshot: Snapshot) -> App {
         .add_plugins(ReviewStatePlugin)
         .add_plugins(ReviewPlugin)
         .add_plugins(OpenPrPlugin)
-        .init_resource::<OpenUrls>();
+        .init_resource::<OpenUrls>()
+        .init_resource::<crate::ui::markdown::CopiedText>();
     app.update();
     app
 }
