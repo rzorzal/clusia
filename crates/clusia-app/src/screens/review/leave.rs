@@ -21,11 +21,16 @@ use crate::ui::modal::{escape_pressed, modal_card, modal_root};
 /// Why a tab or the window did not close: a comment is still being written.
 pub const FINISH_COMMENT: &str = "Finish or cancel the comment you're writing first";
 
-/// A window close in progress: the window, and the tabs still to ask about.
+/// Why the window did not close: a publish is still running.
+pub const WAIT_PUBLISH: &str = "Wait for the publish to finish";
+
+/// A window close in progress: the window, the tabs still to ask about, and the tabs left on
+/// the daemon (`CloseReview`) only once the close goes ahead.
 #[derive(Resource, Debug, Default)]
 pub struct WindowClosing {
     pub window: Option<Entity>,
     pub queue: Vec<PrRef>,
+    pub close: Vec<PrRef>,
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -59,11 +64,30 @@ fn writing(tab: &Tab) -> bool {
     unsent(tab.ui.editor.as_ref())
 }
 
+/// Why the window cannot close over this tab: a comment being written, or a publish running.
+fn window_blocker(tab: &Tab) -> Option<&'static str> {
+    if writing(tab) {
+        Some(FINISH_COMMENT)
+    } else if tab.ui.finalize.busy {
+        Some(WAIT_PUBLISH)
+    } else {
+        None
+    }
+}
+
+/// The first open tab that keeps the window from closing, and why.
+fn window_held(nav: &Nav, tabs: &ReviewTabs) -> Option<(PrRef, &'static str)> {
+    nav.reviews.iter().find_map(|pr| {
+        let why = window_blocker(tabs.0.get(pr)?)?;
+        Some((pr.clone(), why))
+    })
+}
+
 /// Shows `pr` and says why it did not close.
-fn hold(pr: &PrRef, nav: &mut Nav, toasts: &mut Toasts, time: &Time) {
+fn hold(pr: &PrRef, why: &str, nav: &mut Nav, toasts: &mut Toasts, time: &Time) {
     nav.go(&WindowTarget::Review { pr: pr.clone() });
     toasts.0.push(Toast {
-        text: FINISH_COMMENT.to_string(),
+        text: why.to_string(),
         warning: true,
         until: time.elapsed_secs_f64() + TOAST_SECS,
     });
@@ -125,7 +149,7 @@ fn tab_close(
             continue;
         };
         if writing(tab) {
-            hold(pr, &mut nav, &mut toasts, &time);
+            hold(pr, FINISH_COMMENT, &mut nav, &mut toasts, &time);
             continue;
         }
         if needs_prompt(tab) {
@@ -145,7 +169,6 @@ fn window_close(
     mut closing: ResMut<WindowClosing>,
     tabs: Res<ReviewTabs>,
     mut nav: ResMut<Nav>,
-    mut asks: ResMut<Asks>,
     mut toasts: ResMut<Toasts>,
     time: Res<Time>,
 ) {
@@ -153,24 +176,21 @@ fn window_close(
         if closing.window.is_some() {
             continue; // already asking
         }
-        // A comment still being written cancels the close before anything is sent.
-        let held = nav
-            .reviews
-            .iter()
-            .find(|pr| tabs.0.get(*pr).is_some_and(writing))
-            .cloned();
-        if let Some(pr) = held {
-            hold(&pr, &mut nav, &mut toasts, &time);
+        // A comment being written or a publish running cancels the close: nothing is sent.
+        if let Some((pr, why)) = window_held(&nav, &tabs) {
+            hold(&pr, why, &mut nav, &mut toasts, &time);
             continue;
         }
-        closing.window = Some(request.window);
-        closing.queue.clear();
+        *closing = WindowClosing {
+            window: Some(request.window),
+            ..default()
+        };
         for pr in &nav.reviews {
             let Some(tab) = tabs.0.get(pr) else { continue };
             if needs_prompt(tab) {
                 closing.queue.push(pr.clone());
             } else if matches!(tab.phase, Phase::Ready(_)) {
-                asks.send(Ask::CloseReview(pr.clone()));
+                closing.close.push(pr.clone());
             }
         }
     }
@@ -184,6 +204,9 @@ fn advance_closing(
     mut nav: ResMut<Nav>,
     windows: Query<(), With<Window>>,
     mut exit: MessageWriter<AppExit>,
+    mut asks: ResMut<Asks>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
 ) {
     let Some(window) = closing.window else {
         return;
@@ -203,6 +226,22 @@ fn advance_closing(
             tab.ui.modal = Some(Modal::Leave { window: true });
             nav.go(&WindowTarget::Review { pr });
             return;
+        }
+    }
+    // Re-checked before leaving anything: the close is cancelled as it would have been at first.
+    if let Some((pr, why)) = window_held(&nav, &tabs) {
+        hold(&pr, why, &mut nav, &mut toasts, &time);
+        *closing = WindowClosing::default();
+        return;
+    }
+    // The close is sure now: the tabs that needed no answer are left on the daemon.
+    for pr in std::mem::take(&mut closing.close) {
+        if tabs
+            .0
+            .get(&pr)
+            .is_some_and(|t| matches!(t.phase, Phase::Ready(_)))
+        {
+            asks.send(Ask::CloseReview(pr));
         }
     }
     if windows.contains(window) {
@@ -354,7 +393,7 @@ mod tests {
     use crate::bridge::{Tell, Toasts};
     use crate::fixture;
     use crate::nav::CloseTab;
-    use crate::review_state::{EditTarget, Editor};
+    use crate::review_state::{EditTarget, Editor, Ready};
     use crate::testing::{self, NOW};
     use bevy::window::PrimaryWindow;
 
@@ -536,8 +575,33 @@ mod tests {
         let mut app = review_app();
         let pr = fixture::demo_pr();
         set_active(&mut app, &pr);
+        // A second ready tab without items: closed on the daemon only once the close is sure.
+        let quiet: PrRef = "rzorzal/clusia#98".parse().unwrap();
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Review { pr: quiet.clone() });
+        app.update();
+        {
+            let (mut view, _) = fixture::demo_review(NOW);
+            view.review.draft.items.clear();
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            tabs.0.get_mut(&quiet).unwrap().phase = Phase::Ready(Box::new(Ready {
+                view,
+                news: Vec::new(),
+                cached_at: None,
+            }));
+        }
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Review { pr: pr.clone() });
+        testing::settle(&mut app);
+        testing::recorded(&mut app);
         let w = window(&mut app);
         close_window(&mut app, w);
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "nothing sent while asking"
+        );
         let now = testing::find::<LeaveFinalize>(&mut app, |_| true);
         testing::activate(&mut app, now);
         assert!(!exits(&app));
@@ -545,6 +609,40 @@ mod tests {
         assert_eq!(testing::tab(&app, &pr).ui.modal, Some(Modal::Finalize));
         assert!(app.world().get_entity(w).is_ok());
         assert_eq!(app.world().resource::<WindowClosing>().window, None);
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "the cancelled close sent nothing"
+        );
+        assert!(app.world().resource::<Nav>().reviews.contains(&quiet));
+    }
+
+    #[test]
+    fn a_publish_in_flight_cancels_the_window_close() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        set_active(&mut app, &pr);
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let tab = tabs.0.get_mut(&pr).unwrap();
+            tab.ui.modal = Some(Modal::Finalize);
+            tab.ui.finalize.busy = true;
+        }
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Home);
+        app.update();
+        let w = window(&mut app);
+        close_window(&mut app, w);
+        assert!(!exits(&app));
+        assert!(app.world().get_entity(w).is_ok(), "the window stays");
+        assert!(testing::recorded(&mut app).is_empty(), "nothing sent");
+        assert_eq!(app.world().resource::<WindowClosing>().window, None);
+        assert_eq!(
+            app.world().resource::<Nav>().screen,
+            Screen::Review(pr.clone())
+        );
+        assert_eq!(testing::tab(&app, &pr).ui.modal, Some(Modal::Finalize));
+        assert_eq!(toasts(&app), [WAIT_PUBLISH]);
     }
 
     /// A comment being written on the demo tab, not sent yet.
