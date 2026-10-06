@@ -338,6 +338,9 @@ pub(crate) async fn run(
                     if p.closed {
                         lines.push("Closed the pull request".into());
                     }
+                    if let Some(e) = &p.close_error {
+                        lines.push(format!("Could not close the pull request: {e}"));
+                    }
                     if !p.unresolved.is_empty() {
                         lines.push(format!(
                             "Could not resolve {} thread(s); they stay open: {}",

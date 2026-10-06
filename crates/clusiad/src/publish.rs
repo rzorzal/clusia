@@ -364,16 +364,11 @@ pub(crate) async fn publish(
     cleanup_checkout(shared, pr).await;
     shared.files_cache.lock().await.remove(pr);
     announce(shared, &review);
-    if let Some(e) = close_error {
-        let message = format!(
-            "review published ({}), but closing the pull request failed: {e}",
-            url.unwrap_or_default()
-        );
-        return Outcome::Err(ProtocolError::new(ErrorCode::Upstream, message));
-    }
+    // The review is published either way; a failed close is reported, not raised.
     Outcome::Ok(Reply::Published(PublishResult {
         url,
-        closed: plan.close,
+        closed: plan.close && close_error.is_none(),
         unresolved,
+        close_error: close_error.map(|e| e.to_string()),
     }))
 }

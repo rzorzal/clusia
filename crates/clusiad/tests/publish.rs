@@ -62,6 +62,7 @@ async fn publishes_one_review_and_cleans_up() {
             url: Some(REVIEW_URL.into()),
             closed: false,
             unresolved: vec![],
+            close_error: None,
         })
     );
     let started = graphql_requests(&w.server, "addPullRequestReview(").await;
@@ -244,6 +245,7 @@ async fn author_cannot_approve_but_can_close() {
             url: Some(REVIEW_URL.into()),
             closed: true,
             unresolved: vec![],
+            close_error: None,
         })
     );
     w.daemon.stop().await;
@@ -266,7 +268,7 @@ async fn nothing_to_publish_is_a_bad_request() {
 }
 
 #[tokio::test]
-async fn posted_but_close_failed_returns_upstream_with_url_and_forgets_draft() {
+async fn posted_but_close_failed_is_published_with_the_close_error() {
     let w = world().await;
     w.server.reset().await;
     let mut mock = PrMock::new(&w.head, &w.base, &w.origin);
@@ -281,9 +283,12 @@ async fn posted_but_close_failed_returns_upstream_with_url_and_forgets_draft() {
     let mut c = w.daemon.client().await;
     open(&mut c).await;
     match c.request(publish(Verdict::ClosePr, "Superseded")).await {
-        Err(ClientError::Server(e)) => {
-            assert_eq!(e.code, ErrorCode::Upstream);
-            assert!(e.message.contains(REVIEW_URL), "{}", e.message);
+        Ok(Reply::Published(result)) => {
+            assert_eq!(result.url.as_deref(), Some(REVIEW_URL));
+            assert!(!result.closed, "the pull request stays open");
+            assert!(result.unresolved.is_empty());
+            let error = result.close_error.expect("why closing failed");
+            assert!(error.contains("boom"), "{error}");
         }
         other => panic!("{other:?}"),
     }

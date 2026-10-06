@@ -1066,6 +1066,7 @@ pub(crate) fn demo_answers(
                     )),
                     closed: verdict == Verdict::ClosePr,
                     unresolved: Vec::new(),
+                    close_error: None,
                 },
                 pr,
             }),

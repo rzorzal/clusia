@@ -231,6 +231,7 @@ async fn publishes_one_review_with_replies_then_resolves() {
             url: Some(REVIEW_URL.into()),
             closed: false,
             unresolved: vec![],
+            close_error: None,
         })
     );
     let sent = writes(&w).await;
@@ -374,6 +375,7 @@ async fn resolve_failure_still_publishes_and_reports() {
             url: Some(REVIEW_URL.into()),
             closed: false,
             unresolved: vec!["PRRT_locked".into()],
+            close_error: None,
         })
     );
     assert_eq!(
@@ -399,6 +401,7 @@ async fn resolve_only_publish() {
             url: None,
             closed: false,
             unresolved: vec![],
+            close_error: None,
         })
     );
     assert_eq!(ops(&writes(&w).await), ["resolve"], "no review is created");
@@ -409,6 +412,44 @@ async fn resolve_only_publish() {
             .iter()
             .any(|a| a.kind == clusia_core::ActivityKind::ReviewPublished)
     );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn resolve_only_then_close_failure_reports_both() {
+    let w = world().await;
+    w.server.reset().await;
+    let mut mock = PrMock::new(&w.head, &w.base, &w.origin);
+    mock.viewer = "maria".into();
+    mount_pr(&w.server, &mock).await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    graphql_error(
+        &w.server,
+        "PRRT_locked",
+        "Resource not accessible by integration",
+    )
+    .await;
+    Mock::given(method("PATCH"))
+        .and(path("/repos/acme/widgets/pulls/7"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "message": "boom" })))
+        .mount(&w.server)
+        .await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    resolve(&mut c, "PRRT_b").await;
+    resolve(&mut c, "PRRT_locked").await;
+
+    let reply = c.request(publish(Verdict::ClosePr, "")).await.unwrap();
+    let Reply::Published(result) = reply else {
+        panic!("published: {reply:?}")
+    };
+    assert_eq!(
+        (result.url, result.closed, result.unresolved),
+        (None, false, vec!["PRRT_locked".to_string()])
+    );
+    let error = result.close_error.expect("why closing failed");
+    assert!(error.contains("boom"), "{error}");
+    assert!(!w.daemon.paths.review_file(&pr7()).exists());
     w.daemon.stop().await;
 }
 

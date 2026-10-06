@@ -774,6 +774,7 @@ mod tests {
             url: Some("https://github.com/rzorzal/clusia/pull/123#pullrequestreview-1".into()),
             closed: false,
             unresolved: vec!["PRRT_demo_refresh_41".into()],
+            close_error: None,
         };
         testing::tell(
             &mut app,

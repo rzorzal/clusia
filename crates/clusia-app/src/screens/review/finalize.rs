@@ -778,6 +778,10 @@ fn outcomes(
                     "Published to GitHub"
                 };
                 toast(&mut toasts, &time, text.to_string(), false);
+                if let Some(e) = &result.close_error {
+                    let text = format!("Could not close the pull request: {e}");
+                    toast(&mut toasts, &time, text, true);
+                }
                 match result.unresolved.len() {
                     0 => {}
                     1 => toast(
@@ -1191,6 +1195,7 @@ mod tests {
                     ),
                     closed: false,
                     unresolved: vec!["PRRT_1".into()],
+                    close_error: None,
                 },
             },
         );
@@ -1214,6 +1219,46 @@ mod tests {
             ]
         );
         assert_eq!(testing::count::<FinalizeModal>(&mut app), 0);
+    }
+
+    #[test]
+    fn published_but_closing_failed_warns() {
+        let mut app = finalize_app(true);
+        let pr = fixture::demo_pr();
+        testing::tell(
+            &mut app,
+            Tell::Published {
+                pr: pr.clone(),
+                result: PublishResult {
+                    url: Some(
+                        "https://github.com/rzorzal/clusia/pull/123#pullrequestreview-42".into(),
+                    ),
+                    closed: false,
+                    unresolved: vec![],
+                    close_error: Some("GitHub refused the request: boom".into()),
+                },
+            },
+        );
+        testing::settle(&mut app);
+        assert!(!app.world().resource::<ReviewTabs>().0.contains_key(&pr));
+        let toasts: Vec<(String, bool)> = app
+            .world()
+            .resource::<Toasts>()
+            .0
+            .iter()
+            .map(|t| (t.text.clone(), t.warning))
+            .collect();
+        assert_eq!(
+            toasts,
+            [
+                ("Published to GitHub".to_string(), false),
+                (
+                    "Could not close the pull request: GitHub refused the request: boom"
+                        .to_string(),
+                    true
+                )
+            ]
+        );
     }
 
     #[test]

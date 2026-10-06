@@ -474,6 +474,9 @@ pub struct PublishResult {
     /// Review threads marked to resolve that GitHub left open.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved: Vec<String>,
+    /// The review was published but closing the pull request failed (`closed` is false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_error: Option<String>,
 }
 
 /// What the window should show.
@@ -1116,6 +1119,7 @@ mod tests {
                 url: Some("u".into()),
                 closed: false,
                 unresolved: vec![],
+                close_error: None,
             }),
             Reply::WhatsNew(vec![NewsItem {
                 kind: NewsKind::Commits,
@@ -1218,6 +1222,7 @@ mod tests {
             url: Some("u".into()),
             closed: false,
             unresolved: vec!["PRRT_2".into()],
+            close_error: None,
         };
         assert_eq!(
             wire(&published),
@@ -1230,6 +1235,17 @@ mod tests {
         assert_eq!(wire(&all_resolved), r#"{"url":"u","closed":false}"#);
         let old: PublishResult = serde_json::from_str(r#"{"url":null,"closed":true}"#).unwrap();
         assert!(old.unresolved.is_empty());
+        assert_eq!(old.close_error, None);
+        let close_failed = PublishResult {
+            url: Some("u".into()),
+            closed: false,
+            unresolved: vec!["PRRT_2".into()],
+            close_error: Some("GitHub said no".into()),
+        };
+        assert_eq!(
+            wire(&close_failed),
+            r#"{"url":"u","closed":false,"unresolved":["PRRT_2"],"close_error":"GitHub said no"}"#
+        );
     }
 
     #[test]
