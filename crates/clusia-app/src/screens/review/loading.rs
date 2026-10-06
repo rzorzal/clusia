@@ -19,7 +19,7 @@ use crate::screens::review::shell::{
 };
 use crate::theme::Swatch;
 use crate::ui::kit::{Fill, Stroke, Type, Variant, button, disabled_button, panel, text};
-use crate::ui::leaf::{LeafState, leaf};
+use crate::ui::leaf::{LeafState, PULSE, leaf};
 use crate::ui::modal::modal_card;
 
 const KINDS: [LoadStepKind; 4] = [
@@ -577,7 +577,7 @@ fn step_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, r: &StepRow) {
         },
     ))
     .with_children(|row| {
-        row.spawn(panel(
+        let mut dot = row.spawn(panel(
             Node {
                 width: px(18),
                 height: px(18),
@@ -588,8 +588,11 @@ fn step_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, r: &StepRow) {
                 ..default()
             },
             dot_fill,
-        ))
-        .with_children(|d| {
+        ));
+        if r.state == LeafState::Growing {
+            dot.insert((UiTransform::IDENTITY, PULSE));
+        }
+        dot.with_children(|d| {
             d.spawn(text(
                 fonts,
                 icon,
@@ -638,7 +641,7 @@ mod tests {
     use crate::fixture;
     use crate::review_state::Ready;
     use crate::testing::{self, NOW};
-    use crate::ui::leaf::Sprout;
+    use crate::ui::leaf::{Sprout, Sway};
     use clusia_protocol::WindowTarget;
 
     fn pr() -> PrRef {
@@ -895,6 +898,69 @@ mod tests {
             0,
             "disabled without a cache"
         );
+    }
+
+    #[test]
+    fn the_running_step_sways_until_it_is_done() {
+        use bevy::time::TimeUpdateStrategy;
+        use bevy::window::RequestRedraw;
+        use std::time::Duration;
+        let mut app = testing::app(fixture::demo(NOW));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )));
+        show(&mut app);
+        let redraws = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Messages<RequestRedraw>>()
+                .drain()
+                .count()
+        };
+        let swaying = |app: &mut App| {
+            let mut q = app.world_mut().query_filtered::<&UiTransform, With<Sway>>();
+            q.iter(app.world()).copied().collect::<Vec<_>>()
+        };
+        testing::tell(
+            &mut app,
+            Tell::Step(step(LoadStepKind::Repo, StepStatus::Running, None)),
+        );
+        testing::settle(&mut app);
+        redraws(&mut app);
+        let mut last = swaying(&mut app);
+        assert_eq!(last.len(), 2, "the leaf and its status dot");
+        for _ in 0..15 {
+            app.update();
+            assert!(redraws(&mut app) > 0, "a redraw every frame while running");
+            let now = swaying(&mut app);
+            assert!(now.iter().zip(&last).all(|(a, b)| a != b), "both move");
+            last = now;
+        }
+        testing::tell(
+            &mut app,
+            Tell::Step(step(
+                LoadStepKind::Repo,
+                StepStatus::Done,
+                Some("/Users/octo/Repos/clusia"),
+            )),
+        );
+        testing::settle(&mut app);
+        redraws(&mut app);
+        app.update();
+        assert_eq!(redraws(&mut app), 0, "idle once no step runs");
+        assert!(swaying(&mut app).is_empty());
+        let row = testing::find::<Leaves>(&mut app, |_| true);
+        let leaves = app.world().get::<Children>(row).unwrap().to_vec();
+        for l in leaves {
+            for part in app.world().get::<Children>(l).unwrap().iter() {
+                if let Some(t) = app.world().get::<UiTransform>(part) {
+                    assert!(
+                        *t == UiTransform::IDENTITY
+                            || *t == UiTransform::from_rotation(Rot2::degrees(45.0)),
+                        "settled: {t:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

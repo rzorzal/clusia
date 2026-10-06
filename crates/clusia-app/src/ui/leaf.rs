@@ -1,6 +1,7 @@
 //! The loading leaves (mockups `Loading.png`, `LoadFailed.png`): one stalk per load step with a
 //! teardrop leaf on top. Done is green, a running step grows a pale leaf, a failed step has an
-//! orange leaf, and a step not reached (or skipped) is a short dashed stalk.
+//! orange leaf, and a step not reached (or skipped) is a short dashed stalk. While its step runs
+//! the leaf sways and pulses (and so does the step's status dot) until the step ends.
 
 use bevy::prelude::*;
 use bevy::ui::UiSystems;
@@ -11,6 +12,8 @@ use crate::ui::kit::Fill;
 
 /// How long a growing stalk takes to reach its height.
 pub const GROW_SECS: f32 = 0.6;
+/// One sway and pulse loop of a running leaf.
+pub const SWAY_SECS: f64 = 1.2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LeafState {
@@ -31,6 +34,29 @@ pub struct Stalk {
     pub height: f32,
     pub progress: f32,
 }
+
+/// Sways and pulses while its step runs (scale 0.92 ↔ 1, `degrees` either way around `rest`).
+/// The phase comes from `Time`, so a rebuilt leaf carries on where the old one was.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct Sway {
+    pub rest: Rot2,
+    pub degrees: f32,
+}
+
+/// The running leaf's blade: a teardrop at 45° that tilts a few degrees.
+const BLADE: Sway = Sway {
+    rest: Rot2 {
+        cos: std::f32::consts::FRAC_1_SQRT_2,
+        sin: std::f32::consts::FRAC_1_SQRT_2,
+    },
+    degrees: 4.0,
+};
+
+/// A status dot that pulses with the running leaf.
+pub const PULSE: Sway = Sway {
+    rest: Rot2::IDENTITY,
+    degrees: 0.0,
+};
 
 /// (leaf size, stalk height, leaf color) for states that have a leaf.
 fn shape(state: LeafState) -> Option<(f32, f32, Swatch)> {
@@ -58,7 +84,7 @@ pub fn leaf(state: LeafState) -> impl Bundle {
         Children::spawn(SpawnWith(move |p: &mut ChildSpawner| match shape(state) {
             Some((size, height, color)) => {
                 let growing = state == LeafState::Growing;
-                p.spawn((
+                let mut blade = p.spawn((
                     Node {
                         width: px(size),
                         height: px(size),
@@ -77,6 +103,9 @@ pub fn leaf(state: LeafState) -> impl Bundle {
                     BackgroundColor::default(),
                     Fill(color),
                 ));
+                if growing {
+                    blade.insert(BLADE);
+                }
                 p.spawn((
                     Node {
                         width: Val::Px(2.5),
@@ -122,7 +151,7 @@ pub struct LeafPlugin;
 impl Plugin for LeafPlugin {
     fn build(&self, app: &mut App) {
         // After Update, so a leaf a screen spawns is seen in the frame that spawns it.
-        app.add_systems(PostUpdate, grow.before(UiSystems::Layout));
+        app.add_systems(PostUpdate, (grow, sway).before(UiSystems::Layout));
     }
 }
 
@@ -151,6 +180,25 @@ fn grow(
     if moving {
         redraw.write(RequestRedraw);
     }
+}
+
+/// Sways every running leaf (and its dot) along one shared loop; asks for redraws only while
+/// one is alive, so the reactive loop idles once every step has ended.
+fn sway(
+    time: Res<Time>,
+    mut swaying: Query<(&Sway, &mut UiTransform)>,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    if swaying.is_empty() {
+        return;
+    }
+    let phase = (time.elapsed_secs_f64() % SWAY_SECS / SWAY_SECS) as f32 * std::f32::consts::TAU;
+    let scale = 0.96 + 0.04 * phase.cos();
+    for (sway, mut transform) in &mut swaying {
+        transform.scale = Vec2::splat(scale);
+        transform.rotation = sway.rest * Rot2::degrees(sway.degrees * phase.sin());
+    }
+    redraw.write(RequestRedraw);
 }
 
 #[cfg(test)]
@@ -254,11 +302,107 @@ mod tests {
         assert_eq!(height(&app), 40.0);
         redraws(&mut app);
         app.update();
-        assert_eq!(redraws(&mut app), 0, "no redraws once grown");
+        assert_eq!(height(&app), 40.0, "the stalk stays grown");
+        assert!(redraws(&mut app) > 0, "the leaf still sways while running");
         let blade = parts(&mut app, growing)[0];
         assert_eq!(
             app.world().get::<BackgroundColor>(blade).unwrap().0,
             LIGHT.heat[2]
+        );
+    }
+
+    fn transform(app: &App, e: Entity) -> UiTransform {
+        *app.world().get::<UiTransform>(e).unwrap()
+    }
+
+    #[test]
+    fn a_running_leaf_sways_until_it_goes() {
+        let mut app = testing::app(Snapshot::default());
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )));
+        app.update();
+        let growing = app.world_mut().spawn(leaf(LeafState::Growing)).id();
+        app.update();
+        let blade = parts(&mut app, growing)[0];
+        redraws(&mut app);
+        let mut seen = vec![transform(&app, blade)];
+        // Well past the growth: the sway goes on.
+        for _ in 0..20 {
+            app.update();
+            assert!(redraws(&mut app) > 0, "a redraw every frame while running");
+            let t = transform(&app, blade);
+            assert_ne!(Some(&t), seen.last(), "moves every frame");
+            assert!((0.92 - 1e-4..=1.0 + 1e-4).contains(&t.scale.x), "{t:?}");
+            let tilt = (t.rotation.as_degrees() - 45.0).abs();
+            assert!(tilt <= 6.0, "{tilt}");
+            seen.push(t);
+        }
+        app.world_mut().entity_mut(growing).despawn();
+        app.update();
+        redraws(&mut app);
+        app.update();
+        assert_eq!(redraws(&mut app), 0, "idle once no leaf is alive");
+    }
+
+    fn transforms(app: &App, leaves: &[Entity]) -> Vec<Option<UiTransform>> {
+        leaves
+            .iter()
+            .flat_map(|&l| app.world().get::<Children>(l).unwrap().iter())
+            .map(|e| app.world().get::<UiTransform>(e).copied())
+            .collect()
+    }
+
+    #[test]
+    fn still_leaves_never_sway() {
+        let mut app = testing::app(Snapshot::default());
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )));
+        app.update();
+        let leaves: Vec<Entity> = [
+            LeafState::Waiting,
+            LeafState::Skipped,
+            LeafState::Done,
+            LeafState::Failed,
+        ]
+        .into_iter()
+        .map(|s| app.world_mut().spawn(leaf(s)).id())
+        .collect();
+        app.update();
+        redraws(&mut app);
+        let before = transforms(&app, &leaves);
+        for _ in 0..5 {
+            app.update();
+            assert_eq!(redraws(&mut app), 0);
+        }
+        let after = transforms(&app, &leaves);
+        assert_eq!(before, after);
+        assert_eq!(
+            app.world_mut().query::<&Sway>().iter(app.world()).count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_leaf_keeps_the_phase() {
+        let mut app = testing::app(Snapshot::default());
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            70,
+        )));
+        app.update();
+        let old = app.world_mut().spawn(leaf(LeafState::Growing)).id();
+        for _ in 0..7 {
+            app.update();
+        }
+        // A screen rebuild: the same leaf spawned again mid-loop.
+        let new = app.world_mut().spawn(leaf(LeafState::Growing)).id();
+        app.update();
+        let (a, b) = (parts(&mut app, old)[0], parts(&mut app, new)[0]);
+        assert_eq!(transform(&app, a), transform(&app, b), "no restart");
+        assert_ne!(
+            transform(&app, b),
+            UiTransform::from_rotation(Rot2::degrees(45.0))
         );
     }
 }
