@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use clusia_app::bridge::{self, Ask, Link, Tell};
+use clusia_app::fixture;
 use clusia_app::snapshot::Snapshot;
 use clusia_core::config::Theme as ThemeChoice;
-use clusia_core::{Config, DraftKind, PrRef, Verdict};
+use clusia_core::{Config, DraftKind, PrRef, Review, ReviewCache, Verdict};
 use clusia_protocol::{Command, LoadStepKind, Reply, StepStatus, WindowTarget};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -296,6 +297,91 @@ async fn publish_failure_and_leaving_reach_the_window() {
         next(&link, |t| matches!(t, Tell::Left(_))),
         Tell::Left(pr7()),
         "the tab closes even when the daemon had nothing open"
+    );
+    d.stop().await;
+}
+
+/// Writes the demo review and its cache into `dir`, as a daemon that opened it would have.
+fn seed_demo_review(dir: &std::path::Path) -> PrRef {
+    let paths = clusia_core::Paths::new(dir);
+    let (view, _) = fixture::demo_review(1_790_000_000);
+    let pr = view.review.pr.clone();
+    let cache = ReviewCache {
+        pr: view.pr,
+        files: view.diff,
+        conversation: view.conversation.unwrap_or_default(),
+        checks: view.checks,
+        role: view.role,
+        viewer: view.viewer,
+        worktree: view.worktree,
+        fetched_at: 1_790_000_000 - 3600,
+    };
+    for (file, json) in [
+        (
+            paths.review_file(&pr),
+            serde_json::to_vec(&view.review).unwrap(),
+        ),
+        (
+            paths.review_cache_file(&pr),
+            serde_json::to_vec(&cache).unwrap(),
+        ),
+    ] {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, json).unwrap();
+    }
+    pr
+}
+
+fn general(pr: &PrRef, body: &str, ticket: u64) -> Ask {
+    Ask::AddItem {
+        pr: pr.clone(),
+        kind: DraftKind::General,
+        anchor: None,
+        thread: None,
+        body: body.into(),
+        ticket,
+    }
+}
+
+fn review_file(link: &Link) -> Review {
+    match next(link, |t| matches!(t, Tell::ReviewFile(_))) {
+        Tell::ReviewFile(r) => *r,
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_reviews_follow_changes_across_reconnects() {
+    let dir = tempfile::tempdir().unwrap();
+    let pr = seed_demo_review(dir.path());
+    let d = common::Daemon::start_in(dir).await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask.send(Ask::OpenCached(pr.clone())).unwrap();
+    assert!(matches!(
+        next(&link, |t| matches!(t, Tell::OpenedFromCache { .. })),
+        Tell::OpenedFromCache { .. }
+    ));
+    link.ask.send(general(&pr, "Ship it", 1)).unwrap();
+    assert_eq!(
+        review_file(&link).draft.items.len(),
+        4,
+        "ReviewChanged refetches the open review"
+    );
+    let dir = d.stop().await;
+    next(&link, |t| matches!(t, Tell::Lost(_)));
+    let d = common::Daemon::start_in(dir).await;
+    link.ask.send(Ask::Reconnect).unwrap();
+    assert_eq!(
+        review_file(&link).draft.items.len(),
+        4,
+        "a reconnect refetches every open review"
+    );
+    link.ask.send(general(&pr, "One more thing", 2)).unwrap();
+    assert_eq!(
+        review_file(&link).draft.items.len(),
+        5,
+        "still followed after the reconnect"
     );
     d.stop().await;
 }

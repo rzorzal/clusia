@@ -303,9 +303,11 @@ pub fn open_new_tabs(
 }
 
 /// Applies a review tell to the tabs; outcomes for the screens go to `events`. Gives back a
-/// tell it does not handle (not about reviews, or a refusal no editor waits on).
+/// tell it does not handle (not about reviews, or a refusal no editor waits on). A review that
+/// opens after its tab closed is closed on the daemon through `asks`.
 pub(crate) fn apply(
     tabs: &mut ReviewTabs,
+    asks: &mut Asks,
     tell: Tell,
     events: &mut Vec<ReviewEvent>,
 ) -> Option<Tell> {
@@ -337,28 +339,31 @@ pub(crate) fn apply(
                 }));
             }
         }
-        Tell::Opened { pr, view, news } => {
-            if let Some(tab) = tabs.0.get_mut(&pr) {
+        Tell::Opened { pr, view, news } => match tabs.0.get_mut(&pr) {
+            Some(tab) => {
                 tab.phase = Phase::Ready(Box::new(Ready {
                     view: *view,
                     news,
                     cached_at: None,
                 }));
             }
-        }
+            // The tab closed while it loaded: the daemon's review is left too.
+            None => asks.send(Ask::CloseReview(pr)),
+        },
         Tell::OpenedFromCache {
             pr,
             view,
             fetched_at,
-        } => {
-            if let Some(tab) = tabs.0.get_mut(&pr) {
+        } => match tabs.0.get_mut(&pr) {
+            Some(tab) => {
                 tab.phase = Phase::Ready(Box::new(Ready {
                     view: *view,
                     news: Vec::new(),
                     cached_at: Some(fetched_at),
                 }));
             }
-        }
+            None => asks.send(Ask::CloseReview(pr)),
+        },
         Tell::OpenFailed { pr, message, .. } => {
             if let Some(tab) = tabs.0.get_mut(&pr) {
                 // A copy opened from the cache meanwhile stays; it offers *Try again*.
@@ -804,6 +809,41 @@ mod tests {
             testing::ready(&app, &pr()).view.conversation,
             Some(conversation)
         );
+    }
+
+    #[test]
+    fn a_late_open_for_a_closed_tab_leaves_the_review() {
+        let mut app = loading_app();
+        app.world_mut().resource_mut::<Nav>().close_review(&pr());
+        app.update();
+        testing::recorded(&mut app);
+        testing::tell(
+            &mut app,
+            Tell::Opened {
+                pr: pr(),
+                view: view(),
+                news: Vec::new(),
+            },
+        );
+        assert!(
+            app.world().resource::<ReviewTabs>().0.is_empty(),
+            "the closed tab does not come back"
+        );
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::CloseReview(pr())],
+            "the daemon's review is closed too"
+        );
+        testing::tell(
+            &mut app,
+            Tell::OpenedFromCache {
+                pr: pr(),
+                view: view(),
+                fetched_at: NOW - 3600,
+            },
+        );
+        assert!(app.world().resource::<ReviewTabs>().0.is_empty());
+        assert_eq!(testing::recorded(&mut app), [Ask::CloseReview(pr())]);
     }
 
     #[test]

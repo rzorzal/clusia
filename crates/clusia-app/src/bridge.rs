@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -206,6 +206,15 @@ impl Teller {
     }
 }
 
+/// The reviews this window has open on the daemon: their `ReviewChanged` / `ReviewOutdated`
+/// events refetch the review file. Kept across reconnects, and shared with the workers so a
+/// failed open forgets its PR.
+type OpenSet = Arc<Mutex<HashSet<PrRef>>>;
+
+fn open_set(open: &OpenSet) -> std::sync::MutexGuard<'_, HashSet<PrRef>> {
+    open.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Sessions until Bevy drops its `Ask` sender; after a lost session, waits for `Reconnect`.
 async fn run(
     paths: Paths,
@@ -213,8 +222,9 @@ async fn run(
     teller: Teller,
     mut asks: UnboundedReceiver<Ask>,
 ) {
+    let open = OpenSet::default();
     loop {
-        match session(&paths, home.as_deref(), &teller, &mut asks).await {
+        match session(&paths, home.as_deref(), &teller, &open, &mut asks).await {
             Ok(()) => return,
             Err(reason) => teller.send(Tell::Lost(reason)),
         }
@@ -268,6 +278,7 @@ async fn session(
     paths: &Paths,
     home: Option<&Path>,
     teller: &Teller,
+    open: &OpenSet,
     asks: &mut UnboundedReceiver<Ask>,
 ) -> Result<(), String> {
     let (mut client, _) = clusia_protocol::launcher::ensure_daemon(paths, home, crate::CLIENT_NAME)
@@ -295,6 +306,11 @@ async fn session(
         snap.sync = Some(s);
     }
     teller.send(Tell::Snapshot(Box::new(snap.clone())));
+    // The daemon may have restarted while this window was away: its open reviews read again.
+    let reopened: Vec<PrRef> = open_set(open).iter().cloned().collect();
+    for pr in reopened {
+        refetch(&mut client, &pr, teller).await?;
+    }
     let lists = Refresh {
         lists: true,
         ..Refresh::default()
@@ -302,18 +318,16 @@ async fn session(
     fetch(&mut client, &mut snap, lists).await?;
     teller.send(Tell::Snapshot(Box::new(snap.clone())));
     let mut last = snap.clone();
-    // Reviews this window has open: their `ReviewChanged` events refetch the review file.
-    let mut open: HashSet<PrRef> = HashSet::new();
     loop {
         let mut todo = tokio::select! {
             event = client.next_event() => {
                 let (_, event) = event.map_err(lost)?;
-                follow(&mut client, &open, &event, teller).await?;
+                follow(&mut client, open, &event, teller).await?;
                 take(&mut snap, event, teller)
             }
             ask = asks.recv() => {
                 let Some(ask) = ask else { return Ok(()) };
-                answer(&mut client, &mut snap, teller, paths, &mut open, ask).await?;
+                answer(&mut client, &mut snap, teller, paths, open, ask).await?;
                 Refresh::default()
             }
         };
@@ -321,7 +335,7 @@ async fn session(
         while todo.any() {
             match tokio::time::timeout_at(deadline, client.next_event()).await {
                 Ok(Ok((_, event))) => {
-                    follow(&mut client, &open, &event, teller).await?;
+                    follow(&mut client, open, &event, teller).await?;
                     todo.merge(take(&mut snap, event, teller));
                 }
                 Ok(Err(e)) => return Err(lost(e)),
@@ -340,20 +354,28 @@ async fn session(
 /// review that is open here is fetched again.
 async fn follow(
     client: &mut Client,
-    open: &HashSet<PrRef>,
+    open: &OpenSet,
     event: &Event,
     teller: &Teller,
 ) -> Result<(), String> {
     match event {
         Event::LoadStep(step) => teller.send(Tell::Step(step.clone())),
-        Event::ReviewChanged { pr, .. } | Event::ReviewOutdated { pr, .. } if open.contains(pr) => {
-            if let Some(Reply::ReviewFile(review)) =
-                request(client, Command::GetReview { pr: pr.clone() }).await?
-            {
-                teller.send(Tell::ReviewFile(review));
-            }
+        Event::ReviewChanged { pr, .. } | Event::ReviewOutdated { pr, .. }
+            if open_set(open).contains(pr) =>
+        {
+            refetch(client, pr, teller).await?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// `GetReview` → `Tell::ReviewFile` (a refusal is only logged).
+async fn refetch(client: &mut Client, pr: &PrRef, teller: &Teller) -> Result<(), String> {
+    if let Some(Reply::ReviewFile(review)) =
+        request(client, Command::GetReview { pr: pr.clone() }).await?
+    {
+        teller.send(Tell::ReviewFile(review));
     }
     Ok(())
 }
@@ -439,7 +461,7 @@ async fn answer(
     snap: &mut Snapshot,
     teller: &Teller,
     paths: &Paths,
-    open: &mut HashSet<PrRef>,
+    open: &OpenSet,
     ask: Ask,
 ) -> Result<(), String> {
     let auth = Refresh {
@@ -489,10 +511,10 @@ async fn answer(
         }
         Ask::Reconnect => {}
         Ask::OpenReview(ref pr) | Ask::OpenCached(ref pr) => {
-            open.insert(pr.clone());
-            spawn_worker(paths, teller, ask);
+            open_set(open).insert(pr.clone());
+            spawn_worker(paths, teller, open, ask);
         }
-        Ask::Publish { .. } => spawn_worker(paths, teller, ask),
+        Ask::Publish { .. } => spawn_worker(paths, teller, open, ask),
         Ask::LoadConversation(pr) => match client
             .request(Command::GetConversation { pr: pr.clone() })
             .await
@@ -544,7 +566,7 @@ async fn answer(
             notify(client, teller, Command::RemoveDraftItem { pr, id }, "").await?;
         }
         Ask::CloseReview(pr) => {
-            open.remove(&pr);
+            open_set(open).remove(&pr);
             // The tab closes whatever the daemon says; a refusal is only reported.
             notify(client, teller, Command::CloseReview { pr: pr.clone() }, "").await?;
             teller.send(Tell::Left(pr));
@@ -554,7 +576,7 @@ async fn answer(
             .await
         {
             Ok(_) => {
-                open.remove(&pr);
+                open_set(open).remove(&pr);
                 teller.send(Tell::Left(pr));
             }
             Err(ClientError::Server(e)) => teller.send(Tell::Notice {
@@ -588,21 +610,28 @@ async fn draft_write(
 }
 
 /// Runs a long request on its own connection, so this one keeps reading events.
-fn spawn_worker(paths: &Paths, teller: &Teller, ask: Ask) {
-    let socket = paths.socket();
-    let teller = teller.clone();
-    tokio::spawn(async move {
-        match ask {
-            Ask::OpenReview(pr) => open_review(&socket, &teller, pr).await,
-            Ask::OpenCached(pr) => open_cached(&socket, &teller, pr).await,
-            Ask::Publish {
-                pr,
-                verdict,
-                summary,
-            } => publish(&socket, &teller, pr, verdict, summary).await,
-            _ => {}
+fn spawn_worker(paths: &Paths, teller: &Teller, open: &OpenSet, ask: Ask) {
+    tokio::spawn(work(paths.socket(), teller.clone(), open.clone(), ask));
+}
+
+async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
+    match ask {
+        Ask::OpenReview(pr) => {
+            let tell = open_review(&socket, &teller, pr).await;
+            // Nothing is open on the daemon, so there are no changes to follow.
+            if let Tell::OpenFailed { pr, .. } = &tell {
+                open_set(&open).remove(pr);
+            }
+            teller.send(tell);
         }
-    });
+        Ask::OpenCached(pr) => open_cached(&socket, &teller, pr).await,
+        Ask::Publish {
+            pr,
+            verdict,
+            summary,
+        } => publish(&socket, &teller, pr, verdict, summary).await,
+        _ => {}
+    }
 }
 
 async fn worker(socket: &Path) -> Result<Client, String> {
@@ -618,15 +647,16 @@ fn message_of(e: ClientError) -> String {
     }
 }
 
-async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) {
+/// Sends `CachedAvailable` when there is a cached copy; gives back `Opened` or `OpenFailed`.
+async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
     let mut client = match worker(socket).await {
         Ok(c) => c,
         Err(message) => {
-            return teller.send(Tell::OpenFailed {
+            return Tell::OpenFailed {
                 pr,
                 message,
                 cache: false,
-            });
+            };
         }
     };
     let mut cache = false;
@@ -651,18 +681,18 @@ async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) {
                 Ok(Reply::WhatsNew(news)) => news,
                 _ => Vec::new(),
             };
-            teller.send(Tell::Opened { pr, view, news });
+            Tell::Opened { pr, view, news }
         }
-        Ok(_) => teller.send(Tell::OpenFailed {
+        Ok(_) => Tell::OpenFailed {
             pr,
             message: "clusiad sent an unexpected reply".into(),
             cache,
-        }),
-        Err(e) => teller.send(Tell::OpenFailed {
+        },
+        Err(e) => Tell::OpenFailed {
             pr,
             message: message_of(e),
             cache,
-        }),
+        },
     }
 }
 
@@ -900,6 +930,7 @@ pub(crate) fn pump(
     mut model: ResMut<Model>,
     mut toasts: ResMut<Toasts>,
     mut tabs: ResMut<ReviewTabs>,
+    mut asks: ResMut<Asks>,
     mut show: MessageWriter<ShowRequested>,
     mut exit: MessageWriter<AppExit>,
     mut reviews: MessageWriter<ReviewEvent>,
@@ -908,7 +939,7 @@ pub(crate) fn pump(
     let Some(inbox) = inbox else { return };
     for tell in inbox.0.try_iter() {
         let mut events = Vec::new();
-        let rest = review_state::apply(&mut tabs, tell, &mut events);
+        let rest = review_state::apply(&mut tabs, &mut asks, tell, &mut events);
         reviews.write_batch(events);
         let Some(tell) = rest else { continue };
         match tell {
@@ -1132,5 +1163,29 @@ fn demo_edit(
             ticket,
             message,
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_open_is_no_longer_followed() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let pr = fixture::demo_pr();
+        let open = OpenSet::default();
+        open_set(&open).insert(pr.clone());
+        let socket = PathBuf::from("/nonexistent/clusia-test/clusiad.sock");
+        work(socket, teller, open.clone(), Ask::OpenReview(pr.clone())).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Tell::OpenFailed { pr: failed, cache: false, .. }) if failed == pr
+        ));
+        assert!(open_set(&open).is_empty(), "the failed PR is forgotten");
     }
 }
