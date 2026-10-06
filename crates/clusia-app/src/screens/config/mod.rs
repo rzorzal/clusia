@@ -896,6 +896,46 @@ mod tests {
     }
 
     #[test]
+    fn a_new_key_status_clears_an_old_refusal() {
+        let mut app = config_app(Section::Media);
+        let line = |app: &mut App, text: &str| page_texts(app).iter().any(|t| t == text);
+        testing::tell(
+            &mut app,
+            Tell::Gifs(Err((
+                ErrorCode::Unauthorized,
+                "Giphy rejected the key".into(),
+            ))),
+        );
+        testing::settle(&mut app);
+        assert!(line(&mut app, "Giphy rejected the key. Paste a new one."));
+        let mut snap = app.world().resource::<Model>().snapshot.clone();
+        snap.giphy_key = crate::snapshot::GiphyKey::Missing;
+        testing::tell(&mut app, Tell::Snapshot(Box::new(snap.clone())));
+        snap.giphy_key = crate::snapshot::GiphyKey::Set;
+        testing::tell(&mut app, Tell::Snapshot(Box::new(snap)));
+        testing::settle(&mut app);
+        assert!(line(&mut app, "Key saved in the macOS Keychain"));
+    }
+
+    #[test]
+    fn a_snapshot_with_the_same_key_status_keeps_the_refusal() {
+        let mut app = config_app(Section::Media);
+        testing::tell(
+            &mut app,
+            Tell::Gifs(Err((
+                ErrorCode::Unauthorized,
+                "Giphy rejected the key".into(),
+            ))),
+        );
+        let snap = app.world().resource::<Model>().snapshot.clone();
+        testing::tell(&mut app, Tell::Snapshot(Box::new(snap)));
+        testing::settle(&mut app);
+        assert!(
+            page_texts(&mut app).contains(&"Giphy rejected the key. Paste a new one.".to_string())
+        );
+    }
+
+    #[test]
     fn every_section_has_a_page() {
         let mut app = config_app(Section::Appearance);
         for section in Section::ALL {

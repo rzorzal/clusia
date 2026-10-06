@@ -1136,6 +1136,10 @@ pub(crate) fn pump(
                 if matches!(model.connection, Connection::Lost(_)) {
                     media.retry_failed();
                 }
+                // A refusal belongs to the key that was refused; a new status means a new verdict.
+                if s.giphy_key != model.snapshot.giphy_key {
+                    model.rejected.remove(GIPHY_KEY_REFUSAL);
+                }
                 model.snapshot = *s;
                 model.connection = Connection::Live;
             }

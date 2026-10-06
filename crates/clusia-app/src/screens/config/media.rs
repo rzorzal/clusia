@@ -22,6 +22,8 @@ pub struct PasteGiphyKey;
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaView {
     pub key: GiphyKey,
+    /// False until the second fetch lands, while an `Unknown` key just means "not asked yet".
+    pub lists_loaded: bool,
     pub load_external: bool,
     pub load_external_error: Option<String>,
 }
@@ -34,6 +36,7 @@ pub fn view(snap: &Snapshot, rejected: &HashMap<String, String>) -> MediaView {
     };
     MediaView {
         key,
+        lists_loaded: snap.lists_loaded,
         load_external: snap.config.media.load_external_images,
         load_external_error: rejected.get("media.load_external_images").cloned(),
     }
@@ -52,7 +55,7 @@ pub fn giphy_key_from_clipboard(text: &str) -> Result<Secret, &'static str> {
 }
 
 /// The status under the Giphy key, with its color.
-pub fn key_line(key: GiphyKey) -> (&'static str, Swatch) {
+pub fn key_line(key: GiphyKey, lists_loaded: bool) -> (&'static str, Swatch) {
     match key {
         GiphyKey::Set => ("Key saved in the macOS Keychain", Swatch::Green),
         GiphyKey::Missing => (
@@ -60,6 +63,7 @@ pub fn key_line(key: GiphyKey) -> (&'static str, Swatch) {
             Swatch::Muted,
         ),
         GiphyKey::Rejected => ("Giphy rejected the key. Paste a new one.", Swatch::Orange),
+        GiphyKey::Unknown if !lists_loaded => ("Checking the key…", Swatch::Muted),
         GiphyKey::Unknown => ("The key could not be checked right now", Swatch::Muted),
     }
 }
@@ -86,7 +90,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &MediaView) {
         "GIFs from Giphy and the pictures that comments show.",
     );
     heading(p, fonts, "Giphy");
-    let (line, ink) = key_line(v.key);
+    let (line, ink) = key_line(v.key, v.lists_loaded);
     row(
         p,
         fonts,
@@ -152,7 +156,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &MediaView) {
                 setter("media.load_external_images", (!v.load_external).to_string()),
             ));
         },
-        "Off: pictures from sites other than GitHub and Giphy appear as links",
+        "On: pictures from any public https site load. Off: only GitHub and Giphy; others appear as links.",
         v.load_external_error
             .as_deref()
             .map(|m| ("media.load_external_images", m)),
@@ -220,14 +224,19 @@ mod tests {
 
     #[test]
     fn key_status_lines() {
-        assert_eq!(key_line(GiphyKey::Set).1, Swatch::Green);
-        assert_eq!(key_line(GiphyKey::Rejected).1, Swatch::Orange);
-        assert!(key_line(GiphyKey::Missing).0.starts_with("No key yet"));
+        assert_eq!(key_line(GiphyKey::Set, true).1, Swatch::Green);
+        assert_eq!(key_line(GiphyKey::Rejected, true).1, Swatch::Orange);
         assert!(
-            key_line(GiphyKey::Unknown)
+            key_line(GiphyKey::Missing, true)
+                .0
+                .starts_with("No key yet")
+        );
+        assert!(
+            key_line(GiphyKey::Unknown, true)
                 .0
                 .contains("could not be checked")
         );
+        assert_eq!(key_line(GiphyKey::Unknown, false).0, "Checking the key…");
     }
 
     #[test]
