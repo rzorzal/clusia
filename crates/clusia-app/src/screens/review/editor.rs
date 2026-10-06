@@ -16,7 +16,7 @@ use bevy::ui_widgets::{Activate, observe};
 use clusia_core::{DraftKind, PrRef};
 use clusia_protocol::AnchorInput;
 
-use crate::bridge::{Ask, Asks, Connection, Model};
+use crate::bridge::{Ask, Asks, Connection, Model, TOAST_SECS, Toast, Toasts};
 use crate::fonts::UiFonts;
 use crate::review_state::{EditTarget, Editor, ReviewTabs, Tab, Tickets};
 use crate::screens::review::ReviewSystems;
@@ -118,7 +118,7 @@ pub fn submit_editor(
         return false;
     }
     if !live {
-        editor.error = Some("Not connected to clusiad — not sent".into());
+        editor.error = Some(NOT_CONNECTED.into());
         return false;
     }
     let ticket = tickets.issue();
@@ -184,6 +184,39 @@ impl Plugin for EditorPlugin {
 
 /// Why nothing is sent while the tab shows the cached copy.
 pub const CACHED_COPY: &str = "You're viewing the cached copy — try again to make changes";
+
+/// Why nothing is sent without a live connection.
+pub const NOT_CONNECTED: &str = "Not connected to clusiad — not sent";
+
+/// Why no draft change can be sent for `pr` right now (the cached copy, or no live
+/// connection); `None` when it can.
+pub(crate) fn read_only_reason(
+    tabs: &ReviewTabs,
+    model: &Model,
+    pr: &PrRef,
+) -> Option<&'static str> {
+    let cached = tabs
+        .0
+        .get(pr)
+        .and_then(Tab::ready)
+        .is_some_and(|r| r.cached_at.is_some());
+    if cached {
+        Some(CACHED_COPY)
+    } else if model.connection != Connection::Live {
+        Some(NOT_CONNECTED)
+    } else {
+        None
+    }
+}
+
+/// A button that would change the draft on a read-only review: says why nothing was sent.
+pub(crate) fn not_sent(toasts: &mut Toasts, time: &Time, reason: &str) {
+    toasts.0.push(Toast {
+        text: reason.to_string(),
+        warning: true,
+        until: time.elapsed_secs_f64() + TOAST_SECS,
+    });
+}
 
 fn submit(
     pr: &PrRef,

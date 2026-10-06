@@ -19,6 +19,7 @@ use crate::fonts::UiFonts;
 use crate::nav::Nav;
 use crate::review_state::{FinalizeForm, Modal, Phase, Ready, ReviewEvent, ReviewTabs, Tickets};
 use crate::screens::review::ReviewSystems;
+use crate::screens::review::editor::{not_sent, read_only_reason};
 use crate::screens::review::leave::close_tab;
 use crate::screens::review::shell::ModalFor;
 use crate::theme::Swatch;
@@ -211,6 +212,13 @@ pub struct VerdictButton {
     pub verdict: Verdict,
 }
 
+/// **Remove** on an item (an obsolete one blocks Publish until it goes).
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct FinalizeRemove {
+    pub pr: PrRef,
+    pub id: String,
+}
+
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct DiscardButton(pub PrRef);
 
@@ -398,6 +406,16 @@ fn card_content(
                 }
                 if item.obsolete {
                     row.spawn(badge(fonts, "obsolete", Tone::Orange));
+                }
+                if !v.cached {
+                    row.spawn((
+                        button(fonts, "Remove", Variant::Ghost),
+                        FinalizeRemove {
+                            pr: pr.clone(),
+                            id: item.id.clone(),
+                        },
+                        observe(on_remove),
+                    ));
                 }
             });
         }
@@ -719,6 +737,29 @@ fn on_save(
     asks.send(Ask::CloseReview(pr.clone()));
     edits.0.retain(|(p, _), _| p != pr);
     close_tab(pr, &mut tabs, &mut nav);
+}
+
+fn on_remove(
+    activate: On<Activate>,
+    buttons: Query<&FinalizeRemove>,
+    tabs: Res<ReviewTabs>,
+    model: Res<Model>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
+    mut edits: ResMut<FinalizeEdits>,
+) {
+    let Ok(b) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Some(reason) = read_only_reason(&tabs, &model, &b.pr) {
+        return not_sent(&mut toasts, &time, reason);
+    }
+    edits.0.remove(&(b.pr.clone(), b.id.clone()));
+    asks.send(Ask::RemoveItem {
+        pr: b.pr.clone(),
+        id: b.id.clone(),
+    });
 }
 
 fn on_discard(
@@ -1258,6 +1299,52 @@ mod tests {
                     true
                 )
             ]
+        );
+    }
+
+    #[test]
+    fn obsolete_items_can_be_removed_from_finalize() {
+        let mut app = finalize_app(false);
+        let pr = fixture::demo_pr();
+        let obsolete = finalize_view(&ready(), &FinalizeForm::default())
+            .items
+            .into_iter()
+            .find(|i| i.obsolete)
+            .expect("the demo's obsolete item")
+            .id;
+        assert_eq!(testing::count::<FinalizeRemove>(&mut app), 3, "every item");
+        let remove = testing::find::<FinalizeRemove>(&mut app, |r| r.id == obsolete);
+        testing::activate(&mut app, remove);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::RemoveItem {
+                pr: pr.clone(),
+                id: obsolete.clone()
+            }]
+        );
+        // The daemon removes it: nothing blocks Publish any more.
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let tab = tabs.0.get_mut(&pr).unwrap();
+            if let Phase::Ready(r) = &mut tab.phase {
+                r.view.review.draft.remove(&obsolete).unwrap();
+            }
+            tab.ui.finalize.verdict = Some(Verdict::Comment);
+        }
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<FinalizeRemove>(&mut app), 2);
+        assert_eq!(testing::count::<PublishButton>(&mut app), 1);
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            if let Phase::Ready(r) = &mut tabs.0.get_mut(&pr).unwrap().phase {
+                r.cached_at = Some(NOW - 3600);
+            }
+        }
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::count::<FinalizeRemove>(&mut app),
+            0,
+            "nothing is removed from the cached copy"
         );
     }
 

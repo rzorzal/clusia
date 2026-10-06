@@ -12,7 +12,7 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
 use clusia_core::{DraftItem, DraftKind, ItemStatus, PrRef};
 use clusia_protocol::ReviewView;
 
-use crate::bridge::{Ask, Asks, Connection, Model};
+use crate::bridge::{Ask, Asks, Connection, Model, Toasts};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, ReviewScreen, Screen, Section};
@@ -22,7 +22,7 @@ use crate::review_state::{
 };
 use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
-use crate::screens::review::editor::{editor_box, sync_editor_text};
+use crate::screens::review::editor::{editor_box, not_sent, read_only_reason, sync_editor_text};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
@@ -156,6 +156,13 @@ pub struct DraftCardButton {
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeButton(pub PrRef);
+
+/// **Remove** on a draft card (the only way out for an obsolete item outside the diff).
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct DraftCardRemove {
+    pub pr: PrRef,
+    pub id: String,
+}
 
 #[derive(Component)]
 struct ShellTop {
@@ -982,12 +989,18 @@ fn right_region(
             ));
         }
         for card in &v.cards {
-            draft_card_node(draft, fonts, pr, card);
+            draft_card_node(draft, fonts, pr, card, v.read_only);
         }
     });
 }
 
-fn draft_card_node(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, card: &DraftCard) {
+fn draft_card_node(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    card: &DraftCard,
+    read_only: bool,
+) {
     p.spawn((
         Node {
             flex_direction: FlexDirection::Column,
@@ -1026,6 +1039,21 @@ fn draft_card_node(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, ca
             h.spawn(text(fonts, card.title.clone(), Type::MONO));
             if let Some((label, tone)) = &card.badge {
                 h.spawn(badge(fonts, label, *tone));
+            }
+            if !read_only {
+                h.spawn(Node {
+                    flex_grow: 1.0,
+                    ..default()
+                });
+                // A button inside the card's button: its click stops here.
+                h.spawn((
+                    button(fonts, "Remove", Variant::Ghost),
+                    DraftCardRemove {
+                        pr: pr.clone(),
+                        id: card.id.clone(),
+                    },
+                    observe(on_card_remove),
+                ));
             }
         });
         if !card.body.is_empty() {
@@ -1202,6 +1230,27 @@ fn on_card(activate: On<Activate>, cards: Query<&DraftCardButton>, mut tabs: Res
         CardTarget::Comments => tab.ui.section = ReviewSection::Comments,
         CardTarget::Stay => {}
     }
+}
+
+fn on_card_remove(
+    activate: On<Activate>,
+    buttons: Query<&DraftCardRemove>,
+    tabs: Res<ReviewTabs>,
+    model: Res<Model>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
+) {
+    let Ok(b) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Some(reason) = read_only_reason(&tabs, &model, &b.pr) {
+        return not_sent(&mut toasts, &time, reason);
+    }
+    asks.send(Ask::RemoveItem {
+        pr: b.pr.clone(),
+        id: b.id.clone(),
+    });
 }
 
 fn on_finalize(
@@ -1703,6 +1752,61 @@ mod tests {
         assert!(
             app.world().get_entity(modal).is_err(),
             "the tab is not on screen"
+        );
+    }
+
+    #[test]
+    fn draft_cards_remove_their_item_unless_read_only() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        let obsolete = testing::ready(&app, &pr)
+            .view
+            .review
+            .draft
+            .items
+            .iter()
+            .find(|i| matches!(i.status, ItemStatus::Obsolete { .. }))
+            .expect("the demo's obsolete item")
+            .id
+            .clone();
+        assert_eq!(testing::count::<DraftCardRemove>(&mut app), 3, "every card");
+        let remove = testing::find::<DraftCardRemove>(&mut app, |r| r.id == obsolete);
+        testing::activate(&mut app, remove);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::RemoveItem {
+                pr: pr.clone(),
+                id: obsolete
+            }]
+        );
+        assert_eq!(
+            app.world().resource::<ReviewTabs>().0[&pr].ui.file,
+            None,
+            "the card itself was not clicked"
+        );
+        app.world_mut().resource_mut::<Model>().connection = Connection::Lost("gone".into());
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::count::<DraftCardRemove>(&mut app),
+            0,
+            "not connected"
+        );
+        app.world_mut().resource_mut::<Model>().connection = Connection::Live;
+        if let Phase::Ready(ready) = &mut app
+            .world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .phase
+        {
+            ready.cached_at = Some(NOW - 3600);
+        }
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::count::<DraftCardRemove>(&mut app),
+            0,
+            "cached copy"
         );
     }
 }

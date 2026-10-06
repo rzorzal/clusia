@@ -12,7 +12,7 @@ use clusia_core::prdata::ReviewThread;
 use clusia_core::time::parse_rfc3339;
 use clusia_view::status::format_age;
 
-use crate::bridge::{Ask, Asks};
+use crate::bridge::{Ask, Asks, Model, Toasts};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::review_state::{
@@ -20,7 +20,7 @@ use crate::review_state::{
 };
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::diff::{DraftEdit, DraftRemove, on_edit, on_remove, unsent};
-use crate::screens::review::editor::{EditorArea, editor_box};
+use crate::screens::review::editor::{EditorArea, editor_box, not_sent, read_only_reason};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::Swatch;
 use crate::ui::kit::{
@@ -754,10 +754,17 @@ fn on_reply(
 fn on_resolve(
     activate: On<Activate>,
     buttons: Query<&ResolveButton>,
+    tabs: Res<ReviewTabs>,
+    model: Res<Model>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
     mut tickets: ResMut<Tickets>,
     mut asks: ResMut<Asks>,
 ) {
     if let Ok(b) = buttons.get(activate.entity) {
+        if let Some(reason) = read_only_reason(&tabs, &model, &b.pr) {
+            return not_sent(&mut toasts, &time, reason);
+        }
         asks.send(Ask::AddItem {
             pr: b.pr.clone(),
             kind: DraftKind::Resolve,
@@ -769,8 +776,19 @@ fn on_resolve(
     }
 }
 
-fn on_undo(activate: On<Activate>, buttons: Query<&UndoResolve>, mut asks: ResMut<Asks>) {
+fn on_undo(
+    activate: On<Activate>,
+    buttons: Query<&UndoResolve>,
+    tabs: Res<ReviewTabs>,
+    model: Res<Model>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
+) {
     if let Ok(b) = buttons.get(activate.entity) {
+        if let Some(reason) = read_only_reason(&tabs, &model, &b.pr) {
+            return not_sent(&mut toasts, &time, reason);
+        }
         asks.send(Ask::RemoveItem {
             pr: b.pr.clone(),
             id: b.id.clone(),
@@ -1219,5 +1237,34 @@ mod tests {
         testing::settle(&mut app);
         assert_eq!(testing::count::<EditorArea>(&mut app), 1);
         assert_eq!(testing::count::<DraftEdit>(&mut app), 0, "edited in place");
+    }
+
+    #[test]
+    fn the_cached_copy_sends_no_resolve_or_undo() {
+        let mut app = comments_app();
+        with_ready(&mut app, |r, _| r.cached_at = Some(NOW - 3600));
+        testing::settle(&mut app);
+        let resolve = testing::find::<ResolveButton>(&mut app, |r| r.thread.author == "mona");
+        testing::activate(&mut app, resolve);
+        assert!(testing::recorded(&mut app).is_empty(), "no AddItem");
+        with_ready(&mut app, |r, _| {
+            let thread = thread_ref(mona_thread(r));
+            r.view
+                .review
+                .draft
+                .add(DraftKind::Resolve, None, Some(thread), "", NOW)
+                .unwrap();
+        });
+        testing::settle(&mut app);
+        let undo = testing::find::<UndoResolve>(&mut app, |_| true);
+        testing::activate(&mut app, undo);
+        assert!(testing::recorded(&mut app).is_empty(), "no RemoveItem");
+        let toasts = &app.world().resource::<crate::bridge::Toasts>().0;
+        assert_eq!(toasts.len(), 2);
+        assert!(
+            toasts
+                .iter()
+                .all(|t| t.warning && t.text == crate::screens::review::editor::CACHED_COPY)
+        );
     }
 }

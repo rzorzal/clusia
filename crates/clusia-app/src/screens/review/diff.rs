@@ -23,13 +23,13 @@ use clusia_view::diff::{
     Row, RowKind, anchor_of, intraline, line_on, parse_patch, row_of, side_text, split_rows,
 };
 
-use crate::bridge::{Ask, Asks, Model, set_config};
+use crate::bridge::{Ask, Asks, Model, Toasts, set_config};
 use crate::fonts::UiFonts;
 use crate::review_state::{
     DiffMode, EditTarget, Editor, Phase, Ready, ReviewSection, ReviewTabs, SHOW_STEP, TabUi,
 };
 use crate::screens::review::ReviewSystems;
-use crate::screens::review::editor::editor_box;
+use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
 use crate::ui::code::{CodeSpan, code_line, spans_for};
@@ -1467,9 +1467,16 @@ pub(crate) fn on_edit(
 pub(crate) fn on_remove(
     activate: On<Activate>,
     buttons: Query<&DraftRemove>,
+    tabs: Res<ReviewTabs>,
+    model: Res<Model>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
     mut asks: ResMut<Asks>,
 ) {
     if let Ok(b) = buttons.get(activate.entity) {
+        if let Some(reason) = read_only_reason(&tabs, &model, &b.pr) {
+            return not_sent(&mut toasts, &time, reason);
+        }
         asks.send(Ask::RemoveItem {
             pr: b.pr.clone(),
             id: b.id.clone(),
@@ -2089,5 +2096,49 @@ mod tests {
         testing::settle(&mut app);
         assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
         assert_eq!(testing::count::<FileButton>(&mut app), 7);
+    }
+
+    #[test]
+    fn read_only_reviews_remove_nothing() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        let set_cached = |app: &mut App, at: Option<i64>| {
+            if let Phase::Ready(r) = &mut ui_mut(app, &pr).0.get_mut(&pr).unwrap().phase {
+                r.cached_at = at;
+            }
+            testing::settle(app);
+        };
+        let last_toast = |app: &App| {
+            app.world()
+                .resource::<crate::bridge::Toasts>()
+                .0
+                .last()
+                .map(|t| (t.text.clone(), t.warning))
+        };
+        set_cached(&mut app, Some(NOW - 3600));
+        let remove = testing::find::<DraftRemove>(&mut app, |_| true);
+        testing::activate(&mut app, remove);
+        assert!(testing::recorded(&mut app).is_empty(), "the cached copy");
+        assert_eq!(
+            last_toast(&app),
+            Some((
+                crate::screens::review::editor::CACHED_COPY.to_string(),
+                true
+            ))
+        );
+        set_cached(&mut app, None);
+        app.world_mut()
+            .resource_mut::<crate::bridge::Model>()
+            .connection = crate::bridge::Connection::Lost("gone".into());
+        testing::settle(&mut app);
+        testing::recorded(&mut app); // MarkSeen for the fresh copy
+        let remove = testing::find::<DraftRemove>(&mut app, |_| true);
+        testing::activate(&mut app, remove);
+        let sent = testing::recorded(&mut app);
+        assert!(sent.is_empty(), "not connected: {sent:?}");
+        assert_eq!(
+            last_toast(&app),
+            Some(("Not connected to clusiad — not sent".to_string(), true))
+        );
     }
 }
