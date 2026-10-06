@@ -20,6 +20,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
 libc.workspace = true
+pulldown-cmark.workspace = true
 
 [dev-dependencies]
 clusiad.workspace = true

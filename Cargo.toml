@@ -66,6 +66,8 @@ tree-sitter-yaml = "0.7.2"
 tree-sitter-sequel = "0.3.11"
 # Default features only: `parser` would pull a second tree-sitter core.
 tree-sitter-md = "0.5.3"
+# No CLI or HTML renderer: only the event parser.
+pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

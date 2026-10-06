@@ -5,6 +5,13 @@
 
 Standard library only. The output is committed; run this again only to move to a newer emojibase
 or Twemoji release.
+
+Sources of the committed table:
+    emojibase-data 17.0.0   https://registry.npmjs.org/emojibase-data/-/emojibase-data-17.0.0.tgz
+                            sha1 5816fba6395da6b567fbd54b029ca6b5de2d9255
+                            (unpack it and pass the package directory as --emojibase)
+    Twemoji PNGs            https://github.com/jdecked/twemoji/archive/refs/tags/v17.0.3.tar.gz
+                            tag v17.0.3, files in assets/72x72/ (no checksum recorded)
 """
 import argparse
 import json
