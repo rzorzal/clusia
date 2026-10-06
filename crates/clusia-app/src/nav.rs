@@ -28,17 +28,21 @@ pub enum Section {
     Editor,
     Notifications,
     Plugins,
+    Media,
+    About,
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 9] = [
         Section::Appearance,
         Section::GitServer,
         Section::Repositories,
         Section::Harness,
         Section::Editor,
+        Section::Media,
         Section::Notifications,
         Section::Plugins,
+        Section::About,
     ];
 
     pub fn label(self) -> &'static str {
@@ -50,6 +54,8 @@ impl Section {
             Section::Editor => "Editor",
             Section::Notifications => "Notifications",
             Section::Plugins => "Plugins & skills",
+            Section::Media => "Media",
+            Section::About => "About",
         }
     }
 }

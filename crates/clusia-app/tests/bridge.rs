@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use clusia_app::bridge::{self, Ask, Link, Tell};
 use clusia_app::fixture;
-use clusia_app::snapshot::Snapshot;
+use clusia_app::snapshot::{GiphyKey, Snapshot};
 use clusia_core::config::Theme as ThemeChoice;
 use clusia_core::{Config, DraftKind, PrRef, Review, ReviewCache, ReviewState, Verdict};
-use clusia_protocol::{Command, LoadStepKind, Reply, StepStatus, WindowTarget};
+use clusia_protocol::{Command, LoadStepKind, Reply, Secret, StepStatus, WindowTarget};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -425,5 +425,22 @@ async fn leave_choices_reach_the_daemon_before_the_window_exits() {
         assert_eq!(review.state, ReviewState::Saved, "{pr}");
     }
     drop(tell);
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn giphy_key_status_follows_the_daemon() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    let first = snapshot_where(&link, |s| s.lists_loaded);
+    assert_eq!(first.giphy_key, GiphyKey::Missing, "no key in a new home");
+    link.ask
+        .send(Ask::SetGiphyKey(Secret::from(
+            "dc6zaTOxFJmzC1234567890abcdefghi",
+        )))
+        .unwrap();
+    snapshot_where(&link, |s| s.giphy_key == GiphyKey::Set);
+    link.ask.send(Ask::ClearGiphyKey).unwrap();
+    snapshot_where(&link, |s| s.giphy_key == GiphyKey::Missing);
     d.stop().await;
 }

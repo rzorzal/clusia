@@ -30,12 +30,15 @@ use crate::app::Mode;
 use crate::clock::Clock;
 use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
-use crate::snapshot::{self, Refresh, Snapshot};
+use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::ui::media::MediaCache;
 
 /// Events arriving within this window share one refresh.
 pub const COALESCE: Duration = Duration::from_millis(100);
 pub const TOAST_SECS: f64 = 4.0;
+
+/// The `Model.rejected` key under which a refusal Giphy gave for the stored key is kept.
+pub const GIPHY_KEY_REFUSAL: &str = "giphy.key";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ask {
@@ -47,6 +50,9 @@ pub enum Ask {
     ClearToken,
     SyncNow,
     RefreshAuth,
+    /// The key goes straight to the Keychain; `GiphyKeyChanged` refreshes the snapshot.
+    SetGiphyKey(Secret),
+    ClearGiphyKey,
     OpenInEditor {
         path: String,
         line: Option<u32>,
@@ -362,6 +368,17 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
     true
 }
 
+/// The answer to a GIF search; any reply but `Gifs` is a daemon fault, never silence.
+fn gifs_tell(reply: Reply) -> Tell {
+    match reply {
+        Reply::Gifs(page) => Tell::Gifs(Ok(page)),
+        _ => Tell::Gifs(Err((
+            ErrorCode::Internal,
+            "Unexpected reply from clusiad".into(),
+        ))),
+    }
+}
+
 /// `Ok(())` when the UI is gone; `Err(reason)` when the daemon is.
 async fn session(
     paths: &Paths,
@@ -400,8 +417,10 @@ async fn session(
     for pr in reopened {
         refetch(&mut client, &pr, teller).await?;
     }
+    // The Keychain read can wait: it comes after the first snapshot.
     let lists = Refresh {
         lists: true,
+        giphy: true,
         ..Refresh::default()
     };
     fetch(&mut client, &mut snap, lists).await?;
@@ -542,6 +561,16 @@ async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Resul
     {
         snap.auth = Some(a);
     }
+    if what.giphy
+        && let Some(Reply::GiphyKeyStatus(status)) =
+            request(client, Command::GiphyKeyStatus).await?
+    {
+        snap.giphy_key = if status.configured {
+            GiphyKey::Set
+        } else {
+            GiphyKey::Missing
+        };
+    }
     Ok(())
 }
 
@@ -595,6 +624,18 @@ async fn answer(
             }
         }
         Ask::RefreshAuth => fetch(client, snap, auth).await?,
+        Ask::SetGiphyKey(key) => {
+            notify(
+                client,
+                teller,
+                Command::SetGiphyKey { key },
+                "Giphy key saved in the Keychain",
+            )
+            .await?;
+        }
+        Ask::ClearGiphyKey => {
+            notify(client, teller, Command::ClearGiphyKey, "Giphy key removed").await?;
+        }
         Ask::OpenInEditor { path, line } => {
             notify(client, teller, Command::OpenInEditor { path, line }, "").await?;
         }
@@ -620,8 +661,7 @@ async fn answer(
         },
         Ask::SearchGifs { query, offset } => {
             match client.request(Command::SearchGifs { query, offset }).await {
-                Ok(Reply::Gifs(page)) => teller.send(Tell::Gifs(Ok(page))),
-                Ok(_) => {}
+                Ok(reply) => teller.send(gifs_tell(reply)),
                 Err(ClientError::Server(e)) => teller.send(Tell::Gifs(Err((e.code, e.message)))),
                 Err(e) => {
                     teller.send(Tell::Gifs(Err((
@@ -1100,6 +1140,17 @@ pub(crate) fn pump(
                 model.connection = Connection::Live;
             }
             Tell::Gifs(answer) => {
+                match &answer {
+                    Err((ErrorCode::Unauthorized, message)) => {
+                        model
+                            .rejected
+                            .insert(GIPHY_KEY_REFUSAL.to_string(), message.clone());
+                    }
+                    Ok(_) => {
+                        model.rejected.remove(GIPHY_KEY_REFUSAL);
+                    }
+                    Err(_) => {}
+                }
                 gifs.write(GifsArrived(answer));
             }
             Tell::Rejected { key, message } => {
@@ -1155,6 +1206,8 @@ pub(crate) fn demo_answers(
                     model.rejected.insert(key, message);
                 }
             }
+            Ask::SetGiphyKey(_) => model.snapshot.giphy_key = GiphyKey::Set,
+            Ask::ClearGiphyKey => model.snapshot.giphy_key = GiphyKey::Missing,
             Ask::OpenReview(pr) => tells.extend(demo_open(pr, now)),
             Ask::OpenCached(pr) if pr == fixture::demo_pr() => {
                 tells.push(Tell::OpenedFromCache {
@@ -1334,6 +1387,22 @@ fn demo_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_gif_search_gets_an_answer() {
+        let page = clusia_protocol::GifPage {
+            items: Vec::new(),
+            next_offset: None,
+        };
+        assert_eq!(gifs_tell(Reply::Gifs(page.clone())), Tell::Gifs(Ok(page)));
+        assert_eq!(
+            gifs_tell(Reply::Ack),
+            Tell::Gifs(Err((
+                ErrorCode::Internal,
+                "Unexpected reply from clusiad".into()
+            )))
+        );
+    }
 
     #[test]
     fn offline_gif_searches_fail_at_once() {

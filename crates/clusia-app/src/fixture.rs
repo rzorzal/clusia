@@ -11,7 +11,7 @@ use clusia_protocol::{
     TokenSource,
 };
 
-use crate::snapshot::Snapshot;
+use crate::snapshot::{GiphyKey, Snapshot};
 
 pub fn demo(now: i64) -> Snapshot {
     let pr =
@@ -119,6 +119,7 @@ pub fn demo(now: i64) -> Snapshot {
             scopes: vec!["repo".into(), "read:org".into()],
             error: None,
         }),
+        giphy_key: GiphyKey::Set,
         lists_loaded: true,
         daemon_version: "demo".into(),
     }

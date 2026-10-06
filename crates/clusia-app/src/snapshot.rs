@@ -3,6 +3,18 @@
 use clusia_core::{ActivitySummary, Config, PrSummary, ReviewState};
 use clusia_protocol::{AuthInfo, Event, ReviewSummary, SyncStatus, WindowTarget};
 
+/// What the window knows about the Giphy key. The daemon's status gives `Missing` or `Set`;
+/// `Rejected` is only ever derived by the Media page from a refusal the window saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GiphyKey {
+    /// Not asked yet, or the answer was neither yes nor no (offline, rate limit).
+    #[default]
+    Unknown,
+    Missing,
+    Rejected,
+    Set,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Snapshot {
     pub config: Config,
@@ -12,6 +24,7 @@ pub struct Snapshot {
     pub activity: Option<ActivitySummary>,
     pub sync: Option<SyncStatus>,
     pub auth: Option<AuthInfo>,
+    pub giphy_key: GiphyKey,
     /// `assigned` and `mine` hold real lists, not the empty defaults before the first sync.
     pub lists_loaded: bool,
     pub daemon_version: String,
@@ -25,6 +38,7 @@ pub struct Refresh {
     pub reviews: bool,
     pub activity: bool,
     pub auth: bool,
+    pub giphy: bool,
 }
 
 impl Refresh {
@@ -35,6 +49,7 @@ impl Refresh {
         reviews: true,
         activity: true,
         auth: true,
+        giphy: false,
     };
 
     pub fn merge(&mut self, other: Refresh) {
@@ -43,10 +58,11 @@ impl Refresh {
         self.reviews |= other.reviews;
         self.activity |= other.activity;
         self.auth |= other.auth;
+        self.giphy |= other.giphy;
     }
 
     pub fn any(self) -> bool {
-        self.config || self.lists || self.reviews || self.activity || self.auth
+        self.config || self.lists || self.reviews || self.activity || self.auth || self.giphy
     }
 }
 
@@ -58,6 +74,7 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
             r.config = true;
             r.auth = key.starts_with("github.");
         }
+        Event::GiphyKeyChanged => r.giphy = true,
         Event::PrsUpdated { .. } => r.lists = true,
         Event::SyncChanged(status) => {
             r.auth = snap.sync.as_ref().map(|s| s.state) != Some(status.state);
@@ -69,9 +86,8 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         }
         Event::ReviewOutdated { .. } => r.reviews = true,
         Event::WindowRequested { target } => return (r, Some(target)),
-        // `Stopping` is handled by the bridge before `apply` (it closes the window). A Giphy key
-        // change carries nothing to apply: the pages that show it ask for its state themselves.
-        Event::LoadStep(_) | Event::GiphyKeyChanged | Event::Stopping => {}
+        // `Stopping` is handled by the bridge before `apply` (it closes the window).
+        Event::LoadStep(_) | Event::Stopping => {}
     }
     (r, None)
 }
@@ -119,6 +135,27 @@ mod tests {
             state,
             ..SyncStatus::default()
         }
+    }
+
+    #[test]
+    fn the_giphy_key_follows_its_event() {
+        let mut s = Snapshot::default();
+        let (r, _) = apply(&mut s, Event::GiphyKeyChanged);
+        assert_eq!(
+            r,
+            Refresh {
+                giphy: true,
+                ..Refresh::default()
+            }
+        );
+        assert!(!Refresh::default().any());
+        assert!(
+            Refresh {
+                giphy: true,
+                ..Refresh::default()
+            }
+            .any()
+        );
     }
 
     #[test]
