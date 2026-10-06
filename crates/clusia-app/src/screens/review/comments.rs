@@ -22,10 +22,12 @@ use crate::screens::review::ReviewSystems;
 use crate::screens::review::diff::{DraftEdit, DraftRemove, on_edit, on_remove, unsent};
 use crate::screens::review::editor::{EditorArea, editor_box, not_sent, read_only_reason};
 use crate::screens::review::shell::SectionBody;
-use crate::theme::Swatch;
+use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
     Stroke, Tone, Type, Variant, avatar, badge, button, card, chip, divider, panel, text,
 };
+use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::{RenderOpts, copy_button, markdown};
 use crate::ui::text_area::set_text;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,7 +44,7 @@ pub struct PostView {
     pub verb: &'static str,
     /// "3h ago", "just now", or empty when GitHub sent no usable time.
     pub age: String,
-    /// Plain text.
+    /// Markdown source.
     pub body: String,
     pub badge: Option<(&'static str, Tone)>,
 }
@@ -305,8 +307,9 @@ pub struct UndoResolve {
 #[derive(Component)]
 struct ListPart {
     pr: PrRef,
-    /// The view, the editor's error and whether it waits for the daemon (**Saving…**).
-    built: Option<(CommentsView, Option<String>, bool)>,
+    /// The view, the editor's error, whether it waits for the daemon (**Saving…**) and how
+    /// bodies are drawn.
+    built: Option<(CommentsView, Option<String>, bool, RenderOpts)>,
 }
 
 pub struct CommentsPlugin;
@@ -373,10 +376,14 @@ fn rebuild_comments(
     tabs: Res<ReviewTabs>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
+    theme: Res<Theme>,
+    model: Res<Model>,
     mut parts: Query<(Entity, &mut ListPart)>,
 ) {
+    let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
     for (entity, mut part) in &mut parts {
-        if part.built.is_some() && !tabs.is_changed() {
+        let opts_changed = part.built.as_ref().is_some_and(|b| b.3 != opts);
+        if part.built.is_some() && !tabs.is_changed() && !opts_changed {
             continue;
         }
         let Some(tab) = tabs.0.get(&part.pr) else {
@@ -388,7 +395,7 @@ fn rebuild_comments(
         let v = comments_view(ready, &tab.ui, clock.now());
         let error = tab.ui.editor.as_ref().and_then(|e| e.error.clone());
         let saving = tab.ui.editor.as_ref().is_some_and(|e| e.ticket.is_some());
-        let key = (v, error, saving);
+        let key = (v, error, saving, opts.clone());
         if part.built.as_ref() == Some(&key) {
             continue;
         }
@@ -397,7 +404,7 @@ fn rebuild_comments(
         let fonts = &*fonts;
         commands.entity(entity).despawn_related::<Children>();
         commands.entity(entity).with_children(|p| {
-            list(p, fonts, &pr, &key.0, editor.as_ref());
+            list(p, fonts, &pr, &key.0, editor.as_ref(), &key.3);
         });
         part.built = Some(key);
     }
@@ -409,6 +416,7 @@ fn list(
     pr: &PrRef,
     v: &CommentsView,
     editor: Option<&Editor>,
+    opts: &RenderOpts,
 ) {
     p.spawn(Node {
         column_gap: px(8),
@@ -457,7 +465,7 @@ fn list(
                 ..default()
             }))
             .with_children(|c| {
-                post_row(c, fonts, post);
+                post_row(c, fonts, post, opts);
                 c.spawn(divider());
                 c.spawn(footer()).with_children(|f| {
                     f.spawn((
@@ -501,7 +509,7 @@ fn list(
                 if i > 0 {
                     c.spawn(divider());
                 }
-                post_row(c, fonts, post);
+                post_row(c, fonts, post, opts);
             }
             for d in &t.drafts {
                 c.spawn(divider());
@@ -515,7 +523,7 @@ fn list(
                         .with_children(|e| editor_box(e, fonts, editor, pr));
                     }
                 } else {
-                    draft_reply(c, fonts, pr, d);
+                    draft_reply(c, fonts, pr, d, opts);
                 }
             }
             if t.editing
@@ -583,7 +591,7 @@ fn footer() -> impl Bundle {
     }
 }
 
-fn post_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, post: &PostView) {
+fn post_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, post: &PostView, opts: &RenderOpts) {
     p.spawn(Node {
         padding: UiRect::axes(px(14), px(12)),
         column_gap: px(12),
@@ -618,13 +626,24 @@ fn post_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, post: &PostView) {
                 if let Some((label, tone)) = post.badge {
                     h.spawn(badge(fonts, label, tone));
                 }
+                h.spawn(Node {
+                    flex_grow: 1.0,
+                    ..default()
+                });
+                h.spawn(copy_button(fonts, &post.body));
             });
-            c.spawn(text(fonts, post.body.clone(), Type::BODY));
+            markdown(c, fonts, &parse(&post.body), opts);
         });
     });
 }
 
-fn draft_reply(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, d: &DraftReply) {
+fn draft_reply(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    d: &DraftReply,
+    opts: &RenderOpts,
+) {
     p.spawn((
         panel(
             Node {
@@ -654,6 +673,7 @@ fn draft_reply(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, d: &Dr
                 flex_grow: 1.0,
                 ..default()
             });
+            h.spawn(copy_button(fonts, &d.body));
             h.spawn((
                 button(fonts, "Edit", Variant::Ghost),
                 DraftEdit {
@@ -671,7 +691,7 @@ fn draft_reply(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, d: &Dr
                 observe(on_remove),
             ));
         });
-        c.spawn(text(fonts, d.body.clone(), Type::BODY));
+        markdown(c, fonts, &parse(&d.body), opts);
     });
 }
 
@@ -803,6 +823,9 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::testing::{self, NOW};
+    use crate::ui::kit::Fill;
+    use crate::ui::markdown::{CopiedText, CopyMarkdown, MdBody, MdImage};
+    use bevy::ecs::system::RunSystemOnce;
 
     fn ready() -> Ready {
         let (view, news) = fixture::demo_review(NOW);
@@ -1056,7 +1079,7 @@ mod tests {
         let pr = fixture::demo_pr();
         assert_eq!(testing::count::<CommentsRegion>(&mut app), 1);
         assert!(has_text(&mut app, "General discussion"));
-        assert!(has_text(
+        assert!(testing::shows(
             &mut app,
             "Why one minute? The CLI uses 30 seconds."
         ));
@@ -1220,7 +1243,7 @@ mod tests {
                 .clone();
         });
         testing::settle(&mut app);
-        assert!(has_text(&mut app, "Agree with 30 seconds."));
+        assert!(testing::shows(&mut app, "Agree with 30 seconds."));
         // Remove first: while the item is edited, the editor takes its card's place.
         let remove = testing::find::<DraftRemove>(&mut app, |d| d.id == id);
         testing::activate(&mut app, remove);
@@ -1287,5 +1310,164 @@ mod tests {
             [Ask::AddItem { .. }]
         ));
         assert!(has_text(&mut app, "Saving…"));
+    }
+
+    /// Replaces the first comment of the open thread and shows Comments again.
+    fn set_first_body(app: &mut App, body: &str) {
+        let body = body.to_string();
+        with_ready(app, |r, _| {
+            let thread = threads_mut(r)
+                .iter_mut()
+                .find(|t| !t.is_resolved)
+                .expect("an open thread");
+            thread.comments[0].body = body;
+        });
+        testing::settle(app);
+    }
+
+    /// Every node whose whole text is `word`.
+    fn word_entities(app: &mut App, word: &str) -> Vec<Entity> {
+        let mut q = app.world_mut().query::<(Entity, &Text)>();
+        q.iter(app.world())
+            .filter(|(_, t)| t.0 == word)
+            .map(|(e, _)| e)
+            .collect()
+    }
+
+    fn weights(app: &mut App, word: &str) -> Vec<u16> {
+        word_entities(app, word)
+            .into_iter()
+            .map(|e| app.world().get::<TextFont>(e).unwrap().weight.0)
+            .collect()
+    }
+
+    #[test]
+    fn comment_bodies_render_as_markdown() {
+        let mut app = comments_app();
+        let url = "https://github.com/user-attachments/assets/1.png";
+        set_first_body(
+            &mut app,
+            &format!("**Holding** the lock `expires_at` ![graph]({url})"),
+        );
+        assert!(weights(&mut app, "Holding").contains(&600), "a bold word");
+        let chips = word_entities(&mut app, "expires_at");
+        assert!(
+            chips
+                .iter()
+                .any(|e| app.world().get::<Fill>(*e).map(|f| f.0) == Some(Swatch::Line)),
+            "a code chip"
+        );
+        assert!(!testing::shows(&mut app, "**"), "no raw markdown");
+        assert_eq!(testing::count::<MdImage>(&mut app), 1);
+        assert!(testing::recorded(&mut app).contains(&Ask::FetchMedia(url.to_string())));
+    }
+
+    #[test]
+    fn other_sites_stay_links_until_the_setting_is_on() {
+        let mut app = comments_app();
+        set_first_body(&mut app, "see ![x](https://example.com/x.png)");
+        assert_eq!(testing::count::<MdImage>(&mut app), 0);
+        assert!(testing::shows(
+            &mut app,
+            "Image from another site — open in browser"
+        ));
+        app.world_mut()
+            .resource_mut::<Model>()
+            .snapshot
+            .config
+            .media
+            .load_external_images = true;
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::count::<MdImage>(&mut app),
+            1,
+            "the setting redraws"
+        );
+    }
+
+    #[test]
+    fn every_full_comment_has_copy_markdown() {
+        let mut app = comments_app();
+        let source = "**Why** one minute?";
+        set_first_body(&mut app, source);
+        // Three general posts and the three comments of mona's thread.
+        assert_eq!(testing::count::<CopyMarkdown>(&mut app), 6);
+        let copy = testing::find::<CopyMarkdown>(&mut app, |c| c.0 == source);
+        testing::activate(&mut app, copy);
+        assert_eq!(app.world().resource::<CopiedText>().0, [source]);
+    }
+
+    #[test]
+    fn draft_replies_render_markdown_and_copy() {
+        let mut app = comments_app();
+        let pr = fixture::demo_pr();
+        let body = "Agree, `30s` is **fine**";
+        with_ready(&mut app, |r, _| {
+            let thread = {
+                let t = mona_thread(r);
+                ThreadRef {
+                    id: t.id.clone(),
+                    author: "mona".into(),
+                    path: Some(t.path.clone()),
+                    line: t.line,
+                }
+            };
+            r.view
+                .review
+                .draft
+                .add(DraftKind::Reply, None, Some(thread), body, NOW)
+                .unwrap();
+        });
+        testing::settle(&mut app);
+        let fine = weights(&mut app, "fine");
+        assert!(
+            !fine.is_empty() && fine.iter().all(|w| *w == 600),
+            "a bold word in the draft and in its card"
+        );
+        assert_eq!(testing::count::<CopyMarkdown>(&mut app), 7);
+        let copy = testing::find::<CopyMarkdown>(&mut app, |c| c.0 == body);
+        testing::activate(&mut app, copy);
+        assert_eq!(app.world().resource::<CopiedText>().0, [body]);
+        assert!(testing::tab(&app, &pr).ui.editor.is_none());
+    }
+
+    #[test]
+    fn preview_and_thread_render_the_same() {
+        let source = "**Holding the lock** across `exchange` 🐢\n\n- one\n- two\n\n```rust\nlet a = 1;\n```\n\nsee [the race](https://github.com/rzorzal/clusia) ![x](https://github.com/user-attachments/assets/2.png)";
+        let mut app = comments_app();
+        set_first_body(&mut app, source);
+        let (fonts, opts) = {
+            let model = app.world().resource::<Model>();
+            let theme = app.world().resource::<Theme>();
+            (
+                app.world().resource::<UiFonts>().clone(),
+                RenderOpts::from_config(theme.code_size, &model.snapshot.config),
+            )
+        };
+        let stand_in = app.world_mut().spawn(Node::default()).id();
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                commands.entity(stand_in).with_children(|p| {
+                    markdown(p, &fonts, &parse(source), &opts);
+                });
+            })
+            .unwrap();
+        app.update();
+        let preview = testing::tree_signature(&app, stand_in);
+        assert!(preview.contains("image:https://github.com/user-attachments/assets/2.png"));
+        let mut bodies = app.world_mut().query::<(Entity, &MdBody, &ChildOf)>();
+        let signatures: Vec<String> = bodies
+            .iter(app.world())
+            .filter(|(_, _, parent)| parent.parent() != stand_in)
+            .map(|(e, ..)| testing::tree_signature(&app, e))
+            .collect();
+        let bare = preview
+            .strip_prefix("N(")
+            .and_then(|s| s.strip_suffix(",)"))
+            .expect("the stand-in holds one body");
+        assert!(
+            signatures.iter().any(|s| s == bare),
+            "the thread draws what the preview draws:\n{bare}\nnot among\n{signatures:#?}"
+        );
     }
 }

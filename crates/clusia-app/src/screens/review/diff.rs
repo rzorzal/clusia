@@ -37,6 +37,8 @@ use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, avatar, badge, button, card, panel,
     segment, segments, text,
 };
+use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
 
 const NO_DIFF: &str = "No diff to show for this file";
 
@@ -90,9 +92,18 @@ pub struct SplitLine {
 pub struct ThreadCard {
     pub thread: ThreadRef,
     pub author: String,
-    /// First line of the first comment.
-    pub first: String,
+    /// Every comment of the thread, oldest first.
+    pub posts: Vec<CardPost>,
     pub replies: usize,
+    /// Drawn in full instead of as the first line of its first comment.
+    pub expanded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CardPost {
+    pub author: String,
+    /// Markdown source.
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,19 +211,6 @@ fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-fn first_line(body: &str) -> String {
-    let line = body
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim();
-    if line.chars().count() <= 120 {
-        return line.to_string();
-    }
-    let kept: String = line.chars().take(119).collect();
-    format!("{}…", kept.trim_end())
-}
-
 /// Rows under the line editor's range: side and first/last line.
 fn selection(ui: &TabUi, path: &str) -> Option<(Side, u32, u32)> {
     match ui.editor.as_ref().map(|e| &e.target) {
@@ -286,8 +284,16 @@ fn placements(ready: &Ready, ui: &TabUi, path: &str, rows: &[Row]) -> Placements
                 Below::Thread(ThreadCard {
                     thread,
                     author: first.author.clone(),
-                    first: first_line(&first.body),
+                    posts: t
+                        .comments
+                        .iter()
+                        .map(|c| CardPost {
+                            author: c.author.clone(),
+                            body: c.body.clone(),
+                        })
+                        .collect(),
                     replies: t.comments.len() - 1,
+                    expanded: ui.expanded.contains(&t.id),
                 }),
             );
             if matches!(target, Some(EditTarget::Reply(r)) if r.id == t.id) {
@@ -559,6 +565,12 @@ pub struct LineButton {
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct ThreadToggle {
+    pub pr: PrRef,
+    pub id: String,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ThreadReply {
     pub pr: PrRef,
     pub thread: ThreadRef,
@@ -607,6 +619,7 @@ struct BodyKey {
     error: Option<String>,
     /// The editor waits for the daemon (**Saving…**).
     saving: bool,
+    opts: RenderOpts,
 }
 
 #[derive(Component)]
@@ -742,18 +755,23 @@ fn rebuild_diff(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
     theme: Res<Theme>,
+    model: Res<Model>,
     fonts: Res<UiFonts>,
     mut cache: ResMut<HighlightCache>,
+    mut last_opts: Local<Option<RenderOpts>>,
     mut files: Query<(Entity, &mut FilesPart)>,
     mut headers: Query<(Entity, &mut HeaderPart)>,
     mut bodies: Query<(Entity, &mut BodyPart, &mut ScrollPosition)>,
 ) {
+    let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
     let fresh = files.iter().any(|(_, p)| p.built.is_none())
         || headers.iter().any(|(_, p)| p.built.is_none())
         || bodies.iter().any(|(_, p, _)| p.built.is_none());
-    if !(fresh || tabs.is_changed() || theme.is_changed()) {
+    let opts_changed = last_opts.as_ref() != Some(&opts);
+    if !(fresh || tabs.is_changed() || theme.is_changed() || opts_changed) {
         return;
     }
+    *last_opts = Some(opts.clone());
     let mut views: HashMap<PrRef, (DiffView, Option<Editor>)> = HashMap::new();
     for pr in files.iter().map(|(_, p)| p.pr.clone()) {
         if let Some(tab) = tabs.0.get(&pr)
@@ -800,6 +818,7 @@ fn rebuild_diff(
             code_size: v.code_size,
             error: v.editor_error.clone(),
             saving: editor.as_ref().is_some_and(|e| e.ticket.is_some()),
+            opts: opts.clone(),
         };
         if part.built.as_ref() == Some(&key) {
             continue;
@@ -810,7 +829,7 @@ fn rebuild_diff(
         let pr = part.pr.clone();
         let path = v.path.clone().unwrap_or_default();
         refill(&mut commands, entity, |p| {
-            body(p, fonts, &pr, &path, v, editor.as_ref());
+            body(p, fonts, &pr, &path, v, editor.as_ref(), &key.opts);
         });
         part.built = Some(key);
     }
@@ -1044,6 +1063,7 @@ fn body(
     path: &str,
     v: &DiffView,
     editor: Option<&Editor>,
+    opts: &RenderOpts,
 ) {
     let size = v.code_size;
     let line_button = |row: usize, anchor: Option<(Side, u32)>, commentable: bool| {
@@ -1090,7 +1110,7 @@ fn body(
                     })
                     .with_children(|b| {
                         for item in under {
-                            below(b, fonts, pr, item, editor);
+                            below(b, fonts, pr, item, editor, opts);
                         }
                     });
                 }
@@ -1190,7 +1210,7 @@ fn body(
                             })
                             .with_children(|b| {
                                 for item in items {
-                                    below(b, fonts, pr, item, editor);
+                                    below(b, fonts, pr, item, editor, opts);
                                 }
                             });
                         }
@@ -1223,6 +1243,7 @@ fn below(
     pr: &PrRef,
     item: &Below,
     editor: Option<&Editor>,
+    opts: &RenderOpts,
 ) {
     match item {
         Below::Editor => {
@@ -1232,42 +1253,93 @@ fn below(
         }
         Below::Thread(t) => {
             p.spawn(card(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
                 padding: UiRect::axes(px(14), px(10)),
-                column_gap: px(10),
-                align_items: AlignItems::Center,
                 ..default()
             }))
             .with_children(|c| {
-                c.spawn(avatar(fonts, &t.author));
-                c.spawn(text(fonts, format!("@{}", t.author), Type::STRONG));
-                c.spawn((
-                    Node {
+                c.spawn(Node {
+                    column_gap: px(10),
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|h| {
+                    h.spawn(avatar(fonts, &t.author));
+                    h.spawn(text(fonts, format!("@{}", t.author), Type::STRONG));
+                    // Collapsed, the first comment shows as one line: the box is one text
+                    // line high and clips what wraps below it.
+                    let mut line = h.spawn(Node {
                         flex_grow: 1.0,
                         min_width: px(0),
-                        overflow: Overflow::clip_x(),
+                        max_height: if t.expanded { Val::Auto } else { px(18) },
+                        overflow: Overflow::clip(),
                         ..default()
-                    },
-                    children![(
-                        text(fonts, t.first.clone(), Type::BODY),
-                        TextLayout::no_wrap()
-                    )],
-                ));
-                let replies = match t.replies {
-                    0 => String::new(),
-                    1 => "1 reply".to_string(),
-                    n => format!("{n} replies"),
-                };
-                if !replies.is_empty() {
-                    c.spawn(text(fonts, replies, Type::META));
+                    });
+                    if !t.expanded
+                        && let Some(first) = t.posts.first()
+                    {
+                        line.with_children(|l| {
+                            markdown_line(l, fonts, &parse(&first.body), Type::BODY, opts, 120);
+                        });
+                    }
+                    let replies = match t.replies {
+                        0 => String::new(),
+                        1 => "1 reply".to_string(),
+                        n => format!("{n} replies"),
+                    };
+                    if !replies.is_empty() {
+                        h.spawn(text(fonts, replies, Type::META));
+                    }
+                    h.spawn((
+                        button(
+                            fonts,
+                            if t.expanded { "Collapse" } else { "Expand" },
+                            Variant::Ghost,
+                        ),
+                        ThreadToggle {
+                            pr: pr.clone(),
+                            id: t.thread.id.clone(),
+                        },
+                        observe(on_toggle),
+                    ));
+                    h.spawn((
+                        button(fonts, "Reply", Variant::Ghost),
+                        ThreadReply {
+                            pr: pr.clone(),
+                            thread: t.thread.clone(),
+                        },
+                        observe(on_reply),
+                    ));
+                });
+                if t.expanded {
+                    for (i, post) in t.posts.iter().enumerate() {
+                        c.spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(4),
+                            padding: UiRect::left(px(32)),
+                            ..default()
+                        })
+                        .with_children(|b| {
+                            b.spawn(Node {
+                                column_gap: px(8),
+                                align_items: AlignItems::Center,
+                                ..default()
+                            })
+                            .with_children(|r| {
+                                if i > 0 {
+                                    r.spawn(text(fonts, format!("@{}", post.author), Type::STRONG));
+                                }
+                                r.spawn(Node {
+                                    flex_grow: 1.0,
+                                    ..default()
+                                });
+                                r.spawn(copy_button(fonts, &post.body));
+                            });
+                            markdown(b, fonts, &parse(&post.body), opts);
+                        });
+                    }
                 }
-                c.spawn((
-                    button(fonts, "Reply", Variant::Ghost),
-                    ThreadReply {
-                        pr: pr.clone(),
-                        thread: t.thread.clone(),
-                    },
-                    observe(on_reply),
-                ));
             });
         }
         Below::Draft(d) => {
@@ -1307,6 +1379,7 @@ fn below(
                         flex_grow: 1.0,
                         ..default()
                     });
+                    h.spawn(copy_button(fonts, &d.body));
                     h.spawn((
                         button(fonts, "Edit", Variant::Ghost),
                         DraftEdit {
@@ -1324,7 +1397,7 @@ fn below(
                         observe(on_remove),
                     ));
                 });
-                c.spawn(text(fonts, d.body.clone(), Type::BODY));
+                markdown(c, fonts, &parse(&d.body), opts);
             });
         }
     }
@@ -1422,6 +1495,17 @@ fn on_line(
     });
 }
 
+fn on_toggle(activate: On<Activate>, buttons: Query<&ThreadToggle>, mut tabs: ResMut<ReviewTabs>) {
+    let Ok(b) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Some(ui) = ui_of(&mut tabs, &b.pr)
+        && !ui.expanded.remove(&b.id)
+    {
+        ui.expanded.insert(b.id.clone());
+    }
+}
+
 fn on_reply(activate: On<Activate>, buttons: Query<&ThreadReply>, mut tabs: ResMut<ReviewTabs>) {
     let Ok(b) = buttons.get(activate.entity) else {
         return;
@@ -1503,6 +1587,7 @@ mod tests {
     use crate::fixture;
     use crate::screens::review::editor::{EditorArea, EditorSubmit};
     use crate::testing::{self, NOW};
+    use crate::ui::markdown::{CopiedText, CopyMarkdown};
     use bevy::text::EditableText;
     use clusia_core::FileDiff;
     use clusia_protocol::AnchorInput;
@@ -1608,7 +1693,12 @@ mod tests {
             panic!("a thread under 41: {below41:?}")
         };
         assert_eq!(thread.author, "mona");
-        assert_eq!(thread.first, "Why one minute? The CLI uses 30 seconds.");
+        assert_eq!(
+            thread.posts[0].body,
+            "Why one minute? The CLI uses 30 seconds."
+        );
+        assert_eq!(thread.posts.len(), 3);
+        assert!(!thread.expanded);
         assert_eq!(thread.replies, 2, "octo and hubot answered");
         assert_eq!(thread.thread.path.as_deref(), Some(REFRESH));
         assert_eq!(thread.thread.line, Some(41));
@@ -2189,5 +2279,64 @@ mod tests {
             ),
             "sent again after reconnecting: {asks:?}"
         );
+    }
+
+    #[test]
+    fn thread_cards_collapse_to_a_line_and_expand_to_the_full_thread() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        let first = "Why one minute? The CLI uses 30 seconds.";
+        let last = "A minute is safer while the runners drift.";
+        assert!(testing::shows(&mut app, first));
+        assert!(
+            !testing::shows(&mut app, last),
+            "collapsed: the first line only"
+        );
+        let toggle = testing::find::<ThreadToggle>(&mut app, |_| true);
+        testing::activate(&mut app, toggle);
+        testing::settle(&mut app);
+        assert_eq!(testing::tab(&app, &pr).ui.expanded.len(), 1);
+        assert!(testing::shows(&mut app, last), "expanded: every comment");
+        // Each comment of the thread can be copied as written.
+        let copy = testing::find::<CopyMarkdown>(&mut app, |c| c.0 == last);
+        testing::activate(&mut app, copy);
+        assert_eq!(app.world().resource::<CopiedText>().0, [last]);
+        let toggle = testing::find::<ThreadToggle>(&mut app, |_| true);
+        testing::activate(&mut app, toggle);
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ui.expanded.is_empty());
+        assert!(!testing::shows(&mut app, last), "collapsed again");
+    }
+
+    #[test]
+    fn draft_comments_render_markdown_with_a_copy_button() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        let body = "Use a **guard** around `exchange`";
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).unwrap().phase else {
+                panic!("ready")
+            };
+            let id = ready
+                .view
+                .review
+                .draft
+                .items
+                .iter()
+                .find(|i| {
+                    i.kind == DraftKind::LineComment
+                        && i.anchor.as_ref().is_some_and(|a| a.line == 44)
+                })
+                .map(|i| i.id.clone())
+                .expect("the draft on line 44");
+            ready.view.review.draft.update_body(&id, body).unwrap();
+        }
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Use a guard around exchange"));
+        assert!(!testing::shows(&mut app, "**"));
+        let copy = testing::find::<CopyMarkdown>(&mut app, |c| c.0 == body);
+        testing::activate(&mut app, copy);
+        assert_eq!(app.world().resource::<CopiedText>().0, [body]);
     }
 }

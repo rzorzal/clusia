@@ -2,7 +2,7 @@
 //! (section, file, Unified/Split, comment editor, modal). The bridge's tells move the phase;
 //! screens read it and change the UI state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use bevy::prelude::*;
 use clusia_core::config::DiffView;
@@ -135,6 +135,8 @@ pub struct TabUi {
     /// Diff lines shown (steps of `SHOW_STEP`).
     pub shown: usize,
     pub finalize: FinalizeForm,
+    /// Diff threads shown in full instead of as their first line (thread ids).
+    pub expanded: BTreeSet<String>,
 }
 
 impl Default for TabUi {
@@ -148,6 +150,7 @@ impl Default for TabUi {
             editor: None,
             shown: SHOW_STEP,
             finalize: FinalizeForm::default(),
+            expanded: BTreeSet::new(),
         }
     }
 }

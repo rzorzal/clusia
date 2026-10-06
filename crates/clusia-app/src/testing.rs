@@ -186,3 +186,74 @@ pub fn open_ready(app: &mut App, news: bool) -> PrRef {
     recorded(app);
     pr
 }
+
+/// The text a rendered markdown body shows: each wrapping row of words read as one sentence,
+/// and every other `Text` as it is.
+pub fn shown_text(app: &mut App) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut texts = app.world_mut().query::<&Text>();
+    out.extend(texts.iter(app.world()).map(|t| t.0.clone()));
+    let mut rows = app.world_mut().query::<(&Node, &Children)>();
+    for (node, children) in rows.iter(app.world()) {
+        if node.flex_wrap != FlexWrap::Wrap {
+            continue;
+        }
+        let words: Vec<&str> = children
+            .iter()
+            .filter_map(|c| app.world().get::<Text>(c))
+            .map(|t| t.0.as_str())
+            .collect();
+        out.push(
+            words
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+    out
+}
+
+/// Whether `needle` appears in what the window shows (`shown_text`).
+pub fn shows(app: &mut App, needle: &str) -> bool {
+    shown_text(app).iter().any(|t| t.contains(needle))
+}
+
+/// A readable outline of the tree under `root`: texts, emoji and image slots, weights, fills
+/// and links, children in parentheses. Two bodies built from the same markdown have the same
+/// outline.
+pub fn tree_signature(app: &App, root: Entity) -> String {
+    fn walk(world: &World, e: Entity, out: &mut String) {
+        if let Some(t) = world.get::<Text>(e) {
+            out.push_str(&format!("{:?}", t.0));
+            if let Some(f) = world.get::<TextFont>(e) {
+                out.push_str(&format!(" w{}", f.weight.0));
+            }
+        } else {
+            out.push('N');
+        }
+        if let Some(e) = world.get::<crate::ui::markdown::MdEmoji>(e) {
+            out.push_str(&format!(" emoji:{}", e.0));
+        }
+        if let Some(i) = world.get::<crate::ui::markdown::MdImage>(e) {
+            out.push_str(&format!(" image:{}", i.0));
+        }
+        if let Some(l) = world.get::<crate::ui::markdown::MdLink>(e) {
+            out.push_str(&format!(" link:{}", l.0));
+        }
+        if let Some(f) = world.get::<crate::ui::kit::Fill>(e) {
+            out.push_str(&format!(" fill:{:?}", f.0));
+        }
+        if let Some(children) = world.get::<Children>(e) {
+            out.push('(');
+            for c in children {
+                walk(world, *c, out);
+                out.push(',');
+            }
+            out.push(')');
+        }
+    }
+    let mut out = String::new();
+    walk(app.world(), root, &mut out);
+    out
+}

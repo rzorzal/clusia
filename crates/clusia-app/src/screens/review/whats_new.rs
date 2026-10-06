@@ -25,6 +25,8 @@ use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, button, panel, text,
 };
+use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::{RenderOpts, markdown_line};
 use crate::ui::modal::{escape_pressed, modal_card, modal_root};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,7 +325,14 @@ fn news_row_node(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row:
         .with_children(|t| {
             t.spawn(text(fonts, row.what.clone(), Type::BODY.size(13.0)));
             if !row.detail.is_empty() {
-                t.spawn(text(fonts, row.detail.clone(), Type::META));
+                markdown_line(
+                    t,
+                    fonts,
+                    &parse(&row.detail),
+                    Type::META,
+                    &RenderOpts::default(),
+                    140,
+                );
             }
         });
         r.spawn(Node {
@@ -611,5 +620,39 @@ mod tests {
         assert_eq!(modal(&app, &pr), None);
         assert_eq!(testing::recorded(&mut app), [Ask::MarkSeen(pr)]);
         assert_eq!(testing::count::<ModalFor>(&mut app), 0);
+    }
+
+    #[test]
+    fn details_render_as_one_markdown_line() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr: PrRef = "rzorzal/clusia#123".parse().unwrap();
+        app.world_mut().write_message(crate::bridge::ShowRequested(
+            clusia_protocol::WindowTarget::Review { pr: pr.clone() },
+        ));
+        testing::settle(&mut app);
+        let (view, _) = fixture::demo_review(NOW);
+        let news = vec![item(
+            NewsKind::Comment,
+            "GitHub",
+            Some("mona"),
+            "commented: a **big** call on `expires_at`",
+        )];
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::Opened {
+                pr,
+                view: Box::new(view),
+                news,
+            },
+        );
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "a big call on expires_at"));
+        assert!(!testing::shows(&mut app, "**"), "no raw markdown");
+        let mut texts = app.world_mut().query::<(&Text, &TextFont)>();
+        let big = texts
+            .iter(app.world())
+            .find(|(t, _)| t.0 == "big")
+            .expect("a bold word");
+        assert_eq!(big.1.weight.0, 600);
     }
 }
