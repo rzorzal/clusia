@@ -22,7 +22,7 @@ use crate::review_state::{
 };
 use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
-use crate::screens::review::editor::editor_box;
+use crate::screens::review::editor::{editor_box, sync_editor_text};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
@@ -435,6 +435,7 @@ impl Plugin for ShellPlugin {
         app.add_systems(
             Update,
             (
+                sync_editor_text,
                 mount,
                 rebuild_top,
                 fill_placeholders,
@@ -1170,8 +1171,12 @@ fn on_general_note(
     let Ok(GeneralNoteButton(pr)) = buttons.get(activate.entity) else {
         return;
     };
+    // An editor with unsent text stays: the user finishes or cancels it first.
+    let busy = |e: &Editor| {
+        e.target == EditTarget::General || (e.ticket.is_none() && !e.text.trim().is_empty())
+    };
     if let Some(tab) = tabs.0.get_mut(pr)
-        && tab.ui.editor.as_ref().map(|e| &e.target) != Some(&EditTarget::General)
+        && !tab.ui.editor.as_ref().is_some_and(busy)
     {
         tab.ui.editor = Some(Editor {
             target: EditTarget::General,
@@ -1560,6 +1565,52 @@ mod tests {
             1,
             "the general note editor sits in the right panel"
         );
+    }
+
+    #[test]
+    fn a_general_note_waits_for_an_unsent_editor() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        let line = EditTarget::Line {
+            path: "src/auth/refresh.rs".into(),
+            side: Side::Right,
+            start: None,
+            line: 44,
+        };
+        let set = |app: &mut App, text: &str| {
+            app.world_mut()
+                .resource_mut::<ReviewTabs>()
+                .0
+                .get_mut(&pr)
+                .unwrap()
+                .ui
+                .editor = Some(Editor {
+                target: line.clone(),
+                text: text.into(),
+                error: None,
+                ticket: None,
+            });
+            testing::settle(app);
+        };
+        let editor = |app: &App| {
+            app.world().resource::<ReviewTabs>().0[&pr]
+                .ui
+                .editor
+                .clone()
+        };
+        set(&mut app, "Half a thought");
+        let note = testing::find::<GeneralNoteButton>(&mut app, |_| true);
+        testing::activate(&mut app, note);
+        let kept = editor(&app).unwrap();
+        assert_eq!(
+            (kept.target, kept.text.as_str()),
+            (line.clone(), "Half a thought"),
+            "unsent text is never dropped"
+        );
+        set(&mut app, "  ");
+        let note = testing::find::<GeneralNoteButton>(&mut app, |_| true);
+        testing::activate(&mut app, note);
+        assert_eq!(editor(&app).map(|e| e.target), Some(EditTarget::General));
     }
 
     #[test]

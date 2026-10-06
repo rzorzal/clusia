@@ -4,8 +4,9 @@
 //! `editor_box` draws it from `TabUi.editor`; `submit_editor` is the one path from a submit
 //! (⌘↵ or **Add to draft**) to the right `Ask`. The daemon's answer comes back through the
 //! bridge: `Tell::Saved` closes the editor, `Tell::Refused` keeps the text and shows why.
-//! `TabUi.editor.text` is written on submit and when the text area loses focus, not on every
-//! keystroke, so views that ignore it do not rebuild while typing.
+//! `sync_editor_text` copies what was typed into `TabUi.editor.text` at the start of every
+//! frame (before any region rebuilds), so a redrawn editor keeps it; the region views ignore
+//! the text, so typing rebuilds nothing.
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input_focus::{FocusCause, FocusLost, InputFocus};
@@ -175,6 +176,9 @@ impl Plugin for EditorPlugin {
     }
 }
 
+/// Why nothing is sent while the tab shows the cached copy.
+pub const CACHED_COPY: &str = "You're viewing the cached copy — try again to make changes";
+
 fn submit(
     pr: &PrRef,
     text: &str,
@@ -185,7 +189,16 @@ fn submit(
 ) {
     if let Some(tab) = tabs.0.get_mut(pr) {
         let live = model.connection == Connection::Live;
-        submit_editor(tab, pr, text, live, tickets, asks);
+        let cached = tab.ready().is_some_and(|r| r.cached_at.is_some());
+        if cached
+            && let Some(editor) = tab.ui.editor.as_mut()
+            && editor.ticket.is_none()
+        {
+            editor.text = text.to_string();
+            editor.error = Some(CACHED_COPY.into());
+            return;
+        }
+        submit_editor(tab, pr, text, live && !cached, tickets, asks);
     }
 }
 
@@ -227,6 +240,26 @@ fn on_cancel(activate: On<Activate>, buttons: Query<&EditorCancel>, mut tabs: Re
         && let Some(tab) = tabs.0.get_mut(pr)
     {
         tab.ui.editor = None;
+    }
+}
+
+/// Copies the live text of each editor into its tab, so a region that rebuilds (and despawns
+/// the text area before any `FocusLost` could read it) draws it again with what was typed.
+/// Writes only when the text differs, so `ReviewTabs` is not changed every frame.
+pub(crate) fn sync_editor_text(
+    areas: Query<(&EditorArea, &EditableText)>,
+    mut tabs: ResMut<ReviewTabs>,
+) {
+    for (EditorArea(pr), editable) in &areas {
+        let value = editable.value().to_string();
+        let differs = tabs
+            .0
+            .get(pr)
+            .and_then(|t| t.ui.editor.as_ref())
+            .is_some_and(|e| e.text != value);
+        if differs && let Some(editor) = tabs.0.get_mut(pr).and_then(|t| t.ui.editor.as_mut()) {
+            editor.text = value;
+        }
     }
 }
 
@@ -520,6 +553,77 @@ mod tests {
                 .ui
                 .editor
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_rebuild_keeps_what_was_typed() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_general_note(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |_| true);
+        testing::type_into(&mut app, area, "the token cache");
+        let value = |app: &mut App| {
+            let area = testing::find::<EditorArea>(app, |_| true);
+            let text = app
+                .world()
+                .get::<EditableText>(area)
+                .unwrap()
+                .value()
+                .to_string();
+            (area, text)
+        };
+        for connection in [
+            Connection::Lost("clusiad closed the connection".into()),
+            Connection::Live,
+        ] {
+            let before = testing::find::<EditorArea>(&mut app, |_| true);
+            app.world_mut().resource_mut::<Model>().connection = connection;
+            testing::settle(&mut app);
+            let (after, text) = value(&mut app);
+            assert_ne!(before, after, "the right panel was redrawn");
+            assert_eq!(text, "Ask about the token cache");
+        }
+        assert_eq!(
+            app.world().resource::<ReviewTabs>().0[&pr]
+                .ui
+                .editor
+                .as_ref()
+                .map(|e| e.text.as_str()),
+            Some("Ask about the token cache")
+        );
+    }
+
+    #[test]
+    fn the_cached_copy_takes_no_comments() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_general_note(&mut app);
+        if let Some(ready) = app
+            .world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .and_then(Tab::ready_mut)
+        {
+            ready.cached_at = Some(NOW - 3600);
+        }
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |_| true);
+        testing::type_into(&mut app, area, "retries");
+        let add = testing::find::<EditorSubmit>(&mut app, |_| true);
+        testing::activate(&mut app, add);
+        assert!(testing::recorded(&mut app).is_empty());
+        let editor = app.world().resource::<ReviewTabs>().0[&pr]
+            .ui
+            .editor
+            .clone()
+            .unwrap();
+        assert_eq!(
+            (editor.text.as_str(), editor.error.as_deref(), editor.ticket),
+            (
+                "Ask about retries",
+                Some("You're viewing the cached copy — try again to make changes"),
+                None
+            )
         );
     }
 
