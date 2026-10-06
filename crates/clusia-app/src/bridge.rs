@@ -1025,6 +1025,9 @@ pub(crate) fn pump(
         let Some(tell) = rest else { continue };
         match tell {
             Tell::Snapshot(s) => {
+                if matches!(model.connection, Connection::Lost(_)) {
+                    media.retry_failed();
+                }
                 model.snapshot = *s;
                 model.connection = Connection::Live;
             }

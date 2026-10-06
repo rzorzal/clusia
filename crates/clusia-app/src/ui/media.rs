@@ -10,12 +10,14 @@ use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
-use bevy::ui::{CalculatedClip, ComputedNode, UiGlobalTransform};
+use bevy::ui::{CalculatedClip, ComputedNode, UiGlobalTransform, UiSystems};
 use bevy::window::PrimaryWindow;
 use bevy::winit::{UpdateMode, WinitSettings};
 use clusia_core::media::MediaKind;
 use clusia_protocol::MediaFile;
-use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
+use image::{
+    AnimationDecoder, DynamicImage, ImageDecoder, ImageError, ImageFormat, ImageReader, Limits,
+};
 
 use crate::bridge::{Ask, Asks};
 use crate::fonts::UiFonts;
@@ -63,6 +65,14 @@ impl MediaCache {
     /// Queues the daemon's answer for `url`.
     pub fn arrive(&mut self, url: String, file: Result<MediaFile, String>) {
         self.arrived.push((url, file));
+    }
+
+    /// Forgets the pictures that failed, so their slots ask again. Called when the daemon
+    /// comes back: the failure may have been the connection.
+    pub fn retry_failed(&mut self) {
+        self.by_url
+            .retain(|_, state| !matches!(state, MediaState::Failed(_)));
+        self.retried.clear();
     }
 }
 
@@ -177,15 +187,21 @@ fn decode_still(
     format: ImageFormat,
     images: &mut Assets<Image>,
 ) -> Result<MediaState, String> {
-    let picture = image::load_from_memory_with_format(bytes, format)
-        .map_err(|_| "The picture is damaged".to_string())?;
-    if picture.width() > MAX_SIDE || picture.height() > MAX_SIDE {
-        return Err("The picture is too large to show".into());
-    }
+    // The limits make the decoder refuse from the header, before it allocates the pixels.
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    reader.limits(limits);
+    let picture = reader.decode().map_err(|e| match e {
+        ImageError::Limits(_) => "The picture is too large to show".to_string(),
+        _ => "The picture is damaged".to_string(),
+    })?;
+    // Only the GPU needs the pixels once uploaded.
     Ok(MediaState::Image(images.add(Image::from_dynamic(
         picture,
         true,
-        RenderAssetUsages::default(),
+        RenderAssetUsages::RENDER_WORLD,
     ))))
 }
 
@@ -200,15 +216,17 @@ fn decode_gif(bytes: &[u8], images: &mut Assets<Image>) -> Result<MediaState, St
     let mut delays = Vec::new();
     for frame in decoder.into_frames().take(MAX_GIF_FRAMES) {
         let Ok(frame) = frame else { break };
+        // Keeps at least one frame, then stops before the total passes the cap.
+        let total = (frames.len() as u64 + 1) * u64::from(width) * u64::from(height);
+        if !frames.is_empty() && total > MAX_GIF_PIXELS {
+            break;
+        }
         delays.push(frame_delay(Duration::from(frame.delay())));
         frames.push(images.add(Image::from_dynamic(
             DynamicImage::ImageRgba8(frame.into_buffer()),
             true,
             RenderAssetUsages::RENDER_WORLD,
         )));
-        if frames.len() as u64 * u64::from(width) * u64::from(height) > MAX_GIF_PIXELS {
-            break;
-        }
     }
     if frames.is_empty() {
         return Err(damaged());
@@ -256,15 +274,11 @@ fn fill_slots(
     slots: Query<(Entity, &MdImage, Option<&Showing>)>,
 ) {
     for (entity, slot, showing) in &slots {
-        let state = match cache.by_url.get(&slot.0) {
-            Some(state) => state.clone(),
-            None => {
-                cache.by_url.insert(slot.0.clone(), MediaState::Loading);
-                asks.send(Ask::FetchMedia(slot.0.clone()));
-                MediaState::Loading
-            }
-        };
-        let want = match &state {
+        if !cache.by_url.contains_key(&slot.0) {
+            cache.by_url.insert(slot.0.clone(), MediaState::Loading);
+            asks.send(Ask::FetchMedia(slot.0.clone()));
+        }
+        let want = match &cache.by_url[&slot.0] {
             MediaState::Loading => Showing::Loading,
             MediaState::Image(_) => Showing::Image,
             MediaState::Gif(_) => Showing::Gif,
@@ -273,6 +287,7 @@ fn fill_slots(
         if showing == Some(&want) {
             continue;
         }
+        let state = cache.by_url[&slot.0].clone();
         let mut e = commands.entity(entity);
         e.despawn_related::<Children>()
             .remove::<(ImageNode, GifAnim)>()
@@ -406,16 +421,14 @@ impl Plugin for MediaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MediaCache>()
             .init_resource::<GifClock>()
+            .add_systems(Update, (decode_arrived, fill_slots, advance_gifs).chain())
+            // Layout is written in `PostUpdate`; reading it there starts a GIF in the frame
+            // it gets a size, before the event loop settles on how long to wait.
             .add_systems(
-                Update,
-                (
-                    decode_arrived,
-                    fill_slots,
-                    track_visibility,
-                    advance_gifs,
-                    gif_clock,
-                )
-                    .chain(),
+                PostUpdate,
+                (track_visibility, gif_clock)
+                    .chain()
+                    .after(UiSystems::PostLayout),
             );
     }
 }
@@ -653,6 +666,66 @@ mod tests {
         assert!(all.contains(&"The picture is damaged — open in browser".to_string()));
     }
 
+    /// A PNG whose header claims `w` × `h` and which carries no pixel data.
+    fn write_png_header(dir: &std::path::Path, w: u32, h: u32) -> std::path::PathBuf {
+        fn crc(data: &[u8]) -> u32 {
+            let mut c = 0xffff_ffffu32;
+            for b in data {
+                c ^= u32::from(*b);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 {
+                        (c >> 1) ^ 0xedb8_8320
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            !c
+        }
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend(w.to_be_bytes());
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([8, 6, 0, 0, 0]);
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend(13u32.to_be_bytes());
+        bytes.extend(&ihdr);
+        bytes.extend(crc(&ihdr).to_be_bytes());
+        let path = dir.join("huge.png");
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_picture_claiming_a_huge_size_is_refused_from_its_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let huge = write_png_header(dir.path(), 11_000, 11_000);
+        let mut app = app();
+        slot(&mut app, URL);
+        deliver(&mut app, URL, Ok(file(&huge, MediaKind::Png)));
+        assert!(
+            texts(&mut app)
+                .contains(&"The picture is too large to show — open in browser".to_string())
+        );
+    }
+
+    #[test]
+    fn a_failure_while_offline_is_asked_again_after_reconnecting() {
+        let mut app = app();
+        slot(&mut app, URL);
+        testing::recorded(&mut app);
+        deliver(&mut app, URL, Err("Not connected to clusiad".into()));
+        assert!(testing::recorded(&mut app).is_empty());
+        testing::tell(&mut app, Tell::Lost("gone".into()));
+        testing::tell(&mut app, Tell::Snapshot(Box::default()));
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::FetchMedia(URL.to_string())],
+            "one new ask"
+        );
+        assert!(texts(&mut app).contains(&"Loading image…".to_string()));
+    }
+
     #[test]
     fn a_vanished_file_is_fetched_again_once() {
         let mut app = app();
@@ -830,6 +903,28 @@ mod tests {
             settings.unfocused_mode,
             WinitSettings::desktop_app().unfocused_mode
         );
+    }
+
+    #[test]
+    fn the_clock_switches_in_the_frame_the_gif_gets_a_size() {
+        fn lay_out(mut nodes: Query<&mut ComputedNode, With<GifAnim>>) {
+            for mut node in &mut nodes {
+                node.size = Vec2::new(48.0, 32.0);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gif = write_gif(dir.path(), "a.gif", 2, 100);
+        let mut app = app();
+        app.insert_resource(WinitSettings::desktop_app());
+        app.add_systems(PostUpdate, lay_out.in_set(UiSystems::PostLayout));
+        let e = slot(&mut app, URL);
+        deliver(&mut app, URL, Ok(file(&gif, MediaKind::Gif)));
+        app.world_mut().entity_mut(e).insert((
+            UiGlobalTransform::from_translation(Vec2::new(100.0, 100.0)),
+            InheritedVisibility::VISIBLE,
+        ));
+        app.update();
+        assert_eq!(app.world().resource::<GifClock>().switches, 1);
     }
 
     #[test]
