@@ -1333,7 +1333,7 @@ fn ui_of<'a>(tabs: &'a mut ReviewTabs, pr: &PrRef) -> Option<&'a mut TabUi> {
 
 /// An editor with unsent text stays (as for **+ General note**): the user finishes or cancels
 /// it before another one opens.
-fn unsent(editor: Option<&Editor>) -> bool {
+pub(crate) fn unsent(editor: Option<&Editor>) -> bool {
     editor.is_some_and(|e| e.ticket.is_none() && !e.text.trim().is_empty())
 }
 
@@ -1435,7 +1435,11 @@ fn on_reply(activate: On<Activate>, buttons: Query<&ThreadReply>, mut tabs: ResM
     }
 }
 
-fn on_edit(activate: On<Activate>, buttons: Query<&DraftEdit>, mut tabs: ResMut<ReviewTabs>) {
+pub(crate) fn on_edit(
+    activate: On<Activate>,
+    buttons: Query<&DraftEdit>,
+    mut tabs: ResMut<ReviewTabs>,
+) {
     let Ok(b) = buttons.get(activate.entity) else {
         return;
     };
@@ -1460,7 +1464,11 @@ fn on_edit(activate: On<Activate>, buttons: Query<&DraftEdit>, mut tabs: ResMut<
     });
 }
 
-fn on_remove(activate: On<Activate>, buttons: Query<&DraftRemove>, mut asks: ResMut<Asks>) {
+pub(crate) fn on_remove(
+    activate: On<Activate>,
+    buttons: Query<&DraftRemove>,
+    mut asks: ResMut<Asks>,
+) {
     if let Ok(b) = buttons.get(activate.entity) {
         asks.send(Ask::RemoveItem {
             pr: b.pr.clone(),
