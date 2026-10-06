@@ -1,4 +1,4 @@
-//! `reviews/<owner~repo~n>.json`: one file per review in progress.
+//! `reviews/<owner~repo~n>.json`: stores each in-progress review in its own file.
 
 use std::fs;
 use std::io;

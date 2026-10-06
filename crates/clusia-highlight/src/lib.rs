@@ -1,4 +1,4 @@
-//! Syntax highlighting for the review window (spec §2.4 of #75): text + path → per-line spans
+//! Syntax highlighting for the review window: text + path → per-line spans
 //! with a highlight `Class`. Pure: no I/O, no state beyond the lazily built grammars. The app
 //! maps classes to theme swatches, so colors stay in `theme.rs`.
 

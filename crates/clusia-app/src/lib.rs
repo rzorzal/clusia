@@ -1,4 +1,4 @@
-//! The Clúsia window (spec §7.1–7.2, §8). M5a: Home and Config; the review screen is M5b.
+//! The Clúsia window (spec §7.1–7.2, §8): Home, Config, and the review screen.
 // Bevy systems take many queries and parameters by design.
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 

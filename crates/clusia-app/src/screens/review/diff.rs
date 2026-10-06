@@ -110,7 +110,7 @@ pub struct DraftCard {
 pub enum Below {
     Thread(ThreadCard),
     Draft(DraftCard),
-    /// Task 9's `editor_box` for the current `ui.editor`.
+    /// The `editor_box` for the current `ui.editor`.
     Editor,
 }
 
@@ -367,7 +367,7 @@ pub fn diff_view(
     cache: &mut HighlightCache,
 ) -> DiffView {
     let view = &ready.view;
-    // A2: `view.diff` is exactly what the daemon fetched (patches included); `view.files` is
+    // `view.diff` is exactly what the daemon fetched (patches included); `view.files` is
     // only the fallback for a view that carries no patches.
     let listed: Vec<(&str, u64, u64)> = if view.diff.is_empty() {
         view.files
@@ -532,7 +532,7 @@ pub fn diff_view(
     out
 }
 
-/// The Diff section's root inside `SectionBody` (A1: its absence means "fill me").
+/// The Diff section's root inside `SectionBody`; its absence means "fill me".
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct DiffRegion(pub PrRef);
 
@@ -628,7 +628,7 @@ impl Plugin for DiffPlugin {
     }
 }
 
-/// A1: when the Diff section shows and `SectionBody` has no `DiffRegion`, take it over.
+/// When the Diff section shows and `SectionBody` has no `DiffRegion`, spawn a `DiffRegion` for it.
 fn fill_region(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
@@ -936,7 +936,7 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
     });
 }
 
-/// Shows "Arrives with SP3 (#71)" while Story or Calls is hovered.
+/// Shows the 'arrives later' hint while Story or Calls is hovered.
 fn later_hints(
     segments: Query<&Hovered, With<LaterSegment>>,
     mut hints: Query<&mut Node, With<LaterHint>>,

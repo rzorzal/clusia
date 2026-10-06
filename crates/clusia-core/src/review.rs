@@ -76,7 +76,7 @@ pub struct Review {
     /// CI label (`passed`, `failed`, `pending`, `none`) at the last `MarkSeen`.
     #[serde(default)]
     pub last_checks: Option<String>,
-    /// Harness session for this review (SP2).
+    /// Harness session for running agents in a step (when available).
     #[serde(default)]
     pub harness_session: Option<String>,
 }

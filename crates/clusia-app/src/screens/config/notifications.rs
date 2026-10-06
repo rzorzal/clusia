@@ -1,5 +1,4 @@
-//! Config › Notifications (M5a part): Do not disturb. Per-event choices, sounds and schedules
-//! arrive with M6 (#20).
+//! Config › Notifications: the Do not disturb toggle and read-only poll interval.
 
 use std::collections::HashMap;
 

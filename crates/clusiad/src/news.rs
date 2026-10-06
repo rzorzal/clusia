@@ -243,7 +243,7 @@ pub(crate) async fn mark_seen(shared: &Shared, pr: &PrRef) -> Outcome {
     Outcome::Ok(Reply::Ack)
 }
 
-/// Relocates saved reviews whose pull request moved (spec §6.6, SP1: deterministic).
+/// Relocates saved reviews whose pull request moved (spec §6.6); deterministic, no agent involved.
 pub(crate) async fn check_saved_reviews(shared: &Shared) {
     // The sync status says whether GitHub is reachable; polling every PR while offline only logs noise.
     if shared.sync.read().await.state != SyncState::Online {

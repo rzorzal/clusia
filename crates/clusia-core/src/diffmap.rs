@@ -1,4 +1,4 @@
-//! Following commented lines across commits (spec §6.6, deterministic in SP1).
+//! Following commented lines across commits (spec §6.6); deterministic, no agent involved.
 
 use std::collections::{BTreeSet, HashMap};
 

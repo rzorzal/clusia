@@ -1,4 +1,4 @@
-//! A multi-line plain-text field for comments (the rich composer is M5c).
+//! A multi-line plain-text field for comments.
 //!
 //! Enter inserts a new line; ⌘↵ submits (`TextSubmitted`). It does not carry `kit::Field`, whose
 //! Enter-commits behavior is for one-line fields.

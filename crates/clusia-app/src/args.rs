@@ -1,4 +1,4 @@
-//! Command line: the window contract from M4 (`--home`, `--review`, `--config`) plus demo and
+//! Command line: the window contract (`--home`, `--review`, `--config`) plus demo and
 //! screenshot switches.
 
 use std::path::PathBuf;

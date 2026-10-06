@@ -42,7 +42,7 @@ pub struct PostView {
     pub verb: &'static str,
     /// "3h ago", "just now", or empty when GitHub sent no usable time.
     pub age: String,
-    /// Plain text (Markdown rendering is M5c).
+    /// Plain text.
     pub body: String,
     pub badge: Option<(&'static str, Tone)>,
 }
@@ -265,7 +265,7 @@ pub fn comments_view(ready: &Ready, ui: &TabUi, now: i64) -> CommentsView {
     }
 }
 
-/// The Comments section's root inside `SectionBody` (A1: its absence means "fill me").
+/// The Comments section's root inside `SectionBody`; its absence means "fill me".
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CommentsRegion(pub PrRef);
 

@@ -1,4 +1,4 @@
-//! Each review tab's state (spec #75 §3.2): its phase (loading, failed, ready) and its UI state
+//! Each review tab's state: its phase (loading, failed, ready) and its UI state
 //! (section, file, Unified/Split, comment editor, modal). The bridge's tells move the phase;
 //! screens read it and change the UI state.
 
@@ -82,7 +82,7 @@ pub enum CommentsFilter {
 pub enum Modal {
     WhatsNew,
     Finalize,
-    /// `window`: asked while the window closes (Task 13).
+    /// `window`: asked while the window closes.
     Leave {
         window: bool,
     },
@@ -255,7 +255,7 @@ impl Tickets {
     }
 }
 
-/// Review outcomes for the screens (Task 13: toasts, closing tabs, modal errors).
+/// Review outcomes for the screens: toasts, closing tabs, modal errors.
 #[derive(Message, Debug, Clone, PartialEq)]
 pub enum ReviewEvent {
     Published {
@@ -801,7 +801,7 @@ mod tests {
             events(&mut app),
             [ReviewEvent::Published { pr: pr(), result }]
         );
-        // Finalize (Task 13) closes the published tab.
+        // Finalize closes the published tab.
         assert!(!app.world().resource::<ReviewTabs>().0.contains_key(&pr()));
         testing::tell(&mut app, Tell::Left(pr()));
         assert_eq!(events(&mut app), [ReviewEvent::Left(pr())]);
