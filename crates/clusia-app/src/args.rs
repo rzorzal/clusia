@@ -7,6 +7,20 @@ use clap::Parser;
 use clusia_core::{PrRef, PrRefError};
 use clusia_protocol::WindowTarget;
 
+/// The demo states `--scene` can show.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scene {
+    Diff,
+    Split,
+    Comments,
+    Finalize,
+    WhatsNew,
+    Loading,
+    Failed,
+    Leave,
+    Palette,
+}
+
 #[derive(Parser, Debug, Clone, PartialEq)]
 #[command(name = "clusia-app", version, about = "Clúsia window")]
 pub struct Args {
@@ -25,6 +39,9 @@ pub struct Args {
     /// With --demo: start in the dark theme.
     #[arg(long, requires = "demo")]
     pub dark: bool,
+    /// With --demo: stage the demo review in one state (screenshots).
+    #[arg(long, value_enum, requires = "demo", hide = true)]
+    pub scene: Option<Scene>,
     /// Render the first frames to this PNG, then exit.
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
@@ -86,5 +103,16 @@ mod tests {
         assert!(a.demo && a.dark);
         assert_eq!(a.screenshot, Some(PathBuf::from("/tmp/x.png")));
         assert_eq!(a.home, Some(PathBuf::from("/h")));
+    }
+
+    #[test]
+    fn scenes_need_demo() {
+        assert!(parse(&["--scene", "diff"]).is_err());
+        assert_eq!(
+            parse(&["--demo", "--scene", "whats-new"]).unwrap().scene,
+            Some(Scene::WhatsNew)
+        );
+        assert_eq!(parse(&["--demo"]).unwrap().scene, None);
+        assert!(parse(&["--demo", "--scene", "nope"]).is_err());
     }
 }

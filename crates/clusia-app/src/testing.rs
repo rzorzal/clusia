@@ -21,6 +21,7 @@ use crate::platform_open::OpenUrls;
 use crate::review_state::{Phase, Ready, ReviewStatePlugin, ReviewTabs, Tab};
 use crate::screens::config::ConfigPlugin;
 use crate::screens::home::HomePlugin;
+use crate::screens::open_pr::OpenPrPlugin;
 use crate::screens::review::ReviewPlugin;
 use crate::snapshot::{self, Snapshot};
 use crate::theme::{LIGHT, Theme, ThemePlugin};
@@ -56,6 +57,7 @@ pub fn app(snapshot: Snapshot) -> App {
         .add_plugins((ThemePlugin, KitPlugin, NavPlugin, HomePlugin, ConfigPlugin))
         .add_plugins(ReviewStatePlugin)
         .add_plugins(ReviewPlugin)
+        .add_plugins(OpenPrPlugin)
         .init_resource::<OpenUrls>();
     app.update();
     app

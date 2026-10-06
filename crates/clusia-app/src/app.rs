@@ -11,6 +11,7 @@ use bevy::winit::WinitSettings;
 use clusia_core::{Density, Paths};
 use clusia_protocol::WindowTarget;
 
+use crate::args::Scene;
 use crate::clock::Clock;
 use crate::fonts::FontsPlugin;
 use crate::theme::{LIGHT, Theme};
@@ -31,6 +32,8 @@ pub struct Launch {
     pub target: WindowTarget,
     pub mode: Mode,
     pub screenshot: Option<PathBuf>,
+    /// `--demo --scene`: stage the demo review (screenshots).
+    pub scene: Option<Scene>,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -70,6 +73,7 @@ pub fn run(launch: Launch) {
         crate::screens::home::HomePlugin,
         crate::screens::config::ConfigPlugin,
         crate::screens::review::ReviewPlugin,
+        crate::screens::open_pr::OpenPrPlugin,
     ))
     .insert_resource(if launch.screenshot.is_some() {
         WinitSettings::continuous()
@@ -88,6 +92,9 @@ pub fn run(launch: Launch) {
     .add_systems(Startup, |mut commands: Commands| {
         commands.spawn(Camera2d);
     });
+    if let Some(scene) = launch.scene {
+        app.add_plugins(crate::scenes::ScenePlugin(scene));
+    }
     if let Some(path) = &launch.screenshot {
         app.insert_resource(ScreenshotPlan {
             path: path.clone(),

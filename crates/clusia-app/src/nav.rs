@@ -198,6 +198,10 @@ pub struct ReviewScreen(pub PrRef);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CloseTab(pub PrRef);
 
+/// The `+` after the review tabs: opens the palette.
+#[derive(Component, Debug)]
+pub struct NewTabButton;
+
 /// A review tab's × was pressed; `screens::review::leave` decides whether to ask first.
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct TabCloseRequested(pub PrRef);
@@ -436,6 +440,11 @@ fn rebuild_top_bar(
                     TabTarget::Config => {}
                 }
             }
+            p.spawn((
+                button(&fonts, "+", Variant::Ghost),
+                NewTabButton,
+                observe(on_new_tab),
+            ));
             p.spawn(Node {
                 flex_grow: 1.0,
                 ..default()
@@ -474,6 +483,13 @@ fn on_close(
     if let Ok(CloseTab(pr)) = close.get(activate.entity) {
         out.write(TabCloseRequested(pr.clone()));
     }
+}
+
+fn on_new_tab(_activate: On<Activate>, mut palette: ResMut<crate::screens::open_pr::Palette>) {
+    *palette = crate::screens::open_pr::Palette {
+        open: true,
+        ..Default::default()
+    };
 }
 
 fn rebuild_banner(

@@ -12,6 +12,7 @@ pub mod instance;
 pub mod nav;
 pub mod platform_open;
 pub mod review_state;
+pub mod scenes;
 pub mod screens;
 pub mod snapshot;
 pub mod theme;

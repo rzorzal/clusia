@@ -41,6 +41,7 @@ fn main() -> ExitCode {
             Mode::Live
         },
         screenshot: args.screenshot.clone(),
+        scene: args.scene,
     };
     if args.demo {
         app::run(launch);
