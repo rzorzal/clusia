@@ -808,6 +808,7 @@ fn outcomes(
     mut nav: ResMut<Nav>,
     mut toasts: ResMut<Toasts>,
     mut edits: ResMut<FinalizeEdits>,
+    mut asks: ResMut<Asks>,
     time: Res<Time>,
 ) {
     for event in events.read() {
@@ -842,21 +843,28 @@ fn outcomes(
                 close_tab(pr, &mut tabs, &mut nav);
                 nav.go(&WindowTarget::Home);
             }
-            ReviewEvent::PublishFailed { pr, code, message } => {
-                let text = if *code == ErrorCode::Conflict {
-                    "The pull request moved; your comments were re-anchored — check them"
-                        .to_string()
-                } else {
-                    message.clone()
-                };
-                match tabs.0.get_mut(pr) {
-                    Some(tab) if tab.ui.modal == Some(Modal::Finalize) => {
-                        tab.ui.finalize.error = Some(text);
-                        tab.ui.finalize.busy = false;
-                    }
-                    _ => toast(&mut toasts, &time, text, true),
+            // The pull request moved: open it again, so the diff, the header and the relocated
+            // draft all come from the new head. The daemon's message says what to check.
+            ReviewEvent::PublishFailed {
+                pr,
+                code: ErrorCode::Conflict,
+                message,
+            } => {
+                if let Some(tab) = tabs.0.get_mut(pr) {
+                    tab.ui.modal = None;
+                    tab.ui.finalize.busy = false;
+                    tab.ui.finalize.error = None;
+                    tabs.retry(pr, &mut asks);
                 }
+                toast(&mut toasts, &time, message.clone(), true);
             }
+            ReviewEvent::PublishFailed { pr, message, .. } => match tabs.0.get_mut(pr) {
+                Some(tab) if tab.ui.modal == Some(Modal::Finalize) => {
+                    tab.ui.finalize.error = Some(message.clone());
+                    tab.ui.finalize.busy = false;
+                }
+                _ => toast(&mut toasts, &time, message.clone(), true),
+            },
             ReviewEvent::Left(pr) => {
                 edits.0.retain(|(p, _), _| p != pr);
                 close_tab(pr, &mut tabs, &mut nav);
@@ -1207,19 +1215,40 @@ mod tests {
                 .to_string(),
             "Ship it."
         );
+    }
+
+    #[test]
+    fn a_publish_conflict_reopens_the_review() {
+        let mut app = finalize_app(true);
+        let pr = fixture::demo_pr();
+        let verdict = testing::find::<VerdictButton>(&mut app, |b| b.verdict == Verdict::Comment);
+        testing::activate(&mut app, verdict);
+        testing::settle(&mut app);
+        let publish = testing::find::<PublishButton>(&mut app, |_| true);
+        testing::activate(&mut app, publish);
+        testing::recorded(&mut app);
+        let message = "the pull request has new commits; open it again to check the moved comments";
         testing::tell(
             &mut app,
             Tell::PublishFailed {
                 pr: pr.clone(),
                 code: ErrorCode::Conflict,
-                message: "the pull request has new commits".into(),
+                message: message.into(),
             },
         );
         testing::settle(&mut app);
-        assert_eq!(
-            form(&app).error.as_deref(),
-            Some("The pull request moved; your comments were re-anchored — check them")
+        let tab = testing::tab(&app, &pr);
+        assert_eq!(tab.ui.modal, None, "Finalize closes");
+        assert!(!tab.ui.finalize.busy);
+        assert_eq!(tab.ui.finalize.error, None);
+        assert!(
+            matches!(tab.phase, Phase::Loading { .. }),
+            "opens again for the new diff and the relocated draft"
         );
+        assert_eq!(testing::recorded(&mut app), [Ask::OpenReview(pr.clone())]);
+        assert_eq!(testing::count::<FinalizeModal>(&mut app), 0);
+        let toast = app.world().resource::<Toasts>().0.last().cloned().unwrap();
+        assert_eq!((toast.text.as_str(), toast.warning), (message, true));
     }
 
     #[test]
