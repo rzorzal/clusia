@@ -23,6 +23,7 @@ use crate::screens::review::diff::{DraftEdit, DraftRemove, on_edit, on_remove, u
 use crate::screens::review::editor::{EditorArea, editor_box, not_sent, read_only_reason};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
+use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Stroke, Tone, Type, Variant, avatar, badge, button, card, chip, divider, panel, text,
 };
@@ -721,6 +722,7 @@ fn open_editor(
         text,
         error: None,
         ticket: None,
+        mode: ComposerMode::Write,
     });
 }
 
@@ -1057,6 +1059,7 @@ mod tests {
                 text: String::new(),
                 error: None,
                 ticket: None,
+                mode: ComposerMode::Write,
             }),
             ..TabUi::default()
         };
@@ -1067,6 +1070,7 @@ mod tests {
                 text: String::new(),
                 error: None,
                 ticket: None,
+                mode: ComposerMode::Write,
             }),
             ..TabUi::default()
         };

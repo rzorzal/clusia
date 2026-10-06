@@ -33,6 +33,7 @@ use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
 use crate::ui::code::{CodeSpan, code_line, spans_for};
+use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, avatar, badge, button, card, panel,
     segment, segments, text,
@@ -1498,6 +1499,7 @@ fn on_line(
         text: String::new(),
         error: None,
         ticket: None,
+        mode: ComposerMode::Write,
     });
 }
 
@@ -1524,6 +1526,7 @@ fn on_reply(activate: On<Activate>, buttons: Query<&ThreadReply>, mut tabs: ResM
             text: String::new(),
             error: None,
             ticket: None,
+            mode: ComposerMode::Write,
         });
     }
 }
@@ -1554,6 +1557,7 @@ pub(crate) fn on_edit(
         text,
         error: None,
         ticket: None,
+        mode: ComposerMode::Write,
     });
 }
 
@@ -1863,6 +1867,7 @@ mod tests {
                 text: String::new(),
                 error: None,
                 ticket: None,
+                mode: ComposerMode::Write,
             }),
             ..TabUi::default()
         };

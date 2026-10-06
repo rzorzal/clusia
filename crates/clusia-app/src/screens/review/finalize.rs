@@ -23,12 +23,14 @@ use crate::screens::review::editor::{not_sent, read_only_reason};
 use crate::screens::review::leave::close_tab;
 use crate::screens::review::shell::ModalFor;
 use crate::theme::Swatch;
+use crate::ui::composer::{
+    AreaSize, ComposerKey, ComposerMode, ComposerView, ExtraModes, Slot, composer, mode_of,
+};
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, disabled_button, panel,
-    text,
+    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, card, disabled_button,
+    panel, text,
 };
 use crate::ui::modal::{escape_pressed, modal_card, modal_root};
-use crate::ui::text_area::growing_text_area;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FinalizeItem {
@@ -303,6 +305,7 @@ fn rebuild_modal(
     tabs: Res<ReviewTabs>,
     model: Res<Model>,
     edits: Res<FinalizeEdits>,
+    extra: Res<ExtraModes>,
     fonts: Res<UiFonts>,
     mut parts: Query<(Entity, &mut FinalizePart)>,
 ) {
@@ -328,7 +331,8 @@ fn rebuild_modal(
         let fonts = &*fonts;
         commands.entity(entity).despawn_related::<Children>();
         commands.entity(entity).with_children(|p| {
-            card_content(p, fonts, &pr, &v, &summary, &edits);
+            let mode = |key: &ComposerKey| mode_of(key, &tabs, &extra);
+            card_content(p, fonts, &pr, &v, &summary, &edits, &mode);
         });
         part.built = Some(v);
     }
@@ -341,6 +345,7 @@ fn card_content(
     v: &FinalizeView,
     summary: &str,
     edits: &FinalizeEdits,
+    mode: &dyn Fn(&ComposerKey) -> ComposerMode,
 ) {
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
@@ -393,14 +398,33 @@ fn card_content(
                         .0
                         .get(&(pr.clone(), item.id.clone()))
                         .unwrap_or(&item.body);
-                    row.spawn((
-                        growing_text_area(fonts, value, 1.0, 6.0, index as u64 + 1),
-                        FinalizeItemArea {
-                            pr: pr.clone(),
-                            id: item.id.clone(),
-                            index,
-                        },
-                    ));
+                    row.spawn(card(Node {
+                        flex_grow: 1.0,
+                        min_width: px(0),
+                        ..default()
+                    }))
+                    .with_children(|frame| {
+                        let key = ComposerKey(pr.clone(), Slot::FinalizeItem(item.id.clone()));
+                        composer(
+                            frame,
+                            fonts,
+                            &ComposerView {
+                                text: value,
+                                mode: mode(&key),
+                                id: index as u64 + 1,
+                                size: AreaSize::Grow { min: 1.0, max: 6.0 },
+                                compact: true,
+                                suggest: false,
+                                flat: true,
+                            },
+                            key,
+                            FinalizeItemArea {
+                                pr: pr.clone(),
+                                id: item.id.clone(),
+                                index,
+                            },
+                        );
+                    });
                 } else {
                     row.spawn(text(fonts, "Marked to resolve on publish", Type::MUTED));
                 }
@@ -437,10 +461,24 @@ fn card_content(
             });
         }
         c.spawn(text(fonts, "Summary", Type::STRONG));
-        c.spawn((
-            growing_text_area(fonts, summary, 3.0, 6.0, 0),
-            SummaryArea(pr.clone()),
-        ));
+        c.spawn(card(Node::default())).with_children(|frame| {
+            let key = ComposerKey(pr.clone(), Slot::FinalizeSummary);
+            composer(
+                frame,
+                fonts,
+                &ComposerView {
+                    text: summary,
+                    mode: mode(&key),
+                    id: 0,
+                    size: AreaSize::Grow { min: 3.0, max: 6.0 },
+                    compact: false,
+                    suggest: false,
+                    flat: true,
+                },
+                key,
+                SummaryArea(pr.clone()),
+            );
+        });
         c.spawn(text(fonts, "Verdict", Type::STRONG));
         c.spawn(Node {
             column_gap: px(8),
@@ -1071,6 +1109,32 @@ mod tests {
         let mut shown: Vec<Verdict> = q.iter(app.world()).map(|b| b.verdict).collect();
         shown.sort_by_key(|v| format!("{v:?}"));
         assert_eq!(shown, [Verdict::ClosePr, Verdict::Comment]);
+    }
+
+    #[test]
+    fn a_redrawn_finalize_keeps_the_summary_preview() {
+        use crate::ui::composer::{ComposerModeButton, Slot};
+        let mut app = finalize_app(true);
+        let preview = testing::find::<ComposerModeButton>(&mut app, |b| {
+            b.key.1 == Slot::FinalizeSummary && b.mode == ComposerMode::Preview
+        });
+        testing::activate(&mut app, preview);
+        testing::settle(&mut app);
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&fixture::demo_pr())
+            .unwrap()
+            .ui
+            .finalize
+            .verdict = Some(Verdict::Comment);
+        app.update();
+        let summary = testing::find::<SummaryArea>(&mut app, |_| true);
+        assert_eq!(
+            app.world().get::<Node>(summary).unwrap().display,
+            Display::None,
+            "drawn again in Preview, not in Write for a frame"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ use bevy::input_focus::{FocusCause, FocusLost, InputFocus};
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, observe};
-use clusia_core::{DraftKind, PrRef};
+use clusia_core::{DraftKind, PrRef, Side};
 use clusia_protocol::AnchorInput;
 
 use crate::bridge::{Ask, Asks, Connection, Model, TOAST_SECS, Toast, Toasts};
@@ -21,8 +21,9 @@ use crate::fonts::UiFonts;
 use crate::review_state::{EditTarget, Editor, ReviewTabs, Tab, Tickets};
 use crate::screens::review::ReviewSystems;
 use crate::theme::Swatch;
-use crate::ui::kit::{Type, Variant, button, card, disabled_button, text};
-use crate::ui::text_area::{TextSubmitted, text_area};
+use crate::ui::composer::{AreaSize, ComposerKey, ComposerView, Slot, composer};
+use crate::ui::kit::{Stroke, Type, Variant, button, card, disabled_button, text};
+use crate::ui::text_area::TextSubmitted;
 
 /// The `TextArea::id` of every comment editor.
 pub const EDITOR_AREA: u64 = 1;
@@ -43,52 +44,78 @@ pub struct EditorCancel(pub PrRef);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AreaTarget(EditTarget);
 
-/// Draws `editor` for `pr`: the text area, the daemon's refusal (orange) and the buttons.
+/// Draws `editor` for `pr`: the composer, the daemon's refusal (orange) and the buttons, in one
+/// green frame.
 pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor, pr: &PrRef) {
+    let key = ComposerKey(pr.clone(), Slot::Edit(editor.target.clone()));
+    let view = ComposerView {
+        text: &editor.text,
+        mode: editor.mode,
+        id: EDITOR_AREA,
+        size: AreaSize::Lines(4.0),
+        compact: false,
+        suggest: matches!(
+            editor.target,
+            EditTarget::Line {
+                side: Side::Right,
+                ..
+            }
+        ),
+        flat: true,
+    };
     p.spawn(card(Node {
         flex_direction: FlexDirection::Column,
-        row_gap: px(8),
-        padding: px(10).all(),
         ..default()
     }))
+    .insert(Stroke(Swatch::Green))
     .with_children(|c| {
-        c.spawn((
-            text_area(fonts, &editor.text, 4.0, EDITOR_AREA),
-            EditorArea(pr.clone()),
-            AreaTarget(editor.target.clone()),
-        ));
-        if let Some(error) = &editor.error {
-            c.spawn(text(fonts, error.clone(), Type::BODY.ink(Swatch::Orange)));
-        }
+        composer(
+            c,
+            fonts,
+            &view,
+            key,
+            (EditorArea(pr.clone()), AreaTarget(editor.target.clone())),
+        );
         c.spawn(Node {
-            column_gap: px(8),
-            align_items: AlignItems::Center,
+            flex_direction: FlexDirection::Column,
+            row_gap: px(8),
+            padding: UiRect::axes(px(10), px(8)),
             ..default()
         })
-        .with_children(|row| {
-            row.spawn(text(fonts, "⌘↵ to add", Type::META));
-            row.spawn(Node {
-                flex_grow: 1.0,
-                ..default()
-            });
-            row.spawn((
-                button(fonts, "Cancel", Variant::Ghost),
-                EditorCancel(pr.clone()),
-                observe(on_cancel),
-            ));
-            let label = match editor.target {
-                EditTarget::Item(_) => "Save",
-                _ => "Add to draft",
-            };
-            if editor.ticket.is_some() {
-                row.spawn(disabled_button(fonts, "Saving…"));
-            } else {
-                row.spawn((
-                    button(fonts, label, Variant::Primary),
-                    EditorSubmit(pr.clone()),
-                    observe(on_submit_button),
-                ));
+        .with_children(|f| {
+            if let Some(error) = &editor.error {
+                f.spawn(text(fonts, error.clone(), Type::BODY.ink(Swatch::Orange)));
             }
+            f.spawn(Node {
+                column_gap: px(8),
+                align_items: AlignItems::Center,
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn(text(fonts, "⌘↵ to add", Type::META));
+                row.spawn(Node {
+                    flex_grow: 1.0,
+                    ..default()
+                });
+                row.spawn((
+                    button(fonts, "Cancel", Variant::Ghost),
+                    EditorCancel(pr.clone()),
+                    observe(on_cancel),
+                ));
+                let label = match editor.target {
+                    EditTarget::Item(_) => "Save",
+                    _ => "Add to draft",
+                };
+                if editor.ticket.is_some() {
+                    row.spawn(disabled_button(fonts, "Saving…"));
+                } else {
+                    row.spawn((
+                        button(fonts, label, Variant::Primary),
+                        EditorSubmit(pr.clone()),
+                        observe(on_submit_button),
+                    ));
+                }
+            });
         });
     });
 }
@@ -322,9 +349,14 @@ fn keep_text_on_blur(
     }
 }
 
-/// A freshly drawn editor takes the keyboard.
-fn focus_new_editor(areas: Query<Entity, Added<EditorArea>>, mut focus: ResMut<InputFocus>) {
-    if let Some(entity) = areas.iter().last() {
+/// A freshly drawn editor takes the keyboard, unless it is drawn hidden (in Preview), where
+/// keys would edit text nobody sees.
+fn focus_new_editor(
+    areas: Query<(Entity, &Node), Added<EditorArea>>,
+    mut focus: ResMut<InputFocus>,
+) {
+    let shown = areas.iter().filter(|(_, n)| n.display != Display::None);
+    if let Some((entity, _)) = shown.last() {
         focus.set(entity, FocusCause::Navigated);
     }
 }
@@ -335,6 +367,7 @@ mod tests {
     use crate::fixture;
     use crate::review_state::ReviewSection;
     use crate::testing::{self, NOW};
+    use crate::ui::composer::ComposerMode;
     use bevy::input::ButtonInput;
     use clusia_core::{Side, ThreadRef};
 
@@ -351,6 +384,7 @@ mod tests {
             text: String::new(),
             error: None,
             ticket: None,
+            mode: ComposerMode::Write,
         });
         tab
     }
@@ -505,6 +539,7 @@ mod tests {
             text: "Ask about ".into(),
             error: None,
             ticket: None,
+            mode: ComposerMode::Write,
         });
         testing::settle(app);
         pr

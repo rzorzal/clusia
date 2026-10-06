@@ -25,6 +25,7 @@ use crate::screens::review::ReviewSystems;
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason, sync_editor_text};
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
+use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, disabled_button, panel,
     text,
@@ -1261,6 +1262,7 @@ fn on_general_note(
             text: String::new(),
             error: None,
             ticket: None,
+            mode: ComposerMode::Write,
         });
     }
 }
@@ -1695,6 +1697,7 @@ mod tests {
                 text: text.into(),
                 error: None,
                 ticket: None,
+                mode: ComposerMode::Write,
             });
             testing::settle(app);
         };

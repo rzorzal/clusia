@@ -395,6 +395,7 @@ mod tests {
     use crate::nav::CloseTab;
     use crate::review_state::{EditTarget, Editor, Ready};
     use crate::testing::{self, NOW};
+    use crate::ui::composer::ComposerMode;
     use bevy::window::PrimaryWindow;
 
     /// An `AppExit` was written in this frame or the one before (messages live two frames,
@@ -653,6 +654,7 @@ mod tests {
             text: "Half a thought".into(),
             error: None,
             ticket: None,
+            mode: ComposerMode::Write,
         });
     }
 
