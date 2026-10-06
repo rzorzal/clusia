@@ -41,6 +41,8 @@ fn main() -> ExitCode {
             Mode::Live
         },
         screenshot: args.screenshot.clone(),
+        frames: args.frames,
+        frame_step: args.frame_ms.map(Duration::from_millis),
         scene: args.scene,
     };
     if args.demo {

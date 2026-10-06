@@ -19,7 +19,7 @@ use crate::screens::review::shell::{
 };
 use crate::theme::Swatch;
 use crate::ui::kit::{Fill, Stroke, Type, Variant, button, disabled_button, panel, text};
-use crate::ui::leaf::{LeafState, leaf};
+use crate::ui::leaf::{LeafState, leaf, pulsing_dot};
 use crate::ui::modal::modal_card;
 
 const KINDS: [LoadStepKind; 4] = [
@@ -577,7 +577,7 @@ fn step_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, r: &StepRow) {
         },
     ))
     .with_children(|row| {
-        row.spawn(panel(
+        let mut dot = row.spawn(panel(
             Node {
                 width: px(18),
                 height: px(18),
@@ -588,8 +588,11 @@ fn step_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, r: &StepRow) {
                 ..default()
             },
             dot_fill,
-        ))
-        .with_children(|d| {
+        ));
+        if r.state == LeafState::Growing {
+            dot.insert(pulsing_dot());
+        }
+        dot.with_children(|d| {
             d.spawn(text(
                 fonts,
                 icon,
@@ -895,6 +898,117 @@ mod tests {
             0,
             "disabled without a cache"
         );
+    }
+
+    /// The status dot of the row named `name`.
+    fn dot(app: &mut App, name: &str) -> Entity {
+        let label = {
+            let mut q = app.world_mut().query::<(Entity, &Text)>();
+            q.iter(app.world())
+                .find(|(_, t)| t.0 == name)
+                .map(|(e, _)| e)
+                .expect("row label")
+        };
+        let cell = app.world().get::<ChildOf>(label).unwrap().parent();
+        let row = app.world().get::<ChildOf>(cell).unwrap().parent();
+        app.world().get::<Children>(row).unwrap()[0]
+    }
+
+    #[test]
+    fn the_running_step_sways_until_it_is_done() {
+        use crate::ui::kit::Fill;
+        use crate::ui::leaf::{Blink, Pulse, Sway};
+        use bevy::time::TimeUpdateStrategy;
+        use bevy::window::RequestRedraw;
+        use std::time::Duration;
+        let mut app = testing::app(fixture::demo(NOW));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            150,
+        )));
+        show(&mut app);
+        let redraws = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Messages<RequestRedraw>>()
+                .drain()
+                .count()
+        };
+        let moving = |app: &mut App| {
+            let mut q = app.world_mut().query_filtered::<(Entity, &UiTransform), Or<(
+                With<Sway>,
+                With<Pulse>,
+                With<Blink>,
+            )>>();
+            q.iter(app.world())
+                .map(|(e, t)| (e, *t))
+                .collect::<Vec<_>>()
+        };
+        testing::tell(
+            &mut app,
+            Tell::Step(step(LoadStepKind::Repo, StepStatus::Running, None)),
+        );
+        testing::settle(&mut app);
+        redraws(&mut app);
+        let repo = dot(&mut app, "Repo");
+        assert!(
+            app.world().get::<Blink>(repo).is_some(),
+            "the Repo row's dot"
+        );
+        let row = testing::find::<Leaves>(&mut app, |_| true);
+        let sprout = app.world().get::<Children>(row).unwrap()[0];
+        assert!(app.world().get::<Sway>(sprout).is_some(), "the Repo leaf");
+        let blade = app.world().get::<Children>(sprout).unwrap()[0];
+        let mut last = moving(&mut app);
+        assert_eq!(last.len(), 3, "the sprout, its leaf and the status dot");
+        let mut fills = Vec::new();
+        for _ in 0..8 {
+            app.update();
+            assert!(redraws(&mut app) > 0, "a redraw every frame while running");
+            let now = moving(&mut app);
+            assert!(now.iter().zip(&last).all(|(a, b)| a != b), "all move");
+            let scale = |e: Entity| app.world().get::<UiTransform>(e).unwrap().scale;
+            assert_eq!(scale(repo), scale(blade), "the dot pulses with the leaf");
+            fills.push(app.world().get::<Fill>(repo).unwrap().0);
+            last = now;
+        }
+        assert!(fills.contains(&Swatch::Green) && fills.contains(&Swatch::GreenSoft));
+        testing::tell(
+            &mut app,
+            Tell::Step(step(
+                LoadStepKind::Repo,
+                StepStatus::Done,
+                Some("/Users/octo/Repos/clusia"),
+            )),
+        );
+        testing::settle(&mut app);
+        redraws(&mut app);
+        app.update();
+        assert_eq!(redraws(&mut app), 0, "idle once no step runs");
+        assert!(moving(&mut app).is_empty());
+        for name in ["Repo", "Branch", "PR", "Agent"] {
+            let d = dot(&mut app, name);
+            assert_eq!(
+                *app.world().get::<UiTransform>(d).unwrap(),
+                UiTransform::IDENTITY
+            );
+        }
+        // The card was rebuilt for the new state.
+        let row = testing::find::<Leaves>(&mut app, |_| true);
+        let leaves = app.world().get::<Children>(row).unwrap().to_vec();
+        for l in leaves {
+            assert_eq!(
+                *app.world().get::<UiTransform>(l).unwrap(),
+                UiTransform::IDENTITY
+            );
+            for part in app.world().get::<Children>(l).unwrap().iter() {
+                if let Some(t) = app.world().get::<UiTransform>(part) {
+                    assert!(
+                        *t == UiTransform::IDENTITY
+                            || *t == UiTransform::from_rotation(Rot2::degrees(45.0)),
+                        "settled: {t:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
