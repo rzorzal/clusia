@@ -753,24 +753,6 @@ mod tests {
                 .busy = true;
         };
         busy(&mut app);
-        let result = PublishResult {
-            url: Some("https://github.com/rzorzal/clusia/pull/123#pullrequestreview-1".into()),
-            closed: false,
-            unresolved: vec!["PRRT_demo_refresh_41".into()],
-        };
-        testing::tell(
-            &mut app,
-            Tell::Published {
-                pr: pr(),
-                result: result.clone(),
-            },
-        );
-        assert_eq!(
-            events(&mut app),
-            [ReviewEvent::Published { pr: pr(), result }]
-        );
-        assert!(!testing::tab(&app, &pr()).ui.finalize.busy);
-        busy(&mut app);
         testing::tell(
             &mut app,
             Tell::PublishFailed {
@@ -788,6 +770,24 @@ mod tests {
             }]
         );
         assert!(!testing::tab(&app, &pr()).ui.finalize.busy);
+        let result = PublishResult {
+            url: Some("https://github.com/rzorzal/clusia/pull/123#pullrequestreview-1".into()),
+            closed: false,
+            unresolved: vec!["PRRT_demo_refresh_41".into()],
+        };
+        testing::tell(
+            &mut app,
+            Tell::Published {
+                pr: pr(),
+                result: result.clone(),
+            },
+        );
+        assert_eq!(
+            events(&mut app),
+            [ReviewEvent::Published { pr: pr(), result }]
+        );
+        // Finalize (Task 13) closes the published tab.
+        assert!(!app.world().resource::<ReviewTabs>().0.contains_key(&pr()));
         testing::tell(&mut app, Tell::Left(pr()));
         assert_eq!(events(&mut app), [ReviewEvent::Left(pr())]);
     }

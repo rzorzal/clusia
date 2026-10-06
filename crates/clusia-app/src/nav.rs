@@ -198,6 +198,10 @@ pub struct ReviewScreen(pub PrRef);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CloseTab(pub PrRef);
 
+/// A review tab's × was pressed; `screens::review::leave` decides whether to ask first.
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct TabCloseRequested(pub PrRef);
+
 #[derive(Component, Debug)]
 pub struct RetryButton;
 
@@ -238,6 +242,7 @@ impl Plugin for NavPlugin {
             .map(|s| s.0.clone())
             .unwrap_or(WindowTarget::Home);
         app.insert_resource(Nav::new(&start))
+            .add_message::<TabCloseRequested>()
             .add_systems(Startup, (load_leaf, spawn_chrome))
             .add_systems(
                 Update,
@@ -461,9 +466,13 @@ fn on_tab(activate: On<Activate>, tabs: Query<&TabTarget>, mut nav: ResMut<Nav>)
     nav.go(&target);
 }
 
-fn on_close(activate: On<Activate>, close: Query<&CloseTab>, mut nav: ResMut<Nav>) {
+fn on_close(
+    activate: On<Activate>,
+    close: Query<&CloseTab>,
+    mut out: MessageWriter<TabCloseRequested>,
+) {
     if let Ok(CloseTab(pr)) = close.get(activate.entity) {
-        nav.close_review(pr);
+        out.write(TabCloseRequested(pr.clone()));
     }
 }
 

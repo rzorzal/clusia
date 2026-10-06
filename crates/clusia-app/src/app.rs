@@ -54,6 +54,8 @@ pub fn run(launch: Launch) {
             .disable::<LogPlugin>()
             .set(WindowPlugin {
                 primary_window: Some(window()),
+                // The window asks before closing review tabs with a draft (`screens::review::leave`).
+                close_when_requested: false,
                 ..default()
             }),
     )

@@ -10,6 +10,8 @@ use crate::review_state::open_new_tabs;
 pub mod comments;
 pub mod diff;
 pub mod editor;
+pub mod finalize;
+pub mod leave;
 pub mod loading;
 pub mod shell;
 pub mod whats_new;
@@ -33,6 +35,7 @@ impl Plugin for ReviewPlugin {
                 editor::EditorPlugin,
                 loading::LoadingPlugin,
                 whats_new::WhatsNewPlugin,
-            ));
+            ))
+            .add_plugins((finalize::FinalizePlugin, leave::LeavePlugin));
     }
 }
