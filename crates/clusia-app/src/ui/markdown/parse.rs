@@ -97,6 +97,10 @@ pub fn parse(md: &str) -> Vec<Block> {
     }
 }
 
+/// Containers nested deeper than this are flattened into their parent, so no `Block` tree is
+/// deep enough to overflow the stack through its recursive `Drop`, `Clone` or `PartialEq`.
+const MAX_DEPTH: usize = 32;
+
 enum Frame {
     /// The document or a block quote.
     Container(Vec<Block>),
@@ -120,6 +124,8 @@ struct TableState {
 #[derive(Default)]
 struct Builder {
     stack: Vec<Frame>,
+    /// One entry per open quote, list or item: `true` when it was flattened and has no frame.
+    flattened: Vec<bool>,
     inlines: Vec<Inline>,
     /// Adjacent text events, joined so a word or URL cut by the parser is one word again.
     text: String,
@@ -136,7 +142,10 @@ impl Builder {
     fn event(&mut self, event: Event<'_>) {
         match event {
             Event::Text(t) => self.text(&t),
-            Event::SoftBreak => self.text.push(' '),
+            Event::SoftBreak => match &mut self.image {
+                Some((_, alt)) => alt.push(' '),
+                None => self.text.push(' '),
+            },
             other => {
                 self.flush_text();
                 self.other(other);
@@ -185,7 +194,11 @@ impl Builder {
             Tag::Paragraph | Tag::Heading { .. } | Tag::HtmlBlock => self.flush_paragraph(),
             Tag::BlockQuote(_) => {
                 self.flush_paragraph();
-                self.stack.push(Frame::Container(Vec::new()));
+                let flat = self.stack.len() >= MAX_DEPTH;
+                self.flattened.push(flat);
+                if !flat {
+                    self.stack.push(Frame::Container(Vec::new()));
+                }
             }
             Tag::CodeBlock(kind) => {
                 self.flush_paragraph();
@@ -199,17 +212,26 @@ impl Builder {
             }
             Tag::List(first) => {
                 self.flush_paragraph();
-                self.stack.push(Frame::List {
-                    ordered: first.is_some(),
-                    items: Vec::new(),
-                });
+                let flat = self.stack.len() >= MAX_DEPTH;
+                self.flattened.push(flat);
+                if !flat {
+                    self.stack.push(Frame::List {
+                        ordered: first.is_some(),
+                        items: Vec::new(),
+                    });
+                }
             }
             Tag::Item => {
                 self.flush_paragraph();
-                self.stack.push(Frame::Item {
-                    task: None,
-                    blocks: Vec::new(),
-                });
+                // An item follows its list: it is flat exactly when the list was.
+                let flat = !matches!(self.stack.last(), Some(Frame::List { .. }));
+                self.flattened.push(flat);
+                if !flat {
+                    self.stack.push(Frame::Item {
+                        task: None,
+                        blocks: Vec::new(),
+                    });
+                }
             }
             Tag::Table(_) => {
                 self.flush_paragraph();
@@ -238,7 +260,9 @@ impl Builder {
             }
             TagEnd::BlockQuote(_) => {
                 self.flush_paragraph();
-                if let Some(Frame::Container(blocks)) = self.stack.pop() {
+                if !self.flattened.pop().unwrap_or(false)
+                    && let Some(Frame::Container(blocks)) = self.stack.pop()
+                {
                     self.push_block(Block::Quote(blocks));
                 }
             }
@@ -255,14 +279,17 @@ impl Builder {
             }
             TagEnd::Item => {
                 self.flush_paragraph();
-                if let Some(Frame::Item { task, blocks }) = self.stack.pop()
+                if !self.flattened.pop().unwrap_or(false)
+                    && let Some(Frame::Item { task, blocks }) = self.stack.pop()
                     && let Some(Frame::List { items, .. }) = self.stack.last_mut()
                 {
                     items.push(ListItem { task, blocks });
                 }
             }
             TagEnd::List(_) => {
-                if let Some(Frame::List { ordered, items }) = self.stack.pop() {
+                if !self.flattened.pop().unwrap_or(false)
+                    && let Some(Frame::List { ordered, items }) = self.stack.pop()
+                {
                     self.push_block(Block::List { ordered, items });
                 }
             }
@@ -1019,5 +1046,121 @@ mod tests {
             para(&format!("{long} {path}")),
             vec![word(&long, true), word(path, false)]
         );
+    }
+
+    fn depth(blocks: &[Block]) -> usize {
+        let mut deepest = 0;
+        let mut pending: Vec<(&[Block], usize)> = vec![(blocks, 1)];
+        while let Some((level, d)) = pending.pop() {
+            deepest = deepest.max(d);
+            for block in level {
+                match block {
+                    Block::Quote(inner) => pending.push((inner, d + 1)),
+                    Block::List { items, .. } => {
+                        for item in items {
+                            pending.push((&item.blocks, d + 2));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        deepest
+    }
+
+    #[test]
+    fn hostile_input_never_panics() {
+        let cases = vec![
+            format!("{} x", ">".repeat(100_000)),
+            "- ".repeat(100_000),
+            format!(
+                "|{}\n|{}\n|{}",
+                " a |".repeat(10_000),
+                "---|".repeat(10_000),
+                " b |".repeat(10_000)
+            ),
+            format!("| a |\n|---|\n{}", "| b |\n".repeat(10_000)),
+            "```rust\nnever closed".to_string(),
+            "<".to_string(),
+            "<img src=\"".to_string(),
+            "![unclosed".to_string(),
+            "[unclosed".to_string(),
+            ":".repeat(10_000),
+        ];
+        std::thread::spawn(move || {
+            for md in &cases {
+                let blocks = parse(md);
+                assert!(depth(&blocks) <= 40, "nesting is capped");
+                let copy = blocks.clone();
+                assert!(copy == blocks);
+                drop(copy);
+                drop(blocks);
+            }
+        })
+        .join()
+        .expect("no panic or overflow on the default test stack");
+    }
+
+    #[test]
+    fn capped_nesting_keeps_the_text() {
+        let blocks = parse(&format!("{} deep", ">".repeat(200)));
+        assert!(depth(&blocks) <= 40);
+        let mut level = blocks.as_slice();
+        loop {
+            match level {
+                [Block::Quote(inner)] => level = inner,
+                [Block::Paragraph(p)] => {
+                    assert_eq!(p, &vec![word("deep", false)]);
+                    break;
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn soft_break_in_alt_text_stays_in_the_alt() {
+        assert_eq!(
+            para("a ![x\ny](u) b"),
+            vec![
+                word("a", true),
+                Inline::Image {
+                    url: "u".into(),
+                    alt: "x y".into(),
+                    space_after: true
+                },
+                word("b", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn small_edge_cases() {
+        let blocks = parse("| a |\n|---|\n| x<br>y |");
+        let [Block::Table { rows, .. }] = blocks.as_slice() else {
+            panic!("{blocks:?}")
+        };
+        assert_eq!(
+            rows[0][0],
+            vec![word("x", false), Inline::Break, word("y", false)]
+        );
+        assert_eq!(
+            parse("# Title  \n"),
+            vec![Block::Heading(1, vec![word("Title", false)])]
+        );
+        assert_eq!(
+            para("[![alt](https://a.b/i.png)](https://a.b)"),
+            vec![Inline::Image {
+                url: "https://a.b/i.png".into(),
+                alt: "alt".into(),
+                space_after: false
+            }]
+        );
+        assert_eq!(
+            para("[https://a.b/x](https://c.d)"),
+            vec![styled("https://a.b/x", link("https://c.d"), false)]
+        );
+        assert_eq!(para(":SHOUT:"), vec![word(":SHOUT:", false)]);
+        assert_eq!(para(":rocket"), vec![word(":rocket", false)]);
     }
 }
