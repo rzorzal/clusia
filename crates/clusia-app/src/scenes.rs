@@ -52,7 +52,8 @@ pub fn stage(world: &mut World, scene: Scene) {
         cached_at: None,
     };
     if scene != Scene::WhatsNew {
-        // Only the What's new scene shows the What's new modal (it opens on a fresh review with news), so the other scenes clear the news.
+        // Only the What's new scene shows the What's new modal (it opens on a fresh review
+        // with news); the other scenes clear the news.
         ready.news.clear();
     }
     let mut ui = TabUi::default();

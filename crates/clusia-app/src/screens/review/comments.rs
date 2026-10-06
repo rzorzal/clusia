@@ -265,7 +265,7 @@ pub fn comments_view(ready: &Ready, ui: &TabUi, now: i64) -> CommentsView {
     }
 }
 
-/// The Comments section's root inside `SectionBody` (A1: its absence means "fill me").
+/// The Comments section's root inside `SectionBody`; its absence means "fill me".
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CommentsRegion(pub PrRef);
 

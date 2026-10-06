@@ -1,4 +1,4 @@
-//! Config › Notifications: the Do not disturb toggle.
+//! Config › Notifications: the Do not disturb toggle and read-only poll interval.
 
 use std::collections::HashMap;
 

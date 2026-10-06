@@ -1,4 +1,4 @@
-//! Re-anchoring a stored draft when the pull request moved (spec §6.6; deterministic in SP1).
+//! Re-anchoring a stored draft when the pull request moved (spec §6.6); deterministic, no agent involved.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;

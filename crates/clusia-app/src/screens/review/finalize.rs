@@ -804,7 +804,7 @@ fn toast(toasts: &mut Toasts, time: &Time, text: String, warning: bool) {
     });
 }
 
-/// What the daemon said about a publish, a discard or a close (`ReviewEvent`, A1).
+/// What the daemon said about a publish, a discard or a close (from `ReviewEvent`).
 fn outcomes(
     mut events: MessageReader<ReviewEvent>,
     mut tabs: ResMut<ReviewTabs>,
