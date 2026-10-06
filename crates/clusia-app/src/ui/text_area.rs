@@ -8,6 +8,8 @@ use bevy::input_focus::InputFocus;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::prelude::*;
 use bevy::text::{EditableText, TextCursorStyle, TextEdit};
+use bevy::ui::UiSystems;
+use bevy::window::RequestRedraw;
 
 use crate::fonts::UiFonts;
 use crate::theme::Swatch;
@@ -27,11 +29,33 @@ pub struct TextSubmitted {
     pub value: String,
 }
 
+/// Makes a text area as tall as its laid-out text, between `min` and `max` lines; past `max`
+/// it scrolls.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct Grow {
+    pub min: f32,
+    pub max: f32,
+}
+
 /// A text area as wide as its parent, `lines` lines tall, starting with `value`.
 pub fn text_area(fonts: &UiFonts, value: &str, lines: f32, id: u64) -> impl Bundle {
     let mut editable = EditableText::new(value);
     editable.allow_newlines = true;
     editable.visible_lines = Some(lines);
+    area(fonts, editable, id)
+}
+
+/// A text area that shows `value` from its first line and grows with it from `min` to `max`
+/// lines.
+pub fn growing_text_area(fonts: &UiFonts, value: &str, min: f32, max: f32, id: u64) -> impl Bundle {
+    let mut editable = EditableText::new(value);
+    editable.allow_newlines = true;
+    editable.visible_lines = Some(min);
+    editable.queue_edit(TextEdit::TextStart(false));
+    (area(fonts, editable, id), Grow { min, max })
+}
+
+fn area(fonts: &UiFonts, editable: EditableText, id: u64) -> impl Bundle {
     (
         Node {
             width: percent(100),
@@ -69,7 +93,25 @@ pub struct TextAreaPlugin;
 impl Plugin for TextAreaPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<TextSubmitted>()
-            .add_systems(Update, submit_on_cmd_enter);
+            .add_systems(Update, submit_on_cmd_enter)
+            .add_systems(PostUpdate, grow_to_content.after(UiSystems::PostLayout));
+    }
+}
+
+/// Sets each growing area's height from its last layout; the next layout pass applies it.
+fn grow_to_content(
+    mut areas: Query<(&mut EditableText, &Grow)>,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    for (mut editable, grow) in &mut areas {
+        let Some(layout) = editable.editor().try_layout() else {
+            continue;
+        };
+        let lines = Some((layout.len() as f32).clamp(grow.min, grow.max));
+        if editable.visible_lines != lines {
+            editable.visible_lines = lines;
+            redraw.write(RequestRedraw);
+        }
     }
 }
 
@@ -100,7 +142,9 @@ mod tests {
     use super::*;
     use crate::snapshot::Snapshot;
     use crate::testing;
+    use bevy::clipboard::Clipboard;
     use bevy::input_focus::FocusCause;
+    use bevy::text::{FontCx, LayoutCx};
 
     fn submitted(app: &mut App) -> Vec<TextSubmitted> {
         app.world_mut()
@@ -148,6 +192,56 @@ mod tests {
             }]
         );
         assert!(app.world().get::<TextArea>(other).is_some());
+    }
+
+    /// Lays the area's text out in Inter, as `bevy_ui` would before `grow_to_content` runs.
+    fn lay_out(app: &mut App, area: Entity) {
+        let mut fonts = FontCx::default();
+        let family = fonts
+            .collection
+            .register_fonts(Font::from_bytes(crate::fonts::INTER.to_vec()).data, None)[0]
+            .0;
+        let name = fonts.collection.family_name(family).unwrap().to_string();
+        fonts.set_sans_serif_family(&name).unwrap();
+        let mut layout = LayoutCx::default();
+        let mut editable = app.world_mut().get_mut::<EditableText>(area).unwrap();
+        editable.apply_pending_edits(&mut fonts, &mut layout.0, &mut Clipboard::default(), |_| {
+            true
+        });
+        editable.editor_mut().layout(&mut fonts, &mut layout.0);
+    }
+
+    fn lines(app: &App, area: Entity) -> Option<f32> {
+        app.world().get::<EditableText>(area).unwrap().visible_lines
+    }
+
+    #[test]
+    fn growing_areas_fit_their_lines_up_to_a_cap_and_start_at_the_top() {
+        let mut app = testing::app(Snapshot::default());
+        let fonts = UiFonts::default();
+        let mut spawn = |value: &str, id| {
+            app.world_mut()
+                .spawn(growing_text_area(&fonts, value, 2.0, 6.0, id))
+                .id()
+        };
+        let short = spawn("one line", 1);
+        let three = spawn("a\nb\nc", 2);
+        let long = spawn("1\n2\n3\n4\n5\n6\n7\n8\n9", 3);
+        assert_eq!(lines(&app, short), Some(2.0), "starts at its minimum");
+        for area in [short, three, long] {
+            lay_out(&mut app, area);
+        }
+        app.update();
+        assert_eq!(lines(&app, short), Some(2.0), "never below the minimum");
+        assert_eq!(lines(&app, three), Some(3.0), "grows with its text");
+        assert_eq!(lines(&app, long), Some(6.0), "then stops and scrolls");
+        testing::type_into(&mut app, short, "z");
+        let e = app.world().get::<EditableText>(short).unwrap();
+        assert_eq!(
+            e.value().to_string(),
+            "zone line",
+            "the cursor starts at the top"
+        );
     }
 
     #[test]
