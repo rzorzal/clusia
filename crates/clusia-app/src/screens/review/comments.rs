@@ -42,7 +42,7 @@ pub struct PostView {
     pub verb: &'static str,
     /// "3h ago", "just now", or empty when GitHub sent no usable time.
     pub age: String,
-    /// Plain text (Markdown rendering is M5c).
+    /// Plain text.
     pub body: String,
     pub badge: Option<(&'static str, Tone)>,
 }

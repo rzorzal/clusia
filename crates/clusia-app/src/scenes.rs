@@ -52,7 +52,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         cached_at: None,
     };
     if scene != Scene::WhatsNew {
-        // Task 10 opens What's new on a fresh review with news: only its own scene shows it.
+        // What's new only shows on a fresh review with news: only its own scene displays it.
         ready.news.clear();
     }
     let mut ui = TabUi::default();

@@ -120,7 +120,7 @@ async fn saved_review_goes_outdated_and_relocates() {
 async fn retention_removes_orphans_and_keeps_live_reviews() {
     let dir = tempfile::tempdir().unwrap();
     let paths = clusia_core::Paths::new(dir.path());
-    std::fs::create_dir_all(paths.worktrees_dir().join("acme__widgets__1")).unwrap(); // old M2 key: orphan
+    std::fs::create_dir_all(paths.worktrees_dir().join("acme__widgets__1")).unwrap(); // orphan worktree with legacy naming
     std::fs::create_dir_all(paths.worktrees_dir().join("acme~widgets~2")).unwrap(); // no review: orphan
     // Orphans are only removed once they are older than the retention period.
     let long_ago = std::time::SystemTime::now() - Duration::from_secs(100 * 86_400);

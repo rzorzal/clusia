@@ -95,7 +95,7 @@ pub struct ShellView {
 }
 
 /// The center region of a ready review. The section's filler despawns its children and fills
-/// it when the section changes (Diff: Task 11, Comments: Task 12, the rest: `fill_placeholders`).
+/// it when the section changes via `fill_placeholders`.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct SectionBody {
     pub pr: PrRef,

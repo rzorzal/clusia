@@ -110,7 +110,7 @@ pub struct DraftCard {
 pub enum Below {
     Thread(ThreadCard),
     Draft(DraftCard),
-    /// Task 9's `editor_box` for the current `ui.editor`.
+    /// The `editor_box` for the current `ui.editor`.
     Editor,
 }
 
@@ -936,7 +936,7 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
     });
 }
 
-/// Shows "Arrives with SP3 (#71)" while Story or Calls is hovered.
+/// Shows "Arrives with SP3" while Story or Calls is hovered.
 fn later_hints(
     segments: Query<&Hovered, With<LaterSegment>>,
     mut hints: Query<&mut Node, With<LaterHint>>,

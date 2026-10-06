@@ -1,4 +1,4 @@
-//! What a click does: the window when it is installed (M5), otherwise the browser.
+//! What a click does: the window when it is installed, otherwise the browser.
 //! Window contract: `clusia-app --home <root> [--review owner/repo#n | --config]`.
 
 use std::path::{Path, PathBuf};

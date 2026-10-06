@@ -1,4 +1,4 @@
-//! Replies, resolves and the GraphQL publish sequence (M5b): one review with line comments,
+//! Replies, resolves and the GraphQL publish sequence: one review with line comments,
 //! replies and the summary, then the resolves; nothing half-done stays on GitHub.
 
 mod common;
@@ -589,7 +589,7 @@ async fn conversation_failure_fails_the_pr_step() {
     w.daemon.stop().await;
 }
 
-// Maestro ruling (Task 2 review): ambiguous answers and cleanup failures.
+// Ambiguous answers and cleanup failures during publish.
 
 const ORPHAN_URL: &str = "https://github.com/acme/widgets/pull/7#pullrequestreview-77";
 const LEFTOVER: &str =
