@@ -29,6 +29,7 @@ use crate::ui::composer::{
     write_area,
 };
 use crate::ui::kit::{Clickable, FieldCommitted, Fill, HoverFill, Stroke, Type, text, text_field};
+use crate::ui::markdown::build::https_host;
 
 /// Which popover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,8 +176,11 @@ pub fn link_problem(link: &str) -> Option<&'static str> {
     let link = link.trim();
     if link.is_empty() {
         Some("Paste a link first")
-    } else if !link.starts_with("https://") || link.contains(char::is_whitespace) {
+    } else if https_host(link).is_none_or(str::is_empty) || link.contains(char::is_whitespace) {
         Some("Only https links work — GitHub does not show other images")
+    } else if link.contains(['(', ')', '<', '>']) {
+        // They would end the `![](…)` the link goes into.
+        Some("This link has a ( ) < or > in it — use its plain address")
     } else {
         None
     }
@@ -339,6 +343,8 @@ fn sync_popovers(
                     Fill(Swatch::Surface),
                     BorderColor::default(),
                     Stroke(Swatch::Line),
+                    // Shown by `place_panels` once the card has been laid out where it belongs.
+                    Visibility::Hidden,
                     Pickable {
                         should_block_lower: true,
                         is_hoverable: true,
@@ -457,11 +463,12 @@ fn commit_links(
     }
 }
 
-/// Puts each popover card under its toolbar button, inside the window.
+/// Puts each popover card under its toolbar button, inside the window. A new card stays hidden
+/// until a layout pass has used the position, so it never shows at the corner first.
 fn place_panels(
     buttons: Query<(&PopoverButton, &ComputedNode, &UiGlobalTransform)>,
     layers: Query<(&PopoverLayer, &Children)>,
-    mut panels: Query<(&mut Node, &ComputedNode), With<PopoverPanel>>,
+    mut panels: Query<(&mut Node, &mut Visibility), With<PopoverPanel>>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     for (layer, children) in &layers {
@@ -477,13 +484,13 @@ fn place_panels(
         let width = windows.iter().next().map(Window::width);
         let max_left = width.map_or(f32::MAX, |w| (w - PANEL_WIDTH - 8.0).max(8.0));
         for child in children {
-            if let Ok((mut panel, _)) = panels.get_mut(*child) {
+            if let Ok((mut panel, mut visibility)) = panels.get_mut(*child) {
                 let (l, t) = (px(left.clamp(8.0, max_left)), px(top));
-                if panel.left != l {
+                if panel.left != l || panel.top != t {
                     panel.left = l;
-                }
-                if panel.top != t {
                     panel.top = t;
+                } else if *visibility != Visibility::Inherited {
+                    *visibility = Visibility::Inherited;
                 }
             }
         }
@@ -499,8 +506,8 @@ mod tests {
     use crate::testing::{self, NOW};
     use crate::ui::composer::emoji_picker::{EmojiCell, EmojiSearch, RECENT_KEY, push_recent};
     use crate::ui::composer::gif_picker::{
-        GifNeedsKey, GifSearch, GifSearchBox, GifTile, GifTyping, gif_error_text, gif_markdown,
-        gif_search_due,
+        GifNeedsKey, GifSearch, GifSearchBox, GifState, GifStatus, GifTile, GifTyping,
+        gif_error_text, gif_markdown, gif_search_due,
     };
     use crate::ui::composer::testkit::*;
     use crate::ui::composer::{ComposerModeButton, Slot};
@@ -701,6 +708,47 @@ mod tests {
     }
 
     #[test]
+    fn a_late_answer_to_a_closed_popover_is_not_the_new_answer() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (_, key) = composer_for(&mut app, "");
+        show(&mut app, &key, PopoverKind::Gif);
+        assert_eq!(searches(&mut app).len(), 1);
+        app.world_mut().resource_mut::<Popovers>().open = None;
+        app.update();
+        show(&mut app, &key, PopoverKind::Gif);
+        assert_eq!(searches(&mut app).len(), 1, "asked again after reopening");
+        testing::tell(&mut app, Tell::Gifs(Ok(page())));
+        testing::settle(&mut app);
+        assert_ne!(
+            app.world().resource::<GifState>().status,
+            GifStatus::Ready,
+            "the first answer belongs to the closed popover"
+        );
+        assert_eq!(testing::count::<GifTile>(&mut app), 0);
+        testing::tell(&mut app, Tell::Gifs(Ok(page())));
+        testing::settle(&mut app);
+        assert_eq!(app.world().resource::<GifState>().status, GifStatus::Ready);
+        assert_eq!(testing::count::<GifTile>(&mut app), 2);
+    }
+
+    #[test]
+    fn a_popover_card_is_not_shown_before_it_is_placed() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (_, key) = composer_for(&mut app, "");
+        let visible = |app: &mut App| {
+            let panel = testing::find::<PopoverPanel>(app, |_| true);
+            app.world().get::<Visibility>(panel).copied().unwrap()
+        };
+        app.world_mut().resource_mut::<Popovers>().open = Some((key.clone(), PopoverKind::Emoji));
+        app.update();
+        assert_eq!(visible(&mut app), Visibility::Hidden, "not yet placed");
+        testing::settle(&mut app);
+        assert_eq!(visible(&mut app), Visibility::Inherited);
+        let panel = testing::find::<PopoverPanel>(&mut app, |_| true);
+        assert_ne!(app.world().get::<Node>(panel).unwrap().top, px(0));
+    }
+
+    #[test]
     fn gif_click_inserts_markdown() {
         let item = GifItem {
             title: "  a [fast]\nturtle ".into(),
@@ -781,6 +829,19 @@ mod tests {
         assert_eq!(value(&app, area), "keep me![](https://example.com/a.png)");
         assert_eq!(open_popover(&app), None);
         assert_eq!(link_problem(""), Some("Paste a link first"));
+        assert!(link_problem("https://example.com/a.png").is_none());
+        assert!(link_problem("HTTPS://example.com/a.png").is_none());
+        for bad in [
+            "https://",
+            "https:///a.png",
+            "http://example.com/a.png",
+            "https://example.com/a b.png",
+            "https://example.com/a).png",
+            "https://example.com/(a.png",
+            "https://example.com/<a>.png",
+        ] {
+            assert!(link_problem(bad).is_some(), "{bad}");
+        }
     }
 
     #[test]

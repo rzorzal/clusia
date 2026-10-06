@@ -78,6 +78,9 @@ pub struct GifTyping {
     typed_at: f64,
     asked: Option<String>,
     outstanding: u32,
+    /// Searches asked in a popover that has since closed and not yet answered. The worker
+    /// answers in order, so the next `stale` answers are theirs and are dropped.
+    stale: u32,
 }
 
 impl GifTyping {
@@ -194,6 +197,10 @@ fn drive_gifs(
     let now = time.elapsed_secs_f64();
     let open = matches!(&popovers.open, Some((_, PopoverKind::Gif)));
     for GifsArrived(answer) in arrived.read() {
+        if typing.stale > 0 {
+            typing.stale -= 1;
+            continue;
+        }
         typing.outstanding = typing.outstanding.saturating_sub(1);
         if typing.outstanding > 0 || !open || typing.asked.is_none() {
             continue;
@@ -221,8 +228,9 @@ fn drive_gifs(
         }
         typing.asked = None;
         typing.typed.clear();
-        // A search whose answer never came (the connection dropped) must not block the next
-        // popover; an answer that does arrive late finds no question and is ignored.
+        // A search still unanswered must not block the next popover, and its late answer must
+        // not be taken for the next popover's.
+        typing.stale += typing.outstanding;
         typing.outstanding = 0;
         return;
     }
@@ -262,6 +270,12 @@ fn drive_gifs(
     }
 }
 
+/// Whether `a` and `b` draw the same grid. Tiles do not depend on the status, so a search
+/// going Ready → Loading → Ready with the same items keeps its tiles and their scroll position.
+fn same_grid(a: &GifState, b: &GifState) -> bool {
+    a == b || (!a.items.is_empty() && a.items == b.items && a.query == b.query)
+}
+
 /// Draws the grid for the current state.
 fn fill_gifs(
     mut commands: Commands,
@@ -270,7 +284,11 @@ fn fill_gifs(
     mut grids: Query<(Entity, &mut GifGrid)>,
 ) {
     for (entity, mut grid) in &mut grids {
-        if grid.built.as_ref() == Some(&*state) {
+        if grid
+            .built
+            .as_ref()
+            .is_some_and(|built| same_grid(built, &state))
+        {
             continue;
         }
         let key = grid.key.clone();
@@ -391,4 +409,49 @@ fn on_gif_tile(
         &mut focus,
         &mut popovers,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(status: GifStatus, ids: &[&str], query: &str) -> GifState {
+        GifState {
+            status,
+            items: ids
+                .iter()
+                .map(|id| GifItem {
+                    id: (*id).into(),
+                    title: String::new(),
+                    preview_url: String::new(),
+                    url: String::new(),
+                    width: 1,
+                    height: 1,
+                })
+                .collect(),
+            query: query.into(),
+        }
+    }
+
+    #[test]
+    fn a_status_change_alone_keeps_the_tiles() {
+        let ready = state(GifStatus::Ready, &["a", "b"], "cat");
+        assert!(same_grid(
+            &ready,
+            &state(GifStatus::Loading, &["a", "b"], "cat")
+        ));
+        assert!(!same_grid(
+            &ready,
+            &state(GifStatus::Ready, &["a", "c"], "cat")
+        ));
+        assert!(!same_grid(
+            &ready,
+            &state(GifStatus::Ready, &["a", "b"], "dog")
+        ));
+        let none = state(GifStatus::Loading, &[], "");
+        assert!(
+            !same_grid(&none, &state(GifStatus::Ready, &[], "")),
+            "the line changes"
+        );
+    }
 }

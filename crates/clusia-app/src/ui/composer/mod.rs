@@ -803,7 +803,9 @@ mod tests {
     use crate::fixture;
     use crate::review_state::Editor;
     use crate::testing::{self, NOW};
+    use bevy::time::TimeUpdateStrategy;
     use clusia_core::DraftKind;
+    use std::time::Duration;
 
     #[test]
     fn preview_round_trip_keeps_the_text() {
@@ -1103,10 +1105,13 @@ mod tests {
                 .clone()
         };
         assert_eq!(drawn(&app).as_deref(), Some("one"));
+        // Each frame is 70 ms long, so one change per frame never leaves 120 ms of quiet,
+        // however long it goes on.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            70,
+        )));
         for more in [" two", " three", " four"] {
             testing::type_into(&mut app, area, more);
-            // A change on every frame never leaves 120 ms of quiet, however long it goes on.
-            std::thread::sleep(std::time::Duration::from_millis(70));
             app.update();
             assert_eq!(
                 drawn(&app).as_deref(),
@@ -1114,7 +1119,9 @@ mod tests {
                 "still waiting after {more:?}"
             );
         }
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            150,
+        )));
         app.update();
         assert_eq!(drawn(&app).as_deref(), Some("one two three four"));
     }

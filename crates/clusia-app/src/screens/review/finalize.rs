@@ -778,8 +778,7 @@ fn on_save(
     }
     asks.send(Ask::CloseReview(pr.clone()));
     edits.0.retain(|(p, _), _| p != pr);
-    modes.forget(pr);
-    close_tab(pr, &mut tabs, &mut nav);
+    close_tab(pr, &mut tabs, &mut nav, &mut modes);
 }
 
 fn on_remove(
@@ -819,8 +818,7 @@ fn on_discard(
     };
     asks.send(Ask::Discard(pr.clone()));
     edits.0.retain(|(p, _), _| p != pr);
-    modes.forget(pr);
-    close_tab(pr, &mut tabs, &mut nav);
+    close_tab(pr, &mut tabs, &mut nav, &mut modes);
 }
 
 fn escape_closes(keys: Res<ButtonInput<KeyCode>>, nav: Res<Nav>, mut tabs: ResMut<ReviewTabs>) {
@@ -886,8 +884,7 @@ fn outcomes(
                     ),
                 }
                 edits.0.retain(|(p, _), _| p != pr);
-                modes.forget(pr);
-                close_tab(pr, &mut tabs, &mut nav);
+                close_tab(pr, &mut tabs, &mut nav, &mut modes);
                 nav.go(&WindowTarget::Home);
             }
             // The pull request moved: open it again, so the diff, the header and the relocated
@@ -914,8 +911,7 @@ fn outcomes(
             },
             ReviewEvent::Left(pr) => {
                 edits.0.retain(|(p, _), _| p != pr);
-                modes.forget(pr);
-                close_tab(pr, &mut tabs, &mut nav);
+                close_tab(pr, &mut tabs, &mut nav, &mut modes);
             }
         }
     }

@@ -86,9 +86,13 @@ pub struct CopiedText(pub Vec<String>);
 
 /// The host of an `https://` URL: after the last `@` of the authority (what comes before is
 /// userinfo and must not pass for the host) and without a port.
+/// The scheme is case-insensitive and `\\` ends the authority like `/`, as browsers read it.
 pub fn https_host(url: &str) -> Option<&str> {
-    let rest = url.strip_prefix("https://")?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let (scheme, rest) = (url.get(..8)?, url.get(8..)?);
+    if !scheme.eq_ignore_ascii_case("https://") {
+        return None;
+    }
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or("");
     let host = authority.rsplit('@').next().unwrap_or("");
     Some(host.split(':').next().unwrap_or(""))
 }
@@ -1241,6 +1245,19 @@ mod tests {
         assert!(is_external("https://github.com.evil.example/a.png"));
         assert!(is_external("https://github.com:x@evil.example/a.png"));
         assert!(!is_external("https://user@github.com:443/a.png"));
+        assert!(
+            !is_external("HTTPS://github.com/a.png"),
+            "the scheme's case"
+        );
+        assert!(
+            is_external("https://evil.example\\@github.com/a.png"),
+            "a backslash ends the host"
+        );
+        assert_eq!(
+            https_host("https://evil.example\\@github.com"),
+            Some("evil.example")
+        );
+        assert_eq!(https_host("https:/"), None);
     }
 
     #[test]
