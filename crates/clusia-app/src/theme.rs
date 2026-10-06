@@ -153,17 +153,17 @@ pub const LIGHT: Tokens = Tokens {
     scrim: Color::srgba_u8(0xF6, 0xF7, 0xF5, 0x8C),
     code: [
         Color::srgb_u8(0x7C, 0x3A, 0xAD), // keyword
-        Color::srgb_u8(0x0A, 0x6E, 0x5C), // string
-        Color::srgb_u8(0x8A, 0x93, 0x8C), // comment
-        Color::srgb_u8(0x9A, 0x5B, 0x00), // type
+        Color::srgb_u8(0x0A, 0x6C, 0x5A), // string
+        Color::srgb_u8(0x74, 0x7D, 0x76), // comment
+        Color::srgb_u8(0x8B, 0x52, 0x00), // type
         Color::srgb_u8(0x26, 0x59, 0xB8), // function
-        Color::srgb_u8(0xB0, 0x50, 0x1F), // number
-        Color::srgb_u8(0xB0, 0x50, 0x1F), // constant
-        Color::srgb_u8(0x5D, 0x66, 0x5F), // operator
-        Color::srgb_u8(0x5D, 0x66, 0x5F), // punctuation
-        Color::srgb_u8(0x1F, 0x6F, 0x8B), // property
+        Color::srgb_u8(0x9B, 0x47, 0x1B), // number
+        Color::srgb_u8(0x9B, 0x47, 0x1B), // constant
+        Color::srgb_u8(0x59, 0x62, 0x5B), // operator
+        Color::srgb_u8(0x59, 0x62, 0x5B), // punctuation
+        Color::srgb_u8(0x1D, 0x67, 0x81), // property
         Color::srgb_u8(0x26, 0x59, 0xB8), // tag
-        Color::srgb_u8(0x9A, 0x5B, 0x00), // attribute
+        Color::srgb_u8(0x8B, 0x52, 0x00), // attribute
         Color::srgb_u8(0x1B, 0x1F, 0x1C), // variable
         Color::srgb_u8(0x1B, 0x1F, 0x1C), // plain
     ],
@@ -194,23 +194,23 @@ pub const DARK: Tokens = Tokens {
     green_hover: Color::srgb_u8(0x5C, 0xCF, 0x6E),
     on_green: Color::srgb_u8(0x0C, 0x1A, 0x0F),
     green_soft: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x29),
-    added_bg: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x1F),
-    removed_bg: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x1F),
-    added_strong: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x61),
-    removed_strong: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x61),
+    added_bg: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x0C),
+    removed_bg: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x0C),
+    added_strong: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x18),
+    removed_strong: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x18),
     scrim: Color::srgba_u8(0x08, 0x0A, 0x09, 0x99),
     code: [
-        Color::srgb_u8(0xC7, 0x92, 0xEA), // keyword
+        Color::srgb_u8(0xD3, 0xA9, 0xEE), // keyword
         Color::srgb_u8(0x7F, 0xD1, 0xAE), // string
-        Color::srgb_u8(0x6B, 0x74, 0x6D), // comment
+        Color::srgb_u8(0x90, 0x99, 0x92), // comment
         Color::srgb_u8(0xE5, 0xB5, 0x67), // type
-        Color::srgb_u8(0x82, 0xAA, 0xFF), // function
-        Color::srgb_u8(0xF2, 0xA2, 0x72), // number
-        Color::srgb_u8(0xF2, 0xA2, 0x72), // constant
-        Color::srgb_u8(0x9A, 0xA4, 0x9C), // operator
-        Color::srgb_u8(0x9A, 0xA4, 0x9C), // punctuation
+        Color::srgb_u8(0x97, 0xB9, 0xFF), // function
+        Color::srgb_u8(0xF3, 0xA8, 0x7A), // number
+        Color::srgb_u8(0xF3, 0xA8, 0x7A), // constant
+        Color::srgb_u8(0xB3, 0xBB, 0xB5), // operator
+        Color::srgb_u8(0xB3, 0xBB, 0xB5), // punctuation
         Color::srgb_u8(0x7F, 0xC8, 0xDB), // property
-        Color::srgb_u8(0x82, 0xAA, 0xFF), // tag
+        Color::srgb_u8(0x97, 0xB9, 0xFF), // tag
         Color::srgb_u8(0xE5, 0xB5, 0x67), // attribute
         Color::srgb_u8(0xE9, 0xEC, 0xE9), // variable
         Color::srgb_u8(0xE9, 0xEC, 0xE9), // plain
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn added_lines_are_softer_than_green_soft() {
         assert_eq!(LIGHT.added_bg, Color::srgb_u8(0xE9, 0xF6, 0xEB));
-        assert_eq!(DARK.added_bg, Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x1F));
+        assert_eq!(DARK.added_bg, Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x0C));
         assert_eq!(DARK.get(Swatch::AddedBg), DARK.added_bg);
     }
 
@@ -376,14 +376,14 @@ mod tests {
             LIGHT.get(Swatch::RemovedBg),
             Color::srgb_u8(0xFC, 0xEE, 0xE8)
         );
-        assert_eq!(DARK.removed_bg, Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x1F));
+        assert_eq!(DARK.removed_bg, Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x0C));
         assert_eq!(
             LIGHT.get(Swatch::AddedStrong),
             Color::srgba_u8(0x2F, 0x9E, 0x44, 0x42)
         );
         assert_eq!(
             DARK.get(Swatch::RemovedStrong),
-            Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x61)
+            Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x18)
         );
         assert_eq!(
             LIGHT.get(Swatch::Scrim),
@@ -399,19 +399,83 @@ mod tests {
     fn syntax_colors_cover_every_class() {
         for tokens in [LIGHT, DARK] {
             assert_eq!(tokens.get(Swatch::Code(Class::Plain)), tokens.fg);
-            assert_eq!(tokens.get(Swatch::Code(Class::Comment)), tokens.faint);
+            // Comments have their own ink (readable on the diff tints); UI faint text stays put.
+            assert_ne!(tokens.get(Swatch::Code(Class::Comment)), tokens.faint);
             for class in Class::ALL {
                 assert_ne!(tokens.get(Swatch::Code(class)), tokens.surface, "{class:?}");
             }
         }
         assert_eq!(
             LIGHT.get(Swatch::Code(Class::String)),
-            Color::srgb_u8(0x0A, 0x6E, 0x5C),
+            Color::srgb_u8(0x0A, 0x6C, 0x5A),
             "the table follows Class::ALL"
         );
         assert_eq!(
             DARK.get(Swatch::Code(Class::Keyword)),
-            Color::srgb_u8(0xC7, 0x92, 0xEA)
+            Color::srgb_u8(0xD3, 0xA9, 0xEE)
         );
+        assert_eq!(LIGHT.faint, Color::srgb_u8(0x8A, 0x93, 0x8C));
+        assert_eq!(DARK.faint, Color::srgb_u8(0x6B, 0x74, 0x6D));
+    }
+
+    /// `top` over `bottom`, in linear light: what the GPU does on the sRGB window target.
+    fn over(bottom: LinearRgba, top: Color) -> LinearRgba {
+        let t = top.to_linear();
+        let mix = |b: f32, c: f32| b * (1.0 - t.alpha) + c * t.alpha;
+        LinearRgba::rgb(
+            mix(bottom.red, t.red),
+            mix(bottom.green, t.green),
+            mix(bottom.blue, t.blue),
+        )
+    }
+
+    /// WCAG contrast ratio of an opaque ink on an opaque background.
+    fn contrast(ink: LinearRgba, bg: LinearRgba) -> f32 {
+        let lum = |c: LinearRgba| 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
+        let (a, b) = (lum(ink), lum(bg));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn code_stays_readable_on_diff_tints_and_marks() {
+        for (name, tokens) in [("light", LIGHT), ("dark", DARK)] {
+            let surface = tokens.surface.to_linear();
+            for (row, mark) in [
+                (tokens.added_bg, tokens.added_strong),
+                (tokens.removed_bg, tokens.removed_strong),
+            ] {
+                let tinted = over(surface, row);
+                for bg in [surface, tinted, over(tinted, mark)] {
+                    for class in Class::ALL {
+                        let need = if class == Class::Comment { 3.0 } else { 4.5 };
+                        let ratio = contrast(tokens.get(Swatch::Code(class)).to_linear(), bg);
+                        assert!(ratio >= need, "{name} {class:?} on {bg:?}: {ratio:.2}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diff_tints_still_show() {
+        for (name, tokens) in [("light", LIGHT), ("dark", DARK)] {
+            let surface = tokens.surface.to_linear();
+            for (row, mark) in [
+                (tokens.added_bg, tokens.added_strong),
+                (tokens.removed_bg, tokens.removed_strong),
+            ] {
+                let tinted = over(surface, row);
+                let marked = over(tinted, mark);
+                let apart = |a: LinearRgba, b: LinearRgba| {
+                    let (a, b) = (Color::from(a).to_srgba(), Color::from(b).to_srgba());
+                    (a.red - b.red).abs() + (a.green - b.green).abs() + (a.blue - b.blue).abs()
+                };
+                assert!(apart(surface, tinted) > 0.08, "{name}: the row tint shows");
+                assert!(
+                    apart(tinted, marked) > 0.08,
+                    "{name}: the mark shows on the row"
+                );
+            }
+        }
     }
 }
