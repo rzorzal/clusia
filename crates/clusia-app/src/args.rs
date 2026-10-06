@@ -45,6 +45,12 @@ pub struct Args {
     /// Render the first frames to this PNG, then exit.
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
+    /// With --screenshot: save this many consecutive frames (`<name>-0.png`, `<name>-1.png`, …).
+    #[arg(long, requires = "screenshot", default_value_t = 1, hide = true)]
+    pub frames: u32,
+    /// With --screenshot: advance the clock this many milliseconds per frame (animations).
+    #[arg(long, value_name = "MS", requires = "screenshot", hide = true)]
+    pub frame_ms: Option<u64>,
 }
 
 impl Args {
@@ -103,6 +109,21 @@ mod tests {
         assert!(a.demo && a.dark);
         assert_eq!(a.screenshot, Some(PathBuf::from("/tmp/x.png")));
         assert_eq!(a.home, Some(PathBuf::from("/h")));
+        assert_eq!((a.frames, a.frame_ms), (1, None));
+        assert!(
+            parse(&["--frames", "8"]).is_err(),
+            "--frames needs --screenshot"
+        );
+        let a = parse(&[
+            "--screenshot",
+            "/tmp/x.png",
+            "--frames",
+            "8",
+            "--frame-ms",
+            "150",
+        ])
+        .unwrap();
+        assert_eq!((a.frames, a.frame_ms), (8, Some(150)));
     }
 
     #[test]

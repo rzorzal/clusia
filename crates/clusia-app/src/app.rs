@@ -34,6 +34,10 @@ pub struct Launch {
     pub target: WindowTarget,
     pub mode: Mode,
     pub screenshot: Option<PathBuf>,
+    /// How many consecutive frames the screenshot saves.
+    pub frames: u32,
+    /// A fixed clock step per frame, so saved frames sample animations evenly.
+    pub frame_step: Option<Duration>,
     /// `--demo --scene`: stage the demo review (screenshots).
     pub scene: Option<Scene>,
 }
@@ -49,6 +53,19 @@ pub struct StartTarget(pub WindowTarget);
 struct ScreenshotPlan {
     path: PathBuf,
     after_frames: u32,
+    frames: u32,
+}
+
+impl ScreenshotPlan {
+    /// The file for frame `i`: the path itself for a single frame, `<stem>-<i>.<ext>` otherwise.
+    fn path(&self, i: u32) -> PathBuf {
+        if self.frames <= 1 {
+            return self.path.clone();
+        }
+        let stem = self.path.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = self.path.extension().unwrap_or_default().to_string_lossy();
+        self.path.with_file_name(format!("{stem}-{i}.{ext}"))
+    }
 }
 
 /// How long the window waits, once closed, for the bridge to deliver what is still queued.
@@ -106,8 +123,12 @@ pub fn run(launch: Launch) {
         app.insert_resource(ScreenshotPlan {
             path: path.clone(),
             after_frames: 20,
+            frames: launch.frames.max(1),
         })
         .add_systems(Update, take_screenshot);
+        if let Some(step) = launch.frame_step {
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(step));
+        }
     }
     app.run();
     // Leaving the window sends `CloseReview` / `Discard` for its tabs and exits in the same
@@ -136,7 +157,7 @@ fn window() -> Window {
     }
 }
 
-/// Waits for fonts and layout to settle, saves the frame, and exits once it is written.
+/// Waits for fonts and layout to settle, saves the frames, and exits once they are written.
 fn take_screenshot(
     mut commands: Commands,
     plan: Res<ScreenshotPlan>,
@@ -144,12 +165,14 @@ fn take_screenshot(
     mut exit: MessageWriter<AppExit>,
 ) {
     *frame += 1;
-    if *frame == plan.after_frames {
+    if let Some(i) = frame.checked_sub(plan.after_frames)
+        && i < plan.frames
+    {
         commands
             .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(plan.path.clone()));
+            .observe(save_to_disk(plan.path(i)));
     }
-    if *frame == plan.after_frames + 30 {
+    if *frame == plan.after_frames + plan.frames + 30 {
         exit.write(AppExit::Success);
     }
 }
