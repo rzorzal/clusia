@@ -557,14 +557,17 @@ mod tests {
         );
         assert_eq!(cached.unwrap().cached_at, Some(NOW - 3600));
         let (fresh, news) = fixture::demo_review(NOW);
-        testing::tell(
-            &mut app,
-            Tell::Opened {
+        // Only `pump` (PreUpdate): the screen opens What's new later in the frame.
+        let _ = app
+            .world()
+            .resource::<bridge::Outbox>()
+            .0
+            .send(Tell::Opened {
                 pr: pr(),
                 view: Box::new(fresh.clone()),
                 news: news.clone(),
-            },
-        );
+            });
+        app.world_mut().run_schedule(PreUpdate);
         let tab = testing::tab(&app, &pr());
         assert_eq!(
             tab.phase,

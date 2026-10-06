@@ -3,6 +3,7 @@
 //! orange leaf, and a step not reached (or skipped) is a short dashed stalk.
 
 use bevy::prelude::*;
+use bevy::ui::UiSystems;
 use bevy::window::RequestRedraw;
 
 use crate::theme::Swatch;
@@ -120,11 +121,14 @@ pub struct LeafPlugin;
 
 impl Plugin for LeafPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, grow);
+        // After Update, so a leaf a screen spawns is seen in the frame that spawns it.
+        app.add_systems(PostUpdate, grow.before(UiSystems::Layout));
     }
 }
 
-/// Grows stalks with an ease-out; asks for redraws only while one is still growing.
+/// Grows stalks with an ease-out; asks for redraws only while one is still growing. A new
+/// stalk does not move in its first frame (whose delta may hold seconds of idle time under
+/// `desktop_app`): it asks for the next frame and starts from there.
 fn grow(
     time: Res<Time>,
     mut stalks: Query<(&mut Stalk, &mut Node)>,
@@ -133,6 +137,10 @@ fn grow(
     let mut moving = false;
     for (mut stalk, mut node) in &mut stalks {
         if stalk.progress >= 1.0 {
+            continue;
+        }
+        if stalk.is_added() {
+            moving = true;
             continue;
         }
         stalk.progress = (stalk.progress + time.delta_secs() / GROW_SECS).min(1.0);
@@ -195,6 +203,28 @@ mod tests {
     }
 
     #[test]
+    fn a_leaf_spawned_by_a_screen_starts_from_zero_after_a_long_idle() {
+        let mut app = testing::app(Snapshot::default());
+        // Under `desktop_app` the frame that spawns a leaf can follow seconds of idle time:
+        // `Time` hands it up to 250 ms.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            250,
+        )));
+        app.add_systems(Update, |mut commands: Commands, mut done: Local<bool>| {
+            if !*done {
+                commands.spawn(leaf(LeafState::Growing));
+                *done = true;
+            }
+        });
+        redraws(&mut app);
+        app.update();
+        let mut q = app.world_mut().query::<(&Stalk, &Node)>();
+        let (stalk, node) = q.single(app.world()).expect("one stalk");
+        assert_eq!((stalk.progress, node.height), (0.0, px(0)), "no jump");
+        assert!(redraws(&mut app) > 0, "the next frame is asked for at once");
+    }
+
+    #[test]
     fn growing_animates_then_stops_redrawing() {
         let mut app = testing::app(Snapshot::default());
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
@@ -209,6 +239,9 @@ mod tests {
             Val::Px(h) => h,
             other => panic!("{other:?}"),
         };
+        assert_eq!(height(&app), 0.0, "the first frame only asks for the next");
+        assert!(redraws(&mut app) > 0);
+        app.update();
         let first = height(&app);
         assert!(first > 0.0 && first < 40.0, "{first}");
         assert!(

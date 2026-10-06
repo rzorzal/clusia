@@ -8,7 +8,9 @@ use crate::nav::NavSystems;
 use crate::review_state::open_new_tabs;
 
 pub mod editor;
+pub mod loading;
 pub mod shell;
+pub mod whats_new;
 
 pub use shell::ModalFor;
 
@@ -22,6 +24,11 @@ pub struct ReviewPlugin;
 impl Plugin for ReviewPlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(Update, ReviewSystems.after(NavSystems).after(open_new_tabs))
-            .add_plugins((shell::ShellPlugin, editor::EditorPlugin));
+            .add_plugins((
+                shell::ShellPlugin,
+                editor::EditorPlugin,
+                loading::LoadingPlugin,
+                whats_new::WhatsNewPlugin,
+            ));
     }
 }
