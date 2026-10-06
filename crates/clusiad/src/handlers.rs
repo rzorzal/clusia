@@ -12,6 +12,7 @@ use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
 use crate::activity;
 use crate::giphy;
+use crate::media;
 use crate::news;
 use crate::publish;
 use crate::reviews;
@@ -106,8 +107,8 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::OpenInEditor { path, line } => open_in_editor(shared, &path, line).await,
         Command::GetActivity => activity::summary(shared).await,
         Command::GiphyKeyStatus => giphy::key_status(shared),
-        Command::FetchMedia { .. }
-        | Command::SearchGifs { .. }
+        Command::FetchMedia { url } => media::fetch(shared, &url).await,
+        Command::SearchGifs { .. }
         | Command::SetGiphyKey { .. }
         | Command::ClearGiphyKey
         | Command::FirstRunStatus => Outcome::Err(ProtocolError::new(

@@ -71,6 +71,12 @@ impl Paths {
             .join(format!("{}.json", pr.file_key()))
     }
 
+    /// Images and GIFs downloaded for comments, named by `media::cache_key`. Only the daemon
+    /// writes here.
+    pub fn media_dir(&self) -> PathBuf {
+        self.root.join("cache/media")
+    }
+
     pub fn activity_file(&self) -> PathBuf {
         self.root.join("activity.jsonl")
     }
@@ -110,6 +116,12 @@ mod tests {
     fn app_lock_lives_in_the_root() {
         let p = Paths::new("/tmp/clusia-home");
         assert_eq!(p.app_lock(), PathBuf::from("/tmp/clusia-home/app.lock"));
+    }
+
+    #[test]
+    fn media_lives_under_cache() {
+        let p = Paths::new("/tmp/c");
+        assert_eq!(p.media_dir(), PathBuf::from("/tmp/c/cache/media"));
     }
 
     #[test]

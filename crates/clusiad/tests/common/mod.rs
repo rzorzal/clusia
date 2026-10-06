@@ -23,6 +23,8 @@ pub fn test_options() -> DaemonOptions {
         background_sync: false,
         tray_program: None,
         spawner: Arc::new(clusiad::RecordingSpawner::default()),
+        media_extra_hosts: Vec::new(),
+        media_allow_local: false,
     }
 }
 

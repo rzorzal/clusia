@@ -4,6 +4,7 @@ mod activity;
 mod connection;
 mod giphy;
 mod handlers;
+mod media;
 mod news;
 mod options;
 mod publish;

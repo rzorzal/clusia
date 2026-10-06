@@ -115,6 +115,8 @@ mod tests {
             background_sync: false,
             tray_program: None,
             spawner: Arc::new(crate::spawner::RecordingSpawner::default()),
+            media_extra_hosts: Vec::new(),
+            media_allow_local: false,
         };
         let shared = Shared::new(Paths::new(dir.path()), Config::default(), options);
         (dir, shared)

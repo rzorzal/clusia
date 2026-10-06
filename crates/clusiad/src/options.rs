@@ -22,6 +22,12 @@ pub struct DaemonOptions {
     pub tray_program: Option<PathBuf>,
     /// Starts the editor for `OpenInEditor`.
     pub spawner: Arc<dyn Spawner>,
+    /// Exact host names media may also be fetched from, over plain http (tests point it at a
+    /// local server; production leaves it empty).
+    pub media_extra_hosts: Vec<String>,
+    /// Lets fetches of images from other sites reach plain-http and local addresses, which they
+    /// never may in production. Tests set it to use a local server.
+    pub media_allow_local: bool,
 }
 
 impl DaemonOptions {
@@ -43,6 +49,8 @@ impl DaemonOptions {
             background_sync: true,
             tray_program: tray_program_from(var("CLUSIA_TRAY_BIN"), std::env::current_exe().ok()),
             spawner: Arc::new(ProcessSpawner),
+            media_extra_hosts: Vec::new(),
+            media_allow_local: false,
         }
     }
 }

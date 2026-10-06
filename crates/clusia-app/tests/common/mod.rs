@@ -40,6 +40,8 @@ impl Daemon {
             background_sync: false,
             tray_program: None,
             spawner: Arc::new(RecordingSpawner::default()),
+            media_extra_hosts: Vec::new(),
+            media_allow_local: false,
         };
         let daemon = clusiad::Daemon::bind_with(paths.clone(), options)
             .await

@@ -38,6 +38,8 @@ pub(crate) struct Shared {
     pub background_sync: bool,
     pub tray_program: Option<PathBuf>,
     pub spawner: Arc<dyn Spawner>,
+    pub media_extra_hosts: Vec<String>,
+    pub media_allow_local: bool,
     /// Connections subscribed to the `window` topic (open windows).
     pub window_listeners: AtomicUsize,
     pub prs: RwLock<PrLists>,
@@ -80,6 +82,8 @@ impl Shared {
             background_sync: options.background_sync,
             tray_program: options.tray_program,
             spawner: options.spawner,
+            media_extra_hosts: options.media_extra_hosts,
+            media_allow_local: options.media_allow_local,
             window_listeners: AtomicUsize::new(0),
             prs: RwLock::new(PrLists::default()),
             sync: RwLock::new(SyncStatus::default()),

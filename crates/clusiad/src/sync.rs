@@ -307,6 +307,8 @@ mod tests {
             background_sync: true,
             tray_program: None,
             spawner: Arc::new(crate::spawner::RecordingSpawner::default()),
+            media_extra_hosts: Vec::new(),
+            media_allow_local: false,
         };
         let shared = Arc::new(Shared::new(
             clusia_core::Paths::new(dir.path()),
