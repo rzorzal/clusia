@@ -5,6 +5,7 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowTheme, WindowThemeChanged};
 use clusia_core::Density;
 use clusia_core::config::Theme as ThemeChoice;
+use clusia_highlight::Class;
 
 use crate::bridge::Model;
 
@@ -27,6 +28,15 @@ pub enum Swatch {
     GreenSoft,
     /// A softer added-line tint (diff and code previews).
     AddedBg,
+    /// The removed-line tint.
+    RemovedBg,
+    /// The changed part of a paired line (Split view).
+    AddedStrong,
+    RemovedStrong,
+    /// The dimmed layer behind a modal.
+    Scrim,
+    /// Syntax highlighting.
+    Code(Class),
     Orange,
     OrangeSoft,
     Hover,
@@ -56,6 +66,12 @@ pub struct Tokens {
     pub on_green: Color,
     pub green_soft: Color,
     pub added_bg: Color,
+    pub removed_bg: Color,
+    pub added_strong: Color,
+    pub removed_strong: Color,
+    pub scrim: Color,
+    /// Syntax colors, indexed by `Class::index` (the order of `Class::ALL`).
+    pub code: [Color; 14],
     pub orange: Color,
     pub orange_soft: Color,
     pub hover: Color,
@@ -81,6 +97,11 @@ impl Tokens {
             Swatch::OnGreen => self.on_green,
             Swatch::GreenSoft => self.green_soft,
             Swatch::AddedBg => self.added_bg,
+            Swatch::RemovedBg => self.removed_bg,
+            Swatch::AddedStrong => self.added_strong,
+            Swatch::RemovedStrong => self.removed_strong,
+            Swatch::Scrim => self.scrim,
+            Swatch::Code(class) => self.code[class.index()],
             Swatch::Orange => self.orange,
             Swatch::OrangeSoft => self.orange_soft,
             Swatch::Hover => self.hover,
@@ -126,6 +147,26 @@ pub const LIGHT: Tokens = Tokens {
     on_green: Color::srgb_u8(0xFF, 0xFF, 0xFF),
     green_soft: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x24),
     added_bg: Color::srgb_u8(0xE9, 0xF6, 0xEB),
+    removed_bg: Color::srgb_u8(0xFC, 0xEE, 0xE8),
+    added_strong: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x42),
+    removed_strong: Color::srgba_u8(0xD9, 0x57, 0x2B, 0x42),
+    scrim: Color::srgba_u8(0xF6, 0xF7, 0xF5, 0x8C),
+    code: [
+        Color::srgb_u8(0x7C, 0x3A, 0xAD), // keyword
+        Color::srgb_u8(0x0A, 0x6E, 0x5C), // string
+        Color::srgb_u8(0x8A, 0x93, 0x8C), // comment
+        Color::srgb_u8(0x9A, 0x5B, 0x00), // type
+        Color::srgb_u8(0x26, 0x59, 0xB8), // function
+        Color::srgb_u8(0xB0, 0x50, 0x1F), // number
+        Color::srgb_u8(0xB0, 0x50, 0x1F), // constant
+        Color::srgb_u8(0x5D, 0x66, 0x5F), // operator
+        Color::srgb_u8(0x5D, 0x66, 0x5F), // punctuation
+        Color::srgb_u8(0x1F, 0x6F, 0x8B), // property
+        Color::srgb_u8(0x26, 0x59, 0xB8), // tag
+        Color::srgb_u8(0x9A, 0x5B, 0x00), // attribute
+        Color::srgb_u8(0x1B, 0x1F, 0x1C), // variable
+        Color::srgb_u8(0x1B, 0x1F, 0x1C), // plain
+    ],
     orange: Color::srgb_u8(0xD9, 0x57, 0x2B),
     orange_soft: Color::srgba_u8(0xD9, 0x57, 0x2B, 0x1F),
     hover: Color::srgb_u8(0xF1, 0xF4, 0xF1),
@@ -154,6 +195,26 @@ pub const DARK: Tokens = Tokens {
     on_green: Color::srgb_u8(0x0C, 0x1A, 0x0F),
     green_soft: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x29),
     added_bg: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x1F),
+    removed_bg: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x1F),
+    added_strong: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x61),
+    removed_strong: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x61),
+    scrim: Color::srgba_u8(0x08, 0x0A, 0x09, 0x99),
+    code: [
+        Color::srgb_u8(0xC7, 0x92, 0xEA), // keyword
+        Color::srgb_u8(0x7F, 0xD1, 0xAE), // string
+        Color::srgb_u8(0x6B, 0x74, 0x6D), // comment
+        Color::srgb_u8(0xE5, 0xB5, 0x67), // type
+        Color::srgb_u8(0x82, 0xAA, 0xFF), // function
+        Color::srgb_u8(0xF2, 0xA2, 0x72), // number
+        Color::srgb_u8(0xF2, 0xA2, 0x72), // constant
+        Color::srgb_u8(0x9A, 0xA4, 0x9C), // operator
+        Color::srgb_u8(0x9A, 0xA4, 0x9C), // punctuation
+        Color::srgb_u8(0x7F, 0xC8, 0xDB), // property
+        Color::srgb_u8(0x82, 0xAA, 0xFF), // tag
+        Color::srgb_u8(0xE5, 0xB5, 0x67), // attribute
+        Color::srgb_u8(0xE9, 0xEC, 0xE9), // variable
+        Color::srgb_u8(0xE9, 0xEC, 0xE9), // plain
+    ],
     orange: Color::srgb_u8(0xF0, 0x7A, 0x4A),
     orange_soft: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x29),
     hover: Color::srgb_u8(0x22, 0x27, 0x24),
@@ -307,5 +368,50 @@ mod tests {
         assert_eq!(t.tokens, DARK);
         assert_eq!(t.code_size, 16.0);
         assert_eq!(Theme::new(false, 13, Density::Comfortable).tokens, LIGHT);
+    }
+
+    #[test]
+    fn diff_and_modal_tokens_match_the_mockups() {
+        assert_eq!(
+            LIGHT.get(Swatch::RemovedBg),
+            Color::srgb_u8(0xFC, 0xEE, 0xE8)
+        );
+        assert_eq!(DARK.removed_bg, Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x1F));
+        assert_eq!(
+            LIGHT.get(Swatch::AddedStrong),
+            Color::srgba_u8(0x2F, 0x9E, 0x44, 0x42)
+        );
+        assert_eq!(
+            DARK.get(Swatch::RemovedStrong),
+            Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x61)
+        );
+        assert_eq!(
+            LIGHT.get(Swatch::Scrim),
+            Color::srgba_u8(0xF6, 0xF7, 0xF5, 0x8C)
+        );
+        assert_eq!(
+            DARK.get(Swatch::Scrim),
+            Color::srgba_u8(0x08, 0x0A, 0x09, 0x99)
+        );
+    }
+
+    #[test]
+    fn syntax_colors_cover_every_class() {
+        for tokens in [LIGHT, DARK] {
+            assert_eq!(tokens.get(Swatch::Code(Class::Plain)), tokens.fg);
+            assert_eq!(tokens.get(Swatch::Code(Class::Comment)), tokens.faint);
+            for class in Class::ALL {
+                assert_ne!(tokens.get(Swatch::Code(class)), tokens.surface, "{class:?}");
+            }
+        }
+        assert_eq!(
+            LIGHT.get(Swatch::Code(Class::String)),
+            Color::srgb_u8(0x0A, 0x6E, 0x5C),
+            "the table follows Class::ALL"
+        );
+        assert_eq!(
+            DARK.get(Swatch::Code(Class::Keyword)),
+            Color::srgb_u8(0xC7, 0x92, 0xEA)
+        );
     }
 }

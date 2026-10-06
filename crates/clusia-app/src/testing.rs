@@ -1,9 +1,11 @@
 //! A headless app for unit tests: MinimalPlugins, no window, no GPU, no daemon. Asks are
 //! recorded in `Asks::recorded`. Each task that adds a logic plugin registers it in `app`.
 
+use bevy::clipboard::Clipboard;
 use bevy::input::ButtonInput;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
+use bevy::text::{EditableText, FontCx, LayoutCx, TextEdit};
 use bevy::ui_widgets::Activate;
 use bevy::window::{RequestRedraw, WindowThemeChanged};
 use clusia_core::{Density, Paths};
@@ -83,6 +85,19 @@ pub fn set_config_locally(app: &mut App, key: &str, value: &str) {
     let mut model = app.world_mut().resource_mut::<Model>();
     snapshot::apply_config_locally(&mut model.snapshot.config, key, value).unwrap();
     app.update();
+}
+
+/// Types `text` into the `EditableText` on `entity` at its cursor, as a keyboard would.
+pub fn type_into(app: &mut App, entity: Entity, text: &str) {
+    let mut editable = app
+        .world_mut()
+        .get_mut::<EditableText>(entity)
+        .expect("an editable text");
+    editable.queue_edit(TextEdit::Insert(text.into()));
+    let mut fonts = FontCx::default();
+    let mut layout = LayoutCx::default();
+    let mut clipboard = Clipboard::default();
+    editable.apply_pending_edits(&mut fonts, &mut layout.0, &mut clipboard, |_| true);
 }
 
 /// Runs frames until rebuilt screens have settled.

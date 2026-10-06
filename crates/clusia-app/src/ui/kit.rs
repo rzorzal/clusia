@@ -7,8 +7,9 @@ use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::input_focus::{FocusLost, InputFocus};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::text::{EditableText, FontSource, TextCursorStyle};
+use bevy::text::{EditableText, FontSource, TextBackgroundColor, TextCursorStyle};
 use bevy::ui_widgets::Button as WidgetButton;
+use bevy::window::{CursorIcon, PrimaryWindow, SystemCursorIcon};
 
 use crate::fonts::UiFonts;
 use crate::theme::{Swatch, Theme};
@@ -21,6 +22,14 @@ pub struct Ink(pub Swatch);
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stroke(pub Swatch);
+
+/// The background behind a run of text (a `TextSpan`'s highlight).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mark(pub Swatch);
+
+/// Shows the pointing-hand cursor while hovered (needs `Hovered`).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Clickable;
 
 /// Background while hovered (the `Fill` applies otherwise).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,7 +194,7 @@ pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
             flex_shrink: 0.0,
             ..default()
         },
-        WidgetButton,
+        (WidgetButton, Clickable),
         Hovered::default(),
         TabIndex(0),
         BackgroundColor::default(),
@@ -194,6 +203,32 @@ pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
         BorderColor::default(),
         Stroke(stroke),
         children![text(fonts, label.to_string(), Type::STRONG.ink(ink))],
+    )
+}
+
+/// A button that cannot be used right now: same size, faint, no `Activate`.
+pub fn disabled_button(fonts: &UiFonts, label: &str) -> impl Bundle {
+    (
+        Node {
+            height: px(30),
+            padding: UiRect::horizontal(px(12)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            align_self: AlignSelf::Start,
+            border: px(1).all(),
+            border_radius: BorderRadius::all(px(6)),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor::default(),
+        Fill(Swatch::Chrome),
+        BorderColor::default(),
+        Stroke(Swatch::Line),
+        children![text(
+            fonts,
+            label.to_string(),
+            Type::STRONG.ink(Swatch::Faint)
+        )],
     )
 }
 
@@ -220,7 +255,7 @@ pub fn segment(fonts: &UiFonts, label: &str, on: bool) -> impl Bundle {
             border_radius: BorderRadius::all(px(6)),
             ..default()
         },
-        WidgetButton,
+        (WidgetButton, Clickable),
         Hovered::default(),
         TabIndex(0),
         BackgroundColor::default(),
@@ -250,7 +285,7 @@ pub fn toggle(on: bool) -> impl Bundle {
             flex_shrink: 0.0,
             ..default()
         },
-        WidgetButton,
+        (WidgetButton, Clickable),
         Hovered::default(),
         TabIndex(0),
         BackgroundColor::default(),
@@ -291,13 +326,94 @@ pub fn chip(fonts: &UiFonts, label: &str, selected: bool) -> impl Bundle {
             flex_shrink: 0.0,
             ..default()
         },
-        WidgetButton,
+        (WidgetButton, Clickable),
         Hovered::default(),
         TabIndex(0),
         BackgroundColor::default(),
         Fill(fill),
         HoverFill(hover),
         children![text(fonts, label.to_string(), t)],
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tone {
+    Green,
+    Orange,
+    Neutral,
+}
+
+impl Tone {
+    /// (background, ink)
+    pub fn swatches(self) -> (Swatch, Swatch) {
+        match self {
+            Tone::Green => (Swatch::GreenSoft, Swatch::Green),
+            Tone::Orange => (Swatch::OrangeSoft, Swatch::Orange),
+            Tone::Neutral => (Swatch::Chrome, Swatch::Muted),
+        }
+    }
+}
+
+/// A small label pill: "moved from 81", "obsolete", "Draft", "not set up".
+pub fn badge(fonts: &UiFonts, label: &str, tone: Tone) -> impl Bundle {
+    let (fill, ink) = tone.swatches();
+    (
+        Node {
+            height: px(18),
+            padding: UiRect::horizontal(px(6)),
+            align_items: AlignItems::Center,
+            border_radius: BorderRadius::all(px(4)),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor::default(),
+        Fill(fill),
+        children![text(
+            fonts,
+            label.to_string(),
+            Type {
+                size: 11.0,
+                weight: 600,
+                ink,
+                mono: false,
+            }
+        )],
+    )
+}
+
+/// The first letter of `login`, upper case (`?` when empty).
+pub fn initial(login: &str) -> String {
+    login
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_else(|| "?".into())
+}
+
+/// A 22 px circle with the person's initial.
+pub fn avatar(fonts: &UiFonts, login: &str) -> impl Bundle {
+    (
+        Node {
+            width: px(22),
+            height: px(22),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            border_radius: BorderRadius::MAX,
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor::default(),
+        Fill(Swatch::Chrome),
+        children![text(
+            fonts,
+            initial(login),
+            Type {
+                size: 11.0,
+                weight: 600,
+                ink: Swatch::Muted,
+                mono: false,
+            }
+        )],
     )
 }
 
@@ -363,10 +479,14 @@ pub struct KitPlugin;
 
 impl Plugin for KitPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<FieldCommitted>()
-            .add_observer(commit_on_blur)
-            .add_systems(Update, commit_on_enter)
-            .add_systems(PostUpdate, (restyle, hover).chain());
+        app.add_plugins((
+            crate::ui::text_area::TextAreaPlugin,
+            crate::ui::leaf::LeafPlugin,
+        ))
+        .add_message::<FieldCommitted>()
+        .add_observer(commit_on_blur)
+        .add_systems(Update, (commit_on_enter, pointer_cursor))
+        .add_systems(PostUpdate, (restyle, hover).chain());
     }
 }
 
@@ -402,14 +522,40 @@ fn commit_on_blur(
     }
 }
 
+/// The pointing hand while any `Clickable` is hovered. Writes the window's cursor only when it
+/// changes; does nothing without a primary window (headless tests).
+fn pointer_cursor(
+    mut commands: Commands,
+    hovered: Query<&Hovered, With<Clickable>>,
+    window: Query<(Entity, Option<&CursorIcon>), With<PrimaryWindow>>,
+) {
+    let Ok((window, current)) = window.single() else {
+        return;
+    };
+    let want: CursorIcon = if hovered.iter().any(|h| h.get()) {
+        SystemCursorIcon::Pointer.into()
+    } else {
+        SystemCursorIcon::Default.into()
+    };
+    if current != Some(&want) {
+        commands.entity(window).insert(want);
+    }
+}
+
 /// Resolves swatches: everything on a theme change, otherwise only new or changed markers.
 fn restyle(
     theme: Res<Theme>,
     mut fills: Query<(Ref<Fill>, &mut BackgroundColor)>,
     mut inks: Query<(Ref<Ink>, &mut TextColor)>,
     mut strokes: Query<(Ref<Stroke>, &mut BorderColor)>,
+    mut marks: Query<(Ref<Mark>, &mut TextBackgroundColor)>,
 ) {
     let all = theme.is_changed();
+    for (mark, mut color) in &mut marks {
+        if all || mark.is_changed() {
+            color.0 = theme.tokens.get(mark.0);
+        }
+    }
     for (fill, mut color) in &mut fills {
         if all || fill.is_changed() {
             color.0 = theme.tokens.get(fill.0);
@@ -544,5 +690,69 @@ mod tests {
         assert!(w.get::<WidgetButton>(on).is_some());
         assert_eq!(w.get::<BackgroundColor>(on).unwrap().0, LIGHT.green);
         assert_eq!(w.get::<BackgroundColor>(seg).unwrap().0, LIGHT.raised);
+    }
+
+    #[test]
+    fn badges_and_avatars() {
+        let mut app = testing::app(Snapshot::default());
+        let fonts = UiFonts::default();
+        let moved = app
+            .world_mut()
+            .spawn(badge(&fonts, "moved from 81", Tone::Green))
+            .id();
+        let obsolete = app
+            .world_mut()
+            .spawn(badge(&fonts, "obsolete", Tone::Orange))
+            .id();
+        let face = app.world_mut().spawn(avatar(&fonts, "mona")).id();
+        app.update();
+        assert_eq!(bg(&mut app, moved), LIGHT.green_soft);
+        assert_eq!(bg(&mut app, obsolete), LIGHT.orange_soft);
+        let label = app.world().get::<Children>(obsolete).unwrap()[0];
+        assert_eq!(app.world().get::<Text>(label).unwrap().0, "obsolete");
+        assert_eq!(app.world().get::<TextColor>(label).unwrap().0, LIGHT.orange);
+        let letter = app.world().get::<Children>(face).unwrap()[0];
+        assert_eq!(app.world().get::<Text>(letter).unwrap().0, "M");
+        assert_eq!(app.world().get::<Node>(face).unwrap().width, px(22));
+        assert_eq!(initial("@octo"), "O");
+        assert_eq!(initial(""), "?");
+        assert_eq!(initial("élan"), "É");
+    }
+
+    #[test]
+    fn hovering_a_clickable_shows_the_pointer() {
+        let mut app = testing::app(Snapshot::default());
+        let fonts = UiFonts::default();
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        let b = app
+            .world_mut()
+            .spawn(button(&fonts, "Reply", Variant::Ghost))
+            .id();
+        app.update();
+        let cursor = |app: &App| app.world().get::<CursorIcon>(window).cloned();
+        assert_eq!(cursor(&app), Some(SystemCursorIcon::Default.into()));
+        app.world_mut().entity_mut(b).insert(Hovered(true));
+        app.update();
+        assert_eq!(cursor(&app), Some(SystemCursorIcon::Pointer.into()));
+        app.world_mut().entity_mut(b).insert(Hovered(false));
+        app.update();
+        assert_eq!(cursor(&app), Some(SystemCursorIcon::Default.into()));
+    }
+
+    #[test]
+    fn disabled_buttons_cannot_be_activated() {
+        let mut app = testing::app(Snapshot::default());
+        let fonts = UiFonts::default();
+        let off = app
+            .world_mut()
+            .spawn(disabled_button(&fonts, "Publish to GitHub"))
+            .id();
+        app.update();
+        assert!(app.world().get::<WidgetButton>(off).is_none());
+        assert!(app.world().get::<Clickable>(off).is_none());
+        assert_eq!(bg(&mut app, off), LIGHT.chrome);
     }
 }

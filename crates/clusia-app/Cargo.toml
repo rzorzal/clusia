@@ -11,6 +11,7 @@ license.workspace = true
 clusia-core.workspace = true
 clusia-protocol.workspace = true
 clusia-view.workspace = true
+clusia-highlight.workspace = true
 bevy.workspace = true
 crossbeam-channel.workspace = true
 tokio.workspace = true
