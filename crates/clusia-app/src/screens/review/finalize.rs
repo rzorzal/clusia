@@ -1382,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn item_and_summary_texts_grow_from_their_first_line() {
+    fn item_and_summary_areas_grow() {
         let mut app = finalize_app(false);
         let item = testing::find::<FinalizeItemArea>(&mut app, |a| a.index == 0);
         let summary = testing::find::<SummaryArea>(&mut app, |_| true);

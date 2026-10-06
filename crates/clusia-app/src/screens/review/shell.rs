@@ -157,14 +157,14 @@ pub struct DraftCardButton {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeButton(pub PrRef);
 
-/// **Remove** on a draft card (the only way out for an obsolete item outside the diff).
+/// The remove × on a draft card (the only way out for an obsolete item outside the diff).
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct DraftCardRemove {
     pub pr: PrRef,
     pub id: String,
 }
 
-/// A draft card's location and badge: they shrink and are cut so **Remove** stays in the card.
+/// A draft card's location and badge: they shrink and are cut so the remove × stays in the card.
 #[derive(Component, Debug)]
 pub struct DraftCardPlace;
 
@@ -999,7 +999,8 @@ fn right_region(
                 Node {
                     flex_direction: FlexDirection::Column,
                     flex_grow: 1.0,
-                    min_height: px(0),
+                    // About one card, so a short window still shows (and scrolls) the list.
+                    min_height: px(96),
                     row_gap: px(8),
                     padding: UiRect::bottom(px(16)),
                     overflow: Overflow::scroll_y(),
@@ -1090,15 +1091,23 @@ fn draft_card_node(
                 }
             });
             if !read_only {
-                // A button inside the card's button: its click stops here.
+                // A button inside the card's button: its click stops here. A compact × so the
+                // location and the whole badge fit at the panel width.
                 h.spawn((
-                    button(fonts, "Remove", Variant::Ghost),
+                    button(fonts, "×", Variant::Ghost),
                     DraftCardRemove {
                         pr: pr.clone(),
                         id: card.id.clone(),
                     },
                     observe(on_card_remove),
-                ));
+                ))
+                .entry::<Node>()
+                .and_modify(|mut node| {
+                    node.width = px(24);
+                    node.height = px(24);
+                    node.padding = UiRect::ZERO;
+                    node.align_self = AlignSelf::Center;
+                });
             }
         });
         if !card.body.is_empty() {
@@ -1864,7 +1873,16 @@ mod tests {
         let mut app = testing::app(fixture::demo(NOW));
         testing::open_ready(&mut app, false);
         let remove = testing::find::<DraftCardRemove>(&mut app, |_| true);
-        assert_eq!(node(&app, remove).flex_shrink, 0.0, "Remove keeps its size");
+        let n = node(&app, remove);
+        assert_eq!(n.flex_shrink, 0.0, "Remove keeps its size");
+        assert_eq!((n.width, n.height), (px(24), px(24)), "a compact ×");
+        assert!(app.world().get::<Clickable>(remove).is_some());
+        let mut labels = app.world_mut().query::<(&Text, &ChildOf)>();
+        let label = labels
+            .iter(app.world())
+            .find(|(_, parent)| parent.parent() == remove)
+            .map(|(t, _)| t.0.clone());
+        assert_eq!(label.as_deref(), Some("×"));
         let place = testing::find::<DraftCardPlace>(&mut app, |_| true);
         let n = node(&app, place);
         assert_eq!(n.min_width, px(0), "the place may shrink below its text");
@@ -1887,11 +1905,8 @@ mod tests {
         assert!(app.world().get::<ScrollArea>(list).is_some());
         let n = node(&app, list);
         assert_eq!(n.overflow, Overflow::scroll_y());
-        assert_eq!(
-            (n.flex_grow, n.min_height),
-            (1.0, px(0)),
-            "bounded by the panel"
-        );
+        assert_eq!(n.flex_grow, 1.0, "bounded by the panel");
+        assert_eq!(n.min_height, px(96), "but never shorter than a card");
         let card = testing::find::<DraftCardButton>(&mut app, |_| true);
         assert_eq!(app.world().get::<ChildOf>(card).unwrap().parent(), list);
         assert_eq!(node(&app, card).flex_shrink, 0.0, "cards keep their height");

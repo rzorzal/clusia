@@ -174,8 +174,9 @@ fn palette_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, query: &str) {
         Stroke(Swatch::Line),
     ))
     .with_children(|row| {
+        // The field's width is replaced below: it takes what the hint leaves.
         row.spawn((
-            text_field(fonts, query, 380.0, false),
+            text_field(fonts, query, 0.0, false),
             PaletteField,
             AutoFocus,
         ))
