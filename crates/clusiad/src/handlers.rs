@@ -11,6 +11,7 @@ use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
 use crate::activity;
+use crate::first_run;
 use crate::giphy;
 use crate::media;
 use crate::news;
@@ -111,10 +112,7 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::SearchGifs { query, offset } => giphy::search(shared, &query, offset).await,
         Command::SetGiphyKey { key } => giphy::set_key(shared, key.expose()).await,
         Command::ClearGiphyKey => giphy::clear_key(shared).await,
-        Command::FirstRunStatus => Outcome::Err(ProtocolError::new(
-            ErrorCode::BadRequest,
-            "this daemon does not support that yet",
-        )),
+        Command::FirstRunStatus => Outcome::Ok(Reply::FirstRun(first_run::status(shared).await)),
     }
 }
 

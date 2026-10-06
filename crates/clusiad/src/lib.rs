@@ -2,6 +2,7 @@
 
 mod activity;
 mod connection;
+mod first_run;
 mod giphy;
 mod handlers;
 mod media;

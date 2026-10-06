@@ -41,6 +41,7 @@ pub(crate) struct Shared {
     pub media_extra_hosts: Vec<String>,
     pub media_allow_local: bool,
     pub giphy_api: String,
+    pub harness_search_paths: Vec<PathBuf>,
     /// Connections subscribed to the `window` topic (open windows).
     pub window_listeners: AtomicUsize,
     pub prs: RwLock<PrLists>,
@@ -88,6 +89,7 @@ impl Shared {
             giphy_api: options
                 .giphy_api
                 .unwrap_or_else(|| "https://api.giphy.com".to_string()),
+            harness_search_paths: options.harness_search_paths,
             window_listeners: AtomicUsize::new(0),
             prs: RwLock::new(PrLists::default()),
             sync: RwLock::new(SyncStatus::default()),

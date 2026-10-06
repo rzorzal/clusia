@@ -30,6 +30,9 @@ pub struct DaemonOptions {
     pub media_allow_local: bool,
     /// Giphy API base URL override. Env: `CLUSIA_GIPHY_API`.
     pub giphy_api: Option<String>,
+    /// Folders searched, in order, for the `claude` and `codex` commands. A window started from
+    /// the Dock has a bare `PATH`, so `from_env` adds the usual install folders after it.
+    pub harness_search_paths: Vec<PathBuf>,
 }
 
 impl DaemonOptions {
@@ -54,6 +57,10 @@ impl DaemonOptions {
             media_extra_hosts: Vec::new(),
             media_allow_local: false,
             giphy_api: var("CLUSIA_GIPHY_API"),
+            harness_search_paths: harness_dirs(
+                std::env::var_os("PATH"),
+                std::env::var_os("HOME").map(PathBuf::from),
+            ),
         }
     }
 }
@@ -70,9 +77,51 @@ pub fn tray_program_from(env: Option<String>, exe: Option<PathBuf>) -> Option<Pa
     }
 }
 
+/// The `PATH` folders, then the folders agent tools are usually installed in.
+pub fn harness_dirs(path: Option<std::ffi::OsString>, home: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = path
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let usual = [
+        home.as_ref().map(|h| h.join(".local/bin")),
+        home.as_ref().map(|h| h.join(".claude/local")),
+        Some(PathBuf::from("/opt/homebrew/bin")),
+        Some(PathBuf::from("/usr/local/bin")),
+    ];
+    for dir in usual.into_iter().flatten() {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_dirs_follow_path_then_the_usual_folders() {
+        let dirs = harness_dirs(
+            Some("/usr/bin:/opt/homebrew/bin".into()),
+            Some(PathBuf::from("/Users/me")),
+        );
+        assert_eq!(
+            dirs,
+            [
+                "/usr/bin",
+                "/opt/homebrew/bin",
+                "/Users/me/.local/bin",
+                "/Users/me/.claude/local",
+                "/usr/local/bin"
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(
+            harness_dirs(None, None),
+            ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from)
+        );
+    }
 
     #[test]
     fn tray_program_resolution() {

@@ -88,7 +88,7 @@ fn item_from(v: &Value) -> Option<GifItem> {
 /// The page a Giphy answer describes. Entries without both renditions are left out.
 fn page_from(body: &Value, offset: u32) -> Option<GifPage> {
     let data = body.get("data")?.as_array()?;
-    let next = offset + data.len() as u32;
+    let next = offset.saturating_add(data.len() as u32);
     let more = match body
         .pointer("/pagination/total_count")
         .and_then(Value::as_u64)
@@ -168,5 +168,17 @@ pub(crate) async fn search(shared: &Shared, query: &str, offset: u32) -> Outcome
             ErrorCode::Upstream,
             "Giphy sent an answer Clúsia cannot read",
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_at_the_top_of_the_offset_range_does_not_overflow() {
+        let body = serde_json::json!({"data": [{}, {}], "pagination": {"total_count": 10}});
+        let page = page_from(&body, u32::MAX).unwrap();
+        assert_eq!(page.next_offset, None);
     }
 }

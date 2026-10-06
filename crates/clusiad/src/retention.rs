@@ -118,6 +118,7 @@ mod tests {
             media_extra_hosts: Vec::new(),
             media_allow_local: false,
             giphy_api: Some("http://127.0.0.1:9".into()),
+            harness_search_paths: Vec::new(),
         };
         let shared = Shared::new(Paths::new(dir.path()), Config::default(), options);
         (dir, shared)
