@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use clusia_core::Paths;
 use clusia_core::paths::MAX_SOCKET_PATH;
-use clusia_store::load_config;
+use clusia_store::{Loaded, load_config};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::connection;
@@ -102,7 +102,12 @@ impl Daemon {
                 }
             }
         }
-        let config = load_config(&paths)?.into_value();
+        let loaded = load_config(&paths)?;
+        let reset_config = match &loaded {
+            Loaded::Recovered { quarantined, .. } => Some(quarantined.clone()),
+            _ => None,
+        };
+        let config = loaded.into_value();
         if stale {
             fs::remove_file(&socket)?;
             tracing::info!(socket = %socket.display(), "removed stale socket");
@@ -110,10 +115,14 @@ impl Daemon {
         let listener = bind_private(&socket)?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
 
+        let shared = Arc::new(Shared::new(paths, config, options));
+        if let Some(file) = reset_config {
+            crate::notifications::note_recovered(&shared, &file);
+        }
         Ok(Self {
             _lock: lock,
             listener,
-            shared: Arc::new(Shared::new(paths, config, options)),
+            shared,
             socket,
         })
     }
@@ -132,6 +141,7 @@ impl Daemon {
         if self.shared.background_sync {
             tokio::spawn(sync::run_loop(self.shared.clone()));
         }
+        tokio::spawn(crate::notifications::run_checks(self.shared.clone()));
         let tray = self.shared.tray_program.clone().map(|program| {
             tokio::spawn(crate::tray::supervise(
                 program,

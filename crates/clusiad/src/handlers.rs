@@ -4,8 +4,8 @@ use std::sync::atomic::Ordering;
 
 use clusia_core::PrFilter;
 use clusia_protocol::{
-    AuthInfo, Command, DaemonStatus, ErrorCode, Event, Outcome, PermissionStatus, ProtocolError,
-    Reply, TokenSource, topics,
+    AuthInfo, Command, DaemonStatus, ErrorCode, Event, Outcome, ProtocolError, Reply, TokenSource,
+    topics,
 };
 use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
@@ -15,6 +15,7 @@ use crate::first_run;
 use crate::giphy;
 use crate::media;
 use crate::news;
+use crate::notifications;
 use crate::publish;
 use crate::reviews;
 use crate::state::Shared;
@@ -29,7 +30,7 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             uptime_secs: shared.started.elapsed().as_secs(),
             clients: shared.clients.load(Ordering::SeqCst),
             socket: shared.paths.socket().display().to_string(),
-            notifications_permission: PermissionStatus::default(),
+            notifications_permission: notifications::permission(shared),
         })),
         // Shutdown is triggered after the reply is sent; clients hear `Stopping` first.
         Command::Shutdown => {
@@ -56,6 +57,7 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::SyncNow => {
             let status = sync::sync_once(shared).await;
             news::check_saved_reviews(shared).await;
+            notifications::after_sync(shared).await;
             Outcome::Ok(Reply::Sync(status))
         }
         Command::GetSyncStatus => Outcome::Ok(Reply::Sync(shared.sync.read().await.clone())),
@@ -115,11 +117,21 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::ClearGiphyKey => giphy::clear_key(shared).await,
         Command::FirstRunStatus => Outcome::Ok(Reply::FirstRun(first_run::status(shared).await)),
         // Accepted so a newer tray or window can talk to this daemon; nothing acts on them yet.
-        Command::NotificationPermission { .. }
-        | Command::TestNotification
-        | Command::SetStartAtLogin { .. }
-        | Command::MarkInboxSeen { .. } => Outcome::Ok(Reply::Ack),
-        Command::GetInbox => Outcome::Ok(Reply::Inbox(Vec::new())),
+        Command::NotificationPermission { status } => {
+            notifications::set_permission(shared, status);
+            Outcome::Ok(Reply::Ack)
+        }
+        Command::TestNotification => {
+            notifications::send_test(shared).await;
+            Outcome::Ok(Reply::Ack)
+        }
+        // Accepted so a newer tray or window can talk to this daemon; nothing acts on it yet.
+        Command::SetStartAtLogin { .. } => Outcome::Ok(Reply::Ack),
+        Command::GetInbox => Outcome::Ok(Reply::Inbox(notifications::inbox(shared).await)),
+        Command::MarkInboxSeen { ids } => {
+            notifications::mark_seen(shared, &ids).await;
+            Outcome::Ok(Reply::Ack)
+        }
     }
 }
 

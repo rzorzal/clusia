@@ -313,6 +313,7 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             }
         };
         let head_changed = review.head_sha != detail.head_sha;
+        let old_head = review.head_sha.clone();
         let report = relocate::relocate_review(
             &mut review,
             &detail,
@@ -356,6 +357,7 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             },
         );
         announce(shared, &review);
+        crate::notifications::review_outdated(shared, &review, &old_head).await;
     }
 }
 

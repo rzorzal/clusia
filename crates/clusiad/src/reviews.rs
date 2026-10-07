@@ -225,6 +225,7 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         Ok(ReviewLoad::Missing) => None,
         Ok(ReviewLoad::Quarantined { path, .. }) => {
             tracing::warn!(file = %path.display(), "review file was corrupt and has been set aside");
+            crate::notifications::note_recovered(shared, &path);
             None
         }
         Err(e) => {
@@ -360,6 +361,7 @@ pub(crate) fn load_stored(shared: &Shared, pr: &PrRef) -> Result<Option<Review>,
         Ok(ReviewLoad::Missing) => Ok(None),
         Ok(ReviewLoad::Quarantined { path, .. }) => {
             tracing::warn!(file = %path.display(), "review file was corrupt and has been set aside");
+            crate::notifications::note_recovered(shared, &path);
             Ok(None)
         }
         Err(e) => {

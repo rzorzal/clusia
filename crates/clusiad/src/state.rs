@@ -8,10 +8,12 @@ use std::time::Instant;
 
 use clusia_core::{Config, FileDiff, Paths, PrRef, PrSummary};
 use clusia_platform::SecretStore;
-use clusia_protocol::{Event, SyncStatus};
+use clusia_protocol::{Event, PermissionStatus, SyncStatus};
 use clusia_provider::GitHub;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
+use crate::inbox::InboxData;
+use crate::notifications::Engine;
 use crate::options::DaemonOptions;
 use crate::spawner::Spawner;
 
@@ -65,6 +67,14 @@ pub(crate) struct Shared {
     pub sync_lock: Mutex<()>,
     /// Becomes `true` once the first sync has finished (whatever its outcome).
     pub first_sync_done: watch::Sender<bool>,
+    /// The persisted inbox and the routing memory of the notification rules.
+    pub engine: Mutex<Engine>,
+    /// State files set aside since the last sync, as (the file, the name it was moved to).
+    pub recovered: std::sync::Mutex<Vec<(String, String)>>,
+    /// What the tray last reported about macOS notification permission. In memory only.
+    pub permission: std::sync::Mutex<PermissionStatus>,
+    /// Wakes the task that looks at the checks of your pull requests.
+    pub checks_wake: Notify,
 }
 
 impl Shared {
@@ -72,6 +82,18 @@ impl Shared {
         let (events, _) = broadcast::channel(256);
         let (shutdown, _) = watch::channel(false);
         let (first_sync_done, _) = watch::channel(false);
+        let inbox = InboxData::load(&paths);
+        let recovered = inbox
+            .quarantined
+            .iter()
+            .filter_map(|file| file.file_name())
+            .map(|name| {
+                (
+                    "inbox.json".to_string(),
+                    name.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
         Self {
             paths,
             config: RwLock::new(config),
@@ -105,6 +127,10 @@ impl Shared {
             files_cache: Mutex::new(HashMap::new()),
             sync_lock: Mutex::new(()),
             first_sync_done,
+            engine: Mutex::new(Engine::new(inbox.data)),
+            recovered: std::sync::Mutex::new(recovered),
+            permission: std::sync::Mutex::new(PermissionStatus::default()),
+            checks_wake: Notify::new(),
         }
     }
 
