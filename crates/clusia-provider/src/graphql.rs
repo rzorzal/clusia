@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::github::{
     GitHub, MAX_PAGES, ProviderError, PublishedReview, decode, error_message, rate_limit_wait,
+    unauthorized,
 };
 
 /// The GraphQL endpoint next to a REST base: `https://api.github.com` → `…/graphql`,
@@ -233,16 +234,16 @@ impl GitHub {
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
         let status = response.status();
         let headers = response.headers().clone();
-        if status == StatusCode::UNAUTHORIZED {
-            return Err(ProviderError::Unauthorized);
-        }
-        if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
-            return Err(ProviderError::RateLimited { retry_after_secs });
-        }
         let text = response
             .text()
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(unauthorized(&text));
+        }
+        if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
+            return Err(ProviderError::RateLimited { retry_after_secs });
+        }
         let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if !status.is_success() {
             return Err(ProviderError::Http {
@@ -833,5 +834,50 @@ mod tests {
             offline.resolve_thread("PRRT_1").await,
             Err(ProviderError::Offline(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn graphql_writes_map_403_429_and_404() {
+        let server = MockServer::start().await;
+        answer(
+            &server,
+            "resolveReviewThread",
+            ResponseTemplate::new(403)
+                .set_body_json(json!({ "message": "Resource not accessible" })),
+        )
+        .await;
+        answer(
+            &server,
+            "submitPullRequestReview",
+            ResponseTemplate::new(429).insert_header("retry-after", "7"),
+        )
+        .await;
+        answer(
+            &server,
+            "deletePullRequestReview",
+            ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })),
+        )
+        .await;
+        let client = gh(&server);
+        assert_eq!(
+            client.resolve_thread("PRRT_1").await,
+            Err(ProviderError::Http {
+                status: 403,
+                message: "Resource not accessible".into()
+            })
+        );
+        assert_eq!(
+            client.submit_review("PRR_1", "COMMENT", "ok").await,
+            Err(ProviderError::RateLimited {
+                retry_after_secs: 7
+            })
+        );
+        assert_eq!(
+            client.delete_pending_review("PRR_1").await,
+            Err(ProviderError::Http {
+                status: 404,
+                message: "Not Found".into()
+            })
+        );
     }
 }
