@@ -309,6 +309,7 @@ mod tests {
             spawner: Arc::new(crate::spawner::RecordingSpawner::default()),
             media_extra_hosts: Vec::new(),
             media_allow_local: false,
+            media_resolve: Vec::new(),
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
         };

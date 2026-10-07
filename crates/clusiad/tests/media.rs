@@ -364,3 +364,50 @@ async fn external_images_must_be_public_https_on_every_hop() {
     );
     d.stop().await;
 }
+
+async fn set_github_host(c: &mut clusia_protocol::Client, host: &str) {
+    c.request(Command::SetConfigValue {
+        key: "github.host".into(),
+        value: host.into(),
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_enterprise_token_never_goes_to_github_com() {
+    let server = MockServer::start().await;
+    for route in ["/a.png", "/b.png"] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(PNG))
+            .mount(&server)
+            .await;
+    }
+    let mut o = test_options();
+    o.github_token = Some("ghp_test".into());
+    o.media_extra_hosts = vec!["github.com".into()];
+    o.media_resolve = vec![("github.com".into(), *server.address())];
+    let d = TestDaemon::start_with(tempfile::tempdir().unwrap(), o).await;
+    let mut c = d.client().await;
+    let port = server.address().port();
+    set_github_host(&mut c, "ghe.example.com").await;
+    media(
+        c.request(fetch(format!("http://github.com:{port}/a.png")))
+            .await,
+    );
+    set_github_host(&mut c, "github.com").await;
+    media(
+        c.request(fetch(format!("http://github.com:{port}/b.png")))
+            .await,
+    );
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 2);
+    assert_eq!(
+        auth_of(&received[0]),
+        None,
+        "the token belongs to ghe.example.com"
+    );
+    assert_eq!(auth_of(&received[1]).as_deref(), Some("Bearer ghp_test"));
+    d.stop().await;
+}

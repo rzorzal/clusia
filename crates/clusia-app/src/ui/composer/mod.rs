@@ -397,11 +397,7 @@ fn toolbar_row(
                 flex_grow: 1.0,
                 ..default()
             });
-            t.spawn(text(
-                fonts,
-                "Markdown works · paste or drop images",
-                Type::META,
-            ));
+            t.spawn(text(fonts, "Markdown works · images by link", Type::META));
         }
     });
 }

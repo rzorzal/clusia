@@ -3,17 +3,19 @@
 //! Only https, only the hosts `clusia_core::media` allows (or, when the user allows images
 //! from other sites, any public web address), at most five redirects (each hop is
 //! checked again), 10 MiB, and only PNG, GIF or JPEG by magic bytes. The GitHub token goes to
-//! GitHub's own hosts and nowhere else: redirects are followed here, hop by hop, never by the
-//! HTTP client, so a hop to another host starts a request without credentials.
+//! GitHub's own hosts, and only when they belong to the configured GitHub host. Redirects are
+//! followed here, hop by hop, never by the HTTP client, so a hop to another host starts a
+//! request without credentials.
 
 use std::future::Future;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use clusia_core::media::{MAX_MEDIA_BYTES, MediaKind, allowed_host, cache_key, needs_token, sniff};
 use clusia_protocol::{ErrorCode, MediaFile, Outcome, ProtocolError, Reply};
+use clusia_provider::api_base_for_host;
 use clusia_store::atomic::write_atomic;
 use reqwest::{StatusCode, Url, header};
 
@@ -24,17 +26,30 @@ const MAX_REDIRECTS: usize = 5;
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
 const KINDS: [MediaKind; 3] = [MediaKind::Png, MediaKind::Gif, MediaKind::Jpeg];
 
+fn builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(concat!("clusia/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(TOTAL_TIMEOUT)
+}
+
 /// The one HTTP client for media and Giphy: it never follows a redirect by itself.
 pub(crate) fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent(concat!("clusia/", env!("CARGO_PKG_VERSION")))
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(TOTAL_TIMEOUT)
-            .build()
-            .expect("a plain HTTP client builds")
-    })
+    CLIENT.get_or_init(|| builder().build().expect("a plain HTTP client builds"))
+}
+
+/// `http()`, or, when some names are pinned to an address, a client of its own with the same
+/// rules that sends those names there.
+pub(crate) fn client_resolving(pinned: &[(String, SocketAddr)]) -> reqwest::Client {
+    if pinned.is_empty() {
+        return http().clone();
+    }
+    pinned
+        .iter()
+        .fold(builder(), |b, (name, addr)| b.resolve(name, *addr))
+        .build()
+        .expect("a plain HTTP client builds")
 }
 
 fn refused(message: impl Into<String>) -> ProtocolError {
@@ -162,16 +177,22 @@ async fn check_resolved(shared: &Shared, url: &Url) -> Result<(), ProtocolError>
     require_public(host, port, system_resolver).await
 }
 
-/// Whether a request to `host` carries the GitHub token. An overridden GitHub API address
-/// stands in for GitHub itself.
-fn gets_token(shared: &Shared, host: &str) -> bool {
-    needs_token(host)
-        || shared
-            .github_api
-            .as_deref()
-            .and_then(|api| Url::parse(api).ok())
-            .and_then(|api| api.host_str().map(|h| h.eq_ignore_ascii_case(host)))
+/// Whether a request to `host` carries the GitHub token. The token belongs to the configured
+/// GitHub host (`github_host`), so it goes only to that host or its API host, and of those
+/// only to the hosts `needs_token` names; an overridden GitHub API address stands in for
+/// GitHub itself.
+fn gets_token(shared: &Shared, github_host: &str, host: &str) -> bool {
+    let is = |url: &str| {
+        Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.eq_ignore_ascii_case(host)))
             .unwrap_or(false)
+    };
+    if shared.github_api.as_deref().is_some_and(is) {
+        return true;
+    }
+    let configured = github_host.eq_ignore_ascii_case(host) || is(&api_base_for_host(github_host));
+    configured && needs_token(host)
 }
 
 fn cached(dir: &std::path::Path, key: &str) -> Option<MediaFile> {
@@ -189,7 +210,13 @@ fn cached(dir: &std::path::Path, key: &str) -> Option<MediaFile> {
 async fn fetch_inner(shared: &Shared, url: &str) -> Result<MediaFile, ProtocolError> {
     let mut current = Url::parse(url)
         .map_err(|_| ProtocolError::new(ErrorCode::BadRequest, "that is not a web address"))?;
-    let external = shared.config.read().await.media.load_external_images;
+    let (external, github_host) = {
+        let config = shared.config.read().await;
+        (
+            config.media.load_external_images,
+            config.github.host.clone(),
+        )
+    };
     check(shared, &current, external)?;
     let dir = shared.paths.media_dir();
     let key = cache_key(url);
@@ -201,8 +228,8 @@ async fn fetch_inner(shared: &Shared, url: &str) -> Result<MediaFile, ProtocolEr
     let mut response = loop {
         check_resolved(shared, &current).await?;
         let host = current.host_str().unwrap_or("").to_string();
-        let mut request = http().get(current.clone());
-        if gets_token(shared, &host) {
+        let mut request = shared.media_http.get(current.clone());
+        if gets_token(shared, &github_host, &host) {
             if token.is_none() {
                 token = Some(match sync::github_client(shared).await {
                     Ok(Some(gh)) => Some(gh.token().secret().to_string()),

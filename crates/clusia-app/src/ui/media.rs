@@ -34,6 +34,9 @@ const MAX_GIF_PIXELS: u64 = 48_000_000;
 /// Browsers show GIF frames that ask for less than this for this long instead.
 const MIN_FRAME: Duration = Duration::from_millis(20);
 const DEFAULT_FRAME: Duration = Duration::from_millis(100);
+/// The shortest wait between wakes for GIFs (about 30 a second). `GifAnim::advance` carries
+/// the time left over, so a faster GIF skips frames instead of running slow.
+const MIN_WAKE_WAIT: Duration = Duration::from_millis(33);
 
 /// The frames of an animated GIF, each a full picture.
 #[derive(Debug, Clone, PartialEq)]
@@ -379,9 +382,9 @@ pub struct GifClock {
 }
 
 /// While at least one animated GIF is visible the event loop wakes at half its shortest frame
-/// delay; when none is left it goes back to the desktop settings. The settings change only at
-/// those edges, never per frame (a change makes Bevy redraw at once). Screenshot runs keep
-/// their continuous mode.
+/// delay, but never sooner than `MIN_WAKE_WAIT`; when none is left it goes back to the desktop
+/// settings. The settings change only at those edges, never per frame (a change makes Bevy
+/// redraw at once). Screenshot runs keep their continuous mode.
 fn gif_clock(
     mut clock: ResMut<GifClock>,
     gifs: Query<&GifAnim>,
@@ -393,7 +396,7 @@ fn gif_clock(
         .filter(|g| g.visible && g.moves())
         .map(GifAnim::shortest)
         .min()
-        .map(|d| d / 2);
+        .map(|d| (d / 2).max(MIN_WAKE_WAIT));
     match (clock.waiting, want) {
         (None, Some(wait)) if !matches!(settings.focused_mode, UpdateMode::Continuous) => {
             set_pace(&mut settings, wait);
@@ -955,6 +958,19 @@ mod tests {
         assert_eq!(
             settings.unfocused_mode,
             WinitSettings::desktop_app().unfocused_mode
+        );
+        let fast = write_gif(dir.path(), "fast.gif", 2, 20);
+        let quick = "https://github.com/user-attachments/assets/3.gif";
+        let c = slot(&mut app, quick);
+        deliver(&mut app, quick, Ok(file(&fast, MediaKind::Gif)));
+        show(&mut app, c);
+        for _ in 0..5 {
+            app.update();
+        }
+        let waiting = app.world().resource::<GifClock>().waiting;
+        assert!(
+            waiting.is_some_and(|w| w >= Duration::from_millis(33)),
+            "never faster than about 30 wakes a second: {waiting:?}"
         );
     }
 

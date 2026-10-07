@@ -1424,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn m5c_messages_wire_format() {
+    fn media_giphy_first_run_messages_wire_format() {
         let req = |id, cmd| wire(&ClientMessage::Request { id, cmd });
         assert_eq!(
             req(
@@ -1545,7 +1545,7 @@ mod tests {
     }
 
     #[test]
-    fn m5c_messages_round_trip() {
+    fn media_giphy_first_run_messages_round_trip() {
         round_trip(Command::FetchMedia { url: "u".into() });
         round_trip(Command::SearchGifs {
             query: String::new(),

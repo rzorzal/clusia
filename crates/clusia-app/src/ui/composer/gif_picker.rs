@@ -167,7 +167,7 @@ pub fn gif_panel(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &ComposerKe
     note_line(p, fonts);
     p.spawn(text(
         fonts,
-        "Or paste any GIF link. Clúsia fetches it for you; GitHub shows it in the review.",
+        "Or paste any GIF link; GitHub shows it in the review.",
         Type::META,
     ));
 }

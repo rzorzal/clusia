@@ -40,6 +40,8 @@ pub(crate) struct Shared {
     pub spawner: Arc<dyn Spawner>,
     pub media_extra_hosts: Vec<String>,
     pub media_allow_local: bool,
+    /// The client media fetches use (see `DaemonOptions::media_resolve`).
+    pub media_http: reqwest::Client,
     pub giphy_api: String,
     pub harness_search_paths: Vec<PathBuf>,
     /// Connections subscribed to the `window` topic (open windows).
@@ -86,6 +88,7 @@ impl Shared {
             spawner: options.spawner,
             media_extra_hosts: options.media_extra_hosts,
             media_allow_local: options.media_allow_local,
+            media_http: crate::media::client_resolving(&options.media_resolve),
             giphy_api: options
                 .giphy_api
                 .unwrap_or_else(|| "https://api.giphy.com".to_string()),

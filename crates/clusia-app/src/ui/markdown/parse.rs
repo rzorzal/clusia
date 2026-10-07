@@ -132,7 +132,8 @@ struct Builder {
     strong: u32,
     em: u32,
     strike: u32,
-    links: Vec<String>,
+    /// One entry per open link: its address, or `None` when the window cannot open it.
+    links: Vec<Option<String>>,
     code: Option<(Option<String>, String)>,
     image: Option<(String, String)>,
     table: Option<TableState>,
@@ -245,7 +246,7 @@ impl Builder {
             Tag::Emphasis => self.em += 1,
             Tag::Strong => self.strong += 1,
             Tag::Strikethrough => self.strike += 1,
-            Tag::Link { dest_url, .. } => self.links.push(dest_url.to_string()),
+            Tag::Link { dest_url, .. } => self.links.push(openable(&dest_url)),
             Tag::Image { dest_url, .. } => self.image = Some((dest_url.to_string(), String::new())),
             _ => {}
         }
@@ -342,7 +343,7 @@ impl Builder {
             strong: self.strong > 0,
             em: self.em > 0,
             strike: self.strike > 0,
-            link: self.links.last().cloned(),
+            link: self.links.last().cloned().flatten(),
         }
     }
 
@@ -432,7 +433,7 @@ impl Builder {
                 self.inlines.push(Inline::Word {
                     text: url.to_string(),
                     style: Style {
-                        link: Some(url.to_string()),
+                        link: openable(url),
                         ..self.style()
                     },
                     space_after: false,
@@ -490,6 +491,12 @@ impl Builder {
             }
         }
     }
+}
+
+/// `url` when the window can open it (only https; see `platform_open::open_url`), so any
+/// other link is shown as plain text rather than as a link that does nothing.
+fn openable(url: &str) -> Option<String> {
+    url.starts_with("https://").then(|| url.to_string())
 }
 
 /// The words of one link keep the space between them inside their text, so the underline
@@ -749,6 +756,30 @@ mod tests {
                     space_after: true
                 },
                 word("now", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn links_that_cannot_open_are_plain_text() {
+        assert_eq!(
+            para("see [the docs](http://acme.dev/t) or [this](../x) ok"),
+            vec![
+                word("see", true),
+                word("the", true),
+                word("docs", true),
+                word("or", true),
+                word("this", true),
+                word("ok", false),
+            ]
+        );
+        assert_eq!(
+            para("at <http://acme.dev/t> and http://acme.dev/u"),
+            vec![
+                word("at", true),
+                word("http://acme.dev/t", true),
+                word("and", true),
+                word("http://acme.dev/u", false),
             ]
         );
     }

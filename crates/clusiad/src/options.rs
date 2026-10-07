@@ -1,5 +1,6 @@
 //! How the daemon reaches GitHub and stores secrets. Tests replace every outside dependency.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,6 +29,10 @@ pub struct DaemonOptions {
     /// Lets fetches of images from other sites reach plain-http and local addresses, which they
     /// never may in production. Tests set it to use a local server.
     pub media_allow_local: bool,
+    /// Host names that media fetches send to a fixed address instead of asking DNS (tests
+    /// point `github.com` at a local server; production leaves it empty). The port comes
+    /// from the URL.
+    pub media_resolve: Vec<(String, SocketAddr)>,
     /// Giphy API base URL override. Env: `CLUSIA_GIPHY_API`.
     pub giphy_api: Option<String>,
     /// Folders searched, in order, for the `claude` and `codex` commands. A window started from
@@ -56,6 +61,7 @@ impl DaemonOptions {
             spawner: Arc::new(ProcessSpawner),
             media_extra_hosts: Vec::new(),
             media_allow_local: false,
+            media_resolve: Vec::new(),
             giphy_api: var("CLUSIA_GIPHY_API"),
             harness_search_paths: harness_dirs(
                 std::env::var_os("PATH"),
