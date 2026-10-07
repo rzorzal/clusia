@@ -1582,13 +1582,14 @@ mod tests {
     }
 
     #[test]
-    fn demo_theme_flags_set_the_theme_whatever_macos_says() {
+    fn demo_mode_writes_the_forced_theme_into_the_snapshot() {
         use clusia_core::config::Theme;
         for (forced, want) in [
             (Some(Theme::Light), Theme::Light),
             (Some(Theme::Dark), Theme::Dark),
             (None, Theme::System),
         ] {
+            let home = tempfile::tempdir().unwrap();
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
                 .add_message::<RequestRedraw>()
@@ -1599,7 +1600,7 @@ mod tests {
                 .insert_resource(ReviewTabs::default())
                 .add_plugins(BridgePlugin {
                     mode: Mode::Demo { theme: forced },
-                    paths: Paths::new("/tmp/clusia-test-home"),
+                    paths: Paths::new(home.path()),
                     home: None,
                     thread: BridgeSlot::default(),
                 });

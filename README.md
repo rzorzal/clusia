@@ -74,7 +74,7 @@ In a review, click a line to comment (Shift-click for a range), reply to or reso
 
 Comments are rich text everywhere. The composer (under a line, in a reply, in the finalize form) has a toolbar for bold, italic, code, link, list, quote and suggestion, an **Emoji** picker (Twemoji, so they look the same on every Mac), a **GIF** picker backed by Giphy (add your own key in Config › Media; without one you can still paste a link) and **Image** links, and **Preview** renders exactly what GitHub will show. Pictures from other sites appear as links unless you turn on *Load images from other sites* in Config › Media.
 
-<p align="center"><img src="docs/assets/sp1-m5c-composer-light.png" alt="The Clúsia composer under line 44 with a typed comment, the toolbar and the emoji picker open" width="720"></p>
+<p align="center"><img src="docs/assets/sp1-m5c-composer-light.png" alt="The Clúsia composer under line 44 with a typed comment and the formatting toolbar" width="720"></p>
 <p align="center"><img src="docs/assets/sp1-m5c-rendered-dark.png" alt="A comment in the dark theme with bold text, inline code, a code block, a link, an emoji and a playing GIF" width="720"></p>
 
 On a new machine, or whenever the GitHub login is missing, the window opens on a short first run: connect GitHub (the `gh` login or a token), point Clúsia at the folders with your clones, and see which AI harness is installed. It goes away when the login works and you press **Continue**.

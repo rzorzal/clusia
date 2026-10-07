@@ -47,8 +47,8 @@ fn demo_screenshots() {
         ));
     }
     for (name, args) in &shots {
-        // A "-light" shot must not follow the macOS appearance.
-        let light = name.ends_with("-light").then_some("--light");
+        // Only a shot that forces --dark may differ from light, so none follows the macOS appearance.
+        let light = (!args.contains(&"--dark")).then_some("--light");
         let out = dir.path().join(format!("{name}.png"));
         let status = Command::new(env!("CARGO_BIN_EXE_clusia-app"))
             .args(args)

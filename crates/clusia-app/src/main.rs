@@ -7,6 +7,7 @@ use clusia_app::app::{self, Launch, Mode};
 use clusia_app::args::Args;
 use clusia_app::instance::{self, InstanceLock};
 use clusia_core::Paths;
+use clusia_core::config::Theme;
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -37,11 +38,7 @@ fn main() -> ExitCode {
         target,
         mode: if args.demo {
             Mode::Demo {
-                theme: match (args.dark, args.light) {
-                    (true, _) => Some(clusia_core::config::Theme::Dark),
-                    (_, true) => Some(clusia_core::config::Theme::Light),
-                    _ => None,
-                },
+                theme: demo_theme(&args),
             }
         } else {
             Mode::Live
@@ -120,5 +117,31 @@ fn hand_over(launch: &Launch) -> ExitCode {
             eprintln!("clusia-app: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The theme a demo run forces; `None` follows the macOS appearance.
+fn demo_theme(args: &Args) -> Option<Theme> {
+    match (args.dark, args.light) {
+        (true, _) => Some(Theme::Dark),
+        (_, true) => Some(Theme::Light),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme_of(flags: &[&str]) -> Option<Theme> {
+        let argv = ["clusia-app", "--demo"].iter().chain(flags);
+        demo_theme(&Args::try_parse_from(argv).unwrap())
+    }
+
+    #[test]
+    fn demo_flags_pick_the_theme() {
+        assert_eq!(theme_of(&["--dark"]), Some(Theme::Dark));
+        assert_eq!(theme_of(&["--light"]), Some(Theme::Light));
+        assert_eq!(theme_of(&[]), None);
     }
 }
