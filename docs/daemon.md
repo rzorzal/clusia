@@ -44,4 +44,5 @@ does not hide a Homebrew install.
 | `~/Library/Logs/Clusia/daemon.start.log` | what the last start printed before the log opened |
 
 Each log starts a new file every day: yesterday's becomes `daemon.YYYY-MM-DD.log`, and the
-current file plus the six before it are kept. Logs are readable by the owner only.
+current file plus the six before it are kept. Logs are readable by the owner only. With
+`--home` or `CLUSIA_HOME` the logs go to `<data>/logs/` instead of `~/Library/Logs/Clusia/`.

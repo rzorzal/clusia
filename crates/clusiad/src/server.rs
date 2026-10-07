@@ -63,6 +63,13 @@ impl Daemon {
     }
 
     pub async fn bind_with(paths: Paths, options: DaemonOptions) -> Result<Self, StartError> {
+        let lock = Self::acquire_lock(&paths)?;
+        Self::bind_locked(paths, options, lock).await
+    }
+
+    /// Takes the one-daemon-per-home lock. A caller that opens log files should take it
+    /// first: a daemon that loses the lock must not rotate or prune the winner's logs.
+    pub fn acquire_lock(paths: &Paths) -> Result<DaemonLock, StartError> {
         let socket = paths.socket();
         if !paths.socket_path_fits() {
             return Err(StartError::PathTooLong {
@@ -71,9 +78,16 @@ impl Daemon {
             });
         }
         fs::create_dir_all(paths.root())?;
-        let lock = DaemonLock::acquire(&paths.daemon_lock())?
-            .ok_or_else(|| StartError::AlreadyRunning(socket.clone()))?;
+        DaemonLock::acquire(&paths.daemon_lock())?.ok_or(StartError::AlreadyRunning(socket))
+    }
 
+    /// Binds the socket once the lock from [`Daemon::acquire_lock`] is held.
+    pub async fn bind_locked(
+        paths: Paths,
+        options: DaemonOptions,
+        lock: DaemonLock,
+    ) -> Result<Self, StartError> {
+        let socket = paths.socket();
         let socket_exists = fs::symlink_metadata(&socket).is_ok();
         let mut stale = false;
         if socket_exists {

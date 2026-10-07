@@ -3,7 +3,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,6 +68,14 @@ fn rotate(dir: &Path, name: &str, keep: usize, today: &str) -> io::Result<()> {
         }
     }
     prune(dir, name, keep)
+}
+
+/// Whether the file at `path` is the very file `open` holds (same device and inode).
+fn same_file(path: &Path, open: &File) -> bool {
+    match (fs::metadata(path), open.metadata()) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
 }
 
 /// Deletes the oldest rotated files so that at most `keep` files remain, counting the
@@ -146,10 +154,16 @@ impl Inner {
             return Ok(());
         }
         let log = current(&self.dir, &self.name);
-        let renamed = fs::rename(
-            &log,
-            self.dir.join(format!("{}.{}.log", self.name, self.day)),
-        );
+        // Only a file this log still holds is moved: another process may have rotated
+        // `<name>.log` already, and its new file must not replace a dated one.
+        let renamed = if same_file(&log, &self.file) {
+            fs::rename(
+                &log,
+                self.dir.join(format!("{}.{}.log", self.name, self.day)),
+            )
+        } else {
+            Ok(())
+        };
         self.day = now;
         let _ = prune(&self.dir, &self.name, self.keep);
         self.file = open_private(&log, false)?;
@@ -162,7 +176,7 @@ impl Write for DailyLog {
         let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         // A failed roll keeps logging to the old file rather than losing the line.
         if let Err(e) = inner.roll() {
-            eprintln!("clusiad: cannot rotate the log: {e}");
+            eprintln!("{} log: cannot rotate it: {}", inner.name, e);
         }
         inner.file.write(buf)
     }
@@ -284,6 +298,34 @@ mod tests {
                 "daemon.launchd.log",
                 "daemon.log",
             ]
+        );
+    }
+
+    #[test]
+    fn a_log_another_process_already_rotated_is_not_moved_over_a_dated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let days = Arc::new(AtomicUsize::new(0));
+        let clock = days.clone();
+        let mut w = DailyLog::open_with(
+            dir.path(),
+            "daemon",
+            KEEP_FILES,
+            Box::new(move || {
+                ["2026-10-01", "2026-10-02"][clock.load(Ordering::SeqCst).min(1)].to_string()
+            }),
+        )
+        .unwrap();
+        w.write_all(b"yesterday\n").unwrap();
+        // Someone else moved our file away and started a new `daemon.log`.
+        let dated = dir.path().join("daemon.2026-10-01.log");
+        fs::rename(dir.path().join("daemon.log"), &dated).unwrap();
+        fs::write(dir.path().join("daemon.log"), "theirs\n").unwrap();
+        days.store(1, Ordering::SeqCst);
+        w.write_all(b"today\n").unwrap();
+        assert_eq!(fs::read_to_string(&dated).unwrap(), "yesterday\n");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("daemon.log")).unwrap(),
+            "theirs\ntoday\n"
         );
     }
 

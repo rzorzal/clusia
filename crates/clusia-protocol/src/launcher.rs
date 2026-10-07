@@ -62,8 +62,10 @@ pub fn check_socket_path(paths: &Paths) -> Result<(), LaunchError> {
     })
 }
 
-/// Starts clusiad and waits until it accepts connections. Returns its pid.
-pub async fn start_daemon(paths: &Paths, home: Option<&Path>) -> Result<u32, LaunchError> {
+/// Starts clusiad and waits until it accepts connections. Returns the pid of the daemon that
+/// answered, or `None` when it cannot be told (a winner that did not answer `DaemonStatus`
+/// in time, and our own child already gone).
+pub async fn start_daemon(paths: &Paths, home: Option<&Path>) -> Result<Option<u32>, LaunchError> {
     start_daemon_with(paths, home, &daemon_binary()?, READY_TIMEOUT).await
 }
 
@@ -74,7 +76,7 @@ pub async fn start_daemon_with(
     home: Option<&Path>,
     bin: &Path,
     timeout: Duration,
-) -> Result<u32, LaunchError> {
+) -> Result<Option<u32>, LaunchError> {
     check_socket_path(paths)?;
     let logs = paths.logs_dir();
     std::fs::create_dir_all(logs).map_err(io_error(format!("cannot create {}", logs.display())))?;
@@ -125,8 +127,17 @@ pub async fn start_daemon_with(
     let deadline = Instant::now() + timeout;
     loop {
         if let Ok(mut client) = Client::connect(&paths.socket(), "launcher").await {
-            // Whichever daemon won a race answers; it is not necessarily our child.
-            return Ok(daemon_pid(&mut client).await.unwrap_or(child.id()));
+            // Whichever daemon won a race answers; it is not necessarily our child, so our
+            // child's pid is only a fallback while that child is still running.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let pid = match daemon_pid(&mut client, remaining).await {
+                Some(pid) => Some(pid),
+                None => match child.try_wait() {
+                    Ok(None) => Some(child.id()),
+                    _ => None,
+                },
+            };
+            return Ok(pid);
         }
         if let Some(status) = child
             .try_wait()
@@ -150,9 +161,10 @@ pub async fn start_daemon_with(
     }
 }
 
-async fn daemon_pid(client: &mut Client) -> Option<u32> {
-    match client.request(Command::DaemonStatus).await {
-        Ok(Reply::Status(status)) => Some(status.pid),
+/// The pid in the daemon's `DaemonStatus` reply, if it comes within `limit`.
+async fn daemon_pid(client: &mut Client, limit: Duration) -> Option<u32> {
+    match tokio::time::timeout(limit, client.request(Command::DaemonStatus)).await {
+        Ok(Ok(Reply::Status(status))) => Some(status.pid),
         _ => None,
     }
 }
@@ -353,7 +365,42 @@ mod tests {
         let pid = start_daemon_with(&paths, None, &bin, Duration::from_secs(5))
             .await
             .unwrap();
-        assert_eq!(pid, 4242);
+        assert_eq!(pid, Some(4242));
+    }
+
+    #[tokio::test]
+    async fn a_winner_that_never_answers_status_is_unknown_not_our_dead_childs_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let bin = script(dir.path(), "fake", "exit 3");
+        // Starts listening once our child is long gone, accepts the handshake, then says
+        // nothing: the pid lookup must give up by itself.
+        let socket = paths.socket();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let listener = tokio::net::UnixListener::bind(socket).unwrap();
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (r, mut w) = stream.into_split();
+                    let mut r = MessageReader::new(r);
+                    let _hello: Option<ClientMessage> = r.next().await.unwrap_or(None);
+                    let welcome = ServerMessage::Welcome {
+                        protocol: PROTOCOL_VERSION,
+                        daemon: "t".into(),
+                    };
+                    let _ = write_message(&mut w, &welcome).await;
+                    let _ = r.next::<ClientMessage>().await;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+        // The lookup runs until the deadline, which leaves a slow-starting script time to exit.
+        let started = Instant::now();
+        let pid = start_daemon_with(&paths, None, &bin, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(pid, None);
+        assert!(started.elapsed() < Duration::from_secs(8));
     }
 
     #[tokio::test]

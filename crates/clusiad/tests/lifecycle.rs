@@ -282,3 +282,44 @@ async fn the_lock_is_free_again_after_a_stop() {
     drop(again);
     drop(dir);
 }
+
+#[test]
+fn a_daemon_that_loses_the_lock_leaves_the_logs_alone() {
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, SystemTime};
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path());
+    let holder = std::fs::File::create(paths.daemon_lock()).unwrap();
+    // SAFETY: `holder` owns an open descriptor for the whole call.
+    assert_eq!(
+        unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    std::fs::create_dir_all(paths.logs_dir()).unwrap();
+    let log = paths.logs_dir().join("daemon.log");
+    std::fs::write(&log, "running daemon\n").unwrap();
+    let long_ago = SystemTime::now() - Duration::from_secs(3 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&log)
+        .unwrap()
+        .set_modified(long_ago)
+        .unwrap();
+    let before = std::fs::read_dir(paths.logs_dir()).unwrap().count();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_clusiad"))
+        .arg("--home")
+        .arg(dir.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already running"));
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "running daemon\n");
+    assert_eq!(
+        std::fs::metadata(&log).unwrap().modified().unwrap(),
+        long_ago
+    );
+    assert_eq!(std::fs::read_dir(paths.logs_dir()).unwrap().count(), before);
+}

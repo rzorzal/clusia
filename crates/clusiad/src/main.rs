@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use clusia_core::Paths;
 use clusia_core::logging::{DailyLog, KEEP_FILES};
-use clusiad::{Daemon, StartError};
+use clusiad::{Daemon, DaemonOptions, StartError};
 use tokio::signal::unix::{SignalKind, signal};
 
 #[derive(Parser)]
@@ -43,6 +43,14 @@ fn init_logging(paths: &Paths) {
     }
 }
 
+fn start_failed(e: &StartError) -> ExitCode {
+    eprintln!("clusiad: {e}");
+    match e {
+        StartError::AlreadyRunning(_) => ExitCode::from(3),
+        _ => ExitCode::FAILURE,
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
@@ -63,18 +71,16 @@ async fn main() -> ExitCode {
         },
     };
 
+    // The lock comes before the log is opened: a daemon that loses it only writes to stderr.
+    let lock = match Daemon::acquire_lock(&paths) {
+        Ok(lock) => lock,
+        Err(e) => return start_failed(&e),
+    };
     init_logging(&paths);
 
-    let daemon = match Daemon::bind(paths).await {
+    let daemon = match Daemon::bind_locked(paths, DaemonOptions::from_env(), lock).await {
         Ok(d) => d,
-        Err(e @ StartError::AlreadyRunning(_)) => {
-            eprintln!("clusiad: {e}");
-            return ExitCode::from(3);
-        }
-        Err(e) => {
-            eprintln!("clusiad: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return start_failed(&e),
     };
 
     let handle = daemon.shutdown_handle();

@@ -4,11 +4,12 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 /// Held for the life of the daemon.
 #[derive(Debug)]
-pub(crate) struct DaemonLock {
+pub struct DaemonLock {
     _file: File,
 }
 
@@ -19,6 +20,7 @@ impl DaemonLock {
             .create(true)
             .truncate(false)
             .write(true)
+            .mode(0o600)
             .open(path)?;
         // SAFETY: `file` owns an open descriptor for the whole call; flock does not retain it.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -46,5 +48,15 @@ mod tests {
         assert!(DaemonLock::acquire(&path).unwrap().is_none());
         drop(first);
         assert!(DaemonLock::acquire(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_lock_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clusiad.lock");
+        let _lock = DaemonLock::acquire(&path).unwrap().expect("free");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

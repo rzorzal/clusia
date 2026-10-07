@@ -20,6 +20,7 @@ mod sync;
 mod tray;
 mod worktrees;
 
+pub use lock::DaemonLock;
 pub use options::DaemonOptions;
 pub use server::{Daemon, ShutdownHandle, StartError};
 pub use spawner::{ProcessSpawner, RecordingSpawner, Spawner};

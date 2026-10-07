@@ -28,8 +28,12 @@ pub async fn start(paths: &Paths, home: Option<&Path>) -> Result<Output, CliErro
         }
     }
     let pid = launcher::start_daemon(paths, home).await?;
+    let human = match pid {
+        Some(pid) => format!("Clúsia daemon started (pid {pid})"),
+        None => "Clúsia daemon started (pid unknown)".to_string(),
+    };
     Ok(Output {
-        human: format!("Clúsia daemon started (pid {pid})"),
+        human,
         json: json!({ "started": true, "pid": pid }),
     })
 }
