@@ -266,9 +266,21 @@ async fn a_held_lock_stops_a_second_daemon_before_it_touches_anything() {
         "a refused daemon leaves the config alone"
     );
     drop(holder);
-    Daemon::bind_with(paths, common::test_options())
-        .await
-        .expect("free again");
+    bind_once_free(paths).await;
+}
+
+/// A process forked by a parallel test keeps inherited descriptors, and so the flock, until it
+/// execs; a lock that was just released can therefore stay held for a moment.
+async fn bind_once_free(paths: Paths) -> Daemon {
+    let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match Daemon::bind_with(paths.clone(), common::test_options()).await {
+            Err(StartError::AlreadyRunning(_)) if std::time::Instant::now() < give_up => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            other => return other.expect("the lock is free again"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -276,9 +288,7 @@ async fn the_lock_is_free_again_after_a_stop() {
     let d = TestDaemon::start().await;
     let paths = d.paths.clone();
     let dir = d.stop().await;
-    let again = Daemon::bind_with(paths, common::test_options())
-        .await
-        .expect("the stopped daemon released its lock");
+    let again = bind_once_free(paths).await;
     drop(again);
     drop(dir);
 }
