@@ -6,6 +6,7 @@ pub mod diffmap;
 pub mod draft;
 pub mod editor;
 pub mod media;
+pub mod notify;
 pub mod paths;
 pub mod pr;
 pub mod prdata;
@@ -26,6 +27,7 @@ pub use draft::{
 };
 pub use editor::{EditorError, editor_argv};
 pub use media::{MAX_MEDIA_BYTES, MediaKind};
+pub use notify::OpenTarget;
 pub use paths::{LAUNCH_AGENT_FILE, Paths, PathsError};
 pub use pr::{PrDetail, PrFilter, PrRef, PrRefError, PrSummary};
 pub use prdata::{

@@ -1,7 +1,8 @@
 //! Every message that crosses the socket.
 
+pub use clusia_core::OpenTarget;
 use clusia_core::{
-    ActivitySummary, ChecksSummary, Config, DraftItem, DraftKind, FileDiff, MediaKind,
+    ActivitySummary, ChecksSummary, Config, DraftItem, DraftKind, EventKind, FileDiff, MediaKind,
     PrConversation, PrDetail, PrFilter, PrRef, PrSummary, Review, ReviewState, Role, Side,
     ThreadRef, Verdict,
 };
@@ -15,6 +16,8 @@ pub mod topics {
     pub const REVIEWS: &str = "reviews";
     /// Window requests from other launches (`OpenWindow`).
     pub const WINDOW: &str = "window";
+    /// What the tray shows and posts: `Notify` and `InboxChanged`.
+    pub const TRAY: &str = "tray";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -180,6 +183,22 @@ pub enum Command {
     GiphyKeyStatus,
     /// What the first-run screen needs: the GitHub login, repository folders and agent CLIs.
     FirstRunStatus,
+    /// The tray's report of what macOS lets Clúsia do; sent on start and whenever it changes.
+    NotificationPermission {
+        status: PermissionStatus,
+    },
+    /// Send a notification through the whole path, regardless of the event settings.
+    TestNotification,
+    /// Turn the login item on or off (rewrites its `RunAtLoad`).
+    SetStartAtLogin {
+        on: bool,
+    },
+    /// The notification inbox, newest first.
+    GetInbox,
+    /// Mark inbox rows seen; no ids marks them all.
+    MarkInboxSeen {
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -217,6 +236,7 @@ pub enum Reply {
     Gifs(GifPage),
     FirstRun(FirstRun),
     GiphyKeyStatus(GiphyKeyStatus),
+    Inbox(Vec<InboxItem>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +246,32 @@ pub struct DaemonStatus {
     pub uptime_secs: u64,
     pub clients: usize,
     pub socket: String,
+    /// What the tray last reported about macOS notifications.
+    #[serde(default)]
+    pub notifications_permission: PermissionStatus,
+}
+
+/// Whether macOS lets Clúsia post notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionStatus {
+    Allowed,
+    Denied,
+    /// macOS has not been asked yet.
+    #[default]
+    NotDetermined,
+}
+
+/// One row of the notification inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxItem {
+    pub id: String,
+    pub kind: EventKind,
+    pub pr: Option<PrRef>,
+    pub title: String,
+    pub body: String,
+    pub at: i64,
+    pub seen: bool,
 }
 
 /// A secret on the wire (e.g. a GitHub token). Serializes as a plain string; `Debug` never shows it.
@@ -379,6 +425,24 @@ pub enum Event {
     },
     /// The Giphy key was set or removed (topic `config`).
     GiphyKeyChanged,
+    /// A macOS notification for the tray to post (topic `tray`).
+    Notify {
+        id: String,
+        title: String,
+        subtitle: String,
+        body: String,
+        /// The id of the bundled sound to play; `None` is silent.
+        sound: Option<String>,
+        /// Where a click on the notification goes.
+        open: OpenTarget,
+        /// Break through a macOS Focus (interruption level `timeSensitive`); off is `active`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        time_sensitive: bool,
+    },
+    /// The number of unseen inbox rows changed (topic `tray`).
+    InboxChanged {
+        unseen: u32,
+    },
     /// The daemon is shutting down on request (`Shutdown`); clients should close.
     Stopping,
 }
@@ -585,7 +649,14 @@ pub struct FirstRun {
 pub enum WindowTarget {
     Home,
     Config,
-    Review { pr: PrRef },
+    /// Config on one of its pages, by name (`git`, `notifications`); an unknown name shows
+    /// Appearance.
+    ConfigPage {
+        page: String,
+    },
+    Review {
+        pr: PrRef,
+    },
 }
 
 #[cfg(test)]
@@ -757,11 +828,12 @@ mod tests {
                 uptime_secs: 5,
                 clients: 1,
                 socket: "/tmp/c/clusiad.sock".into(),
+                notifications_permission: PermissionStatus::NotDetermined,
             })),
         };
         assert_eq!(
             wire(&status),
-            r#"{"type":"response","id":1,"result":{"ok":{"status":{"version":"0.1.0","pid":42,"uptime_secs":5,"clients":1,"socket":"/tmp/c/clusiad.sock"}}}}"#
+            r#"{"type":"response","id":1,"result":{"ok":{"status":{"version":"0.1.0","pid":42,"uptime_secs":5,"clients":1,"socket":"/tmp/c/clusiad.sock","notifications_permission":"not_determined"}}}}"#
         );
 
         let event = ServerMessage::Event {
@@ -809,6 +881,7 @@ mod tests {
                 uptime_secs: 2,
                 clients: 3,
                 socket: "/s".into(),
+                notifications_permission: PermissionStatus::Allowed,
             }),
         ] {
             round_trip(ServerMessage::Response {
@@ -857,6 +930,10 @@ mod tests {
         assert_eq!(
             wire(&open(2, WindowTarget::Review { pr: acme7() })),
             r#"{"type":"request","id":2,"cmd":{"open_window":{"target":{"review":{"pr":"acme/widgets#7"}}}}}"#
+        );
+        assert_eq!(
+            wire(&open(9, WindowTarget::ConfigPage { page: "git".into() })),
+            r#"{"type":"request","id":9,"cmd":{"open_window":{"target":{"config_page":{"page":"git"}}}}}"#
         );
         let editor = ClientMessage::Request {
             id: 3,
@@ -1584,5 +1661,193 @@ mod tests {
         };
         let dbg = format!("{msg:?}");
         assert!(!dbg.contains("supersecret"), "{dbg}");
+    }
+
+    #[test]
+    fn notify_and_install_messages_wire_format() {
+        let notify = ServerMessage::Event {
+            topic: topics::TRAY.into(),
+            event: Event::Notify {
+                id: "n1".into(),
+                title: "Review requested".into(),
+                subtitle: "acme/widgets #7".into(),
+                body: "@octo asked you to review".into(),
+                sound: Some("leaf".into()),
+                open: OpenTarget::Review {
+                    pr: acme7(),
+                    thread: Some("PRRT_1".into()),
+                },
+                time_sensitive: false,
+            },
+        };
+        assert_eq!(
+            wire(&notify),
+            r#"{"type":"event","topic":"tray","event":{"notify":{"id":"n1","title":"Review requested","subtitle":"acme/widgets #7","body":"@octo asked you to review","sound":"leaf","open":{"review":{"pr":"acme/widgets#7","thread":"PRRT_1"}}}}}"#
+        );
+        let silent = Event::Notify {
+            id: "n2".into(),
+            title: "t".into(),
+            subtitle: String::new(),
+            body: "b".into(),
+            sound: None,
+            open: OpenTarget::Config { page: "git".into() },
+            time_sensitive: false,
+        };
+        assert_eq!(
+            wire(&silent),
+            r#"{"notify":{"id":"n2","title":"t","subtitle":"","body":"b","sound":null,"open":{"config":{"page":"git"}}}}"#
+        );
+        let focus_override = Event::Notify {
+            id: "n3".into(),
+            title: "t".into(),
+            subtitle: String::new(),
+            body: "b".into(),
+            sound: None,
+            open: OpenTarget::Home { pr: None },
+            time_sensitive: true,
+        };
+        assert_eq!(
+            wire(&focus_override),
+            r#"{"notify":{"id":"n3","title":"t","subtitle":"","body":"b","sound":null,"open":{"home":{}},"time_sensitive":true}}"#
+        );
+        let old_notify: Event = serde_json::from_str(
+            r#"{"notify":{"id":"n2","title":"t","subtitle":"","body":"b","sound":null,"open":{"config":{"page":"git"}}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old_notify,
+            Event::Notify {
+                time_sensitive: false,
+                ..
+            }
+        ));
+        assert_eq!(wire(&OpenTarget::Home { pr: None }), r#"{"home":{}}"#);
+        assert_eq!(
+            wire(&OpenTarget::Home { pr: Some(acme7()) }),
+            r#"{"home":{"pr":"acme/widgets#7"}}"#
+        );
+        assert_eq!(
+            wire(&OpenTarget::Review {
+                pr: acme7(),
+                thread: None
+            }),
+            r#"{"review":{"pr":"acme/widgets#7"}}"#
+        );
+        assert_eq!(
+            wire(&Event::InboxChanged { unseen: 3 }),
+            r#"{"inbox_changed":{"unseen":3}}"#
+        );
+
+        let req = |cmd| wire(&ClientMessage::Request { id: 1, cmd });
+        assert_eq!(
+            req(Command::NotificationPermission {
+                status: PermissionStatus::NotDetermined
+            }),
+            r#"{"type":"request","id":1,"cmd":{"notification_permission":{"status":"not_determined"}}}"#
+        );
+        assert_eq!(
+            req(Command::TestNotification),
+            r#"{"type":"request","id":1,"cmd":"test_notification"}"#
+        );
+        assert_eq!(
+            req(Command::SetStartAtLogin { on: false }),
+            r#"{"type":"request","id":1,"cmd":{"set_start_at_login":{"on":false}}}"#
+        );
+        assert_eq!(
+            req(Command::GetInbox),
+            r#"{"type":"request","id":1,"cmd":"get_inbox"}"#
+        );
+        assert_eq!(
+            req(Command::MarkInboxSeen {
+                ids: vec!["n1".into()]
+            }),
+            r#"{"type":"request","id":1,"cmd":{"mark_inbox_seen":{"ids":["n1"]}}}"#
+        );
+
+        let inbox = Reply::Inbox(vec![InboxItem {
+            id: "n1".into(),
+            kind: EventKind::ReviewRequested,
+            pr: Some(acme7()),
+            title: "Review requested".into(),
+            body: "b".into(),
+            at: 100,
+            seen: false,
+        }]);
+        assert_eq!(
+            wire(&ServerMessage::Response {
+                id: 2,
+                result: Outcome::Ok(inbox)
+            }),
+            r#"{"type":"response","id":2,"result":{"ok":{"inbox":[{"id":"n1","kind":"review_requested","pr":"acme/widgets#7","title":"Review requested","body":"b","at":100,"seen":false}]}}}"#
+        );
+        for (status, text) in [
+            (PermissionStatus::Allowed, r#""allowed""#),
+            (PermissionStatus::Denied, r#""denied""#),
+            (PermissionStatus::NotDetermined, r#""not_determined""#),
+        ] {
+            assert_eq!(wire(&status), text);
+        }
+        assert_eq!(PermissionStatus::default(), PermissionStatus::NotDetermined);
+    }
+
+    #[test]
+    fn notify_and_install_messages_round_trip() {
+        round_trip(Event::InboxChanged { unseen: 0 });
+        round_trip(Event::Notify {
+            id: "n".into(),
+            title: "t".into(),
+            subtitle: "s".into(),
+            body: "b".into(),
+            sound: Some("tick".into()),
+            open: OpenTarget::Home { pr: Some(acme7()) },
+            time_sensitive: false,
+        });
+        round_trip(Event::Notify {
+            id: "n".into(),
+            title: "t".into(),
+            subtitle: String::new(),
+            body: "b".into(),
+            sound: None,
+            open: OpenTarget::Home { pr: None },
+            time_sensitive: true,
+        });
+        for cmd in [
+            Command::TestNotification,
+            Command::GetInbox,
+            Command::SetStartAtLogin { on: true },
+            Command::MarkInboxSeen { ids: vec![] },
+            Command::NotificationPermission {
+                status: PermissionStatus::Denied,
+            },
+        ] {
+            round_trip(ClientMessage::Request { id: 1, cmd });
+        }
+    }
+
+    #[test]
+    fn older_daemons_and_caches_omit_the_new_fields() {
+        let status: DaemonStatus = serde_json::from_str(
+            r#"{"version":"0.1.0","pid":1,"uptime_secs":2,"clients":0,"socket":"/s"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            status.notifications_permission,
+            PermissionStatus::NotDetermined
+        );
+        let review: clusia_core::ReviewInfo = serde_json::from_str(
+            r#"{"id":1,"author":"ana","state":"APPROVED","body":"","submitted_at":null,"url":"u"}"#,
+        )
+        .unwrap();
+        assert_eq!(review.commit_id, None);
+        let with_commit = clusia_core::ReviewInfo {
+            commit_id: Some("abc123".into()),
+            ..review
+        };
+        assert!(wire(&with_commit).ends_with(r#""url":"u","commit_id":"abc123"}"#));
+        let without = clusia_core::ReviewInfo {
+            commit_id: None,
+            ..with_commit
+        };
+        assert!(wire(&without).ends_with(r#""url":"u"}"#));
     }
 }

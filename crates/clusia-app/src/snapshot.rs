@@ -100,7 +100,10 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         Event::ReviewOutdated { .. } => r.reviews = true,
         Event::WindowRequested { target } => return (r, Some(target)),
         // `Stopping` is handled by the bridge before `apply` (it closes the window).
-        Event::LoadStep(_) | Event::Stopping => {}
+        Event::LoadStep(_)
+        | Event::Stopping
+        | Event::Notify { .. }
+        | Event::InboxChanged { .. } => {}
     }
     (r, None)
 }

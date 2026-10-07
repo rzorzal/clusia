@@ -92,7 +92,9 @@ impl Nav {
     pub fn go(&mut self, target: &WindowTarget) {
         self.screen = match target {
             WindowTarget::Home => Screen::Home,
-            WindowTarget::Config => Screen::Config(self.section),
+            // The page a `ConfigPage` names is chosen by the Config screen; here it only
+            // brings Config forward.
+            WindowTarget::Config | WindowTarget::ConfigPage { .. } => Screen::Config(self.section),
             WindowTarget::Review { pr } => {
                 if !self.reviews.contains(pr) {
                     self.reviews.push(pr.clone());
@@ -663,6 +665,13 @@ mod tests {
 
     fn pr(s: &str) -> PrRef {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_config_page_target_shows_config() {
+        let mut nav = Nav::new(&WindowTarget::Home);
+        nav.go(&WindowTarget::ConfigPage { page: "git".into() });
+        assert_eq!(nav.screen, Screen::Config(nav.section));
     }
 
     #[test]

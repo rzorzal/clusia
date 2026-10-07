@@ -516,6 +516,7 @@ impl GitHub {
                     body: r.body.unwrap_or_default(),
                     submitted_at: r.submitted_at,
                     url: r.html_url,
+                    commit_id: None,
                 })
                 .collect(),
             review_threads,

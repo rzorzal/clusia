@@ -391,6 +391,7 @@ fn demo_conversation(now: i64) -> PrConversation {
             body: "Looks good once the lock change lands.".into(),
             submitted_at: Some(rfc3339(now - 3 * 3600)),
             url: "https://github.com/rzorzal/clusia/pull/123#pullrequestreview-3001".into(),
+            commit_id: None,
         }],
         review_threads: vec![
             ReviewThread {

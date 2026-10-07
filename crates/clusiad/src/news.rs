@@ -432,6 +432,7 @@ mod tests {
                     body: String::new(),
                     submitted_at: Some("2000-01-01T00:50:00Z".into()),
                     url: "r4".into(),
+                    commit_id: None,
                 }],
                 review_threads: vec![],
             },

@@ -15,7 +15,7 @@ use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 
 enum Push {
-    Event(&'static str, Event),
+    Event(&'static str, Box<Event>),
     Close,
 }
 
@@ -37,7 +37,7 @@ impl Fake {
     }
 
     fn event(&self, topic: &'static str, e: Event) {
-        self.push.send(Push::Event(topic, e)).unwrap();
+        self.push.send(Push::Event(topic, Box::new(e))).unwrap();
     }
 }
 
@@ -152,7 +152,7 @@ fn fake_failing(fail: &'static [&'static str]) -> Fake {
                 }
                 p = rx.recv() => match p {
                     Some(Push::Event(topic, event)) => {
-                        let msg = ServerMessage::Event { topic: topic.into(), event };
+                        let msg = ServerMessage::Event { topic: topic.into(), event: *event };
                         if write_message(&mut w, &msg).await.is_err() { return; }
                     }
                     _ => return,
