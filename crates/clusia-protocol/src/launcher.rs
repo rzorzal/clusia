@@ -130,14 +130,9 @@ pub async fn start_daemon_with(
             // Whichever daemon won a race answers; it is not necessarily our child, so our
             // child's pid is only a fallback while that child is still running.
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let pid = match daemon_pid(&mut client, remaining).await {
-                Some(pid) => Some(pid),
-                None => match child.try_wait() {
-                    Ok(None) => Some(child.id()),
-                    _ => None,
-                },
-            };
-            return Ok(pid);
+            let status = daemon_pid(&mut client, remaining).await;
+            let running = matches!(child.try_wait(), Ok(None));
+            return Ok(pick_pid(status, running, child.id()));
         }
         if let Some(status) = child
             .try_wait()
@@ -159,6 +154,11 @@ pub async fn start_daemon_with(
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// The daemon's own answer wins; our child's pid is only a guess while that child is running.
+fn pick_pid(status: Option<u32>, child_running: bool, child: u32) -> Option<u32> {
+    status.or(child_running.then_some(child))
 }
 
 /// The pid in the daemon's `DaemonStatus` reply, if it comes within `limit`.
@@ -369,11 +369,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_winner_that_never_answers_status_is_unknown_not_our_dead_childs_pid() {
+    async fn a_winner_that_never_answers_status_does_not_hang_the_start() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path());
         let bin = script(dir.path(), "fake", "exit 3");
-        // Starts listening once our child is long gone, accepts the handshake, then says
+        // Starts listening once our child has likely gone, accepts the handshake, then says
         // nothing: the pid lookup must give up by itself.
         let socket = paths.socket();
         tokio::spawn(async move {
@@ -394,13 +394,26 @@ mod tests {
                 });
             }
         });
-        // The lookup runs until the deadline, which leaves a slow-starting script time to exit.
-        let started = Instant::now();
-        let pid = start_daemon_with(&paths, None, &bin, Duration::from_secs(5))
-            .await
-            .unwrap();
-        assert_eq!(pid, None);
-        assert!(started.elapsed() < Duration::from_secs(8));
+        // Whether the child is still running at the deadline is up to the scheduler, so the
+        // pid is not asserted here; `pick_pid` covers that choice.
+        let started = tokio::time::timeout(
+            Duration::from_secs(10),
+            start_daemon_with(&paths, None, &bin, Duration::from_millis(500)),
+        )
+        .await;
+        assert!(started.expect("the start gave up by itself").is_ok());
+    }
+
+    #[test]
+    fn the_daemons_own_pid_beats_our_childs() {
+        assert_eq!(pick_pid(Some(4242), true, 7), Some(4242));
+        assert_eq!(pick_pid(Some(4242), false, 7), Some(4242));
+    }
+
+    #[test]
+    fn our_childs_pid_is_only_a_guess_while_it_runs() {
+        assert_eq!(pick_pid(None, true, 7), Some(7));
+        assert_eq!(pick_pid(None, false, 7), None);
     }
 
     #[tokio::test]
