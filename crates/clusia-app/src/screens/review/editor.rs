@@ -52,7 +52,10 @@ pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor
         text: &editor.text,
         mode: editor.mode,
         id: EDITOR_AREA,
-        size: AreaSize::Lines(4.0),
+        size: AreaSize::Grow {
+            min: 4.0,
+            max: 10.0,
+        },
         compact: false,
         suggest: matches!(
             editor.target,

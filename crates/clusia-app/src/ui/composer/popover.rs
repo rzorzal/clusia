@@ -1,11 +1,12 @@
 //! The toolbar's popovers: Emoji, GIF and Image.
 //!
 //! A popover is a layer of its own at the root of the window, so no scroll area or modal clips
-//! it; a transparent backdrop closes it on any click outside. It sits under the toolbar button
-//! that opened it. Only one is open at a time and it closes when something is picked, when the
-//! composer goes away, on Esc (which is consumed, so a modal behind stays open) and when the
-//! composer switches to Preview. Whatever happens inside a popover — an error, a refused link —
-//! the text of the composer is never touched except by the pick itself.
+//! it; a transparent backdrop closes it on any click outside. It opens at the toolbar button
+//! that opened it, below or above, always inside the window. Only one is open at a time and it
+//! closes when something is picked, when the composer goes away, on Esc (which is consumed, so a
+//! modal behind stays open) and when the composer switches to Preview. Whatever happens inside a
+//! popover — an error, a refused link — the text of the composer is never touched except by the
+//! pick itself.
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::{ButtonInput, InputSystems};
@@ -40,11 +41,20 @@ pub enum PopoverKind {
 }
 
 impl PopoverKind {
-    fn label(self) -> &'static str {
+    /// The button's icon, drawn in the mono face: Inter has neither a smiley nor a framed square.
+    fn icon(self) -> Option<&'static str> {
         match self {
-            PopoverKind::Emoji => "☺ Emoji",
+            PopoverKind::Emoji => Some("◎"),
+            PopoverKind::Gif => None,
+            PopoverKind::Image => Some("⊡"),
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            PopoverKind::Emoji => "Emoji",
             PopoverKind::Gif => "GIF",
-            PopoverKind::Image => "▣ Image",
+            PopoverKind::Image => "Image",
         }
     }
 }
@@ -105,6 +115,12 @@ pub(crate) struct Placeholder(pub Entity);
 
 pub const PANEL_WIDTH: f32 = 340.0;
 
+/// Space between a card and its button.
+const PANEL_GAP: f32 = 6.0;
+
+/// Space kept between a card and the window's edges.
+const PANEL_MARGIN: f32 = 8.0;
+
 const LAYER_Z: i32 = 120;
 
 /// The three toolbar buttons that open a popover.
@@ -114,6 +130,7 @@ pub fn popover_buttons(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &Comp
             Node {
                 height: px(26),
                 padding: UiRect::horizontal(px(8)),
+                column_gap: px(4),
                 align_items: AlignItems::Center,
                 border_radius: BorderRadius::all(px(6)),
                 ..default()
@@ -127,8 +144,13 @@ pub fn popover_buttons(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &Comp
                 kind,
             },
             observe(on_popover_button),
-            children![text(fonts, kind.label(), Type::MUTED.size(12.5))],
-        ));
+        ))
+        .with_children(|b| {
+            if let Some(icon) = kind.icon() {
+                b.spawn(text(fonts, icon, Type::MONO.size(13.0)));
+            }
+            b.spawn(text(fonts, kind.word(), Type::MUTED.size(12.5)));
+        });
     }
 }
 
@@ -337,6 +359,7 @@ pub(crate) fn sync_popovers(
                         padding: px(12).all(),
                         border: px(1).all(),
                         border_radius: BorderRadius::all(px(12)),
+                        overflow: Overflow::clip(),
                         ..default()
                     },
                     BackgroundColor::default(),
@@ -463,14 +486,56 @@ fn commit_links(
     }
 }
 
-/// Puts each popover card under its toolbar button, inside the window. A new card stays hidden
-/// until a layout pass has used the position, so it never shows at the corner first.
+/// Where a popover card goes and how tall it may be.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PanelSpot {
+    /// The card's top-left corner.
+    pub at: Vec2,
+    /// The room on the chosen side; a taller card scrolls its list instead.
+    pub max_height: f32,
+}
+
+/// Where a `card`-sized card goes for the toolbar `button` in a `window` (all in logical pixels):
+/// under the button when the card fits there, otherwise above it, otherwise on the side with
+/// more room, cut to that room. Horizontally it starts at the button's left edge and is pushed
+/// back in from the window's right edge. A card cut to its room fits there on the next pass, so
+/// the choice is stable.
+pub(crate) fn panel_spot(button: Rect, card: Vec2, window: Vec2) -> PanelSpot {
+    let room_below = window.y - PANEL_MARGIN - (button.max.y + PANEL_GAP);
+    let room_above = button.min.y - PANEL_GAP - PANEL_MARGIN;
+    let below = card.y <= room_below || (card.y > room_above && room_below >= room_above);
+    let (top, room) = if below {
+        (button.max.y + PANEL_GAP, room_below)
+    } else {
+        (
+            button.min.y - PANEL_GAP - card.y.min(room_above),
+            room_above,
+        )
+    };
+    let left = button
+        .min
+        .x
+        .min(window.x - card.x - PANEL_MARGIN)
+        .max(PANEL_MARGIN);
+    PanelSpot {
+        at: Vec2::new(left, top),
+        max_height: room.max(0.0),
+    }
+}
+
+/// Places each popover card at its toolbar button (see `panel_spot`). A new card stays hidden
+/// until a layout pass has used the position — and its own size, which decides between below
+/// and above — so it never shows at the corner or on the wrong side first.
 fn place_panels(
     buttons: Query<(&PopoverButton, &ComputedNode, &UiGlobalTransform)>,
     layers: Query<(&PopoverLayer, &Children)>,
-    mut panels: Query<(&mut Node, &mut Visibility), With<PopoverPanel>>,
+    mut panels: Query<(&mut Node, &mut Visibility, &ComputedNode), With<PopoverPanel>>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
+    let window = windows
+        .iter()
+        .next()
+        .map_or(Vec2::splat(f32::MAX), |w| Vec2::new(w.width(), w.height()));
     for (layer, children) in &layers {
         let Some((_, node, at)) = buttons
             .iter()
@@ -479,16 +544,16 @@ fn place_panels(
             continue;
         };
         let scale = node.inverse_scale_factor;
-        let left = (at.translation.x - node.size.x / 2.0) * scale;
-        let top = (at.translation.y + node.size.y / 2.0) * scale + 6.0;
-        let width = windows.iter().next().map(Window::width);
-        let max_left = width.map_or(f32::MAX, |w| (w - PANEL_WIDTH - 8.0).max(8.0));
+        let button = Rect::from_center_size(at.translation * scale, node.size * scale);
         for child in children {
-            if let Ok((mut panel, mut visibility)) = panels.get_mut(*child) {
-                let (l, t) = (px(left.clamp(8.0, max_left)), px(top));
-                if panel.left != l || panel.top != t {
+            if let Ok((mut panel, mut visibility, card)) = panels.get_mut(*child) {
+                let size = card.size * card.inverse_scale_factor;
+                let spot = panel_spot(button, size, window);
+                let (l, t, h) = (px(spot.at.x), px(spot.at.y), px(spot.max_height));
+                if panel.left != l || panel.top != t || panel.max_height != h {
                     panel.left = l;
                     panel.top = t;
+                    panel.max_height = h;
                 } else if *visibility != Visibility::Inherited {
                     *visibility = Visibility::Inherited;
                 }
@@ -729,6 +794,81 @@ mod tests {
         testing::settle(&mut app);
         assert_eq!(app.world().resource::<GifState>().status, GifStatus::Ready);
         assert_eq!(testing::count::<GifTile>(&mut app), 2);
+    }
+
+    #[test]
+    fn every_toolbar_face_has_its_glyphs() {
+        use crate::fonts::{INTER, JETBRAINS_MONO, covers};
+        use crate::ui::composer::toolbar::ToolbarAction as A;
+        let mut faces: Vec<(String, &[u8])> = [
+            A::Bold,
+            A::Italic,
+            A::Code,
+            A::Link,
+            A::List,
+            A::Quote,
+            A::Suggest,
+        ]
+        .map(|a| {
+            let font = if a == A::Code { JETBRAINS_MONO } else { INTER };
+            (a.glyph().to_string(), font)
+        })
+        .to_vec();
+        for kind in [PopoverKind::Emoji, PopoverKind::Gif, PopoverKind::Image] {
+            faces.extend(kind.icon().map(|i| (i.to_string(), JETBRAINS_MONO)));
+            faces.push((kind.word().to_string(), INTER));
+        }
+        for (face, font) in faces {
+            for ch in face.chars().filter(|c| !c.is_whitespace()) {
+                assert!(covers(font, ch), "{ch:?} in {face:?} has no glyph");
+            }
+        }
+    }
+
+    #[test]
+    fn a_card_opens_below_its_button_when_there_is_room() {
+        let window = Vec2::new(1280.0, 800.0);
+        let button = Rect::new(440.0, 160.0, 500.0, 186.0);
+        let spot = panel_spot(button, Vec2::new(PANEL_WIDTH, 200.0), window);
+        assert_eq!(spot.at, Vec2::new(440.0, 186.0 + PANEL_GAP));
+    }
+
+    #[test]
+    fn a_card_near_the_bottom_opens_above_its_button() {
+        let window = Vec2::new(1280.0, 800.0);
+        let button = Rect::new(440.0, 640.0, 500.0, 666.0);
+        let card = Vec2::new(PANEL_WIDTH, 300.0);
+        let spot = panel_spot(button, card, window).at;
+        assert_eq!(spot.y, 640.0 - PANEL_GAP - 300.0);
+        assert!(spot.y >= PANEL_MARGIN && spot.y + card.y <= window.y - PANEL_MARGIN);
+    }
+
+    #[test]
+    fn a_card_stays_inside_a_window_too_small_for_it() {
+        let window = Vec2::new(500.0, 400.0);
+        // Near the right edge: moved left so its right side is inside.
+        let button = Rect::new(460.0, 20.0, 490.0, 46.0);
+        let card = Vec2::new(PANEL_WIDTH, 120.0);
+        let spot = panel_spot(button, card, window).at;
+        assert_eq!(spot.x, 500.0 - PANEL_WIDTH - PANEL_MARGIN);
+        // Room on neither side: the roomier side, above here, cut to its room.
+        let button = Rect::new(20.0, 220.0, 80.0, 246.0);
+        let tall = Vec2::new(PANEL_WIDTH, 360.0);
+        let spot = panel_spot(button, tall, window);
+        let room = 220.0 - PANEL_GAP - PANEL_MARGIN;
+        assert_eq!(
+            spot,
+            PanelSpot {
+                at: Vec2::new(20.0, PANEL_MARGIN),
+                max_height: room,
+            }
+        );
+        let cut = Vec2::new(PANEL_WIDTH, room);
+        assert_eq!(
+            panel_spot(button, cut, window),
+            spot,
+            "and stays there once cut"
+        );
     }
 
     #[test]

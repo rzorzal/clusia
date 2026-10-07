@@ -68,6 +68,7 @@ pub fn emoji_panel(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &Composer
             flex_direction: FlexDirection::Column,
             row_gap: px(6),
             max_height: px(264),
+            min_height: px(0),
             overflow: Overflow::scroll_y(),
             ..default()
         },

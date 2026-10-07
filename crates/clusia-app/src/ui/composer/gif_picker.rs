@@ -128,6 +128,7 @@ pub fn gif_panel(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &ComposerKe
         Node {
             flex_direction: FlexDirection::Column,
             row_gap: px(8),
+            min_height: px(0),
             ..default()
         },
         GifSearchBox,
@@ -140,6 +141,7 @@ pub fn gif_panel(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &ComposerKe
                 column_gap: px(8),
                 row_gap: px(8),
                 max_height: px(280),
+                min_height: px(0),
                 overflow: Overflow::scroll_y(),
                 ..default()
             },

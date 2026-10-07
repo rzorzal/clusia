@@ -33,6 +33,7 @@ use crate::ui::text_area::{TextArea, TextSubmitted, growing_text_area, text_area
 mod emoji_picker;
 mod gif_picker;
 pub mod popover;
+mod reveal;
 pub mod toolbar;
 
 #[cfg(test)]
@@ -408,6 +409,7 @@ impl Plugin for ComposerPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             popover::PopoverPlugin,
+            reveal::RevealPlugin,
             emoji_picker::EmojiPickerPlugin,
             gif_picker::GifPickerPlugin,
         ))
