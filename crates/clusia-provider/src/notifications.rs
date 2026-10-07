@@ -39,14 +39,13 @@ impl Notification {
         PrRef::new(owner, repo, number).ok()
     }
 
-    /// The id of the comment that caused the notification, when it points at one.
+    /// The id of the comment that caused the notification, when it points at one. When a thread
+    /// changed without a new comment (a push, a review, a label), GitHub points
+    /// `latest_comment_url` at the pull request itself, whose number is no comment id.
     pub fn comment_id(&self) -> Option<u64> {
-        self.latest_comment_url
-            .as_deref()?
-            .rsplit('/')
-            .next()?
-            .parse()
-            .ok()
+        let mut segments = self.latest_comment_url.as_deref()?.rsplit('/');
+        let id = segments.next()?.parse().ok()?;
+        (segments.next()? == "comments").then_some(id)
     }
 }
 
@@ -335,6 +334,18 @@ mod tests {
             repository: "rzorzal/clusia".into(),
         };
         assert_eq!(n.pr(), PrRef::new("rzorzal", "clusia", 123).ok());
+        assert_eq!(n.comment_id(), None);
+        n.latest_comment_url =
+            Some("https://api.github.com/repos/rzorzal/clusia/pulls/comments/42".into());
+        assert_eq!(n.comment_id(), Some(42), "a review comment");
+        n.latest_comment_url = Some("https://api.github.com/repos/rzorzal/clusia/pulls/123".into());
+        assert_eq!(
+            n.comment_id(),
+            None,
+            "the thread changed without a new comment: the URL is the pull request's"
+        );
+        n.latest_comment_url =
+            Some("https://api.github.com/repos/rzorzal/clusia/issues/123".into());
         assert_eq!(n.comment_id(), None);
         n.subject_url = Some("https://api.github.com/repos/rzorzal/clusia/issues/5".into());
         assert_eq!(n.pr(), None);

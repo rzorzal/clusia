@@ -73,10 +73,7 @@ pub(crate) fn from_notification(
     let comment = n.comment_id();
     let by = by.unwrap_or(SOMEONE);
     // A comment is announced once, whichever way it reached the feed.
-    let comment_key = |fallback: &str| match comment {
-        Some(id) => format!("comment:{pr}:{id}"),
-        None => format!("{fallback}:{pr}:{}", n.updated_at),
-    };
+    let comment_key = |id: u64| format!("comment:{pr}:{id}");
     Some(match n.reason.as_str() {
         "review_requested" => NotifyEvent::review_requested(
             &pr,
@@ -85,17 +82,20 @@ pub(crate) fn from_notification(
             format!("review_requested:{pr}:{}", n.id),
             at,
         ),
+        // A mention outside a comment (the description, say) has no id of its own: the thread
+        // is announced once, whatever else later changes on it.
         "mention" | "team_mention" => {
-            NotifyEvent::mentioned(&pr, &n.title, by, comment_key("mentioned"), at)
+            let key = match comment {
+                Some(id) => comment_key(id),
+                None => format!("mentioned:{pr}:{}", n.id),
+            };
+            NotifyEvent::mentioned(&pr, &n.title, by, key, at)
         }
-        "comment" | "author" => NotifyEvent::reply_to_you(
-            &pr,
-            &n.title,
-            by,
-            comment.map(|id| id.to_string()),
-            comment_key("reply_to_you"),
-            at,
-        ),
+        // Without a comment the thread changed some other way, which is no reply.
+        "comment" | "author" => {
+            let id = comment?;
+            NotifyEvent::reply_to_you(&pr, &n.title, by, Some(id.to_string()), comment_key(id), at)
+        }
         _ => return None,
     })
 }
@@ -188,6 +188,16 @@ pub(crate) struct Processed {
     pub notify: Option<Event>,
     /// The inbox or the remembered keys changed and must be saved.
     pub changed: bool,
+    /// A new event that would make a banner were it not part of a burst.
+    pub posts: bool,
+}
+
+/// What `Engine::process_batch` made of several events.
+pub(crate) struct Batch {
+    /// The banners to publish, a burst on one pull request already summed up in one.
+    pub banners: Vec<Event>,
+    /// The inbox or the remembered keys changed and must be saved.
+    pub changed: bool,
 }
 
 /// The persisted inbox plus the short-term memory that routing needs.
@@ -221,10 +231,12 @@ impl Engine {
             return Processed {
                 notify: None,
                 changed: false,
+                posts: false,
             };
         }
         self.data.remember(&event.key, event.at);
         let decision = decide(&event, cfg, local, &self.recent);
+        let posts = decide(&event, cfg, local, &Recent::default()).macos;
         if decision.tray {
             self.data.push(InboxItem {
                 id: event.key.clone(),
@@ -254,7 +266,60 @@ impl Engine {
         Processed {
             notify,
             changed: true,
+            posts,
         }
+    }
+
+    /// `process` for each of `events`, oldest first. Several new events about one pull request
+    /// that would each make a banner make one, which says how many there are.
+    pub fn process_batch(
+        &mut self,
+        mut events: Vec<NotifyEvent>,
+        cfg: &Notifications,
+        local: LocalTime,
+    ) -> Batch {
+        events.sort_by_key(|e| (e.at, priority(e.kind)));
+        let mut changed = false;
+        let mut banners = Vec::new();
+        // Titles of the new events per pull request that would make a banner, in this batch.
+        let mut arrived: std::collections::HashMap<PrRef, Vec<String>> = Default::default();
+        for event in events {
+            let pr = event.pr.clone();
+            let title = event.title.clone();
+            let processed = self.process(event, cfg, local);
+            changed |= processed.changed;
+            if cfg.group_bursts
+                && processed.posts
+                && let Some(pr) = &pr
+            {
+                arrived.entry(pr.clone()).or_default().push(title);
+            }
+            banners.extend(processed.notify.map(|banner| (banner, pr)));
+        }
+        let banners = banners
+            .into_iter()
+            .map(|(mut banner, pr)| {
+                if let (Event::Notify { title, body, .. }, Some(pr)) = (&mut banner, &pr)
+                    && let Some(titles) = arrived.get(pr).filter(|titles| titles.len() > 1)
+                {
+                    (*title, *body) = group_banner(titles, pr.number);
+                }
+                banner
+            })
+            .collect();
+        Batch { banners, changed }
+    }
+
+    /// Whether the feed may be read at `now`, which then counts as its last read.
+    pub fn may_read_feed(&mut self, now: std::time::Instant) -> bool {
+        if self
+            .feed_read_at
+            .is_some_and(|at| now.saturating_duration_since(at) < FEED_MIN_INTERVAL)
+        {
+            return false;
+        }
+        self.feed_read_at = Some(now);
+        true
     }
 }
 
@@ -293,36 +358,16 @@ fn group_banner(titles: &[String], number: u64) -> (String, String) {
 }
 
 /// Files and announces `events`: the inbox is saved once, then each banner goes to the tray
-/// topic, then the new unseen count. Several new events about one pull request make one banner
-/// that says how many there are.
-pub(crate) async fn deliver(shared: &Shared, mut events: Vec<NotifyEvent>) {
+/// topic, then the new unseen count.
+pub(crate) async fn deliver(shared: &Shared, events: Vec<NotifyEvent>) {
     if events.is_empty() {
         return;
     }
-    events.sort_by_key(|e| (e.at, priority(e.kind)));
     let cfg = shared.config.read().await.notifications.clone();
     let local = LocalTime::from_unix(now_unix());
     let mut engine = shared.engine.lock().await;
-    let mut changed = false;
-    let mut banners = Vec::new();
-    // Titles of the new events per pull request, in this batch.
-    let mut arrived: std::collections::HashMap<PrRef, Vec<String>> = Default::default();
-    for event in events {
-        if cfg.group_bursts
-            && let Some(pr) = &event.pr
-            && !engine.data.has_key(&event.key)
-        {
-            arrived
-                .entry(pr.clone())
-                .or_default()
-                .push(event.title.clone());
-        }
-        let pr = event.pr.clone();
-        let processed = engine.process(event, &cfg, local);
-        changed |= processed.changed;
-        banners.extend(processed.notify.map(|banner| (banner, pr)));
-    }
-    if !changed {
+    let batch = engine.process_batch(events, &cfg, local);
+    if !batch.changed {
         return;
     }
     if let Err(e) = engine.data.save(&shared.paths) {
@@ -330,12 +375,7 @@ pub(crate) async fn deliver(shared: &Shared, mut events: Vec<NotifyEvent>) {
     }
     let unseen = engine.data.unseen();
     drop(engine);
-    for (mut banner, pr) in banners {
-        if let (Event::Notify { title, body, .. }, Some(pr)) = (&mut banner, &pr)
-            && let Some(titles) = arrived.get(pr).filter(|titles| titles.len() > 1)
-        {
-            (*title, *body) = group_banner(titles, pr.number);
-        }
+    for banner in batch.banners {
         shared.publish(topics::TRAY, banner);
     }
     shared.publish(topics::TRAY, Event::InboxChanged { unseen });
@@ -369,13 +409,9 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
             set_feed_since(shared, now).await;
             return;
         };
-        if engine
-            .feed_read_at
-            .is_some_and(|at| at.elapsed() < FEED_MIN_INTERVAL)
-        {
+        if !engine.may_read_feed(std::time::Instant::now()) {
             return;
         }
-        engine.feed_read_at = Some(std::time::Instant::now());
         since
     };
     let floor = now - FEED_LOOKBACK_SECS;
@@ -391,6 +427,8 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
         }
     };
     let mut events = Vec::new();
+    // Asked for once, and only when someone has to be named.
+    let mut viewer: Option<Option<String>> = None;
     for n in &feed {
         let Some(mut candidate) = from_notification(n, None, now) else {
             continue;
@@ -398,10 +436,24 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
         if shared.engine.lock().await.data.has_key(&candidate.key) {
             continue;
         }
-        if let Some(by) = who(gh, n, candidate.kind).await
-            && let Some(named) = from_notification(n, Some(&by), now)
-        {
-            candidate = named;
+        if let Some(by) = who(gh, n, candidate.kind).await {
+            if viewer.is_none() {
+                viewer = Some(gh.viewer().await.ok().map(|v| v.login));
+            }
+            if viewer.as_ref().is_some_and(|me| me.as_deref() == Some(&by)) {
+                // What you wrote yourself is no news to you; remembered so it is not looked
+                // up again.
+                shared
+                    .engine
+                    .lock()
+                    .await
+                    .data
+                    .remember(&candidate.key, candidate.at);
+                continue;
+            }
+            if let Some(named) = from_notification(n, Some(&by), now) {
+                candidate = named;
+            }
         }
         events.push(candidate);
     }
@@ -413,10 +465,12 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
 async fn who(gh: &GitHub, n: &Notification, kind: EventKind) -> Option<String> {
     match kind {
         EventKind::ReviewRequested => Some(gh.get_pr(&n.pr()?).await.ok()?.summary.author),
-        EventKind::Mentioned | EventKind::ReplyToYou => gh
-            .comment_author(n.latest_comment_url.as_deref()?)
-            .await
-            .ok(),
+        EventKind::Mentioned | EventKind::ReplyToYou => {
+            n.comment_id()?;
+            gh.comment_author(n.latest_comment_url.as_deref()?)
+                .await
+                .ok()
+        }
         _ => None,
     }
 }
@@ -664,6 +718,7 @@ mod tests {
     use super::*;
     use clusia_core::PrRef;
     use clusia_core::config::{Dnd, HourMinute, Weekday};
+    use std::time::Duration;
 
     fn pr() -> PrRef {
         "rzorzal/clusia#123".parse().unwrap()
@@ -755,12 +810,76 @@ mod tests {
                 thread: Some("991".into())
             }
         );
-        let author = from_notification(&entry("author", None), None, 0).unwrap();
+        let author = from_notification(&entry("author", Some(992)), None, 0).unwrap();
         assert_eq!(author.kind, EventKind::ReplyToYou);
+        assert_eq!(author.key, "comment:rzorzal/clusia#123:992");
+    }
+
+    #[test]
+    fn a_thread_update_that_is_not_a_comment_is_not_a_reply() {
+        for reason in ["comment", "author"] {
+            let mut n = entry(reason, None);
+            assert!(from_notification(&n, None, 0).is_none(), "{reason}");
+            n.updated_at = "2026-10-01T13:00:00Z".into();
+            assert!(
+                from_notification(&n, None, 0).is_none(),
+                "{reason}: a later push, review or label"
+            );
+            n.latest_comment_url =
+                Some("https://api.github.com/repos/rzorzal/clusia/pulls/123".into());
+            assert!(from_notification(&n, None, 0).is_none(), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_mention_without_a_comment_is_announced_once_per_thread() {
+        let mut n = entry("mention", None);
+        n.latest_comment_url = Some("https://api.github.com/repos/rzorzal/clusia/pulls/123".into());
+        let first = from_notification(&n, None, 0).unwrap();
+        assert_eq!(first.kind, EventKind::Mentioned);
+        assert_eq!(first.key, "mentioned:rzorzal/clusia#123:77");
+        n.updated_at = "2026-10-01T13:00:00Z".into();
+        n.latest_comment_url = None;
+        assert_eq!(from_notification(&n, None, 0).unwrap().key, first.key);
+    }
+
+    #[test]
+    fn the_feed_is_read_again_only_after_a_minute() {
+        let mut engine = engine();
+        let t0 = std::time::Instant::now();
+        assert!(engine.may_read_feed(t0), "never read");
+        assert!(!engine.may_read_feed(t0 + Duration::from_secs(30)));
+        assert!(!engine.may_read_feed(t0 + Duration::from_secs(59)));
+        assert!(engine.may_read_feed(t0 + Duration::from_secs(60)));
+        assert!(!engine.may_read_feed(t0 + Duration::from_secs(61)));
+        assert!(engine.may_read_feed(t0 + Duration::from_secs(125)));
+    }
+
+    #[test]
+    fn a_grouped_title_counts_only_the_events_that_would_make_a_banner() {
+        let cfg = Notifications::default();
+        let mut engine = engine();
+        let failed =
+            NotifyEvent::checks_failed(&pr(), "feat: auth refresh", 2, "checks_failed:x:c1", 1_000);
+        let events = vec![
+            mention(1, 1_000, "rzorzal/clusia#123"),
+            mention(2, 1_001, "rzorzal/clusia#123"),
+            failed,
+        ];
+        let batch = engine.process_batch(events, &cfg, at(600));
+        assert!(batch.changed);
         assert_eq!(
-            author.key,
-            "reply_to_you:rzorzal/clusia#123:2026-10-01T12:00:00Z"
+            engine.data.items.len(),
+            3,
+            "every event is in the tray list"
         );
+        match &batch.banners[..] {
+            [Event::Notify { title, body, .. }] => {
+                assert_eq!(title, "2 updates on #123");
+                assert_eq!(body, "@octo mentioned you");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

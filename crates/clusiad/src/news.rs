@@ -357,7 +357,10 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             },
         );
         announce(shared, &review);
-        crate::notifications::review_outdated(shared, &review, &old_head).await;
+        // A base that moved alone may obsolete comments, but brings no commits to re-read.
+        if head_changed {
+            crate::notifications::review_outdated(shared, &review, &old_head).await;
+        }
     }
 }
 
