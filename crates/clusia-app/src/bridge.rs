@@ -1084,7 +1084,7 @@ impl Plugin for BridgePlugin {
                     connect(world, paths.clone(), home.clone(), &slot);
                 });
             }
-            Mode::Demo { dark } => {
+            Mode::Demo { theme } => {
                 let (inbox, outbox) = local_link();
                 app.init_resource::<Asks>()
                     .insert_resource(inbox)
@@ -1093,9 +1093,8 @@ impl Plugin for BridgePlugin {
                         Startup,
                         move |mut model: ResMut<Model>, clock: Res<Clock>| {
                             model.snapshot = fixture::demo(clock.now());
-                            if dark {
-                                model.snapshot.config.appearance.theme =
-                                    clusia_core::config::Theme::Dark;
+                            if let Some(theme) = theme {
+                                model.snapshot.config.appearance.theme = theme;
                             }
                             model.connection = Connection::Live;
                         },
@@ -1292,14 +1291,10 @@ pub(crate) fn demo_answers(
                 pr,
             }),
             Ask::CloseReview(pr) | Ask::Discard(pr) => tells.push(Tell::Left(pr)),
-            Ask::SearchGifs { .. } => tells.push(Tell::Gifs(Err((
-                ErrorCode::NotConfigured,
-                "Demo mode has no Giphy key".into(),
-            )))),
-            Ask::FetchMedia(url) => tells.push(Tell::Media {
-                url,
-                file: Err(MediaError::refused("Pictures are not loaded in demo mode")),
-            }),
+            Ask::SearchGifs { query, offset } => {
+                tells.push(Tell::Gifs(Ok(fixture::demo_gif_page(&query, offset))));
+            }
+            Ask::FetchMedia(url) => tells.push(demo_media_tell(url)),
             _ => toasts.0.push(Toast {
                 text: "Demo mode: nothing is sent to the daemon".into(),
                 warning: false,
@@ -1313,6 +1308,25 @@ pub(crate) fn demo_answers(
         }
         redraw.write(RequestRedraw);
     }
+}
+
+/// The demo's copy of `url`, written under the temp folder where the window may read it.
+fn demo_media_tell(url: String) -> Tell {
+    let file = fixture::demo_media(&url)
+        .ok_or_else(|| MediaError::refused("Demo mode has no copy of this picture"))
+        .and_then(|(kind, bytes)| {
+            let dir = std::env::temp_dir().join("clusia-demo-media");
+            let path = dir.join(format!("{}.gif", clusia_core::media::cache_key(&url)));
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, &bytes))
+                .map_err(|e| MediaError::transient(e.to_string()))?;
+            Ok(MediaFile {
+                path: path.display().to_string(),
+                kind,
+                bytes: bytes.len() as u64,
+            })
+        });
+    Tell::Media { url, file }
 }
 
 /// The demo review opens at once (every step done, no harness); any other PR fails at the
@@ -1511,6 +1525,95 @@ mod tests {
             rx.try_recv(),
             Ok(Tell::Media { file: Err(e), .. }) if e.transient && e.message == "Not connected to clusiad"
         ));
+    }
+
+    /// Runs `demo_answers` on `asks` and returns the tells it produced.
+    fn demo_tells(asks: Vec<Ask>) -> Vec<Tell> {
+        let (inbox, outbox) = local_link();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .insert_resource(Asks {
+                recorded: asks,
+                ..Asks::default()
+            })
+            .insert_resource(Model::default())
+            .insert_resource(Toasts::default())
+            .insert_resource(ReviewTabs::default())
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .insert_resource(outbox)
+            .add_systems(Update, demo_answers);
+        app.update();
+        inbox.0.try_iter().collect()
+    }
+
+    #[test]
+    fn demo_mode_answers_gif_searches_and_media() {
+        let url = "https://media.giphy.com/media/demo-party/giphy.gif".to_string();
+        let tells = demo_tells(vec![
+            Ask::SearchGifs {
+                query: "turtle".into(),
+                offset: 0,
+            },
+            Ask::FetchMedia(url.clone()),
+            Ask::FetchMedia("https://example.org/a.png".into()),
+        ]);
+        let [
+            Tell::Gifs(Ok(page)),
+            Tell::Media { file: Ok(file), .. },
+            Tell::Media { file: Err(why), .. },
+        ] = &tells[..]
+        else {
+            panic!("unexpected answers: {tells:?}");
+        };
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|i| i.title.as_str())
+                .collect::<Vec<_>>(),
+            ["party turtle"]
+        );
+        assert_eq!(file.kind, clusia_core::media::MediaKind::Gif);
+        let bytes = std::fs::read(&file.path).expect("the demo wrote its GIF");
+        assert!(bytes.starts_with(b"GIF8"));
+        assert_eq!(bytes.len() as u64, file.bytes);
+        assert_eq!(why.message, "Demo mode has no copy of this picture");
+        assert!(!why.transient);
+    }
+
+    #[test]
+    fn demo_theme_flags_set_the_theme_whatever_macos_says() {
+        use clusia_core::config::Theme;
+        for (forced, want) in [
+            (Some(Theme::Light), Theme::Light),
+            (Some(Theme::Dark), Theme::Dark),
+            (None, Theme::System),
+        ] {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .add_message::<RequestRedraw>()
+                .insert_resource(Clock(Some(1_790_000_000)))
+                .add_message::<ReviewEvent>()
+                .add_message::<AppExit>()
+                .init_resource::<MediaCache>()
+                .insert_resource(ReviewTabs::default())
+                .add_plugins(BridgePlugin {
+                    mode: Mode::Demo { theme: forced },
+                    paths: Paths::new("/tmp/clusia-test-home"),
+                    home: None,
+                    thread: BridgeSlot::default(),
+                });
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<Model>()
+                    .snapshot
+                    .config
+                    .appearance
+                    .theme,
+                want
+            );
+        }
     }
 
     #[test]

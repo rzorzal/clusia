@@ -1,5 +1,6 @@
 //! Demo data for `--demo` and screenshots: only `rzorzal` repositories and generic people.
 
+use clusia_core::media::MediaKind;
 use clusia_core::time::civil_from_days;
 use clusia_core::{
     ActivitySummary, Anchor, ChecksSummary, Config, DayCount, Draft, DraftItem, DraftKind,
@@ -7,8 +8,8 @@ use clusia_core::{
     ReviewInfo, ReviewState, ReviewThread, Role, Side, ThreadPost,
 };
 use clusia_protocol::{
-    AuthInfo, FileSummary, NewsItem, NewsKind, ReviewSummary, ReviewView, SyncState, SyncStatus,
-    TokenSource,
+    AuthInfo, FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness, HarnessKind, NewsItem,
+    NewsKind, RepoFolder, ReviewSummary, ReviewView, SyncState, SyncStatus, TokenSource,
 };
 
 use crate::snapshot::{GiphyKey, Snapshot};
@@ -124,6 +125,114 @@ pub fn demo(now: i64) -> Snapshot {
         lists_loaded: true,
         daemon_version: "demo".into(),
     }
+}
+
+/// What the first-run screen shows in demo mode (mockup `FirstRun.png`).
+pub fn demo_first_run() -> FirstRun {
+    let folder = |path: &str, exists, repos| RepoFolder {
+        path: path.into(),
+        exists,
+        repos,
+    };
+    FirstRun {
+        github: GithubLogin::SignedIn {
+            login: "rzorzal".into(),
+            scopes: vec!["repo".into(), "read:org".into()],
+        },
+        folders: vec![
+            folder("~/Repos", true, 12),
+            folder("~/Projects", true, 3),
+            folder("~/src", true, 0),
+            folder("~/code", false, 0),
+        ],
+        harnesses: vec![
+            Harness {
+                kind: HarnessKind::ClaudeCode,
+                path: Some("/opt/homebrew/bin/claude".into()),
+                version: Some("2.1.0".into()),
+            },
+            Harness {
+                kind: HarnessKind::Codex,
+                path: None,
+                version: None,
+            },
+        ],
+    }
+}
+
+/// `(id, title)` of the GIFs the demo's Giphy search knows.
+const DEMO_GIFS: [(&str, &str); 6] = [
+    ("demo-party", "party turtle"),
+    ("demo-thumbs", "thumbs up"),
+    ("demo-mind", "mind blown"),
+    ("demo-clap", "applause"),
+    ("demo-ship", "ship it"),
+    ("demo-coffee", "coffee time"),
+];
+
+/// The demo's answer to a Giphy search: every GIF for an empty query, else the titles that
+/// contain it (ignoring case). Only the first page has results.
+pub fn demo_gif_page(query: &str, offset: u32) -> GifPage {
+    let query = query.trim().to_lowercase();
+    let items = DEMO_GIFS
+        .iter()
+        .filter(|_| offset == 0)
+        .filter(|(_, title)| title.contains(&query))
+        .map(|(id, title)| GifItem {
+            id: (*id).into(),
+            title: (*title).into(),
+            preview_url: format!("https://media.giphy.com/media/{id}/100w.gif"),
+            url: format!("https://media.giphy.com/media/{id}/giphy.gif"),
+            width: 100,
+            height: 75,
+        })
+        .collect();
+    GifPage {
+        items,
+        next_offset: None,
+    }
+}
+
+/// A small looping animation colored by `url`, standing in for a downloaded GIF.
+pub fn demo_gif_bytes(url: &str) -> Vec<u8> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{Delay, Frame, Rgba, RgbaImage};
+    const WIDTH: u32 = 120;
+    const HEIGHT: u32 = 90;
+    const SIDE: u32 = 24;
+    const FRAMES: u32 = 6;
+    let hash = url.bytes().fold(2_166_136_261_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16_777_619)
+    });
+    let channel = |shift: u32| 80 + ((hash >> shift) & 0x7f) as u8;
+    let ink = Rgba([channel(0), channel(8), channel(16), 255]);
+    let mut out = Vec::new();
+    {
+        let mut encoder = GifEncoder::new(&mut out);
+        encoder
+            .set_repeat(Repeat::Infinite)
+            .expect("an in-memory encoder takes the repeat");
+        for i in 0..FRAMES {
+            let mut image = RgbaImage::from_pixel(WIDTH, HEIGHT, Rgba([240, 244, 240, 255]));
+            let x = 8 + i * (WIDTH - SIDE - 16) / (FRAMES - 1);
+            for dy in 0..SIDE {
+                for dx in 0..SIDE {
+                    image.put_pixel(x + dx, 33 + dy, ink);
+                }
+            }
+            let frame = Frame::from_parts(image, 0, 0, Delay::from_numer_denom_ms(120, 1));
+            encoder
+                .encode_frame(frame)
+                .expect("an in-memory encoder takes the frame");
+        }
+    }
+    out
+}
+
+/// The demo's copy of a picture: Giphy URLs are animated GIFs, nothing else exists.
+pub fn demo_media(url: &str) -> Option<(MediaKind, Vec<u8>)> {
+    url.starts_with("https://media.giphy.com/")
+        .then(|| (MediaKind::Gif, demo_gif_bytes(url)))
 }
 
 /// The review every demo scene shows (mockup `Review.png`).
@@ -263,14 +372,14 @@ fn demo_conversation(now: i64) -> PrConversation {
             IssueComment {
                 id: 2001,
                 author: "joao".into(),
-                body: "Tested against the staging token server: the refresh works.".into(),
+                body: "Tested against the staging token server: the **refresh works** :white_check_mark:\n\nThe retry waits `30s` before it asks again, as the CLI does:\n\n```rust\nlet delay = Duration::from_secs(30);\n```".into(),
                 created_at: rfc3339(now - 5 * 3600),
                 url: "https://github.com/rzorzal/clusia/pull/123#issuecomment-2001".into(),
             },
             IssueComment {
                 id: 2002,
                 author: "octo".into(),
-                body: "Thanks! Rebased on main.".into(),
+                body: "Thanks! _Rebased on main_ :tada: Here is the run on my machine:\n\n![party](https://media.giphy.com/media/demo-party/giphy.gif)\n\nNotes in the [auth guide](https://github.com/rzorzal/clusia/pull/98) 🐢".into(),
                 created_at: rfc3339(now - 4 * 3600),
                 url: "https://github.com/rzorzal/clusia/pull/123#issuecomment-2002".into(),
             },
@@ -827,5 +936,89 @@ mod tests {
         assert!(can_comment(&patch("src/auth/refresh.rs"), Side::Right, 41));
         assert!(can_comment(&patch("src/auth/store.rs"), Side::Right, 88));
         assert!(can_comment(&patch("src/auth/mod.rs"), Side::Right, 3));
+    }
+
+    #[test]
+    fn demo_gif_is_a_real_animated_gif() {
+        use image::AnimationDecoder;
+        let bytes = demo_gif_bytes("https://media.giphy.com/media/demo-party/giphy.gif");
+        assert!(bytes.starts_with(b"GIF8"));
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let frames = decoder.into_frames().collect_frames().unwrap();
+        assert_eq!(frames.len(), 6);
+        assert_eq!(frames[0].buffer().dimensions(), (120, 90));
+        assert_ne!(
+            demo_gif_bytes("https://media.giphy.com/media/demo-thumbs/giphy.gif"),
+            demo_gif_bytes("https://media.giphy.com/media/demo-party/giphy.gif"),
+            "each GIF has its own color"
+        );
+    }
+
+    #[test]
+    fn demo_media_only_serves_giphy() {
+        let (kind, bytes) =
+            demo_media("https://media.giphy.com/media/demo-clap/giphy.gif").unwrap();
+        assert_eq!(kind, MediaKind::Gif);
+        assert!(!bytes.is_empty());
+        assert!(demo_media("https://example.org/pic.png").is_none());
+        assert!(demo_media("http://media.giphy.com/media/a/giphy.gif").is_none());
+    }
+
+    #[test]
+    fn demo_gif_search_filters_by_title() {
+        let titles = |q: &str, offset| -> Vec<String> {
+            demo_gif_page(q, offset)
+                .items
+                .into_iter()
+                .map(|i| i.title)
+                .collect()
+        };
+        assert_eq!(titles("", 0).len(), 6, "trending");
+        assert_eq!(titles(" TURTLE ", 0), ["party turtle"]);
+        assert!(titles("nothing like it", 0).is_empty());
+        assert!(titles("", 24).is_empty(), "only the first page has results");
+        let item = &demo_gif_page("ship", 0).items[0];
+        assert_eq!(
+            item.preview_url,
+            "https://media.giphy.com/media/demo-ship/100w.gif"
+        );
+        assert_eq!(
+            item.url,
+            "https://media.giphy.com/media/demo-ship/giphy.gif"
+        );
+    }
+
+    #[test]
+    fn demo_comments_show_rich_text() {
+        let comments = demo_review(NOW).0.conversation.unwrap().comments;
+        let bodies: Vec<&str> = comments.iter().map(|c| c.body.as_str()).collect();
+        assert!(bodies[0].contains("**refresh works**") && bodies[0].contains("```rust"));
+        assert!(bodies[0].contains(":white_check_mark:"));
+        assert!(bodies[1].contains(":tada:") && bodies[1].contains("🐢"));
+        assert!(bodies[1].contains("![party](https://media.giphy.com/media/demo-party/giphy.gif)"));
+        assert!(bodies[1].contains("[auth guide](https://github.com/rzorzal/clusia/pull/98)"));
+    }
+
+    #[test]
+    fn demo_first_run_matches_the_mockup() {
+        let f = demo_first_run();
+        assert!(matches!(&f.github, GithubLogin::SignedIn { login, .. } if login == "rzorzal"));
+        let chips: Vec<(&str, bool, u32)> = f
+            .folders
+            .iter()
+            .map(|d| (d.path.as_str(), d.exists, d.repos))
+            .collect();
+        assert_eq!(
+            chips,
+            [
+                ("~/Repos", true, 12),
+                ("~/Projects", true, 3),
+                ("~/src", true, 0),
+                ("~/code", false, 0)
+            ]
+        );
+        assert_eq!(f.harnesses.len(), 2, "the daemon reports both kinds");
+        assert_eq!(f.harnesses[0].kind, HarnessKind::ClaudeCode);
+        assert!(f.harnesses[0].path.is_some() && f.harnesses[1].path.is_none());
     }
 }

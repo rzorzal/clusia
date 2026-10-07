@@ -36,7 +36,13 @@ fn main() -> ExitCode {
         home,
         target,
         mode: if args.demo {
-            Mode::Demo { dark: args.dark }
+            Mode::Demo {
+                theme: match (args.dark, args.light) {
+                    (true, _) => Some(clusia_core::config::Theme::Dark),
+                    (_, true) => Some(clusia_core::config::Theme::Light),
+                    _ => None,
+                },
+            }
         } else {
             Mode::Live
         },

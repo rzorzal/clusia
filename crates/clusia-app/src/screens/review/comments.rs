@@ -876,6 +876,12 @@ mod tests {
                 t.viewer_can_reply = true;
                 t.viewer_can_resolve = true;
             }
+            // The demo's rich issue comments load a picture; these tests count pictures and asks.
+            if let Some(c) = r.view.conversation.as_mut() {
+                for comment in &mut c.comments {
+                    comment.body = "Thanks!".into();
+                }
+            }
             ui.section = ReviewSection::Comments;
         });
         testing::settle(&mut app);

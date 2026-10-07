@@ -606,7 +606,12 @@ mod tests {
             app.world().resource::<ReviewTabs>().0[&pr].ui.section,
             ReviewSection::Comments
         );
-        assert_eq!(testing::recorded(&mut app), [Ask::MarkSeen(pr.clone())]);
+        // The Comments section shows the demo's GIF, which it asks the daemon for.
+        let asks: Vec<Ask> = testing::recorded(&mut app)
+            .into_iter()
+            .filter(|a| !matches!(a, Ask::FetchMedia(_)))
+            .collect();
+        assert_eq!(asks, [Ask::MarkSeen(pr.clone())]);
         assert_eq!(modal(&app, &pr), None);
         app.world_mut()
             .resource_mut::<ReviewTabs>()

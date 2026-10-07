@@ -22,8 +22,10 @@ use crate::theme::{LIGHT, Theme};
 pub enum Mode {
     /// Connected to the daemon.
     Live,
-    /// Demo data; `dark` forces the dark theme.
-    Demo { dark: bool },
+    /// Demo data; `theme` forces a theme (`None` follows the macOS appearance).
+    Demo {
+        theme: Option<clusia_core::config::Theme>,
+    },
 }
 
 #[derive(Debug, Clone)]
