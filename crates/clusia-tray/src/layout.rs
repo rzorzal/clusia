@@ -877,9 +877,17 @@ mod tests {
             ..Snapshot::default()
         };
         m.apply(base.clone());
-        let mut changed = base;
-        changed.assigned[0].updated_at = "2026-09-21T10:00:00Z".into();
-        m.apply(changed);
+        let mut unseen = base;
+        unseen.inbox = vec![clusia_protocol::message::InboxItem {
+            id: "n1".into(),
+            kind: clusia_core::config::EventKind::ReviewRequested,
+            pr: Some(unseen.assigned[0].pr.clone()),
+            title: "Review requested".into(),
+            body: "@octo asked for your review".into(),
+            at: 0,
+            seen: false,
+        }];
+        m.apply(unseen);
         let l = layout(&m.view(NOW));
         // The header dot plus the fresh row's dot.
         assert_eq!(

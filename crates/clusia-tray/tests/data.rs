@@ -5,7 +5,9 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use clusia_core::config::EventKind;
 use clusia_core::{ActivitySummary, Config, PrFilter, PrRef, PrSummary, ReviewState};
+use clusia_protocol::message::{InboxItem, OpenTarget, PermissionStatus};
 use clusia_protocol::{
     ClientMessage, Command, ErrorCode, Event, MessageReader, Outcome, PROTOCOL_VERSION,
     ProtocolError, Reply, ServerMessage, SyncState, SyncStatus, write_message,
@@ -65,6 +67,18 @@ fn pr(n: u64) -> PrSummary {
     }
 }
 
+fn inbox_item(id: &str, seen: bool) -> InboxItem {
+    InboxItem {
+        id: id.into(),
+        kind: EventKind::ReviewRequested,
+        pr: Some(pr(7).pr),
+        title: "Review requested".into(),
+        body: "@octo asked for your review".into(),
+        at: 1,
+        seen,
+    }
+}
+
 fn online() -> SyncStatus {
     SyncStatus {
         state: SyncState::Online,
@@ -91,6 +105,7 @@ fn reply(cmd: &Command, fail: &[&str]) -> Outcome {
         } => Reply::Prs(vec![pr(7)]),
         Command::ListPrs { .. } => Reply::Prs(vec![]),
         Command::ListReviews => Reply::Reviews(vec![]),
+        Command::GetInbox => Reply::Inbox(vec![inbox_item("n1", false)]),
         Command::GetActivity => Reply::Activity(ActivitySummary {
             heatmap: vec![],
             published_this_week: 2,
@@ -208,6 +223,7 @@ async fn snapshots_then_quit_when_the_daemon_hangs_up() {
     );
     assert_eq!(early.activity.as_ref().unwrap().published_this_week, 2);
     assert_eq!(early.sync, Some(online()));
+    assert_eq!(early.inbox, vec![inbox_item("n1", false)]);
     let full = snapshot(&rx);
     assert!(full.lists_loaded);
     assert_eq!(full.assigned, vec![pr(7)]);
@@ -218,6 +234,7 @@ async fn snapshots_then_quit_when_the_daemon_hangs_up() {
             "GetConfig",
             "ListReviews",
             "GetActivity",
+            "GetInbox",
             "GetSyncStatus",
             "ListPrs",
             "ListPrs"
@@ -225,7 +242,7 @@ async fn snapshots_then_quit_when_the_daemon_hangs_up() {
     );
     assert_eq!(
         *fake.topics.lock().unwrap(),
-        ["prs", "sync", "reviews", "config"]
+        ["prs", "sync", "reviews", "config", "tray"]
     );
     fake.push.send(Push::Close).unwrap();
     assert_eq!(
@@ -486,4 +503,74 @@ async fn lists_config_echo_always_sends_a_snapshot() {
         },
     );
     assert_eq!(snapshot(&rx), full);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_notify_event_reaches_the_ui_without_a_refresh() {
+    let fake = fake();
+    let (rx, _writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    fake.clear();
+    let open = OpenTarget::Review {
+        pr: pr(7).pr,
+        thread: None,
+    };
+    fake.event(
+        "tray",
+        Event::Notify {
+            id: "n2".into(),
+            title: "Review requested".into(),
+            subtitle: "rzorzal/clusia #7".into(),
+            body: "@octo asked for your review".into(),
+            sound: Some("leaf".into()),
+            open: open.clone(),
+            time_sensitive: true,
+        },
+    );
+    match next(&rx) {
+        Update::Notify(n) => {
+            assert_eq!(n.id, "n2");
+            assert_eq!(n.sound.as_deref(), Some("leaf"));
+            assert_eq!(n.open, open);
+            assert!(
+                n.time_sensitive,
+                "the interruption level is carried through"
+            );
+        }
+        other => panic!("expected Notify, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_inbox_change_refetches_only_the_inbox() {
+    let fake = fake();
+    let (rx, _writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    fake.clear();
+    for unseen in 1..=5 {
+        fake.event("tray", Event::InboxChanged { unseen });
+    }
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(fake.requests(), ["GetInbox"], "a burst is one fetch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permission_and_seen_become_commands() {
+    let fake = fake();
+    let (rx, writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    fake.clear();
+    writes
+        .send(data::Outgoing::Permission(PermissionStatus::Allowed))
+        .unwrap();
+    writes
+        .send(data::Outgoing::MarkInboxSeen(Vec::new()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake.requests(), ["NotificationPermission", "MarkInboxSeen"]);
 }

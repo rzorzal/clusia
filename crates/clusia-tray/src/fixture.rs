@@ -1,6 +1,8 @@
 //! Demo data for `--render` (generic and `rzorzal/*` only).
 
+use clusia_core::config::EventKind;
 use clusia_core::{ActivitySummary, DayCount, Lists, PrRef, PrSummary, ReviewState};
+use clusia_protocol::message::InboxItem;
 use clusia_protocol::{ReviewSummary, SyncState, SyncStatus};
 
 use crate::model::Snapshot;
@@ -32,7 +34,7 @@ fn pr(repo: &str, n: u64, title: &str, updated: i64, draft: bool) -> PrSummary {
     }
 }
 
-/// Two snapshots: applying both leaves `#123` with a new-activity dot.
+/// Two snapshots: applying both leaves `#123` with a new-activity dot (an unseen inbox item).
 pub fn demo(now: i64) -> Vec<Snapshot> {
     let first = Snapshot {
         assigned: vec![
@@ -116,6 +118,19 @@ pub fn demo(now: i64) -> Vec<Snapshot> {
             filter: String::new(),
             ..Lists::default()
         },
+        inbox: vec![InboxItem {
+            id: "demo-1".into(),
+            kind: EventKind::ReviewRequested,
+            pr: Some(PrRef {
+                owner: "rzorzal".into(),
+                repo: "clusia".into(),
+                number: 123,
+            }),
+            title: "Review requested".into(),
+            body: "@octo asked for your review".into(),
+            at: now - 300,
+            seen: false,
+        }],
     };
     let mut second = first.clone();
     second.assigned[0].updated_at = rfc3339(now - 300);

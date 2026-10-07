@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clusia_core::{Paths, PrRef};
+use clusia_protocol::message::OpenTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -16,6 +17,8 @@ pub enum Action {
     OpenUrl(String),
     OpenHome,
     OpenConfig,
+    /// Config opened on one page (`git`, `notifications`, …).
+    OpenConfigPage(String),
     /// Next sort order for that list (handled inside the tray, saved to the config).
     CycleSort(crate::model::ListId),
     /// Move one page back (-1) or forward (+1).
@@ -79,6 +82,20 @@ fn browser(url: &str) -> Option<Launch> {
     })
 }
 
+/// Without the window, Config is the settings file (or the folder before it exists).
+fn config_fallback(paths: &Paths) -> Option<Launch> {
+    let file = paths.config_file();
+    let args = if file.is_file() {
+        vec!["-t".to_string(), file.to_string_lossy().into_owned()]
+    } else {
+        vec![paths.root().to_string_lossy().into_owned()]
+    };
+    Some(Launch {
+        program: PathBuf::from(OPEN),
+        args,
+    })
+}
+
 pub fn plan(action: &Action, app: Option<&Path>, paths: &Paths) -> Option<Launch> {
     let home = paths.root().to_string_lossy().into_owned();
     let window = |extra: &[String]| {
@@ -101,18 +118,25 @@ pub fn plan(action: &Action, app: Option<&Path>, paths: &Paths) -> Option<Launch
         }
         Action::OpenUrl(url) => browser(url),
         Action::OpenHome => window(&[]),
-        Action::OpenConfig => window(&["--config".into()]).or_else(|| {
-            let file = paths.config_file();
-            let args = if file.is_file() {
-                vec!["-t".to_string(), file.to_string_lossy().into_owned()]
-            } else {
-                vec![home.clone()]
-            };
-            Some(Launch {
-                program: PathBuf::from(OPEN),
-                args,
-            })
-        }),
+        Action::OpenConfigPage(page) => {
+            window(&["--config-page".into(), page.clone()]).or_else(|| config_fallback(paths))
+        }
+        Action::OpenConfig => window(&["--config".into()]).or_else(|| config_fallback(paths)),
+    }
+}
+
+/// What a clicked notification opens. `host` is `github.com` or the Enterprise host, for the
+/// browser fallback. A Config page opens that page; a review thread has no deep link yet, so
+/// the review opens.
+pub fn action_for(target: &OpenTarget, host: &str) -> Action {
+    match target {
+        OpenTarget::Review { pr, .. } => Action::OpenReview {
+            pr: pr.clone(),
+            url: format!("https://{host}/{}/{}/pull/{}", pr.owner, pr.repo, pr.number),
+        },
+        OpenTarget::Home { .. } => Action::OpenHome,
+        OpenTarget::Config { page } if page.is_empty() => Action::OpenConfig,
+        OpenTarget::Config { page } => Action::OpenConfigPage(page.clone()),
     }
 }
 
@@ -241,6 +265,31 @@ mod tests {
     }
 
     #[test]
+    fn a_config_page_opens_the_window_on_that_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let app = Path::new("/Applications/Clusia.app/Contents/MacOS/clusia-app");
+        let home = dir.path().to_string_lossy().into_owned();
+        assert_eq!(
+            plan(&Action::OpenConfigPage("git".into()), Some(app), &paths),
+            Some(Launch {
+                program: app.into(),
+                args: vec![
+                    "--home".into(),
+                    home.clone(),
+                    "--config-page".into(),
+                    "git".into()
+                ]
+            })
+        );
+        // Without the window it falls back like Config does.
+        assert_eq!(
+            plan(&Action::OpenConfigPage("git".into()), None, &paths),
+            open(&[&home])
+        );
+    }
+
+    #[test]
     fn config_without_the_window_opens_the_file_or_the_folder() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path());
@@ -271,6 +320,41 @@ mod tests {
         assert_eq!(
             app_binary_from(None, Some(exe)),
             Some(dir.path().join("clusia-app"))
+        );
+    }
+
+    #[test]
+    fn a_clicked_notification_opens_its_target() {
+        let target = OpenTarget::Review {
+            pr: pr(),
+            thread: Some("PRRT_1".into()),
+        };
+        assert_eq!(
+            action_for(&target, "ghe.example.com"),
+            review("https://ghe.example.com/rzorzal/clusia/pull/7")
+        );
+        assert_eq!(
+            action_for(&OpenTarget::Home { pr: Some(pr()) }, "github.com"),
+            Action::OpenHome
+        );
+        assert_eq!(
+            action_for(
+                &OpenTarget::Config {
+                    page: "notifications".into()
+                },
+                "github.com"
+            ),
+            Action::OpenConfigPage("notifications".into())
+        );
+        assert_eq!(
+            action_for(
+                &OpenTarget::Config {
+                    page: String::new()
+                },
+                "github.com"
+            ),
+            Action::OpenConfig,
+            "no page is plain Config"
         );
     }
 

@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clusia_core::{PrFilter, ReviewState};
+use clusia_protocol::message::PermissionStatus;
 use clusia_protocol::{Client, ClientError, Command, Event, Reply, topics};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::model::Snapshot;
+use crate::notify::Notification;
 
 pub const CLIENT_NAME: &str = "clusia-tray";
 /// Events arriving within this window share one refresh.
@@ -18,6 +20,8 @@ pub enum Update {
     Snapshot(Box<Snapshot>),
     /// The daemon rejected a config write for this key.
     WriteFailed(String),
+    /// The daemon wants a banner posted.
+    Notify(Box<Notification>),
     /// The `SyncNow` asked for by the UI finished (whatever its outcome).
     Refreshed,
     /// The tray must exit. `failure` asks for a non-zero status, so the daemon's supervisor
@@ -33,6 +37,7 @@ struct Refresh {
     lists: bool,
     reviews: bool,
     activity: bool,
+    inbox: bool,
     /// A `lists.*` config event arrived: the UI hears about it even when nothing changed,
     /// so a write echoed back to the last snapshot's value still clears its pending state.
     preferences: bool,
@@ -43,12 +48,37 @@ impl Refresh {
         self.lists |= other.lists;
         self.reviews |= other.reviews;
         self.activity |= other.activity;
+        self.inbox |= other.inbox;
         self.preferences |= other.preferences;
     }
 }
 
-fn refresh_for(event: Event, snap: &mut Snapshot) -> Refresh {
+fn refresh_for(event: Event, snap: &mut Snapshot, send: &impl Fn(Update)) -> Refresh {
     match event {
+        Event::Notify {
+            id,
+            title,
+            subtitle,
+            body,
+            sound,
+            open,
+            time_sensitive,
+        } => {
+            send(Update::Notify(Box::new(Notification {
+                id,
+                title,
+                subtitle,
+                body,
+                sound,
+                open,
+                time_sensitive,
+            })));
+            Refresh::default()
+        }
+        Event::InboxChanged { .. } => Refresh {
+            inbox: true,
+            ..Refresh::default()
+        },
         Event::PrsUpdated { .. } => Refresh {
             lists: true,
             ..Refresh::default()
@@ -83,6 +113,10 @@ fn refresh_for(event: Event, snap: &mut Snapshot) -> Refresh {
 pub enum Outgoing {
     /// `SetConfigValue`.
     Config(String, String),
+    /// What macOS lets the tray post (`NotificationPermission`).
+    Permission(PermissionStatus),
+    /// `MarkInboxSeen`; no ids means all of them.
+    MarkInboxSeen(Vec<String>),
     SyncNow,
     PauseSync,
     ResumeSync,
@@ -159,6 +193,7 @@ async fn session(
                 topics::SYNC.into(),
                 topics::REVIEWS.into(),
                 topics::CONFIG.into(),
+                topics::TRAY.into(),
             ],
         })
         .await
@@ -174,6 +209,7 @@ async fn session(
         Refresh {
             reviews: true,
             activity: true,
+            inbox: true,
             ..Refresh::default()
         },
     )
@@ -197,7 +233,7 @@ async fn session(
     loop {
         let mut todo = tokio::select! {
             event = client.next_event() => match event {
-                Ok((_, event)) => refresh_for(event, &mut snap),
+                Ok((_, event)) => refresh_for(event, &mut snap, send),
                 Err(e) => return Err(stop_for(e)),
             },
             out = writes.recv() => {
@@ -206,6 +242,12 @@ async fn session(
                 };
                 match out {
                     Outgoing::Config(key, value) => write_config(&mut client, send, key, value).await?,
+                    Outgoing::Permission(status) => {
+                        request(&mut client, Command::NotificationPermission { status }).await?;
+                    }
+                    Outgoing::MarkInboxSeen(ids) => {
+                        request(&mut client, Command::MarkInboxSeen { ids }).await?;
+                    }
                     Outgoing::SyncNow => {
                         if let Reply::Sync(status) = request(&mut client, Command::SyncNow).await? {
                             snap.sync = Some(status);
@@ -237,7 +279,7 @@ async fn session(
         let deadline = tokio::time::Instant::now() + COALESCE;
         loop {
             match tokio::time::timeout_at(deadline, client.next_event()).await {
-                Ok(Ok((_, event))) => todo.merge(refresh_for(event, &mut snap)),
+                Ok(Ok((_, event))) => todo.merge(refresh_for(event, &mut snap, send)),
                 Ok(Err(e)) => return Err(stop_for(e)),
                 Err(_) => break,
             }
@@ -285,6 +327,11 @@ async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Resul
         && let Reply::Activity(activity) = request(client, Command::GetActivity).await?
     {
         snap.activity = Some(activity);
+    }
+    if what.inbox
+        && let Reply::Inbox(items) = request(client, Command::GetInbox).await?
+    {
+        snap.inbox = items;
     }
     Ok(())
 }

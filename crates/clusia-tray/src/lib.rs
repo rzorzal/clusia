@@ -6,5 +6,6 @@ pub mod fixture;
 pub use clusia_view::heatmap;
 pub mod layout;
 pub mod model;
+pub mod notify;
 pub mod theme;
 pub mod ui;
