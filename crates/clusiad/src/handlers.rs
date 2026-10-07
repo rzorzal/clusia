@@ -171,6 +171,9 @@ async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome 
     }
     let rendered = get_value(&updated, &key).unwrap_or(raw);
     *config = updated;
+    // A new host or sign-in method may change what the token resolves to; without a token
+    // the loop would otherwise sit out its idle retry.
+    let resync = key.starts_with("github.");
     shared.publish(
         topics::CONFIG,
         Event::ConfigChanged {
@@ -178,6 +181,9 @@ async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome 
             value: rendered.clone(),
         },
     );
+    if resync {
+        shared.sync_now.notify_one();
+    }
     Outcome::Ok(Reply::Value(rendered))
 }
 

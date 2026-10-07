@@ -223,8 +223,28 @@ pub fn view(snap: &Snapshot, ui: &FirstRunUi, home: Option<&str>) -> FirstRunVie
     }
 }
 
+/// `path` with a leading `~` written out and no trailing slash, so two spellings of one folder
+/// compare equal.
+fn expanded(path: &str, home: Option<&str>) -> String {
+    let path = path.trim();
+    let full = match (path.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{}{rest}", home.trim_end_matches('/'))
+        }
+        _ => path.to_string(),
+    };
+    match full.trim_end_matches('/') {
+        "" if full.starts_with('/') => "/".to_string(),
+        trimmed => trimmed.to_string(),
+    }
+}
+
 /// The folder list with `picked` added, as the config value; `None` when nothing changes.
 pub fn roots_with(roots: &[String], picked: &str, home: Option<&str>) -> Option<String> {
+    let same = |a: &str| expanded(a, home) == expanded(picked, home);
+    if roots.iter().any(|r| same(r)) {
+        return None;
+    }
     let new = tilde(picked, home);
     repos::with_root(roots, &new).map(|all| repos::roots_value(&all))
 }
@@ -680,6 +700,8 @@ fn on_use_gh(_activate: On<Activate>, mut asks: ResMut<Asks>) {
         value: "gh-cli".into(),
     });
     asks.send(Ask::RefreshAuth);
+    // Without a token the daemon waits out its idle retry; this makes it look again now.
+    asks.send(Ask::SyncNow);
 }
 
 fn on_use_token(_activate: On<Activate>, mut ui: ResMut<FirstRunUi>) {
@@ -1009,7 +1031,8 @@ mod tests {
                     key: "github.auth".into(),
                     value: "gh-cli".into()
                 },
-                Ask::RefreshAuth
+                Ask::RefreshAuth,
+                Ask::SyncNow
             ]
         );
     }
@@ -1044,6 +1067,21 @@ mod tests {
                 },
                 Ask::SetToken(clusia_protocol::Secret::from("ghp_abc123")),
             ]
+        );
+    }
+
+    #[test]
+    fn a_folder_already_listed_is_not_added_again() {
+        let home = Some("/Users/maria");
+        let tilde_roots = ["~/Repos".to_string()];
+        let absolute_roots = ["/Users/maria/Repos".to_string()];
+        for roots in [&tilde_roots, &absolute_roots] {
+            assert_eq!(roots_with(roots, "/Users/maria/Repos", home), None);
+            assert_eq!(roots_with(roots, "/Users/maria/Repos/", home), None);
+        }
+        assert_eq!(
+            roots_with(&tilde_roots, "/Users/maria/Work", home),
+            Some(r#"["~/Repos","~/Work"]"#.to_string())
         );
     }
 

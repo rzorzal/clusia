@@ -21,6 +21,7 @@ use image::{
 
 use crate::bridge::{Ask, Asks, MediaError};
 use crate::fonts::UiFonts;
+use crate::ui::composer::popover::sync_popovers;
 use crate::ui::kit::{Type, text};
 use crate::ui::markdown::{MdImage, link_chip};
 
@@ -424,7 +425,14 @@ impl Plugin for MediaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MediaCache>()
             .init_resource::<GifClock>()
-            .add_systems(Update, (decode_arrived, fill_slots, advance_gifs).chain())
+            .add_systems(
+                Update,
+                // Slots inside a popover are despawned with it; filling them afterwards
+                // would touch a gone entity.
+                (decode_arrived, fill_slots, advance_gifs)
+                    .chain()
+                    .after(sync_popovers),
+            )
             // Layout is written in `PostUpdate`; reading it there starts a GIF in the frame
             // it gets a size, before the event loop settles on how long to wait.
             .add_systems(

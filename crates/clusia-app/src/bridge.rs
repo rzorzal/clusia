@@ -417,7 +417,8 @@ async fn session(
     for pr in reopened {
         refetch(&mut client, &pr, teller).await?;
     }
-    // The Keychain read can wait: it comes after the first snapshot.
+    // Asking Giphy and `gh` and scanning the folders can take seconds: they come after the first
+    // snapshot.
     let lists = Refresh {
         lists: true,
         giphy: true,
