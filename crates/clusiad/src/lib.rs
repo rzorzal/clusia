@@ -5,6 +5,7 @@ mod connection;
 mod first_run;
 mod giphy;
 mod handlers;
+mod lock;
 mod media;
 mod news;
 mod options;

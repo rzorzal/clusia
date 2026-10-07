@@ -2,6 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -11,9 +12,12 @@ use clusia_core::Paths;
 use clusia_core::paths::MAX_SOCKET_PATH;
 
 use crate::client::{Client, ClientError};
+use crate::message::{Command, Reply};
 
 pub const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(100);
+/// The exit status of a clusiad that found another one running (`StartError::AlreadyRunning`).
+const ALREADY_RUNNING: i32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
@@ -74,10 +78,14 @@ pub async fn start_daemon_with(
     check_socket_path(paths)?;
     let logs = paths.logs_dir();
     std::fs::create_dir_all(logs).map_err(io_error(format!("cannot create {}", logs.display())))?;
-    let log = logs.join("daemon.log");
+    // What the daemon prints before its own log is open (a refusal to start, a panic). The
+    // running daemon writes `daemon.log` itself, so this file only keeps the latest start.
+    let log = logs.join("daemon.start.log");
     let out = OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
         .open(&log)
         .map_err(io_error(format!("cannot open {}", log.display())))?;
     let err = out
@@ -116,23 +124,36 @@ pub async fn start_daemon_with(
 
     let deadline = Instant::now() + timeout;
     loop {
-        if Client::connect(&paths.socket(), "launcher").await.is_ok() {
-            return Ok(child.id());
+        if let Ok(mut client) = Client::connect(&paths.socket(), "launcher").await {
+            // Whichever daemon won a race answers; it is not necessarily our child.
+            return Ok(daemon_pid(&mut client).await.unwrap_or(child.id()));
         }
         if let Some(status) = child
             .try_wait()
             .map_err(io_error("cannot check on clusiad".into()))?
         {
-            // Another client may have started the daemon a moment earlier; ours then exits with 3.
-            if Client::connect(&paths.socket(), "launcher").await.is_ok() {
-                return Ok(child.id());
+            // Another client started the daemon a moment earlier and ours stepped aside:
+            // keep waiting for the winner to accept connections.
+            if status.code() != Some(ALREADY_RUNNING) {
+                return Err(LaunchError::Exited { status, log });
             }
-            return Err(LaunchError::Exited { status, log });
+        } else if Instant::now() >= deadline {
+            // It would otherwise start late and find itself unwanted, or linger half-started.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(LaunchError::Timeout { timeout, log });
         }
         if Instant::now() >= deadline {
             return Err(LaunchError::Timeout { timeout, log });
         }
         tokio::time::sleep(POLL).await;
+    }
+}
+
+async fn daemon_pid(client: &mut Client) -> Option<u32> {
+    match client.request(Command::DaemonStatus).await {
+        Ok(Reply::Status(status)) => Some(status.pid),
+        _ => None,
     }
 }
 
@@ -189,7 +210,7 @@ mod tests {
         match start_daemon_with(&paths, None, &bin, Duration::from_secs(5)).await {
             Err(LaunchError::Exited { status, log }) => {
                 assert_eq!(status.code(), Some(7));
-                assert!(log.ends_with("daemon.log"));
+                assert!(log.ends_with("daemon.start.log"));
                 assert!(std::fs::read_to_string(&log).unwrap().contains("boom"));
             }
             other => panic!("expected Exited, got {other:?}"),
@@ -288,5 +309,98 @@ mod tests {
         });
         let (_client, started) = ensure_daemon(&paths, None, "t").await.unwrap();
         assert!(!started);
+    }
+
+    /// A daemon that answers the handshake and `DaemonStatus` with `pid`, from `delay` on.
+    fn serve_pid(socket: PathBuf, pid: u32, delay: Duration) {
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let listener = tokio::net::UnixListener::bind(socket).unwrap();
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (r, mut w) = stream.into_split();
+                    let mut r = MessageReader::new(r);
+                    let _hello: Option<ClientMessage> = r.next().await.unwrap_or(None);
+                    let welcome = ServerMessage::Welcome {
+                        protocol: PROTOCOL_VERSION,
+                        daemon: "t".into(),
+                    };
+                    let _ = write_message(&mut w, &welcome).await;
+                    while let Ok(Some(ClientMessage::Request { id, .. })) = r.next().await {
+                        let status = serde_json::from_value(serde_json::json!({
+                            "version": "t", "pid": pid, "uptime_secs": 1,
+                            "clients": 1, "socket": "s"
+                        }))
+                        .unwrap();
+                        let reply = ServerMessage::Response {
+                            id,
+                            result: crate::Outcome::Ok(Reply::Status(status)),
+                        };
+                        let _ = write_message(&mut w, &reply).await;
+                    }
+                });
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn a_lost_race_returns_the_winners_pid_even_when_it_is_still_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        // Our child steps aside at once; the winner only starts listening a moment later.
+        let bin = script(dir.path(), "fake", "exit 3");
+        serve_pid(paths.socket(), 4242, Duration::from_millis(400));
+        let pid = start_daemon_with(&paths, None, &bin, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(pid, 4242);
+    }
+
+    #[tokio::test]
+    async fn a_lost_race_with_no_winner_is_a_timeout_not_an_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let bin = script(dir.path(), "fake", "exit 3");
+        let err = start_daemon_with(&paths, None, &bin, Duration::from_millis(400))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LaunchError::Timeout { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_never_listens_is_killed_on_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let bin = script(
+            dir.path(),
+            "fake",
+            r#"echo $$ > "$(dirname "$0")/pid"; exec sleep 30"#,
+        );
+        let err = start_daemon_with(&paths, None, &bin, Duration::from_secs(3))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LaunchError::Timeout { .. }), "{err}");
+        let pid = std::fs::read_to_string(dir.path().join("pid")).expect("the script ran");
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the child {pid} outlived the timeout");
+    }
+
+    #[tokio::test]
+    async fn the_start_log_holds_only_the_latest_start_and_is_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        for word in ["first", "second"] {
+            let bin = script(dir.path(), "fake", &format!("echo {word} >&2; exit 7"));
+            let _ = start_daemon_with(&paths, None, &bin, Duration::from_secs(5)).await;
+        }
+        let log = paths.logs_dir().join("daemon.start.log");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "second\n");
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

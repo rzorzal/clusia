@@ -240,3 +240,45 @@ async fn oversized_line_drops_only_that_client() {
         .unwrap();
     d.stop().await;
 }
+
+#[tokio::test]
+async fn a_held_lock_stops_a_second_daemon_before_it_touches_anything() {
+    use std::os::fd::AsRawFd;
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path());
+    let holder = std::fs::File::create(paths.daemon_lock()).unwrap();
+    // SAFETY: `holder` owns an open descriptor for the whole call.
+    assert_eq!(
+        unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    std::fs::write(paths.config_file(), "[github\nhost = ").unwrap();
+    let err = Daemon::bind_with(paths.clone(), common::test_options())
+        .await
+        .err()
+        .expect("the lock is held");
+    assert!(matches!(err, StartError::AlreadyRunning(_)), "{err}");
+    assert!(!paths.socket().exists(), "no socket without the lock");
+    assert_eq!(
+        std::fs::read_to_string(paths.config_file()).unwrap(),
+        "[github\nhost = ",
+        "a refused daemon leaves the config alone"
+    );
+    drop(holder);
+    Daemon::bind_with(paths, common::test_options())
+        .await
+        .expect("free again");
+}
+
+#[tokio::test]
+async fn the_lock_is_free_again_after_a_stop() {
+    let d = TestDaemon::start().await;
+    let paths = d.paths.clone();
+    let dir = d.stop().await;
+    let again = Daemon::bind_with(paths, common::test_options())
+        .await
+        .expect("the stopped daemon released its lock");
+    drop(again);
+    drop(dir);
+}

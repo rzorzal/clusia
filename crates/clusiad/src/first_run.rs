@@ -147,7 +147,7 @@ fn count_repos(dir: &Path, depth: usize) -> u32 {
     count
 }
 
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 

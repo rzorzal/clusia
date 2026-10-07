@@ -12,6 +12,7 @@ use clusia_store::load_config;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::connection;
+use crate::lock::DaemonLock;
 use crate::options::DaemonOptions;
 use crate::state::Shared;
 use crate::sync;
@@ -27,6 +28,8 @@ pub enum StartError {
 }
 
 pub struct Daemon {
+    /// Released when the daemon is dropped, after the socket is gone.
+    _lock: DaemonLock,
     listener: UnixListener,
     shared: Arc<Shared>,
     socket: PathBuf,
@@ -40,6 +43,17 @@ impl ShutdownHandle {
     pub fn trigger(&self) {
         self.0.trigger_shutdown();
     }
+}
+
+/// Binds under a umask that leaves nothing to group or others, so the socket is never
+/// reachable by anyone else, not even for the moment before its mode is set.
+fn bind_private(socket: &Path) -> io::Result<UnixListener> {
+    // SAFETY: `umask` only changes the file-creation mask of this process and cannot fail.
+    let previous = unsafe { libc::umask(0o077) };
+    let bound = UnixListener::bind(socket);
+    // SAFETY: as above; restores the mask read a moment ago.
+    unsafe { libc::umask(previous) };
+    bound
 }
 
 impl Daemon {
@@ -57,6 +71,8 @@ impl Daemon {
             });
         }
         fs::create_dir_all(paths.root())?;
+        let lock = DaemonLock::acquire(&paths.daemon_lock())?
+            .ok_or_else(|| StartError::AlreadyRunning(socket.clone()))?;
 
         let socket_exists = fs::symlink_metadata(&socket).is_ok();
         let mut stale = false;
@@ -77,10 +93,11 @@ impl Daemon {
             fs::remove_file(&socket)?;
             tracing::info!(socket = %socket.display(), "removed stale socket");
         }
-        let listener = UnixListener::bind(&socket)?;
+        let listener = bind_private(&socket)?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
 
         Ok(Self {
+            _lock: lock,
             listener,
             shared: Arc::new(Shared::new(paths, config, options)),
             socket,
@@ -178,5 +195,19 @@ impl Daemon {
         }
         tracing::info!("clusiad stopped");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[tokio::test]
+    async fn the_socket_is_private_from_the_moment_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s.sock");
+        let _listener = bind_private(&socket).unwrap();
+        assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o077, 0);
     }
 }

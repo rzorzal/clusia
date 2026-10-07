@@ -1,10 +1,12 @@
-//! Clúsia domain types and pure logic. No I/O beyond reading environment variables.
+//! Clúsia domain types and pure logic. Besides reading environment variables, the only I/O is
+//! the log files of `logging`.
 
 pub mod activity;
 pub mod config;
 pub mod diffmap;
 pub mod draft;
 pub mod editor;
+pub mod logging;
 pub mod media;
 pub mod notify;
 pub mod paths;
