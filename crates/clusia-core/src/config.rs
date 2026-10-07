@@ -404,7 +404,8 @@ impl std::str::FromStr for HourMinute {
     fn from_str(s: &str) -> Result<Self, String> {
         let bad = || format!("{s:?} is not a time like 19:00");
         let (h, m) = s.trim().split_once(':').ok_or_else(bad)?;
-        if h.is_empty() || h.len() > 2 || m.len() != 2 {
+        let digits = |t: &str| t.chars().all(|c| c.is_ascii_digit());
+        if h.is_empty() || h.len() > 2 || m.len() != 2 || !digits(h) || !digits(m) {
             return Err(bad());
         }
         let hour: u8 = h.parse().map_err(|_| bad())?;
@@ -464,7 +465,15 @@ impl Weekday {
 
     /// Monday is 0.
     pub fn index(self) -> usize {
-        Self::ALL.iter().position(|d| *d == self).unwrap_or(0)
+        match self {
+            Self::Mon => 0,
+            Self::Tue => 1,
+            Self::Wed => 2,
+            Self::Thu => 3,
+            Self::Fri => 4,
+            Self::Sat => 5,
+            Self::Sun => 6,
+        }
     }
 
     pub fn previous(self) -> Self {
@@ -897,7 +906,7 @@ mod tests {
         assert_eq!(HourMinute::new(24, 0), None);
         assert_eq!(HourMinute::new(0, 60), None);
         for bad in [
-            "", "19", "19:5", "7:00pm", "25:00", "12:60", "-1:00", "123:00",
+            "", "19", "19:5", "7:00pm", "25:00", "12:60", "-1:00", "123:00", "+9:00", "09:+5",
         ] {
             assert!(bad.parse::<HourMinute>().is_err(), "{bad:?}");
         }
