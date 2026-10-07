@@ -1,5 +1,5 @@
 //! The GIF popover: a search field on top (Giphy's trending GIFs while it is empty), a grid of
-//! two columns of animated previews, "Powered by GIPHY" and a field to paste any GIF link.
+//! three columns of animated previews, "Powered by GIPHY" and a field to paste any GIF link.
 //!
 //! Searching is debounced and one search is in flight at a time, so an answer always belongs to
 //! the last question. Without a Giphy key only the link field stays, with a line saying where to
@@ -113,14 +113,33 @@ pub fn gif_error_text(code: ErrorCode, message: &str) -> String {
     }
 }
 
-fn tile_size(item: &GifItem) -> Vec2 {
-    let width = (PANEL_WIDTH - 24.0 - 8.0) / 2.0;
-    let ratio = if item.width == 0 {
-        1.0
-    } else {
-        item.height as f32 / item.width as f32
-    };
-    Vec2::new(width, (width * ratio).clamp(60.0, 150.0))
+/// Space between tiles, across and down.
+const GRID_GAP: f32 = 8.0;
+
+/// Every row is this tall; a tile's GIF fits inside it.
+const ROW_HEIGHT: f32 = 100.0;
+
+/// The width of the grid inside the card.
+const GRID_WIDTH: f32 = PANEL_WIDTH - 24.0;
+
+/// Columns of the grid in a card `width` wide: three, or two when it is narrow.
+pub fn gif_columns(width: f32) -> usize {
+    if width >= 300.0 { 3 } else { 2 }
+}
+
+/// The width of a tile when `columns` of them fill `width` with equal gaps.
+pub fn tile_width(width: f32, columns: usize) -> f32 {
+    let gaps = GRID_GAP * (columns.saturating_sub(1)) as f32;
+    ((width - gaps) / columns as f32).floor()
+}
+
+/// The size a `width` × `height` GIF takes inside a `cell`, whole and in its own shape.
+pub fn fit_in(item: &GifItem, cell: Vec2) -> Vec2 {
+    if item.width == 0 || item.height == 0 {
+        return cell;
+    }
+    let scale = (cell.x / item.width as f32).min(cell.y / item.height as f32);
+    Vec2::new(item.width as f32 * scale, item.height as f32 * scale)
 }
 
 pub fn gif_panel(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &ComposerKey, seed: &str) {
@@ -138,8 +157,9 @@ pub fn gif_panel(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &ComposerKe
         b.spawn((
             Node {
                 flex_wrap: FlexWrap::Wrap,
-                column_gap: px(8),
-                row_gap: px(8),
+                width: px(GRID_WIDTH),
+                column_gap: px(GRID_GAP),
+                row_gap: px(GRID_GAP),
                 max_height: px(280),
                 min_height: px(0),
                 overflow: Overflow::scroll_y(),
@@ -300,6 +320,7 @@ fn fill_gifs(
             continue;
         }
         let key = grid.key.clone();
+        let columns = gif_columns(GRID_WIDTH);
         commands
             .entity(entity)
             .despawn_related::<Children>()
@@ -324,11 +345,14 @@ fn fill_gifs(
                 }
                 _ => {
                     for item in &state.items {
-                        let size = tile_size(item);
+                        let cell = Vec2::new(tile_width(GRID_WIDTH, columns), ROW_HEIGHT);
+                        let shown = fit_in(item, cell);
                         p.spawn((
                             Node {
-                                width: px(size.x),
-                                height: px(size.y),
+                                width: px(cell.x),
+                                height: px(cell.y),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
                                 overflow: Overflow::clip(),
                                 border_radius: BorderRadius::all(px(8)),
                                 ..default()
@@ -343,8 +367,8 @@ fn fill_gifs(
                             observe(on_gif_tile),
                             children![(
                                 Node {
-                                    width: percent(100),
-                                    height: percent(100),
+                                    width: px(shown.x),
+                                    height: px(shown.y),
                                     ..default()
                                 },
                                 MdImage(item.preview_url.clone()),
@@ -439,6 +463,40 @@ mod tests {
                 .collect(),
             query: query.into(),
         }
+    }
+
+    fn gif(width: u32, height: u32) -> GifItem {
+        GifItem {
+            id: "g".into(),
+            title: String::new(),
+            preview_url: String::new(),
+            url: String::new(),
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn three_tiles_fill_the_card_with_equal_gaps() {
+        assert_eq!(gif_columns(GRID_WIDTH), 3);
+        assert_eq!(gif_columns(240.0), 2);
+        let w = tile_width(GRID_WIDTH, 3);
+        assert!(3.0 * w + 2.0 * GRID_GAP <= GRID_WIDTH);
+        assert!(
+            3.0 * w + 2.0 * GRID_GAP > GRID_WIDTH - 3.0,
+            "no wasted strip"
+        );
+        assert!(4.0 * tile_width(GRID_WIDTH, 4) + 3.0 * GRID_GAP <= GRID_WIDTH);
+    }
+
+    #[test]
+    fn a_gif_keeps_its_shape_inside_the_row() {
+        let cell = Vec2::new(100.0, ROW_HEIGHT);
+        let wide = fit_in(&gif(400, 200), cell);
+        assert_eq!(wide, Vec2::new(100.0, 50.0));
+        let tall = fit_in(&gif(100, 400), cell);
+        assert_eq!(tall, Vec2::new(25.0, 100.0));
+        assert_eq!(fit_in(&gif(0, 0), cell), cell);
     }
 
     #[test]

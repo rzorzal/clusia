@@ -45,13 +45,12 @@ pub fn text_area(fonts: &UiFonts, value: &str, lines: f32, id: u64) -> impl Bund
     area(fonts, editable, id)
 }
 
-/// A text area that shows `value` from its first line and grows with it from `min` to `max`
-/// lines.
+/// A text area that grows with `value` from `min` to `max` lines, with the cursor at its end.
 pub fn growing_text_area(fonts: &UiFonts, value: &str, min: f32, max: f32, id: u64) -> impl Bundle {
     let mut editable = EditableText::new(value);
     editable.allow_newlines = true;
     editable.visible_lines = Some(min);
-    editable.queue_edit(TextEdit::TextStart(false));
+    editable.queue_edit(TextEdit::TextEnd(false));
     (area(fonts, editable, id), Grow { min, max })
 }
 
@@ -216,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn growing_areas_fit_their_lines_up_to_a_cap_and_start_at_the_top() {
+    fn growing_areas_fit_their_lines_up_to_a_cap_and_start_at_the_end() {
         let mut app = testing::app(Snapshot::default());
         let fonts = UiFonts::default();
         let mut spawn = |value: &str, id| {
@@ -239,8 +238,8 @@ mod tests {
         let e = app.world().get::<EditableText>(short).unwrap();
         assert_eq!(
             e.value().to_string(),
-            "zone line",
-            "the cursor starts at the top"
+            "one linez",
+            "the cursor starts at the end"
         );
     }
 
