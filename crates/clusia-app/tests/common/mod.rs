@@ -32,9 +32,9 @@ impl Daemon {
 
     async fn start_with(dir: tempfile::TempDir, api: String, token: Option<String>) -> Self {
         let paths = Paths::new(dir.path());
-        let options = DaemonOptions {
-            github_api: Some(api),
-            github_token: token,
+        let options = || DaemonOptions {
+            github_api: Some(api.clone()),
+            github_token: token.clone(),
             gh_program: "/nonexistent/gh".into(),
             secrets: Arc::new(MemoryStore::default()),
             background_sync: false,
@@ -46,9 +46,19 @@ impl Daemon {
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
         };
-        let daemon = clusiad::Daemon::bind_with(paths.clone(), options)
-            .await
-            .expect("daemon binds");
+        // A restart in the same home can find the lock still held: a child forked by a parallel
+        // test keeps the descriptor (and so the flock) until it execs. Wait for it to let go.
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let daemon = loop {
+            match clusiad::Daemon::bind_with(paths.clone(), options()).await {
+                Err(clusiad::StartError::AlreadyRunning(_))
+                    if std::time::Instant::now() < give_up =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                other => break other.expect("daemon binds"),
+            }
+        };
         let handle = daemon.shutdown_handle();
         let task = tokio::spawn(daemon.run());
         Self {
