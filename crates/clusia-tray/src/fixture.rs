@@ -34,11 +34,11 @@ fn pr(repo: &str, n: u64, title: &str, updated: i64, draft: bool) -> PrSummary {
     }
 }
 
-/// Two snapshots: applying both leaves `#123` with a new-activity dot (an unseen inbox item).
-pub fn demo(now: i64) -> Vec<Snapshot> {
-    let first = Snapshot {
+/// The demo state: `#123` has a new-activity dot (an unseen inbox item).
+pub fn demo(now: i64) -> Snapshot {
+    Snapshot {
         assigned: vec![
-            pr("clusia", 123, "feat: auth refresh", now - 2 * 3600, false),
+            pr("clusia", 123, "feat: auth refresh", now - 300, false),
             pr(
                 "clusia",
                 98,
@@ -131,8 +131,5 @@ pub fn demo(now: i64) -> Vec<Snapshot> {
             at: now - 300,
             seen: false,
         }],
-    };
-    let mut second = first.clone();
-    second.assigned[0].updated_at = rfc3339(now - 300);
-    vec![first, second]
+    }
 }

@@ -76,9 +76,7 @@ fn main() -> ExitCode {
         let _app = NSApplication::sharedApplication(mtm);
         let now = now();
         let mut model = TrayModel::new(true);
-        for snapshot in fixture::demo(now) {
-            model.apply(snapshot);
-        }
+        model.apply(fixture::demo(now));
         return match ui::render::render_png(
             mtm,
             layout::layout(&model.view(now)),

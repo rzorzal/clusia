@@ -47,6 +47,8 @@ struct Ui {
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
+    /// A click that arrived before `UI` existed (one that launched the app); replayed once it does.
+    static EARLY_CLICK: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn now() -> i64 {
@@ -148,8 +150,22 @@ fn permission_changed(status: PermissionStatus) {
     });
 }
 
+/// Asks the system for the permission again: it can change in System Settings at any time.
+/// Only a change reaches the daemon.
+fn refresh_permission() {
+    UI.with_borrow(|ui| {
+        if let Some(notifier) = ui.as_ref().and_then(|ui| ui.notifier.as_ref()) {
+            notifier.refresh_status();
+        }
+    });
+}
+
 /// A notification was clicked: open what it points at, in the window or the browser.
 fn notification_clicked(open_json: &str) {
+    if UI.with_borrow(Option::is_none) {
+        EARLY_CLICK.set(Some(open_json.to_owned()));
+        return;
+    }
     let Some(target) = notify::parse_open(open_json) else {
         tracing::warn!("a clicked notification carried no target");
         return;
@@ -352,11 +368,10 @@ define_class!(
                     ui.render(mtm);
                 }
             });
-            UI.with_borrow(|ui| {
-                if let Some(notifier) = ui.as_ref().and_then(|ui| ui.notifier.as_ref()) {
-                    notifier.refresh_status();
-                }
-            });
+            refresh_permission();
+            if let Some(click) = EARLY_CLICK.take() {
+                notification_clicked(&click);
+            }
             // The permission prompt waits, so the first banner is noticed.
             let _ = DispatchQueue::main().after(
                 dispatch2::DispatchTime::NOW.time(notify::AUTH_DELAY.as_nanos() as i64),
@@ -387,6 +402,11 @@ define_class!(
                 fail(&format!("cannot start the data thread: {e}"));
             }
         }
+
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _notification: &NSNotification) {
+            refresh_permission();
+        }
     }
 
     // SAFETY: the method signature matches NSPopoverDelegate.
@@ -396,8 +416,9 @@ define_class!(
             let mtm = self.mtm();
             let window = UI.with_borrow_mut(|ui| {
                 ui.as_mut().and_then(|ui| {
-                    if ui.model.mark_seen() {
-                        ui.send(Outgoing::MarkInboxSeen(Vec::new()));
+                    let seen = ui.model.mark_seen();
+                    if !seen.is_empty() {
+                        ui.send(Outgoing::MarkInboxSeen(seen));
                     }
                     ui.model.flush_query();
                     ui.push_writes();
@@ -474,6 +495,7 @@ define_class!(
                 unsafe { popover.performClose(None) };
                 return;
             }
+            refresh_permission();
             // Fresh ages ("2m") at open time.
             UI.with_borrow(|ui| {
                 if let Some(ui) = ui {

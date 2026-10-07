@@ -34,6 +34,19 @@ impl Fake {
         self.log.lock().unwrap().clone()
     }
 
+    /// The requests once at least `n` have arrived; panics after a generous deadline.
+    async fn wait_for(&self, n: usize) -> Vec<String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let r = self.requests();
+            if r.len() >= n {
+                return r;
+            }
+            assert!(std::time::Instant::now() < deadline, "{r:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     fn clear(&self) {
         self.log.lock().unwrap().clear();
     }
@@ -283,6 +296,8 @@ async fn event_burst_is_one_refresh() {
             },
         );
     }
+    fake.wait_for(2).await;
+    // Past the coalesce window: no second refresh follows.
     tokio::time::sleep(Duration::from_millis(800)).await;
     let lists = fake.requests().iter().filter(|r| *r == "ListPrs").count();
     assert_eq!(
@@ -312,8 +327,7 @@ async fn published_review_refreshes_activity_and_sync_changes_need_no_request() 
             items: 0,
         },
     );
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(fake.requests(), ["ListReviews", "GetActivity"]);
+    assert_eq!(fake.wait_for(2).await, ["ListReviews", "GetActivity"]);
     fake.clear();
     let offline = SyncStatus {
         state: SyncState::Offline,
@@ -337,8 +351,7 @@ async fn writes_become_config_sets_and_config_events_update_lists() {
             "oldest".into(),
         ))
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(fake.requests(), ["SetConfigValue"]);
+    assert_eq!(fake.wait_for(1).await, ["SetConfigValue"]);
     fake.event(
         "config",
         Event::ConfigChanged {
@@ -554,6 +567,8 @@ async fn an_inbox_change_refetches_only_the_inbox() {
     for unseen in 1..=5 {
         fake.event("tray", Event::InboxChanged { unseen });
     }
+    assert_eq!(fake.wait_for(1).await, ["GetInbox"]);
+    // Past the coalesce window: nothing more arrives.
     tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(fake.requests(), ["GetInbox"], "a burst is one fetch");
 }
@@ -569,8 +584,10 @@ async fn permission_and_seen_become_commands() {
         .send(data::Outgoing::Permission(PermissionStatus::Allowed))
         .unwrap();
     writes
-        .send(data::Outgoing::MarkInboxSeen(Vec::new()))
+        .send(data::Outgoing::MarkInboxSeen(vec!["a".into()]))
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(fake.requests(), ["NotificationPermission", "MarkInboxSeen"]);
+    assert_eq!(
+        fake.wait_for(2).await,
+        ["NotificationPermission", "MarkInboxSeen"]
+    );
 }

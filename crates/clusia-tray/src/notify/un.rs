@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
 use objc2_foundation::{NSDictionary, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
@@ -27,14 +27,17 @@ struct DelegateIvars {
 define_class!(
     // SAFETY: NSObject has no subclassing requirements and `CenterDelegate` does not implement Drop.
     #[unsafe(super = NSObject)]
-    #[thread_kind = MainThreadOnly]
+    // UserNotifications calls the delegate on its own queue, never the main thread: the ivars
+    // must be `Send + Sync`, and the methods touch nothing else.
+    #[thread_kind = AnyThread]
     #[ivars = DelegateIvars]
     struct CenterDelegate;
 
     // SAFETY: NSObjectProtocol has no safety requirements.
     unsafe impl NSObjectProtocol for CenterDelegate {}
 
-    // SAFETY: the method signatures match UNUserNotificationCenterDelegate.
+    // SAFETY: the method signatures match UNUserNotificationCenterDelegate. The system may call
+    // them on any thread; they use only the `Send + Sync` ivars and their arguments.
     unsafe impl UNUserNotificationCenterDelegate for CenterDelegate {
         /// The tray is always the foreground app, so without this macOS would swallow the banner.
         #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
@@ -69,8 +72,8 @@ define_class!(
 );
 
 impl CenterDelegate {
-    fn new(mtm: MainThreadMarker, on_open: OnOpen) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(DelegateIvars { on_open });
+    fn new(on_open: OnOpen) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(DelegateIvars { on_open });
         // SAFETY: `init` is NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
     }
@@ -90,8 +93,8 @@ fn status_of(s: UNAuthorizationStatus) -> PermissionStatus {
 }
 
 /// Posts through the system notification center. `on_open` gets the `userInfo.open` JSON of a
-/// clicked notification; `on_status` gets every permission status read or granted. Both
-/// run on an arbitrary thread (the callers hop to the main one).
+/// clicked notification; `on_status` gets every permission status read or granted. Both run
+/// on a UserNotifications queue, not the main thread (the callers hop to the main one).
 pub struct UNPoster {
     center: Retained<UNUserNotificationCenter>,
     // The center keeps only a weak reference to its delegate.
@@ -101,15 +104,15 @@ pub struct UNPoster {
 }
 
 impl UNPoster {
-    /// Registers the delegate: do it before the run loop starts, so a click that launched the
-    /// app is delivered.
+    /// Registers the delegate: do it on the main thread before the run loop starts, so a click
+    /// that launched the app is delivered.
     pub fn new(
-        mtm: MainThreadMarker,
+        _mtm: MainThreadMarker,
         on_open: impl Fn(String) + Send + Sync + 'static,
         on_status: impl Fn(PermissionStatus) + Send + Sync + 'static,
     ) -> Self {
         let center = UNUserNotificationCenter::currentNotificationCenter();
-        let delegate = CenterDelegate::new(mtm, Box::new(on_open));
+        let delegate = CenterDelegate::new(Box::new(on_open));
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         let last = Arc::new(Mutex::new(PermissionStatus::NotDetermined));
         let remember = last.clone();
@@ -193,5 +196,17 @@ impl Poster for UNPoster {
         });
         self.center
             .getNotificationSettingsWithCompletionHandler(&done);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn callable_from_any_thread<T: Send + Sync>() {}
+
+    #[test]
+    fn the_delegate_can_be_called_off_the_main_thread() {
+        callable_from_any_thread::<CenterDelegate>();
     }
 }

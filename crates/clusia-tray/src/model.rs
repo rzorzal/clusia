@@ -307,13 +307,12 @@ impl TrayModel {
         self.unseen().next().is_some()
     }
 
-    /// The user looked at the popover: clear the dots now. `true` when there was something to
-    /// clear, so the caller tells the daemon.
-    pub fn mark_seen(&mut self) -> bool {
+    /// The user looked at the popover: clear the dots now. Returns the ids it cleared, for the
+    /// daemon; only these, so an item that arrived unseen keeps its dot. Empty when nothing changed.
+    pub fn mark_seen(&mut self) -> Vec<String> {
         let ids: Vec<String> = self.unseen().map(|i| i.id.clone()).collect();
-        let any = !ids.is_empty();
-        self.looked_at.extend(ids);
-        any
+        self.looked_at.extend(ids.iter().cloned());
+        ids
     }
 
     pub fn view(&self, now: i64) -> TrayView {
@@ -713,10 +712,10 @@ mod tests {
         let mut m = TrayModel::new(false);
         let unseen = with_inbox(vec![pr(1, NOW - 60)], vec![item("a", Some(1), false)]);
         m.apply(unseen.clone());
-        assert!(m.mark_seen(), "there was something to clear");
+        assert_eq!(m.mark_seen(), ["a"], "exactly the items the user saw");
         assert!(!m.has_news());
         assert!(!m.view(NOW).sections[0].rows[0].fresh);
-        assert!(!m.mark_seen(), "nothing left to tell the daemon");
+        assert!(m.mark_seen().is_empty(), "nothing left to tell the daemon");
         // A snapshot taken before the daemon processed the request must not bring the dot back.
         m.apply(unseen);
         assert!(!m.has_news());

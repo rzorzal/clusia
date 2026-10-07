@@ -126,8 +126,7 @@ pub fn plan(action: &Action, app: Option<&Path>, paths: &Paths) -> Option<Launch
 }
 
 /// What a clicked notification opens. `host` is `github.com` or the Enterprise host, for the
-/// browser fallback. A Config page opens that page; a review thread has no deep link yet, so
-/// the review opens.
+/// browser fallback. A Config page opens that page; a review thread opens its review.
 pub fn action_for(target: &OpenTarget, host: &str) -> Action {
     match target {
         OpenTarget::Review { pr, .. } => Action::OpenReview {
