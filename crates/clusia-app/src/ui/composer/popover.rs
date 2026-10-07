@@ -265,7 +265,7 @@ fn on_backdrop_press(_press: On<Pointer<Press>>, mut popovers: ResMut<Popovers>)
 }
 
 /// Keeps exactly the popover `Popovers::open` names on screen.
-fn sync_popovers(
+pub(crate) fn sync_popovers(
     mut commands: Commands,
     fonts: Res<UiFonts>,
     mut popovers: ResMut<Popovers>,

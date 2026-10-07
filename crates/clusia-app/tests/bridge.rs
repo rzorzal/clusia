@@ -11,7 +11,9 @@ use clusia_app::fixture;
 use clusia_app::snapshot::{GiphyKey, Snapshot};
 use clusia_core::config::Theme as ThemeChoice;
 use clusia_core::{Config, DraftKind, PrRef, Review, ReviewCache, ReviewState, Verdict};
-use clusia_protocol::{Command, LoadStepKind, Reply, Secret, StepStatus, WindowTarget};
+use clusia_protocol::{
+    Command, GithubLogin, LoadStepKind, Reply, Secret, StepStatus, WindowTarget,
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -442,5 +444,19 @@ async fn giphy_key_status_follows_the_daemon() {
     snapshot_where(&link, |s| s.giphy_key == GiphyKey::Set);
     link.ask.send(Ask::ClearGiphyKey).unwrap();
     snapshot_where(&link, |s| s.giphy_key == GiphyKey::Missing);
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_run_status_reaches_the_window() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    let s = snapshot_where(&link, |s| s.first_run.is_some());
+    let status = s.first_run.expect("answered");
+    assert_eq!(
+        status.github,
+        GithubLogin::Unknown,
+        "the test daemon has no gh to ask"
+    );
     d.stop().await;
 }

@@ -63,6 +63,8 @@ impl Section {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
     Home,
+    /// Stands in for Home while the GitHub login is missing (`screens::first_run`).
+    FirstRun,
     Config(Section),
     Review(PrRef),
 }
@@ -172,7 +174,7 @@ pub fn top_bar_view(nav: &Nav, snap: &Snapshot) -> TopBarView {
     let mut tabs = vec![TabView {
         target: TabTarget::Home,
         label: "Home".into(),
-        on: nav.screen == Screen::Home,
+        on: matches!(nav.screen, Screen::Home | Screen::FirstRun),
     }];
     for pr in &nav.reviews {
         let label = match pr_title(snap, pr) {
@@ -197,6 +199,9 @@ pub struct HomeScreen;
 
 #[derive(Component, Debug)]
 pub struct ConfigScreen;
+
+#[derive(Component, Debug)]
+pub struct FirstRunScreen;
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ReviewScreen(pub PrRef);
@@ -586,6 +591,9 @@ fn rebuild_screen(
                 Screen::Home => {
                     p.spawn((fill, HomeScreen));
                 }
+                Screen::FirstRun => {
+                    p.spawn((fill, FirstRunScreen));
+                }
                 Screen::Config(_) => {
                     p.spawn((fill, ConfigScreen));
                 }
@@ -722,6 +730,14 @@ mod tests {
         let labels: Vec<&str> = v.tabs.iter().map(|t| t.label.as_str()).collect();
         assert_eq!(labels, ["Home", "#98 api pagination for long pull…", "#5"]);
         assert!(v.tabs[2].on && !v.tabs[0].on && !v.config_on);
+    }
+
+    #[test]
+    fn the_home_tab_stays_lit_during_first_run() {
+        let mut nav = Nav::new(&WindowTarget::Home);
+        nav.screen = Screen::FirstRun;
+        let v = top_bar_view(&nav, &fixture::demo(NOW));
+        assert!(v.tabs[0].on && !v.config_on);
     }
 
     #[test]

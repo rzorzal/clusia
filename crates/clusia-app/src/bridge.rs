@@ -421,6 +421,7 @@ async fn session(
     let lists = Refresh {
         lists: true,
         giphy: true,
+        first_run: true,
         ..Refresh::default()
     };
     fetch(&mut client, &mut snap, lists).await?;
@@ -561,6 +562,11 @@ async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Resul
     {
         snap.auth = Some(a);
     }
+    if what.first_run
+        && let Some(Reply::FirstRun(f)) = request(client, Command::FirstRunStatus).await?
+    {
+        snap.first_run = Some(f);
+    }
     if what.giphy
         && let Some(Reply::GiphyKeyStatus(status)) =
             request(client, Command::GiphyKeyStatus).await?
@@ -584,6 +590,7 @@ async fn answer(
 ) -> Result<(), String> {
     let auth = Refresh {
         auth: true,
+        first_run: true,
         ..Refresh::default()
     };
     match ask {

@@ -19,6 +19,7 @@ use crate::fonts::UiFonts;
 use crate::theme::Swatch;
 use crate::ui::composer::popover::{
     LinkField, PANEL_WIDTH, PopoverKind, Popovers, hinted_field, insert_into_area, note_line,
+    sync_popovers,
 };
 use crate::ui::composer::{ComposerArea, ComposerKey};
 use crate::ui::kit::{Clickable, Type, text};
@@ -178,7 +179,12 @@ impl Plugin for GifPickerPlugin {
         app.init_resource::<GifState>()
             .init_resource::<GifTyping>()
             .add_message::<GifsArrived>()
-            .add_systems(Update, (drive_gifs, fill_gifs, show_sections).chain());
+            .add_systems(
+                Update,
+                (drive_gifs, fill_gifs, show_sections)
+                    .chain()
+                    .after(sync_popovers),
+            );
     }
 }
 

@@ -120,6 +120,7 @@ pub fn demo(now: i64) -> Snapshot {
             error: None,
         }),
         giphy_key: GiphyKey::Set,
+        first_run: None,
         lists_loaded: true,
         daemon_version: "demo".into(),
     }

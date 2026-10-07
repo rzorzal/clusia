@@ -95,6 +95,7 @@ pub fn run(launch: Launch) {
         crate::nav::NavPlugin,
         crate::review_state::ReviewStatePlugin,
         crate::screens::home::HomePlugin,
+        crate::screens::first_run::FirstRunPlugin,
         crate::screens::config::ConfigPlugin,
         crate::screens::review::ReviewPlugin,
         crate::screens::open_pr::OpenPrPlugin,

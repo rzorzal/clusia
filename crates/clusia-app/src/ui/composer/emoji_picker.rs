@@ -16,7 +16,7 @@ use bevy::window::RequestRedraw;
 use crate::bridge::{Ask, Asks, Connection, Model};
 use crate::fonts::UiFonts;
 use crate::theme::Swatch;
-use crate::ui::composer::popover::{Popovers, hinted_field, insert_into_area};
+use crate::ui::composer::popover::{Popovers, hinted_field, insert_into_area, sync_popovers};
 use crate::ui::composer::{ComposerArea, ComposerKey};
 use crate::ui::emoji::{EMOJI, EmojiEntry, EmojiImages, Group, by_group, search};
 use crate::ui::kit::{Clickable, Fill, HoverFill, Type, text};
@@ -90,7 +90,7 @@ pub struct EmojiPickerPlugin;
 
 impl Plugin for EmojiPickerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, fill_emoji);
+        app.add_systems(Update, fill_emoji.after(sync_popovers));
     }
 }
 

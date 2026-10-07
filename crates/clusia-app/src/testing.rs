@@ -20,6 +20,7 @@ use crate::nav::{Nav, NavPlugin};
 use crate::platform_open::OpenUrls;
 use crate::review_state::{Phase, Ready, ReviewStatePlugin, ReviewTabs, Tab};
 use crate::screens::config::ConfigPlugin;
+use crate::screens::first_run::FirstRunPlugin;
 use crate::screens::home::HomePlugin;
 use crate::screens::open_pr::OpenPrPlugin;
 use crate::screens::review::ReviewPlugin;
@@ -64,6 +65,7 @@ pub fn app(snapshot: Snapshot) -> App {
             HomePlugin,
             ConfigPlugin,
         ))
+        .add_plugins(FirstRunPlugin)
         .add_plugins(ReviewStatePlugin)
         .add_plugins(ReviewPlugin)
         .add_plugins(OpenPrPlugin)

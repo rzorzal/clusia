@@ -1,7 +1,7 @@
 //! What the window knows from the daemon, and what each event changes.
 
 use clusia_core::{ActivitySummary, Config, PrSummary, ReviewState};
-use clusia_protocol::{AuthInfo, Event, ReviewSummary, SyncStatus, WindowTarget};
+use clusia_protocol::{AuthInfo, Event, FirstRun, ReviewSummary, SyncStatus, WindowTarget};
 
 /// What the window knows about the Giphy key. The daemon's status gives `Missing` or `Set`;
 /// `Rejected` is only ever derived by the Media page from a refusal the window saw.
@@ -25,6 +25,8 @@ pub struct Snapshot {
     pub sync: Option<SyncStatus>,
     pub auth: Option<AuthInfo>,
     pub giphy_key: GiphyKey,
+    /// What the first-run screen shows; `None` until the daemon has answered.
+    pub first_run: Option<FirstRun>,
     /// `assigned` and `mine` hold real lists, not the empty defaults before the first sync.
     pub lists_loaded: bool,
     pub daemon_version: String,
@@ -39,6 +41,7 @@ pub struct Refresh {
     pub activity: bool,
     pub auth: bool,
     pub giphy: bool,
+    pub first_run: bool,
 }
 
 impl Refresh {
@@ -50,6 +53,7 @@ impl Refresh {
         activity: true,
         auth: true,
         giphy: false,
+        first_run: false,
     };
 
     pub fn merge(&mut self, other: Refresh) {
@@ -59,10 +63,17 @@ impl Refresh {
         self.activity |= other.activity;
         self.auth |= other.auth;
         self.giphy |= other.giphy;
+        self.first_run |= other.first_run;
     }
 
     pub fn any(self) -> bool {
-        self.config || self.lists || self.reviews || self.activity || self.auth || self.giphy
+        self.config
+            || self.lists
+            || self.reviews
+            || self.activity
+            || self.auth
+            || self.giphy
+            || self.first_run
     }
 }
 
@@ -73,11 +84,13 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         Event::ConfigChanged { key, .. } => {
             r.config = true;
             r.auth = key.starts_with("github.");
+            r.first_run = r.auth || key == "repositories.roots";
         }
         Event::GiphyKeyChanged => r.giphy = true,
         Event::PrsUpdated { .. } => r.lists = true,
         Event::SyncChanged(status) => {
             r.auth = snap.sync.as_ref().map(|s| s.state) != Some(status.state);
+            r.first_run = r.auth;
             snap.sync = Some(status);
         }
         Event::ReviewChanged { state, .. } => {
@@ -156,6 +169,34 @@ mod tests {
             }
             .any()
         );
+    }
+
+    #[test]
+    fn first_run_follows_the_login_and_the_folders() {
+        let mut s = Snapshot::default();
+        let (r, _) = apply(
+            &mut s,
+            Event::ConfigChanged {
+                key: "repositories.roots".into(),
+                value: "[]".into(),
+            },
+        );
+        assert!(
+            r.first_run && !r.auth,
+            "folders change only the first-run answer"
+        );
+        let (r, _) = apply(
+            &mut s,
+            Event::ConfigChanged {
+                key: "github.auth".into(),
+                value: "pat".into(),
+            },
+        );
+        assert!(r.first_run && r.auth);
+        let (r, _) = apply(&mut s, Event::SyncChanged(sync(SyncState::Unauthorized)));
+        assert!(r.first_run && r.auth, "the login state changed");
+        let (r, _) = apply(&mut s, Event::SyncChanged(sync(SyncState::Unauthorized)));
+        assert!(!r.first_run, "the same state again asks nothing");
     }
 
     #[test]

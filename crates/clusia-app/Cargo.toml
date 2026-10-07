@@ -14,6 +14,7 @@ clusia-view.workspace = true
 clusia-highlight.workspace = true
 bevy.workspace = true
 crossbeam-channel.workspace = true
+rfd.workspace = true
 image.workspace = true
 tokio.workspace = true
 clap.workspace = true
