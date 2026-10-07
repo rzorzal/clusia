@@ -300,8 +300,8 @@ mod tests {
         assert_eq!(c.appearance.code_size, 16);
         apply_config_locally(&mut c, "repositories.roots", r#"["~/a","~/b c"]"#).unwrap();
         assert_eq!(c.repositories.roots, ["~/a", "~/b c"]);
-        apply_config_locally(&mut c, "notifications.do_not_disturb", "true").unwrap();
-        assert!(c.notifications.do_not_disturb);
+        apply_config_locally(&mut c, "notifications.dnd.enabled", "true").unwrap();
+        assert!(c.notifications.dnd.enabled);
         let before = c.clone();
         for (key, value) in [
             ("appearance.code_size", "15"),

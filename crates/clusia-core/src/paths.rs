@@ -6,10 +6,14 @@ use std::path::{Path, PathBuf};
 /// macOS limits `sun_path` to 104 bytes including the trailing NUL.
 pub const MAX_SOCKET_PATH: usize = 103;
 
+/// The login item's file name, which is also its launchd label plus `.plist`.
+pub const LAUNCH_AGENT_FILE: &str = "io.github.rzorzal.clusia.daemon.plist";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     root: PathBuf,
     logs: PathBuf,
+    launch_agents: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -23,7 +27,12 @@ impl Paths {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let logs = root.join("logs");
-        Self { root, logs }
+        let launch_agents = root.join("LaunchAgents");
+        Self {
+            root,
+            logs,
+            launch_agents,
+        }
     }
 
     /// `CLUSIA_HOME` when set and non-empty, otherwise the macOS defaults.
@@ -40,6 +49,7 @@ impl Paths {
         Ok(Self {
             root: home.join("Library/Application Support/Clusia"),
             logs: home.join("Library/Logs/Clusia"),
+            launch_agents: home.join("Library/LaunchAgents"),
         })
     }
 
@@ -96,6 +106,26 @@ impl Paths {
     /// Held by the open window (`clusia-app`), so a second launch hands over instead.
     pub fn app_lock(&self) -> PathBuf {
         self.root.join("app.lock")
+    }
+
+    /// Held by the running daemon (`flock`), so a second one exits instead of competing.
+    pub fn daemon_lock(&self) -> PathBuf {
+        self.root.join("clusiad.lock")
+    }
+
+    /// The notification inbox: what the tray list shows and which events were already seen.
+    pub fn inbox(&self) -> PathBuf {
+        self.root.join("inbox.json")
+    }
+
+    /// The user's LaunchAgents folder.
+    pub fn launch_agents_dir(&self) -> &Path {
+        &self.launch_agents
+    }
+
+    /// The login item that starts the daemon.
+    pub fn launch_agent(&self) -> PathBuf {
+        self.launch_agents.join(LAUNCH_AGENT_FILE)
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -207,6 +237,26 @@ mod tests {
         assert_eq!(
             p.review_cache_file(&pr),
             PathBuf::from("/tmp/c/cache/reviews/acme~widgets~7.json")
+        );
+    }
+
+    #[test]
+    fn lock_inbox_and_login_item_locations() {
+        let p = Paths::new("/tmp/c");
+        assert_eq!(p.daemon_lock(), PathBuf::from("/tmp/c/clusiad.lock"));
+        assert_eq!(p.inbox(), PathBuf::from("/tmp/c/inbox.json"));
+        assert_eq!(
+            p.launch_agent(),
+            PathBuf::from("/tmp/c/LaunchAgents/io.github.rzorzal.clusia.daemon.plist")
+        );
+        let real = Paths::resolve(None, Some("/Users/me".into())).unwrap();
+        assert_eq!(
+            real.launch_agent(),
+            PathBuf::from("/Users/me/Library/LaunchAgents/io.github.rzorzal.clusia.daemon.plist")
+        );
+        assert_eq!(
+            real.launch_agents_dir(),
+            Path::new("/Users/me/Library/LaunchAgents")
         );
     }
 }

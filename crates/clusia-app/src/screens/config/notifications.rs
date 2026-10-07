@@ -19,8 +19,8 @@ pub struct NotificationsView {
 
 pub fn view(snap: &Snapshot, rejected: &HashMap<String, String>) -> NotificationsView {
     NotificationsView {
-        dnd: snap.config.notifications.do_not_disturb,
-        dnd_error: rejected.get("notifications.do_not_disturb").cloned(),
+        dnd: snap.config.notifications.dnd.enabled,
+        dnd_error: rejected.get("notifications.dnd.enabled").cloned(),
         poll_secs: snap.config.github.poll_interval_secs,
     }
 }
@@ -39,13 +39,13 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &NotificationsVie
         |r| {
             r.spawn((
                 toggle(v.dnd),
-                setter("notifications.do_not_disturb", (!v.dnd).to_string()),
+                setter("notifications.dnd.enabled", (!v.dnd).to_string()),
             ));
         },
         "No macOS notifications or sounds; the tray still counts",
         v.dnd_error
             .as_deref()
-            .map(|m| ("notifications.do_not_disturb", m)),
+            .map(|m| ("notifications.dnd.enabled", m)),
     );
     row(
         p,
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn view_reads_dnd_and_poll() {
         let mut snap = Snapshot::default();
-        snap.config.notifications.do_not_disturb = true;
+        snap.config.notifications.dnd.enabled = true;
         let v = view(&snap, &HashMap::new());
         assert!(v.dnd);
         assert_eq!(v.poll_secs, 60);

@@ -780,12 +780,12 @@ mod tests {
     #[test]
     fn do_not_disturb_toggles() {
         let mut app = config_app(Section::Notifications);
-        let dnd = testing::find::<SetValue>(&mut app, |s| s.key == "notifications.do_not_disturb");
+        let dnd = testing::find::<SetValue>(&mut app, |s| s.key == "notifications.dnd.enabled");
         testing::activate(&mut app, dnd);
         assert_eq!(
             testing::recorded(&mut app),
             [Ask::SetConfig {
-                key: "notifications.do_not_disturb".into(),
+                key: "notifications.dnd.enabled".into(),
                 value: "true".into()
             }]
         );

@@ -57,13 +57,15 @@ pub fn load_config(paths: &Paths) -> io::Result<Loaded<Config>> {
     let parsed = String::from_utf8(bytes)
         .map_err(|e| format!("not valid UTF-8: {e}"))
         .and_then(|text| {
-            let config = toml::from_str::<Config>(&text).map_err(|e| e.to_string())?;
+            let mut file = toml::from_str::<toml::Table>(&text).map_err(|e| e.to_string())?;
+            migrate_legacy_keys(&mut file);
+            let config = toml::Value::Table(file.clone())
+                .try_into::<Config>()
+                .map_err(|e| e.to_string())?;
             config.validate()?;
-            if let Ok(file) = toml::from_str::<toml::Table>(&text) {
-                let unknown = unknown_keys(&file, &to_table(&config));
-                if !unknown.is_empty() {
-                    tracing::warn!("ignoring unknown config keys: {}", unknown.join(", "));
-                }
+            let unknown = unknown_keys(&file, &to_table(&config));
+            if !unknown.is_empty() {
+                tracing::warn!("ignoring unknown config keys: {}", unknown.join(", "));
             }
             Ok(config)
         });
@@ -78,6 +80,27 @@ pub fn load_config(paths: &Paths) -> io::Result<Loaded<Config>> {
                 error,
             })
         }
+    }
+}
+
+/// Moves keys written by older versions to where they live now: `notifications.do_not_disturb`
+/// became `notifications.dnd.enabled`, unless the file already has a `dnd` section.
+fn migrate_legacy_keys(file: &mut toml::Table) {
+    let Some(notifications) = file
+        .get_mut("notifications")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return;
+    };
+    let Some(legacy) = notifications.remove("do_not_disturb") else {
+        return;
+    };
+    if let toml::Value::Boolean(enabled) = legacy
+        && !notifications.contains_key("dnd")
+    {
+        let mut dnd = toml::Table::new();
+        dnd.insert("enabled".into(), toml::Value::Boolean(enabled));
+        notifications.insert("dnd".into(), toml::Value::Table(dnd));
     }
 }
 
@@ -190,7 +213,7 @@ pub fn set_value(cfg: &Config, key: &str, raw: &str) -> Result<Config, ConfigKey
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clusia_core::config::Theme;
+    use clusia_core::config::{Dnd, EventKind, SoundId, Theme, Weekday};
 
     #[test]
     fn recent_emoji_are_set_as_a_list() {
@@ -336,9 +359,13 @@ mod tests {
         assert_eq!(get_value(&c, "github.poll_interval_secs").unwrap(), "60");
         assert_eq!(get_value(&c, "github.host").unwrap(), "github.com");
         assert_eq!(get_value(&c, "appearance.theme").unwrap(), "system");
+        assert_eq!(get_value(&c, "notifications.dnd.enabled").unwrap(), "false");
+        assert_eq!(get_value(&c, "notifications.dnd.from").unwrap(), "19:00");
+        assert_eq!(get_value(&c, "notifications.sound").unwrap(), "leaf");
+        assert_eq!(get_value(&c, "general.start_at_login").unwrap(), "true");
         assert_eq!(
-            get_value(&c, "notifications.do_not_disturb").unwrap(),
-            "false"
+            get_value(&c, "notifications.events.mentioned.sound").unwrap(),
+            "true"
         );
         assert!(
             get_value(&c, "repositories.roots")
@@ -380,10 +407,11 @@ mod tests {
             "123"
         );
         assert!(
-            set_value(&c, "notifications.do_not_disturb", "true")
+            set_value(&c, "notifications.dnd.enabled", "true")
                 .unwrap()
                 .notifications
-                .do_not_disturb
+                .dnd
+                .enabled
         );
         assert_eq!(
             set_value(&c, "repositories.roots", r#"["~/a"]"#)
@@ -447,5 +475,91 @@ mod tests {
         assert_eq!(get_value(&c, "lists.filter").unwrap(), "auth refresh");
         assert!(set_value(&c, "lists.saved_sort", "sideways").is_err());
         assert!(set_value(&c, "lists.repository", "nope").is_err());
+    }
+
+    #[test]
+    fn notification_settings_are_set_leaf_by_leaf() {
+        let c = Config::default();
+        let c = set_value(&c, "notifications.events.checks_failed.macos", "true").unwrap();
+        assert!(c.notifications.route(EventKind::ChecksFailed).macos);
+        assert!(!c.notifications.route(EventKind::ChecksFailed).sound);
+        let c = set_value(&c, "notifications.sound", "chime").unwrap();
+        assert_eq!(c.notifications.sound, SoundId::Chime);
+        assert!(set_value(&c, "notifications.sound", "bell").is_err());
+        let c = set_value(&c, "notifications.dnd.from", "22:30").unwrap();
+        assert_eq!(c.notifications.dnd.from.to_string(), "22:30");
+        assert!(set_value(&c, "notifications.dnd.to", "25:00").is_err());
+        let c = set_value(&c, "notifications.dnd.days", r#"["sat","sun"]"#).unwrap();
+        assert_eq!(
+            c.notifications.dnd.days.iter().copied().collect::<Vec<_>>(),
+            [Weekday::Sat, Weekday::Sun]
+        );
+        assert!(set_value(&c, "notifications.dnd.days", r#"["funday"]"#).is_err());
+        let c = set_value(&c, "notifications.follow_focus", "false").unwrap();
+        assert!(!c.notifications.follow_focus);
+        let c = set_value(&c, "general.start_at_login", "false").unwrap();
+        assert!(!c.general.start_at_login);
+        assert!(matches!(
+            set_value(&c, "notifications.events.nope.tray", "true"),
+            Err(ConfigKeyError::Unknown(_))
+        ));
+        assert!(matches!(
+            set_value(&c, "notifications.events", "1"),
+            Err(ConfigKeyError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn saved_notification_settings_round_trip() {
+        let (_d, p) = paths();
+        let mut c = Config::default();
+        c.notifications.dnd.enabled = true;
+        c.notifications.sound = SoundId::Drop;
+        c.notifications
+            .events
+            .get_mut(&EventKind::Mentioned)
+            .unwrap()
+            .sound = false;
+        save_config(&p, &c).unwrap();
+        assert_eq!(load_config(&p).unwrap(), Loaded::Read(c));
+    }
+
+    #[test]
+    fn the_old_do_not_disturb_switch_becomes_dnd_enabled() {
+        let (_d, p) = paths();
+        fs::create_dir_all(p.root()).unwrap();
+        fs::write(p.config_file(), "[notifications]\ndo_not_disturb = true\n").unwrap();
+        let loaded = load_config(&p).unwrap();
+        assert!(matches!(loaded, Loaded::Read(_)), "not a recovery");
+        let n = loaded.into_value().notifications;
+        assert!(n.dnd.enabled);
+        assert_eq!(n.dnd.from, Dnd::default().from, "the rest keeps defaults");
+
+        fs::write(p.config_file(), "[notifications]\ndo_not_disturb = false\n").unwrap();
+        assert!(
+            !load_config(&p)
+                .unwrap()
+                .into_value()
+                .notifications
+                .dnd
+                .enabled
+        );
+
+        fs::write(
+            p.config_file(),
+            "[notifications]\ndo_not_disturb = true\n[notifications.dnd]\nfrom = \"20:00\"\n",
+        )
+        .unwrap();
+        let n = load_config(&p).unwrap().into_value().notifications;
+        assert!(!n.dnd.enabled, "an explicit dnd section wins");
+        assert_eq!(n.dnd.from.to_string(), "20:00");
+    }
+
+    #[test]
+    fn a_bad_time_in_the_file_is_recovered() {
+        let (_d, p) = paths();
+        fs::create_dir_all(p.root()).unwrap();
+        fs::write(p.config_file(), "[notifications.dnd]\nfrom = \"late\"\n").unwrap();
+        assert!(matches!(load_config(&p).unwrap(), Loaded::Recovered { .. }));
     }
 }

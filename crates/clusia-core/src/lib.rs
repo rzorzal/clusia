@@ -14,7 +14,10 @@ pub mod review;
 pub mod time;
 
 pub use activity::{Activity, ActivityKind, ActivitySummary, DayCount};
-pub use config::{CODE_SIZES, Config, Density, DiffView, ListSort, Lists, Media};
+pub use config::{
+    CODE_SIZES, Config, Density, DiffView, Dnd, EventKind, General, HourMinute, ListSort, Lists,
+    Media, Notifications, Route, SoundId, Weekday,
+};
 pub use diffmap::{
     DiffMap, FileChange, Hunk, LineMap, Relocation, can_comment, commentable_lines, relocate,
 };
@@ -23,7 +26,7 @@ pub use draft::{
 };
 pub use editor::{EditorError, editor_argv};
 pub use media::{MAX_MEDIA_BYTES, MediaKind};
-pub use paths::{Paths, PathsError};
+pub use paths::{LAUNCH_AGENT_FILE, Paths, PathsError};
 pub use pr::{PrDetail, PrFilter, PrRef, PrRefError, PrSummary};
 pub use prdata::{
     ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, ReviewCache, ReviewInfo,
