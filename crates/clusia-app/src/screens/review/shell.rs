@@ -24,11 +24,14 @@ use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason, sync_editor_text};
 use crate::snapshot::Snapshot;
-use crate::theme::Swatch;
+use crate::theme::{Swatch, Theme};
+use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, disabled_button, panel,
     text,
 };
+use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::{RenderOpts, markdown_line};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderView {
@@ -69,7 +72,7 @@ pub struct DraftCard {
     /// `refresh.rs:44`, `General note`, `Reply to @mona · refresh.rs:41`, `Resolve thread by @ana`
     pub title: String,
     pub badge: Option<(String, Tone)>,
-    /// The first words of the body (empty for a resolve).
+    /// The body's Markdown source (empty for a resolve); the card shows its first words.
     pub body: String,
     pub obsolete: bool,
     pub target: CardTarget,
@@ -247,16 +250,6 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// The first `max` characters of `body` on one line, with `…` when cut.
-fn preview(body: &str, max: usize) -> String {
-    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= max {
-        return flat;
-    }
-    let kept: String = flat.chars().take(max).collect();
-    format!("{}…", kept.trim_end())
-}
-
 pub fn header_view(view: &ReviewView) -> HeaderView {
     let pr = &view.pr;
     let s = &pr.summary;
@@ -362,7 +355,7 @@ pub fn draft_card(item: &DraftItem) -> DraftCard {
         body: if item.kind == DraftKind::Resolve {
             String::new()
         } else {
-            preview(&item.body, 80)
+            item.body.trim().to_string()
         },
         obsolete: matches!(item.status, ItemStatus::Obsolete { .. }),
         target,
@@ -885,8 +878,10 @@ fn rebuild_right(
     model: Res<Model>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
+    theme: Res<Theme>,
     mut panels: Query<(Entity, &mut RightPanel)>,
 ) {
+    let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
     for (entity, mut right) in &mut panels {
         let Some((v, _)) = current_view(&tabs, &model, &right.pr, clock.now()) else {
             continue;
@@ -909,7 +904,7 @@ fn rebuild_right(
         let pr = right.pr.clone();
         let editor = general.cloned();
         refill(&mut commands, entity, |p| {
-            right_region(p, &fonts, &pr, &want, editor.as_ref())
+            right_region(p, &fonts, &pr, &want, editor.as_ref(), &opts)
         });
         right.built = Some(want);
     }
@@ -921,6 +916,7 @@ fn right_region(
     pr: &PrRef,
     v: &RightView,
     editor: Option<&Editor>,
+    opts: &RenderOpts,
 ) {
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
@@ -1021,7 +1017,7 @@ fn right_region(
                     ));
                 }
                 for card in &v.cards {
-                    draft_card_node(list, fonts, pr, card, v.read_only);
+                    draft_card_node(list, fonts, pr, card, v.read_only, opts);
                 }
             });
     });
@@ -1033,6 +1029,7 @@ fn draft_card_node(
     pr: &PrRef,
     card: &DraftCard,
     read_only: bool,
+    opts: &RenderOpts,
 ) {
     p.spawn((
         Node {
@@ -1111,7 +1108,7 @@ fn draft_card_node(
             }
         });
         if !card.body.is_empty() {
-            c.spawn(text(fonts, card.body.clone(), Type::BODY));
+            markdown_line(c, fonts, &parse(&card.body), Type::BODY, opts, 80);
         }
     });
 }
@@ -1265,6 +1262,7 @@ fn on_general_note(
             text: String::new(),
             error: None,
             ticket: None,
+            mode: ComposerMode::Write,
         });
     }
 }
@@ -1393,7 +1391,11 @@ mod tests {
                 .body
                 .starts_with("Holding the lock across the network call")
         );
-        assert!(v.draft[0].body.ends_with('…'));
+        assert_eq!(
+            v.draft[0].body,
+            v.draft[0].body.trim(),
+            "the whole body, trimmed: the card cuts it when it draws it"
+        );
         assert_eq!(
             v.draft[1].badge,
             Some(("moved from 81".into(), Tone::Green))
@@ -1511,7 +1513,7 @@ mod tests {
         };
         let line = draft_card(&item(DraftKind::LineComment, Some(range.clone()), None));
         assert_eq!(line.title, "store.rs:40–44");
-        assert_eq!(line.body, "Why one minute? The CLI uses 30 seconds.");
+        assert_eq!(line.body, "Why one minute?\n\nThe CLI uses 30 seconds.");
         let general = draft_card(&item(DraftKind::General, None, None));
         assert_eq!(
             (general.title.as_str(), general.target),
@@ -1534,7 +1536,6 @@ mod tests {
             draft_card(&moved).badge,
             Some(("moved from old.rs:9".into(), Tone::Green))
         );
-        assert_eq!(preview("a b", 80), "a b");
     }
 
     #[test]
@@ -1696,6 +1697,7 @@ mod tests {
                 text: text.into(),
                 error: None,
                 ticket: None,
+                mode: ComposerMode::Write,
             });
             testing::settle(app);
         };
@@ -1910,5 +1912,29 @@ mod tests {
         let card = testing::find::<DraftCardButton>(&mut app, |_| true);
         assert_eq!(app.world().get::<ChildOf>(card).unwrap().parent(), list);
         assert_eq!(node(&app, card).flex_shrink, 0.0, "cards keep their height");
+    }
+
+    #[test]
+    fn draft_cards_show_the_first_words_as_markdown() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).unwrap().phase else {
+                panic!("ready")
+            };
+            let id = ready.view.review.draft.items[0].id.clone();
+            let body = format!("**Holding** the lock `now`\n\n{}", "word ".repeat(40));
+            ready.view.review.draft.update_body(&id, &body).unwrap();
+        }
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Holding the lock now word"));
+        let long = testing::shown_text(&mut app)
+            .into_iter()
+            .find(|t| t.starts_with("Holding the lock"))
+            .unwrap();
+        assert!(long.ends_with('…') && long.chars().count() <= 81, "{long}");
+        assert!(!testing::shows(&mut app, "**"));
+        assert_eq!(testing::count::<crate::ui::markdown::MdLink>(&mut app), 0);
     }
 }

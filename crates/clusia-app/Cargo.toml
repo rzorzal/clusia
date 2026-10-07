@@ -14,12 +14,15 @@ clusia-view.workspace = true
 clusia-highlight.workspace = true
 bevy.workspace = true
 crossbeam-channel.workspace = true
+rfd.workspace = true
+image.workspace = true
 tokio.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
 libc.workspace = true
+pulldown-cmark.workspace = true
 
 [dev-dependencies]
 clusiad.workspace = true

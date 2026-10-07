@@ -2,7 +2,7 @@
 //! (section, file, Unified/Split, comment editor, modal). The bridge's tells move the phase;
 //! screens read it and change the UI state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use bevy::prelude::*;
 use clusia_core::config::DiffView;
@@ -13,6 +13,7 @@ use clusia_protocol::{
 
 use crate::bridge::{Ask, Asks, Model, Tell};
 use crate::nav::{Nav, NavSystems};
+use crate::ui::composer::ComposerMode;
 
 /// Diff lines shown at first and added by each *Show more*.
 pub const SHOW_STEP: usize = 500;
@@ -112,6 +113,8 @@ pub struct Editor {
     pub error: Option<String>,
     /// Set while an `AddItem`/`UpdateItem` is in flight; the bridge answers with this ticket.
     pub ticket: Option<u64>,
+    /// Write or Preview.
+    pub mode: ComposerMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -135,6 +138,8 @@ pub struct TabUi {
     /// Diff lines shown (steps of `SHOW_STEP`).
     pub shown: usize,
     pub finalize: FinalizeForm,
+    /// Diff threads shown in full instead of as their first line (thread ids).
+    pub expanded: BTreeSet<String>,
 }
 
 impl Default for TabUi {
@@ -148,6 +153,7 @@ impl Default for TabUi {
             editor: None,
             shown: SHOW_STEP,
             finalize: FinalizeForm::default(),
+            expanded: BTreeSet::new(),
         }
     }
 }
@@ -688,6 +694,7 @@ mod tests {
             text: "Nice cleanup".into(),
             error: None,
             ticket: Some(7),
+            mode: ComposerMode::Write,
         };
         let set = |app: &mut App, editor: &Editor| {
             app.world_mut()
@@ -896,6 +903,7 @@ mod tests {
             text: "Ship it after the lock fix.".into(),
             error: None,
             ticket: Some(1),
+            mode: ComposerMode::Write,
         });
         send(
             &mut app,
@@ -922,6 +930,7 @@ mod tests {
             text: "   ".into(),
             error: None,
             ticket: Some(2),
+            mode: ComposerMode::Write,
         });
         send(
             &mut app,

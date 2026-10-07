@@ -15,6 +15,7 @@ use crate::review_state::{Modal, Phase, ReviewTabs, Tab};
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::diff::unsent;
 use crate::screens::review::shell::ModalFor;
+use crate::ui::composer::ExtraModes;
 use crate::ui::kit::{Type, Variant, button, divider, text};
 use crate::ui::modal::{escape_pressed, modal_card, modal_root};
 
@@ -107,10 +108,12 @@ pub fn leave_text(pr: &PrRef, items: usize) -> (String, String) {
     )
 }
 
-/// Removes the tab from the top bar and forgets its state.
-pub fn close_tab(pr: &PrRef, tabs: &mut ReviewTabs, nav: &mut Nav) {
+/// Removes the tab from the top bar and forgets its state, including the modes of its Finalize
+/// composers: every way of dropping a review comes through here.
+pub fn close_tab(pr: &PrRef, tabs: &mut ReviewTabs, nav: &mut Nav, modes: &mut ExtraModes) {
     nav.close_review(pr);
     tabs.0.remove(pr);
+    modes.forget(pr);
 }
 
 pub struct LeavePlugin;
@@ -141,6 +144,7 @@ fn tab_close(
     mut nav: ResMut<Nav>,
     mut asks: ResMut<Asks>,
     mut toasts: ResMut<Toasts>,
+    mut modes: ResMut<ExtraModes>,
     time: Res<Time>,
 ) {
     for TabCloseRequested(pr) in requests.read() {
@@ -160,7 +164,7 @@ fn tab_close(
         if matches!(tab.phase, Phase::Ready(_)) {
             asks.send(Ask::CloseReview(pr.clone()));
         }
-        close_tab(pr, &mut tabs, &mut nav);
+        close_tab(pr, &mut tabs, &mut nav, &mut modes);
     }
 }
 
@@ -333,10 +337,11 @@ fn on_discard(
     mut tabs: ResMut<ReviewTabs>,
     mut nav: ResMut<Nav>,
     mut asks: ResMut<Asks>,
+    mut modes: ResMut<ExtraModes>,
 ) {
     if let Ok(LeaveDiscard(pr)) = buttons.get(activate.entity) {
         asks.send(Ask::Discard(pr.clone()));
-        close_tab(pr, &mut tabs, &mut nav);
+        close_tab(pr, &mut tabs, &mut nav, &mut modes);
     }
 }
 
@@ -346,10 +351,11 @@ fn on_keep(
     mut tabs: ResMut<ReviewTabs>,
     mut nav: ResMut<Nav>,
     mut asks: ResMut<Asks>,
+    mut modes: ResMut<ExtraModes>,
 ) {
     if let Ok(LeaveKeep(pr)) = buttons.get(activate.entity) {
         asks.send(Ask::CloseReview(pr.clone()));
-        close_tab(pr, &mut tabs, &mut nav);
+        close_tab(pr, &mut tabs, &mut nav, &mut modes);
     }
 }
 
@@ -395,6 +401,7 @@ mod tests {
     use crate::nav::CloseTab;
     use crate::review_state::{EditTarget, Editor, Ready};
     use crate::testing::{self, NOW};
+    use crate::ui::composer::ComposerMode;
     use bevy::window::PrimaryWindow;
 
     /// An `AppExit` was written in this frame or the one before (messages live two frames,
@@ -482,6 +489,50 @@ mod tests {
         assert!(!nav.reviews.contains(&pr));
         assert!(!app.world().resource::<ReviewTabs>().0.contains_key(&pr));
         assert_eq!(testing::count::<LeaveModal>(&mut app), 0);
+    }
+
+    #[test]
+    fn every_way_of_leaving_forgets_the_finalize_modes() {
+        use crate::ui::composer::{ComposerKey, ExtraModes, Slot, mode_of, set_mode};
+        for how in ["close", "keep", "discard"] {
+            let mut app = review_app();
+            let pr = fixture::demo_pr();
+            set_active(&mut app, &pr);
+            if how == "close" {
+                empty_draft(&mut app, &pr);
+            }
+            let key = ComposerKey(pr.clone(), Slot::FinalizeSummary);
+            {
+                let world = app.world_mut();
+                let mut extra = world.remove_resource::<ExtraModes>().unwrap();
+                let mut tabs = world.remove_resource::<ReviewTabs>().unwrap();
+                set_mode(&key, ComposerMode::Preview, &mut tabs, &mut extra);
+                world.insert_resource(extra);
+                world.insert_resource(tabs);
+            }
+            let close = testing::find::<CloseTab>(&mut app, |c| c.0 == pr);
+            testing::activate(&mut app, close);
+            testing::settle(&mut app);
+            match how {
+                "keep" => {
+                    let b = testing::find::<LeaveKeep>(&mut app, |_| true);
+                    testing::activate(&mut app, b);
+                }
+                "discard" => {
+                    let b = testing::find::<LeaveDiscard>(&mut app, |_| true);
+                    testing::activate(&mut app, b);
+                }
+                _ => {}
+            }
+            testing::settle(&mut app);
+            assert!(!app.world().resource::<ReviewTabs>().0.contains_key(&pr));
+            let mode = mode_of(
+                &key,
+                app.world().resource::<ReviewTabs>(),
+                app.world().resource::<ExtraModes>(),
+            );
+            assert_eq!(mode, ComposerMode::Write, "{how}: forgotten");
+        }
     }
 
     #[test]
@@ -653,6 +704,7 @@ mod tests {
             text: "Half a thought".into(),
             error: None,
             ticket: None,
+            mode: ComposerMode::Write,
         });
     }
 

@@ -2,15 +2,18 @@
 //! section. Every control writes one config key through the daemon. A refusal shows under its
 //! field, and the page rebuilds from the saved config.
 
+pub mod about;
 pub mod appearance;
 pub mod editor;
 pub mod git;
+pub mod media;
 pub mod notifications;
 mod placeholders;
 pub mod repos;
 
 use std::collections::HashMap;
 
+use bevy::clipboard::Clipboard;
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input_focus::InputFocus;
 use bevy::input_focus::tab_navigation::TabIndex;
@@ -21,14 +24,16 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::Paths;
 
 use crate::app::AppPaths;
-use crate::bridge::{Ask, Asks, Model, set_config};
+use crate::bridge::{Ask, Asks, Model, TOAST_SECS, Toast, Toasts, set_config};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::nav::{ConfigScreen, Nav, NavSystems, Screen, Section};
+use crate::platform_open::{OpenUrls, visit};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
-    Field, FieldCommitted, Fill, HoverFill, Stroke, Type, segment, segments, text, text_field,
+    Field, FieldCommitted, Fill, HoverFill, Stroke, Type, Variant, button, segment, segments, text,
+    text_field,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +42,8 @@ pub enum PageView {
     Git(git::GitView),
     Repos(repos::ReposView),
     Editor(editor::EditorView),
+    Media(media::MediaView),
+    About(about::AboutView),
     Notifications(notifications::NotificationsView),
     Harness,
     Plugins,
@@ -53,6 +60,8 @@ pub fn page_view(
         Section::GitServer => PageView::Git(git::view(snap, rejected)),
         Section::Repositories => PageView::Repos(repos::view(snap, rejected, paths)),
         Section::Editor => PageView::Editor(editor::view(snap, rejected, paths)),
+        Section::Media => PageView::Media(media::view(snap, rejected)),
+        Section::About => PageView::About(about::view(snap)),
         Section::Notifications => PageView::Notifications(notifications::view(snap, rejected)),
         Section::Harness => PageView::Harness,
         Section::Plugins => PageView::Plugins,
@@ -112,6 +121,44 @@ impl Plugin for ConfigPlugin {
                 .after(NavSystems),
         );
     }
+}
+
+/// Opens `0` in the browser when activated.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenLink(pub &'static str);
+
+/// A quiet button that opens `url` in the browser.
+pub fn link(fonts: &UiFonts, label: &str, url: &'static str) -> impl Bundle {
+    (
+        button(fonts, label, Variant::Ghost),
+        OpenLink(url),
+        observe(on_link),
+    )
+}
+
+fn on_link(activate: On<Activate>, links: Query<&OpenLink>, urls: Option<ResMut<OpenUrls>>) {
+    if let Ok(OpenLink(url)) = links.get(activate.entity) {
+        visit(urls, url);
+    }
+}
+
+/// The clipboard's text, or why it cannot be read.
+pub fn clipboard_text(clipboard: Option<ResMut<Clipboard>>) -> Result<String, &'static str> {
+    const UNREADABLE: &str = "Could not read the clipboard.";
+    let mut clipboard = clipboard.ok_or(UNREADABLE)?;
+    match clipboard.fetch_text().poll_result() {
+        Some(Ok(text)) => Ok(text),
+        _ => Err(UNREADABLE),
+    }
+}
+
+/// A warning toast that lasts `TOAST_SECS` from `now` (`Time::elapsed_secs_f64`).
+pub fn warn(toasts: &mut Toasts, now: f64, message: &str) {
+    toasts.0.push(Toast {
+        text: message.to_string(),
+        warning: true,
+        until: now + TOAST_SECS,
+    });
 }
 
 /// The bundle that makes a button write `key = value`.
@@ -292,6 +339,8 @@ fn rebuild_config(
                 ),
                 PageView::Repos(v) => repos::build(c, fonts, v),
                 PageView::Editor(v) => editor::build(c, fonts, v),
+                PageView::Media(v) => media::build(c, fonts, v),
+                PageView::About(v) => about::build(c, fonts, v),
                 PageView::Notifications(v) => notifications::build(c, fonts, v),
                 PageView::Harness => placeholders::harness(c, fonts),
                 PageView::Plugins => placeholders::plugins(c, fonts),
@@ -465,11 +514,13 @@ pub fn option_card(selected: bool, width: f32) -> impl Bundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::Tell;
     use crate::bridge::Toasts;
     use crate::fixture;
+    use crate::platform_open::OpenUrls;
     use crate::testing::{self, NOW};
     use crate::ui::kit::Field;
-    use clusia_protocol::WindowTarget;
+    use clusia_protocol::{ErrorCode, GifPage, WindowTarget};
 
     fn config_app(section: Section) -> App {
         let mut app = testing::app(fixture::demo(NOW));
@@ -542,7 +593,7 @@ mod tests {
     #[test]
     fn section_list_switches_pages() {
         let mut app = config_app(Section::Appearance);
-        assert_eq!(testing::count::<ConfigNavItem>(&mut app), 7);
+        assert_eq!(testing::count::<ConfigNavItem>(&mut app), 9);
         testing::find::<PageOf>(&mut app, |p| p.0 == Section::Appearance);
         let git = testing::find::<ConfigNavItem>(&mut app, |i| i.0 == Section::GitServer);
         testing::activate(&mut app, git);
@@ -737,6 +788,150 @@ mod tests {
                 key: "notifications.do_not_disturb".into(),
                 value: "true".into()
             }]
+        );
+    }
+
+    #[test]
+    fn media_page_controls() {
+        let mut app = config_app(Section::Media);
+        let toggle = testing::find::<SetValue>(&mut app, |s| {
+            s.key == "media.load_external_images" && s.value == "true"
+        });
+        testing::activate(&mut app, toggle);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "media.load_external_images".into(),
+                value: "true".into()
+            }]
+        );
+        testing::find::<media::PasteGiphyKey>(&mut app, |_| true);
+        let remove = testing::find::<Sends>(&mut app, |s| s.0 == Ask::ClearGiphyKey);
+        testing::activate(&mut app, remove);
+        assert_eq!(testing::recorded(&mut app), [Ask::ClearGiphyKey]);
+        let how = testing::find::<OpenLink>(&mut app, |l| l.0.contains("developers.giphy.com"));
+        testing::activate(&mut app, how);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            ["https://developers.giphy.com/"]
+        );
+    }
+
+    #[test]
+    fn media_page_without_a_key_has_nothing_to_remove() {
+        let mut snap = fixture::demo(NOW);
+        snap.giphy_key = crate::snapshot::GiphyKey::Missing;
+        let mut app = testing::app(snap);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Config);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::Media);
+        testing::settle(&mut app);
+        testing::find::<media::PasteGiphyKey>(&mut app, |_| true);
+        assert_eq!(testing::count::<Sends>(&mut app), 0);
+    }
+
+    #[test]
+    fn paste_without_a_clipboard_warns_and_sends_nothing() {
+        let mut app = config_app(Section::Media);
+        let paste = testing::find::<media::PasteGiphyKey>(&mut app, |_| true);
+        testing::activate(&mut app, paste);
+        assert!(testing::recorded(&mut app).is_empty());
+        assert_eq!(app.world().resource::<Toasts>().0.len(), 1);
+    }
+
+    #[test]
+    fn about_page_links_every_credit() {
+        let mut app = config_app(Section::About);
+        assert_eq!(
+            testing::count::<OpenLink>(&mut app),
+            about::CREDITS.len(),
+            "one link per credit"
+        );
+        let twemoji = testing::find::<OpenLink>(&mut app, |l| l.0.contains("jdecked/twemoji"));
+        testing::activate(&mut app, twemoji);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            ["https://github.com/jdecked/twemoji"]
+        );
+    }
+
+    fn page_texts(app: &mut App) -> Vec<String> {
+        let mut q = app.world_mut().query::<&Text>();
+        q.iter(app.world()).map(|t| t.0.clone()).collect()
+    }
+
+    #[test]
+    fn a_search_the_window_saw_refused_marks_the_key_rejected() {
+        let mut app = config_app(Section::Media);
+        let line = |app: &mut App, text: &str| page_texts(app).iter().any(|t| t == text);
+        assert!(line(&mut app, "Key saved in the macOS Keychain"));
+        testing::tell(
+            &mut app,
+            Tell::Gifs(Err((
+                ErrorCode::Unauthorized,
+                "Giphy rejected the key".into(),
+            ))),
+        );
+        testing::settle(&mut app);
+        assert!(line(&mut app, "Giphy rejected the key. Paste a new one."));
+        // A search that works again clears it.
+        testing::tell(
+            &mut app,
+            Tell::Gifs(Ok(GifPage {
+                items: Vec::new(),
+                next_offset: None,
+            })),
+        );
+        testing::settle(&mut app);
+        assert!(line(&mut app, "Key saved in the macOS Keychain"));
+        assert!(
+            !app.world()
+                .resource::<Model>()
+                .rejected
+                .contains_key(crate::bridge::GIPHY_KEY_REFUSAL)
+        );
+    }
+
+    #[test]
+    fn a_new_key_status_clears_an_old_refusal() {
+        let mut app = config_app(Section::Media);
+        let line = |app: &mut App, text: &str| page_texts(app).iter().any(|t| t == text);
+        testing::tell(
+            &mut app,
+            Tell::Gifs(Err((
+                ErrorCode::Unauthorized,
+                "Giphy rejected the key".into(),
+            ))),
+        );
+        testing::settle(&mut app);
+        assert!(line(&mut app, "Giphy rejected the key. Paste a new one."));
+        let mut snap = app.world().resource::<Model>().snapshot.clone();
+        snap.giphy_key = crate::snapshot::GiphyKey::Missing;
+        testing::tell(&mut app, Tell::Snapshot(Box::new(snap.clone())));
+        snap.giphy_key = crate::snapshot::GiphyKey::Set;
+        testing::tell(&mut app, Tell::Snapshot(Box::new(snap)));
+        testing::settle(&mut app);
+        assert!(line(&mut app, "Key saved in the macOS Keychain"));
+    }
+
+    #[test]
+    fn a_snapshot_with_the_same_key_status_keeps_the_refusal() {
+        let mut app = config_app(Section::Media);
+        testing::tell(
+            &mut app,
+            Tell::Gifs(Err((
+                ErrorCode::Unauthorized,
+                "Giphy rejected the key".into(),
+            ))),
+        );
+        let snap = app.world().resource::<Model>().snapshot.clone();
+        testing::tell(&mut app, Tell::Snapshot(Box::new(snap)));
+        testing::settle(&mut app);
+        assert!(
+            page_texts(&mut app).contains(&"Giphy rejected the key. Paste a new one.".to_string())
         );
     }
 

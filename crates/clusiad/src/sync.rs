@@ -307,6 +307,11 @@ mod tests {
             background_sync: true,
             tray_program: None,
             spawner: Arc::new(crate::spawner::RecordingSpawner::default()),
+            media_extra_hosts: Vec::new(),
+            media_allow_local: false,
+            media_resolve: Vec::new(),
+            giphy_api: Some("http://127.0.0.1:9".into()),
+            harness_search_paths: Vec::new(),
         };
         let shared = Arc::new(Shared::new(
             clusia_core::Paths::new(dir.path()),

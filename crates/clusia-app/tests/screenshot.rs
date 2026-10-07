@@ -9,7 +9,7 @@ use std::process::Command;
 #[ignore = "opens a window"]
 fn demo_screenshots() {
     let dir = tempfile::tempdir().unwrap();
-    let shots: [(&str, &[&str]); 14] = [
+    let base: [(&str, &[&str]); 14] = [
         ("home-light", &["--demo"]),
         ("home-dark", &["--demo", "--dark"]),
         ("config-light", &["--demo", "--config"]),
@@ -25,10 +25,34 @@ fn demo_screenshots() {
         ("leave", &["--demo", "--scene", "leave"]),
         ("palette", &["--demo", "--scene", "palette"]),
     ];
-    for (name, args) in shots {
+    let mut shots: Vec<(String, Vec<&str>)> = base
+        .iter()
+        .map(|(name, args)| (name.to_string(), args.to_vec()))
+        .collect();
+    // The rich-text, media and first-run scenes, each in both themes.
+    for scene in [
+        "composer",
+        "composer-preview",
+        "emoji",
+        "gif",
+        "rendered",
+        "first-run",
+        "config-media",
+        "config-about",
+    ] {
+        shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
+        shots.push((
+            format!("{scene}-dark"),
+            vec!["--demo", "--dark", "--scene", scene],
+        ));
+    }
+    for (name, args) in &shots {
+        // Only a shot that forces --dark may differ from light, so none follows the macOS appearance.
+        let light = (!args.contains(&"--dark")).then_some("--light");
         let out = dir.path().join(format!("{name}.png"));
         let status = Command::new(env!("CARGO_BIN_EXE_clusia-app"))
             .args(args)
+            .args(light)
             .arg("--home")
             .arg(dir.path())
             .arg("--screenshot")

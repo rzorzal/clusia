@@ -3,8 +3,9 @@
 //! - `Tell`s go to Bevy over a crossbeam channel, and every one wakes the reactive event loop;
 //! - `Ask`s come back over a tokio channel.
 //!
-//! `OpenReview`, `OpenCached` and `Publish` run on a second, short-lived connection (a task on
-//! the same runtime), so the main one keeps streaming `LoadStep` events while they wait.
+//! `OpenReview`, `OpenCached`, `Publish` and `FetchMedia` run on a second, short-lived connection
+//! (a task on the same runtime), so the main one keeps streaming `LoadStep` events while they
+//! wait.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -18,8 +19,9 @@ use clusia_core::{
     Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
 };
 use clusia_protocol::{
-    AnchorInput, Client, ClientError, Command, ErrorCode, Event, LoadStep, LoadStepKind, NewsItem,
-    PublishResult, Reply, ReviewView, Secret, StepStatus, WindowTarget, topics,
+    AnchorInput, Client, ClientError, Command, ErrorCode, Event, GifPage, LoadStep, LoadStepKind,
+    MediaFile, NewsItem, PublishResult, Reply, ReviewView, Secret, StepStatus, WindowTarget,
+    topics,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -28,11 +30,15 @@ use crate::app::Mode;
 use crate::clock::Clock;
 use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
-use crate::snapshot::{self, Refresh, Snapshot};
+use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
+use crate::ui::media::MediaCache;
 
 /// Events arriving within this window share one refresh.
 pub const COALESCE: Duration = Duration::from_millis(100);
 pub const TOAST_SECS: f64 = 4.0;
+
+/// The `Model.rejected` key under which a refusal Giphy gave for the stored key is kept.
+pub const GIPHY_KEY_REFUSAL: &str = "giphy.key";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ask {
@@ -44,6 +50,9 @@ pub enum Ask {
     ClearToken,
     SyncNow,
     RefreshAuth,
+    /// The key goes straight to the Keychain; `GiphyKeyChanged` refreshes the snapshot.
+    SetGiphyKey(Secret),
+    ClearGiphyKey,
     OpenInEditor {
         path: String,
         line: Option<u32>,
@@ -85,11 +94,48 @@ pub enum Ask {
     /// Leave the review (saved when the draft has items): `Left`.
     CloseReview(PrRef),
     Discard(PrRef),
+    /// Worker connection: `Tell::Media` with this URL.
+    FetchMedia(String),
+    /// Giphy search (empty query: trending), answered by `Tell::Gifs`.
+    SearchGifs {
+        query: String,
+        offset: u32,
+    },
+}
+
+/// A `Tell::Gifs` on its way to the GIF popover.
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct GifsArrived(pub Result<GifPage, (ErrorCode, String)>);
+
+/// Why the daemon has no file for a picture, and whether asking again later can help.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaError {
+    /// The connection or the daemon's network failed; the picture itself was not turned down.
+    pub transient: bool,
+    pub message: String,
+}
+
+impl MediaError {
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            transient: true,
+            message: message.into(),
+        }
+    }
+
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self {
+            transient: false,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tell {
     Snapshot(Box<Snapshot>),
+    /// The answer to the last `Ask::SearchGifs`: a page, or the daemon's error code and message.
+    Gifs(Result<GifPage, (ErrorCode, String)>),
     /// A config write was refused: the key and the daemon's message.
     Rejected {
         key: String,
@@ -158,6 +204,11 @@ pub enum Tell {
     },
     /// The review was closed or discarded on the daemon.
     Left(PrRef),
+    /// The daemon's answer to `FetchMedia`: the file in its media cache, or why there is none.
+    Media {
+        url: String,
+        file: Result<MediaFile, MediaError>,
+    },
 }
 
 /// The ends Bevy keeps, and the connection thread.
@@ -304,9 +355,28 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
             code: ErrorCode::Offline,
             message: "Not connected to clusiad — nothing was published".into(),
         }),
+        Ask::FetchMedia(url) => teller.send(Tell::Media {
+            url: url.clone(),
+            file: Err(MediaError::transient("Not connected to clusiad")),
+        }),
+        Ask::SearchGifs { .. } => teller.send(Tell::Gifs(Err((
+            ErrorCode::Offline,
+            "Not connected to clusiad".into(),
+        )))),
         _ => return false,
     }
     true
+}
+
+/// The answer to a GIF search; any reply but `Gifs` is a daemon fault, never silence.
+fn gifs_tell(reply: Reply) -> Tell {
+    match reply {
+        Reply::Gifs(page) => Tell::Gifs(Ok(page)),
+        _ => Tell::Gifs(Err((
+            ErrorCode::Internal,
+            "Unexpected reply from clusiad".into(),
+        ))),
+    }
 }
 
 /// `Ok(())` when the UI is gone; `Err(reason)` when the daemon is.
@@ -347,8 +417,12 @@ async fn session(
     for pr in reopened {
         refetch(&mut client, &pr, teller).await?;
     }
+    // Asking Giphy and `gh` and scanning the folders can take seconds: they come after the first
+    // snapshot.
     let lists = Refresh {
         lists: true,
+        giphy: true,
+        first_run: true,
         ..Refresh::default()
     };
     fetch(&mut client, &mut snap, lists).await?;
@@ -489,6 +563,21 @@ async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Resul
     {
         snap.auth = Some(a);
     }
+    if what.first_run
+        && let Some(Reply::FirstRun(f)) = request(client, Command::FirstRunStatus).await?
+    {
+        snap.first_run = Some(f);
+    }
+    if what.giphy
+        && let Some(Reply::GiphyKeyStatus(status)) =
+            request(client, Command::GiphyKeyStatus).await?
+    {
+        snap.giphy_key = if status.configured {
+            GiphyKey::Set
+        } else {
+            GiphyKey::Missing
+        };
+    }
     Ok(())
 }
 
@@ -502,6 +591,7 @@ async fn answer(
 ) -> Result<(), String> {
     let auth = Refresh {
         auth: true,
+        first_run: true,
         ..Refresh::default()
     };
     match ask {
@@ -542,6 +632,18 @@ async fn answer(
             }
         }
         Ask::RefreshAuth => fetch(client, snap, auth).await?,
+        Ask::SetGiphyKey(key) => {
+            notify(
+                client,
+                teller,
+                Command::SetGiphyKey { key },
+                "Giphy key saved in the Keychain",
+            )
+            .await?;
+        }
+        Ask::ClearGiphyKey => {
+            notify(client, teller, Command::ClearGiphyKey, "Giphy key removed").await?;
+        }
         Ask::OpenInEditor { path, line } => {
             notify(client, teller, Command::OpenInEditor { path, line }, "").await?;
         }
@@ -550,7 +652,7 @@ async fn answer(
             open_set(open).insert(pr.clone());
             spawn_worker(paths, teller, open, ask);
         }
-        Ask::Publish { .. } => spawn_worker(paths, teller, open, ask),
+        Ask::Publish { .. } | Ask::FetchMedia(_) => spawn_worker(paths, teller, open, ask),
         Ask::LoadConversation(pr) => match client
             .request(Command::GetConversation { pr: pr.clone() })
             .await
@@ -565,6 +667,19 @@ async fn answer(
             }),
             Err(e) => return Err(lost(e)),
         },
+        Ask::SearchGifs { query, offset } => {
+            match client.request(Command::SearchGifs { query, offset }).await {
+                Ok(reply) => teller.send(gifs_tell(reply)),
+                Err(ClientError::Server(e)) => teller.send(Tell::Gifs(Err((e.code, e.message)))),
+                Err(e) => {
+                    teller.send(Tell::Gifs(Err((
+                        ErrorCode::Offline,
+                        "Not connected to clusiad".into(),
+                    ))));
+                    return Err(lost(e));
+                }
+            }
+        }
         Ask::MarkSeen(pr) => {
             request(client, Command::MarkSeen { pr }).await?;
         }
@@ -667,6 +782,7 @@ async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
             teller.send(tell);
         }
         Ask::OpenCached(pr) => open_cached(&socket, &teller, pr).await,
+        Ask::FetchMedia(url) => teller.send(fetch_media(&socket, url).await),
         Ask::Publish {
             pr,
             verdict,
@@ -764,6 +880,34 @@ async fn open_cached(socket: &Path, teller: &Teller, pr: PrRef) {
             text,
             warning: true,
         }),
+    }
+}
+
+/// `Media`: the daemon's cached file for `url`, or the reason it has none.
+async fn fetch_media(socket: &Path, url: String) -> Tell {
+    let file = match worker(socket).await {
+        Err(message) => Err(MediaError::transient(message)),
+        Ok(mut client) => match client
+            .request(Command::FetchMedia { url: url.clone() })
+            .await
+        {
+            Ok(Reply::Media(file)) => Ok(file),
+            Ok(_) => Err(MediaError::transient("clusiad sent an unexpected reply")),
+            Err(e) => Err(media_error(e)),
+        },
+    };
+    Tell::Media { url, file }
+}
+
+/// Only the daemon's error code says whether asking again can help; every other failure is the
+/// connection.
+fn media_error(e: ClientError) -> MediaError {
+    match e {
+        ClientError::Server(e) => MediaError {
+            transient: matches!(e.code, ErrorCode::Offline | ErrorCode::Internal),
+            message: e.message,
+        },
+        e => MediaError::transient(lost(e)),
     }
 }
 
@@ -930,6 +1074,7 @@ impl Plugin for BridgePlugin {
         app.init_resource::<Model>()
             .init_resource::<Toasts>()
             .add_message::<ShowRequested>()
+            .add_message::<GifsArrived>()
             .add_systems(PreUpdate, pump);
         match self.mode {
             Mode::Live => {
@@ -939,7 +1084,7 @@ impl Plugin for BridgePlugin {
                     connect(world, paths.clone(), home.clone(), &slot);
                 });
             }
-            Mode::Demo { dark } => {
+            Mode::Demo { theme } => {
                 let (inbox, outbox) = local_link();
                 app.init_resource::<Asks>()
                     .insert_resource(inbox)
@@ -948,9 +1093,8 @@ impl Plugin for BridgePlugin {
                         Startup,
                         move |mut model: ResMut<Model>, clock: Res<Clock>| {
                             model.snapshot = fixture::demo(clock.now());
-                            if dark {
-                                model.snapshot.config.appearance.theme =
-                                    clusia_core::config::Theme::Dark;
+                            if let Some(theme) = theme {
+                                model.snapshot.config.appearance.theme = theme;
                             }
                             model.connection = Connection::Live;
                         },
@@ -984,6 +1128,8 @@ pub(crate) fn pump(
     mut show: MessageWriter<ShowRequested>,
     mut exit: MessageWriter<AppExit>,
     mut reviews: MessageWriter<ReviewEvent>,
+    mut media: ResMut<MediaCache>,
+    mut gifs: MessageWriter<GifsArrived>,
     time: Res<Time>,
 ) {
     let Some(inbox) = inbox else { return };
@@ -994,8 +1140,29 @@ pub(crate) fn pump(
         let Some(tell) = rest else { continue };
         match tell {
             Tell::Snapshot(s) => {
+                if matches!(model.connection, Connection::Lost(_)) {
+                    media.retry_failed();
+                }
+                // A refusal belongs to the key that was refused; a new status means a new verdict.
+                if s.giphy_key != model.snapshot.giphy_key {
+                    model.rejected.remove(GIPHY_KEY_REFUSAL);
+                }
                 model.snapshot = *s;
                 model.connection = Connection::Live;
+            }
+            Tell::Gifs(answer) => {
+                match &answer {
+                    Err((ErrorCode::Unauthorized, message)) => {
+                        model
+                            .rejected
+                            .insert(GIPHY_KEY_REFUSAL.to_string(), message.clone());
+                    }
+                    Ok(_) => {
+                        model.rejected.remove(GIPHY_KEY_REFUSAL);
+                    }
+                    Err(_) => {}
+                }
+                gifs.write(GifsArrived(answer));
             }
             Tell::Rejected { key, message } => {
                 model.rejected.insert(key, message);
@@ -1017,6 +1184,7 @@ pub(crate) fn pump(
                 warning: true,
                 until: time.elapsed_secs_f64() + TOAST_SECS,
             }),
+            Tell::Media { url, file } => media.arrive(url, file),
             _ => {} // the other review tells were applied above
         }
     }
@@ -1049,6 +1217,8 @@ pub(crate) fn demo_answers(
                     model.rejected.insert(key, message);
                 }
             }
+            Ask::SetGiphyKey(_) => model.snapshot.giphy_key = GiphyKey::Set,
+            Ask::ClearGiphyKey => model.snapshot.giphy_key = GiphyKey::Missing,
             Ask::OpenReview(pr) => tells.extend(demo_open(pr, now)),
             Ask::OpenCached(pr) if pr == fixture::demo_pr() => {
                 tells.push(Tell::OpenedFromCache {
@@ -1121,6 +1291,10 @@ pub(crate) fn demo_answers(
                 pr,
             }),
             Ask::CloseReview(pr) | Ask::Discard(pr) => tells.push(Tell::Left(pr)),
+            Ask::SearchGifs { query, offset } => {
+                tells.push(Tell::Gifs(Ok(fixture::demo_gif_page(&query, offset))));
+            }
+            Ask::FetchMedia(url) => tells.push(demo_media_tell(url)),
             _ => toasts.0.push(Toast {
                 text: "Demo mode: nothing is sent to the daemon".into(),
                 warning: false,
@@ -1134,6 +1308,25 @@ pub(crate) fn demo_answers(
         }
         redraw.write(RequestRedraw);
     }
+}
+
+/// The demo's copy of `url`, written under the temp folder where the window may read it.
+fn demo_media_tell(url: String) -> Tell {
+    let file = fixture::demo_media(&url)
+        .ok_or_else(|| MediaError::refused("Demo mode has no copy of this picture"))
+        .and_then(|(kind, bytes)| {
+            let dir = std::env::temp_dir().join("clusia-demo-media");
+            let path = dir.join(format!("{}.gif", clusia_core::media::cache_key(&url)));
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, &bytes))
+                .map_err(|e| MediaError::transient(e.to_string()))?;
+            Ok(MediaFile {
+                path: path.display().to_string(),
+                kind,
+                bytes: bytes.len() as u64,
+            })
+        });
+    Tell::Media { url, file }
 }
 
 /// The demo review opens at once (every step done, no harness); any other PR fails at the
@@ -1221,6 +1414,43 @@ fn demo_edit(
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_gif_search_gets_an_answer() {
+        let page = clusia_protocol::GifPage {
+            items: Vec::new(),
+            next_offset: None,
+        };
+        assert_eq!(gifs_tell(Reply::Gifs(page.clone())), Tell::Gifs(Ok(page)));
+        assert_eq!(
+            gifs_tell(Reply::Ack),
+            Tell::Gifs(Err((
+                ErrorCode::Internal,
+                "Unexpected reply from clusiad".into()
+            )))
+        );
+    }
+
+    #[test]
+    fn offline_gif_searches_fail_at_once() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let ask = Ask::SearchGifs {
+            query: "turtle".into(),
+            offset: 0,
+        };
+        assert!(offline(&ask, &teller));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Tell::Gifs(Err((
+                ErrorCode::Offline,
+                "Not connected to clusiad".into()
+            ))))
+        );
+    }
+
     #[tokio::test]
     async fn a_failed_open_is_no_longer_followed() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -1238,6 +1468,153 @@ mod tests {
             Ok(Tell::OpenFailed { pr: failed, cache: false, .. }) if failed == pr
         ));
         assert!(open_set(&open).is_empty(), "the failed PR is forgotten");
+    }
+
+    #[tokio::test]
+    async fn a_media_fetch_without_a_daemon_says_why() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let url = "https://github.com/user-attachments/assets/1.png".to_string();
+        let socket = PathBuf::from("/nonexistent/clusia-test/clusiad.sock");
+        work(
+            socket,
+            teller,
+            OpenSet::default(),
+            Ask::FetchMedia(url.clone()),
+        )
+        .await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Tell::Media { url: asked, file: Err(e) }) if asked == url && e.transient && e.message.contains("cannot reach clusiad")
+        ));
+    }
+
+    #[test]
+    fn only_offline_and_internal_daemon_errors_are_transient() {
+        let class = |code| {
+            media_error(ClientError::Server(clusia_protocol::ProtocolError {
+                code,
+                message: "m".into(),
+            }))
+            .transient
+        };
+        assert!(class(ErrorCode::Offline));
+        assert!(class(ErrorCode::Internal));
+        assert!(!class(ErrorCode::Refused));
+        assert!(!class(ErrorCode::BadRequest));
+        assert!(!class(ErrorCode::NotFound));
+        assert!(!class(ErrorCode::NotConfigured));
+        assert!(media_error(ClientError::Closed).transient);
+    }
+
+    #[test]
+    fn offline_media_asks_fail_at_once() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        assert!(offline(
+            &Ask::FetchMedia("https://github.com/a.png".into()),
+            &teller
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Tell::Media { file: Err(e), .. }) if e.transient && e.message == "Not connected to clusiad"
+        ));
+    }
+
+    /// Runs `demo_answers` on `asks` and returns the tells it produced.
+    fn demo_tells(asks: Vec<Ask>) -> Vec<Tell> {
+        let (inbox, outbox) = local_link();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .insert_resource(Asks {
+                recorded: asks,
+                ..Asks::default()
+            })
+            .insert_resource(Model::default())
+            .insert_resource(Toasts::default())
+            .insert_resource(ReviewTabs::default())
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .insert_resource(outbox)
+            .add_systems(Update, demo_answers);
+        app.update();
+        inbox.0.try_iter().collect()
+    }
+
+    #[test]
+    fn demo_mode_answers_gif_searches_and_media() {
+        let url = "https://media.giphy.com/media/demo-party/giphy.gif".to_string();
+        let tells = demo_tells(vec![
+            Ask::SearchGifs {
+                query: "turtle".into(),
+                offset: 0,
+            },
+            Ask::FetchMedia(url.clone()),
+            Ask::FetchMedia("https://example.org/a.png".into()),
+        ]);
+        let [
+            Tell::Gifs(Ok(page)),
+            Tell::Media { file: Ok(file), .. },
+            Tell::Media { file: Err(why), .. },
+        ] = &tells[..]
+        else {
+            panic!("unexpected answers: {tells:?}");
+        };
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|i| i.title.as_str())
+                .collect::<Vec<_>>(),
+            ["party turtle"]
+        );
+        assert_eq!(file.kind, clusia_core::media::MediaKind::Gif);
+        let bytes = std::fs::read(&file.path).expect("the demo wrote its GIF");
+        assert!(bytes.starts_with(b"GIF8"));
+        assert_eq!(bytes.len() as u64, file.bytes);
+        assert_eq!(why.message, "Demo mode has no copy of this picture");
+        assert!(!why.transient);
+    }
+
+    #[test]
+    fn demo_mode_writes_the_forced_theme_into_the_snapshot() {
+        use clusia_core::config::Theme;
+        for (forced, want) in [
+            (Some(Theme::Light), Theme::Light),
+            (Some(Theme::Dark), Theme::Dark),
+            (None, Theme::System),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .add_message::<RequestRedraw>()
+                .insert_resource(Clock(Some(1_790_000_000)))
+                .add_message::<ReviewEvent>()
+                .add_message::<AppExit>()
+                .init_resource::<MediaCache>()
+                .insert_resource(ReviewTabs::default())
+                .add_plugins(BridgePlugin {
+                    mode: Mode::Demo { theme: forced },
+                    paths: Paths::new(home.path()),
+                    home: None,
+                    thread: BridgeSlot::default(),
+                });
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<Model>()
+                    .snapshot
+                    .config
+                    .appearance
+                    .theme,
+                want
+            );
+        }
     }
 
     #[test]

@@ -11,6 +11,9 @@ use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
 use crate::activity;
+use crate::first_run;
+use crate::giphy;
+use crate::media;
 use crate::news;
 use crate::publish;
 use crate::reviews;
@@ -104,6 +107,12 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         }
         Command::OpenInEditor { path, line } => open_in_editor(shared, &path, line).await,
         Command::GetActivity => activity::summary(shared).await,
+        Command::GiphyKeyStatus => giphy::key_status(shared),
+        Command::FetchMedia { url } => media::fetch(shared, &url).await,
+        Command::SearchGifs { query, offset } => giphy::search(shared, &query, offset).await,
+        Command::SetGiphyKey { key } => giphy::set_key(shared, key.expose()).await,
+        Command::ClearGiphyKey => giphy::clear_key(shared).await,
+        Command::FirstRunStatus => Outcome::Ok(Reply::FirstRun(first_run::status(shared).await)),
     }
 }
 
@@ -162,6 +171,9 @@ async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome 
     }
     let rendered = get_value(&updated, &key).unwrap_or(raw);
     *config = updated;
+    // A new host or sign-in method may change what the token resolves to; without a token
+    // the loop would otherwise sit out its idle retry.
+    let resync = key.starts_with("github.");
     shared.publish(
         topics::CONFIG,
         Event::ConfigChanged {
@@ -169,6 +181,9 @@ async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome 
             value: rendered.clone(),
         },
     );
+    if resync {
+        shared.sync_now.notify_one();
+    }
     Outcome::Ok(Reply::Value(rendered))
 }
 

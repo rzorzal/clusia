@@ -10,8 +10,10 @@ use clusia_core::config::AuthSource;
 use clusia_protocol::{Secret, SyncState, SyncStatus, TokenSource};
 use clusia_view::status::{format_age, status_line};
 
-use super::{field_row, heading, option_card, page_header, row, sends, setter};
-use crate::bridge::{Ask, Asks, TOAST_SECS, Toast, Toasts};
+use super::{
+    clipboard_text, field_row, heading, option_card, page_header, row, sends, setter, warn,
+};
+use crate::bridge::{Ask, Asks, Toasts};
 use crate::fonts::UiFonts;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
@@ -252,20 +254,9 @@ fn on_paste(
     mut toasts: ResMut<Toasts>,
     time: Res<Time>,
 ) {
-    let read = match clipboard {
-        Some(mut c) => match c.fetch_text().poll_result() {
-            Some(Ok(text)) => Ok(text),
-            _ => Err("Could not read the clipboard."),
-        },
-        None => Err("Could not read the clipboard."),
-    };
-    match read.and_then(|text| token_from_clipboard(&text)) {
+    match clipboard_text(clipboard).and_then(|text| token_from_clipboard(&text)) {
         Ok(token) => asks.send(Ask::SetToken(token)),
-        Err(message) => toasts.0.push(Toast {
-            text: message.to_string(),
-            warning: true,
-            until: time.elapsed_secs_f64() + TOAST_SECS,
-        }),
+        Err(message) => warn(&mut toasts, time.elapsed_secs_f64(), message),
     }
 }
 

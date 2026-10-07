@@ -120,6 +120,19 @@ impl Daemon {
                     if removed > 0 {
                         tracing::info!(removed, "removed stale worktrees");
                     }
+                    let media = shared.paths.media_dir();
+                    let trimmed = tokio::task::spawn_blocking(move || {
+                        crate::retention::sweep_media(
+                            &media,
+                            crate::retention::MEDIA_MAX_AGE,
+                            crate::retention::MEDIA_MAX_BYTES,
+                        )
+                    })
+                    .await
+                    .unwrap_or(0);
+                    if trimmed > 0 {
+                        tracing::info!(removed = trimmed, "trimmed the media cache");
+                    }
                     if !periodic {
                         return;
                     }

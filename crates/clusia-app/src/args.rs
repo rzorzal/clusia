@@ -19,6 +19,14 @@ pub enum Scene {
     Failed,
     Leave,
     Palette,
+    Composer,
+    ComposerPreview,
+    Emoji,
+    Gif,
+    Rendered,
+    FirstRun,
+    ConfigMedia,
+    ConfigAbout,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -39,6 +47,9 @@ pub struct Args {
     /// With --demo: start in the dark theme.
     #[arg(long, requires = "demo")]
     pub dark: bool,
+    /// With --demo: start in the light theme, whatever the macOS appearance is.
+    #[arg(long, requires = "demo", conflicts_with = "dark")]
+    pub light: bool,
     /// With --demo: stage the demo review in one state (screenshots).
     #[arg(long, value_enum, requires = "demo", hide = true)]
     pub scene: Option<Scene>,
@@ -135,5 +146,32 @@ mod tests {
         );
         assert_eq!(parse(&["--demo"]).unwrap().scene, None);
         assert!(parse(&["--demo", "--scene", "nope"]).is_err());
+    }
+
+    #[test]
+    fn composer_media_and_first_run_scenes_parse() {
+        for (name, scene) in [
+            ("composer", Scene::Composer),
+            ("composer-preview", Scene::ComposerPreview),
+            ("emoji", Scene::Emoji),
+            ("gif", Scene::Gif),
+            ("rendered", Scene::Rendered),
+            ("first-run", Scene::FirstRun),
+            ("config-media", Scene::ConfigMedia),
+            ("config-about", Scene::ConfigAbout),
+        ] {
+            assert_eq!(
+                parse(&["--demo", "--scene", name]).unwrap().scene,
+                Some(scene),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn light_is_the_counterpart_of_dark() {
+        assert!(parse(&["--demo", "--light"]).unwrap().light);
+        assert!(parse(&["--light"]).is_err(), "--light needs --demo");
+        assert!(parse(&["--demo", "--dark", "--light"]).is_err());
     }
 }

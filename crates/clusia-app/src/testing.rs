@@ -20,11 +20,13 @@ use crate::nav::{Nav, NavPlugin};
 use crate::platform_open::OpenUrls;
 use crate::review_state::{Phase, Ready, ReviewStatePlugin, ReviewTabs, Tab};
 use crate::screens::config::ConfigPlugin;
+use crate::screens::first_run::FirstRunPlugin;
 use crate::screens::home::HomePlugin;
 use crate::screens::open_pr::OpenPrPlugin;
 use crate::screens::review::ReviewPlugin;
 use crate::snapshot::{self, Snapshot};
 use crate::theme::{LIGHT, Theme, ThemePlugin};
+use crate::ui::emoji::EmojiPlugin;
 use crate::ui::kit::KitPlugin;
 
 pub const NOW: i64 = 1_790_000_000;
@@ -32,7 +34,8 @@ pub const NOW: i64 = 1_790_000_000;
 pub fn app(snapshot: Snapshot) -> App {
     let (inbox, outbox) = bridge::local_link();
     let mut app = App::new();
-    app.add_plugins(MinimalPlugins)
+    app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+        .init_asset::<Image>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<InputFocus>()
         .add_message::<WindowThemeChanged>()
@@ -54,11 +57,20 @@ pub fn app(snapshot: Snapshot) -> App {
         .insert_resource(inbox)
         .insert_resource(outbox)
         .add_systems(PreUpdate, bridge::pump)
-        .add_plugins((ThemePlugin, KitPlugin, NavPlugin, HomePlugin, ConfigPlugin))
+        .add_plugins((
+            ThemePlugin,
+            KitPlugin,
+            EmojiPlugin,
+            NavPlugin,
+            HomePlugin,
+            ConfigPlugin,
+        ))
+        .add_plugins(FirstRunPlugin)
         .add_plugins(ReviewStatePlugin)
         .add_plugins(ReviewPlugin)
         .add_plugins(OpenPrPlugin)
-        .init_resource::<OpenUrls>();
+        .init_resource::<OpenUrls>()
+        .init_resource::<crate::ui::markdown::CopiedText>();
     app.update();
     app
 }
@@ -96,15 +108,29 @@ pub fn set_config_locally(app: &mut App, key: &str, value: &str) {
 
 /// Types `text` into the `EditableText` on `entity` at its cursor, as a keyboard would.
 pub fn type_into(app: &mut App, entity: Entity, text: &str) {
-    let mut editable = app
-        .world_mut()
+    app.world_mut()
         .get_mut::<EditableText>(entity)
-        .expect("an editable text");
-    editable.queue_edit(TextEdit::Insert(text.into()));
-    let mut fonts = FontCx::default();
-    let mut layout = LayoutCx::default();
-    let mut clipboard = Clipboard::default();
-    editable.apply_pending_edits(&mut fonts, &mut layout.0, &mut clipboard, |_| true);
+        .expect("an editable text")
+        .queue_edit(TextEdit::Insert(text.into()));
+    // The app's own text contexts, when it has them, so moves that need a layout (to the start
+    // of the text) work as in the window.
+    let own_fonts = app.world_mut().remove_resource::<FontCx>();
+    let own_layout = app.world_mut().remove_resource::<LayoutCx>();
+    let (had_fonts, had_layout) = (own_fonts.is_some(), own_layout.is_some());
+    let mut fonts = own_fonts.unwrap_or_default();
+    let mut layout = own_layout.unwrap_or_default();
+    app.world_mut()
+        .get_mut::<EditableText>(entity)
+        .expect("an editable text")
+        .apply_pending_edits(&mut fonts, &mut layout.0, &mut Clipboard::default(), |_| {
+            true
+        });
+    if had_fonts {
+        app.world_mut().insert_resource(fonts);
+    }
+    if had_layout {
+        app.world_mut().insert_resource(layout);
+    }
 }
 
 /// Runs frames until rebuilt screens have settled.
@@ -175,4 +201,75 @@ pub fn open_ready(app: &mut App, news: bool) -> PrRef {
     settle(app);
     recorded(app);
     pr
+}
+
+/// The text a rendered markdown body shows: each wrapping row of words read as one sentence,
+/// and every other `Text` as it is.
+pub fn shown_text(app: &mut App) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut texts = app.world_mut().query::<&Text>();
+    out.extend(texts.iter(app.world()).map(|t| t.0.clone()));
+    let mut rows = app.world_mut().query::<(&Node, &Children)>();
+    for (node, children) in rows.iter(app.world()) {
+        if node.flex_wrap != FlexWrap::Wrap {
+            continue;
+        }
+        let words: Vec<&str> = children
+            .iter()
+            .filter_map(|c| app.world().get::<Text>(c))
+            .map(|t| t.0.as_str())
+            .collect();
+        out.push(
+            words
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+    out
+}
+
+/// Whether `needle` appears in what the window shows (`shown_text`).
+pub fn shows(app: &mut App, needle: &str) -> bool {
+    shown_text(app).iter().any(|t| t.contains(needle))
+}
+
+/// A readable outline of the tree under `root`: texts, emoji and image slots, weights, fills
+/// and links, children in parentheses. Two bodies built from the same markdown have the same
+/// outline.
+pub fn tree_signature(app: &App, root: Entity) -> String {
+    fn walk(world: &World, e: Entity, out: &mut String) {
+        if let Some(t) = world.get::<Text>(e) {
+            out.push_str(&format!("{:?}", t.0));
+            if let Some(f) = world.get::<TextFont>(e) {
+                out.push_str(&format!(" w{}", f.weight.0));
+            }
+        } else {
+            out.push('N');
+        }
+        if let Some(e) = world.get::<crate::ui::markdown::MdEmoji>(e) {
+            out.push_str(&format!(" emoji:{}", e.0));
+        }
+        if let Some(i) = world.get::<crate::ui::markdown::MdImage>(e) {
+            out.push_str(&format!(" image:{}", i.0));
+        }
+        if let Some(l) = world.get::<crate::ui::markdown::MdLink>(e) {
+            out.push_str(&format!(" link:{}", l.0));
+        }
+        if let Some(f) = world.get::<crate::ui::kit::Fill>(e) {
+            out.push_str(&format!(" fill:{:?}", f.0));
+        }
+        if let Some(children) = world.get::<Children>(e) {
+            out.push('(');
+            for c in children {
+                walk(world, *c, out);
+                out.push(',');
+            }
+            out.push(')');
+        }
+    }
+    let mut out = String::new();
+    walk(app.world(), root, &mut out);
+    out
 }

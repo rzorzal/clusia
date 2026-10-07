@@ -14,6 +14,8 @@ pub struct Config {
     pub editor: Editor,
     pub notifications: Notifications,
     pub lists: Lists,
+    pub media: Media,
+    pub composer: Composer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +138,14 @@ pub struct Notifications {
     pub do_not_disturb: bool,
 }
 
+/// Images and GIFs in comments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Media {
+    /// Show images hosted outside GitHub and Giphy; off, they appear as links.
+    pub load_external_images: bool,
+}
+
 /// How the pull request lists (tray and Home) are ordered, filtered and narrowed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -151,6 +161,17 @@ pub struct Lists {
 }
 
 pub const MAX_FILTER_CHARS: usize = 200;
+
+/// How many emoji the composer remembers as recently used.
+pub const MAX_RECENT_EMOJI: usize = 16;
+
+/// What the comment composer remembers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Composer {
+    /// The emoji picked last, newest first (at most `MAX_RECENT_EMOJI`).
+    pub recent_emoji: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -252,6 +273,11 @@ impl Config {
                 "lists.filter must be at most {MAX_FILTER_CHARS} characters"
             ));
         }
+        if self.composer.recent_emoji.len() > MAX_RECENT_EMOJI {
+            return Err(format!(
+                "composer.recent_emoji must hold at most {MAX_RECENT_EMOJI} emoji"
+            ));
+        }
         let repo = &self.lists.repository;
         let owner_repo = repo.split_once('/').is_some_and(|(owner, name)| {
             !owner.is_empty() && !name.is_empty() && !name.contains('/')
@@ -274,6 +300,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composer_remembers_at_most_sixteen_emoji() {
+        let mut c = Config::default();
+        assert!(c.composer.recent_emoji.is_empty());
+        c.composer.recent_emoji = (0..MAX_RECENT_EMOJI).map(|i| i.to_string()).collect();
+        assert_eq!(c.validate(), Ok(()));
+        c.composer.recent_emoji.push("🐢".into());
+        assert!(c.validate().unwrap_err().contains("recent_emoji"));
+    }
+
+    #[test]
     fn defaults_match_spec() {
         let c = Config::default();
         assert_eq!(c.appearance.theme, Theme::System);
@@ -292,6 +328,7 @@ mod tests {
         assert_eq!(c.editor.kind, EditorKind::VsCode);
         assert_eq!(c.editor.custom_command, "");
         assert!(!c.notifications.do_not_disturb);
+        assert!(!c.media.load_external_images);
         assert_eq!(c.validate(), Ok(()));
     }
 
@@ -442,5 +479,14 @@ mod tests {
         }
         c.lists.repository = "rzorzal/clusia".into();
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn media_section_defaults_and_round_trips() {
+        let c: Config = serde_json::from_str(r#"{"media":{"load_external_images":true}}"#).unwrap();
+        assert!(c.media.load_external_images);
+        let none: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(none.media, Media::default());
+        assert_eq!(c.validate(), Ok(()));
     }
 }

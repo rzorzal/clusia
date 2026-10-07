@@ -36,7 +36,7 @@ Clúsia is a Rust workspace with four programs that talk over a local Unix socke
 |---|---|
 | `clusiad` | The background service. It syncs with GitHub, manages worktrees, keeps review drafts and publishes reviews. It is the only part that holds state or secrets. |
 | `clusia-tray` | The menu bar icon and popover (native AppKit). The daemon starts it, and it exits when the daemon stops. |
-| `clusia-app` | The main window (Bevy): Home, Config and the review screen (diff in Unified or Split with syntax colors, comments, finalize). Opening it starts the daemon if needed, and a second launch brings the open window forward. |
+| `clusia-app` | The main window (Bevy): Home, Config and the review screen (diff in Unified or Split with syntax colors, rich-text comments with one composer: formatting, emoji, Giphy GIFs, image links and a preview; finalize), plus a first run for a new machine. Opening it starts the daemon if needed, and a second launch brings the open window forward. |
 | `clusia` | The command-line interface. |
 
 <p align="center"><img src="docs/assets/sp1-m5b-review-light.png" alt="The Clúsia review screen: PR header, sections, a syntax-highlighted diff with a thread and a draft comment, and the draft panel" width="720"></p>
@@ -72,6 +72,15 @@ target/debug/clusia-app --demo --review rzorzal/clusia#123 # the demo review
 
 In a review, click a line to comment (Shift-click for a range), reply to or resolve threads under Comments, then **Finalize review**: everything goes to GitHub as one review, and nothing is posted before you publish. Closing a tab or the window with an unpublished draft asks first; the tray reminds you about reviews kept for later.
 
+Comments are rich text everywhere. The composer (under a line, in a reply, in the finalize form) has a toolbar for bold, italic, code, link, list, quote and suggestion, an **Emoji** picker (Twemoji, so they look the same on every Mac), a **GIF** picker backed by Giphy (add your own key in Config › Media; without one you can still paste a link) and **Image** links, and **Preview** renders exactly what GitHub will show. Pictures from other sites appear as links unless you turn on *Load images from other sites* in Config › Media.
+
+<p align="center"><img src="docs/assets/sp1-m5c-composer-light.png" alt="The Clúsia composer under line 44 with a typed comment and the formatting toolbar" width="720"></p>
+<p align="center"><img src="docs/assets/sp1-m5c-rendered-dark.png" alt="A comment in the dark theme with bold text, inline code, a code block, a link, an emoji and a playing GIF" width="720"></p>
+
+On a new machine, or whenever the GitHub login is missing, the window opens on a short first run: connect GitHub (the `gh` login or a token), point Clúsia at the folders with your clones, and see which AI harness is installed. It goes away when the login works and you press **Continue**.
+
+<p align="center"><img src="docs/assets/sp1-m5c-first-run-light.png" alt="The first-run screen: connect GitHub, where your repositories are, and the AI harness" width="720"></p>
+
 ## Development
 
 Every change passes the same gate:
@@ -81,6 +90,10 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Tests never call the real GitHub, the real `gh` or the real Keychain. Plans and specs live in the GitHub issues: the design spec is [#2](https://github.com/rzorzal/clusia/issues/2).
+
+## Credits
+
+Emoji graphics from [Twemoji](https://github.com/jdecked/twemoji), © Twitter, Inc. and other contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). Resized for use in Clúsia. Emoji names and shortcodes from [emojibase](https://github.com/milesj/emojibase) (MIT). Fonts: Inter and JetBrains Mono (SIL OFL 1.1). GIF search is powered by [GIPHY](https://giphy.com/). The licences and links are also under Config › About.
 
 ## License
 

@@ -313,3 +313,69 @@ async fn sync_changes_are_published() {
     ));
     d.stop().await;
 }
+
+#[tokio::test]
+async fn changing_a_github_setting_syncs_again_at_once() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = MockServer::start().await;
+    mount_lists(&server, vec![issue(7, "acme/widgets")], vec![], None).await;
+    // A `gh` that has a token only once the flag file exists.
+    let tools = tempfile::tempdir().unwrap();
+    let flag = tools.path().join("signed-in");
+    let gh = tools.path().join("gh");
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\n[ -f '{}' ] && echo tok || exit 1\n",
+            flag.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut options = test_options();
+    options.github_api = Some(server.uri());
+    options.gh_program = gh;
+    options.background_sync = true;
+    let d = TestDaemon::start_with(tempfile::tempdir().unwrap(), options).await;
+    let mut c = d.client().await;
+    c.request(Command::SetConfigValue {
+        key: "github.auth".into(),
+        value: "gh-cli".into(),
+    })
+    .await
+    .unwrap();
+    // The first sync finds no token, so the loop now waits out its idle retry.
+    c.request(Command::ListPrs {
+        filter: PrFilter::Assigned,
+    })
+    .await
+    .unwrap();
+    std::fs::write(&flag, "").unwrap();
+    let mut watcher = d.client().await;
+    watcher
+        .request(Command::Subscribe {
+            topics: vec![topics::SYNC.into()],
+        })
+        .await
+        .unwrap();
+    c.request(Command::SetConfigValue {
+        key: "github.auth".into(),
+        value: "gh-cli".into(),
+    })
+    .await
+    .unwrap();
+    let (topic, event) = tokio::time::timeout(Duration::from_secs(3), watcher.next_event())
+        .await
+        .expect("the sync loop woke")
+        .unwrap();
+    assert_eq!(topic, topics::SYNC);
+    assert!(matches!(
+        event,
+        Event::SyncChanged(SyncStatus {
+            state: SyncState::Online,
+            ..
+        })
+    ));
+    d.stop().await;
+}

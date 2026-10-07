@@ -45,13 +45,29 @@ pub fn text_area(fonts: &UiFonts, value: &str, lines: f32, id: u64) -> impl Bund
     area(fonts, editable, id)
 }
 
-/// A text area that shows `value` from its first line and grows with it from `min` to `max`
-/// lines.
-pub fn growing_text_area(fonts: &UiFonts, value: &str, min: f32, max: f32, id: u64) -> impl Bundle {
+/// Where the cursor of a growing area starts. A text taller than the area opens scrolled to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caret {
+    Start,
+    End,
+}
+
+/// A text area that grows with `value` from `min` to `max` lines, with the cursor at `caret`.
+pub fn growing_text_area(
+    fonts: &UiFonts,
+    value: &str,
+    min: f32,
+    max: f32,
+    caret: Caret,
+    id: u64,
+) -> impl Bundle {
     let mut editable = EditableText::new(value);
     editable.allow_newlines = true;
     editable.visible_lines = Some(min);
-    editable.queue_edit(TextEdit::TextStart(false));
+    editable.queue_edit(match caret {
+        Caret::Start => TextEdit::TextStart(false),
+        Caret::End => TextEdit::TextEnd(false),
+    });
     (area(fonts, editable, id), Grow { min, max })
 }
 
@@ -216,12 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn growing_areas_fit_their_lines_up_to_a_cap_and_start_at_the_top() {
+    fn growing_areas_fit_their_lines_up_to_a_cap_and_start_at_their_caret() {
         let mut app = testing::app(Snapshot::default());
         let fonts = UiFonts::default();
         let mut spawn = |value: &str, id| {
             app.world_mut()
-                .spawn(growing_text_area(&fonts, value, 2.0, 6.0, id))
+                .spawn(growing_text_area(&fonts, value, 2.0, 6.0, Caret::End, id))
                 .id()
         };
         let short = spawn("one line", 1);
@@ -239,9 +255,24 @@ mod tests {
         let e = app.world().get::<EditableText>(short).unwrap();
         assert_eq!(
             e.value().to_string(),
-            "zone line",
-            "the cursor starts at the top"
+            "one linez",
+            "the cursor starts at the end"
         );
+        let first = app
+            .world_mut()
+            .spawn(growing_text_area(
+                &fonts,
+                "one line",
+                2.0,
+                6.0,
+                Caret::Start,
+                4,
+            ))
+            .id();
+        lay_out(&mut app, first);
+        testing::type_into(&mut app, first, "z");
+        let e = app.world().get::<EditableText>(first).unwrap();
+        assert_eq!(e.value().to_string(), "zone line", "or at the start");
     }
 
     #[test]

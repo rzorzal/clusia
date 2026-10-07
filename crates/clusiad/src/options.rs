@@ -1,5 +1,6 @@
 //! How the daemon reaches GitHub and stores secrets. Tests replace every outside dependency.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,6 +23,21 @@ pub struct DaemonOptions {
     pub tray_program: Option<PathBuf>,
     /// Starts the editor for `OpenInEditor`.
     pub spawner: Arc<dyn Spawner>,
+    /// Exact host names media may also be fetched from, over plain http (tests point it at a
+    /// local server; production leaves it empty).
+    pub media_extra_hosts: Vec<String>,
+    /// Lets fetches of images from other sites reach plain-http and local addresses, which they
+    /// never may in production. Tests set it to use a local server.
+    pub media_allow_local: bool,
+    /// Host names that media fetches send to a fixed address instead of asking DNS (tests
+    /// point `github.com` at a local server; production leaves it empty). The port comes
+    /// from the URL.
+    pub media_resolve: Vec<(String, SocketAddr)>,
+    /// Giphy API base URL override. Env: `CLUSIA_GIPHY_API`.
+    pub giphy_api: Option<String>,
+    /// Folders searched, in order, for the `claude` and `codex` commands. A window started from
+    /// the Dock has a bare `PATH`, so `from_env` adds the usual install folders after it.
+    pub harness_search_paths: Vec<PathBuf>,
 }
 
 impl DaemonOptions {
@@ -43,6 +59,14 @@ impl DaemonOptions {
             background_sync: true,
             tray_program: tray_program_from(var("CLUSIA_TRAY_BIN"), std::env::current_exe().ok()),
             spawner: Arc::new(ProcessSpawner),
+            media_extra_hosts: Vec::new(),
+            media_allow_local: false,
+            media_resolve: Vec::new(),
+            giphy_api: var("CLUSIA_GIPHY_API"),
+            harness_search_paths: harness_dirs(
+                std::env::var_os("PATH"),
+                std::env::var_os("HOME").map(PathBuf::from),
+            ),
         }
     }
 }
@@ -59,9 +83,51 @@ pub fn tray_program_from(env: Option<String>, exe: Option<PathBuf>) -> Option<Pa
     }
 }
 
+/// The `PATH` folders, then the folders agent tools are usually installed in.
+pub fn harness_dirs(path: Option<std::ffi::OsString>, home: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = path
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let usual = [
+        home.as_ref().map(|h| h.join(".local/bin")),
+        home.as_ref().map(|h| h.join(".claude/local")),
+        Some(PathBuf::from("/opt/homebrew/bin")),
+        Some(PathBuf::from("/usr/local/bin")),
+    ];
+    for dir in usual.into_iter().flatten() {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_dirs_follow_path_then_the_usual_folders() {
+        let dirs = harness_dirs(
+            Some("/usr/bin:/opt/homebrew/bin".into()),
+            Some(PathBuf::from("/Users/me")),
+        );
+        assert_eq!(
+            dirs,
+            [
+                "/usr/bin",
+                "/opt/homebrew/bin",
+                "/Users/me/.local/bin",
+                "/Users/me/.claude/local",
+                "/usr/local/bin"
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(
+            harness_dirs(None, None),
+            ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from)
+        );
+    }
 
     #[test]
     fn tray_program_resolution() {

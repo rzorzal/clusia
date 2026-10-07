@@ -13,7 +13,7 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
 use clusia_core::PrRef;
 use clusia_protocol::{NewsItem, NewsKind};
 
-use crate::bridge::{Ask, Asks};
+use crate::bridge::{Ask, Asks, Model};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, Screen};
@@ -21,10 +21,12 @@ use crate::review_state::{Modal, Phase, Ready, ReviewSection, ReviewTabs};
 use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::shell::ModalFor;
-use crate::theme::Swatch;
+use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, button, panel, text,
 };
+use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::{RenderOpts, markdown_line};
 use crate::ui::modal::{escape_pressed, modal_card, modal_root};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +187,8 @@ fn show_whats_new(
     tabs: Res<ReviewTabs>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
+    theme: Res<Theme>,
+    model: Res<Model>,
     open: Query<&ModalFor>,
 ) {
     let Screen::Review(pr) = &nav.screen else {
@@ -202,6 +206,7 @@ fn show_whats_new(
         return;
     }
     let view = whats_new_view(ready, clock.now());
+    let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
     commands
         .spawn((
             modal_root(),
@@ -212,11 +217,17 @@ fn show_whats_new(
         ))
         .with_children(|root| {
             root.spawn(modal_card(560.0))
-                .with_children(|card| dialog(card, &fonts, pr, &view));
+                .with_children(|card| dialog(card, &fonts, pr, &view, &opts));
         });
 }
 
-fn dialog(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &WhatsNewView) {
+fn dialog(
+    c: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    v: &WhatsNewView,
+    opts: &RenderOpts,
+) {
     c.spawn(Node {
         flex_direction: FlexDirection::Column,
         row_gap: px(4),
@@ -233,7 +244,7 @@ fn dialog(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &WhatsNe
         h.spawn(text(fonts, v.since.clone(), Type::MUTED));
     });
     for row in &v.rows {
-        news_row_node(c, fonts, pr, row);
+        news_row_node(c, fonts, pr, row, opts);
     }
     c.spawn((
         panel(
@@ -263,7 +274,13 @@ fn dialog(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &WhatsNe
     });
 }
 
-fn news_row_node(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row: &NewsRow) {
+fn news_row_node(
+    c: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    row: &NewsRow,
+    opts: &RenderOpts,
+) {
     let (fill, ink) = row.tone.swatches();
     c.spawn((
         Node {
@@ -323,7 +340,7 @@ fn news_row_node(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row:
         .with_children(|t| {
             t.spawn(text(fonts, row.what.clone(), Type::BODY.size(13.0)));
             if !row.detail.is_empty() {
-                t.spawn(text(fonts, row.detail.clone(), Type::META));
+                markdown_line(t, fonts, &parse(&row.detail), Type::META, opts, 140);
             }
         });
         r.spawn(Node {
@@ -589,7 +606,12 @@ mod tests {
             app.world().resource::<ReviewTabs>().0[&pr].ui.section,
             ReviewSection::Comments
         );
-        assert_eq!(testing::recorded(&mut app), [Ask::MarkSeen(pr.clone())]);
+        // The Comments section shows the demo's GIF, which it asks the daemon for.
+        let asks: Vec<Ask> = testing::recorded(&mut app)
+            .into_iter()
+            .filter(|a| !matches!(a, Ask::FetchMedia(_)))
+            .collect();
+        assert_eq!(asks, [Ask::MarkSeen(pr.clone())]);
         assert_eq!(modal(&app, &pr), None);
         app.world_mut()
             .resource_mut::<ReviewTabs>()
@@ -611,5 +633,39 @@ mod tests {
         assert_eq!(modal(&app, &pr), None);
         assert_eq!(testing::recorded(&mut app), [Ask::MarkSeen(pr)]);
         assert_eq!(testing::count::<ModalFor>(&mut app), 0);
+    }
+
+    #[test]
+    fn details_render_as_one_markdown_line() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr: PrRef = "rzorzal/clusia#123".parse().unwrap();
+        app.world_mut().write_message(crate::bridge::ShowRequested(
+            clusia_protocol::WindowTarget::Review { pr: pr.clone() },
+        ));
+        testing::settle(&mut app);
+        let (view, _) = fixture::demo_review(NOW);
+        let news = vec![item(
+            NewsKind::Comment,
+            "GitHub",
+            Some("mona"),
+            "commented: a **big** call on `expires_at`",
+        )];
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::Opened {
+                pr,
+                view: Box::new(view),
+                news,
+            },
+        );
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "a big call on expires_at"));
+        assert!(!testing::shows(&mut app, "**"), "no raw markdown");
+        let mut texts = app.world_mut().query::<(&Text, &TextFont)>();
+        let big = texts
+            .iter(app.world())
+            .find(|(t, _)| t.0 == "big")
+            .expect("a bold word");
+        assert_eq!(big.1.weight.0, 600);
     }
 }

@@ -24,7 +24,7 @@ use clusia_view::status::{Tone, format_age, status_line};
 use crate::bridge::{Asks, Model, set_config};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
-use crate::nav::{HomeScreen, Nav, NavSystems, Section};
+use crate::nav::{HomeScreen, Nav, NavSystems};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
@@ -91,7 +91,6 @@ pub struct HomeView {
     pub headline: String,
     /// Text and whether it is a warning.
     pub sync: (String, bool),
-    pub notice: Option<String>,
     /// `WEEKS * 7` levels 0–4, oldest first, one column per week.
     pub heat: Vec<u8>,
     /// Week column and month name where a month starts.
@@ -116,6 +115,14 @@ pub fn long_age(secs: i64) -> String {
     } else {
         format!("{n} {unit}s")
     }
+}
+
+/// GitHub refused the token or there is none. Unknown (nothing fetched yet) is not signed out.
+pub fn signed_out(snap: &Snapshot) -> bool {
+    snap.sync
+        .as_ref()
+        .is_some_and(|s| s.state == SyncState::Unauthorized)
+        || snap.auth.as_ref().is_some_and(|a| a.source.is_none())
 }
 
 pub fn home_view(snap: &Snapshot, state: &HomeState, now: i64) -> HomeView {
@@ -150,15 +157,6 @@ pub fn home_view(snap: &Snapshot, state: &HomeState, now: i64) -> HomeView {
             (n, None) => format!("{n} pull requests are waiting for you."),
         }
     };
-    let signed_out = snap
-        .sync
-        .as_ref()
-        .is_some_and(|s| s.state == SyncState::Unauthorized)
-        || snap.auth.as_ref().is_some_and(|a| a.source.is_none());
-    let notice = signed_out.then(|| {
-        "Not signed in to GitHub. Open Config › Git server to sign in with the GitHub CLI or a token."
-            .to_string()
-    });
 
     let days = WEEKS * 7;
     let (heat, months) = match &snap.activity {
@@ -281,7 +279,6 @@ pub fn home_view(snap: &Snapshot, state: &HomeState, now: i64) -> HomeView {
     HomeView {
         headline,
         sync: sync_pill(snap.sync.as_ref(), &snap.config.github.host, now),
-        notice,
         heat,
         months,
         stats,
@@ -422,14 +419,8 @@ pub struct ChipButton(pub Option<String>);
 #[derive(Component, Debug)]
 pub struct SearchField;
 
-#[derive(Component, Debug)]
-pub struct NoticeButton;
-
 #[derive(Component, Default)]
 struct HeaderPart(Option<(String, (String, bool))>);
-
-#[derive(Component, Default)]
-struct NoticePart(Option<Option<String>>);
 
 #[derive(Component, Default)]
 struct HeatPart(Option<(Vec<u8>, Vec<(usize, &'static str)>)>);
@@ -516,13 +507,6 @@ fn build_home(
                         ..default()
                     },
                     HeaderPart::default(),
-                ));
-                c.spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        ..default()
-                    },
-                    NoticePart::default(),
                 ));
                 c.spawn(Node {
                     column_gap: px(16),
@@ -628,7 +612,6 @@ fn rebuild_home(
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
     mut headers: Query<(Entity, &mut HeaderPart)>,
-    mut notices: Query<(Entity, &mut NoticePart)>,
     mut heats: Query<(Entity, &mut HeatPart)>,
     mut stats: Query<(Entity, &mut StatsPart)>,
     mut chips: Query<(Entity, &mut ChipsPart)>,
@@ -646,17 +629,6 @@ fn rebuild_home(
         }
         refill(&mut commands, e, |p| header(p, fonts, &v.headline, &v.sync));
         part.0 = Some(built);
-    }
-    for (e, mut part) in &mut notices {
-        if part.0.as_ref() == Some(&v.notice) {
-            continue;
-        }
-        refill(&mut commands, e, |p| {
-            if let Some(n) = &v.notice {
-                notice(p, fonts, n);
-            }
-        });
-        part.0 = Some(v.notice.clone());
     }
     for (e, mut part) in &mut heats {
         let built = (v.heat.clone(), v.months.clone());
@@ -745,31 +717,6 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, headline: &str, sync: &
             dot,
         ));
         c.spawn(text(fonts, sync.0.clone(), Type::BODY.ink(ink)));
-    });
-}
-
-fn notice(p: &mut ChildSpawnerCommands, fonts: &UiFonts, message: &str) {
-    p.spawn(panel(
-        Node {
-            padding: UiRect::axes(px(16), px(12)),
-            column_gap: px(12),
-            align_items: AlignItems::Center,
-            border_radius: BorderRadius::all(px(8)),
-            ..default()
-        },
-        Swatch::OrangeSoft,
-    ))
-    .with_children(|c| {
-        c.spawn(text(
-            fonts,
-            message.to_string(),
-            Type::BODY.ink(Swatch::Orange),
-        ));
-        c.spawn((
-            button(fonts, "Open Git server", Variant::Secondary),
-            NoticeButton,
-            observe(|_: On<Activate>, mut nav: ResMut<Nav>| nav.open_section(Section::GitServer)),
-        ));
     });
 }
 
@@ -1075,7 +1022,6 @@ mod tests {
             "7 pull requests are waiting for you. The oldest has waited 8 days."
         );
         assert_eq!(v.sync, ("Synced 1m ago · github.com".to_string(), false));
-        assert_eq!(v.notice, None);
         assert_eq!(v.heat.len(), WEEKS * 7);
         assert!(v.heat.iter().any(|&l| l > 0));
         assert_eq!(
@@ -1149,7 +1095,6 @@ mod tests {
         };
         let v = view(&snap, &HomeState::default());
         assert_eq!(v.headline, "Nothing is waiting for your review.");
-        assert!(v.notice.as_deref().unwrap().contains("Config › Git server"));
         assert!(v.sync.1, "signed out is a warning");
         assert_eq!(v.heat, vec![0; WEEKS * 7]);
         assert!(v.months.is_empty());
@@ -1335,27 +1280,6 @@ mod tests {
                 key: "lists.filter".into(),
                 value: "auth".into()
             }]
-        );
-    }
-
-    #[test]
-    fn signed_out_notice_opens_git_server() {
-        let snap = Snapshot {
-            sync: Some(SyncStatus {
-                state: SyncState::Unauthorized,
-                ..SyncStatus::default()
-            }),
-            lists_loaded: true,
-            daemon_version: "0.1.0".into(),
-            ..Snapshot::default()
-        };
-        let mut app = testing::app(snap);
-        testing::settle(&mut app);
-        let notice = testing::find::<NoticeButton>(&mut app, |_| true);
-        testing::activate(&mut app, notice);
-        assert_eq!(
-            app.world().resource::<Nav>().screen,
-            Screen::Config(Section::GitServer)
         );
     }
 }

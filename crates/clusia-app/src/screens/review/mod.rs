@@ -36,6 +36,10 @@ impl Plugin for ReviewPlugin {
                 loading::LoadingPlugin,
                 whats_new::WhatsNewPlugin,
             ))
-            .add_plugins((finalize::FinalizePlugin, leave::LeavePlugin));
+            .add_plugins((
+                finalize::FinalizePlugin,
+                leave::LeavePlugin,
+                crate::ui::composer::ComposerPlugin,
+            ));
     }
 }

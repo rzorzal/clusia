@@ -22,8 +22,10 @@ use crate::theme::{LIGHT, Theme};
 pub enum Mode {
     /// Connected to the daemon.
     Live,
-    /// Demo data; `dark` forces the dark theme.
-    Demo { dark: bool },
+    /// Demo data; `theme` forces a theme (`None` follows the macOS appearance).
+    Demo {
+        theme: Option<clusia_core::config::Theme>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -91,9 +93,11 @@ pub fn run(launch: Launch) {
         FontsPlugin,
         crate::theme::ThemePlugin,
         crate::ui::kit::KitPlugin,
+        crate::ui::emoji::EmojiPlugin,
         crate::nav::NavPlugin,
         crate::review_state::ReviewStatePlugin,
         crate::screens::home::HomePlugin,
+        crate::screens::first_run::FirstRunPlugin,
         crate::screens::config::ConfigPlugin,
         crate::screens::review::ReviewPlugin,
         crate::screens::open_pr::OpenPrPlugin,

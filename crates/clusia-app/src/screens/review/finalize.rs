@@ -23,12 +23,14 @@ use crate::screens::review::editor::{not_sent, read_only_reason};
 use crate::screens::review::leave::close_tab;
 use crate::screens::review::shell::ModalFor;
 use crate::theme::Swatch;
+use crate::ui::composer::{
+    AreaSize, ComposerKey, ComposerMode, ComposerView, ExtraModes, Slot, composer, mode_of,
+};
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, disabled_button, panel,
-    text,
+    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, card, disabled_button,
+    panel, text,
 };
 use crate::ui::modal::{escape_pressed, modal_card, modal_root};
-use crate::ui::text_area::growing_text_area;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FinalizeItem {
@@ -303,6 +305,7 @@ fn rebuild_modal(
     tabs: Res<ReviewTabs>,
     model: Res<Model>,
     edits: Res<FinalizeEdits>,
+    extra: Res<ExtraModes>,
     fonts: Res<UiFonts>,
     mut parts: Query<(Entity, &mut FinalizePart)>,
 ) {
@@ -328,7 +331,8 @@ fn rebuild_modal(
         let fonts = &*fonts;
         commands.entity(entity).despawn_related::<Children>();
         commands.entity(entity).with_children(|p| {
-            card_content(p, fonts, &pr, &v, &summary, &edits);
+            let mode = |key: &ComposerKey| mode_of(key, &tabs, &extra);
+            card_content(p, fonts, &pr, &v, &summary, &edits, &mode);
         });
         part.built = Some(v);
     }
@@ -341,6 +345,7 @@ fn card_content(
     v: &FinalizeView,
     summary: &str,
     edits: &FinalizeEdits,
+    mode: &dyn Fn(&ComposerKey) -> ComposerMode,
 ) {
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
@@ -393,14 +398,33 @@ fn card_content(
                         .0
                         .get(&(pr.clone(), item.id.clone()))
                         .unwrap_or(&item.body);
-                    row.spawn((
-                        growing_text_area(fonts, value, 1.0, 6.0, index as u64 + 1),
-                        FinalizeItemArea {
-                            pr: pr.clone(),
-                            id: item.id.clone(),
-                            index,
-                        },
-                    ));
+                    row.spawn(card(Node {
+                        flex_grow: 1.0,
+                        min_width: px(0),
+                        ..default()
+                    }))
+                    .with_children(|frame| {
+                        let key = ComposerKey(pr.clone(), Slot::FinalizeItem(item.id.clone()));
+                        composer(
+                            frame,
+                            fonts,
+                            &ComposerView {
+                                text: value,
+                                mode: mode(&key),
+                                id: index as u64 + 1,
+                                size: AreaSize::Grow { min: 1.0, max: 6.0 },
+                                compact: true,
+                                suggest: false,
+                                flat: true,
+                            },
+                            key,
+                            FinalizeItemArea {
+                                pr: pr.clone(),
+                                id: item.id.clone(),
+                                index,
+                            },
+                        );
+                    });
                 } else {
                     row.spawn(text(fonts, "Marked to resolve on publish", Type::MUTED));
                 }
@@ -437,10 +461,24 @@ fn card_content(
             });
         }
         c.spawn(text(fonts, "Summary", Type::STRONG));
-        c.spawn((
-            growing_text_area(fonts, summary, 3.0, 6.0, 0),
-            SummaryArea(pr.clone()),
-        ));
+        c.spawn(card(Node::default())).with_children(|frame| {
+            let key = ComposerKey(pr.clone(), Slot::FinalizeSummary);
+            composer(
+                frame,
+                fonts,
+                &ComposerView {
+                    text: summary,
+                    mode: mode(&key),
+                    id: 0,
+                    size: AreaSize::Grow { min: 3.0, max: 6.0 },
+                    compact: false,
+                    suggest: false,
+                    flat: true,
+                },
+                key,
+                SummaryArea(pr.clone()),
+            );
+        });
         c.spawn(text(fonts, "Verdict", Type::STRONG));
         c.spawn(Node {
             column_gap: px(8),
@@ -724,6 +762,7 @@ fn on_save(
     mut tickets: ResMut<Tickets>,
     mut asks: ResMut<Asks>,
     mut edits: ResMut<FinalizeEdits>,
+    mut modes: ResMut<ExtraModes>,
 ) {
     let Ok(SaveButton(pr)) = buttons.get(activate.entity) else {
         return;
@@ -739,7 +778,7 @@ fn on_save(
     }
     asks.send(Ask::CloseReview(pr.clone()));
     edits.0.retain(|(p, _), _| p != pr);
-    close_tab(pr, &mut tabs, &mut nav);
+    close_tab(pr, &mut tabs, &mut nav, &mut modes);
 }
 
 fn on_remove(
@@ -772,13 +811,14 @@ fn on_discard(
     mut nav: ResMut<Nav>,
     mut asks: ResMut<Asks>,
     mut edits: ResMut<FinalizeEdits>,
+    mut modes: ResMut<ExtraModes>,
 ) {
     let Ok(DiscardButton(pr)) = buttons.get(activate.entity) else {
         return;
     };
     asks.send(Ask::Discard(pr.clone()));
     edits.0.retain(|(p, _), _| p != pr);
-    close_tab(pr, &mut tabs, &mut nav);
+    close_tab(pr, &mut tabs, &mut nav, &mut modes);
 }
 
 fn escape_closes(keys: Res<ButtonInput<KeyCode>>, nav: Res<Nav>, mut tabs: ResMut<ReviewTabs>) {
@@ -811,6 +851,7 @@ fn outcomes(
     mut nav: ResMut<Nav>,
     mut toasts: ResMut<Toasts>,
     mut edits: ResMut<FinalizeEdits>,
+    mut modes: ResMut<ExtraModes>,
     mut asks: ResMut<Asks>,
     time: Res<Time>,
 ) {
@@ -843,7 +884,7 @@ fn outcomes(
                     ),
                 }
                 edits.0.retain(|(p, _), _| p != pr);
-                close_tab(pr, &mut tabs, &mut nav);
+                close_tab(pr, &mut tabs, &mut nav, &mut modes);
                 nav.go(&WindowTarget::Home);
             }
             // The pull request moved: open it again, so the diff, the header and the relocated
@@ -870,7 +911,7 @@ fn outcomes(
             },
             ReviewEvent::Left(pr) => {
                 edits.0.retain(|(p, _), _| p != pr);
-                close_tab(pr, &mut tabs, &mut nav);
+                close_tab(pr, &mut tabs, &mut nav, &mut modes);
             }
         }
     }
@@ -883,6 +924,7 @@ mod tests {
     use crate::fixture;
     use crate::nav::Screen;
     use crate::testing::{self, NOW};
+    use crate::ui::composer::testkit::with_fonts;
     use crate::ui::text_area::Grow;
     use clusia_core::Role;
     use clusia_protocol::PublishResult;
@@ -911,6 +953,7 @@ mod tests {
     /// The demo review with Finalize open; `fit` drops the obsolete item so Publish can work.
     fn finalize_app(fit: bool) -> App {
         let mut app = review_app();
+        with_fonts(&mut app);
         let pr = fixture::demo_pr();
         {
             let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
@@ -1074,6 +1117,32 @@ mod tests {
     }
 
     #[test]
+    fn a_redrawn_finalize_keeps_the_summary_preview() {
+        use crate::ui::composer::{ComposerModeButton, Slot};
+        let mut app = finalize_app(true);
+        let preview = testing::find::<ComposerModeButton>(&mut app, |b| {
+            b.key.1 == Slot::FinalizeSummary && b.mode == ComposerMode::Preview
+        });
+        testing::activate(&mut app, preview);
+        testing::settle(&mut app);
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&fixture::demo_pr())
+            .unwrap()
+            .ui
+            .finalize
+            .verdict = Some(Verdict::Comment);
+        app.update();
+        let summary = testing::find::<SummaryArea>(&mut app, |_| true);
+        assert_eq!(
+            app.world().get::<Node>(summary).unwrap().display,
+            Display::None,
+            "drawn again in Preview, not in Write for a frame"
+        );
+    }
+
+    #[test]
     fn closed_pr_disables_publish() {
         let mut r = ready();
         r.view.pr.closed = true;
@@ -1112,6 +1181,41 @@ mod tests {
     }
 
     #[test]
+    fn leaving_a_review_forgets_its_composer_modes() {
+        use crate::ui::composer::{ComposerKey, ComposerMode, ExtraModes, Slot, mode_of, set_mode};
+        let mut app = finalize_app(true);
+        let pr = fixture::demo_pr();
+        let summary = ComposerKey(pr.clone(), Slot::FinalizeSummary);
+        let other = ComposerKey("rzorzal/other#7".parse().unwrap(), Slot::FinalizeSummary);
+        {
+            let world = app.world_mut();
+            let mut extra = world.remove_resource::<ExtraModes>().unwrap();
+            let mut tabs = world.remove_resource::<ReviewTabs>().unwrap();
+            set_mode(&summary, ComposerMode::Preview, &mut tabs, &mut extra);
+            set_mode(&other, ComposerMode::Preview, &mut tabs, &mut extra);
+            world.insert_resource(extra);
+            world.insert_resource(tabs);
+        }
+        let mode = |app: &App, key: &ComposerKey| {
+            mode_of(
+                key,
+                app.world().resource::<ReviewTabs>(),
+                app.world().resource::<ExtraModes>(),
+            )
+        };
+        assert_eq!(mode(&app, &summary), ComposerMode::Preview);
+        let discard = testing::find::<DiscardButton>(&mut app, |_| true);
+        testing::activate(&mut app, discard);
+        testing::settle(&mut app);
+        assert_eq!(mode(&app, &summary), ComposerMode::Write, "forgotten");
+        assert_eq!(
+            mode(&app, &other),
+            ComposerMode::Preview,
+            "another review's modes stay"
+        );
+    }
+
+    #[test]
     fn publish_sends_edits_then_the_review() {
         let mut app = finalize_app(true);
         let pr = fixture::demo_pr();
@@ -1134,7 +1238,7 @@ mod tests {
             .unwrap()
             .value()
             .to_string();
-        testing::type_into(&mut app, first, " Please.");
+        testing::type_into(&mut app, first, "Please. ");
         let publish = testing::find::<PublishButton>(&mut app, |_| true);
         testing::activate(&mut app, publish);
         let asks = testing::recorded(&mut app);
@@ -1156,7 +1260,7 @@ mod tests {
         };
         assert_eq!(
             (p1, edited, body.as_str()),
-            (&pr, &id, format!("{before} Please.").as_str())
+            (&pr, &id, format!("Please. {before}").as_str())
         );
         assert_eq!(
             (p2, *verdict, summary.as_str()),
@@ -1392,6 +1496,34 @@ mod tests {
     }
 
     #[test]
+    fn item_and_summary_areas_open_at_their_start() {
+        let mut app = review_app();
+        with_fonts(&mut app);
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let tab = tabs.0.get_mut(&pr).unwrap();
+            tab.ui.finalize.summary = "on the token store.".into();
+            tab.ui.modal = Some(Modal::Finalize);
+        }
+        testing::settle(&mut app);
+        let item = testing::find::<FinalizeItemArea>(&mut app, |a| a.index == 0);
+        let summary = testing::find::<SummaryArea>(&mut app, |_| true);
+        let value = |app: &App, e| {
+            app.world()
+                .get::<EditableText>(e)
+                .unwrap()
+                .value()
+                .to_string()
+        };
+        let before = value(&app, item);
+        testing::type_into(&mut app, item, "Also: ");
+        testing::type_into(&mut app, summary, "Two things ");
+        assert_eq!(value(&app, item), format!("Also: {before}"));
+        assert_eq!(value(&app, summary), "Two things on the token store.");
+    }
+
+    #[test]
     fn item_edits_save_on_blur() {
         let mut app = finalize_app(false);
         let pr = fixture::demo_pr();
@@ -1408,7 +1540,7 @@ mod tests {
             .unwrap()
             .value()
             .to_string();
-        testing::type_into(&mut app, area, " Thanks!");
+        testing::type_into(&mut app, area, "Thanks! ");
         app.world_mut().trigger(FocusLost { entity: area });
         app.update();
         let asks = testing::recorded(&mut app);
@@ -1425,7 +1557,7 @@ mod tests {
         };
         assert_eq!(
             (to, sent, body.as_str()),
-            (&pr, &id, format!("{before} Thanks!").as_str())
+            (&pr, &id, format!("Thanks! {before}").as_str())
         );
         assert!(*ticket > 0);
         // Once the daemon has the new text, another blur sends nothing.

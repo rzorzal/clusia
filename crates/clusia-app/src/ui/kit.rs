@@ -202,7 +202,10 @@ pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
         HoverFill(hover),
         BorderColor::default(),
         Stroke(stroke),
-        children![text(fonts, label.to_string(), Type::STRONG.ink(ink))],
+        children![(
+            text(fonts, label.to_string(), Type::STRONG.ink(ink)),
+            TextLayout::no_wrap(),
+        )],
     )
 }
 
@@ -482,6 +485,8 @@ impl Plugin for KitPlugin {
         app.add_plugins((
             crate::ui::text_area::TextAreaPlugin,
             crate::ui::leaf::LeafPlugin,
+            crate::ui::markdown::MarkdownPlugin,
+            crate::ui::media::MediaPlugin,
         ))
         .add_message::<FieldCommitted>()
         .add_observer(commit_on_blur)

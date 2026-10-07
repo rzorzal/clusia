@@ -192,6 +192,19 @@ mod tests {
     use super::*;
     use clusia_core::config::Theme;
 
+    #[test]
+    fn recent_emoji_are_set_as_a_list() {
+        let c = Config::default();
+        let set = set_value(&c, "composer.recent_emoji", r#"["🐢","🚀"]"#).unwrap();
+        assert_eq!(set.composer.recent_emoji, ["🐢", "🚀"]);
+        assert_eq!(
+            get_value(&set, "composer.recent_emoji").as_deref(),
+            Ok(r#"["🐢", "🚀"]"#)
+        );
+        let many = format!("[{}]", vec![r#""x""#; 17].join(","));
+        assert!(set_value(&c, "composer.recent_emoji", &many).is_err());
+    }
+
     fn paths() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
         let p = Paths::new(dir.path());
@@ -379,6 +392,25 @@ mod tests {
                 .roots,
             vec!["~/a"]
         );
+    }
+
+    #[test]
+    fn the_media_toggle_is_settable_and_readable() {
+        let c = Config::default();
+        assert_eq!(
+            get_value(&c, "media.load_external_images").unwrap(),
+            "false"
+        );
+        let on = set_value(&c, "media.load_external_images", "true").unwrap();
+        assert!(on.media.load_external_images);
+        assert_eq!(
+            get_value(&on, "media.load_external_images").unwrap(),
+            "true"
+        );
+        assert!(matches!(
+            set_value(&c, "media.load_external_images", "maybe"),
+            Err(ConfigKeyError::Invalid { .. })
+        ));
     }
 
     #[test]
