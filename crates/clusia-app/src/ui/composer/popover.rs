@@ -115,6 +115,13 @@ pub(crate) struct Placeholder(pub Entity);
 
 pub const PANEL_WIDTH: f32 = 340.0;
 
+/// A card's padding and border, on every side.
+const PANEL_PADDING: f32 = 12.0;
+const PANEL_BORDER: f32 = 1.0;
+
+/// The width inside a card's padding and border, where its content goes.
+pub const PANEL_CONTENT_WIDTH: f32 = PANEL_WIDTH - 2.0 * (PANEL_PADDING + PANEL_BORDER);
+
 /// Space between a card and its button.
 const PANEL_GAP: f32 = 6.0;
 
@@ -286,6 +293,23 @@ fn on_backdrop_press(_press: On<Pointer<Press>>, mut popovers: ResMut<Popovers>)
     popovers.close();
 }
 
+/// A popover card, at the window's corner until `place_panels` moves it.
+pub(crate) fn panel_node() -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: px(0),
+        top: px(0),
+        width: px(PANEL_WIDTH),
+        flex_direction: FlexDirection::Column,
+        row_gap: px(8),
+        padding: px(PANEL_PADDING).all(),
+        border: px(PANEL_BORDER).all(),
+        border_radius: BorderRadius::all(px(12)),
+        overflow: Overflow::clip(),
+        ..default()
+    }
+}
+
 /// Keeps exactly the popover `Popovers::open` names on screen.
 pub(crate) fn sync_popovers(
     mut commands: Commands,
@@ -349,19 +373,7 @@ pub(crate) fn sync_popovers(
         .with_children(|layer| {
             layer
                 .spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: px(0),
-                        top: px(0),
-                        width: px(PANEL_WIDTH),
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(8),
-                        padding: px(12).all(),
-                        border: px(1).all(),
-                        border_radius: BorderRadius::all(px(12)),
-                        overflow: Overflow::clip(),
-                        ..default()
-                    },
+                    panel_node(),
                     BackgroundColor::default(),
                     Fill(Swatch::Surface),
                     BorderColor::default(),

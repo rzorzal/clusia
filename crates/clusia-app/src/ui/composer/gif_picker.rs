@@ -18,8 +18,8 @@ use crate::bridge::{Ask, Asks, GifsArrived};
 use crate::fonts::UiFonts;
 use crate::theme::Swatch;
 use crate::ui::composer::popover::{
-    LinkField, PANEL_WIDTH, PopoverKind, Popovers, hinted_field, insert_into_area, note_line,
-    sync_popovers,
+    LinkField, PANEL_CONTENT_WIDTH, PopoverKind, Popovers, hinted_field, insert_into_area,
+    note_line, sync_popovers,
 };
 use crate::ui::composer::{ComposerArea, ComposerKey};
 use crate::ui::kit::{Clickable, Type, text};
@@ -119,8 +119,8 @@ const GRID_GAP: f32 = 8.0;
 /// Every row is this tall; a tile's GIF fits inside it.
 const ROW_HEIGHT: f32 = 100.0;
 
-/// The width of the grid inside the card.
-const GRID_WIDTH: f32 = PANEL_WIDTH - 24.0;
+/// The grid fills the card's content box.
+const GRID_WIDTH: f32 = PANEL_CONTENT_WIDTH;
 
 /// Columns of the grid in a card `width` wide: three, or two when it is narrow.
 pub fn gif_columns(width: f32) -> usize {
@@ -345,40 +345,45 @@ fn fill_gifs(
                 }
                 _ => {
                     for item in &state.items {
-                        let cell = Vec2::new(tile_width(GRID_WIDTH, columns), ROW_HEIGHT);
-                        let shown = fit_in(item, cell);
-                        p.spawn((
-                            Node {
-                                width: px(cell.x),
-                                height: px(cell.y),
-                                align_items: AlignItems::Center,
-                                justify_content: JustifyContent::Center,
-                                overflow: Overflow::clip(),
-                                border_radius: BorderRadius::all(px(8)),
-                                ..default()
-                            },
-                            (WidgetButton, Clickable, Hovered::default()),
-                            BackgroundColor::default(),
-                            crate::ui::kit::Fill(Swatch::Chrome),
-                            GifTile {
-                                key: key.clone(),
-                                item: item.clone(),
-                            },
-                            observe(on_gif_tile),
-                            children![(
-                                Node {
-                                    width: px(shown.x),
-                                    height: px(shown.y),
-                                    ..default()
-                                },
-                                MdImage(item.preview_url.clone()),
-                            )],
-                        ));
+                        p.spawn(gif_tile(&key, item, columns));
                     }
                 }
             });
         grid.built = Some(state.clone());
     }
+}
+
+/// One GIF of a grid of `columns`, whole and centred in its cell; a click inserts it.
+fn gif_tile(key: &ComposerKey, item: &GifItem, columns: usize) -> impl Bundle {
+    let cell = Vec2::new(tile_width(GRID_WIDTH, columns), ROW_HEIGHT);
+    let shown = fit_in(item, cell);
+    (
+        Node {
+            width: px(cell.x),
+            height: px(cell.y),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            overflow: Overflow::clip(),
+            border_radius: BorderRadius::all(px(8)),
+            ..default()
+        },
+        (WidgetButton, Clickable, Hovered::default()),
+        BackgroundColor::default(),
+        crate::ui::kit::Fill(Swatch::Chrome),
+        GifTile {
+            key: key.clone(),
+            item: item.clone(),
+        },
+        observe(on_gif_tile),
+        children![(
+            Node {
+                width: px(shown.x),
+                height: px(shown.y),
+                ..default()
+            },
+            MdImage(item.preview_url.clone()),
+        )],
+    )
 }
 
 /// Without a key only the link field is left, with the line that says where to add one.
@@ -446,6 +451,8 @@ fn on_gif_tile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::composer::popover::PANEL_WIDTH;
+    use bevy::ui::{ComputedNode, UiGlobalTransform};
 
     fn state(status: GifStatus, ids: &[&str], query: &str) -> GifState {
         GifState {
@@ -487,6 +494,109 @@ mod tests {
             "no wasted strip"
         );
         assert!(4.0 * tile_width(GRID_WIDTH, 4) + 3.0 * GRID_GAP <= GRID_WIDTH);
+    }
+
+    /// An app that lays out UI as the window does, on an 800 × 600 target, without a GPU.
+    fn layout_app() -> App {
+        use bevy::camera::{Camera, ComputedCameraValues, RenderTargetInfo, Viewport};
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            bevy::input::InputPlugin,
+            bevy::window::WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            },
+            bevy::transform::TransformPlugin,
+            bevy::image::ImagePlugin::default(),
+            bevy::text::TextPlugin,
+            bevy::picking::DefaultPickingPlugins,
+            bevy::ui::UiPlugin,
+        ))
+        .init_asset::<bevy::image::TextureAtlasLayout>();
+        let size = UVec2::new(800, 600);
+        app.world_mut().spawn((
+            Camera2d,
+            Camera {
+                computed: ComputedCameraValues {
+                    target_info: Some(RenderTargetInfo {
+                        physical_size: size,
+                        scale_factor: 1.0,
+                    }),
+                    ..default()
+                },
+                viewport: Some(Viewport {
+                    physical_size: size,
+                    ..default()
+                }),
+                ..default()
+            },
+        ));
+        app
+    }
+
+    /// Left and right edges and top of a laid-out node, in logical pixels.
+    fn edges(app: &App, e: Entity) -> (f32, f32, f32) {
+        let node = app.world().get::<ComputedNode>(e).unwrap();
+        let at = app.world().get::<UiGlobalTransform>(e).unwrap().translation;
+        let half = node.size / 2.0;
+        (at.x - half.x, at.x + half.x, at.y - half.y)
+    }
+
+    #[test]
+    fn the_card_lays_three_gifs_out_in_a_row_inside_its_padding() {
+        let mut app = layout_app();
+        let key = ComposerKey(
+            clusia_core::PrRef {
+                owner: "rzorzal".into(),
+                repo: "clusia".into(),
+                number: 1,
+            },
+            crate::ui::composer::Slot::FinalizeSummary,
+        );
+        let fonts = UiFonts::default();
+        let card = {
+            let world = app.world_mut();
+            let mut commands = world.commands();
+            let card = commands
+                .spawn(super::super::popover::panel_node())
+                .with_children(|p| gif_panel(p, &fonts, &key, ""))
+                .id();
+            world.flush();
+            card
+        };
+        let grid = {
+            let mut q = app.world_mut().query_filtered::<Entity, With<GifGrid>>();
+            q.single(app.world()).unwrap()
+        };
+        let columns = gif_columns(GRID_WIDTH);
+        let tiles: Vec<Entity> = [gif(200, 150), gif(100, 300), gif(480, 270)]
+            .iter()
+            .map(|item| {
+                app.world_mut()
+                    .spawn((gif_tile(&key, item, columns), ChildOf(grid)))
+                    .id()
+            })
+            .collect();
+        app.update();
+        let (card_left, card_right, _) = edges(&app, card);
+        let inset = (PANEL_WIDTH - PANEL_CONTENT_WIDTH) / 2.0;
+        let (grid_left, grid_right, _) = edges(&app, grid);
+        assert_eq!(grid_left, card_left + inset);
+        assert!(
+            grid_right <= card_right - inset,
+            "the grid ends at {grid_right}, past the card's content at {}",
+            card_right - inset
+        );
+        let rows: Vec<(f32, f32, f32)> = tiles.iter().map(|t| edges(&app, *t)).collect();
+        assert!(
+            rows.iter().all(|r| r.2 == rows[0].2),
+            "three GIFs share one row: {rows:?}"
+        );
+        assert!(rows[2].1 <= grid_right, "the last one inside the grid");
     }
 
     #[test]

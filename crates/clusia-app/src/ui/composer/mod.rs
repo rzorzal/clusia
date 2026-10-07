@@ -28,7 +28,7 @@ use crate::ui::kit::{Fill, HoverFill, Ink, Stroke, Type, panel, segment, segment
 use crate::ui::markdown::MdImage;
 use crate::ui::markdown::build::{RenderOpts, is_external, markdown};
 use crate::ui::markdown::parse::parse;
-use crate::ui::text_area::{TextArea, TextSubmitted, growing_text_area, text_area};
+use crate::ui::text_area::{Caret, TextArea, TextSubmitted, growing_text_area, text_area};
 
 mod emoji_picker;
 mod gif_picker;
@@ -296,7 +296,7 @@ pub fn composer<B: Bundle>(
                 area,
             )),
             AreaSize::Grow { min, max } => c.spawn((
-                growing_text_area(fonts, view.text, min, max, view.id),
+                growing_text_area(fonts, view.text, min, max, caret(&key.1), view.id),
                 ComposerArea(key.clone()),
                 area,
             )),
@@ -340,6 +340,14 @@ pub fn composer<B: Bundle>(
             ChipRow { key, built: None },
         ));
     });
+}
+
+/// An editor goes on from where its text ends; a Finalize field is read from its beginning.
+fn caret(slot: &Slot) -> Caret {
+    match slot {
+        Slot::Edit(_) => Caret::End,
+        Slot::FinalizeItem(_) | Slot::FinalizeSummary => Caret::Start,
+    }
 }
 
 fn toolbar_row(
@@ -804,6 +812,14 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
     use clusia_core::DraftKind;
     use std::time::Duration;
+
+    #[test]
+    fn an_opening_editor_types_after_its_text() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (_, area) = open(&mut app, EditTarget::General, "Looks");
+        testing::type_into(&mut app, area, " good");
+        assert_eq!(value(&app, area), "Looks good");
+    }
 
     #[test]
     fn preview_round_trip_keeps_the_text() {

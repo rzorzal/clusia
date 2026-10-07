@@ -924,6 +924,7 @@ mod tests {
     use crate::fixture;
     use crate::nav::Screen;
     use crate::testing::{self, NOW};
+    use crate::ui::composer::testkit::with_fonts;
     use crate::ui::text_area::Grow;
     use clusia_core::Role;
     use clusia_protocol::PublishResult;
@@ -952,6 +953,7 @@ mod tests {
     /// The demo review with Finalize open; `fit` drops the obsolete item so Publish can work.
     fn finalize_app(fit: bool) -> App {
         let mut app = review_app();
+        with_fonts(&mut app);
         let pr = fixture::demo_pr();
         {
             let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
@@ -1236,7 +1238,7 @@ mod tests {
             .unwrap()
             .value()
             .to_string();
-        testing::type_into(&mut app, first, " Please.");
+        testing::type_into(&mut app, first, "Please. ");
         let publish = testing::find::<PublishButton>(&mut app, |_| true);
         testing::activate(&mut app, publish);
         let asks = testing::recorded(&mut app);
@@ -1258,7 +1260,7 @@ mod tests {
         };
         assert_eq!(
             (p1, edited, body.as_str()),
-            (&pr, &id, format!("{before} Please.").as_str())
+            (&pr, &id, format!("Please. {before}").as_str())
         );
         assert_eq!(
             (p2, *verdict, summary.as_str()),
@@ -1494,6 +1496,34 @@ mod tests {
     }
 
     #[test]
+    fn item_and_summary_areas_open_at_their_start() {
+        let mut app = review_app();
+        with_fonts(&mut app);
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let tab = tabs.0.get_mut(&pr).unwrap();
+            tab.ui.finalize.summary = "on the token store.".into();
+            tab.ui.modal = Some(Modal::Finalize);
+        }
+        testing::settle(&mut app);
+        let item = testing::find::<FinalizeItemArea>(&mut app, |a| a.index == 0);
+        let summary = testing::find::<SummaryArea>(&mut app, |_| true);
+        let value = |app: &App, e| {
+            app.world()
+                .get::<EditableText>(e)
+                .unwrap()
+                .value()
+                .to_string()
+        };
+        let before = value(&app, item);
+        testing::type_into(&mut app, item, "Also: ");
+        testing::type_into(&mut app, summary, "Two things ");
+        assert_eq!(value(&app, item), format!("Also: {before}"));
+        assert_eq!(value(&app, summary), "Two things on the token store.");
+    }
+
+    #[test]
     fn item_edits_save_on_blur() {
         let mut app = finalize_app(false);
         let pr = fixture::demo_pr();
@@ -1510,7 +1540,7 @@ mod tests {
             .unwrap()
             .value()
             .to_string();
-        testing::type_into(&mut app, area, " Thanks!");
+        testing::type_into(&mut app, area, "Thanks! ");
         app.world_mut().trigger(FocusLost { entity: area });
         app.update();
         let asks = testing::recorded(&mut app);
@@ -1527,7 +1557,7 @@ mod tests {
         };
         assert_eq!(
             (to, sent, body.as_str()),
-            (&pr, &id, format!("{before} Thanks!").as_str())
+            (&pr, &id, format!("Thanks! {before}").as_str())
         );
         assert!(*ticket > 0);
         // Once the daemon has the new text, another blur sends nothing.

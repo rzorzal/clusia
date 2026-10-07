@@ -108,15 +108,29 @@ pub fn set_config_locally(app: &mut App, key: &str, value: &str) {
 
 /// Types `text` into the `EditableText` on `entity` at its cursor, as a keyboard would.
 pub fn type_into(app: &mut App, entity: Entity, text: &str) {
-    let mut editable = app
-        .world_mut()
+    app.world_mut()
         .get_mut::<EditableText>(entity)
-        .expect("an editable text");
-    editable.queue_edit(TextEdit::Insert(text.into()));
-    let mut fonts = FontCx::default();
-    let mut layout = LayoutCx::default();
-    let mut clipboard = Clipboard::default();
-    editable.apply_pending_edits(&mut fonts, &mut layout.0, &mut clipboard, |_| true);
+        .expect("an editable text")
+        .queue_edit(TextEdit::Insert(text.into()));
+    // The app's own text contexts, when it has them, so moves that need a layout (to the start
+    // of the text) work as in the window.
+    let own_fonts = app.world_mut().remove_resource::<FontCx>();
+    let own_layout = app.world_mut().remove_resource::<LayoutCx>();
+    let (had_fonts, had_layout) = (own_fonts.is_some(), own_layout.is_some());
+    let mut fonts = own_fonts.unwrap_or_default();
+    let mut layout = own_layout.unwrap_or_default();
+    app.world_mut()
+        .get_mut::<EditableText>(entity)
+        .expect("an editable text")
+        .apply_pending_edits(&mut fonts, &mut layout.0, &mut Clipboard::default(), |_| {
+            true
+        });
+    if had_fonts {
+        app.world_mut().insert_resource(fonts);
+    }
+    if had_layout {
+        app.world_mut().insert_resource(layout);
+    }
 }
 
 /// Runs frames until rebuilt screens have settled.

@@ -6,7 +6,8 @@
 //! the Finalize composers are always on screen and would otherwise pull the page to the last one.
 //! Any composer is revealed when its text area gets the keyboard. The scroll moves only as far as
 //! needed, so a frame already in view stays where it is. For a short while after, a frame that
-//! grows (a preview drawn, a picture loaded) is kept in view the same way.
+//! grows (a preview drawn, a picture loaded) is kept in view the same way — until the user
+//! scrolls, after which the view is theirs.
 
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
@@ -42,8 +43,19 @@ pub(crate) fn reveal_offset(offset: f32, view: f32, top: f32, bottom: f32) -> f3
 pub(crate) struct Reveal {
     pub pending: Option<ComposerKey>,
     shown: Option<ComposerKey>,
-    /// The frame revealed last, its height then and until when its growth is followed.
-    follow: Option<(ComposerKey, f32, f64)>,
+    follow: Option<Follow>,
+}
+
+/// The frame revealed last, kept in view while it grows.
+#[derive(Debug, Clone, PartialEq)]
+struct Follow {
+    key: ComposerKey,
+    /// Its height when last revealed.
+    height: f32,
+    /// When following stops, on the `Time` clock.
+    until: f64,
+    /// The scroll offset the reveal left; any other offset means the user has scrolled since.
+    offset: Option<f32>,
 }
 
 pub(crate) struct RevealPlugin;
@@ -92,8 +104,8 @@ fn span(node: &ComputedNode, at: &UiGlobalTransform) -> (f32, f32) {
 }
 
 /// Scrolls the nearest vertical scroll area around the pending composer's frame — or around
-/// the frame revealed last when it has grown since. It waits while the frame has not been laid
-/// out yet.
+/// the frame revealed last when it has grown since, until the user scrolls. It waits while the
+/// frame has not been laid out yet, and drops a request whose composer is gone.
 fn reveal(
     mut reveal: ResMut<Reveal>,
     time: Res<Time>,
@@ -103,15 +115,20 @@ fn reveal(
     mut scrolls: Query<&mut ScrollPosition>,
 ) {
     let now = time.elapsed_secs_f64();
-    let grown = reveal.follow.clone().filter(|(_, _, until)| now < *until);
+    let grown = reveal.follow.clone().filter(|f| now < f.until);
     let Some(key) = reveal
         .pending
         .clone()
-        .or_else(|| grown.clone().map(|f| f.0))
+        .or_else(|| grown.as_ref().map(|f| f.key.clone()))
     else {
         return;
     };
     let Some((composer, _)) = composers.iter().find(|(_, c)| c.0 == key) else {
+        if reveal.pending.is_some() {
+            reveal.pending = None;
+        } else {
+            reveal.follow = None;
+        }
         return;
     };
     let frame = parents.get(composer).map_or(composer, ChildOf::parent);
@@ -123,18 +140,29 @@ fn reveal(
         return;
     }
     let pending = reveal.pending.is_some();
-    if !pending && grown.is_some_and(|(_, was, _)| (height - was).abs() < 0.5) {
-        return;
-    }
-    let (top, bottom) = span(frame_node, frame_at);
     let view = parents.iter_ancestors(frame).find(|e| {
         nodes
             .get(*e)
             .is_ok_and(|(n, _, _)| n.overflow.y == OverflowAxis::Scroll)
     });
+    let mut scroll = view.and_then(|v| scrolls.get_mut(v).ok());
+    if !pending && let Some(follow) = &grown {
+        let moved = match (&scroll, follow.offset) {
+            (Some(scroll), Some(left)) => (scroll.y - left).abs() > 0.5,
+            _ => false,
+        };
+        if moved {
+            reveal.follow = None;
+            return;
+        }
+        if (height - follow.height).abs() < 0.5 {
+            return;
+        }
+    }
+    let (top, bottom) = span(frame_node, frame_at);
     if let Some(view) = view
         && let Ok((_, view_node, view_at)) = nodes.get(view)
-        && let Ok(mut scroll) = scrolls.get_mut(view)
+        && let Some(scroll) = scroll.as_mut()
     {
         let (view_top, view_bottom) = span(view_node, view_at);
         let want = reveal_offset(
@@ -150,9 +178,14 @@ fn reveal(
     let until = if pending {
         now + FOLLOW_SECS
     } else {
-        reveal.follow.as_ref().map_or(now, |f| f.2)
+        grown.map_or(now, |f| f.until)
     };
-    reveal.follow = Some((key.clone(), height, until));
+    reveal.follow = Some(Follow {
+        key: key.clone(),
+        height,
+        until,
+        offset: scroll.map(|s| s.y),
+    });
     reveal.pending = None;
     if matches!(key.1, Slot::Edit(_)) {
         reveal.shown = Some(key);
@@ -205,6 +238,126 @@ mod tests {
             .set(area, FocusCause::Navigated);
         app.update();
         assert_eq!(pending(&app), Some(Slot::Edit(EditTarget::General)));
+    }
+
+    /// A 600 px scroll area at the top of the screen holding one composer's frame, laid out by
+    /// hand: the test app has no layout pass.
+    struct Scene {
+        app: App,
+        view: Entity,
+        frame: Entity,
+        composer: Entity,
+        key: ComposerKey,
+    }
+
+    impl Scene {
+        fn new() -> Self {
+            Self::with(Slot::Edit(EditTarget::General))
+        }
+
+        fn with(slot: Slot) -> Self {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<InputFocus>()
+                .add_plugins(RevealPlugin);
+            let view = app
+                .world_mut()
+                .spawn((
+                    Node {
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ComputedNode {
+                        size: Vec2::new(400.0, 600.0),
+                        ..ComputedNode::DEFAULT
+                    },
+                    UiGlobalTransform::from_xy(200.0, 300.0),
+                    ScrollPosition::default(),
+                ))
+                .id();
+            let frame = app.world_mut().spawn((Node::default(), ChildOf(view))).id();
+            let key = ComposerKey(fixture::demo_pr(), slot);
+            let composer = app
+                .world_mut()
+                .spawn((Node::default(), Composer(key.clone()), ChildOf(frame)))
+                .id();
+            let mut scene = Scene {
+                app,
+                view,
+                frame,
+                composer,
+                key,
+            };
+            scene.place(700.0, 200.0);
+            scene
+        }
+
+        /// Puts the frame's top `top` px below the top of the view (as on screen), `height` tall.
+        fn place(&mut self, top: f32, height: f32) {
+            self.app.world_mut().entity_mut(self.frame).insert((
+                ComputedNode {
+                    size: Vec2::new(400.0, height),
+                    ..ComputedNode::DEFAULT
+                },
+                UiGlobalTransform::from_xy(200.0, top + height / 2.0),
+            ));
+        }
+
+        fn scroll(&self) -> f32 {
+            self.app.world().get::<ScrollPosition>(self.view).unwrap().y
+        }
+
+        fn set_scroll(&mut self, y: f32) {
+            self.app
+                .world_mut()
+                .get_mut::<ScrollPosition>(self.view)
+                .unwrap()
+                .y = y;
+        }
+
+        fn reveal(&mut self) {
+            self.app.world_mut().resource_mut::<Reveal>().pending = Some(self.key.clone());
+            self.app.update();
+        }
+    }
+
+    #[test]
+    fn a_revealed_frame_that_grows_stays_in_view() {
+        let mut s = Scene::new();
+        s.reveal();
+        // Bottom at 900 in a 600 view.
+        assert_eq!(s.scroll(), 300.0 + MARGIN);
+        // On screen the frame now sits 312 px higher; it grows by 60.
+        s.place(700.0 - s.scroll(), 260.0);
+        s.app.update();
+        assert_eq!(s.scroll(), 360.0 + MARGIN);
+    }
+
+    #[test]
+    fn once_the_user_scrolls_a_growing_frame_no_longer_moves_the_view() {
+        let mut s = Scene::new();
+        s.reveal();
+        s.set_scroll(50.0);
+        s.place(700.0 - 50.0, 260.0);
+        s.app.update();
+        assert_eq!(s.scroll(), 50.0, "the view stays where the user put it");
+        s.place(700.0 - 50.0, 320.0);
+        s.app.update();
+        assert_eq!(s.scroll(), 50.0, "and keeps staying");
+    }
+
+    #[test]
+    fn a_pending_reveal_whose_composer_is_gone_is_dropped() {
+        let mut s = Scene::with(Slot::FinalizeSummary);
+        s.app.world_mut().entity_mut(s.composer).despawn();
+        s.reveal();
+        assert_eq!(s.app.world().resource::<Reveal>().pending, None);
+        // A composer with the same key drawn later is not revealed for the old request.
+        s.app
+            .world_mut()
+            .spawn((Node::default(), Composer(s.key.clone()), ChildOf(s.frame)));
+        s.app.update();
+        assert_eq!(s.scroll(), 0.0);
     }
 
     #[test]
