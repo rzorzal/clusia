@@ -235,6 +235,18 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
             ));
         }
     };
+    // A publish that never got its answer may have reached GitHub: ask before reopening, so the
+    // same review is never posted twice.
+    let stored = match stored {
+        Some(mut r) if r.state == clusia_core::ReviewState::Publishing => {
+            match crate::publish::settle_interrupted(shared, &gh, client, &mut r).await {
+                Ok(true) => None,
+                Ok(false) => Some(r),
+                Err(out) => return out,
+            }
+        }
+        other => other,
+    };
     let mut review = match stored {
         Some(r) if !r.state.is_terminal() => r,
         _ => {

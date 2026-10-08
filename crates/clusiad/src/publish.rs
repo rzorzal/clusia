@@ -3,9 +3,10 @@
 
 use std::path::PathBuf;
 
+use clusia_core::time::parse_rfc3339;
 use clusia_core::{
-    ActivityKind, ItemStatus, PrRef, ReplyPayload, Review, ReviewEvent, ReviewPayload, ReviewState,
-    Role, Verdict, plan_publish,
+    ActivityKind, ItemStatus, PrRef, ReplyPayload, Review, ReviewEvent, ReviewInfo, ReviewPayload,
+    ReviewState, Role, Verdict, plan_publish,
 };
 use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, PublishResult, Reply};
@@ -36,7 +37,7 @@ fn fail_publish(shared: &Shared, review: &mut Review) {
 
 /// Records a completed publish and removes the review file. The review is already on
 /// GitHub, so failures here are logged, never returned.
-fn finish_published(
+pub(crate) fn finish_published(
     shared: &Shared,
     review: &mut Review,
     pr: &PrRef,
@@ -51,6 +52,85 @@ fn finish_published(
     }
     drop_cache(shared, pr);
     record(shared, ActivityKind::ReviewPublished, pr, client, url, None);
+}
+
+/// How far GitHub's clock may trail ours when telling whether a review was submitted after the
+/// Finalize moment.
+const CLOCK_SKEW_SECS: i64 = 30;
+
+/// The review `viewer` submitted on `head_sha` at or after `finalized_at`, if GitHub has one:
+/// proof that an earlier publish got through although its answer was lost.
+pub(crate) fn find_posted<'a>(
+    reviews: &'a [ReviewInfo],
+    viewer: &str,
+    head_sha: &str,
+    finalized_at: i64,
+) -> Option<&'a ReviewInfo> {
+    reviews
+        .iter()
+        .filter(|r| r.author.eq_ignore_ascii_case(viewer) && r.state != "PENDING")
+        .filter(|r| r.commit_id.as_deref() == Some(head_sha))
+        .filter(|r| {
+            r.submitted_at
+                .as_deref()
+                .and_then(parse_rfc3339)
+                .is_some_and(|at| at >= finalized_at - CLOCK_SKEW_SECS)
+        })
+        .max_by_key(|r| r.id)
+}
+
+/// What GitHub says about a publish whose outcome is unknown.
+pub(crate) enum Posted {
+    /// The review is there, at this URL.
+    Yes(String),
+    No,
+    /// GitHub could not be asked.
+    Unknown(ProviderError),
+}
+
+pub(crate) async fn posted_review(
+    gh: &GitHub,
+    pr: &PrRef,
+    head_sha: &str,
+    finalized_at: i64,
+) -> Posted {
+    let viewer = match gh.viewer().await {
+        Ok(v) => v.login,
+        Err(e) => return Posted::Unknown(e),
+    };
+    match gh.list_reviews(pr).await {
+        Ok(reviews) => find_posted(&reviews, &viewer, head_sha, finalized_at)
+            .map_or(Posted::No, |r| Posted::Yes(r.url.clone())),
+        Err(e) => Posted::Unknown(e),
+    }
+}
+
+/// A review found `publishing` (the daemon died or the answer was lost): when GitHub already
+/// has it, records it as published and returns `true`; when it does not, `false`, and the
+/// caller returns the review to `saved`. When GitHub cannot be asked, an error outcome: the
+/// review is left as it is, so nothing is posted twice.
+#[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
+pub(crate) async fn settle_interrupted(
+    shared: &Shared,
+    gh: &GitHub,
+    client: &str,
+    review: &mut Review,
+) -> Result<bool, Outcome> {
+    let finalized_at = review.updated_at;
+    match posted_review(gh, &review.pr, &review.head_sha, finalized_at).await {
+        Posted::Yes(url) => {
+            let pr = review.pr.clone();
+            finish_published(shared, review, &pr, client, Some(url));
+            Ok(true)
+        }
+        Posted::No => Ok(false),
+        Posted::Unknown(e) => Err(Outcome::Err(ProtocolError::new(
+            ErrorCode::Upstream,
+            format!(
+                "cannot tell whether your last publish reached GitHub ({e}); try again when you are online"
+            ),
+        ))),
+    }
 }
 
 /// Appended when a cleanup failed and GitHub may still hold our pending review.
@@ -313,6 +393,7 @@ pub(crate) async fn publish(
     if let Err(out) = save(shared, &review) {
         return out;
     }
+    let finalized_at = review.updated_at;
 
     let mut url = None;
     let mut posted = false;
@@ -326,9 +407,23 @@ pub(crate) async fn publish(
                 posted = true;
             }
             Err(failure) => {
-                fail_publish(shared, &mut review);
-                announce(shared, &review);
-                return failure.into_outcome();
+                // An answer that was lost or unreadable may hide a review GitHub did take.
+                let found = if failure.error.is_ambiguous() {
+                    match posted_review(&gh, pr, &review.head_sha, finalized_at).await {
+                        Posted::Yes(found) => Some(found),
+                        Posted::No | Posted::Unknown(_) => None,
+                    }
+                } else {
+                    None
+                };
+                let Some(found) = found else {
+                    fail_publish(shared, &mut review);
+                    announce(shared, &review);
+                    return failure.into_outcome();
+                };
+                finish_published(shared, &mut review, pr, client, Some(found.clone()));
+                url = Some(found);
+                posted = true;
             }
         }
     }
@@ -371,4 +466,76 @@ pub(crate) async fn publish(
         unresolved,
         close_error: close_error.map(|e| e.to_string()),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn review(id: u64, who: &str, state: &str, commit: Option<&str>, at: &str) -> ReviewInfo {
+        ReviewInfo {
+            id,
+            author: who.into(),
+            state: state.into(),
+            body: String::new(),
+            submitted_at: Some(at.into()),
+            url: format!("https://github.com/acme/widgets/pull/7#pullrequestreview-{id}"),
+            commit_id: commit.map(String::from),
+        }
+    }
+
+    // 2026-10-07T12:00:00Z
+    const FINALIZED: i64 = 1_791_374_400;
+
+    #[test]
+    fn finds_your_review_on_the_head_after_finalize() {
+        let reviews = [
+            review(1, "mona", "APPROVED", Some("abc"), "2026-10-07T12:00:05Z"),
+            review(2, "me", "COMMENTED", Some("old"), "2026-10-07T12:00:05Z"),
+            review(3, "ME", "COMMENTED", Some("abc"), "2026-10-07T12:00:05Z"),
+        ];
+        assert_eq!(
+            find_posted(&reviews, "me", "abc", FINALIZED).map(|r| r.id),
+            Some(3),
+            "the login is compared without case"
+        );
+    }
+
+    #[test]
+    fn ignores_reviews_from_before_finalize_and_pending_ones() {
+        let reviews = [
+            review(1, "me", "COMMENTED", Some("abc"), "2026-10-07T11:00:00Z"),
+            review(2, "me", "PENDING", Some("abc"), "2026-10-07T12:00:05Z"),
+            review(3, "me", "COMMENTED", None, "2026-10-07T12:00:05Z"),
+            review(4, "me", "COMMENTED", Some("abc"), "not a date"),
+        ];
+        assert!(find_posted(&reviews, "me", "abc", FINALIZED).is_none());
+    }
+
+    #[test]
+    fn a_clock_a_little_behind_still_matches() {
+        let at = "2026-10-07T11:59:45Z"; // 15 s before the Finalize moment we recorded
+        let reviews = [review(1, "me", "COMMENTED", Some("abc"), at)];
+        assert!(find_posted(&reviews, "me", "abc", FINALIZED).is_some());
+        let too_old = [review(
+            1,
+            "me",
+            "COMMENTED",
+            Some("abc"),
+            "2026-10-07T11:59:00Z",
+        )];
+        assert!(find_posted(&too_old, "me", "abc", FINALIZED).is_none());
+    }
+
+    #[test]
+    fn the_latest_matching_review_wins() {
+        let reviews = [
+            review(5, "me", "COMMENTED", Some("abc"), "2026-10-07T12:00:05Z"),
+            review(9, "me", "COMMENTED", Some("abc"), "2026-10-07T12:00:09Z"),
+        ];
+        assert_eq!(
+            find_posted(&reviews, "me", "abc", FINALIZED).map(|r| r.id),
+            Some(9)
+        );
+    }
 }
