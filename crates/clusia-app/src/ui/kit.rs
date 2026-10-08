@@ -2,6 +2,7 @@
 //! Builders return bundles. Colors are `Swatch` markers that `restyle` resolves against the
 //! current `Theme`, so a theme switch recolors everything without rebuilding a screen.
 
+use bevy::ecs::spawn::SpawnIter;
 use bevy::input::ButtonInput;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::input_focus::{FocusLost, InputFocus};
@@ -332,17 +333,35 @@ fn checkbox_box(on: bool, enabled: bool) -> impl Bundle {
         Fill(fill),
         BorderColor::default(),
         Stroke(stroke),
-        children![panel(
-            Node {
-                width: px(8),
-                height: px(8),
-                border_radius: BorderRadius::all(px(2)),
-                ..default()
-            },
-            if on { Swatch::Knob } else { Swatch::Clear },
-        )],
+        // A turned corner drawn from two borders: it needs no glyph from the bundled fonts.
+        Children::spawn(SpawnIter(
+            on.then(|| {
+                (
+                    CheckMark,
+                    Node {
+                        width: px(5),
+                        height: px(9),
+                        margin: UiRect::bottom(px(2)),
+                        border: UiRect {
+                            right: px(2),
+                            bottom: px(2),
+                            ..default()
+                        },
+                        ..default()
+                    },
+                    UiTransform::from_rotation(Rot2::degrees(45.0)),
+                    BorderColor::default(),
+                    Stroke(Swatch::OnGreen),
+                )
+            })
+            .into_iter(),
+        )),
     )
 }
+
+/// The white tick inside a checked box.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CheckMark;
 
 /// A checkbox. Activating it should write the opposite value.
 pub fn checkbox(on: bool) -> impl Bundle {
@@ -651,6 +670,21 @@ mod tests {
 
     fn bg(app: &mut App, e: Entity) -> Color {
         app.world().get::<BackgroundColor>(e).unwrap().0
+    }
+
+    #[test]
+    fn only_a_checked_box_has_a_tick() {
+        let mut app = testing::app(Snapshot::default());
+        app.world_mut().spawn(checkbox(true));
+        app.world_mut().spawn(checkbox(false));
+        app.world_mut().spawn(disabled_checkbox(true));
+        app.update();
+        let ticks = app
+            .world_mut()
+            .query::<&CheckMark>()
+            .iter(app.world())
+            .count();
+        assert_eq!(ticks, 2);
     }
 
     #[test]

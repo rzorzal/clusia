@@ -11,7 +11,7 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
 use clusia_core::config::{EventKind, Route, SoundId, Weekday};
 use clusia_protocol::PermissionStatus;
 
-use super::{ConfigField, OpenLink, page_header, row, sends, setter};
+use super::{ConfigField, FieldError, OpenLink, page_header, row, sends, setter};
 use crate::bridge::Ask;
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, Screen, Section};
@@ -147,11 +147,24 @@ pub struct NotificationsView {
     pub dnd_from: String,
     pub dnd_to: String,
     pub dnd_days: BTreeSet<Weekday>,
-    pub dnd_from_error: Option<String>,
-    pub dnd_to_error: Option<String>,
+    /// The first refusal among the DND keys, with its key.
+    pub dnd_error: Option<(&'static str, String)>,
+    /// The first refusal among the event keys, with its key.
+    pub events_error: Option<(&'static str, String)>,
+    pub sound_error: Option<String>,
     pub follow_focus: bool,
+    pub follow_focus_error: Option<String>,
     pub group_bursts: bool,
+    pub group_bursts_error: Option<String>,
     pub permission: PermissionStatus,
+}
+
+fn first_refusal(
+    rejected: &HashMap<String, String>,
+    keys: impl IntoIterator<Item = &'static str>,
+) -> Option<(&'static str, String)> {
+    keys.into_iter()
+        .find_map(|key| rejected.get(key).map(|m| (key, m.clone())))
 }
 
 pub fn view(snap: &Snapshot, rejected: &HashMap<String, String>) -> NotificationsView {
@@ -228,10 +241,13 @@ pub fn view(snap: &Snapshot, rejected: &HashMap<String, String>) -> Notification
         dnd_from: n.dnd.from.to_string(),
         dnd_to: n.dnd.to.to_string(),
         dnd_days: n.dnd.days.clone(),
-        dnd_from_error: rejected.get(DND_FROM).cloned(),
-        dnd_to_error: rejected.get(DND_TO).cloned(),
+        dnd_error: first_refusal(rejected, [DND_ENABLED, DND_FROM, DND_TO, DND_DAYS]),
+        events_error: first_refusal(rejected, KEYS.iter().flat_map(|(_, keys)| *keys)),
+        sound_error: rejected.get(SOUND).cloned(),
         follow_focus: n.follow_focus,
+        follow_focus_error: rejected.get(FOLLOW_FOCUS).cloned(),
         group_bursts: n.group_bursts,
+        group_bursts_error: rejected.get(GROUP_BURSTS).cloned(),
         permission: snap.notifications_permission,
     }
 }
@@ -306,6 +322,7 @@ fn checks(
     key: &'static str,
     on: bool,
     hint: &str,
+    error: Option<&str>,
 ) {
     row(
         p,
@@ -315,7 +332,7 @@ fn checks(
             r.spawn((checkbox(on), setter(key, (!on).to_string())));
         },
         hint,
-        None,
+        error.map(|m| (key, m)),
     );
 }
 
@@ -349,6 +366,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &NotificationsVie
         FOLLOW_FOCUS,
         v.follow_focus,
         "Silent while a Focus is on; the tray still counts",
+        v.follow_focus_error.as_deref(),
     );
     checks(
         p,
@@ -357,6 +375,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &NotificationsVie
         GROUP_BURSTS,
         v.group_bursts,
         "Several events within 2 minutes become one notification",
+        v.group_bursts_error.as_deref(),
     );
     permission_row(p, fonts, v.permission);
 }
@@ -423,6 +442,16 @@ fn event_table(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &NotificationsV
             });
         }
     });
+    if let Some((key, message)) = &v.events_error {
+        p.spawn((
+            Node {
+                margin: UiRect::top(px(4)),
+                ..default()
+            },
+            FieldError(key),
+            children![text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange))],
+        ));
+    }
 }
 
 fn cell(p: &mut ChildSpawnerCommands, fill: impl FnOnce(&mut ChildSpawnerCommands)) {
@@ -456,16 +485,12 @@ fn sound_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &NotificationsVie
             ));
         },
         "",
-        None,
+        v.sound_error.as_deref().map(|m| (SOUND, m)),
     );
 }
 
 fn dnd_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &NotificationsView) {
-    let error = v
-        .dnd_from_error
-        .as_deref()
-        .map(|m| (DND_FROM, m))
-        .or(v.dnd_to_error.as_deref().map(|m| (DND_TO, m)));
+    let error = v.dnd_error.as_ref().map(|(key, m)| (*key, m.as_str()));
     row(
         p,
         fonts,

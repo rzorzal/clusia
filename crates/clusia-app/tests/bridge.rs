@@ -481,7 +481,30 @@ async fn the_snapshot_carries_the_notification_permission() {
         first.notifications_permission,
         clusia_protocol::PermissionStatus::NotDetermined
     );
+    let mut tray = d.client().await;
+    tray.request(Command::NotificationPermission {
+        status: clusia_protocol::PermissionStatus::Allowed,
+    })
+    .await
+    .unwrap();
     link.ask.send(Ask::RefreshStatus).unwrap();
+    let read = snapshot_where(&link, |s| {
+        s.notifications_permission == clusia_protocol::PermissionStatus::Allowed
+    });
+    assert_eq!(
+        read.notifications_permission,
+        clusia_protocol::PermissionStatus::Allowed
+    );
     link.ask.send(Ask::TestNotification).unwrap();
+    match next(&link, |t| {
+        matches!(t, Tell::Notice { .. } | Tell::Refused { .. })
+    }) {
+        Tell::Notice { text, warning } => {
+            assert_eq!(text, "Test notification sent");
+            assert!(!warning);
+        }
+        Tell::Refused { message, .. } => assert!(!message.is_empty()),
+        _ => unreachable!(),
+    }
     d.stop().await;
 }

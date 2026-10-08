@@ -196,8 +196,17 @@ fn on_set(
     }
 }
 
-fn on_send(activate: On<Activate>, senders: Query<&Sends>, mut asks: ResMut<Asks>) {
+fn on_send(
+    activate: On<Activate>,
+    senders: Query<&Sends>,
+    mut asks: ResMut<Asks>,
+    mut model: ResMut<Model>,
+) {
     if let Ok(Sends(ask)) = senders.get(activate.entity) {
+        // Like `set_config`: a new try forgets the last refusal, so a fixed cause shows clean.
+        if matches!(ask, Ask::SetStartAtLogin { .. }) {
+            model.rejected.remove(crate::bridge::START_AT_LOGIN);
+        }
         asks.send(ask.clone());
     }
 }
@@ -828,6 +837,44 @@ mod tests {
         testing::settle(&mut app);
         testing::find::<FieldError>(&mut app, |e| e.0 == crate::bridge::START_AT_LOGIN);
         assert!(page_texts(&mut app).contains(&"cannot write the login agent".to_string()));
+        let toggle =
+            testing::find::<Sends>(&mut app, |s| s.0 == Ask::SetStartAtLogin { on: false });
+        testing::activate(&mut app, toggle);
+        testing::settle(&mut app);
+        assert!(
+            !app.world()
+                .resource::<Model>()
+                .rejected
+                .contains_key(crate::bridge::START_AT_LOGIN),
+            "trying again clears the old refusal"
+        );
+        let mut errors = app.world_mut().query::<&FieldError>();
+        assert!(
+            errors
+                .iter(app.world())
+                .all(|e| e.0 != crate::bridge::START_AT_LOGIN)
+        );
+    }
+
+    #[test]
+    fn every_notifications_row_shows_its_refusal() {
+        for key in [
+            "notifications.events.checks_failed.macos",
+            "notifications.dnd.days",
+            "notifications.dnd.enabled",
+            "notifications.sound",
+            "notifications.follow_focus",
+            "notifications.group_bursts",
+        ] {
+            let mut app = notifications_app();
+            app.world_mut()
+                .resource_mut::<Model>()
+                .rejected
+                .insert(key.into(), format!("refused {key}"));
+            testing::settle(&mut app);
+            testing::find::<FieldError>(&mut app, |e| e.0 == key);
+            assert!(page_texts(&mut app).contains(&format!("refused {key}")));
+        }
     }
 
     #[test]
@@ -1024,7 +1071,16 @@ mod tests {
         assert_eq!(
             refreshes(testing::recorded(&mut app)),
             0,
-            "then every few seconds"
+            "not again straight away"
+        );
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs(4),
+        ));
+        app.update();
+        assert_eq!(
+            refreshes(testing::recorded(&mut app)),
+            1,
+            "again every four seconds"
         );
         app.world_mut()
             .resource_mut::<Nav>()
