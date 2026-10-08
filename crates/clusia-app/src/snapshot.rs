@@ -5,6 +5,8 @@ use clusia_protocol::{
     AuthInfo, Event, FirstRun, PermissionStatus, ReviewSummary, SyncStatus, WindowTarget,
 };
 
+use crate::screens::home::signed_out;
+
 /// What the window knows about the Giphy key. The daemon's status gives `Missing` or `Set`;
 /// `Rejected` is only ever derived by the Media page from a refusal the window saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,10 +32,25 @@ pub struct Snapshot {
     /// What the first-run screen shows; `None` until the daemon has answered.
     pub first_run: Option<FirstRun>,
     /// `assigned` and `mine` hold real lists, not the empty defaults before the first sync.
+    /// The first-run screen may still be on screen (the login was missing and **Continue** has
+    /// not been pressed), so its status keeps being asked for.
+    pub first_run_open: bool,
     pub lists_loaded: bool,
     pub daemon_version: String,
     /// Whether macOS lets the tray post notifications, as the tray last reported it.
     pub notifications_permission: PermissionStatus,
+}
+
+impl Snapshot {
+    /// Whether the first-run status is worth asking the daemon for: while the login is missing
+    /// (it opens the screen) and until **Continue** closes it. The answer costs a `gh` call and
+    /// a folder scan, so it is not asked for once the screen is gone.
+    pub fn first_run_wanted(&mut self) -> bool {
+        if signed_out(self) {
+            self.first_run_open = true;
+        }
+        self.first_run_open
+    }
 }
 
 /// What must be fetched again.
@@ -343,5 +360,36 @@ mod tests {
             );
         }
         assert_eq!(c, before, "refused writes change nothing");
+    }
+
+    fn signed_out_snapshot() -> Snapshot {
+        Snapshot {
+            auth: Some(AuthInfo {
+                source: None,
+                login: None,
+                scopes: Vec::new(),
+                error: Some("no GitHub token".into()),
+            }),
+            ..Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn first_run_is_asked_only_while_it_is_needed() {
+        let mut s = Snapshot::default();
+        assert!(!s.first_run_wanted(), "nothing says the login is missing");
+
+        let mut s = signed_out_snapshot();
+        assert!(s.first_run_wanted(), "no login opens the first run");
+        s.auth = None;
+        assert!(
+            s.first_run_wanted(),
+            "it stays wanted after the login works, until Continue"
+        );
+        s.first_run_open = false;
+        assert!(!s.first_run_wanted(), "Continue ends it");
+
+        s.auth = signed_out_snapshot().auth;
+        assert!(s.first_run_wanted(), "a login lost later opens it again");
     }
 }

@@ -53,6 +53,8 @@ pub enum Ask {
     ClearToken,
     SyncNow,
     RefreshAuth,
+    /// The first-run screen is gone: stop asking for its status.
+    FirstRunDone,
     /// The key goes straight to the Keychain; `GiphyKeyChanged` refreshes the snapshot.
     SetGiphyKey(Secret),
     ClearGiphyKey,
@@ -576,6 +578,7 @@ async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Resul
         snap.auth = Some(a);
     }
     if what.first_run
+        && snap.first_run_wanted()
         && let Some(Reply::FirstRun(f)) = request(client, Command::FirstRunStatus).await?
     {
         snap.first_run = Some(f);
@@ -679,6 +682,7 @@ async fn answer(
             }
         }
         Ask::RefreshAuth => fetch(client, snap, auth).await?,
+        Ask::FirstRunDone => snap.first_run_open = false,
         Ask::SetGiphyKey(key) => {
             notify(
                 client,
