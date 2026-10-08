@@ -669,3 +669,58 @@ fn install_dry_run_prints_the_plan_and_changes_nothing() {
     assert_eq!(std::fs::read_dir(apps.path()).unwrap().count(), 0);
     assert_eq!(std::fs::read_dir(bin.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn uninstall_removes_the_bundle_the_agent_and_the_link_in_the_given_folders() {
+    let home = Home::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (apps, bin, agents) = (
+        dir.path().join("apps"),
+        dir.path().join("bin"),
+        dir.path().join("agents"),
+    );
+    let contents = apps.join("Clusia.app/Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    std::fs::write(
+        contents.join("Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>io.github.rzorzal.clusia</string></dict></plist>"#,
+    )
+    .unwrap();
+    std::fs::write(contents.join("MacOS/clusia"), "").unwrap();
+    std::fs::create_dir_all(&agents).unwrap();
+    let agent = agents.join("io.github.rzorzal.clusia.daemon.plist");
+    std::fs::write(
+        &agent,
+        r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Label</key><string>io.github.rzorzal.clusia.daemon</string></dict></plist>"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(contents.join("MacOS/clusia"), bin.join("clusia")).unwrap();
+    std::fs::write(bin.join("other"), "x").unwrap();
+
+    let out = home.clusia(&[
+        "--json",
+        "uninstall",
+        "--applications",
+        apps.to_str().unwrap(),
+        "--bin-dir",
+        bin.to_str().unwrap(),
+        "--agents-dir",
+        agents.to_str().unwrap(),
+        "--no-launchctl",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["removed"].as_array().unwrap().len(), 3, "{v}");
+    assert!(
+        v["kept"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k.as_str().unwrap().contains("Application Support"))
+    );
+    assert!(!apps.join("Clusia.app").exists());
+    assert!(!agent.exists());
+    assert!(bin.join("clusia").symlink_metadata().is_err());
+    assert!(bin.join("other").exists(), "nothing else is touched");
+}

@@ -55,7 +55,7 @@ pub fn render(agent: &LaunchAgent<'_>) -> String {
     dict.insert("StandardOutPath".into(), log.clone());
     dict.insert("StandardErrorPath".into(), log);
     dict.insert("EnvironmentVariables".into(), Value::Dictionary(env));
-    to_xml(dict).unwrap_or_default()
+    to_xml(dict).expect("a fixed dictionary serializes")
 }
 
 fn parse(text: &str) -> Result<Dictionary, LaunchAgentError> {

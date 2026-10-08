@@ -1,6 +1,8 @@
 //! `clusia install`: assemble `Clusia.app`, sign it, register the LaunchAgent and link the CLI.
 
 mod assets;
+mod execute;
+mod os;
 mod plan;
 
 use std::ffi::CString;
@@ -9,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 use clusia_core::Paths;
 
-pub use plan::{InstallEnv, InstallOptions, plan};
+pub use execute::{execute, uninstall};
+pub use os::SystemOs;
+pub use plan::{InstallEnv, InstallOptions, Plan, plan};
 
 /// The machine as it is now: home, user id, writable folders and the `$PATH`.
 pub fn system_env(paths: &Paths, start_at_login: bool) -> Result<InstallEnv, String> {

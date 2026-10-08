@@ -116,7 +116,6 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
         Command::SetGiphyKey { key } => giphy::set_key(shared, key.expose()).await,
         Command::ClearGiphyKey => giphy::clear_key(shared).await,
         Command::FirstRunStatus => Outcome::Ok(Reply::FirstRun(first_run::status(shared).await)),
-        // Accepted so a newer tray or window can talk to this daemon; nothing acts on them yet.
         Command::NotificationPermission { status } => {
             notifications::set_permission(shared, status);
             Outcome::Ok(Reply::Ack)
@@ -125,8 +124,7 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             notifications::send_test(shared).await;
             Outcome::Ok(Reply::Ack)
         }
-        // Accepted so a newer tray or window can talk to this daemon; nothing acts on it yet.
-        Command::SetStartAtLogin { .. } => Outcome::Ok(Reply::Ack),
+        Command::SetStartAtLogin { on } => crate::login::set_start_at_login(shared, on).await,
         Command::GetInbox => Outcome::Ok(Reply::Inbox(notifications::inbox(shared).await)),
         Command::MarkInboxSeen { ids } => {
             notifications::mark_seen(shared, &ids).await;
@@ -176,7 +174,7 @@ async fn open_in_editor(shared: &Shared, path: &str, line: Option<u32>) -> Outco
     }
 }
 
-async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome {
+pub(crate) async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome {
     let mut config = shared.config.write().await;
     let updated = match set_value(&config, &key, &raw) {
         Ok(c) => c,

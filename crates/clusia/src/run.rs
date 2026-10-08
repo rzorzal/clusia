@@ -9,7 +9,7 @@ use clusia_protocol::{
 };
 use serde_json::json;
 
-use crate::cli::{AuthCommand, Command, ConfigCommand, DaemonCommand, InstallArgs};
+use crate::cli::{AuthCommand, Command, ConfigCommand, DaemonCommand, InstallArgs, UninstallArgs};
 use crate::{install, review, spawn};
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
@@ -81,7 +81,8 @@ pub async fn run(paths: &Paths, home: Option<&Path>, command: Command) -> Result
         Command::Open { pr } => review::open(paths, home, &pr).await,
         Command::Review(cmd) => review::run(paths, home, cmd).await,
         Command::Activity => review::activity(paths, home).await,
-        Command::Install(args) => install_command(paths, &args),
+        Command::Install(args) => install_command(paths, home, &args),
+        Command::Uninstall(args) => uninstall_command(paths, home, &args),
     }
 }
 
@@ -390,28 +391,64 @@ async fn worktree(paths: &Paths, home: Option<&Path>, pr: &str) -> Result<Output
     }
 }
 
-fn install_command(paths: &Paths, args: &InstallArgs) -> Result<Output, CliError> {
+fn install_plan(paths: &Paths, opts: install::InstallOptions) -> Result<install::Plan, CliError> {
     let start_at_login = clusia_store::load_config(paths)
         .map(|loaded| loaded.into_value().general.start_at_login)
         .unwrap_or(true);
     let env = install::system_env(paths, start_at_login).map_err(CliError::Other)?;
-    let opts = install::InstallOptions {
-        applications: args.applications.clone(),
-        bin_dir: args.bin_dir.clone(),
-        agents_dir: args.agents_dir.clone(),
-        from: args.from.clone(),
-        workspace: args.workspace.clone(),
-        no_launchctl: args.no_launchctl,
-    };
-    let plan = install::plan(&opts, &env);
-    if !args.dry_run {
-        return Err(CliError::Other(
-            "installing is not available yet; run it with --dry-run to see the plan".into(),
-        ));
+    Ok(install::plan(&opts, &env))
+}
+
+fn install_command(
+    paths: &Paths,
+    home: Option<&Path>,
+    args: &InstallArgs,
+) -> Result<Output, CliError> {
+    let plan = install_plan(
+        paths,
+        install::InstallOptions {
+            applications: args.applications.clone(),
+            bin_dir: args.bin_dir.clone(),
+            agents_dir: args.agents_dir.clone(),
+            from: args.from.clone(),
+            workspace: args.workspace.clone(),
+            no_launchctl: args.no_launchctl,
+        },
+    )?;
+    if args.dry_run {
+        return Ok(Output {
+            human: plan.describe_full(),
+            json: plan.to_json(),
+        });
     }
+    let mut os = install::SystemOs::new(paths.clone(), home.map(Path::to_path_buf));
+    let report = install::execute(&plan, &mut os).map_err(|e| CliError::Other(e.to_string()))?;
     Ok(Output {
-        human: plan.describe_full(),
-        json: plan.to_json(),
+        human: report.describe(),
+        json: report.to_json(),
+    })
+}
+
+fn uninstall_command(
+    paths: &Paths,
+    home: Option<&Path>,
+    args: &UninstallArgs,
+) -> Result<Output, CliError> {
+    let plan = install_plan(
+        paths,
+        install::InstallOptions {
+            applications: args.applications.clone(),
+            bin_dir: args.bin_dir.clone(),
+            agents_dir: args.agents_dir.clone(),
+            no_launchctl: args.no_launchctl,
+            ..install::InstallOptions::default()
+        },
+    )?;
+    let mut os = install::SystemOs::new(paths.clone(), home.map(Path::to_path_buf));
+    let removed = install::uninstall(&plan, &mut os).map_err(|e| CliError::Other(e.to_string()))?;
+    Ok(Output {
+        human: removed.describe(),
+        json: removed.to_json(),
     })
 }
 

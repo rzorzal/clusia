@@ -18,6 +18,8 @@ pub const MAIN_EXECUTABLE: &str = "clusia-tray";
 pub const BINARIES: [&str; 4] = ["clusia-tray", "clusiad", "clusia-app", "clusia"];
 /// The common name of the local code-signing identity.
 pub const SIGNING_NAME: &str = "Clúsia Local";
+/// Used when the keychain cannot hold the accented name.
+pub const SIGNING_NAME_ASCII: &str = "Clusia Local";
 
 /// What the user asked for on the command line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -122,6 +124,15 @@ impl Plan {
 }
 
 pub fn plan(opts: &InstallOptions, env: &InstallEnv) -> Plan {
+    // Relative folders on the command line mean the folder the command was run from.
+    let opts = &InstallOptions {
+        applications: opts.applications.as_ref().map(|d| env.current_dir.join(d)),
+        bin_dir: opts.bin_dir.as_ref().map(|d| env.current_dir.join(d)),
+        agents_dir: opts.agents_dir.as_ref().map(|d| env.current_dir.join(d)),
+        from: opts.from.as_ref().map(|d| env.current_dir.join(d)),
+        workspace: opts.workspace.as_ref().map(|d| env.current_dir.join(d)),
+        no_launchctl: opts.no_launchctl,
+    };
     let mut notes = Vec::new();
     let applications = match &opts.applications {
         Some(dir) => dir.clone(),
@@ -242,10 +253,8 @@ pub fn render_info_plist(plan: &Plan) -> String {
     d.insert("LSUIElement".into(), Value::Boolean(true));
     d.insert("NSHighResolutionCapable".into(), Value::Boolean(true));
     let mut out = Vec::new();
-    match plist::to_writer_xml(&mut out, &Value::Dictionary(d)) {
-        Ok(()) => String::from_utf8(out).unwrap_or_default(),
-        Err(_) => String::new(),
-    }
+    plist::to_writer_xml(&mut out, &Value::Dictionary(d)).expect("a fixed dictionary serializes");
+    String::from_utf8(out).expect("plist writes UTF-8")
 }
 
 /// The LaunchAgent for this install; `start_at_login` becomes `RunAtLoad`.
@@ -535,5 +544,79 @@ mod tests {
         assert_eq!(v["cli_link"], "/usr/local/bin/clusia");
         assert_eq!(v["run_at_load"], true);
         assert_eq!(v["files"].as_array().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn plists_keep_a_path_with_spaces_and_an_ampersand() {
+        let opts = InstallOptions {
+            applications: Some("/Users/Ana & Co/Apps".into()),
+            ..InstallOptions::default()
+        };
+        let p = plan(&opts, &env());
+        assert_eq!(p.app, PathBuf::from("/Users/Ana & Co/Apps/Clusia.app"));
+
+        let Value::Dictionary(agent) =
+            Value::from_reader_xml(render_launch_agent(&p, true).as_bytes()).unwrap()
+        else {
+            panic!("not a dictionary");
+        };
+        let args = agent
+            .get("ProgramArguments")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(
+            args[0].as_string(),
+            Some("/Users/Ana & Co/Apps/Clusia.app/Contents/MacOS/clusiad")
+        );
+        assert_eq!(
+            agent.get("StandardOutPath").and_then(Value::as_string),
+            Some("/Users/maria/Library/Logs/Clusia/daemon.launchd.log")
+        );
+
+        let Value::Dictionary(info) =
+            Value::from_reader_xml(render_info_plist(&p).as_bytes()).unwrap()
+        else {
+            panic!("not a dictionary");
+        };
+        assert_eq!(
+            info.get("CFBundleIdentifier").and_then(Value::as_string),
+            Some(BUNDLE_ID)
+        );
+    }
+
+    #[test]
+    fn relative_folders_are_taken_from_the_current_folder() {
+        let opts = InstallOptions {
+            applications: Some("apps".into()),
+            bin_dir: Some("./bin".into()),
+            agents_dir: Some("agents".into()),
+            from: Some("target/release".into()),
+            ..InstallOptions::default()
+        };
+        let p = plan(&opts, &env());
+        let cwd = Path::new("/Users/maria/Repos/clusia");
+        assert_eq!(p.app, cwd.join("apps/Clusia.app"));
+        assert_eq!(p.staging, cwd.join("apps/.Clusia.app.installing"));
+        assert_eq!(p.cli.link, cwd.join("bin/clusia"));
+        assert_eq!(
+            p.cli.target,
+            cwd.join("apps/Clusia.app/Contents/MacOS/clusia")
+        );
+        assert_eq!(
+            p.launch_agent,
+            cwd.join("agents/io.github.rzorzal.clusia.daemon.plist")
+        );
+        assert_eq!(p.source, Source::Dir(cwd.join("target/release")));
+
+        let opts = InstallOptions {
+            workspace: Some("src/clusia".into()),
+            ..InstallOptions::default()
+        };
+        assert_eq!(
+            plan(&opts, &env()).source,
+            Source::Build {
+                workspace: cwd.join("src/clusia")
+            }
+        );
     }
 }

@@ -56,6 +56,8 @@ pub enum Command {
     Activity,
     /// Put Clúsia.app, the login agent and the `clusia` command in place.
     Install(InstallArgs),
+    /// Remove Clúsia.app, the login agent and the `clusia` link; your data stays.
+    Uninstall(UninstallArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -152,6 +154,22 @@ pub struct InstallArgs {
     #[arg(long, value_name = "DIR")]
     pub bin_dir: Option<PathBuf>,
     /// Where the login agent's plist goes (default: ~/Library/LaunchAgents).
+    #[arg(long, value_name = "DIR")]
+    pub agents_dir: Option<PathBuf>,
+    /// Do not touch launchd or stop the running daemon.
+    #[arg(long)]
+    pub no_launchctl: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct UninstallArgs {
+    /// Where Clusia.app was put (default: /Applications, else ~/Applications).
+    #[arg(long, value_name = "DIR")]
+    pub applications: Option<PathBuf>,
+    /// Where the `clusia` link was put (default: /usr/local/bin, else ~/.local/bin).
+    #[arg(long, value_name = "DIR")]
+    pub bin_dir: Option<PathBuf>,
+    /// Where the login agent's plist was put (default: ~/Library/LaunchAgents).
     #[arg(long, value_name = "DIR")]
     pub agents_dir: Option<PathBuf>,
     /// Do not touch launchd or stop the running daemon.

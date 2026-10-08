@@ -7,6 +7,7 @@ mod giphy;
 mod handlers;
 mod inbox;
 mod lock;
+mod login;
 mod media;
 mod news;
 mod notifications;
