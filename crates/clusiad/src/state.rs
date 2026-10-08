@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clusia_core::{Config, FileDiff, Paths, PrRef, PrSummary};
 use clusia_platform::SecretStore;
@@ -26,6 +26,15 @@ pub(crate) struct PrLists {
 /// Head SHA and the parsed files fetched for it.
 pub(crate) type CachedFiles = (String, Arc<Vec<FileDiff>>);
 
+/// Counts one piece of work in `Shared::busy` while it lives, so a shutdown can wait for it.
+pub(crate) struct Busy(Arc<Shared>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.busy.send_modify(|n| *n -= 1);
+    }
+}
+
 pub(crate) struct Shared {
     pub paths: Paths,
     pub config: RwLock<Config>,
@@ -33,6 +42,8 @@ pub(crate) struct Shared {
     pub clients: AtomicUsize,
     pub events: broadcast::Sender<(String, Event)>,
     pub shutdown: watch::Sender<bool>,
+    /// How many requests are being handled (a handler plus the write of its response).
+    pub busy: watch::Sender<usize>,
     pub github_api: Option<String>,
     pub github_token: Option<String>,
     pub gh_program: PathBuf,
@@ -81,6 +92,7 @@ impl Shared {
     pub fn new(paths: Paths, config: Config, options: DaemonOptions) -> Self {
         let (events, _) = broadcast::channel(256);
         let (shutdown, _) = watch::channel(false);
+        let (busy, _) = watch::channel(0);
         let (first_sync_done, _) = watch::channel(false);
         let inbox = InboxData::load(&paths);
         let recovered = inbox
@@ -101,6 +113,7 @@ impl Shared {
             clients: AtomicUsize::new(0),
             events,
             shutdown,
+            busy,
             github_api: options.github_api,
             github_token: options.github_token,
             gh_program: options.gh_program,
@@ -147,6 +160,20 @@ impl Shared {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .contains(key)
+    }
+
+    /// Marks a request as being handled until the returned guard is dropped.
+    pub fn begin_work(self: &Arc<Self>) -> Busy {
+        self.busy.send_modify(|n| *n += 1);
+        Busy(self.clone())
+    }
+
+    /// Waits until no request is being handled; `false` when `limit` ran out first.
+    pub async fn wait_idle(&self, limit: Duration) -> bool {
+        let mut busy = self.busy.subscribe();
+        tokio::time::timeout(limit, busy.wait_for(|n| *n == 0))
+            .await
+            .is_ok()
     }
 
     pub fn trigger_shutdown(&self) {

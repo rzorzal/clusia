@@ -15,7 +15,7 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::task::JoinHandle;
 
 use crate::handlers;
-use crate::state::Shared;
+use crate::state::{Busy, Shared};
 
 pub(crate) async fn serve(stream: UnixStream, shared: Arc<Shared>) {
     shared.clients.fetch_add(1, Ordering::SeqCst);
@@ -117,9 +117,10 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
     let mut shutdown = shared.shutdown.subscribe();
     let mut topics: HashSet<String> = HashSet::new();
     let mut window: Option<WindowListener> = None;
-    // The request being handled: (id, whether it is Shutdown, the handler task). Requests stay
-    // sequential (the next line is read only once it is answered), but events keep flowing.
-    let mut pending: Option<(u64, bool, JoinHandle<Outcome>)> = None;
+    // The request being handled: (id, whether it is Shutdown, the handler task, its claim on the
+    // daemon staying up). Requests stay sequential (the next line is read only once it is
+    // answered), but events keep flowing.
+    let mut pending: Option<(u64, bool, JoinHandle<Outcome>, Busy)> = None;
     loop {
         if pending.is_none() && *shutdown.borrow_and_update() {
             return drain_events(&mut events, &topics, &mut w).await;
@@ -147,13 +148,14 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                     }
                 }
                 let stop = matches!(cmd, Command::Shutdown);
+                let busy = shared.begin_work();
                 let task_shared = shared.clone();
                 let client = client_name.clone();
                 let task = tokio::spawn(async move { handlers::handle(&task_shared, &client, cmd).await });
-                pending = Some((id, stop, task));
+                pending = Some((id, stop, task, busy));
             }
-            joined = async { pending.as_mut().map(|(_, _, task)| task).expect("guarded").await }, if pending.is_some() => {
-                let Some((id, stop, _)) = pending.take() else { continue };
+            joined = async { pending.as_mut().map(|(_, _, task, _)| task).expect("guarded").await }, if pending.is_some() => {
+                let Some((id, stop, _, _busy)) = pending.take() else { continue };
                 let result = joined.unwrap_or_else(|e| {
                     tracing::error!(error = %e, "a request handler failed");
                     Outcome::Err(ProtocolError::new(ErrorCode::Internal, "the request failed inside the daemon"))

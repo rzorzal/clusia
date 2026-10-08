@@ -27,6 +27,9 @@ pub enum StartError {
     Io(#[from] io::Error),
 }
 
+/// How long a stop request lets running requests (a publish) finish.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub struct Daemon {
     /// Released when the daemon is dropped, after the socket is gone.
     _lock: DaemonLock,
@@ -207,6 +210,9 @@ impl Daemon {
             }
         }
         drop(self.listener);
+        if !self.shared.wait_idle(SHUTDOWN_GRACE).await {
+            tracing::warn!("stopping with requests still running after {SHUTDOWN_GRACE:?}");
+        }
         if let Some(tray) = tray {
             // The supervisor kills the tray on shutdown; give it a moment to reap it.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), tray).await;
