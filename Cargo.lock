@@ -1785,6 +1785,7 @@ dependencies = [
  "bevy",
  "clap",
  "clusia-core",
+ "clusia-harness",
  "clusia-highlight",
  "clusia-platform",
  "clusia-protocol",

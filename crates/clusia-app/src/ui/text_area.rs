@@ -71,6 +71,26 @@ pub fn growing_text_area(
     (area(fonts, editable, id), Grow { min, max })
 }
 
+/// Like `growing_text_area`, but Enter does not insert a line break: the owner sends on Enter
+/// and queues the break itself for Shift+Enter.
+pub fn growing_line_area(
+    fonts: &UiFonts,
+    value: &str,
+    min: f32,
+    max: f32,
+    caret: Caret,
+    id: u64,
+) -> impl Bundle {
+    let mut editable = EditableText::new(value);
+    editable.allow_newlines = false;
+    editable.visible_lines = Some(min);
+    editable.queue_edit(match caret {
+        Caret::Start => TextEdit::TextStart(false),
+        Caret::End => TextEdit::TextEnd(false),
+    });
+    (area(fonts, editable, id), Grow { min, max })
+}
+
 fn area(fonts: &UiFonts, editable: EditableText, id: u64) -> impl Bundle {
     (
         Node {

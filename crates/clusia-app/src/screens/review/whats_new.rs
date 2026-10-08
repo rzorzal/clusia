@@ -578,7 +578,11 @@ mod tests {
             },
         );
         testing::settle(&mut app);
-        assert_eq!(testing::recorded(&mut app), [Ask::MarkSeen(pr.clone())]);
+        let asks: Vec<Ask> = testing::recorded(&mut app)
+            .into_iter()
+            .filter(|a| !matches!(a, Ask::AgentLog { .. }))
+            .collect();
+        assert_eq!(asks, [Ask::MarkSeen(pr.clone())]);
         assert_eq!(modal(&app, &pr), None);
         assert_eq!(testing::count::<NewsRowButton>(&mut app), 0);
         // A copy from the cache is not "fresh": nothing is marked.

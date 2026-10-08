@@ -19,9 +19,9 @@ use clusia_core::{
     Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
 };
 use clusia_protocol::{
-    AnchorInput, Client, ClientError, Command, ErrorCode, Event, GifPage, LoadStep, LoadStepKind,
-    MediaFile, NewsItem, PublishResult, Reply, ReviewView, Secret, StepStatus, WindowTarget,
-    topics,
+    AgentErrorKind, AgentLogEntry, AnchorInput, Client, ClientError, Command, ErrorCode, Event,
+    GifPage, LoadStep, LoadStepKind, MediaFile, NewsItem, ProbeResult, PublishResult, Reply,
+    ReviewView, Secret, SessionStateKind, StepStatus, Suggestion, WindowTarget, topics,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -30,6 +30,7 @@ use crate::app::Mode;
 use crate::clock::Clock;
 use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
+use crate::screens::review::agent::Chats;
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::ui::media::MediaCache;
 
@@ -115,6 +116,179 @@ pub enum Ask {
     TestNotification,
     /// Reads the daemon's status again (the notification permission).
     RefreshStatus,
+    /// A question for the review's agent. A refusal comes back as `AgentTell::Refused`.
+    AgentSend {
+        pr: PrRef,
+        text: String,
+    },
+    /// Stops the running turn.
+    AgentCancel {
+        pr: PrRef,
+    },
+    /// Turns a suggestion into a draft item (`body`: the edited text, else the suggestion's own).
+    AcceptSuggestion {
+        pr: PrRef,
+        id: String,
+        body: Option<String>,
+    },
+    DismissSuggestion {
+        pr: PrRef,
+        id: String,
+    },
+    /// The review's chat log: `Tell::AgentLog`.
+    AgentLog {
+        pr: PrRef,
+    },
+    /// Tests the harness on a worker connection: `Tell::Probe`.
+    Probe,
+}
+
+/// What the agent did, for the review's chat. Built from the daemon's agent events, or by the
+/// bridge when an ask could not reach the agent.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentTell {
+    Chunk {
+        pr: PrRef,
+        turn: u64,
+        text: String,
+    },
+    ToolUse {
+        pr: PrRef,
+        turn: u64,
+        summary: String,
+    },
+    Denied {
+        pr: PrRef,
+        turn: u64,
+        tool: String,
+        detail: String,
+    },
+    Suggestion {
+        pr: PrRef,
+        turn: u64,
+        suggestion: Suggestion,
+    },
+    Done {
+        pr: PrRef,
+        turn: u64,
+        duration_ms: u64,
+    },
+    Error {
+        pr: PrRef,
+        turn: u64,
+        kind: AgentErrorKind,
+        message: String,
+    },
+    State {
+        pr: PrRef,
+        state: SessionStateKind,
+    },
+    /// A send that did not start a turn (queue full, no review, not connected).
+    Refused {
+        pr: PrRef,
+        message: String,
+    },
+    /// An accept (`accepted`) or a dismiss went through.
+    Handled {
+        pr: PrRef,
+        id: String,
+        accepted: bool,
+    },
+}
+
+impl AgentTell {
+    pub fn pr(&self) -> &PrRef {
+        match self {
+            AgentTell::Chunk { pr, .. }
+            | AgentTell::ToolUse { pr, .. }
+            | AgentTell::Denied { pr, .. }
+            | AgentTell::Suggestion { pr, .. }
+            | AgentTell::Done { pr, .. }
+            | AgentTell::Error { pr, .. }
+            | AgentTell::State { pr, .. }
+            | AgentTell::Refused { pr, .. }
+            | AgentTell::Handled { pr, .. } => pr,
+        }
+    }
+
+    /// The tell for an agent event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<AgentTell> {
+        Some(match event.clone() {
+            Event::AgentChunk { pr, turn, text } => AgentTell::Chunk { pr, turn, text },
+            Event::AgentToolUse { pr, turn, summary } => AgentTell::ToolUse { pr, turn, summary },
+            Event::AgentDenied {
+                pr,
+                turn,
+                tool,
+                detail,
+            } => AgentTell::Denied {
+                pr,
+                turn,
+                tool,
+                detail,
+            },
+            Event::AgentSuggestion {
+                pr,
+                turn,
+                suggestion,
+            } => AgentTell::Suggestion {
+                pr,
+                turn,
+                suggestion,
+            },
+            Event::AgentDone {
+                pr,
+                turn,
+                duration_ms,
+            } => AgentTell::Done {
+                pr,
+                turn,
+                duration_ms,
+            },
+            Event::AgentError {
+                pr,
+                turn,
+                kind,
+                message,
+            } => AgentTell::Error {
+                pr,
+                turn,
+                kind,
+                message,
+            },
+            Event::SessionState { pr, state } => AgentTell::State { pr, state },
+            _ => return None,
+        })
+    }
+}
+
+/// The harness test on Config › Harness.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ProbeState {
+    #[default]
+    Idle,
+    Testing,
+    Done(ProbeResult),
+}
+
+/// What a refused `AgentSend` says in the chat.
+fn refusal_text(code: ErrorCode, message: &str) -> String {
+    if code == ErrorCode::Busy {
+        AgentErrorKind::Busy.to_string()
+    } else {
+        message.to_string()
+    }
+}
+
+/// A probe that could not run, shown as the failed card.
+fn failed_probe(message: impl Into<String>) -> ProbeResult {
+    ProbeResult {
+        ok: false,
+        version: None,
+        program: String::new(),
+        elapsed_ms: 0,
+        error: Some(message.into()),
+    }
 }
 
 /// A `Tell::Gifs` on its way to the GIF popover.
@@ -218,6 +392,15 @@ pub enum Tell {
     },
     /// The review was closed or discarded on the daemon.
     Left(PrRef),
+    /// What the agent of a review did.
+    Agent(AgentTell),
+    /// The review's chat log, in answer to `Ask::AgentLog`.
+    AgentLog {
+        pr: PrRef,
+        entries: Vec<AgentLogEntry>,
+    },
+    /// The harness test finished.
+    Probe(ProbeResult),
     /// The daemon's answer to `FetchMedia`: the file in its media cache, or why there is none.
     Media {
         url: String,
@@ -373,6 +556,11 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
             url: url.clone(),
             file: Err(MediaError::transient("Not connected to clusiad")),
         }),
+        Ask::AgentSend { pr, .. } => teller.send(Tell::Agent(AgentTell::Refused {
+            pr: pr.clone(),
+            message: "Not connected to clusiad — not sent".into(),
+        })),
+        Ask::Probe => teller.send(Tell::Probe(failed_probe("Not connected to clusiad"))),
         Ask::SearchGifs { .. } => teller.send(Tell::Gifs(Err((
             ErrorCode::Offline,
             "Not connected to clusiad".into(),
@@ -410,6 +598,7 @@ async fn session(
         topics::SYNC,
         topics::REVIEWS,
         topics::WINDOW,
+        topics::AGENT,
     ];
     client
         .request(Command::Subscribe {
@@ -430,6 +619,7 @@ async fn session(
     let reopened: Vec<PrRef> = open_set(open).iter().cloned().collect();
     for pr in reopened {
         refetch(&mut client, &pr, teller).await?;
+        fetch_log(&mut client, &mut snap, open, teller, pr).await?;
     }
     // Asking Giphy and `gh` and scanning the folders can take seconds: they come after the first
     // snapshot.
@@ -489,7 +679,11 @@ async fn follow(
         {
             refetch(client, pr, teller).await?;
         }
-        _ => {}
+        other => {
+            if let Some(tell) = AgentTell::from_event(other) {
+                teller.send(Tell::Agent(tell));
+            }
+        }
     }
     Ok(())
 }
@@ -788,6 +982,42 @@ async fn answer(
             }),
             Err(e) => return Err(lost(e)),
         },
+        Ask::AgentSend { pr, text } => {
+            match client
+                .request(Command::AgentSend {
+                    pr: pr.clone(),
+                    text,
+                })
+                .await
+            {
+                Ok(_) => {}
+                Err(ClientError::Server(e)) => teller.send(Tell::Agent(AgentTell::Refused {
+                    pr,
+                    message: refusal_text(e.code, &e.message),
+                })),
+                Err(e) => return Err(lost(e)),
+            }
+        }
+        Ask::AgentCancel { pr } => {
+            notify(client, teller, Command::AgentCancel { pr }, "").await?;
+        }
+        Ask::AcceptSuggestion { pr, id, body } => {
+            let cmd = Command::AcceptSuggestion {
+                pr: pr.clone(),
+                id: id.clone(),
+                body,
+            };
+            suggestion_write(client, teller, cmd, pr, id, true).await?;
+        }
+        Ask::DismissSuggestion { pr, id } => {
+            let cmd = Command::DismissSuggestion {
+                pr: pr.clone(),
+                id: id.clone(),
+            };
+            suggestion_write(client, teller, cmd, pr, id, false).await?;
+        }
+        Ask::AgentLog { pr } => fetch_log(client, snap, open, teller, pr).await?,
+        Ask::Probe => spawn_worker(paths, teller, open, Ask::Probe),
     }
     Ok(())
 }
@@ -806,6 +1036,56 @@ async fn draft_write(
             pr,
             ticket,
             message: e.message,
+        }),
+        Err(e) => return Err(lost(e)),
+    }
+    Ok(())
+}
+
+/// Asks for the chat log of `pr` and tells it. The agent events that arrived while the reply
+/// was awaited were written to the log before it was read, so they are dropped (they would
+/// show twice); every other buffered event is handled as usual.
+async fn fetch_log(
+    client: &mut Client,
+    snap: &mut Snapshot,
+    open: &OpenSet,
+    teller: &Teller,
+    pr: PrRef,
+) -> Result<(), String> {
+    let reply = request(client, Command::GetAgentLog { pr: pr.clone() }).await?;
+    for (_, event) in client.take_events() {
+        if AgentTell::from_event(&event).is_some() {
+            continue;
+        }
+        follow(client, open, &event, teller).await?;
+        let todo = take(snap, event, teller);
+        fetch(client, snap, todo).await?;
+    }
+    if let Some(Reply::AgentLog(entries)) = reply {
+        teller.send(Tell::AgentLog { pr, entries });
+    }
+    Ok(())
+}
+
+/// `AcceptSuggestion` / `DismissSuggestion`: `Handled` when it went through, else a warning.
+async fn suggestion_write(
+    client: &mut Client,
+    teller: &Teller,
+    cmd: Command,
+    pr: PrRef,
+    id: String,
+    accepted: bool,
+) -> Result<(), String> {
+    match client.request(cmd).await {
+        Ok(_) => teller.send(Tell::Agent(AgentTell::Handled { pr, id, accepted })),
+        // The daemon says `NotFound` for a suggestion that is no longer waiting (handled from
+        // another window or the CLI): for the card that is the same as done.
+        Err(ClientError::Server(e)) if e.code == ErrorCode::NotFound => {
+            teller.send(Tell::Agent(AgentTell::Handled { pr, id, accepted }));
+        }
+        Err(ClientError::Server(e)) => teller.send(Tell::Notice {
+            text: e.message,
+            warning: true,
         }),
         Err(e) => return Err(lost(e)),
     }
@@ -843,7 +1123,20 @@ async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
             forget_finished(&open, &tell);
             teller.send(tell);
         }
+        Ask::Probe => teller.send(probe(&socket).await),
         _ => {}
+    }
+}
+
+async fn probe(socket: &Path) -> Tell {
+    let mut client = match worker(socket).await {
+        Ok(client) => client,
+        Err(message) => return Tell::Probe(failed_probe(message)),
+    };
+    match client.request(Command::HarnessProbe).await {
+        Ok(Reply::Probe(result)) => Tell::Probe(result),
+        Ok(_) => Tell::Probe(failed_probe("Unexpected reply from clusiad")),
+        Err(e) => Tell::Probe(failed_probe(message_of(e))),
     }
 }
 
@@ -1048,6 +1341,7 @@ pub struct Model {
     pub connection: Connection,
     /// The daemon's last refusal per config key, shown next to that field.
     pub rejected: HashMap<String, String>,
+    pub probe: ProbeState,
 }
 
 /// Where UI actions go: the bridge in live mode, `recorded` otherwise (demo mode, tests).
@@ -1181,6 +1475,7 @@ pub(crate) fn pump(
     mut reviews: MessageWriter<ReviewEvent>,
     mut media: ResMut<MediaCache>,
     mut gifs: MessageWriter<GifsArrived>,
+    mut chats: ResMut<Chats>,
     time: Res<Time>,
 ) {
     let Some(inbox) = inbox else { return };
@@ -1236,6 +1531,9 @@ pub(crate) fn pump(
                 until: time.elapsed_secs_f64() + TOAST_SECS,
             }),
             Tell::Media { url, file } => media.arrive(url, file),
+            Tell::Agent(agent) => chats.apply(&agent),
+            Tell::AgentLog { pr, entries } => chats.replay(&pr, &entries),
+            Tell::Probe(result) => model.probe = ProbeState::Done(result),
             _ => {} // the other review tells were applied above
         }
     }
@@ -1292,7 +1590,7 @@ pub(crate) fn demo_answers(
                     tells.push(Tell::Conversation { pr, conversation });
                 }
             }
-            Ask::MarkSeen(_) | Ask::RefreshStatus => {}
+            Ask::MarkSeen(_) | Ask::RefreshStatus | Ask::AgentLog { .. } => {}
             Ask::AddItem {
                 pr,
                 kind,
@@ -1684,6 +1982,7 @@ mod tests {
                 .add_message::<AppExit>()
                 .init_resource::<MediaCache>()
                 .insert_resource(ReviewTabs::default())
+                .init_resource::<Chats>()
                 .add_plugins(BridgePlugin {
                     mode: Mode::Demo { theme: forced },
                     paths: Paths::new(home.path()),
@@ -1733,5 +2032,131 @@ mod tests {
         open_set(&open).insert(pr.clone());
         forget_finished(&open, &Tell::Left(pr));
         assert!(open_set(&open).is_empty());
+    }
+
+    #[test]
+    fn agent_events_become_agent_tells() {
+        use clusia_protocol::{AgentErrorKind, SessionStateKind, Suggestion};
+        let pr = fixture::demo_pr();
+        let suggestion = Suggestion {
+            id: "sug-0123456789ab".into(),
+            file: "a.rs".into(),
+            line: Some(3),
+            start_line: None,
+            end_line: None,
+            body: "x".into(),
+        };
+        let cases = [
+            (
+                Event::AgentChunk {
+                    pr: pr.clone(),
+                    turn: 2,
+                    text: "hi".into(),
+                },
+                AgentTell::Chunk {
+                    pr: pr.clone(),
+                    turn: 2,
+                    text: "hi".into(),
+                },
+            ),
+            (
+                Event::AgentToolUse {
+                    pr: pr.clone(),
+                    turn: 2,
+                    summary: "Read a.rs".into(),
+                },
+                AgentTell::ToolUse {
+                    pr: pr.clone(),
+                    turn: 2,
+                    summary: "Read a.rs".into(),
+                },
+            ),
+            (
+                Event::AgentDenied {
+                    pr: pr.clone(),
+                    turn: 2,
+                    tool: "Bash".into(),
+                    detail: "ls".into(),
+                },
+                AgentTell::Denied {
+                    pr: pr.clone(),
+                    turn: 2,
+                    tool: "Bash".into(),
+                    detail: "ls".into(),
+                },
+            ),
+            (
+                Event::AgentSuggestion {
+                    pr: pr.clone(),
+                    turn: 2,
+                    suggestion: suggestion.clone(),
+                },
+                AgentTell::Suggestion {
+                    pr: pr.clone(),
+                    turn: 2,
+                    suggestion,
+                },
+            ),
+            (
+                Event::AgentDone {
+                    pr: pr.clone(),
+                    turn: 2,
+                    duration_ms: 5,
+                },
+                AgentTell::Done {
+                    pr: pr.clone(),
+                    turn: 2,
+                    duration_ms: 5,
+                },
+            ),
+            (
+                Event::AgentError {
+                    pr: pr.clone(),
+                    turn: 2,
+                    kind: AgentErrorKind::Crashed,
+                    message: "boom".into(),
+                },
+                AgentTell::Error {
+                    pr: pr.clone(),
+                    turn: 2,
+                    kind: AgentErrorKind::Crashed,
+                    message: "boom".into(),
+                },
+            ),
+            (
+                Event::SessionState {
+                    pr: pr.clone(),
+                    state: SessionStateKind::Queued,
+                },
+                AgentTell::State {
+                    pr: pr.clone(),
+                    state: SessionStateKind::Queued,
+                },
+            ),
+        ];
+        for (event, tell) in cases {
+            assert_eq!(
+                AgentTell::from_event(&event),
+                Some(tell.clone()),
+                "{event:?}"
+            );
+            assert_eq!(tell.pr(), &pr);
+        }
+        assert_eq!(AgentTell::from_event(&Event::Stopping), None);
+    }
+
+    #[test]
+    fn refusals_read_like_the_chat() {
+        assert_eq!(
+            refusal_text(ErrorCode::Busy, "busy"),
+            "The agent is busy: wait for the current turn"
+        );
+        assert_eq!(
+            refusal_text(
+                ErrorCode::InvalidState,
+                "no review for acme/widgets#1; open it first"
+            ),
+            "no review for acme/widgets#1; open it first"
+        );
     }
 }

@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use crate::nav::NavSystems;
 use crate::review_state::open_new_tabs;
 
+pub mod agent;
 pub mod comments;
 pub mod diff;
 pub mod editor;
@@ -39,6 +40,7 @@ impl Plugin for ReviewPlugin {
             .add_plugins((
                 finalize::FinalizePlugin,
                 leave::LeavePlugin,
+                agent::AgentPanel,
                 crate::ui::composer::ComposerPlugin,
             ));
     }

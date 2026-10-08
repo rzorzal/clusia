@@ -283,6 +283,7 @@ impl Plugin for ReviewStatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ReviewTabs>()
             .init_resource::<Tickets>()
+            .init_resource::<crate::screens::review::agent::Chats>()
             .add_message::<ReviewEvent>()
             .add_systems(Update, open_new_tabs.after(NavSystems));
     }
