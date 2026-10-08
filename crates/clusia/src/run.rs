@@ -9,8 +9,10 @@ use clusia_protocol::{
 };
 use serde_json::json;
 
-use crate::cli::{AuthCommand, Command, ConfigCommand, DaemonCommand, InstallArgs, UninstallArgs};
-use crate::{install, review, spawn};
+use crate::cli::{
+    AgentCommand, AuthCommand, Command, ConfigCommand, DaemonCommand, InstallArgs, UninstallArgs,
+};
+use crate::{agent, install, review, spawn};
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
 pub struct Output {
@@ -68,7 +70,12 @@ impl CliError {
     }
 }
 
-pub async fn run(paths: &Paths, home: Option<&Path>, command: Command) -> Result<Output, CliError> {
+pub async fn run(
+    paths: &Paths,
+    home: Option<&Path>,
+    command: Command,
+    json: bool,
+) -> Result<Output, CliError> {
     match command {
         Command::Daemon(DaemonCommand::Start) => spawn::start(paths, home).await,
         Command::Daemon(DaemonCommand::Stop) => spawn::stop(paths).await,
@@ -81,6 +88,9 @@ pub async fn run(paths: &Paths, home: Option<&Path>, command: Command) -> Result
         Command::Open { pr } => review::open(paths, home, &pr).await,
         Command::Review(cmd) => review::run(paths, home, cmd).await,
         Command::Activity => review::activity(paths, home).await,
+        Command::Ask { pr, text } => agent::ask(paths, home, &pr, &text, json).await,
+        Command::Agent(AgentCommand::Log { pr }) => agent::log(paths, home, &pr).await,
+        Command::Agent(AgentCommand::Stop { pr }) => agent::stop(paths, home, &pr).await,
         Command::Install(args) => install_command(paths, home, &args),
         Command::Uninstall(args) => uninstall_command(paths, home, &args),
     }

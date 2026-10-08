@@ -1757,6 +1757,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clusia-core",
+ "clusia-harness",
  "clusia-protocol",
  "clusia-store",
  "libc",

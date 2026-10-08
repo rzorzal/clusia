@@ -11,7 +11,7 @@ use serde_json::json;
 use crate::cli::{ReviewCommand, VerdictArg};
 use crate::run::{CliError, Output, connect, unexpected, uptime};
 
-fn parse_pr(s: &str) -> Result<PrRef, CliError> {
+pub(crate) fn parse_pr(s: &str) -> Result<PrRef, CliError> {
     s.parse()
         .map_err(|e: clusia_core::PrRefError| CliError::Other(e.to_string()))
 }
