@@ -18,6 +18,8 @@ pub mod topics {
     pub const WINDOW: &str = "window";
     /// What the tray shows and posts: `Notify` and `InboxChanged`.
     pub const TRAY: &str = "tray";
+    /// The review agent's chat: every `Agent*` event and `SessionState`.
+    pub const AGENT: &str = "agent";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,6 +201,34 @@ pub enum Command {
     MarkInboxSeen {
         ids: Vec<String>,
     },
+    /// A message to the review's agent. It runs now, waits behind the running turn, or is
+    /// refused with `ErrorCode::Busy` when one is already waiting.
+    AgentSend {
+        pr: PrRef,
+        text: String,
+    },
+    /// Stop the review's running turn and drop the one waiting behind it.
+    AgentCancel {
+        pr: PrRef,
+    },
+    /// Turn a suggestion into a draft item, with `body` instead of the agent's text when set.
+    AcceptSuggestion {
+        pr: PrRef,
+        id: String,
+        #[serde(default)]
+        body: Option<String>,
+    },
+    /// Never show this suggestion again.
+    DismissSuggestion {
+        pr: PrRef,
+        id: String,
+    },
+    /// Everything the agent chat of this review said, oldest first.
+    GetAgentLog {
+        pr: PrRef,
+    },
+    /// Ask the configured agent program for its version.
+    HarnessProbe,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,6 +267,12 @@ pub enum Reply {
     FirstRun(FirstRun),
     GiphyKeyStatus(GiphyKeyStatus),
     Inbox(Vec<InboxItem>),
+    /// The id of the turn that `AgentSend` started or queued.
+    AgentTurn {
+        turn: u64,
+    },
+    AgentLog(Vec<AgentLogEntry>),
+    Probe(ProbeResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +431,8 @@ pub enum ErrorCode {
     Refused,
     /// A needed setting is missing (e.g. no Giphy key).
     NotConfigured,
+    /// The review's agent already has a turn running and one waiting.
+    Busy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -445,6 +483,50 @@ pub enum Event {
     },
     /// The daemon is shutting down on request (`Shutdown`); clients should close.
     Stopping,
+    /// Part of the agent's answer (topic `agent`).
+    AgentChunk {
+        pr: PrRef,
+        turn: u64,
+        text: String,
+    },
+    /// The agent used a tool, e.g. "Read src/auth/store.rs" (topic `agent`).
+    AgentToolUse {
+        pr: PrRef,
+        turn: u64,
+        summary: String,
+    },
+    /// A tool the agent was not allowed to use (topic `agent`).
+    AgentDenied {
+        pr: PrRef,
+        turn: u64,
+        tool: String,
+        detail: String,
+    },
+    /// A comment the agent suggests; it joins the draft only through `AcceptSuggestion`
+    /// (topic `agent`).
+    AgentSuggestion {
+        pr: PrRef,
+        turn: u64,
+        suggestion: Suggestion,
+    },
+    /// The turn ended (topic `agent`).
+    AgentDone {
+        pr: PrRef,
+        turn: u64,
+        duration_ms: u64,
+    },
+    /// The turn failed or was interrupted (topic `agent`).
+    AgentError {
+        pr: PrRef,
+        turn: u64,
+        kind: AgentErrorKind,
+        message: String,
+    },
+    /// Where the review's agent session stands (topic `agent`).
+    SessionState {
+        pr: PrRef,
+        state: SessionStateKind,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -634,6 +716,126 @@ pub struct Harness {
     pub kind: HarnessKind,
     pub path: Option<String>,
     pub version: Option<String>,
+}
+
+/// A review comment the agent proposes. The human accepts, edits or dismisses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Suggestion {
+    /// `sug-` and the first 12 hex digits of the hash of file, lines and body: the same
+    /// suggestion always has the same id.
+    pub id: String,
+    /// Path relative to the repository root.
+    pub file: String,
+    /// A single line; `None` when the suggestion is a range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentErrorKind {
+    NotInstalled,
+    NotSignedIn,
+    UsageLimit,
+    Crashed,
+    Interrupted,
+    Unparsed,
+    Busy,
+}
+
+impl AgentErrorKind {
+    /// The chat line for this failure when the program said nothing more specific.
+    pub fn default_message(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "Install Claude Code or set its path",
+            Self::NotSignedIn => "Run `claude` once in a terminal",
+            Self::UsageLimit => "Claude Code reached its usage limit",
+            Self::Crashed => "Claude Code stopped unexpectedly",
+            Self::Interrupted => "The turn was interrupted",
+            Self::Unparsed => "Claude Code answered in a format Clúsia does not know",
+            Self::Busy => "The agent is busy: wait for the current turn",
+        }
+    }
+}
+
+impl std::fmt::Display for AgentErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.default_message())
+    }
+}
+
+/// Where a review's agent session stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStateKind {
+    /// No session: nothing was asked yet, or the review ended.
+    None,
+    Ready,
+    Running,
+    /// A message is waiting for the running turn to end.
+    Queued,
+}
+
+/// One line of the agent chat as the daemon logged it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentLogEntry {
+    /// What the human sent.
+    User {
+        at: i64,
+        turn: u64,
+        text: String,
+    },
+    Text {
+        at: i64,
+        turn: u64,
+        text: String,
+    },
+    ToolUse {
+        at: i64,
+        turn: u64,
+        summary: String,
+    },
+    Denied {
+        at: i64,
+        turn: u64,
+        tool: String,
+        detail: String,
+    },
+    Suggestion {
+        at: i64,
+        turn: u64,
+        suggestion: Suggestion,
+    },
+    Done {
+        at: i64,
+        turn: u64,
+        duration_ms: u64,
+    },
+    Error {
+        at: i64,
+        turn: u64,
+        kind: AgentErrorKind,
+        message: String,
+    },
+}
+
+/// The answer to `HarnessProbe`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeResult {
+    pub ok: bool,
+    /// What the program printed for `--version`.
+    pub version: Option<String>,
+    /// The program that was run.
+    pub program: String,
+    pub elapsed_ms: u64,
+    /// Why it failed, when `ok` is false.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1849,5 +2051,316 @@ mod tests {
             ..with_commit
         };
         assert!(wire(&without).ends_with(r#""url":"u"}"#));
+    }
+
+    fn acme() -> PrRef {
+        "acme/widgets#7".parse().unwrap()
+    }
+
+    fn suggestion() -> Suggestion {
+        Suggestion {
+            id: "sug-0123456789ab".into(),
+            file: "src/auth/store.rs".into(),
+            line: Some(44),
+            start_line: None,
+            end_line: None,
+            body: "Check the expiry.".into(),
+        }
+    }
+
+    #[test]
+    fn agent_messages_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 4, cmd });
+        assert_eq!(
+            request(Command::AgentSend {
+                pr: acme(),
+                text: "is the expiry checked?".into()
+            }),
+            r#"{"type":"request","id":4,"cmd":{"agent_send":{"pr":"acme/widgets#7","text":"is the expiry checked?"}}}"#
+        );
+        assert_eq!(
+            request(Command::AgentCancel { pr: acme() }),
+            r#"{"type":"request","id":4,"cmd":{"agent_cancel":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::AcceptSuggestion {
+                pr: acme(),
+                id: "sug-1".into(),
+                body: None
+            }),
+            r#"{"type":"request","id":4,"cmd":{"accept_suggestion":{"pr":"acme/widgets#7","id":"sug-1","body":null}}}"#
+        );
+        assert_eq!(
+            request(Command::AcceptSuggestion {
+                pr: acme(),
+                id: "sug-1".into(),
+                body: Some("Better text".into())
+            }),
+            r#"{"type":"request","id":4,"cmd":{"accept_suggestion":{"pr":"acme/widgets#7","id":"sug-1","body":"Better text"}}}"#
+        );
+        assert_eq!(
+            request(Command::DismissSuggestion {
+                pr: acme(),
+                id: "sug-1".into()
+            }),
+            r#"{"type":"request","id":4,"cmd":{"dismiss_suggestion":{"pr":"acme/widgets#7","id":"sug-1"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetAgentLog { pr: acme() }),
+            r#"{"type":"request","id":4,"cmd":{"get_agent_log":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::HarnessProbe),
+            r#"{"type":"request","id":4,"cmd":"harness_probe"}"#
+        );
+        let old: Command =
+            serde_json::from_str(r#"{"accept_suggestion":{"pr":"acme/widgets#7","id":"sug-1"}}"#)
+                .unwrap();
+        assert_eq!(
+            old,
+            Command::AcceptSuggestion {
+                pr: acme(),
+                id: "sug-1".into(),
+                body: None
+            },
+            "body is optional on the wire"
+        );
+    }
+
+    #[test]
+    fn agent_turn_reply_wire_format() {
+        assert_eq!(
+            wire(&ServerMessage::Response {
+                id: 4,
+                result: Outcome::Ok(Reply::AgentTurn { turn: 3 }),
+            }),
+            r#"{"type":"response","id":4,"result":{"ok":{"agent_turn":{"turn":3}}}}"#
+        );
+        assert_eq!(
+            wire(&ServerMessage::Response {
+                id: 4,
+                result: Outcome::Err(ProtocolError::new(
+                    ErrorCode::Busy,
+                    AgentErrorKind::Busy.default_message()
+                )),
+            }),
+            r#"{"type":"response","id":4,"result":{"err":{"code":"busy","message":"The agent is busy: wait for the current turn"}}}"#
+        );
+    }
+
+    #[test]
+    fn agent_events_wire_format() {
+        let event = |event| {
+            wire(&ServerMessage::Event {
+                topic: topics::AGENT.into(),
+                event,
+            })
+        };
+        assert_eq!(topics::AGENT, "agent");
+        assert_eq!(
+            event(Event::AgentChunk {
+                pr: acme(),
+                turn: 1,
+                text: "Hi".into()
+            }),
+            r#"{"type":"event","topic":"agent","event":{"agent_chunk":{"pr":"acme/widgets#7","turn":1,"text":"Hi"}}}"#
+        );
+        assert_eq!(
+            event(Event::AgentToolUse {
+                pr: acme(),
+                turn: 1,
+                summary: "Read src/auth/store.rs".into()
+            }),
+            r#"{"type":"event","topic":"agent","event":{"agent_tool_use":{"pr":"acme/widgets#7","turn":1,"summary":"Read src/auth/store.rs"}}}"#
+        );
+        assert_eq!(
+            event(Event::AgentDenied {
+                pr: acme(),
+                turn: 1,
+                tool: "Bash".into(),
+                detail: "cargo --version".into()
+            }),
+            r#"{"type":"event","topic":"agent","event":{"agent_denied":{"pr":"acme/widgets#7","turn":1,"tool":"Bash","detail":"cargo --version"}}}"#
+        );
+        assert_eq!(
+            event(Event::AgentSuggestion {
+                pr: acme(),
+                turn: 1,
+                suggestion: suggestion()
+            }),
+            r#"{"type":"event","topic":"agent","event":{"agent_suggestion":{"pr":"acme/widgets#7","turn":1,"suggestion":{"id":"sug-0123456789ab","file":"src/auth/store.rs","line":44,"body":"Check the expiry."}}}}"#
+        );
+        assert_eq!(
+            event(Event::AgentDone {
+                pr: acme(),
+                turn: 1,
+                duration_ms: 6000
+            }),
+            r#"{"type":"event","topic":"agent","event":{"agent_done":{"pr":"acme/widgets#7","turn":1,"duration_ms":6000}}}"#
+        );
+        assert_eq!(
+            event(Event::AgentError {
+                pr: acme(),
+                turn: 2,
+                kind: AgentErrorKind::NotSignedIn,
+                message: "Run `claude` once in a terminal".into()
+            }),
+            r#"{"type":"event","topic":"agent","event":{"agent_error":{"pr":"acme/widgets#7","turn":2,"kind":"not_signed_in","message":"Run `claude` once in a terminal"}}}"#
+        );
+        assert_eq!(
+            event(Event::SessionState {
+                pr: acme(),
+                state: SessionStateKind::Queued
+            }),
+            r#"{"type":"event","topic":"agent","event":{"session_state":{"pr":"acme/widgets#7","state":"queued"}}}"#
+        );
+    }
+
+    #[test]
+    fn agent_log_and_probe_wire_format() {
+        let ok = |reply| {
+            wire(&ServerMessage::Response {
+                id: 5,
+                result: Outcome::Ok(reply),
+            })
+        };
+        assert_eq!(
+            ok(Reply::AgentLog(vec![
+                AgentLogEntry::User {
+                    at: 100,
+                    turn: 1,
+                    text: "hi".into()
+                },
+                AgentLogEntry::Suggestion {
+                    at: 101,
+                    turn: 1,
+                    suggestion: Suggestion {
+                        line: None,
+                        start_line: Some(40),
+                        end_line: Some(44),
+                        ..suggestion()
+                    }
+                },
+                AgentLogEntry::Error {
+                    at: 102,
+                    turn: 1,
+                    kind: AgentErrorKind::UsageLimit,
+                    message: "limit".into()
+                },
+            ])),
+            r#"{"type":"response","id":5,"result":{"ok":{"agent_log":[{"type":"user","at":100,"turn":1,"text":"hi"},{"type":"suggestion","at":101,"turn":1,"suggestion":{"id":"sug-0123456789ab","file":"src/auth/store.rs","start_line":40,"end_line":44,"body":"Check the expiry."}},{"type":"error","at":102,"turn":1,"kind":"usage_limit","message":"limit"}]}}}"#
+        );
+        assert_eq!(
+            ok(Reply::Probe(ProbeResult {
+                ok: true,
+                version: Some("2.1.294 (Claude Code)".into()),
+                program: "claude".into(),
+                elapsed_ms: 410,
+                error: None
+            })),
+            r#"{"type":"response","id":5,"result":{"ok":{"probe":{"ok":true,"version":"2.1.294 (Claude Code)","program":"claude","elapsed_ms":410,"error":null}}}}"#
+        );
+    }
+
+    #[test]
+    fn agent_enums_use_snake_case_and_read_aloud() {
+        let kinds = [
+            (AgentErrorKind::NotInstalled, "not_installed"),
+            (AgentErrorKind::NotSignedIn, "not_signed_in"),
+            (AgentErrorKind::UsageLimit, "usage_limit"),
+            (AgentErrorKind::Crashed, "crashed"),
+            (AgentErrorKind::Interrupted, "interrupted"),
+            (AgentErrorKind::Unparsed, "unparsed"),
+            (AgentErrorKind::Busy, "busy"),
+        ];
+        for (kind, name) in kinds {
+            assert_eq!(wire(&kind), format!("\"{name}\""));
+            assert_eq!(kind.to_string(), kind.default_message());
+            assert!(!kind.default_message().is_empty());
+        }
+        assert_eq!(
+            AgentErrorKind::NotInstalled.default_message(),
+            "Install Claude Code or set its path"
+        );
+        for (state, name) in [
+            (SessionStateKind::None, "none"),
+            (SessionStateKind::Ready, "ready"),
+            (SessionStateKind::Running, "running"),
+            (SessionStateKind::Queued, "queued"),
+        ] {
+            assert_eq!(wire(&state), format!("\"{name}\""));
+        }
+        assert_eq!(wire(&ErrorCode::Busy), r#""busy""#);
+    }
+
+    #[test]
+    fn every_agent_message_round_trips() {
+        for cmd in [
+            Command::AgentSend {
+                pr: acme(),
+                text: "t".into(),
+            },
+            Command::AgentCancel { pr: acme() },
+            Command::AcceptSuggestion {
+                pr: acme(),
+                id: "s".into(),
+                body: Some("b".into()),
+            },
+            Command::DismissSuggestion {
+                pr: acme(),
+                id: "s".into(),
+            },
+            Command::GetAgentLog { pr: acme() },
+            Command::HarnessProbe,
+        ] {
+            round_trip(ClientMessage::Request { id: 1, cmd });
+        }
+        for event in [
+            Event::AgentChunk {
+                pr: acme(),
+                turn: 1,
+                text: "t".into(),
+            },
+            Event::AgentSuggestion {
+                pr: acme(),
+                turn: 1,
+                suggestion: suggestion(),
+            },
+            Event::AgentError {
+                pr: acme(),
+                turn: 1,
+                kind: AgentErrorKind::Crashed,
+                message: "m".into(),
+            },
+            Event::SessionState {
+                pr: acme(),
+                state: SessionStateKind::None,
+            },
+        ] {
+            round_trip(ServerMessage::Event {
+                topic: topics::AGENT.into(),
+                event,
+            });
+        }
+        for reply in [
+            Reply::AgentTurn { turn: 9 },
+            Reply::AgentLog(vec![AgentLogEntry::Done {
+                at: 1,
+                turn: 1,
+                duration_ms: 2,
+            }]),
+            Reply::Probe(ProbeResult {
+                ok: false,
+                version: None,
+                program: "claude".into(),
+                elapsed_ms: 3,
+                error: Some("not found".into()),
+            }),
+        ] {
+            round_trip(ServerMessage::Response {
+                id: 2,
+                result: Outcome::Ok(reply),
+            });
+        }
     }
 }

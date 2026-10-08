@@ -144,7 +144,21 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             notifications::mark_seen(shared, &ids).await;
             Outcome::Ok(Reply::Ack)
         }
+        Command::AgentSend { .. }
+        | Command::AgentCancel { .. }
+        | Command::AcceptSuggestion { .. }
+        | Command::DismissSuggestion { .. }
+        | Command::GetAgentLog { .. }
+        | Command::HarnessProbe => agent_unavailable(),
     }
+}
+
+/// The daemon has no agent sessions: every agent command gets this answer.
+fn agent_unavailable() -> Outcome {
+    Outcome::Err(ProtocolError::new(
+        ErrorCode::InvalidState,
+        "the review agent is not available in this daemon",
+    ))
 }
 
 fn key_error(e: ConfigKeyError) -> Outcome {
