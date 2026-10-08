@@ -52,6 +52,8 @@ pub(crate) enum Refusal {
     Busy,
     NoReview(String),
     Stopping,
+    /// A summary of the same head is already running or waiting.
+    Summarizing,
 }
 
 impl Refusal {
@@ -63,6 +65,10 @@ impl Refusal {
             ),
             Refusal::NoReview(message) => (ErrorCode::InvalidState, message),
             Refusal::Stopping => (ErrorCode::InvalidState, "clusiad is stopping".to_string()),
+            Refusal::Summarizing => (
+                ErrorCode::Busy,
+                "Claude Code is already reading this version".to_string(),
+            ),
         };
         Outcome::Err(ProtocolError::new(code, message))
     }
@@ -128,6 +134,19 @@ struct Slot {
     queued: Option<Queued>,
     /// The id a first turn starts its session with, kept until the CLI confirms the session.
     fresh_session: Option<String>,
+    /// The summary turn running or waiting, and the head it describes. The head is recorded
+    /// only when that turn ends well, so until then this is what keeps a second open of the
+    /// same head from asking again.
+    summarizing: Option<(u64, String)>,
+}
+
+impl Slot {
+    /// Turn `turn` ended or was dropped: if it was the summary, the head may be asked again.
+    fn summary_over(&mut self, turn: u64) {
+        if self.summarizing.as_ref().is_some_and(|(t, _)| *t == turn) {
+            self.summarizing = None;
+        }
+    }
 }
 
 /// The running agent turns of every review.
@@ -206,11 +225,19 @@ impl Sessions {
                 return Err(Refusal::Stopping);
             }
             let slot = table.entry(pr.clone()).or_default();
+            if let Some(head) = &prompt.summary_for
+                && slot.summarizing.as_ref().is_some_and(|(_, h)| h == head)
+            {
+                return Err(Refusal::Summarizing);
+            }
             if slot.running.is_some() && slot.queued.is_some() {
                 return Err(Refusal::Busy);
             }
             slot.last_turn = slot.last_turn.max(floor) + 1;
             let turn = slot.last_turn;
+            if let Some(head) = &prompt.summary_for {
+                slot.summarizing = Some((turn, head.clone()));
+            }
             if slot.running.is_some() {
                 slot.queued = Some(Queued {
                     turn,
@@ -245,15 +272,25 @@ impl Sessions {
         self.stop_with(shared, pr, Why::User);
     }
 
+    /// Like [`Sessions::cancel`], for a review that ended: the chat says so, and a turn that
+    /// still finishes records and tells nothing. Does not wait, so the review lock may be held.
+    pub(crate) fn cancel_ended(&self, shared: &Shared, pr: &PrRef) {
+        self.stop_with(shared, pr, Why::Ended);
+    }
+
     fn stop_with(&self, shared: &Shared, pr: &PrRef, why: Why) {
         let (stop, dropped) = {
             let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
             let Some(slot) = table.get_mut(pr) else {
                 return;
             };
+            let queued = slot.queued.take();
+            if let Some(queued) = &queued {
+                slot.summary_over(queued.turn);
+            }
             (
                 slot.running.as_ref().map(|active| active.stop.clone()),
-                slot.queued.take(),
+                queued,
             )
         };
         if let Some(queued) = dropped {
@@ -334,9 +371,16 @@ impl Sessions {
     }
 
     /// Called when a turn ended: the queued turn takes over, or the session is ready.
-    fn next_after(&self, shared: &Shared, pr: &PrRef) -> Option<(u64, Prompt, Arc<Stop>)> {
+    /// What runs once `finished` is over: the waiting turn, or nothing.
+    fn next_after(
+        &self,
+        shared: &Shared,
+        pr: &PrRef,
+        finished: u64,
+    ) -> Option<(u64, Prompt, Arc<Stop>)> {
         let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
         let slot = table.get_mut(pr)?;
+        slot.summary_over(finished);
         match slot.queued.take() {
             Some(queued) => {
                 let stop = Stop::new();
@@ -393,7 +437,7 @@ async fn drive(
                 AgentErrorKind::Crashed.default_message().to_string(),
             );
         }
-        next = shared.sessions.next_after(&shared, &pr);
+        next = shared.sessions.next_after(&shared, &pr, turn);
     }
 }
 
@@ -673,6 +717,8 @@ struct Run<'a> {
     /// Some answer text already went out as chunks.
     streamed: bool,
     summary_for: Option<String>,
+    /// Why the turn was asked to stop: a turn whose review ended records and tells nothing.
+    stop: Arc<Stop>,
 }
 
 impl Run<'_> {
@@ -734,13 +780,22 @@ impl Run<'_> {
                 if !self.failed {
                     self.out.done(duration_ms);
                     if let Some(head) = self.summary_for.take() {
+                        // Checked under the review lock: the end of a review stops the turn
+                        // before it takes that lock to forget the summary, so a head written
+                        // here is either refused or forgotten after.
+                        let stop = self.stop.clone();
                         crate::agent::update_state(self.shared, self.out.pr, move |state| {
-                            state.last_summary_head = Some(head);
+                            if stop.why() != Why::Ended {
+                                state.last_summary_head = Some(head);
+                            }
                         })
                         .await;
                     }
                     crate::agent::refresh(self.shared, self.out.pr);
-                    crate::agent::notify_finished(self.shared, self.out.pr, self.out.turn).await;
+                    if self.stop.why() != Why::Ended {
+                        crate::agent::notify_finished(self.shared, self.out.pr, self.out.turn)
+                            .await;
+                    }
                 }
             }
         }
@@ -863,6 +918,7 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         failed: false,
         streamed: false,
         summary_for: prompt.summary_for.clone(),
+        stop: stop.clone(),
     };
     let limit = Duration::from_secs(u64::from(harness.turn_timeout_secs));
     let deadline = tokio::time::sleep(limit);
@@ -2033,5 +2089,148 @@ mod tests {
         assert!(state.dismissed.contains(&id));
         assert_eq!(state.last_summary_head, None);
         assert!(!lab.log(&pr).is_empty(), "the log stays");
+    }
+
+    #[tokio::test]
+    async fn two_accepts_at_once_add_one_item() {
+        let answer =
+            "```clusia-suggestion\n{\"file\":\"src/a.rs\",\"line\":2,\"body\":\"Why?\"}\n```\n";
+        let mut lab = lab(Script::one(Turn::answer(answer)));
+        let pr = pr(7);
+        lab.send(&pr, "review").await.unwrap();
+        let events = until(&mut lab.events, ready(&pr)).await;
+        let id = events
+            .iter()
+            .find_map(|e| match e {
+                Event::AgentSuggestion { suggestion, .. } => Some(suggestion.id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let files = vec![clusia_core::FileDiff {
+            path: "src/a.rs".into(),
+            previous_path: None,
+            status: "added".into(),
+            additions: 3,
+            deletions: 0,
+            patch: Some("@@ -0,0 +1,3 @@\n+a\n+b\n+c".into()),
+        }];
+        lab.shared
+            .files_cache
+            .lock()
+            .await
+            .insert(pr.clone(), ("h".into(), Arc::new(files)));
+
+        // Both accepts see the suggestion waiting before either can take the review.
+        let guard = reviews::lock(&lab.shared, &pr).await;
+        let accept = |shared: Arc<Shared>, pr: PrRef, id: String| async move {
+            crate::agent::accept(&shared, "test", &pr, &id, None).await
+        };
+        let first = tokio::spawn(accept(lab.shared.clone(), pr.clone(), id.clone()));
+        let second = tokio::spawn(accept(lab.shared.clone(), pr.clone(), id.clone()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(guard);
+        let outcomes = [first.await.unwrap(), second.await.unwrap()];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| matches!(o, Outcome::Ok(Reply::DraftItem(_))))
+                .count(),
+            1,
+            "{outcomes:?}"
+        );
+        let review = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+        assert_eq!(review.draft.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_discard_keeps_the_agent() {
+        let lab = lab(Script::one(Turn::hanging()));
+        let pr = pr(7);
+        lab.send(&pr, "review").await.unwrap();
+        let call = wait_calls(&lab, 1).await.remove(0);
+        let mut review = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+        review.state = clusia_core::ReviewState::Publishing;
+        save_review(&lab.shared.paths, &review).unwrap();
+
+        let outcome = reviews::discard(&lab.shared, "test", &pr).await;
+        assert!(
+            matches!(&outcome, Outcome::Err(e) if e.code == ErrorCode::InvalidState),
+            "{outcome:?}"
+        );
+        assert_eq!(lab.shared.sessions.state(&pr), SessionStateKind::Running);
+        assert!(FakeClaude::is_running(call.pid));
+        lab.shared.sessions.end(&lab.shared, &pr).await;
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_ends_after_its_review_ended_records_and_tells_nothing() {
+        let mut lab = lab(Script::one(Turn::answer("x")));
+        let pr = pr(7);
+        let finish = |stop: Arc<Stop>| {
+            let shared = lab.shared.clone();
+            let pr = pr.clone();
+            async move {
+                let mut run = Run {
+                    shared: &shared,
+                    out: Out::new(&shared, &pr, 1),
+                    filter: StreamFilter::default(),
+                    saw_final: false,
+                    failed: false,
+                    streamed: false,
+                    summary_for: Some("abc123".into()),
+                    stop,
+                };
+                run.handle(AgentEvent::Final {
+                    text: "The summary.".into(),
+                    duration_ms: 5,
+                    is_error: false,
+                })
+                .await;
+            }
+        };
+        let told = |events: &mut Events| {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|(_, e)| matches!(e, Event::InboxChanged { .. }))
+        };
+
+        let ended = Stop::new();
+        ended.fire(Why::Ended);
+        finish(ended).await;
+        let state =
+            clusia_store::agent::load_agent_state(&lab.shared.paths, &pr).unwrap_or_default();
+        assert_eq!(state.last_summary_head, None);
+        assert!(
+            !told(&mut lab.events),
+            "no notification for an ended review"
+        );
+
+        finish(Stop::new()).await;
+        let state = clusia_store::agent::load_agent_state(&lab.shared.paths, &pr).unwrap();
+        assert_eq!(state.last_summary_head.as_deref(), Some("abc123"));
+        assert!(told(&mut lab.events), "a live review is notified");
+    }
+
+    #[tokio::test]
+    async fn closing_an_empty_review_says_the_review_ended() {
+        let lab = lab(Script::one(Turn::hanging()));
+        let pr = pr(7);
+        lab.send(&pr, "review").await.unwrap();
+        wait_calls(&lab, 1).await;
+        assert!(matches!(
+            reviews::close(&lab.shared, "test", &pr).await,
+            Outcome::Ok(Reply::Ack)
+        ));
+        let mut message = None;
+        for _ in 0..50 {
+            message = lab.log(&pr).into_iter().find_map(|e| match e {
+                AgentLogEntry::Error { message, .. } => Some(message),
+                _ => None,
+            });
+            if message.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(message.as_deref(), Some("Stopped because the review ended"));
     }
 }

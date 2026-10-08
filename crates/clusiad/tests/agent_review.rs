@@ -152,6 +152,23 @@ async fn reopen_resumes_and_resummarizes_on_new_head() {
 }
 
 #[tokio::test]
+async fn reopening_while_the_summary_runs_asks_for_one_summary() {
+    let w = world().await;
+    let dir = fake_program(&w, Script::one(Turn::answer("The summary.").delay_ms(300))).await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    open(&mut c).await;
+    until(&mut watcher, ready).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        FakeClaude::calls(&dir).len(),
+        1,
+        "one summary for one head, even while it runs"
+    );
+}
+
+#[tokio::test]
 async fn accepting_a_suggestion_adds_an_agent_item() {
     let w = world().await;
     use_fake(&w, Script::one(Turn::answer(SUGGESTING))).await;

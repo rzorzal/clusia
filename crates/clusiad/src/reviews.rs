@@ -531,13 +531,24 @@ pub(crate) async fn add_item_as(
     origin: Origin,
     new: NewItem<'_>,
 ) -> Outcome {
+    let _guard = lock(shared, pr).await;
+    add_item_locked(shared, client, pr, origin, new).await
+}
+
+/// [`add_item_as`] for a caller that already holds the review lock.
+pub(crate) async fn add_item_locked(
+    shared: &Shared,
+    client: &str,
+    pr: &PrRef,
+    origin: Origin,
+    new: NewItem<'_>,
+) -> Outcome {
     let NewItem {
         kind,
         anchor,
         thread,
         body,
     } = new;
-    let _guard = lock(shared, pr).await;
     let mut review = match load_existing(shared, pr) {
         Ok(r) => r,
         Err(out) => return out,
@@ -636,7 +647,7 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
             ));
         }
         drop_cache(shared, pr);
-        shared.sessions.cancel(shared, pr);
+        shared.sessions.cancel_ended(shared, pr);
         crate::agent::forget(shared, pr);
         return Outcome::Ok(Reply::Ack);
     }
@@ -667,6 +678,16 @@ pub(crate) async fn cleanup_checkout(shared: &Shared, pr: &PrRef) {
 }
 
 pub(crate) async fn discard(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
+    // A discard that will be refused must not end the agent. Checked without the lock, which a
+    // running turn may be waiting for, and again under it below.
+    match load_existing(shared, pr) {
+        Ok(review) => {
+            if let Err(e) = review.state.apply(ReviewEvent::Discard) {
+                return invalid_state(e.to_string());
+            }
+        }
+        Err(out) => return out,
+    }
     crate::agent::stop(shared, pr).await;
     let _guard = lock(shared, pr).await;
     let mut review = match load_existing(shared, pr) {

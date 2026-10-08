@@ -20,7 +20,7 @@ use clusia_store::load_review_cache;
 use crate::agent_log;
 use crate::notifications;
 use crate::reviews;
-use crate::sessions::{Prompt, Sessions};
+use crate::sessions::{Prompt, Refusal, Sessions};
 use crate::state::Shared;
 use crate::sync::now_unix;
 
@@ -199,6 +199,7 @@ pub(crate) async fn on_open(shared: &Arc<Shared>, pr: &PrRef, head: &str) -> (St
     };
     match Sessions::submit(shared, pr, prompt).await {
         Ok(_) => (StepStatus::Done, "Claude Code is reading it".to_string()),
+        Err(Refusal::Summarizing) => skipped("Claude Code is already reading this version"),
         Err(_) => skipped("Claude Code is busy with this review"),
     }
 }
@@ -241,7 +242,9 @@ fn anchor_of(suggestion: &Suggestion) -> Option<AnchorInput> {
 }
 
 /// Turns a waiting suggestion into a draft item written by the agent. The text may be edited
-/// first. A suggestion the draft refuses (its line left the diff) stays waiting.
+/// first. A suggestion the draft refuses (its line left the diff) stays waiting. The check, the
+/// new item and the record that it was accepted happen under one review lock, so two accepts
+/// add one item.
 pub(crate) async fn accept(
     shared: &Shared,
     client: &str,
@@ -249,6 +252,7 @@ pub(crate) async fn accept(
     id: &str,
     body: Option<String>,
 ) -> Outcome {
+    let guard = reviews::lock(shared, pr).await;
     let Some(suggestion) = waiting(shared, pr, id) else {
         return not_waiting(id);
     };
@@ -265,12 +269,12 @@ pub(crate) async fn accept(
         thread: None,
         body: &body,
     };
-    let outcome = reviews::add_item_as(shared, client, pr, Origin::Agent, item).await;
+    let outcome = reviews::add_item_locked(shared, client, pr, Origin::Agent, item).await;
     if matches!(outcome, Outcome::Ok(Reply::DraftItem(_))) {
-        update_state(shared, pr, |state| {
+        write_state(shared, pr, |state| {
             state.accepted.insert(id.to_string());
-        })
-        .await;
+        });
+        drop(guard);
         refresh(shared, pr);
     }
     outcome
