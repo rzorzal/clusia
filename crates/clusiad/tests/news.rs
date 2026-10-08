@@ -141,7 +141,7 @@ async fn retention_removes_orphans_and_keeps_live_reviews() {
 
     let d = common::TestDaemon::start_in(dir).await;
     let gone = |p: std::path::PathBuf| async move {
-        for _ in 0..40 {
+        for _ in 0..200 {
             if !p.exists() {
                 return true;
             }

@@ -49,12 +49,14 @@ impl DaemonOptions {
             } else {
                 Arc::new(Keychain::new(Keychain::GITHUB_SERVICE))
             };
+        let search_paths = harness_dirs(
+            std::env::var_os("PATH"),
+            std::env::var_os("HOME").map(PathBuf::from),
+        );
         Self {
             github_api: var("CLUSIA_GITHUB_API"),
             github_token: var("CLUSIA_GITHUB_TOKEN"),
-            gh_program: var("CLUSIA_GH_BIN")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("gh")),
+            gh_program: gh_program_from(var("CLUSIA_GH_BIN"), &search_paths),
             secrets,
             background_sync: true,
             tray_program: tray_program_from(var("CLUSIA_TRAY_BIN"), std::env::current_exe().ok()),
@@ -63,10 +65,7 @@ impl DaemonOptions {
             media_allow_local: false,
             media_resolve: Vec::new(),
             giphy_api: var("CLUSIA_GIPHY_API"),
-            harness_search_paths: harness_dirs(
-                std::env::var_os("PATH"),
-                std::env::var_os("HOME").map(PathBuf::from),
-            ),
+            harness_search_paths: search_paths,
         }
     }
 }
@@ -81,6 +80,19 @@ pub fn tray_program_from(env: Option<String>, exe: Option<PathBuf>) -> Option<Pa
             .map(|e| e.with_file_name("clusia-tray"))
             .filter(|p| p.is_file()),
     }
+}
+
+/// `CLUSIA_GH_BIN` wins; otherwise the first `gh` found in `dirs`, which are searched in order
+/// (a window started from the Dock or by launchd has a bare `PATH`, so the usual install
+/// folders follow it); otherwise plain `gh`, left to the system's lookup.
+pub fn gh_program_from(env: Option<String>, dirs: &[PathBuf]) -> PathBuf {
+    if let Some(program) = env {
+        return PathBuf::from(program);
+    }
+    dirs.iter()
+        .map(|dir| dir.join("gh"))
+        .find(|candidate| crate::first_run::is_executable(candidate))
+        .unwrap_or_else(|| PathBuf::from("gh"))
 }
 
 /// The `PATH` folders, then the folders agent tools are usually installed in.
@@ -126,6 +138,43 @@ mod tests {
         assert_eq!(
             harness_dirs(None, None),
             ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn gh_is_taken_from_the_first_folder_that_has_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (bare, brew, local) = (
+            dir.path().join("bare"),
+            dir.path().join("brew"),
+            dir.path().join("local"),
+        );
+        for folder in [&bare, &brew, &local] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let install = |folder: &PathBuf, mode: u32| {
+            let gh = folder.join("gh");
+            std::fs::write(&gh, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(mode)).unwrap();
+            gh
+        };
+        let dirs = [bare.clone(), brew.clone(), local.clone()];
+        assert_eq!(gh_program_from(None, &dirs), PathBuf::from("gh"));
+        install(&bare, 0o644); // present but not runnable
+        let in_local = install(&local, 0o755);
+        assert_eq!(gh_program_from(None, &dirs), in_local);
+        let in_brew = install(&brew, 0o755);
+        assert_eq!(
+            gh_program_from(None, &dirs),
+            in_brew,
+            "the earlier folder wins"
+        );
+        assert_eq!(
+            gh_program_from(Some("/opt/custom/gh".into()), &dirs),
+            PathBuf::from("/opt/custom/gh"),
+            "the override wins over every folder"
         );
     }
 

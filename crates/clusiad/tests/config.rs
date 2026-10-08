@@ -95,7 +95,7 @@ async fn subscribers_receive_config_changed() {
         })
         .await
         .unwrap();
-    let (topic, event) = tokio::time::timeout(Duration::from_secs(2), watcher.next_event())
+    let (topic, event) = tokio::time::timeout(common::EVENT_WAIT, watcher.next_event())
         .await
         .unwrap()
         .unwrap();

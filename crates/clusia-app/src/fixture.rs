@@ -9,7 +9,8 @@ use clusia_core::{
 };
 use clusia_protocol::{
     AuthInfo, FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness, HarnessKind, NewsItem,
-    NewsKind, RepoFolder, ReviewSummary, ReviewView, SyncState, SyncStatus, TokenSource,
+    NewsKind, PermissionStatus, RepoFolder, ReviewSummary, ReviewView, SyncState, SyncStatus,
+    TokenSource,
 };
 
 use crate::snapshot::{GiphyKey, Snapshot};
@@ -34,6 +35,7 @@ pub fn demo(now: i64) -> Snapshot {
     };
     let day = 86_400;
     Snapshot {
+        notifications_permission: PermissionStatus::Allowed,
         config: Config::default(),
         assigned: vec![
             pr("clusia", 123, "feat: auth refresh", "octo", 300, false),
@@ -122,6 +124,7 @@ pub fn demo(now: i64) -> Snapshot {
         }),
         giphy_key: GiphyKey::Set,
         first_run: None,
+        first_run_open: false,
         lists_loaded: true,
         daemon_version: "demo".into(),
     }
@@ -391,6 +394,7 @@ fn demo_conversation(now: i64) -> PrConversation {
             body: "Looks good once the lock change lands.".into(),
             submitted_at: Some(rfc3339(now - 3 * 3600)),
             url: "https://github.com/rzorzal/clusia/pull/123#pullrequestreview-3001".into(),
+            commit_id: None,
         }],
         review_threads: vec![
             ReviewThread {

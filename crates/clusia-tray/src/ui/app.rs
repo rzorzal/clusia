@@ -18,14 +18,17 @@ use objc2_app_kit::{
     NSVisualEffectView,
 };
 use objc2_foundation::{
-    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRectEdge, NSSize, NSString,
+    NSBundle, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRectEdge, NSSize,
+    NSString,
 };
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::actions::{self, Action};
 use crate::data::{self, Outgoing, Update};
+use crate::launch::{self, LaunchReason, SystemHost};
 use crate::layout::{SEARCH_PLACEHOLDER, WIDTH, layout};
 use crate::model::TrayModel;
+use crate::notify::{self, Notifier, PermissionStatus, UNPoster};
 use crate::ui::icon;
 use crate::ui::paint::ContentView;
 
@@ -39,10 +42,14 @@ struct Ui {
     writes: UnboundedSender<Outgoing>,
     paths: Paths,
     app_bin: Option<PathBuf>,
+    /// `None` outside an app bundle: the system refuses notifications there.
+    notifier: Option<Notifier<UNPoster>>,
 }
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
+    /// A click that arrived before `UI` existed (one that launched the app); replayed once it does.
+    static EARLY_CLICK: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn now() -> i64 {
@@ -105,6 +112,11 @@ fn deliver(update: Update) {
                 ui.render(mtm);
             }
         }),
+        Update::Notify(note) => UI.with_borrow_mut(|ui| {
+            if let Some(notifier) = ui.as_mut().and_then(|ui| ui.notifier.as_mut()) {
+                notifier.notify(&note);
+            }
+        }),
         Update::Refreshed => UI.with_borrow_mut(|ui| {
             if let Some(ui) = ui {
                 ui.model.refresh_done();
@@ -125,6 +137,60 @@ fn deliver(update: Update) {
             NSApplication::sharedApplication(mtm).terminate(None);
         }
     }
+}
+
+/// The system reported the notification permission (hopped to the main queue).
+fn permission_changed(status: PermissionStatus) {
+    UI.with_borrow_mut(|ui| {
+        if let Some(ui) = ui
+            && let Some(notifier) = ui.notifier.as_mut()
+            && let Some(changed) = notifier.status_changed(status)
+        {
+            ui.send(Outgoing::Permission(changed));
+        }
+    });
+}
+
+/// Asks the system for the permission again: it can change in System Settings at any time.
+/// Only a change reaches the daemon.
+fn refresh_permission() {
+    UI.with_borrow(|ui| {
+        if let Some(notifier) = ui.as_ref().and_then(|ui| ui.notifier.as_ref()) {
+            notifier.refresh_status();
+        }
+    });
+}
+
+/// A notification was clicked: open what it points at, in the window or the browser.
+fn notification_clicked(open_json: &str) {
+    if UI.with_borrow(Option::is_none) {
+        EARLY_CLICK.set(Some(open_json.to_owned()));
+        return;
+    }
+    let Some(target) = notify::parse_open(open_json) else {
+        tracing::warn!("a clicked notification carried no target");
+        return;
+    };
+    let launch = UI.with_borrow(|ui| {
+        ui.as_ref().and_then(|ui| {
+            let action = actions::action_for(&target, ui.model.host());
+            actions::plan(&action, ui.app_bin.as_deref(), &ui.paths)
+        })
+    });
+    if let Some(launch) = launch {
+        actions::launch(&launch);
+    }
+}
+
+/// The poster, when this process is the main executable of an app bundle.
+fn make_poster(mtm: MainThreadMarker) -> Option<Notifier<UNPoster>> {
+    NSBundle::mainBundle().bundleIdentifier()?;
+    let poster = UNPoster::new(
+        mtm,
+        |json| DispatchQueue::main().exec_async(move || notification_clicked(&json)),
+        |status| DispatchQueue::main().exec_async(move || permission_changed(status)),
+    );
+    Some(Notifier::new(poster))
 }
 
 /// Ends the process with a failure status, so the daemon's supervisor restarts the tray.
@@ -174,9 +240,18 @@ fn show_turn_off_menu(
     menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(content));
 }
 
+struct Setup {
+    paths: Paths,
+    app_bin: Option<PathBuf>,
+    notifier: Option<Notifier<UNPoster>>,
+    reason: LaunchReason,
+    /// The `--home` this tray was started with (resolved), passed on to a daemon it starts.
+    home: Option<PathBuf>,
+}
+
 #[derive(Default)]
 struct DelegateIvars {
-    setup: RefCell<Option<(Paths, Option<PathBuf>)>>,
+    setup: RefCell<Option<Setup>>,
 }
 
 define_class!(
@@ -191,10 +266,23 @@ define_class!(
 
     // SAFETY: the method signature matches NSApplicationDelegate.
     unsafe impl NSApplicationDelegate for Delegate {
+        /// Opening the app again while it runs (Finder, Spotlight, `open`) shows the window.
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_handle_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
+            let launch = UI.with_borrow(|ui| {
+                ui.as_ref()
+                    .and_then(|ui| actions::plan(&Action::OpenHome, ui.app_bin.as_deref(), &ui.paths))
+            });
+            if let Some(launch) = launch {
+                actions::launch(&launch);
+            }
+            true
+        }
+
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
             let mtm = self.mtm();
-            let Some((paths, app_bin)) = self.ivars().setup.take() else { return };
+            let Some(Setup { paths, app_bin, notifier, reason, home }) = self.ivars().setup.take() else { return };
             let item = NSStatusBar::systemStatusBar().statusItemWithLength(icon::ITEM_LENGTH);
             if let Some(button) = item.button(mtm) {
                 button.setImage(Some(&icon::status_image(false)));
@@ -290,19 +378,45 @@ define_class!(
                 }
             }));
             let socket = paths.socket();
+            // Only a user opening the app installs the login item; the daemon's own tray never does.
+            let login_agent = (reason == LaunchReason::User).then(|| paths.launch_agent());
+            let host = SystemHost::new(paths.clone(), app_bin.clone(), home);
             let (writes, queue) = unbounded_channel();
-            UI.set(Some(Ui { model, item, popover, content, search, writes, paths, app_bin }));
+            UI.set(Some(Ui { model, item, popover, content, search, writes, paths, app_bin, notifier }));
             UI.with_borrow(|ui| {
                 if let Some(ui) = ui {
                     ui.render(mtm);
                 }
             });
+            refresh_permission();
+            if let Some(click) = EARLY_CLICK.take() {
+                notification_clicked(&click);
+            }
+            // The permission prompt waits, so the first banner is noticed. Only a user start asks:
+            // an unattended start just reads the status (above).
+            if launch::should_request_authorization(reason) {
+                let _ = DispatchQueue::main().after(
+                    dispatch2::DispatchTime::NOW.time(notify::AUTH_DELAY.as_nanos() as i64),
+                    || {
+                        UI.with_borrow_mut(|ui| {
+                            if let Some(notifier) = ui.as_mut().and_then(|ui| ui.notifier.as_mut()) {
+                                notifier.authorize();
+                            }
+                        });
+                    },
+                );
+            }
             // Start the data loop only now, so no update can arrive before `UI` exists.
             let spawned = std::thread::Builder::new().name("clusia-tray-data".into()).spawn(move || {
+                // Before the runtime exists: starting the daemon runs its own.
+                let up = launch::bring_up(reason, &host);
+                if let Some(e) = up.error {
+                    tracing::warn!(error = %e, "could not bring Clúsia up");
+                }
                 match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                     Ok(rt) => {
                         let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                            rt.block_on(data::run(socket, deliver_on_main, queue))
+                            rt.block_on(data::run_with(socket, deliver_on_main, queue, login_agent))
                         }));
                         if run.is_err() {
                             // Non-zero so the supervisor restarts us; exit 0 is reserved for "daemon gone".
@@ -316,6 +430,11 @@ define_class!(
                 fail(&format!("cannot start the data thread: {e}"));
             }
         }
+
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _notification: &NSNotification) {
+            refresh_permission();
+        }
     }
 
     // SAFETY: the method signature matches NSPopoverDelegate.
@@ -325,7 +444,10 @@ define_class!(
             let mtm = self.mtm();
             let window = UI.with_borrow_mut(|ui| {
                 ui.as_mut().and_then(|ui| {
-                    ui.model.mark_seen();
+                    let seen = ui.model.mark_seen();
+                    if !seen.is_empty() {
+                        ui.send(Outgoing::MarkInboxSeen(seen));
+                    }
                     ui.model.flush_query();
                     ui.push_writes();
                     ui.search.window()
@@ -401,6 +523,7 @@ define_class!(
                 unsafe { popover.performClose(None) };
                 return;
             }
+            refresh_permission();
             // Fresh ages ("2m") at open time.
             UI.with_borrow(|ui| {
                 if let Some(ui) = ui {
@@ -417,9 +540,9 @@ define_class!(
 );
 
 impl Delegate {
-    fn new(mtm: MainThreadMarker, paths: Paths, app_bin: Option<PathBuf>) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, setup: Setup) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
-            setup: RefCell::new(Some((paths, app_bin))),
+            setup: RefCell::new(Some(setup)),
         });
         // SAFETY: `init` is NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
@@ -427,10 +550,27 @@ impl Delegate {
 }
 
 /// Runs the menu bar tray until the daemon goes away.
-pub fn run(mtm: MainThreadMarker, paths: Paths, app_bin: Option<PathBuf>) {
+pub fn run(
+    mtm: MainThreadMarker,
+    paths: Paths,
+    app_bin: Option<PathBuf>,
+    reason: LaunchReason,
+    home: Option<PathBuf>,
+) {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    let delegate = Delegate::new(mtm, paths, app_bin);
+    // Registered before the run loop starts, so a click that launched the app is delivered.
+    let notifier = make_poster(mtm);
+    let delegate = Delegate::new(
+        mtm,
+        Setup {
+            paths,
+            app_bin,
+            notifier,
+            reason,
+            home,
+        },
+    );
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.run();
 }

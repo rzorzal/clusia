@@ -43,10 +43,60 @@ impl Home {
     }
 }
 
+/// The pids of every clusiad serving `home`, whichever client started it.
+fn daemons_of(home: &std::path::Path) -> Vec<String> {
+    let name = home.file_name().unwrap().to_string_lossy();
+    let out = Command::new("pgrep")
+        .args(["-f", &format!("clusiad --home .*{name}")])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(String::from)
+        .collect()
+}
+
 impl Drop for Home {
+    /// Stops the daemon the test started; one that does not stop in time is killed and waited
+    /// for, so no test leaves a daemon running on a deleted home. One that outlives the kill
+    /// too (a zombie, an unkillable process) fails the test instead of hanging it.
     fn drop(&mut self) {
         let _ = self.clusia(&["daemon", "stop"]);
+        let start = std::time::Instant::now();
+        let kill_after = std::time::Duration::from_secs(5);
+        let give_up = std::time::Duration::from_secs(10);
+        loop {
+            let left = daemons_of(self.dir.path());
+            if left.is_empty() {
+                return;
+            }
+            if start.elapsed() > give_up {
+                let message = format!("daemons still running after kill -9: {left:?}");
+                // A panic while already unwinding would abort the whole test binary.
+                if std::thread::panicking() {
+                    eprintln!("{message}");
+                    return;
+                }
+                panic!("{message}");
+            }
+            if start.elapsed() > kill_after {
+                for pid in &left {
+                    let _ = Command::new("kill").args(["-9", pid]).status();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
+}
+
+#[test]
+fn a_dropped_home_leaves_no_daemon_behind() {
+    let h = Home::new();
+    assert!(h.clusia(&["daemon", "start"]).status.success());
+    let dir = h.dir.path().to_path_buf();
+    assert_eq!(daemons_of(&dir).len(), 1, "the started daemon is found");
+    drop(h);
+    assert!(daemons_of(&dir).is_empty());
 }
 
 fn stdout(o: &Output) -> String {
@@ -640,4 +690,108 @@ mod review_flow {
             "no daemon was started"
         );
     }
+}
+
+#[test]
+fn install_dry_run_prints_the_plan_and_changes_nothing() {
+    let home = Home::new();
+    let apps = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let out = home.clusia(&[
+        "install",
+        "--dry-run",
+        "--applications",
+        apps.path().to_str().unwrap(),
+        "--bin-dir",
+        bin.path().to_str().unwrap(),
+        "--from",
+        "/tmp/built",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("main executable clusia-tray"), "{text}");
+    assert!(text.contains("<key>LSUIElement</key>"), "{text}");
+    assert!(text.contains("<key>RunAtLoad</key>"), "{text}");
+    assert!(
+        text.contains(&format!("{}/clusia", bin.path().display())),
+        "{text}"
+    );
+    assert_eq!(std::fs::read_dir(apps.path()).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(bin.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn install_for_another_data_folder_is_refused_unless_isolated() {
+    let home = Home::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (apps, bin) = (dir.path().join("apps"), dir.path().join("bin"));
+    // A folder with no binaries: should the refusal ever go missing, nothing gets installed.
+    let from = dir.path().join("built");
+    let out = home.clusia(&[
+        "install",
+        "--applications",
+        apps.to_str().unwrap(),
+        "--bin-dir",
+        bin.to_str().unwrap(),
+        "--from",
+        from.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(stderr(&out).contains("--no-launchctl"), "{}", stderr(&out));
+    assert!(!apps.exists() && !bin.exists());
+}
+
+#[test]
+fn uninstall_removes_the_bundle_the_agent_and_the_link_in_the_given_folders() {
+    let home = Home::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (apps, bin, agents) = (
+        dir.path().join("apps"),
+        dir.path().join("bin"),
+        dir.path().join("agents"),
+    );
+    let contents = apps.join("Clusia.app/Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    std::fs::write(
+        contents.join("Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>io.github.rzorzal.clusia</string></dict></plist>"#,
+    )
+    .unwrap();
+    std::fs::write(contents.join("MacOS/clusia"), "").unwrap();
+    std::fs::create_dir_all(&agents).unwrap();
+    let agent = agents.join("io.github.rzorzal.clusia.daemon.plist");
+    std::fs::write(
+        &agent,
+        r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Label</key><string>io.github.rzorzal.clusia.daemon</string></dict></plist>"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(contents.join("MacOS/clusia"), bin.join("clusia")).unwrap();
+    std::fs::write(bin.join("other"), "x").unwrap();
+
+    let out = home.clusia(&[
+        "--json",
+        "uninstall",
+        "--applications",
+        apps.to_str().unwrap(),
+        "--bin-dir",
+        bin.to_str().unwrap(),
+        "--agents-dir",
+        agents.to_str().unwrap(),
+        "--no-launchctl",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["removed"].as_array().unwrap().len(), 3, "{v}");
+    assert!(
+        v["kept"].as_array().unwrap().iter().any(|k| k
+            .as_str()
+            .unwrap()
+            .contains(home.dir.path().to_str().unwrap())),
+        "the data folder is the one given with --home: {v}"
+    );
+    assert!(!apps.join("Clusia.app").exists());
+    assert!(!agent.exists());
+    assert!(bin.join("clusia").symlink_metadata().is_err());
+    assert!(bin.join("other").exists(), "nothing else is touched");
 }

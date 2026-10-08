@@ -25,6 +25,9 @@ pub enum Scene {
     Gif,
     Rendered,
     FirstRun,
+    ConfigGeneral,
+    ConfigNotifications,
+    ConfigNotificationsBottom,
     ConfigMedia,
     ConfigAbout,
 }
@@ -41,6 +44,9 @@ pub struct Args {
     /// Open Config.
     #[arg(long)]
     pub config: bool,
+    /// Open Config on one page (`general`, `git`, `notifications`, …).
+    #[arg(long, value_name = "PAGE", conflicts_with_all = ["config", "review"])]
+    pub config_page: Option<String>,
     /// Show demo data: no daemon, nothing is saved.
     #[arg(long)]
     pub demo: bool,
@@ -70,6 +76,9 @@ impl Args {
             return Ok(WindowTarget::Review {
                 pr: pr.parse::<PrRef>()?,
             });
+        }
+        if let Some(page) = &self.config_page {
+            return Ok(WindowTarget::ConfigPage { page: page.clone() });
         }
         Ok(if self.config {
             WindowTarget::Config
@@ -157,6 +166,12 @@ mod tests {
             ("gif", Scene::Gif),
             ("rendered", Scene::Rendered),
             ("first-run", Scene::FirstRun),
+            ("config-general", Scene::ConfigGeneral),
+            ("config-notifications", Scene::ConfigNotifications),
+            (
+                "config-notifications-bottom",
+                Scene::ConfigNotificationsBottom,
+            ),
             ("config-media", Scene::ConfigMedia),
             ("config-about", Scene::ConfigAbout),
         ] {
@@ -173,5 +188,15 @@ mod tests {
         assert!(parse(&["--demo", "--light"]).unwrap().light);
         assert!(parse(&["--light"]).is_err(), "--light needs --demo");
         assert!(parse(&["--demo", "--dark", "--light"]).is_err());
+    }
+
+    #[test]
+    fn a_config_page_is_a_window_target() {
+        assert_eq!(
+            parse(&["--config-page", "git"]).unwrap().target().unwrap(),
+            WindowTarget::ConfigPage { page: "git".into() }
+        );
+        assert!(parse(&["--config-page", "git", "--config"]).is_err());
+        assert!(parse(&["--config-page", "git", "--review", "a/b#1"]).is_err());
     }
 }

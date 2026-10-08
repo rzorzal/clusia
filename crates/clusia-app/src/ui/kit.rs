@@ -2,6 +2,7 @@
 //! Builders return bundles. Colors are `Swatch` markers that `restyle` resolves against the
 //! current `Theme`, so a theme switch recolors everything without rebuilding a screen.
 
+use bevy::ecs::spawn::SpawnIter;
 use bevy::input::ButtonInput;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::input_focus::{FocusLost, InputFocus};
@@ -310,6 +311,73 @@ pub fn toggle(on: bool) -> impl Bundle {
     )
 }
 
+fn checkbox_box(on: bool, enabled: bool) -> impl Bundle {
+    let (fill, stroke) = match (on, enabled) {
+        (true, true) => (Swatch::Green, Swatch::Green),
+        (true, false) => (Swatch::Line, Swatch::Line),
+        (false, true) => (Swatch::Surface, Swatch::Faint),
+        (false, false) => (Swatch::Chrome, Swatch::Line),
+    };
+    (
+        Node {
+            width: px(18),
+            height: px(18),
+            border: px(1).all(),
+            border_radius: BorderRadius::all(px(4)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor::default(),
+        Fill(fill),
+        BorderColor::default(),
+        Stroke(stroke),
+        // A turned corner drawn from two borders: it needs no glyph from the bundled fonts.
+        Children::spawn(SpawnIter(
+            on.then(|| {
+                (
+                    CheckMark,
+                    Node {
+                        width: px(5),
+                        height: px(9),
+                        margin: UiRect::bottom(px(2)),
+                        border: UiRect {
+                            right: px(2),
+                            bottom: px(2),
+                            ..default()
+                        },
+                        ..default()
+                    },
+                    UiTransform::from_rotation(Rot2::degrees(45.0)),
+                    BorderColor::default(),
+                    Stroke(Swatch::OnGreen),
+                )
+            })
+            .into_iter(),
+        )),
+    )
+}
+
+/// The white tick inside a checked box.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CheckMark;
+
+/// A checkbox. Activating it should write the opposite value.
+pub fn checkbox(on: bool) -> impl Bundle {
+    (
+        checkbox_box(on, true),
+        (WidgetButton, Clickable),
+        Hovered::default(),
+        TabIndex(0),
+    )
+}
+
+/// A checkbox that cannot be changed: faint, not a button.
+pub fn disabled_checkbox(on: bool) -> impl Bundle {
+    checkbox_box(on, false)
+}
+
 pub fn chip(fonts: &UiFonts, label: &str, selected: bool) -> impl Bundle {
     let (fill, hover, t) = if selected {
         (
@@ -602,6 +670,21 @@ mod tests {
 
     fn bg(app: &mut App, e: Entity) -> Color {
         app.world().get::<BackgroundColor>(e).unwrap().0
+    }
+
+    #[test]
+    fn only_a_checked_box_has_a_tick() {
+        let mut app = testing::app(Snapshot::default());
+        app.world_mut().spawn(checkbox(true));
+        app.world_mut().spawn(checkbox(false));
+        app.world_mut().spawn(disabled_checkbox(true));
+        app.update();
+        let ticks = app
+            .world_mut()
+            .query::<&CheckMark>()
+            .iter(app.world())
+            .count();
+        assert_eq!(ticks, 2);
     }
 
     #[test]

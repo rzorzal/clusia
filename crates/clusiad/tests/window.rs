@@ -44,7 +44,7 @@ async fn open_window_reaches_listening_windows() {
             .unwrap(),
         Reply::Delivered(1)
     );
-    let (topic, event) = tokio::time::timeout(Duration::from_secs(5), window.next_event())
+    let (topic, event) = tokio::time::timeout(common::EVENT_WAIT, window.next_event())
         .await
         .expect("event arrives")
         .unwrap();

@@ -1,5 +1,8 @@
 //! The activity heatmap and stats (spec §7, Home and tray).
 
+use std::io;
+
+use clusia_core::{Activity, Paths};
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, Reply};
 use clusia_store::read_activity;
 
@@ -20,8 +23,17 @@ pub(crate) fn local_offset_secs(now: i64) -> i64 {
     if result_is_null { 0 } else { offset }
 }
 
+/// The activity log, read on a blocking thread: it is a whole-file scan that grows with use,
+/// and the async threads also serve every other request.
+pub(crate) async fn read_off_thread(paths: &Paths) -> io::Result<(Vec<Activity>, usize)> {
+    let paths = paths.clone();
+    tokio::task::spawn_blocking(move || read_activity(&paths))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e)))
+}
+
 pub(crate) async fn summary(shared: &Shared) -> Outcome {
-    match read_activity(&shared.paths) {
+    match read_off_thread(&shared.paths).await {
         Ok((activities, skipped)) => {
             if skipped > 0 {
                 tracing::debug!(skipped, "ignored unreadable activity lines");
@@ -42,6 +54,32 @@ pub(crate) async fn summary(shared: &Shared) -> Outcome {
 
 #[cfg(test)]
 mod tests {
+    use clusia_core::{Activity, ActivityKind, Paths};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_log_reads_the_same_off_the_async_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        std::fs::create_dir_all(paths.root()).unwrap();
+        for ts in [10, 20, 30] {
+            clusia_store::append_activity(
+                &paths,
+                &Activity {
+                    ts,
+                    kind: ActivityKind::ReviewOpened,
+                    pr: "acme/widgets#7".parse().unwrap(),
+                    client: "test".into(),
+                    url: None,
+                    note: None,
+                },
+            )
+            .unwrap();
+        }
+        let (items, skipped) = super::read_off_thread(&paths).await.unwrap();
+        assert_eq!((items.len(), skipped), (3, 0));
+        assert_eq!(items, clusia_store::read_activity(&paths).unwrap().0);
+    }
+
     #[test]
     fn local_offset_is_a_sane_timezone() {
         let offset = super::local_offset_secs(1_700_000_000);

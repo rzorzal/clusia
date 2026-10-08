@@ -175,7 +175,7 @@ struct RawIssueComment {
 }
 
 #[derive(Deserialize)]
-struct RawReview {
+pub(crate) struct RawReview {
     id: u64,
     user: Option<UserRef>,
     state: String,
@@ -183,6 +183,27 @@ struct RawReview {
     body: Option<String>,
     submitted_at: Option<String>,
     html_url: String,
+    commit_id: Option<String>,
+}
+
+fn review_info(r: RawReview) -> ReviewInfo {
+    ReviewInfo {
+        id: r.id,
+        author: login(r.user),
+        state: r.state,
+        body: r.body.unwrap_or_default(),
+        submitted_at: r.submitted_at,
+        url: r.html_url,
+        commit_id: r.commit_id,
+    }
+}
+
+/// The reviews that were submitted; a pending one is a draft only its author sees.
+pub(crate) fn submitted_reviews(raw: Vec<RawReview>) -> Vec<ReviewInfo> {
+    raw.into_iter()
+        .filter(|r| r.state != "PENDING")
+        .map(review_info)
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -219,7 +240,7 @@ fn login(user: Option<UserRef>) -> String {
     user.map(|u| u.login).unwrap_or_else(|| "ghost".to_string())
 }
 
-fn decode_list<T: serde::de::DeserializeOwned>(
+pub(crate) fn decode_list<T: serde::de::DeserializeOwned>(
     values: Vec<serde_json::Value>,
 ) -> Result<Vec<T>, ProviderError> {
     values.into_iter().map(decode).collect()
@@ -293,6 +314,29 @@ pub struct PublishedReview {
     pub url: String,
 }
 
+/// GitHub's own explanation in an error body; empty when the body is not JSON.
+pub(crate) fn body_message(text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text)
+        .map(|body| error_message(&body))
+        .unwrap_or_default()
+}
+
+/// A 401: the error carries nothing, so the reason GitHub gave goes to the log.
+pub(crate) fn unauthorized(text: &str) -> ProviderError {
+    tracing::warn!(reason = %body_message(text), "GitHub rejected the token");
+    ProviderError::Unauthorized
+}
+
+/// A 404 names the path and, when GitHub says why, the reason.
+pub(crate) fn not_found(path: &str, text: &str) -> ProviderError {
+    let reason = body_message(text);
+    ProviderError::NotFound(if reason.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}: {reason}")
+    })
+}
+
 /// `message` plus the details of `errors[]` (strings or `{ "message": … }` objects).
 pub(crate) fn error_message(body: &serde_json::Value) -> String {
     let message = body
@@ -347,8 +391,24 @@ impl GitHub {
     }
 
     /// Every page of a list endpoint (`per_page=100`, following `Link: rel="next"`).
-    async fn get_paginated(&self, path: &str) -> Result<Vec<serde_json::Value>, ProviderError> {
-        let (first, mut headers) = self.request(path, &[("per_page", "100")], true).await?;
+    pub(crate) async fn get_paginated(
+        &self,
+        path: &str,
+    ) -> Result<Vec<serde_json::Value>, ProviderError> {
+        self.get_paginated_with(path, &[], true).await
+    }
+
+    /// Like `get_paginated`, with `extra` query parameters on the first page (the `Link`
+    /// headers carry them on the next ones) and a choice whether the ETag cache is used.
+    pub(crate) async fn get_paginated_with(
+        &self,
+        path: &str,
+        extra: &[(&str, &str)],
+        use_cache: bool,
+    ) -> Result<Vec<serde_json::Value>, ProviderError> {
+        let mut query = vec![("per_page", "100")];
+        query.extend_from_slice(extra);
+        let (first, mut headers) = self.request(path, &query, use_cache).await?;
         let mut items = match first {
             serde_json::Value::Array(a) => a,
             _ => {
@@ -366,7 +426,7 @@ impl GitHub {
                 tracing::warn!(path, "ignoring pagination link to a different host");
                 break;
             }
-            let (page, h) = self.request_url(next, &[], true).await?;
+            let (page, h) = self.request_url(next, &[], use_cache).await?;
             headers = h;
             match page {
                 serde_json::Value::Array(a) => items.extend(a),
@@ -398,18 +458,18 @@ impl GitHub {
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
         let status = response.status();
         let headers = response.headers().clone();
-        if status == StatusCode::UNAUTHORIZED {
-            return Err(ProviderError::Unauthorized);
-        }
-        if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
-            return Err(ProviderError::RateLimited { retry_after_secs });
-        }
         let text = response
             .text()
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(unauthorized(&text));
+        }
+        if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
+            return Err(ProviderError::RateLimited { retry_after_secs });
+        }
         if status == StatusCode::NOT_FOUND {
-            return Err(ProviderError::NotFound(path.to_string()));
+            return Err(not_found(path, &text));
         }
         let parsed = if text.trim().is_empty() {
             serde_json::Value::Null
@@ -436,7 +496,7 @@ impl GitHub {
         .map(|_| ())
     }
 
-    fn repo_path(pr: &PrRef) -> String {
+    pub(crate) fn repo_path(pr: &PrRef) -> String {
         format!("/repos/{}/{}", pr.owner, pr.repo)
     }
 
@@ -506,18 +566,7 @@ impl GitHub {
                     url: c.html_url,
                 })
                 .collect(),
-            reviews: reviews
-                .into_iter()
-                .filter(|r| r.state != "PENDING")
-                .map(|r| ReviewInfo {
-                    id: r.id,
-                    author: login(r.user),
-                    state: r.state,
-                    body: r.body.unwrap_or_default(),
-                    submitted_at: r.submitted_at,
-                    url: r.html_url,
-                })
-                .collect(),
+            reviews: submitted_reviews(reviews),
             review_threads,
         })
     }
@@ -569,7 +618,7 @@ impl GitHub {
         Ok(summary)
     }
 
-    async fn get(
+    pub(crate) async fn get(
         &self,
         path: &str,
         query: &[(&str, &str)],
@@ -649,18 +698,18 @@ impl GitHub {
                 )),
             };
         }
-        if status == StatusCode::UNAUTHORIZED {
-            return Err(ProviderError::Unauthorized);
-        }
-        if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
-            return Err(ProviderError::RateLimited { retry_after_secs });
-        }
         let text = response
             .text()
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(unauthorized(&text));
+        }
+        if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
+            return Err(ProviderError::RateLimited { retry_after_secs });
+        }
         if status == StatusCode::NOT_FOUND {
-            return Err(ProviderError::NotFound(request_path));
+            return Err(not_found(&request_path, &text));
         }
         if !status.is_success() {
             let message = serde_json::from_str::<serde_json::Value>(&text)
@@ -1398,6 +1447,99 @@ mod tests {
         assert_eq!(
             gh(&server).close_pr(&pr7()).await,
             Err(ProviderError::Unauthorized)
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_writes_map_403_429_and_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/acme/widgets/pulls/7"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(json!({ "message": "Resource not accessible by integration" })),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/acme/widgets/pulls/7"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "7"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/acme/widgets/pulls/7"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("x-ratelimit-remaining", "0")
+                    .insert_header("x-ratelimit-reset", "99999999999"),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/acme/widgets/pulls/7"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })),
+            )
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        assert_eq!(
+            client.close_pr(&pr7()).await,
+            Err(ProviderError::Http {
+                status: 403,
+                message: "Resource not accessible by integration".into()
+            })
+        );
+        assert_eq!(
+            client.close_pr(&pr7()).await,
+            Err(ProviderError::RateLimited {
+                retry_after_secs: 7
+            })
+        );
+        assert!(matches!(
+            client.close_pr(&pr7()).await,
+            Err(ProviderError::RateLimited { .. })
+        ));
+        assert_eq!(
+            client.close_pr(&pr7()).await,
+            Err(ProviderError::NotFound(
+                "/repos/acme/widgets/pulls/7: Not Found".into()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_404_on_a_read_carries_githubs_reason() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls/7"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls/8"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("<html>nope</html>"))
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        assert_eq!(
+            client.get_pr(&pr7()).await,
+            Err(ProviderError::NotFound(
+                "/repos/acme/widgets/pulls/7: Not Found".into()
+            ))
+        );
+        let other = PrRef::new("acme", "widgets", 8).unwrap();
+        assert_eq!(
+            client.get_pr(&other).await,
+            Err(ProviderError::NotFound(
+                "/repos/acme/widgets/pulls/8".into()
+            )),
+            "a body that is not JSON leaves just the path"
         );
     }
 }

@@ -460,3 +460,56 @@ async fn first_run_status_reaches_the_window() {
     );
     d.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_at_login_goes_through_the_daemon() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask.send(Ask::SetStartAtLogin { on: false }).unwrap();
+    let s = snapshot_where(&link, |s| !s.config.general.start_at_login);
+    assert!(!s.config.general.start_at_login);
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_snapshot_carries_the_notification_permission() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    let first = snapshot_where(&link, |_| true);
+    assert_eq!(
+        first.notifications_permission,
+        clusia_protocol::PermissionStatus::NotDetermined
+    );
+    let mut tray = d.client().await;
+    tray.request(Command::NotificationPermission {
+        status: clusia_protocol::PermissionStatus::Allowed,
+    })
+    .await
+    .unwrap();
+    link.ask.send(Ask::RefreshStatus).unwrap();
+    let read = snapshot_where(&link, |s| {
+        s.notifications_permission == clusia_protocol::PermissionStatus::Allowed
+    });
+    assert_eq!(
+        read.notifications_permission,
+        clusia_protocol::PermissionStatus::Allowed
+    );
+    let notice = |link: &Link| {
+        link.ask.send(Ask::TestNotification).unwrap();
+        match next(link, |t| matches!(t, Tell::Notice { .. })) {
+            Tell::Notice { text, warning } => (text, warning),
+            _ => unreachable!(),
+        }
+    };
+    let (text, warning) = notice(&link);
+    assert!(text.contains("tray is not running"), "{text}");
+    assert!(warning);
+    tray.request(Command::Subscribe {
+        topics: vec![clusia_protocol::topics::TRAY.into()],
+    })
+    .await
+    .unwrap();
+    assert_eq!(notice(&link), ("Test notification sent".into(), false));
+    d.stop().await;
+}

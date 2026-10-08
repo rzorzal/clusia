@@ -17,7 +17,6 @@ use crate::fonts::UiFonts;
 use crate::nav::{FirstRunScreen, Leaf, Nav, NavSystems, Screen};
 use crate::screens::config::git::token_from_clipboard;
 use crate::screens::config::{clipboard_text, link, repos, warn};
-use crate::screens::home::signed_out;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{Fill, Stroke, Type, Variant, button, card, disabled_button, text};
@@ -117,7 +116,7 @@ pub struct FirstRunView {
 
 /// The login works: GitHub accepted a token (offline counts as signed in).
 pub fn signed_in(snap: &Snapshot) -> bool {
-    snap.auth.is_some() && !signed_out(snap)
+    snap.auth.is_some() && !snap.signed_out()
 }
 
 /// `path` with the home folder written as `~`.
@@ -268,12 +267,18 @@ impl Plugin for FirstRunPlugin {
 }
 
 /// Swaps Home and First run as the login comes and goes.
-fn gate(model: Res<Model>, mut ui: ResMut<FirstRunUi>, mut nav: ResMut<Nav>) {
-    if signed_out(&model.snapshot) {
+fn gate(
+    model: Res<Model>,
+    mut ui: ResMut<FirstRunUi>,
+    mut nav: ResMut<Nav>,
+    mut asks: ResMut<Asks>,
+) {
+    if model.snapshot.signed_out() {
         ui.pending = true;
-    } else if nav.screen != Screen::FirstRun {
+    } else if nav.screen != Screen::FirstRun && ui.pending {
         // The login came back somewhere else (Config): nothing is left to show.
         ui.pending = false;
+        asks.send(Ask::FirstRunDone);
     }
     match (&nav.screen, ui.pending) {
         (Screen::Home, true) => nav.screen = Screen::FirstRun,
@@ -741,8 +746,9 @@ fn on_add_folder(_activate: On<Activate>, mut picks: MessageWriter<PickFolder>) 
     picks.write(PickFolder);
 }
 
-fn on_continue(_activate: On<Activate>, mut ui: ResMut<FirstRunUi>) {
+fn on_continue(_activate: On<Activate>, mut ui: ResMut<FirstRunUi>, mut asks: ResMut<Asks>) {
     ui.pending = false;
+    asks.send(Ask::FirstRunDone);
 }
 
 /// The native dialog needs the main thread, which `NonSendMarker` pins this system to.
@@ -770,7 +776,7 @@ fn pick_folder(
 mod tests {
     use super::*;
     use crate::fixture;
-    use crate::nav::HomeScreen;
+    use crate::nav::{HomeScreen, Section};
     use crate::testing::{self, NOW};
     use clusia_protocol::{AuthInfo, SyncState, SyncStatus};
 
@@ -956,6 +962,41 @@ mod tests {
         // The login is lost later: it comes back.
         set_snapshot(&mut app, signed_out_snap(Some(with_clones())));
         assert_eq!(screen(&app), Screen::FirstRun);
+    }
+
+    #[test]
+    fn continue_tells_the_bridge_first_run_is_done() {
+        let mut app = testing::app(signed_out_snap(Some(with_clones())));
+        testing::settle(&mut app);
+        let mut signed_in = fixture::demo(NOW);
+        signed_in.first_run = Some(with_clones());
+        set_snapshot(&mut app, signed_in);
+        assert!(
+            !testing::recorded(&mut app).contains(&Ask::FirstRunDone),
+            "the screen is still open"
+        );
+        let go = testing::find::<Continue>(&mut app, |_| true);
+        testing::activate(&mut app, go);
+        testing::settle(&mut app);
+        assert_eq!(testing::recorded(&mut app), [Ask::FirstRunDone]);
+    }
+
+    #[test]
+    fn a_login_made_in_config_tells_the_bridge_too() {
+        let mut app = testing::app(signed_out_snap(Some(with_clones())));
+        testing::settle(&mut app);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::GitServer);
+        let mut signed_in = fixture::demo(NOW);
+        signed_in.first_run = Some(with_clones());
+        set_snapshot(&mut app, signed_in);
+        assert_eq!(testing::recorded(&mut app), [Ask::FirstRunDone]);
+        testing::settle(&mut app);
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "it is said once, not every frame"
+        );
     }
 
     #[test]

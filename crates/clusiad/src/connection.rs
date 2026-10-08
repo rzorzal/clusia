@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clusia_protocol::{
     ClientMessage, CodecError, Command, ErrorCode, Event, MessageReader, Outcome, PROTOCOL_VERSION,
@@ -15,7 +15,7 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::task::JoinHandle;
 
 use crate::handlers;
-use crate::state::Shared;
+use crate::state::{Busy, Shared};
 
 pub(crate) async fn serve(stream: UnixStream, shared: Arc<Shared>) {
     shared.clients.fetch_add(1, Ordering::SeqCst);
@@ -33,12 +33,25 @@ fn bad_request(id: u64, message: impl Into<String>) -> ServerMessage {
     }
 }
 
-/// Counts its connection in `Shared::window_listeners` while it lives.
-struct WindowListener(Arc<Shared>);
+/// Counts its connection in one of `Shared`'s listener counters while it lives.
+struct Listener {
+    shared: Arc<Shared>,
+    count: fn(&Shared) -> &AtomicUsize,
+}
 
-impl Drop for WindowListener {
+impl Listener {
+    fn new(shared: &Arc<Shared>, count: fn(&Shared) -> &AtomicUsize) -> Self {
+        count(shared).fetch_add(1, Ordering::SeqCst);
+        Self {
+            shared: shared.clone(),
+            count,
+        }
+    }
+}
+
+impl Drop for Listener {
     fn drop(&mut self) {
-        self.0.window_listeners.fetch_sub(1, Ordering::SeqCst);
+        (self.count)(&self.shared).fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -116,10 +129,12 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
     let mut events = shared.events.subscribe();
     let mut shutdown = shared.shutdown.subscribe();
     let mut topics: HashSet<String> = HashSet::new();
-    let mut window: Option<WindowListener> = None;
-    // The request being handled: (id, whether it is Shutdown, the handler task). Requests stay
-    // sequential (the next line is read only once it is answered), but events keep flowing.
-    let mut pending: Option<(u64, bool, JoinHandle<Outcome>)> = None;
+    let mut window: Option<Listener> = None;
+    let mut tray: Option<Listener> = None;
+    // The request being handled: (id, whether it is Shutdown, the handler task, a claim on the
+    // daemon staying up until the response is written). Requests stay sequential (the next line is read only once it is
+    // answered), but events keep flowing.
+    let mut pending: Option<(u64, bool, JoinHandle<Outcome>, Busy)> = None;
     loop {
         if pending.is_none() && *shutdown.borrow_and_update() {
             return drain_events(&mut events, &topics, &mut w).await;
@@ -142,18 +157,27 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                 if let Command::Subscribe { topics: wanted } = &cmd {
                     topics.extend(wanted.iter().cloned());
                     if window.is_none() && topics.contains(clusia_protocol::topics::WINDOW) {
-                        shared.window_listeners.fetch_add(1, Ordering::SeqCst);
-                        window = Some(WindowListener(shared.clone()));
+                        window = Some(Listener::new(shared, |s| &s.window_listeners));
+                    }
+                    if tray.is_none() && topics.contains(clusia_protocol::topics::TRAY) {
+                        tray = Some(Listener::new(shared, |s| &s.tray_listeners));
                     }
                 }
                 let stop = matches!(cmd, Command::Shutdown);
+                let busy = shared.begin_work();
+                // The handler holds its own claim: a client that goes away drops `pending` and
+                // detaches the task, which still runs and must still be waited for.
+                let working = shared.begin_work();
                 let task_shared = shared.clone();
                 let client = client_name.clone();
-                let task = tokio::spawn(async move { handlers::handle(&task_shared, &client, cmd).await });
-                pending = Some((id, stop, task));
+                let task = tokio::spawn(async move {
+                    let _working = working;
+                    handlers::handle(&task_shared, &client, cmd).await
+                });
+                pending = Some((id, stop, task, busy));
             }
-            joined = async { pending.as_mut().map(|(_, _, task)| task).expect("guarded").await }, if pending.is_some() => {
-                let Some((id, stop, _)) = pending.take() else { continue };
+            joined = async { pending.as_mut().map(|(_, _, task, _)| task).expect("guarded").await }, if pending.is_some() => {
+                let Some((id, stop, _, _busy)) = pending.take() else { continue };
                 let result = joined.unwrap_or_else(|e| {
                     tracing::error!(error = %e, "a request handler failed");
                     Outcome::Err(ProtocolError::new(ErrorCode::Internal, "the request failed inside the daemon"))

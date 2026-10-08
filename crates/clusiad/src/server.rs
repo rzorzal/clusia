@@ -8,10 +8,11 @@ use std::sync::Arc;
 
 use clusia_core::Paths;
 use clusia_core::paths::MAX_SOCKET_PATH;
-use clusia_store::load_config;
+use clusia_store::{Loaded, load_config};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::connection;
+use crate::lock::DaemonLock;
 use crate::options::DaemonOptions;
 use crate::state::Shared;
 use crate::sync;
@@ -26,7 +27,12 @@ pub enum StartError {
     Io(#[from] io::Error),
 }
 
+/// How long a stop request lets running requests (a publish) finish.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub struct Daemon {
+    /// Released when the daemon is dropped, after the socket is gone.
+    _lock: DaemonLock,
     listener: UnixListener,
     shared: Arc<Shared>,
     socket: PathBuf,
@@ -42,6 +48,17 @@ impl ShutdownHandle {
     }
 }
 
+/// Binds under a umask that leaves nothing to group or others, so the socket is never
+/// reachable by anyone else, not even for the moment before its mode is set.
+fn bind_private(socket: &Path) -> io::Result<UnixListener> {
+    // SAFETY: `umask` only changes the file-creation mask of this process and cannot fail.
+    let previous = unsafe { libc::umask(0o077) };
+    let bound = UnixListener::bind(socket);
+    // SAFETY: as above; restores the mask read a moment ago.
+    unsafe { libc::umask(previous) };
+    bound
+}
+
 impl Daemon {
     /// Binds with options from the environment (`DaemonOptions::from_env`).
     pub async fn bind(paths: Paths) -> Result<Self, StartError> {
@@ -49,6 +66,13 @@ impl Daemon {
     }
 
     pub async fn bind_with(paths: Paths, options: DaemonOptions) -> Result<Self, StartError> {
+        let lock = Self::acquire_lock(&paths)?;
+        Self::bind_locked(paths, options, lock).await
+    }
+
+    /// Takes the one-daemon-per-home lock. A caller that opens log files should take it
+    /// first: a daemon that loses the lock must not rotate or prune the winner's logs.
+    pub fn acquire_lock(paths: &Paths) -> Result<DaemonLock, StartError> {
         let socket = paths.socket();
         if !paths.socket_path_fits() {
             return Err(StartError::PathTooLong {
@@ -57,7 +81,16 @@ impl Daemon {
             });
         }
         fs::create_dir_all(paths.root())?;
+        DaemonLock::acquire(&paths.daemon_lock())?.ok_or(StartError::AlreadyRunning(socket))
+    }
 
+    /// Binds the socket once the lock from [`Daemon::acquire_lock`] is held.
+    pub async fn bind_locked(
+        paths: Paths,
+        options: DaemonOptions,
+        lock: DaemonLock,
+    ) -> Result<Self, StartError> {
+        let socket = paths.socket();
         let socket_exists = fs::symlink_metadata(&socket).is_ok();
         let mut stale = false;
         if socket_exists {
@@ -72,17 +105,27 @@ impl Daemon {
                 }
             }
         }
-        let config = load_config(&paths)?.into_value();
+        let loaded = load_config(&paths)?;
+        let reset_config = match &loaded {
+            Loaded::Recovered { quarantined, .. } => Some(quarantined.clone()),
+            _ => None,
+        };
+        let config = loaded.into_value();
         if stale {
             fs::remove_file(&socket)?;
             tracing::info!(socket = %socket.display(), "removed stale socket");
         }
-        let listener = UnixListener::bind(&socket)?;
+        let listener = bind_private(&socket)?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
 
+        let shared = Arc::new(Shared::new(paths, config, options));
+        if let Some(file) = reset_config {
+            crate::notifications::note_recovered(&shared, &file);
+        }
         Ok(Self {
+            _lock: lock,
             listener,
-            shared: Arc::new(Shared::new(paths, config, options)),
+            shared,
             socket,
         })
     }
@@ -101,6 +144,7 @@ impl Daemon {
         if self.shared.background_sync {
             tokio::spawn(sync::run_loop(self.shared.clone()));
         }
+        tokio::spawn(crate::notifications::run_checks(self.shared.clone()));
         let tray = self.shared.tray_program.clone().map(|program| {
             tokio::spawn(crate::tray::supervise(
                 program,
@@ -166,6 +210,9 @@ impl Daemon {
             }
         }
         drop(self.listener);
+        if !self.shared.wait_idle(SHUTDOWN_GRACE).await {
+            tracing::warn!("stopping with requests still running after {SHUTDOWN_GRACE:?}");
+        }
         if let Some(tray) = tray {
             // The supervisor kills the tray on shutdown; give it a moment to reap it.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), tray).await;
@@ -178,5 +225,19 @@ impl Daemon {
         }
         tracing::info!("clusiad stopped");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[tokio::test]
+    async fn the_socket_is_private_from_the_moment_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s.sock");
+        let _listener = bind_private(&socket).unwrap();
+        assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o077, 0);
     }
 }

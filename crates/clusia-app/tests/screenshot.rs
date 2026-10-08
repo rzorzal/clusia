@@ -39,6 +39,9 @@ fn demo_screenshots() {
         "first-run",
         "config-media",
         "config-about",
+        "config-general",
+        "config-notifications",
+        "config-notifications-bottom",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((

@@ -4,14 +4,17 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clusia_core::{Config, FileDiff, Paths, PrRef, PrSummary};
 use clusia_platform::SecretStore;
-use clusia_protocol::{Event, SyncStatus};
+use clusia_protocol::{Event, PermissionStatus, SyncStatus};
 use clusia_provider::GitHub;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
+use crate::inbox::InboxData;
+use crate::news::Backoff;
+use crate::notifications::Engine;
 use crate::options::DaemonOptions;
 use crate::spawner::Spawner;
 
@@ -24,6 +27,15 @@ pub(crate) struct PrLists {
 /// Head SHA and the parsed files fetched for it.
 pub(crate) type CachedFiles = (String, Arc<Vec<FileDiff>>);
 
+/// Counts one piece of work in `Shared::busy` while it lives, so a shutdown can wait for it.
+pub(crate) struct Busy(Arc<Shared>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.busy.send_modify(|n| *n -= 1);
+    }
+}
+
 pub(crate) struct Shared {
     pub paths: Paths,
     pub config: RwLock<Config>,
@@ -31,6 +43,8 @@ pub(crate) struct Shared {
     pub clients: AtomicUsize,
     pub events: broadcast::Sender<(String, Event)>,
     pub shutdown: watch::Sender<bool>,
+    /// How many requests are being handled (a handler plus the write of its response).
+    pub busy: watch::Sender<usize>,
     pub github_api: Option<String>,
     pub github_token: Option<String>,
     pub gh_program: PathBuf,
@@ -46,6 +60,8 @@ pub(crate) struct Shared {
     pub harness_search_paths: Vec<PathBuf>,
     /// Connections subscribed to the `window` topic (open windows).
     pub window_listeners: AtomicUsize,
+    /// Connections subscribed to the `tray` topic (running trays).
+    pub tray_listeners: AtomicUsize,
     pub prs: RwLock<PrLists>,
     pub sync: RwLock<SyncStatus>,
     /// Wakes the sync loop early (e.g. after a new token is stored).
@@ -61,17 +77,40 @@ pub(crate) struct Shared {
     pub review_locks: std::sync::Mutex<HashMap<PrRef, Arc<tokio::sync::Mutex<()>>>>,
     /// Parsed files per PR, keyed by the head SHA they were fetched for.
     pub files_cache: Mutex<HashMap<PrRef, CachedFiles>>,
+    /// When each saved review whose worktree would not update may be tried again.
+    pub checkout_backoff: std::sync::Mutex<HashMap<PrRef, Backoff>>,
     /// Held for the whole of a sync, so the loop, `SyncNow` and `ListPrs` never overlap.
     pub sync_lock: Mutex<()>,
     /// Becomes `true` once the first sync has finished (whatever its outcome).
     pub first_sync_done: watch::Sender<bool>,
+    /// The persisted inbox and the routing memory of the notification rules.
+    pub engine: Mutex<Engine>,
+    /// State files set aside since the last sync, as (the file, the name it was moved to).
+    pub recovered: std::sync::Mutex<Vec<(String, String)>>,
+    /// What the tray last reported about macOS notification permission. In memory only.
+    pub permission: std::sync::Mutex<PermissionStatus>,
+    /// Wakes the task that looks at the checks of your pull requests.
+    pub checks_wake: Notify,
 }
 
 impl Shared {
     pub fn new(paths: Paths, config: Config, options: DaemonOptions) -> Self {
         let (events, _) = broadcast::channel(256);
         let (shutdown, _) = watch::channel(false);
+        let (busy, _) = watch::channel(0);
         let (first_sync_done, _) = watch::channel(false);
+        let inbox = InboxData::load(&paths);
+        let recovered = inbox
+            .quarantined
+            .iter()
+            .filter_map(|file| file.file_name())
+            .map(|name| {
+                (
+                    "inbox.json".to_string(),
+                    name.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
         Self {
             paths,
             config: RwLock::new(config),
@@ -79,6 +118,7 @@ impl Shared {
             clients: AtomicUsize::new(0),
             events,
             shutdown,
+            busy,
             github_api: options.github_api,
             github_token: options.github_token,
             gh_program: options.gh_program,
@@ -94,6 +134,7 @@ impl Shared {
                 .unwrap_or_else(|| "https://api.giphy.com".to_string()),
             harness_search_paths: options.harness_search_paths,
             window_listeners: AtomicUsize::new(0),
+            tray_listeners: AtomicUsize::new(0),
             prs: RwLock::new(PrLists::default()),
             sync: RwLock::new(SyncStatus::default()),
             sync_now: Notify::new(),
@@ -103,9 +144,46 @@ impl Shared {
             touched: std::sync::Mutex::new(HashSet::new()),
             review_locks: std::sync::Mutex::new(HashMap::new()),
             files_cache: Mutex::new(HashMap::new()),
+            checkout_backoff: std::sync::Mutex::new(HashMap::new()),
             sync_lock: Mutex::new(()),
             first_sync_done,
+            engine: Mutex::new(Engine::new(inbox.data)),
+            recovered: std::sync::Mutex::new(recovered),
+            permission: std::sync::Mutex::new(PermissionStatus::default()),
+            checks_wake: Notify::new(),
         }
+    }
+
+    /// Seconds since the daemon started; the clock `checkout_backoff` runs on.
+    pub fn uptime_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// Whether the saved review of `pr` may try to update its worktree now.
+    pub fn checkout_due(&self, pr: &PrRef) -> bool {
+        let now = self.uptime_secs();
+        self.checkout_backoff
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(pr)
+            .is_none_or(|b| b.due(now))
+    }
+
+    pub fn checkout_failed(&self, pr: &PrRef) {
+        let now = self.uptime_secs();
+        self.checkout_backoff
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(pr.clone())
+            .or_default()
+            .failed(now);
+    }
+
+    pub fn checkout_worked(&self, pr: &PrRef) {
+        self.checkout_backoff
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
     }
 
     /// Marks `pr`'s worktree as in use this session. Call before checking it out.
@@ -121,6 +199,20 @@ impl Shared {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .contains(key)
+    }
+
+    /// Marks a request as being handled until the returned guard is dropped.
+    pub fn begin_work(self: &Arc<Self>) -> Busy {
+        self.busy.send_modify(|n| *n += 1);
+        Busy(self.clone())
+    }
+
+    /// Waits until no request is being handled; `false` when `limit` ran out first.
+    pub async fn wait_idle(&self, limit: Duration) -> bool {
+        let mut busy = self.busy.subscribe();
+        tokio::time::timeout(limit, busy.wait_for(|n| *n == 0))
+            .await
+            .is_ok()
     }
 
     pub fn trigger_shutdown(&self) {

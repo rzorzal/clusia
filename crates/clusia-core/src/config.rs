@@ -1,6 +1,9 @@
 //! User configuration (`config.toml`). Pure data: loading and saving live in `clusia-store`.
 
-use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub const MIN_POLL_SECS: u64 = 15;
 pub const MAX_POLL_SECS: u64 = 3600;
@@ -8,6 +11,7 @@ pub const MAX_POLL_SECS: u64 = 3600;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    pub general: General,
     pub appearance: Appearance,
     pub github: Github,
     pub repositories: Repositories,
@@ -132,10 +136,349 @@ pub enum EditorKind {
     Custom,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Start-up behaviour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct General {
+    /// Whether the daemon's login item runs at login.
+    pub start_at_login: bool,
+}
+
+impl Default for General {
+    fn default() -> Self {
+        Self {
+            start_at_login: true,
+        }
+    }
+}
+
+/// What Clúsia tells you about, and where.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Notifications {
-    pub do_not_disturb: bool,
+    /// One route per kind; a file that lists only some kinds keeps the defaults of the rest.
+    #[serde(deserialize_with = "events_over_defaults")]
+    pub events: BTreeMap<EventKind, Route>,
+    pub sound: SoundId,
+    pub dnd: Dnd,
+    /// Silent while a macOS Focus is on (interruption level `active`); off, notifications
+    /// break through (`timeSensitive`).
+    pub follow_focus: bool,
+    /// Several events for one pull request within two minutes become one notification.
+    pub group_bursts: bool,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self {
+            events: EventKind::ALL
+                .into_iter()
+                .map(|kind| (kind, Route::default_for(kind)))
+                .collect(),
+            sound: SoundId::default(),
+            dnd: Dnd::default(),
+            follow_focus: true,
+            group_bursts: true,
+        }
+    }
+}
+
+impl Notifications {
+    /// The route for `kind`, falling back to its default when the map lacks it.
+    pub fn route(&self, kind: EventKind) -> Route {
+        self.events
+            .get(&kind)
+            .copied()
+            .unwrap_or_else(|| Route::default_for(kind))
+    }
+}
+
+fn events_over_defaults<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<EventKind, Route>, D::Error> {
+    #[derive(Deserialize)]
+    struct Patch {
+        tray: Option<bool>,
+        macos: Option<bool>,
+        sound: Option<bool>,
+    }
+    let patches = BTreeMap::<String, Patch>::deserialize(deserializer)?;
+    let mut events = Notifications::default().events;
+    for (name, patch) in patches {
+        let Some(route) = EventKind::parse(&name).and_then(|kind| events.get_mut(&kind)) else {
+            continue;
+        };
+        route.tray = patch.tray.unwrap_or(route.tray);
+        route.macos = patch.macos.unwrap_or(route.macos);
+        route.sound = patch.sound.unwrap_or(route.sound);
+    }
+    Ok(events)
+}
+
+/// What can be notified about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
+    ReviewRequested,
+    CommitsAfterReview,
+    ReplyToYou,
+    Mentioned,
+    ChecksFailed,
+    SyncProblem,
+    StateRecovered,
+    AgentFinished,
+    AgentPermission,
+}
+
+impl EventKind {
+    pub const ALL: [EventKind; 9] = [
+        Self::ReviewRequested,
+        Self::CommitsAfterReview,
+        Self::ReplyToYou,
+        Self::Mentioned,
+        Self::ChecksFailed,
+        Self::SyncProblem,
+        Self::StateRecovered,
+        Self::AgentFinished,
+        Self::AgentPermission,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReviewRequested => "review_requested",
+            Self::CommitsAfterReview => "commits_after_review",
+            Self::ReplyToYou => "reply_to_you",
+            Self::Mentioned => "mentioned",
+            Self::ChecksFailed => "checks_failed",
+            Self::SyncProblem => "sync_problem",
+            Self::StateRecovered => "state_recovered",
+            Self::AgentFinished => "agent_finished",
+            Self::AgentPermission => "agent_permission",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+}
+
+impl fmt::Display for EventKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Where one kind of event shows up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Route {
+    /// The tray's inbox and its dot.
+    pub tray: bool,
+    /// A macOS notification.
+    pub macos: bool,
+    /// The notification plays the chosen sound.
+    pub sound: bool,
+}
+
+impl Route {
+    pub fn default_for(kind: EventKind) -> Self {
+        let (tray, macos, sound) = match kind {
+            EventKind::ReviewRequested | EventKind::Mentioned | EventKind::AgentPermission => {
+                (true, true, true)
+            }
+            EventKind::CommitsAfterReview
+            | EventKind::ReplyToYou
+            | EventKind::SyncProblem
+            | EventKind::StateRecovered
+            | EventKind::AgentFinished => (true, true, false),
+            EventKind::ChecksFailed => (true, false, false),
+        };
+        Self { tray, macos, sound }
+    }
+}
+
+/// The bundled notification sounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SoundId {
+    #[default]
+    Leaf,
+    Drop,
+    Chime,
+    Tick,
+}
+
+impl SoundId {
+    pub const ALL: [SoundId; 4] = [Self::Leaf, Self::Drop, Self::Chime, Self::Tick];
+
+    /// The id, also the file name (`<id>.aiff`) in the bundle.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Leaf => "leaf",
+            Self::Drop => "drop",
+            Self::Chime => "chime",
+            Self::Tick => "tick",
+        }
+    }
+
+    /// The name shown in the sound menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Leaf => "Leaf (Clúsia)",
+            Self::Drop => "Drop",
+            Self::Chime => "Chime",
+            Self::Tick => "Tick",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+}
+
+/// Quiet hours: no macOS notification or sound inside the range on the chosen days. A range
+/// whose `from` is later than `to` runs overnight and belongs to the day it starts on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dnd {
+    pub enabled: bool,
+    pub from: HourMinute,
+    pub to: HourMinute,
+    pub days: BTreeSet<Weekday>,
+}
+
+impl Default for Dnd {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            from: HourMinute::new(19, 0).expect("19:00 is a time"),
+            to: HourMinute::new(9, 0).expect("09:00 is a time"),
+            days: [
+                Weekday::Mon,
+                Weekday::Tue,
+                Weekday::Wed,
+                Weekday::Thu,
+                Weekday::Fri,
+            ]
+            .into(),
+        }
+    }
+}
+
+/// A time of day in local time, written `HH:MM` in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct HourMinute(u16);
+
+impl HourMinute {
+    pub fn new(hour: u8, minute: u8) -> Option<Self> {
+        (hour < 24 && minute < 60).then(|| Self(u16::from(hour) * 60 + u16::from(minute)))
+    }
+
+    /// Minutes since midnight, 0..1440.
+    pub fn from_minutes(minutes: u16) -> Option<Self> {
+        (minutes < 24 * 60).then_some(Self(minutes))
+    }
+
+    pub fn minutes(self) -> u16 {
+        self.0
+    }
+
+    pub fn hour(self) -> u8 {
+        (self.0 / 60) as u8
+    }
+
+    pub fn minute(self) -> u8 {
+        (self.0 % 60) as u8
+    }
+}
+
+impl fmt::Display for HourMinute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:02}:{:02}", self.hour(), self.minute())
+    }
+}
+
+impl std::str::FromStr for HourMinute {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad = || format!("{s:?} is not a time like 19:00");
+        let (h, m) = s.trim().split_once(':').ok_or_else(bad)?;
+        let digits = |t: &str| t.chars().all(|c| c.is_ascii_digit());
+        if h.is_empty() || h.len() > 2 || m.len() != 2 || !digits(h) || !digits(m) {
+            return Err(bad());
+        }
+        let hour: u8 = h.parse().map_err(|_| bad())?;
+        let minute: u8 = m.parse().map_err(|_| bad())?;
+        Self::new(hour, minute).ok_or_else(bad)
+    }
+}
+
+impl TryFrom<String> for HourMinute {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, String> {
+        s.parse()
+    }
+}
+
+impl From<HourMinute> for String {
+    fn from(t: HourMinute) -> String {
+        t.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Weekday {
+    Mon,
+    Tue,
+    Wed,
+    Thu,
+    Fri,
+    Sat,
+    Sun,
+}
+
+impl Weekday {
+    pub const ALL: [Weekday; 7] = [
+        Self::Mon,
+        Self::Tue,
+        Self::Wed,
+        Self::Thu,
+        Self::Fri,
+        Self::Sat,
+        Self::Sun,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mon => "mon",
+            Self::Tue => "tue",
+            Self::Wed => "wed",
+            Self::Thu => "thu",
+            Self::Fri => "fri",
+            Self::Sat => "sat",
+            Self::Sun => "sun",
+        }
+    }
+
+    /// Monday is 0.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Mon => 0,
+            Self::Tue => 1,
+            Self::Wed => 2,
+            Self::Thu => 3,
+            Self::Fri => 4,
+            Self::Sat => 5,
+            Self::Sun => 6,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        Self::ALL[(self.index() + 6) % 7]
+    }
 }
 
 /// Images and GIFs in comments.
@@ -327,7 +670,9 @@ mod tests {
         assert_eq!(c.repositories.worktree_retention_days, 14);
         assert_eq!(c.editor.kind, EditorKind::VsCode);
         assert_eq!(c.editor.custom_command, "");
-        assert!(!c.notifications.do_not_disturb);
+        assert!(c.general.start_at_login);
+        assert!(c.notifications.follow_focus);
+        assert!(c.notifications.group_bursts);
         assert!(!c.media.load_external_images);
         assert_eq!(c.validate(), Ok(()));
     }
@@ -488,5 +833,141 @@ mod tests {
         let none: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(none.media, Media::default());
         assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn default_routes_match_the_spec() {
+        let n = Notifications::default();
+        assert_eq!(n.events.len(), 9, "every kind has a route");
+        let expected = [
+            (EventKind::ReviewRequested, (true, true, true)),
+            (EventKind::CommitsAfterReview, (true, true, false)),
+            (EventKind::ReplyToYou, (true, true, false)),
+            (EventKind::Mentioned, (true, true, true)),
+            (EventKind::ChecksFailed, (true, false, false)),
+            (EventKind::SyncProblem, (true, true, false)),
+            (EventKind::StateRecovered, (true, true, false)),
+            (EventKind::AgentFinished, (true, true, false)),
+            (EventKind::AgentPermission, (true, true, true)),
+        ];
+        for (kind, (tray, macos, sound)) in expected {
+            assert_eq!(n.route(kind), Route { tray, macos, sound }, "{kind}");
+        }
+        assert_eq!(n.sound, SoundId::Leaf);
+        assert!(!n.dnd.enabled);
+        assert_eq!(n.dnd.from.to_string(), "19:00");
+        assert_eq!(n.dnd.to.to_string(), "09:00");
+        assert_eq!(
+            n.dnd.days.iter().copied().collect::<Vec<_>>(),
+            [
+                Weekday::Mon,
+                Weekday::Tue,
+                Weekday::Wed,
+                Weekday::Thu,
+                Weekday::Fri
+            ]
+        );
+    }
+
+    #[test]
+    fn event_kinds_have_stable_names() {
+        for kind in EventKind::ALL {
+            assert_eq!(EventKind::parse(kind.as_str()), Some(kind));
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{}\"", kind.as_str())
+            );
+            assert_eq!(kind.to_string(), kind.as_str());
+        }
+        assert_eq!(EventKind::parse("nope"), None);
+        assert_eq!(EventKind::ALL.len(), 9);
+        assert!(EventKind::ReviewRequested < EventKind::AgentPermission);
+    }
+
+    #[test]
+    fn sounds_have_ids_and_labels() {
+        let ids: Vec<_> = SoundId::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(ids, ["leaf", "drop", "chime", "tick"]);
+        assert_eq!(SoundId::Leaf.label(), "Leaf (Clúsia)");
+        assert_eq!(SoundId::parse("chime"), Some(SoundId::Chime));
+        assert_eq!(SoundId::parse("bell"), None);
+        assert_eq!(serde_json::to_string(&SoundId::Tick).unwrap(), r#""tick""#);
+    }
+
+    #[test]
+    fn times_and_weekdays_have_wire_forms() {
+        assert_eq!(HourMinute::new(9, 5).unwrap().to_string(), "09:05");
+        assert_eq!(
+            "9:05".parse::<HourMinute>(),
+            Ok(HourMinute::new(9, 5).unwrap())
+        );
+        assert_eq!(HourMinute::new(23, 59).unwrap().minutes(), 1439);
+        assert_eq!(HourMinute::from_minutes(1440), None);
+        assert_eq!(HourMinute::new(24, 0), None);
+        assert_eq!(HourMinute::new(0, 60), None);
+        for bad in [
+            "", "19", "19:5", "7:00pm", "25:00", "12:60", "-1:00", "123:00", "+9:00", "09:+5",
+        ] {
+            assert!(bad.parse::<HourMinute>().is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            serde_json::to_string(&HourMinute::new(19, 0).unwrap()).unwrap(),
+            r#""19:00""#
+        );
+        assert_eq!(
+            serde_json::from_str::<HourMinute>(r#""07:30""#)
+                .unwrap()
+                .minutes(),
+            450
+        );
+        assert!(serde_json::from_str::<HourMinute>(r#""late""#).is_err());
+        assert_eq!(serde_json::to_string(&Weekday::Mon).unwrap(), r#""mon""#);
+        assert_eq!(Weekday::Mon.previous(), Weekday::Sun);
+        assert_eq!(Weekday::Wed.previous(), Weekday::Tue);
+        assert_eq!(Weekday::ALL.map(Weekday::index), [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(Weekday::Sat.as_str(), "sat");
+    }
+
+    #[test]
+    fn a_partial_events_table_keeps_the_other_defaults() {
+        let c: Config = serde_json::from_str(
+            r#"{"notifications":{"events":{"checks_failed":{"macos":true},"from_the_future":{"tray":false}},"sound":"chime"}}"#,
+        )
+        .unwrap();
+        let defaults = Notifications::default();
+        assert_eq!(
+            c.notifications.route(EventKind::ChecksFailed),
+            Route {
+                tray: true,
+                macos: true,
+                sound: false
+            }
+        );
+        assert_eq!(
+            c.notifications.route(EventKind::Mentioned),
+            defaults.route(EventKind::Mentioned)
+        );
+        assert_eq!(c.notifications.events.len(), 9, "unknown kinds are dropped");
+        assert_eq!(c.notifications.sound, SoundId::Chime);
+        assert_eq!(c.notifications.dnd, defaults.dnd);
+        assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn missing_routes_fall_back_to_the_default() {
+        let mut n = Notifications::default();
+        n.events.clear();
+        assert_eq!(
+            n.route(EventKind::ReviewRequested),
+            Route::default_for(EventKind::ReviewRequested)
+        );
+    }
+
+    #[test]
+    fn general_defaults_to_start_at_login() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert!(c.general.start_at_login);
+        let off: Config = serde_json::from_str(r#"{"general":{"start_at_login":false}}"#).unwrap();
+        assert!(!off.general.start_at_login);
     }
 }

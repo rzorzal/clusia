@@ -22,6 +22,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
 libc.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
 pulldown-cmark.workspace = true
 
 [dev-dependencies]

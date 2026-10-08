@@ -2,6 +2,7 @@
 //! rendered (screenshots) without a daemon.
 
 use bevy::prelude::*;
+use bevy::ui_widgets::ScrollArea;
 use clusia_core::draft::{DraftKind, ThreadRef};
 use clusia_core::{Side, Verdict};
 use clusia_protocol::{
@@ -31,6 +32,21 @@ impl Plugin for ScenePlugin {
             .add_systems(PostStartup, move |world: &mut World| {
                 stage_snapshot(world, scene);
             });
+        add_scroll(app, scene);
+    }
+}
+
+/// Only the scene that shows the end of the Notifications page keeps its scroll area scrolled.
+fn add_scroll(app: &mut App, scene: Scene) {
+    if scene == Scene::ConfigNotificationsBottom {
+        app.add_systems(Update, scroll_to_bottom);
+    }
+}
+
+/// Keeps the page's scroll area at its end; the layout clamps the position to the content.
+fn scroll_to_bottom(mut areas: Query<&mut ScrollPosition, With<ScrollArea>>) {
+    for mut position in &mut areas {
+        position.y = f32::MAX;
     }
 }
 
@@ -74,8 +90,38 @@ fn composer_editor(mode: ComposerMode) -> Editor {
     }
 }
 
+/// What the Config › Notifications mockup shows: Do not disturb on weekday evenings, and the two
+/// switches under it on.
+const NOTIFICATION_SETTINGS: [(&str, &str); 6] = [
+    ("notifications.dnd.enabled", "true"),
+    ("notifications.dnd.from", "19:00"),
+    ("notifications.dnd.to", "09:00"),
+    (
+        "notifications.dnd.days",
+        r#"["mon","tue","wed","thu","fri"]"#,
+    ),
+    ("notifications.follow_focus", "true"),
+    ("notifications.group_bursts", "true"),
+];
+
+/// Writes demo settings into the snapshot the way the daemon would parse them.
+fn set_demo_config(world: &mut World, settings: &[(&str, &str)]) {
+    let mut model = world.resource_mut::<Model>();
+    for (key, value) in settings {
+        crate::snapshot::apply_config_locally(&mut model.snapshot.config, key, value)
+            .expect("the demo setting is valid");
+    }
+}
+
 /// Signs the demo out and gives the first-run screen its answers.
 fn stage_snapshot(world: &mut World, scene: Scene) {
+    match scene {
+        Scene::ConfigGeneral => set_demo_config(world, &[("general.start_at_login", "true")]),
+        Scene::ConfigNotifications | Scene::ConfigNotificationsBottom => {
+            set_demo_config(world, &NOTIFICATION_SETTINGS);
+        }
+        _ => {}
+    }
     if scene != Scene::FirstRun {
         return;
     }
@@ -97,6 +143,10 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
 /// the first run need no review).
 pub fn stage(world: &mut World, scene: Scene) {
     let section = match scene {
+        Scene::ConfigGeneral => Some(Section::General),
+        Scene::ConfigNotifications | Scene::ConfigNotificationsBottom => {
+            Some(Section::Notifications)
+        }
         Scene::ConfigMedia => Some(Section::Media),
         Scene::ConfigAbout => Some(Section::About),
         _ => None,
@@ -124,7 +174,12 @@ pub fn stage(world: &mut World, scene: Scene) {
     let mut ui = TabUi::default();
     match scene {
         Scene::Diff | Scene::Loading | Scene::Failed | Scene::Palette => {}
-        Scene::FirstRun | Scene::ConfigMedia | Scene::ConfigAbout => {}
+        Scene::FirstRun
+        | Scene::ConfigGeneral
+        | Scene::ConfigNotifications
+        | Scene::ConfigNotificationsBottom
+        | Scene::ConfigMedia
+        | Scene::ConfigAbout => {}
         Scene::Composer | Scene::Emoji | Scene::Gif => {
             ui.editor = Some(composer_editor(ComposerMode::Write));
         }
@@ -210,6 +265,28 @@ pub fn stage(world: &mut World, scene: Scene) {
 
 #[cfg(test)]
 mod tests {
+    fn scroll_after_update(scene: Scene) -> f32 {
+        let mut app = App::new();
+        add_scroll(&mut app, scene);
+        let area = app
+            .world_mut()
+            .spawn((ScrollArea, ScrollPosition::default()))
+            .id();
+        app.update();
+        app.world().get::<ScrollPosition>(area).unwrap().y
+    }
+
+    #[test]
+    fn only_the_bottom_scene_scrolls_to_the_end() {
+        assert_eq!(
+            scroll_after_update(Scene::ConfigNotificationsBottom),
+            f32::MAX
+        );
+        for scene in [Scene::ConfigNotifications, Scene::ConfigGeneral] {
+            assert_eq!(scroll_after_update(scene), 0.0, "{scene:?}");
+        }
+    }
+
     use super::*;
     use crate::nav::{FirstRunScreen, Screen};
     use crate::screens::open_pr::PaletteRoot;
@@ -239,7 +316,12 @@ mod tests {
         for &scene in Scene::value_variants() {
             if matches!(
                 scene,
-                Scene::FirstRun | Scene::ConfigMedia | Scene::ConfigAbout
+                Scene::FirstRun
+                    | Scene::ConfigGeneral
+                    | Scene::ConfigNotifications
+                    | Scene::ConfigNotificationsBottom
+                    | Scene::ConfigMedia
+                    | Scene::ConfigAbout
             ) {
                 continue;
             }
@@ -285,7 +367,12 @@ mod tests {
                 }
                 Scene::WhatsNew => assert!(modal_shown(&mut app, Modal::WhatsNew)),
                 Scene::Leave => assert_eq!(testing::count::<LeaveModal>(&mut app), 1),
-                Scene::FirstRun | Scene::ConfigMedia | Scene::ConfigAbout => {
+                Scene::FirstRun
+                | Scene::ConfigGeneral
+                | Scene::ConfigNotifications
+                | Scene::ConfigNotificationsBottom
+                | Scene::ConfigMedia
+                | Scene::ConfigAbout => {
                     unreachable!("skipped above")
                 }
                 Scene::Composer | Scene::ComposerPreview | Scene::Emoji | Scene::Gif => {
@@ -343,6 +430,9 @@ mod tests {
     #[test]
     fn config_scenes_open_their_sections() {
         for (scene, section) in [
+            (Scene::ConfigGeneral, Section::General),
+            (Scene::ConfigNotifications, Section::Notifications),
+            (Scene::ConfigNotificationsBottom, Section::Notifications),
             (Scene::ConfigMedia, Section::Media),
             (Scene::ConfigAbout, Section::About),
         ] {
@@ -353,6 +443,52 @@ mod tests {
             );
             testing::find::<crate::screens::config::PageOf>(&mut app, |p| p.0 == section);
         }
+    }
+
+    fn demo_config(scene: Scene) -> serde_json::Value {
+        let app = staged_outside_review(scene);
+        let config = &app.world().resource::<Model>().snapshot.config;
+        serde_json::to_value(config).unwrap()
+    }
+
+    #[test]
+    fn the_notifications_scene_shows_the_mockup_settings() {
+        let config = demo_config(Scene::ConfigNotifications);
+        let notifications = &config["notifications"];
+        assert_eq!(
+            notifications["dnd"],
+            serde_json::json!({
+                "enabled": true,
+                "from": "19:00",
+                "to": "09:00",
+                "days": ["mon", "tue", "wed", "thu", "fri"]
+            })
+        );
+        assert_eq!(notifications["follow_focus"], true);
+        assert_eq!(notifications["group_bursts"], true);
+    }
+
+    #[test]
+    fn the_bottom_scene_has_the_notification_settings_too() {
+        assert_eq!(
+            demo_config(Scene::ConfigNotificationsBottom),
+            demo_config(Scene::ConfigNotifications)
+        );
+    }
+
+    #[test]
+    fn the_general_scene_starts_at_login() {
+        assert_eq!(
+            demo_config(Scene::ConfigGeneral)["general"]["start_at_login"],
+            true
+        );
+    }
+
+    #[test]
+    fn the_other_config_scenes_keep_the_default_settings() {
+        let default = serde_json::to_value(clusia_core::Config::default()).unwrap();
+        assert_eq!(demo_config(Scene::ConfigMedia), default);
+        assert_eq!(demo_config(Scene::ConfigAbout), default);
     }
 
     #[test]

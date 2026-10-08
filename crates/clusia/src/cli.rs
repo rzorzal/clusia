@@ -54,6 +54,10 @@ pub enum Command {
     Review(ReviewCommand),
     /// Your review activity: heatmap and stats.
     Activity,
+    /// Put Clúsia.app, the login agent and the `clusia` command in place.
+    Install(InstallArgs),
+    /// Remove Clúsia.app, the login agent and the `clusia` link; your data stays.
+    Uninstall(UninstallArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -129,4 +133,47 @@ pub enum VerdictArg {
     RequestChanges,
     Comment,
     Close,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct InstallArgs {
+    /// Print what would be done, and change nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Use binaries that are already built: a folder with clusia, clusiad, clusia-app and
+    /// clusia-tray. Without it the workspace is built in release mode.
+    #[arg(long, value_name = "DIR")]
+    pub from: Option<PathBuf>,
+    /// The workspace to build (default: the current folder).
+    #[arg(long, value_name = "DIR", conflicts_with = "from")]
+    pub workspace: Option<PathBuf>,
+    /// Where Clusia.app goes (default: /Applications, else ~/Applications).
+    #[arg(long, value_name = "DIR")]
+    pub applications: Option<PathBuf>,
+    /// Where the `clusia` link goes (default: /usr/local/bin, else ~/.local/bin).
+    #[arg(long, value_name = "DIR")]
+    pub bin_dir: Option<PathBuf>,
+    /// Where the login agent's plist goes (default: ~/Library/LaunchAgents). Start at login in
+    /// Config changes only the agent in the default folder.
+    #[arg(long, value_name = "DIR")]
+    pub agents_dir: Option<PathBuf>,
+    /// Do not touch launchd or stop the running daemon.
+    #[arg(long)]
+    pub no_launchctl: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct UninstallArgs {
+    /// Where Clusia.app was put (default: /Applications, else ~/Applications).
+    #[arg(long, value_name = "DIR")]
+    pub applications: Option<PathBuf>,
+    /// Where the `clusia` link was put (default: /usr/local/bin, else ~/.local/bin).
+    #[arg(long, value_name = "DIR")]
+    pub bin_dir: Option<PathBuf>,
+    /// Where the login agent's plist was put (default: ~/Library/LaunchAgents).
+    #[arg(long, value_name = "DIR")]
+    pub agents_dir: Option<PathBuf>,
+    /// Do not touch launchd or stop the running daemon.
+    #[arg(long)]
+    pub no_launchctl: bool,
 }

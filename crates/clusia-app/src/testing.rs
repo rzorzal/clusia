@@ -70,6 +70,8 @@ pub fn app(snapshot: Snapshot) -> App {
         .add_plugins(ReviewPlugin)
         .add_plugins(OpenPrPlugin)
         .init_resource::<OpenUrls>()
+        .init_resource::<crate::platform_sound::PlayedSounds>()
+        .init_resource::<crate::platform_window::Foregrounds>()
         .init_resource::<crate::ui::markdown::CopiedText>();
     app.update();
     app

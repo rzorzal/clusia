@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use clusia_core::time::parse_rfc3339;
 use clusia_core::{ActivitySummary, ListSort, Lists, PrSummary, ReviewState};
+use clusia_protocol::message::InboxItem;
 use clusia_protocol::{ReviewSummary, SyncState, SyncStatus};
 use clusia_view::heatmap;
 use clusia_view::lists::{self, Entry, is_saved};
@@ -41,6 +42,8 @@ pub struct Snapshot {
     pub lists_loaded: bool,
     /// The `lists` preferences from the config.
     pub lists: Lists,
+    /// The daemon's notification inbox, newest first.
+    pub inbox: Vec<InboxItem>,
 }
 
 impl Default for Snapshot {
@@ -54,6 +57,7 @@ impl Default for Snapshot {
             host: "github.com".into(),
             lists_loaded: false,
             lists: Lists::default(),
+            inbox: Vec::new(),
         }
     }
 }
@@ -76,7 +80,7 @@ pub struct Row {
     pub number: String,
     pub title: String,
     pub meta: String,
-    /// New activity since the user last opened the popover.
+    /// The inbox holds something unseen about this pull request.
     pub fresh: bool,
     pub badge: Option<Badge>,
     pub action: Action,
@@ -121,10 +125,8 @@ pub struct TrayView {
 #[derive(Debug, Default)]
 pub struct TrayModel {
     snapshot: Snapshot,
-    /// `updated_at` per PR at the last loaded lists; `None` until the first sync finished.
-    known: Option<HashMap<String, String>>,
-    /// PRs that changed since the user last opened the popover.
-    fresh: HashSet<String>,
+    /// Inbox ids the user looked at, until the daemon's own `seen` flags catch up.
+    looked_at: HashSet<String>,
     app_available: bool,
     /// The live list preferences (the model's own; the daemon config follows them).
     prefs: Lists,
@@ -158,34 +160,18 @@ impl TrayModel {
         self.refreshing = false;
     }
 
+    /// `github.com` or the Enterprise host, for browser links.
+    pub fn host(&self) -> &str {
+        &self.snapshot.host
+    }
+
     pub fn is_paused(&self) -> bool {
         self.snapshot.sync.as_ref().is_some_and(|s| s.paused)
     }
 
     pub fn apply(&mut self, snapshot: Snapshot) {
-        if snapshot.lists_loaded {
-            let current: HashMap<String, String> = snapshot
-                .assigned
-                .iter()
-                .chain(&snapshot.mine)
-                .map(|p| (p.pr.file_key(), p.updated_at.clone()))
-                .collect();
-            if let Some(known) = &self.known {
-                for (key, at) in &current {
-                    if known.get(key) != Some(at) {
-                        self.fresh.insert(key.clone());
-                    }
-                }
-            }
-            self.fresh.retain(|k| current.contains_key(k));
-            let synced = snapshot
-                .sync
-                .as_ref()
-                .is_some_and(|s| s.last_sync_unix.is_some());
-            if synced {
-                self.known = Some(current);
-            }
-        }
+        let kept: HashSet<&str> = snapshot.inbox.iter().map(|i| i.id.as_str()).collect();
+        self.looked_at.retain(|id| kept.contains(id.as_str()));
         self.adopt(&snapshot.lists);
         self.snapshot = snapshot;
         for id in [ListId::Assigned, ListId::Saved] {
@@ -309,13 +295,24 @@ impl TrayModel {
         true
     }
 
-    pub fn has_news(&self) -> bool {
-        !self.fresh.is_empty()
+    fn unseen(&self) -> impl Iterator<Item = &InboxItem> {
+        self.snapshot
+            .inbox
+            .iter()
+            .filter(|i| !i.seen && !self.looked_at.contains(&i.id))
     }
 
-    /// The user looked at the popover: clear the dots.
-    pub fn mark_seen(&mut self) {
-        self.fresh.clear();
+    /// The inbox holds something the user has not looked at.
+    pub fn has_news(&self) -> bool {
+        self.unseen().next().is_some()
+    }
+
+    /// The user looked at the popover: clear the dots now. Returns the ids it cleared, for the
+    /// daemon; only these, so an item that arrived unseen keeps its dot. Empty when nothing changed.
+    pub fn mark_seen(&mut self) -> Vec<String> {
+        let ids: Vec<String> = self.unseen().map(|i| i.id.clone()).collect();
+        self.looked_at.extend(ids.iter().cloned());
+        ids
     }
 
     pub fn view(&self, now: i64) -> TrayView {
@@ -449,7 +446,7 @@ impl TrayModel {
             number: format!("#{}", p.pr.number),
             title: p.title.clone(),
             meta,
-            fresh: self.fresh.contains(&p.pr.file_key()),
+            fresh: self.unseen().any(|i| i.pr.as_ref() == Some(&p.pr)),
             badge: None,
             action: Action::OpenReview {
                 pr: p.pr.clone(),
@@ -530,6 +527,7 @@ pub fn sync_caption(sync: Option<&SyncStatus>, refreshing: bool, now: i64) -> Op
 mod tests {
     use super::*;
     use clusia_core::{ActivitySummary, DayCount, ListSort, Lists, PrRef, PrSummary, ReviewState};
+    use clusia_protocol::message::InboxItem;
     use clusia_protocol::{ReviewSummary, SyncState, SyncStatus};
 
     const NOW: i64 = 1_790_000_000;
@@ -657,8 +655,27 @@ mod tests {
         assert!(m.view(NOW).paused);
     }
 
+    fn item(id: &str, pr_number: Option<u64>, seen: bool) -> InboxItem {
+        InboxItem {
+            id: id.into(),
+            kind: clusia_core::config::EventKind::ReviewRequested,
+            pr: pr_number.map(|n| pr(n, NOW).pr),
+            title: "Review requested".into(),
+            body: "@octo asked for your review".into(),
+            at: NOW - 60,
+            seen,
+        }
+    }
+
+    fn with_inbox(assigned: Vec<PrSummary>, inbox: Vec<InboxItem>) -> Snapshot {
+        Snapshot {
+            inbox,
+            ..snap(assigned)
+        }
+    }
+
     #[test]
-    fn first_load_marks_nothing_fresh() {
+    fn an_empty_inbox_has_no_news() {
         let mut m = TrayModel::new(false);
         m.apply(snap(vec![pr(1, NOW - 60)]));
         assert!(!m.has_news());
@@ -666,32 +683,16 @@ mod tests {
     }
 
     #[test]
-    fn lists_arriving_late_mark_nothing_fresh() {
+    fn unseen_inbox_items_mark_their_rows_and_the_icon() {
         let mut m = TrayModel::new(false);
-        // Early snapshot: synced, but the lists are still being fetched.
-        m.apply(Snapshot {
-            sync: synced(),
-            ..Snapshot::default()
-        });
-        m.apply(snap(vec![pr(1, NOW - 60), pr(2, NOW - 90)]));
-        assert!(!m.has_news());
-        // Never synced yet: nothing is compared either.
-        let mut m = TrayModel::new(false);
-        m.apply(Snapshot {
-            assigned: vec![pr(1, NOW)],
-            lists_loaded: true,
-            ..Snapshot::default()
-        });
-        m.apply(snap(vec![pr(1, NOW + 5)]));
-        assert!(!m.has_news());
-    }
-
-    #[test]
-    fn changed_or_new_prs_are_fresh_until_seen() {
-        let mut m = TrayModel::new(false);
-        m.apply(snap(vec![pr(1, NOW - 60), pr(2, NOW - 90)]));
-        m.apply(snap(vec![pr(1, NOW - 10), pr(2, NOW - 90), pr(3, NOW - 5)]));
-        assert!(m.has_news());
+        m.apply(with_inbox(
+            vec![pr(1, NOW - 60), pr(2, NOW - 90), pr(3, NOW - 120)],
+            vec![
+                item("a", Some(1), false),
+                item("b", Some(2), true),
+                item("c", None, false),
+            ],
+        ));
         let v = m.view(NOW);
         let fresh: Vec<_> = v.sections[0]
             .rows
@@ -699,21 +700,31 @@ mod tests {
             .filter(|r| r.fresh)
             .map(|r| r.number.clone())
             .collect();
-        assert_eq!(fresh, vec!["#3", "#1"], "sorted newest first");
-        assert!(v.has_news);
-        m.mark_seen();
-        assert!(!m.has_news());
-        assert!(m.view(NOW).sections[0].rows.iter().all(|r| !r.fresh));
+        assert_eq!(fresh, vec!["#1"], "only unseen items about a listed PR");
+        assert!(
+            v.has_news,
+            "an unseen item without a PR still lights the dot"
+        );
     }
 
     #[test]
-    fn prs_that_leave_the_lists_drop_their_dot() {
+    fn looking_at_the_popover_clears_the_dots_until_the_daemon_agrees() {
         let mut m = TrayModel::new(false);
-        m.apply(snap(vec![pr(1, NOW - 60)]));
-        m.apply(snap(vec![pr(1, NOW - 1)]));
-        assert!(m.has_news());
-        m.apply(snap(vec![]));
+        let unseen = with_inbox(vec![pr(1, NOW - 60)], vec![item("a", Some(1), false)]);
+        m.apply(unseen.clone());
+        assert_eq!(m.mark_seen(), ["a"], "exactly the items the user saw");
         assert!(!m.has_news());
+        assert!(!m.view(NOW).sections[0].rows[0].fresh);
+        assert!(m.mark_seen().is_empty(), "nothing left to tell the daemon");
+        // A snapshot taken before the daemon processed the request must not bring the dot back.
+        m.apply(unseen);
+        assert!(!m.has_news());
+        // The daemon's answer, then a new item.
+        m.apply(with_inbox(
+            vec![pr(1, NOW - 60)],
+            vec![item("a", Some(1), true), item("b", Some(1), false)],
+        ));
+        assert!(m.has_news(), "a later item is news again");
     }
 
     #[test]

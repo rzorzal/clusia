@@ -117,14 +117,6 @@ pub fn long_age(secs: i64) -> String {
     }
 }
 
-/// GitHub refused the token or there is none. Unknown (nothing fetched yet) is not signed out.
-pub fn signed_out(snap: &Snapshot) -> bool {
-    snap.sync
-        .as_ref()
-        .is_some_and(|s| s.state == SyncState::Unauthorized)
-        || snap.auth.as_ref().is_some_and(|a| a.source.is_none())
-}
-
 pub fn home_view(snap: &Snapshot, state: &HomeState, now: i64) -> HomeView {
     let prefs = &snap.config.lists;
     let query = if state.seeded {

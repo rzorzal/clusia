@@ -225,6 +225,7 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         Ok(ReviewLoad::Missing) => None,
         Ok(ReviewLoad::Quarantined { path, .. }) => {
             tracing::warn!(file = %path.display(), "review file was corrupt and has been set aside");
+            crate::notifications::note_recovered(shared, &path);
             None
         }
         Err(e) => {
@@ -233,6 +234,18 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
                 format!("cannot read the stored review for {pr}: {e}; it was left untouched"),
             ));
         }
+    };
+    // A publish that never got its answer may have reached GitHub: ask before reopening, so the
+    // same review is never posted twice.
+    let stored = match stored {
+        Some(mut r) if r.state == clusia_core::ReviewState::Publishing => {
+            match crate::publish::settle_interrupted(shared, &gh, client, &mut r).await {
+                Ok(true) => None,
+                Ok(false) => Some(r),
+                Err(out) => return out,
+            }
+        }
+        other => other,
     };
     let mut review = match stored {
         Some(r) if !r.state.is_terminal() => r,
@@ -271,6 +284,7 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         }
     }
     review.title = detail.summary.title.clone();
+    review.pr_state = clusia_core::PrState::of(detail.closed, detail.merged);
     if let Err(e) = review.apply(ReviewEvent::Reopen, now) {
         return invalid_state(e.to_string());
     }
@@ -360,6 +374,7 @@ pub(crate) fn load_stored(shared: &Shared, pr: &PrRef) -> Result<Option<Review>,
         Ok(ReviewLoad::Missing) => Ok(None),
         Ok(ReviewLoad::Quarantined { path, .. }) => {
             tracing::warn!(file = %path.display(), "review file was corrupt and has been set aside");
+            crate::notifications::note_recovered(shared, &path);
             Ok(None)
         }
         Err(e) => {
@@ -411,6 +426,15 @@ pub(crate) async fn files_for(
         Err(e) => return Err(provider_error(e)),
     };
     let files = Arc::new(gh.get_files(pr).await.map_err(provider_error)?);
+    // GitHub lists the files of whatever the head is now. A push while they loaded would store
+    // the new head's files under the old head, so the head is read again to prove it held.
+    let current = gh.get_pr(pr).await.map_err(provider_error)?;
+    if current.head_sha != head {
+        return Err(Outcome::Err(ProtocolError::new(
+            ErrorCode::Conflict,
+            "the pull request changed while its files were loading; try again",
+        )));
+    }
     shared
         .files_cache
         .lock()

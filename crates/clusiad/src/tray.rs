@@ -82,14 +82,16 @@ pub async fn supervise(
 }
 
 fn spawn(program: &Path, home: &Path, log: &Path) -> std::io::Result<Child> {
-    if let Some(dir) = log.parent() {
-        std::fs::create_dir_all(dir)?;
+    if let (Some(dir), Some(name)) = (log.parent(), log.file_stem().and_then(|n| n.to_str())) {
+        clusia_core::logging::prepare(dir, name, clusia_core::logging::KEEP_FILES)?;
     }
     let out = OpenOptions::new().create(true).append(true).open(log)?;
     let err = out.try_clone()?;
     Command::new(program)
         .arg("--home")
         .arg(home)
+        // Tells the tray it was not opened by the user, so it shows no window.
+        .env(clusia_protocol::launcher::LAUNCHED_BY, "daemon")
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err)
@@ -248,9 +250,11 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         supervise(prog, dir.path().into(), log.clone(), rx, FAST).await;
         assert!(
-            std::fs::read_to_string(log)
+            std::fs::read_to_string(&log)
                 .unwrap()
                 .contains("hello-from-tray")
         );
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "only the owner reads the log");
     }
 }

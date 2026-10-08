@@ -50,6 +50,9 @@ pub struct ReviewInfo {
     pub body: String,
     pub submitted_at: Option<String>,
     pub url: String,
+    /// The commit the review was left on; GitHub always says, older caches do not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

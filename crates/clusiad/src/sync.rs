@@ -109,13 +109,17 @@ async fn set_status(shared: &Shared, status: SyncStatus) {
         ..status
     };
     let mut current = shared.sync.write().await;
+    let previous = current.state;
     let changed = current.state != status.state
         || current.message != status.message
         || current.paused != status.paused;
+    let state = status.state;
     *current = status.clone();
     if changed {
         shared.publish(topics::SYNC, Event::SyncChanged(status));
     }
+    drop(current);
+    crate::notifications::sync_observed(shared, previous, state).await;
 }
 
 /// Pauses or resumes background syncing and returns the new status. Resuming syncs at once.
@@ -231,6 +235,7 @@ pub(crate) async fn run_loop(shared: Arc<Shared>) {
         }
         let status = sync_once(&shared).await;
         crate::news::check_saved_reviews(&shared).await;
+        crate::notifications::after_sync(&shared).await;
         let wait = status
             .next_sync_unix
             .map_or(IDLE_RETRY_SECS, |at| (at - now_unix()).max(1) as u64);
@@ -331,9 +336,17 @@ mod tests {
         let paused = set_paused(&shared, true).await;
         assert!(paused.paused);
         assert_eq!(paused.next_sync_unix, None, "paused: no countdown");
-        tokio::time::sleep(Duration::from_millis(200)).await; // let the running sync finish
+        // A sync that was already running finishes; wait until the request count stops moving.
+        let mut before = hits().await;
+        loop {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let now = hits().await;
+            if now == before {
+                break;
+            }
+            before = now;
+        }
         assert_eq!(shared.sync.read().await.next_sync_unix, None);
-        let before = hits().await;
         shared.sync_now.notify_one(); // e.g. a new token was stored
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(hits().await, before, "paused: no requests");

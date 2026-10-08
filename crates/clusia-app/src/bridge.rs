@@ -40,6 +40,9 @@ pub const TOAST_SECS: f64 = 4.0;
 /// The `Model.rejected` key under which a refusal Giphy gave for the stored key is kept.
 pub const GIPHY_KEY_REFUSAL: &str = "giphy.key";
 
+/// The config key `Ask::SetStartAtLogin` writes, and the `Model.rejected` key for its refusal.
+pub const START_AT_LOGIN: &str = "general.start_at_login";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ask {
     SetConfig {
@@ -50,6 +53,8 @@ pub enum Ask {
     ClearToken,
     SyncNow,
     RefreshAuth,
+    /// The first-run screen is gone: stop asking for its status.
+    FirstRunDone,
     /// The key goes straight to the Keychain; `GiphyKeyChanged` refreshes the snapshot.
     SetGiphyKey(Secret),
     ClearGiphyKey,
@@ -101,6 +106,15 @@ pub enum Ask {
         query: String,
         offset: u32,
     },
+    /// Saves the setting and the login agent together; a refusal comes back as `Tell::Rejected`
+    /// for `general.start_at_login`.
+    SetStartAtLogin {
+        on: bool,
+    },
+    /// Asks the tray to post one notification now.
+    TestNotification,
+    /// Reads the daemon's status again (the notification permission).
+    RefreshStatus,
 }
 
 /// A `Tell::Gifs` on its way to the GIF popover.
@@ -564,9 +578,15 @@ async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Resul
         snap.auth = Some(a);
     }
     if what.first_run
+        && snap.first_run_wanted()
         && let Some(Reply::FirstRun(f)) = request(client, Command::FirstRunStatus).await?
     {
         snap.first_run = Some(f);
+    }
+    if what.status
+        && let Some(Reply::Status(s)) = request(client, Command::DaemonStatus).await?
+    {
+        snap.notifications_permission = s.notifications_permission;
     }
     if what.giphy
         && let Some(Reply::GiphyKeyStatus(status)) =
@@ -626,12 +646,43 @@ async fn answer(
             notify(client, teller, Command::ClearToken, "Stored token removed").await?;
             fetch(client, snap, auth).await?;
         }
+        Ask::SetStartAtLogin { on } => {
+            match client.request(Command::SetStartAtLogin { on }).await {
+                Ok(_) => {}
+                Err(ClientError::Server(e)) => teller.send(Tell::Rejected {
+                    key: START_AT_LOGIN.into(),
+                    message: e.message,
+                }),
+                Err(e) => return Err(lost(e)),
+            }
+        }
+        Ask::TestNotification => {
+            notify(
+                client,
+                teller,
+                Command::TestNotification,
+                "Test notification sent",
+            )
+            .await?;
+        }
+        Ask::RefreshStatus => {
+            fetch(
+                client,
+                snap,
+                Refresh {
+                    status: true,
+                    ..Refresh::default()
+                },
+            )
+            .await?;
+        }
         Ask::SyncNow => {
             if let Some(Reply::Sync(s)) = request(client, Command::SyncNow).await? {
                 snap.sync = Some(s);
             }
         }
         Ask::RefreshAuth => fetch(client, snap, auth).await?,
+        Ask::FirstRunDone => snap.first_run_open = false,
         Ask::SetGiphyKey(key) => {
             notify(
                 client,
@@ -1217,6 +1268,15 @@ pub(crate) fn demo_answers(
                     model.rejected.insert(key, message);
                 }
             }
+            Ask::SetStartAtLogin { on } => {
+                if let Err(message) = snapshot::apply_config_locally(
+                    &mut model.snapshot.config,
+                    START_AT_LOGIN,
+                    &on.to_string(),
+                ) {
+                    model.rejected.insert(START_AT_LOGIN.into(), message);
+                }
+            }
             Ask::SetGiphyKey(_) => model.snapshot.giphy_key = GiphyKey::Set,
             Ask::ClearGiphyKey => model.snapshot.giphy_key = GiphyKey::Missing,
             Ask::OpenReview(pr) => tells.extend(demo_open(pr, now)),
@@ -1232,7 +1292,7 @@ pub(crate) fn demo_answers(
                     tells.push(Tell::Conversation { pr, conversation });
                 }
             }
-            Ask::MarkSeen(_) => {}
+            Ask::MarkSeen(_) | Ask::RefreshStatus => {}
             Ask::AddItem {
                 pr,
                 kind,
@@ -1545,6 +1605,32 @@ mod tests {
             .add_systems(Update, demo_answers);
         app.update();
         inbox.0.try_iter().collect()
+    }
+
+    #[test]
+    fn demo_mode_applies_start_at_login_and_ignores_status_refreshes() {
+        let (_inbox, outbox) = local_link();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .insert_resource(Asks {
+                recorded: vec![Ask::SetStartAtLogin { on: false }, Ask::RefreshStatus],
+                ..Asks::default()
+            })
+            .insert_resource(Model::default())
+            .insert_resource(Toasts::default())
+            .insert_resource(ReviewTabs::default())
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .insert_resource(outbox)
+            .add_systems(Update, demo_answers);
+        app.update();
+        let model = app.world().resource::<Model>();
+        assert!(!model.snapshot.config.general.start_at_login);
+        assert!(model.rejected.is_empty());
+        assert!(
+            app.world().resource::<Toasts>().0.is_empty(),
+            "a status refresh is not worth a toast"
+        );
     }
 
     #[test]

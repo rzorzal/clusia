@@ -5,7 +5,9 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use clusia_core::config::EventKind;
 use clusia_core::{ActivitySummary, Config, PrFilter, PrRef, PrSummary, ReviewState};
+use clusia_protocol::message::{InboxItem, OpenTarget, PermissionStatus};
 use clusia_protocol::{
     ClientMessage, Command, ErrorCode, Event, MessageReader, Outcome, PROTOCOL_VERSION,
     ProtocolError, Reply, ServerMessage, SyncState, SyncStatus, write_message,
@@ -15,7 +17,7 @@ use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 
 enum Push {
-    Event(&'static str, Event),
+    Event(&'static str, Box<Event>),
     Close,
 }
 
@@ -32,12 +34,25 @@ impl Fake {
         self.log.lock().unwrap().clone()
     }
 
+    /// The requests once at least `n` have arrived; panics after a generous deadline.
+    async fn wait_for(&self, n: usize) -> Vec<String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let r = self.requests();
+            if r.len() >= n {
+                return r;
+            }
+            assert!(std::time::Instant::now() < deadline, "{r:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     fn clear(&self) {
         self.log.lock().unwrap().clear();
     }
 
     fn event(&self, topic: &'static str, e: Event) {
-        self.push.send(Push::Event(topic, e)).unwrap();
+        self.push.send(Push::Event(topic, Box::new(e))).unwrap();
     }
 }
 
@@ -62,6 +77,18 @@ fn pr(n: u64) -> PrSummary {
         draft: false,
         updated_at: "2026-10-02T10:00:00Z".into(),
         comments: 1,
+    }
+}
+
+fn inbox_item(id: &str, seen: bool) -> InboxItem {
+    InboxItem {
+        id: id.into(),
+        kind: EventKind::ReviewRequested,
+        pr: Some(pr(7).pr),
+        title: "Review requested".into(),
+        body: "@octo asked for your review".into(),
+        at: 1,
+        seen,
     }
 }
 
@@ -91,6 +118,7 @@ fn reply(cmd: &Command, fail: &[&str]) -> Outcome {
         } => Reply::Prs(vec![pr(7)]),
         Command::ListPrs { .. } => Reply::Prs(vec![]),
         Command::ListReviews => Reply::Reviews(vec![]),
+        Command::GetInbox => Reply::Inbox(vec![inbox_item("n1", false)]),
         Command::GetActivity => Reply::Activity(ActivitySummary {
             heatmap: vec![],
             published_this_week: 2,
@@ -152,7 +180,7 @@ fn fake_failing(fail: &'static [&'static str]) -> Fake {
                 }
                 p = rx.recv() => match p {
                     Some(Push::Event(topic, event)) => {
-                        let msg = ServerMessage::Event { topic: topic.into(), event };
+                        let msg = ServerMessage::Event { topic: topic.into(), event: *event };
                         if write_message(&mut w, &msg).await.is_err() { return; }
                     }
                     _ => return,
@@ -184,6 +212,20 @@ fn start(socket: PathBuf) -> (Receiver<Update>, WriteQueue) {
     (rx, writes)
 }
 
+fn start_with_agent(socket: PathBuf, agent: PathBuf) -> (Receiver<Update>, WriteQueue) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (writes, queue) = mpsc::unbounded_channel();
+    tokio::spawn(data::run_with(
+        socket,
+        move |u| {
+            let _ = tx.send(u);
+        },
+        queue,
+        Some(agent),
+    ));
+    (rx, writes)
+}
+
 fn next(rx: &Receiver<Update>) -> Update {
     rx.recv_timeout(Duration::from_secs(5)).expect("an update")
 }
@@ -208,6 +250,7 @@ async fn snapshots_then_quit_when_the_daemon_hangs_up() {
     );
     assert_eq!(early.activity.as_ref().unwrap().published_this_week, 2);
     assert_eq!(early.sync, Some(online()));
+    assert_eq!(early.inbox, vec![inbox_item("n1", false)]);
     let full = snapshot(&rx);
     assert!(full.lists_loaded);
     assert_eq!(full.assigned, vec![pr(7)]);
@@ -218,6 +261,7 @@ async fn snapshots_then_quit_when_the_daemon_hangs_up() {
             "GetConfig",
             "ListReviews",
             "GetActivity",
+            "GetInbox",
             "GetSyncStatus",
             "ListPrs",
             "ListPrs"
@@ -225,7 +269,7 @@ async fn snapshots_then_quit_when_the_daemon_hangs_up() {
     );
     assert_eq!(
         *fake.topics.lock().unwrap(),
-        ["prs", "sync", "reviews", "config"]
+        ["prs", "sync", "reviews", "config", "tray"]
     );
     fake.push.send(Push::Close).unwrap();
     assert_eq!(
@@ -266,6 +310,8 @@ async fn event_burst_is_one_refresh() {
             },
         );
     }
+    fake.wait_for(2).await;
+    // Past the coalesce window: no second refresh follows.
     tokio::time::sleep(Duration::from_millis(800)).await;
     let lists = fake.requests().iter().filter(|r| *r == "ListPrs").count();
     assert_eq!(
@@ -295,8 +341,7 @@ async fn published_review_refreshes_activity_and_sync_changes_need_no_request() 
             items: 0,
         },
     );
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(fake.requests(), ["ListReviews", "GetActivity"]);
+    assert_eq!(fake.wait_for(2).await, ["ListReviews", "GetActivity"]);
     fake.clear();
     let offline = SyncStatus {
         state: SyncState::Offline,
@@ -320,8 +365,7 @@ async fn writes_become_config_sets_and_config_events_update_lists() {
             "oldest".into(),
         ))
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(fake.requests(), ["SetConfigValue"]);
+    assert_eq!(fake.wait_for(1).await, ["SetConfigValue"]);
     fake.event(
         "config",
         Event::ConfigChanged {
@@ -486,4 +530,129 @@ async fn lists_config_echo_always_sends_a_snapshot() {
         },
     );
     assert_eq!(snapshot(&rx), full);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_notify_event_reaches_the_ui_without_a_refresh() {
+    let fake = fake();
+    let (rx, _writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    fake.clear();
+    let open = OpenTarget::Review {
+        pr: pr(7).pr,
+        thread: None,
+    };
+    fake.event(
+        "tray",
+        Event::Notify {
+            id: "n2".into(),
+            title: "Review requested".into(),
+            subtitle: "rzorzal/clusia #7".into(),
+            body: "@octo asked for your review".into(),
+            sound: Some("leaf".into()),
+            open: open.clone(),
+            time_sensitive: true,
+        },
+    );
+    match next(&rx) {
+        Update::Notify(n) => {
+            assert_eq!(n.id, "n2");
+            assert_eq!(n.sound.as_deref(), Some("leaf"));
+            assert_eq!(n.open, open);
+            assert!(
+                n.time_sensitive,
+                "the interruption level is carried through"
+            );
+        }
+        other => panic!("expected Notify, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_inbox_change_refetches_only_the_inbox() {
+    let fake = fake();
+    let (rx, _writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    fake.clear();
+    for unseen in 1..=5 {
+        fake.event("tray", Event::InboxChanged { unseen });
+    }
+    assert_eq!(fake.wait_for(1).await, ["GetInbox"]);
+    // Past the coalesce window: nothing more arrives.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(fake.requests(), ["GetInbox"], "a burst is one fetch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permission_and_seen_become_commands() {
+    let fake = fake();
+    let (rx, writes) = start(fake.socket.clone());
+    snapshot(&rx);
+    snapshot(&rx);
+    fake.clear();
+    writes
+        .send(data::Outgoing::Permission(PermissionStatus::Allowed))
+        .unwrap();
+    writes
+        .send(data::Outgoing::MarkInboxSeen(vec!["a".into()]))
+        .unwrap();
+    assert_eq!(
+        fake.wait_for(2).await,
+        ["NotificationPermission", "MarkInboxSeen"]
+    );
+}
+
+#[test]
+fn a_login_agent_is_needed_only_when_wanted_and_missing() {
+    assert!(data::needs_login_agent(true, false));
+    assert!(!data::needs_login_agent(true, true), "already installed");
+    assert!(
+        !data::needs_login_agent(false, false),
+        "start at login is off"
+    );
+    assert!(!data::needs_login_agent(false, true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opening_the_app_installs_a_missing_login_agent() {
+    let fake = fake();
+    let dir = tempfile::tempdir().unwrap();
+    let (rx, _writes) = start_with_agent(fake.socket.clone(), dir.path().join("agent.plist"));
+    snapshot(&rx);
+    snapshot(&rx);
+    assert_eq!(
+        fake.requests(),
+        [
+            "Subscribe",
+            "GetConfig",
+            "SetStartAtLogin",
+            "ListReviews",
+            "GetActivity",
+            "GetInbox",
+            "GetSyncStatus",
+            "ListPrs",
+            "ListPrs"
+        ],
+        "the daemon is asked once, right after the config is read"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_installed_login_agent_is_left_alone() {
+    let fake = fake();
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("agent.plist");
+    std::fs::write(&agent, "").unwrap();
+    let (rx, _writes) = start_with_agent(fake.socket.clone(), agent);
+    snapshot(&rx);
+    snapshot(&rx);
+    assert!(
+        !fake.requests().iter().any(|r| r == "SetStartAtLogin"),
+        "{:?}",
+        fake.requests()
+    );
 }

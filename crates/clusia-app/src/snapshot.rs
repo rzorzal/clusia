@@ -1,7 +1,9 @@
 //! What the window knows from the daemon, and what each event changes.
 
 use clusia_core::{ActivitySummary, Config, PrSummary, ReviewState};
-use clusia_protocol::{AuthInfo, Event, FirstRun, ReviewSummary, SyncStatus, WindowTarget};
+use clusia_protocol::{
+    AuthInfo, Event, FirstRun, PermissionStatus, ReviewSummary, SyncState, SyncStatus, WindowTarget,
+};
 
 /// What the window knows about the Giphy key. The daemon's status gives `Missing` or `Set`;
 /// `Rejected` is only ever derived by the Media page from a refusal the window saw.
@@ -27,9 +29,34 @@ pub struct Snapshot {
     pub giphy_key: GiphyKey,
     /// What the first-run screen shows; `None` until the daemon has answered.
     pub first_run: Option<FirstRun>,
+    /// The first-run screen may still be on screen (the login was missing and **Continue** has
+    /// not been pressed), so its status keeps being asked for.
+    pub first_run_open: bool,
     /// `assigned` and `mine` hold real lists, not the empty defaults before the first sync.
     pub lists_loaded: bool,
     pub daemon_version: String,
+    /// Whether macOS lets the tray post notifications, as the tray last reported it.
+    pub notifications_permission: PermissionStatus,
+}
+
+impl Snapshot {
+    /// GitHub refused the token or there is none. Unknown (nothing fetched yet) is not signed out.
+    pub fn signed_out(&self) -> bool {
+        self.sync
+            .as_ref()
+            .is_some_and(|s| s.state == SyncState::Unauthorized)
+            || self.auth.as_ref().is_some_and(|a| a.source.is_none())
+    }
+
+    /// Whether the first-run status is worth asking the daemon for: while the login is missing
+    /// (it opens the screen) and until **Continue** closes it. The answer costs a `gh` call and
+    /// a folder scan, so it is not asked for once the screen is gone.
+    pub fn first_run_wanted(&mut self) -> bool {
+        if self.signed_out() {
+            self.first_run_open = true;
+        }
+        self.first_run_open
+    }
 }
 
 /// What must be fetched again.
@@ -42,6 +69,7 @@ pub struct Refresh {
     pub auth: bool,
     pub giphy: bool,
     pub first_run: bool,
+    pub status: bool,
 }
 
 impl Refresh {
@@ -54,6 +82,7 @@ impl Refresh {
         auth: true,
         giphy: false,
         first_run: false,
+        status: true,
     };
 
     pub fn merge(&mut self, other: Refresh) {
@@ -64,6 +93,7 @@ impl Refresh {
         self.auth |= other.auth;
         self.giphy |= other.giphy;
         self.first_run |= other.first_run;
+        self.status |= other.status;
     }
 
     pub fn any(self) -> bool {
@@ -74,6 +104,7 @@ impl Refresh {
             || self.auth
             || self.giphy
             || self.first_run
+            || self.status
     }
 }
 
@@ -100,7 +131,10 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         Event::ReviewOutdated { .. } => r.reviews = true,
         Event::WindowRequested { target } => return (r, Some(target)),
         // `Stopping` is handled by the bridge before `apply` (it closes the window).
-        Event::LoadStep(_) | Event::Stopping => {}
+        Event::LoadStep(_)
+        | Event::Stopping
+        | Event::Notify { .. }
+        | Event::InboxChanged { .. } => {}
     }
     (r, None)
 }
@@ -292,6 +326,21 @@ mod tests {
     }
 
     #[test]
+    fn notification_keys_apply_locally_like_the_daemon_does() {
+        let mut c = Config::default();
+        apply_config_locally(&mut c, "notifications.events.mentioned.sound", "false").unwrap();
+        assert!(!c.notifications.events[&clusia_core::config::EventKind::Mentioned].sound);
+        apply_config_locally(&mut c, "notifications.dnd.days", r#"["sat","sun"]"#).unwrap();
+        assert_eq!(c.notifications.dnd.days.len(), 2);
+        apply_config_locally(&mut c, "notifications.dnd.from", "20:30").unwrap();
+        assert_eq!(c.notifications.dnd.from.to_string(), "20:30");
+        assert!(apply_config_locally(&mut c, "notifications.dnd.to", "25:00").is_err());
+        apply_config_locally(&mut c, "notifications.sound", "tick").unwrap();
+        apply_config_locally(&mut c, "general.start_at_login", "false").unwrap();
+        assert!(!c.general.start_at_login);
+    }
+
+    #[test]
     fn local_config_writes_follow_the_daemon_rules() {
         let mut c = Config::default();
         apply_config_locally(&mut c, "appearance.theme", "dark").unwrap();
@@ -300,8 +349,8 @@ mod tests {
         assert_eq!(c.appearance.code_size, 16);
         apply_config_locally(&mut c, "repositories.roots", r#"["~/a","~/b c"]"#).unwrap();
         assert_eq!(c.repositories.roots, ["~/a", "~/b c"]);
-        apply_config_locally(&mut c, "notifications.do_not_disturb", "true").unwrap();
-        assert!(c.notifications.do_not_disturb);
+        apply_config_locally(&mut c, "notifications.dnd.enabled", "true").unwrap();
+        assert!(c.notifications.dnd.enabled);
         let before = c.clone();
         for (key, value) in [
             ("appearance.code_size", "15"),
@@ -317,5 +366,36 @@ mod tests {
             );
         }
         assert_eq!(c, before, "refused writes change nothing");
+    }
+
+    fn signed_out_snapshot() -> Snapshot {
+        Snapshot {
+            auth: Some(AuthInfo {
+                source: None,
+                login: None,
+                scopes: Vec::new(),
+                error: Some("no GitHub token".into()),
+            }),
+            ..Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn first_run_is_asked_only_while_it_is_needed() {
+        let mut s = Snapshot::default();
+        assert!(!s.first_run_wanted(), "nothing says the login is missing");
+
+        let mut s = signed_out_snapshot();
+        assert!(s.first_run_wanted(), "no login opens the first run");
+        s.auth = None;
+        assert!(
+            s.first_run_wanted(),
+            "it stays wanted after the login works, until Continue"
+        );
+        s.first_run_open = false;
+        assert!(!s.first_run_wanted(), "Continue ends it");
+
+        s.auth = signed_out_snapshot().auth;
+        assert!(s.first_run_wanted(), "a login lost later opens it again");
     }
 }

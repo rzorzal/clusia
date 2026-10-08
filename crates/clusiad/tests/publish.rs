@@ -4,8 +4,8 @@ use clusia_core::{ActivityKind, DraftKind, ReviewState, Side, Verdict};
 use clusia_protocol::{AnchorInput, ClientError, Command, ErrorCode, PublishResult, Reply};
 use common::git_fixture::advance_pr;
 use common::github_mock::{PrMock, graphql_error, graphql_requests, mount_pr, mount_publish};
-use common::review_world::{open, pr7, world};
-use serde_json::json;
+use common::review_world::{open, pr7, view_of, world};
+use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
 use wiremock::{Mock, ResponseTemplate};
 
@@ -394,5 +394,438 @@ async fn publish_of_an_interrupted_publish_asks_to_reopen() {
         other => panic!("{other:?}"),
     }
     no_review_written(&w).await;
+    w.daemon.stop().await;
+}
+
+/// What GitHub lists for acme/widgets#7 (winning over the empty default).
+async fn mount_reviews(w: &common::review_world::World, reviews: Value) {
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reviews))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+}
+
+/// A review `me` submitted on the PR's head after any Finalize moment.
+fn my_review(w: &common::review_world::World) -> Value {
+    json!({
+        "id": 42, "user": { "login": "me" }, "state": "COMMENTED", "body": "Please rename.",
+        "submitted_at": "2099-01-01T00:00:00Z", "html_url": REVIEW_URL, "commit_id": w.head
+    })
+}
+
+fn activity_of(w: &common::review_world::World, kind: ActivityKind) -> Vec<clusia_core::Activity> {
+    let (activity, _) = clusia_store::read_activity(&w.daemon.paths).unwrap();
+    activity.into_iter().filter(|a| a.kind == kind).collect()
+}
+
+#[tokio::test]
+async fn a_lost_answer_after_submit_is_recorded_not_posted_again() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    // GitHub takes the submit but the answer is unreadable, and the review can no longer be
+    // deleted because it is not pending any more.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    graphql_error(
+        &w.server,
+        "deletePullRequestReview",
+        "Could not resolve to a node",
+    )
+    .await;
+    mount_reviews(&w, json!([my_review(&w)])).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+
+    let reply = c
+        .request(publish(Verdict::RequestChanges, "Please rename."))
+        .await
+        .unwrap();
+    assert_eq!(
+        reply,
+        Reply::Published(PublishResult {
+            url: Some(REVIEW_URL.into()),
+            closed: false,
+            unresolved: vec![],
+            close_error: None,
+        })
+    );
+    assert_eq!(
+        graphql_requests(&w.server, "addPullRequestReview(")
+            .await
+            .len(),
+        1,
+        "one pending review"
+    );
+    assert_eq!(
+        graphql_requests(&w.server, "submitPullRequestReview")
+            .await
+            .len(),
+        1,
+        "one submit"
+    );
+    assert!(!w.daemon.paths.review_file(&pr7()).exists());
+    let published = activity_of(&w, ActivityKind::ReviewPublished);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].url.as_deref(), Some(REVIEW_URL));
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_lost_answer_with_no_review_on_github_fails_as_before() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "")).await),
+        ErrorCode::Upstream
+    );
+    match c.request(Command::GetReview { pr: pr7() }).await.unwrap() {
+        Reply::ReviewFile(r) => assert_eq!((r.state, r.draft.items.len()), (ReviewState::Saved, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert!(activity_of(&w, ActivityKind::ReviewPublished).is_empty());
+    w.daemon.stop().await;
+}
+
+/// Leaves the stored review as a daemon that died mid-publish would: `publishing`.
+fn die_during_publish(w: &common::review_world::World) {
+    let mut review = stored_review(w);
+    review.state = ReviewState::Publishing;
+    clusia_store::save_review(&w.daemon.paths, &review).unwrap();
+}
+
+#[tokio::test]
+async fn death_during_publish_does_not_post_again() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    die_during_publish(&w);
+    mount_reviews(&w, json!([my_review(&w)])).await;
+
+    let view = view_of(c.request(Command::OpenReview { pr: pr7() }).await.unwrap());
+    assert_eq!(
+        (view.review.state, view.review.draft.items.len()),
+        (ReviewState::Active, 0),
+        "the review GitHub already has is not a draft any more"
+    );
+    assert!(
+        graphql_requests(&w.server, "addPullRequestReview(")
+            .await
+            .is_empty(),
+        "nothing is posted again"
+    );
+    let published = activity_of(&w, ActivityKind::ReviewPublished);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].url.as_deref(), Some(REVIEW_URL));
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn an_interrupted_publish_that_never_reached_github_keeps_its_draft() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    die_during_publish(&w);
+    // Someone else's review and one on an older commit are not ours to adopt.
+    mount_reviews(
+        &w,
+        json!([
+            { "id": 1, "user": { "login": "mona" }, "state": "APPROVED", "body": "",
+              "submitted_at": "2099-01-01T00:00:00Z", "html_url": REVIEW_URL, "commit_id": w.head },
+            { "id": 2, "user": { "login": "me" }, "state": "COMMENTED", "body": "",
+              "submitted_at": "2099-01-01T00:00:00Z", "html_url": REVIEW_URL, "commit_id": "0000" }
+        ]),
+    )
+    .await;
+
+    let view = view_of(c.request(Command::OpenReview { pr: pr7() }).await.unwrap());
+    assert_eq!(
+        (view.review.state, view.review.draft.items.len()),
+        (ReviewState::Active, 1)
+    );
+    assert!(activity_of(&w, ActivityKind::ReviewPublished).is_empty());
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn an_unreadable_review_list_leaves_an_interrupted_publish_alone() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    die_during_publish(&w);
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "message": "forbidden" })))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+
+    assert_eq!(
+        code(c.request(Command::OpenReview { pr: pr7() }).await),
+        ErrorCode::Upstream
+    );
+    assert_eq!(stored_review(&w).state, ReviewState::Publishing);
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_publish_whose_outcome_is_unknown_is_never_posted_twice() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    // The connection drops right after the submit: its answer, the cleanup and the check that
+    // follows all fail, so nobody can tell whether GitHub took the review.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("deletePullRequestReview"))
+        .respond_with(ResponseTemplate::new(502))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(502))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    // Once the network is back, GitHub lists the review it did take.
+    mount_reviews(&w, json!([my_review(&w)])).await;
+
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "Please rename.")).await),
+        ErrorCode::Upstream
+    );
+    assert_eq!(
+        stored_review(&w).state,
+        ReviewState::Publishing,
+        "an unknown outcome is not a failure to retry"
+    );
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "Please rename.")).await),
+        ErrorCode::InvalidState,
+        "publishing again is refused until GitHub has been asked"
+    );
+    let view = view_of(c.request(Command::OpenReview { pr: pr7() }).await.unwrap());
+    assert_eq!(
+        (view.review.state, view.review.draft.items.len()),
+        (ReviewState::Active, 0),
+        "the review GitHub took is recorded, not offered again"
+    );
+    assert_eq!(
+        graphql_requests(&w.server, "addPullRequestReview(")
+            .await
+            .len(),
+        1,
+        "one review posted"
+    );
+    let published = activity_of(&w, ActivityKind::ReviewPublished);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].url.as_deref(), Some(REVIEW_URL));
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_second_publish_never_takes_the_first_review_for_its_own() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    c.request(publish(Verdict::Comment, "")).await.unwrap();
+    // A moment later, on the same head, a second review loses its answer; GitHub lists only the
+    // first one, which is already recorded.
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    graphql_error(
+        &w.server,
+        "deletePullRequestReview",
+        "Could not resolve to a node",
+    )
+    .await;
+    mount_reviews(&w, json!([my_review(&w)])).await;
+
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "")).await),
+        ErrorCode::Upstream
+    );
+    match c.request(Command::GetReview { pr: pr7() }).await.unwrap() {
+        Reply::ReviewFile(r) => assert_eq!((r.state, r.draft.items.len()), (ReviewState::Saved, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(activity_of(&w, ActivityKind::ReviewPublished).len(), 1);
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_published_review_whose_file_cannot_be_removed_is_not_posted_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    // The submit answers slowly, so the reviews folder can be locked once Finalize saved.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(
+                    json!({ "data": { "submitPullRequestReview": { "pullRequestReview": {
+                    "id": "PRR_1", "databaseId": 42, "url": REVIEW_URL, "state": "COMMENTED"
+                } } } }),
+                )
+                .set_delay(std::time::Duration::from_millis(800)),
+        )
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    mount_reviews(&w, json!([my_review(&w)])).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+
+    let dir = w.daemon.paths.reviews_dir();
+    let mut publisher = w.daemon.client().await;
+    let publishing = tokio::spawn(async move {
+        publisher
+            .request(publish(Verdict::Comment, "Please rename."))
+            .await
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while stored_review(&w).state != ReviewState::Publishing {
+        assert!(std::time::Instant::now() < deadline, "Finalize never saved");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let reply = publishing.await.unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(reply, Ok(Reply::Published(_))), "{reply:?}");
+
+    let view = view_of(c.request(Command::OpenReview { pr: pr7() }).await.unwrap());
+    assert_eq!(
+        (view.review.state, view.review.draft.items.len()),
+        (ReviewState::Active, 0),
+        "the published review is not offered again as a draft"
+    );
+    assert_eq!(
+        graphql_requests(&w.server, "submitPullRequestReview")
+            .await
+            .len(),
+        1,
+        "one submit"
+    );
+    assert_eq!(activity_of(&w, ActivityKind::ReviewPublished).len(), 1);
+    w.daemon.stop().await;
+}
+
+/// A gateway error on the submit although GitHub took the review: the pending review is gone.
+async fn submit_times_out_after_posting(w: &common::review_world::World) {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(ResponseTemplate::new(502))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    graphql_error(
+        &w.server,
+        "deletePullRequestReview",
+        "Can not delete a non-pending pull request review",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_gateway_error_on_the_submit_is_reconciled_not_posted_again() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    submit_times_out_after_posting(&w).await;
+    mount_reviews(&w, json!([my_review(&w)])).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+
+    let reply = c
+        .request(publish(Verdict::Comment, "Please rename."))
+        .await
+        .unwrap();
+    assert!(
+        matches!(&reply, Reply::Published(r) if r.url.as_deref() == Some(REVIEW_URL)),
+        "{reply:?}"
+    );
+    assert!(!w.daemon.paths.review_file(&pr7()).exists());
+    assert_eq!(activity_of(&w, ActivityKind::ReviewPublished).len(), 1);
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_gateway_error_on_the_submit_with_github_unreachable_stays_publishing() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    submit_times_out_after_posting(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(502))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "Please rename.")).await),
+        ErrorCode::Upstream
+    );
+    assert_eq!(stored_review(&w).state, ReviewState::Publishing);
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "Please rename.")).await),
+        ErrorCode::InvalidState,
+        "a retry posts nothing"
+    );
+    assert_eq!(
+        graphql_requests(&w.server, "submitPullRequestReview")
+            .await
+            .len(),
+        1
+    );
     w.daemon.stop().await;
 }

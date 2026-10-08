@@ -13,6 +13,10 @@ use clusia_protocol::Client;
 use clusiad::{Daemon, DaemonOptions, ShutdownHandle};
 use tokio::task::JoinHandle;
 
+/// How long a test waits for an event the daemon pushes. It returns as soon as the event
+/// arrives; the margin only matters on a loaded machine.
+pub const EVENT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// No network, no real gh, no Keychain, no background loop.
 pub fn test_options() -> DaemonOptions {
     DaemonOptions {
@@ -43,8 +47,22 @@ impl TestDaemon {
         Self::start_in(tempfile::tempdir().unwrap()).await
     }
 
+    /// A restart in a home whose lock or socket a parallel test's forked child still holds (it
+    /// keeps inherited descriptors until it execs) is refused for a moment: retry until it lets go.
     pub async fn start_in(dir: tempfile::TempDir) -> Self {
-        Self::start_with(dir, test_options()).await
+        let paths = Paths::new(dir.path());
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let daemon = loop {
+            match Daemon::bind_with(paths.clone(), test_options()).await {
+                Err(clusiad::StartError::AlreadyRunning(_))
+                    if std::time::Instant::now() < give_up =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                other => break other.expect("daemon binds"),
+            }
+        };
+        Self::running(dir, paths, daemon)
     }
 
     pub async fn start_with(dir: tempfile::TempDir, options: DaemonOptions) -> Self {
@@ -52,6 +70,10 @@ impl TestDaemon {
         let daemon = Daemon::bind_with(paths.clone(), options)
             .await
             .expect("daemon binds");
+        Self::running(dir, paths, daemon)
+    }
+
+    fn running(dir: tempfile::TempDir, paths: Paths, daemon: Daemon) -> Self {
         let handle = daemon.shutdown_handle();
         let task = tokio::spawn(daemon.run());
         Self {

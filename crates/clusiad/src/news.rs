@@ -5,11 +5,11 @@ use std::path::PathBuf;
 
 use clusia_core::time::parse_rfc3339;
 use clusia_core::{
-    Activity, ActivityKind, CommitInfo, PrConversation, PrRef, ReviewEvent, ReviewState,
+    Activity, ActivityKind, CommitInfo, PrConversation, PrRef, PrState, ReviewEvent, ReviewState,
 };
 use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{Event, NewsItem, NewsKind, Outcome, Reply, SyncState, topics};
-use clusia_store::{list_reviews, read_activity};
+use clusia_store::list_reviews;
 
 use crate::handlers::{no_token, provider_error};
 use crate::reviews::{announce, files_for, load_existing, load_stored, lock, record, save};
@@ -197,7 +197,7 @@ pub(crate) async fn whats_new(shared: &Shared, pr: &PrRef) -> Outcome {
         .ok()
         .map(|c| c.label().to_string());
     let viewer = gh.viewer().await.ok().map(|v| v.login);
-    let local = match read_activity(&shared.paths) {
+    let local = match crate::activity::read_off_thread(&shared.paths).await {
         Ok((all, _)) => all.into_iter().filter(|a| &a.pr == pr).collect(),
         Err(e) => {
             tracing::warn!(error = %e, "cannot read the activity log");
@@ -243,6 +243,47 @@ pub(crate) async fn mark_seen(shared: &Shared, pr: &PrRef) -> Outcome {
     Outcome::Ok(Reply::Ack)
 }
 
+const BACKOFF_FIRST_SECS: u64 = 60;
+const BACKOFF_MAX_SECS: u64 = 3600;
+
+/// Spaces out the attempts to update the worktree of a saved review that keeps failing: a
+/// minute, then double each time, never more than an hour.
+#[derive(Debug, Default)]
+pub(crate) struct Backoff {
+    failures: u32,
+    retry_at: u64,
+}
+
+impl Backoff {
+    pub fn due(&self, now: u64) -> bool {
+        now >= self.retry_at
+    }
+
+    pub fn failed(&mut self, now: u64) {
+        self.failures = self.failures.saturating_add(1);
+        let delay = BACKOFF_FIRST_SECS
+            .saturating_mul(1 << (self.failures - 1).min(6))
+            .min(BACKOFF_MAX_SECS);
+        self.retry_at = now + delay;
+    }
+}
+
+/// Remembers that a saved review's pull request is closed or merged, so later syncs leave it
+/// alone.
+async fn note_pr_ended(shared: &Shared, pr: &PrRef, state: PrState) {
+    let _guard = lock(shared, pr).await;
+    let Ok(Some(mut review)) = load_stored(shared, pr) else {
+        return;
+    };
+    if review.pr_state == state {
+        return;
+    }
+    review.pr_state = state;
+    if save(shared, &review).is_err() {
+        tracing::warn!(pr = %pr, "cannot record that a pull request ended");
+    }
+}
+
 /// Relocates saved reviews whose pull request moved (spec §6.6); deterministic, no agent involved.
 pub(crate) async fn check_saved_reviews(shared: &Shared) {
     // The sync status says whether GitHub is reachable; polling every PR while offline only logs noise.
@@ -266,7 +307,14 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
         ) {
             continue;
         }
+        // A closed or merged pull request cannot move any more; opening the review looks again.
+        if !stored.pr_state.is_open() {
+            continue;
+        }
         let pr = stored.pr.clone();
+        if !shared.checkout_due(&pr) {
+            continue;
+        }
         let detail = match gh.get_pr(&pr).await {
             Ok(d) => d,
             Err(e) => {
@@ -274,6 +322,10 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
                 continue;
             }
         };
+        if detail.closed || detail.merged {
+            note_pr_ended(shared, &pr, PrState::of(detail.closed, detail.merged)).await;
+            continue;
+        }
         if detail.head_sha == stored.head_sha && detail.base_sha == stored.base_sha {
             continue;
         }
@@ -300,9 +352,11 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             Ok(x) => x,
             Err(e) => {
                 tracing::warn!(error = %e, pr = %pr, "cannot update the worktree of a saved review");
+                shared.checkout_failed(&pr);
                 continue;
             }
         };
+        shared.checkout_worked(&pr);
         let repo = PathBuf::from(&info.clone);
         relocate::refresh_base(&repo, &remote, &pr, &detail.base_ref).await;
         let files = match files_for(shared, &pr, &detail.head_sha).await {
@@ -313,6 +367,7 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             }
         };
         let head_changed = review.head_sha != detail.head_sha;
+        let old_head = review.head_sha.clone();
         let report = relocate::relocate_review(
             &mut review,
             &detail,
@@ -356,6 +411,10 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             },
         );
         announce(shared, &review);
+        // A base that moved alone may obsolete comments, but brings no commits to re-read.
+        if head_changed {
+            crate::notifications::review_outdated(shared, &review, &old_head).await;
+        }
     }
 }
 
@@ -432,6 +491,7 @@ mod tests {
                     body: String::new(),
                     submitted_at: Some("2000-01-01T00:50:00Z".into()),
                     url: "r4".into(),
+                    commit_id: None,
                 }],
                 review_threads: vec![],
             },
@@ -499,5 +559,21 @@ mod tests {
         i.since = SINCE + 100_000;
         i.last_checks = Some("passed".into());
         assert!(news_items(&i).is_empty());
+    }
+
+    #[test]
+    fn backoff_doubles_from_a_minute_up_to_an_hour() {
+        let mut b = Backoff::default();
+        assert!(b.due(0), "a review that never failed is always due");
+        let mut now = 100;
+        let mut waits = Vec::new();
+        for _ in 0..9 {
+            b.failed(now);
+            assert!(!b.due(now), "not due right after a failure");
+            waits.push(b.retry_at - now);
+            now = b.retry_at;
+            assert!(b.due(now), "due again when the wait is over");
+        }
+        assert_eq!(waits, [60, 120, 240, 480, 960, 1920, 3600, 3600, 3600]);
     }
 }
