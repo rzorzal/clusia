@@ -2,6 +2,7 @@
 //! `Clusia.app`, so the user opening the app, the daemon starting its tray and a notification
 //! click all land here.
 
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
@@ -15,7 +16,7 @@ use crate::actions::{self, Action};
 
 /// Set by the daemon on the tray it spawns (`daemon`). A relaunch by a notification click
 /// carries no marker, so it looks like the user opening the app; `click` exists for tools.
-pub const LAUNCHED_BY: &str = "CLUSIA_LAUNCHED_BY";
+pub use clusia_protocol::launcher::LAUNCHED_BY;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchReason {
@@ -25,6 +26,14 @@ pub enum LaunchReason {
     Daemon,
     /// A notification click started the process.
     NotificationClick,
+}
+
+/// The command line without the `-psn_…` process serial number older macOS versions (and
+/// quarantined first launches) pass to an app LaunchServices opens; the parser would refuse it.
+pub fn without_psn(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    args.into_iter()
+        .filter(|a| !a.to_string_lossy().starts_with("-psn_"))
+        .collect()
 }
 
 /// `env` is the value of [`LAUNCHED_BY`]; `args` are the arguments after the program name.
@@ -216,6 +225,15 @@ mod tests {
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn launch_services_process_serial_numbers_are_dropped() {
+        let given = ["clusia-tray", "-psn_0_1234", "--home", "/x"].map(OsString::from);
+        assert_eq!(
+            without_psn(given),
+            ["clusia-tray", "--home", "/x"].map(OsString::from)
+        );
     }
 
     #[test]
@@ -437,6 +455,61 @@ mod tests {
         // A process forked by a parallel test holds the lock until it execs, so allow a moment.
         let again = InstanceLock::acquire_waiting(&path, 100, Duration::from_millis(20)).unwrap();
         assert!(again.is_some(), "free again once the first tray let go");
+    }
+
+    /// Run by `a_killed_tray_releases_its_lock` in a process of its own: takes the lock at
+    /// `CLUSIA_TEST_HOLD_LOCK`, says so in the file next to it and waits to be killed.
+    #[test]
+    #[ignore = "a helper process, started by a_killed_tray_releases_its_lock"]
+    fn hold_the_lock_until_killed() {
+        let Some(path) = std::env::var_os("CLUSIA_TEST_HOLD_LOCK") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let _lock = InstanceLock::acquire(&path)
+            .unwrap()
+            .expect("the lock is free");
+        std::fs::write(path.with_extension("held"), "").unwrap();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn a_killed_tray_releases_its_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tray.lock");
+        let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launch::tests::hold_the_lock_until_killed",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("CLUSIA_TEST_HOLD_LOCK", &path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !path.with_extension("held").exists() {
+            if std::time::Instant::now() > deadline || holder.try_wait().unwrap().is_some() {
+                let _ = holder.kill();
+                let _ = holder.wait();
+                panic!("the helper never took the lock");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            InstanceLock::acquire(&path).unwrap().is_none(),
+            "the live helper holds the lock"
+        );
+
+        holder.kill().unwrap(); // SIGKILL: no destructor runs
+        holder.wait().unwrap();
+        // A process forked by a parallel test holds the lock until it execs, so allow a moment.
+        let again = InstanceLock::acquire_waiting(&path, 100, Duration::from_millis(20)).unwrap();
+        assert!(again.is_some(), "the OS let go of a killed tray's lock");
     }
 
     #[test]

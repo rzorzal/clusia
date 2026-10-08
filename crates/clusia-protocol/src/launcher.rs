@@ -14,6 +14,10 @@ use clusia_core::paths::MAX_SOCKET_PATH;
 use crate::client::{Client, ClientError};
 use crate::message::{Command, Reply};
 
+/// Set by the daemon on the tray it spawns (`daemon`), so the tray knows the user did not open
+/// it. Every other child is started without it.
+pub const LAUNCHED_BY: &str = "CLUSIA_LAUNCHED_BY";
+
 pub const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(100);
 /// The exit status of a clusiad that found another one running (`StartError::AlreadyRunning`).
@@ -100,14 +104,8 @@ pub async fn start_daemon_with(
     } else {
         bin.to_path_buf()
     };
-    let mut cmd = std::process::Command::new(&program);
-    if let Some(home) = home {
-        cmd.arg("--home").arg(home);
-    }
-    cmd.stdin(Stdio::null())
-        .stdout(out)
-        .stderr(err)
-        .current_dir("/");
+    let mut cmd = daemon_command(&program, home);
+    cmd.stdin(Stdio::null()).stdout(out).stderr(err);
     // A new session (and so a new process group) without a controlling terminal: the daemon
     // never receives the terminal's SIGHUP/SIGINT and can never block reading from it.
     // SAFETY: `setsid` is async-signal-safe and touches no memory of the parent.
@@ -156,6 +154,17 @@ pub async fn start_daemon_with(
     }
 }
 
+/// `program --home <home>` in `/`. A tray the daemon started carries its launch marker, and a
+/// daemon that inherited it would hand it on to the tray it starts.
+fn daemon_command(program: &Path, home: Option<&Path>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    if let Some(home) = home {
+        cmd.arg("--home").arg(home);
+    }
+    cmd.env_remove(LAUNCHED_BY).current_dir("/");
+    cmd
+}
+
 /// The daemon's own answer wins; our child's pid is only a guess while that child is running.
 fn pick_pid(status: Option<u32>, child_running: bool, child: u32) -> Option<u32> {
     status.or(child_running.then_some(child))
@@ -191,6 +200,24 @@ mod tests {
     use super::*;
     use crate::{ClientMessage, MessageReader, PROTOCOL_VERSION, ServerMessage, write_message};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_launch_marker_has_one_name_for_every_process() {
+        assert_eq!(LAUNCHED_BY, "CLUSIA_LAUNCHED_BY");
+    }
+
+    #[test]
+    fn a_started_daemon_does_not_inherit_the_launch_marker() {
+        let cmd = daemon_command(Path::new("/bin/clusiad"), Some(Path::new("/h")));
+        assert!(
+            cmd.get_envs()
+                .any(|(key, value)| key == LAUNCHED_BY && value.is_none()),
+            "the marker is removed from the child's environment"
+        );
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["--home", "/h"]);
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/")));
+    }
 
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);

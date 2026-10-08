@@ -93,7 +93,7 @@ fn init_logging(paths: &clusia_core::Paths, reason: LaunchReason, holds_lock: bo
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
+    let args = Args::parse_from(launch::without_psn(std::env::args_os()));
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("clusia-tray: must run on the main thread");
         return ExitCode::FAILURE;
@@ -181,4 +181,15 @@ fn main() -> ExitCode {
     };
     ui::app::run(mtm, paths, app_bin, reason, home);
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_launch_services_start_parses() {
+        let args = launch::without_psn(["clusia-tray", "-psn_0_1234"].map(Into::into));
+        assert!(Args::try_parse_from(args).is_ok());
+    }
 }

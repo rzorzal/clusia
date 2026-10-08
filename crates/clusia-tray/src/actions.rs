@@ -139,10 +139,17 @@ pub fn action_for(target: &OpenTarget, host: &str) -> Action {
     }
 }
 
+/// The program with its arguments, without the marker the daemon set on this tray: what the
+/// tray starts was not started by the daemon.
+fn command(l: &Launch) -> Command {
+    let mut cmd = Command::new(&l.program);
+    cmd.args(&l.args).env_remove(crate::launch::LAUNCHED_BY);
+    cmd
+}
+
 /// Starts the program detached; a reaper thread collects its exit status.
 pub fn launch(l: &Launch) {
-    match Command::new(&l.program)
-        .args(&l.args)
+    match command(l)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -160,6 +167,20 @@ pub fn launch(l: &Launch) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launched_program_does_not_inherit_the_launch_marker() {
+        let cmd = command(&Launch {
+            program: PathBuf::from("/bin/clusia-app"),
+            args: vec!["--config".into()],
+        });
+        assert!(
+            cmd.get_envs()
+                .any(|(key, value)| key == crate::launch::LAUNCHED_BY && value.is_none()),
+            "a window the daemon's tray opens is not told the daemon started it"
+        );
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["--config"]);
+    }
 
     fn pr() -> PrRef {
         PrRef {
