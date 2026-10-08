@@ -25,7 +25,7 @@ class Clusia < Formula
       That puts Clusia.app in /Applications, registers the daemon to start at login and
       links `clusia` for your terminal. Run it again after every `brew upgrade`.
 
-      The first time Clúsia has something to tell you, macOS asks to allow notifications.
+      A few seconds after you open Clusia.app, macOS asks to allow notifications.
       Choose Allow; you can change it later in System Settings › Notifications.
 
       Before `brew uninstall clusia`, run `clusia uninstall`. It removes what `clusia install`

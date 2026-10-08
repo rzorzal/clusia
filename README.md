@@ -62,7 +62,7 @@ cargo run --release -p clusia -- install
 
 `clusia install` puts **Clusia.app** in `/Applications` (or `~/Applications` when that is not writable), signs it ad hoc on this Mac (no Apple account and no keychain prompt are involved), registers the background service to start at login and restarts itself if it crashes, and links `clusia` into `/usr/local/bin` (or `~/.local/bin`, and tells you how to add that to your `PATH`). Running it again replaces the app and keeps your settings and the notification permission. `clusia install --dry-run` shows what it would do.
 
-Opening **Clusia.app** brings up the menu bar tray, the background service and the window. The first time Clúsia has something to tell you, macOS asks to allow notifications; choose **Allow**. Config › General turns *Start at login* on or off, and Config › Notifications chooses which events notify you, with which sound, and when.
+Opening **Clusia.app** brings up the menu bar tray, the background service and the window. A few seconds after you open it, macOS asks to allow notifications; choose **Allow**. Config › General turns *Start at login* on or off, and Config › Notifications chooses which events notify you, with which sound, and when.
 
 <p align="center"><img src="docs/assets/sp1-m6-config-notifications-light.png" alt="Config › Notifications: for each event, whether it reaches the tray, macOS and plays a sound, the sound, Do not disturb hours and weekdays, Follow macOS Focus, Group bursts and the macOS permission" width="720"></p>
 <p align="center"><img src="docs/assets/sp1-m6-config-general-dark.png" alt="Config › General in the dark theme: Start at login" width="720"></p>

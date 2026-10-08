@@ -51,6 +51,8 @@ pub struct InstallEnv {
     pub usr_local_bin_writable: bool,
     /// The folders of `$PATH`, to say whether the CLI link is already reachable.
     pub path: Vec<PathBuf>,
+    /// The `clusia` a shell runs now, if any (a Homebrew one, say).
+    pub clusia_on_path: Option<PathBuf>,
 }
 
 /// Where the binaries come from.
@@ -217,7 +219,8 @@ fn cli_link(
         }
     };
     let on_path = env.path.iter().any(|p| p == &dir);
-    if !on_path {
+    // A `clusia` the shell already finds (Homebrew's own link, say) makes the note noise.
+    if !on_path && env.clusia_on_path.is_none() {
         notes.push(format!(
             "{} is not on your PATH. Add it: export PATH=\"{}:$PATH\"",
             dir.display(),
@@ -370,6 +373,7 @@ mod tests {
             applications_writable: true,
             usr_local_bin_writable: true,
             path: vec!["/usr/local/bin".into(), "/usr/bin".into()],
+            clusia_on_path: None,
         }
     }
 
@@ -469,6 +473,17 @@ mod tests {
                 .iter()
                 .any(|n| n.contains("export PATH=\"/Users/maria/.local/bin:$PATH\""))
         );
+    }
+
+    #[test]
+    fn a_clusia_already_on_the_path_needs_no_path_note() {
+        let mut e = env();
+        e.usr_local_bin_writable = false;
+        e.path = vec!["/opt/homebrew/bin".into(), "/usr/bin".into()];
+        e.clusia_on_path = Some("/opt/homebrew/bin/clusia".into());
+        let p = plan(&InstallOptions::default(), &e);
+        assert_eq!(p.cli.link, PathBuf::from("/Users/maria/.local/bin/clusia"));
+        assert!(p.notes.iter().all(|n| !n.contains("PATH")), "{:?}", p.notes);
     }
 
     #[test]

@@ -41,6 +41,9 @@ pub trait InstallOs {
     fn remove_dir_all(&mut self, dir: &Path) -> Result<(), InstallError>;
     fn remove_file(&mut self, path: &Path) -> Result<(), InstallError>;
     fn rename(&mut self, from: &Path, to: &Path) -> Result<(), InstallError>;
+    /// Exchanges two existing folders in one step. `Ok(false)` when the volume cannot, and
+    /// nothing was changed.
+    fn exchange(&mut self, a: &Path, b: &Path) -> Result<bool, InstallError>;
     fn symlink(&mut self, target: &Path, link: &Path) -> Result<(), InstallError>;
     fn link_state(&self, path: &Path) -> LinkState;
     /// Every file below `dir`, at any depth.
@@ -91,7 +94,9 @@ impl Report {
         for note in &self.notes {
             out.push_str(&format!("  {note}\n"));
         }
-        out.push_str("Open Clusia.app to start; the first notification asks for permission.\n");
+        out.push_str(
+            "Open Clusia.app to start; a few seconds later macOS asks to allow notifications.\n",
+        );
         out
     }
 }
@@ -259,12 +264,24 @@ fn sign(os: &mut dyn InstallOs, bundle: &Path) -> Result<(), InstallError> {
         .map_err(|e| InstallError::new(format!("the bundle could not be signed: {e}")))
 }
 
+/// Puts the staged bundle in place: in one step when the volume can exchange the two folders,
+/// so `Clusia.app` never goes missing; else through a backup that comes back on failure.
 fn swap(
     plan: &Plan,
     os: &mut dyn InstallOs,
     warnings: &mut Vec<String>,
 ) -> Result<(), InstallError> {
     let had_old = os.exists(&plan.app);
+    if had_old && os.exchange(&plan.staging, &plan.app)? {
+        // The staging folder now holds the old bundle.
+        if let Err(e) = os.remove_dir_all(&plan.staging) {
+            warnings.push(format!(
+                "the previous bundle was left in {}: {e}",
+                plan.staging.display()
+            ));
+        }
+        return Ok(());
+    }
     if had_old {
         if os.exists(&plan.backup) {
             os.remove_dir_all(&plan.backup)?;
@@ -440,6 +457,8 @@ mod tests {
         copies_leave_cstemp: bool,
         launchctl_fails: bool,
         kickstart_fails: bool,
+        /// The volume cannot exchange two folders in one step.
+        exchange_unsupported: bool,
         daemon_running: bool,
         /// How many renames onto `Clusia.app` fail.
         renames_into_place_fail: u32,
@@ -543,6 +562,31 @@ mod tests {
             }
             Ok(())
         }
+        fn exchange(&mut self, a: &Path, b: &Path) -> Result<bool, InstallError> {
+            if self.exchange_unsupported {
+                return Ok(false);
+            }
+            self.calls
+                .push(format!("exchange {} {}", a.display(), b.display()));
+            if self.renames_into_place_fail > 0 {
+                self.renames_into_place_fail -= 1;
+                return Err(InstallError::new("disk full"));
+            }
+            let (from_a, from_b): (Vec<_>, Vec<_>) = std::mem::take(&mut self.files)
+                .into_iter()
+                .partition(|(p, _)| p.starts_with(a));
+            for (path, bytes) in from_b {
+                match path.strip_prefix(b) {
+                    Ok(rest) => self.files.insert(a.join(rest), bytes),
+                    Err(_) => self.files.insert(path, bytes),
+                };
+            }
+            for (path, bytes) in from_a {
+                self.files
+                    .insert(b.join(path.strip_prefix(a).unwrap()), bytes);
+            }
+            Ok(true)
+        }
         fn symlink(&mut self, target: &Path, link: &Path) -> Result<(), InstallError> {
             self.calls.push(format!("ln {}", link.display()));
             self.links.insert(link.to_path_buf(), target.to_path_buf());
@@ -621,6 +665,7 @@ mod tests {
             applications_writable: true,
             usr_local_bin_writable: true,
             path: vec!["/usr/local/bin".into()],
+            clusia_on_path: None,
         }
     }
 
@@ -804,6 +849,7 @@ mod tests {
         );
         os.daemon_running = true;
         os.calls.clear();
+        os.exchange_unsupported = true;
         os.renames_into_place_fail = 1;
         let err = execute(&p, &mut os).unwrap_err();
         assert_eq!(err.0, "disk full");
@@ -835,10 +881,55 @@ mod tests {
     }
 
     #[test]
+    fn a_reinstall_exchanges_the_bundles_in_one_step() {
+        let mut os = Fake::machine();
+        let p = plan(&from_built(), &env());
+        execute(&p, &mut os).unwrap();
+        let old = PathBuf::from("/Applications/Clusia.app/Contents/old-marker");
+        os.files.insert(old.clone(), b"old".to_vec());
+        os.calls.clear();
+        let report = execute(&p, &mut os).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(
+            os.calls.contains(&format!(
+                "exchange {} /Applications/Clusia.app",
+                p.staging.display()
+            )),
+            "{:#?}",
+            os.calls
+        );
+        assert!(
+            os.calls_starting("mv ").is_empty(),
+            "there is never a moment without Clusia.app: {:#?}",
+            os.calls
+        );
+        assert!(!os.files.contains_key(&old), "the old bundle is gone");
+        assert!(os.under(&p.staging).is_empty(), "and so is its folder");
+        assert!(os.files.contains_key(Path::new(
+            "/Applications/Clusia.app/Contents/MacOS/clusia-tray"
+        )));
+
+        // A failed exchange changed nothing, and launchd is back as it was.
+        os.files.insert(old.clone(), b"old".to_vec());
+        os.calls.clear();
+        os.renames_into_place_fail = 1;
+        assert_eq!(execute(&p, &mut os).unwrap_err().0, "disk full");
+        assert!(os.files.contains_key(&old));
+        assert!(
+            os.calls
+                .iter()
+                .any(|c| c.starts_with("launchctl bootstrap")),
+            "{:#?}",
+            os.calls
+        );
+    }
+
+    #[test]
     fn a_failed_rollback_says_where_the_old_bundle_is() {
         let mut os = Fake::machine();
         let p = plan(&from_built(), &env());
         execute(&p, &mut os).unwrap();
+        os.exchange_unsupported = true;
         os.renames_into_place_fail = 2;
         let err = execute(&p, &mut os).unwrap_err();
         assert!(err.0.contains("disk full"), "{err}");
@@ -852,6 +943,7 @@ mod tests {
         execute(&p, &mut os).unwrap();
         os.daemon_running = true;
         os.calls.clear();
+        os.exchange_unsupported = true;
         os.removing_fails.push(p.backup.clone());
         let report = execute(&p, &mut os).unwrap();
         assert!(

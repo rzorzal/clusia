@@ -17,6 +17,9 @@ pub use plan::{InstallEnv, InstallOptions, Plan, plan};
 
 /// The machine as it is now: home, user id, writable folders and the `$PATH`.
 pub fn system_env(paths: &Paths, start_at_login: bool) -> Result<InstallEnv, String> {
+    let path: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
     let home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
@@ -31,11 +34,18 @@ pub fn system_env(paths: &Paths, start_at_login: bool) -> Result<InstallEnv, Str
         logs_dir: paths.logs_dir().to_path_buf(),
         applications_writable: writable(Path::new("/Applications")),
         usr_local_bin_writable: writable(Path::new("/usr/local/bin")),
-        path: std::env::var_os("PATH")
-            .map(|p| std::env::split_paths(&p).collect())
-            .unwrap_or_default(),
+        clusia_on_path: path
+            .iter()
+            .map(|dir| dir.join("clusia"))
+            .find(|exe| executable(exe)),
+        path,
         home,
     })
+}
+
+fn executable(file: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// Whether this process may create files in `dir` (which must exist).

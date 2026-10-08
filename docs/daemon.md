@@ -1,7 +1,9 @@
 # The daemon: environment, files and logs
 
 `clusiad` is started on demand by `clusia`, `clusia-tray` and `clusia-app` (and at login by
-the LaunchAgent). It is one process per data folder; a lock file and the socket keep a second
+the LaunchAgent). For the default data folder, when the LaunchAgent is loaded, they ask launchd
+to start it (`launchctl kickstart`), so launchd restarts it after a crash; otherwise they start
+it themselves. It is one process per data folder; a lock file and the socket keep a second
 one from starting.
 
 ## Which environment the daemon sees
@@ -37,11 +39,13 @@ does not hide a Homebrew install.
 
 | File | What |
 |---|---|
-| `<data>/clusiad.sock` | the socket, created private (mode 0600) |
+| `<data>/clusiad.sock` | the socket, created private (mode 0700: the daemon's umask is 077) |
 | `<data>/clusiad.lock` | held (`flock`) by the running daemon; the OS drops it when the daemon dies |
 | `~/Library/Logs/Clusia/daemon.log` | the daemon's log |
 | `~/Library/Logs/Clusia/tray.log` | the tray's output |
-| `~/Library/Logs/Clusia/daemon.start.log` | what the last start printed before the log opened |
+| `~/Library/Logs/Clusia/app.log` | the window's log |
+| `~/Library/Logs/Clusia/daemon.start.log` | what each start printed before the log opened; appended to, emptied once past 256 KiB |
+| `~/Library/Logs/Clusia/daemon.launchd.log` | what a daemon launchd started printed (the login agent's output); not rotated |
 
 Each log starts a new file every day: yesterday's becomes `daemon.YYYY-MM-DD.log`, and the
 current file plus the six before it are kept. Logs are readable by the owner only. With

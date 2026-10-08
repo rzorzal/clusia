@@ -20,7 +20,9 @@ LABEL="io.github.rzorzal.clusia.daemon"
 BUNDLE_ID="io.github.rzorzal.clusia"
 ROOT="${CLUSIA_HOME:-$HOME/Library/Application Support/Clusia}"
 SOCKET="$ROOT/clusiad.sock"
-LOGS="$HOME/Library/Logs/Clusia"
+# Under CLUSIA_HOME the logs live in its logs folder, as the programs put them.
+LOGS="${CLUSIA_HOME:+$CLUSIA_HOME/logs}"
+LOGS="${LOGS:-$HOME/Library/Logs/Clusia}"
 UID_NUM="$(id -u)"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 FLAKE_RUNS="${CLUSIA_FLAKE_RUNS:-20}"
@@ -191,13 +193,13 @@ step_second_launch() {
 step_terminal() {
   say "4. A new terminal"
   local found
-  found="$(zsh -lc 'command -v clusia' 2>/dev/null)"
+  found="$(zsh -ilc 'command -v clusia' 2>/dev/null)"
   if [ -n "$found" ]; then
     pass "a login shell finds clusia at $found"
   else
-    fail "a login shell does not find clusia (is ~/.local/bin on the PATH?)"
+    fail "a new shell does not find clusia (is ~/.local/bin on the PATH?)"
   fi
-  if zsh -lc 'clusia prs' >/dev/null 2>&1; then
+  if zsh -ilc 'clusia prs' >/dev/null 2>&1; then
     pass "clusia prs works in a login shell"
   else
     fail "clusia prs failed in a login shell (signed out? try: clusia auth status)"

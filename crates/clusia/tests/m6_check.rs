@@ -141,3 +141,21 @@ fn the_notification_step_reads_the_daemons_real_answers() {
         "the daemon never answers that: {body}"
     );
 }
+
+#[test]
+fn the_terminal_step_reads_the_interactive_shell_setup() {
+    // `~/.zshrc`, where people extend PATH, is read only by an interactive shell.
+    let body = function_body("step_terminal");
+    assert!(body.contains("zsh -ilc"), "{body}");
+    assert!(!body.contains("zsh -lc"), "{body}");
+}
+
+#[test]
+fn the_logs_follow_clusia_home_like_the_data() {
+    let text = std::fs::read_to_string(script()).unwrap();
+    let logs = text
+        .lines()
+        .find(|l| l.starts_with("LOGS="))
+        .expect("LOGS is set");
+    assert!(logs.contains("CLUSIA_HOME"), "{logs}");
+}

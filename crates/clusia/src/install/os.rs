@@ -127,6 +127,24 @@ impl InstallOs for SystemOs {
         fs::rename(from, to).map_err(|e| io("cannot move to", to, e))
     }
 
+    fn exchange(&mut self, a: &Path, b: &Path) -> Result<bool, InstallError> {
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| {
+            std::ffi::CString::new(p.as_os_str().as_bytes())
+                .map_err(|e| io("cannot move to", p, std::io::Error::other(e)))
+        };
+        let (from, to) = (c(a)?, c(b)?);
+        // SAFETY: both are valid NUL-terminated paths for the whole call.
+        if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) } == 0 {
+            return Ok(true);
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENOTSUP | libc::EINVAL) => Ok(false),
+            _ => Err(io("cannot move to", b, e)),
+        }
+    }
+
     fn symlink(&mut self, target: &Path, link: &Path) -> Result<(), InstallError> {
         symlink(target, link).map_err(|e| io("cannot link", link, e))
     }
@@ -203,5 +221,25 @@ impl InstallOs for SystemOs {
                 clusia.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exchange_swaps_two_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(a.join("new"), "n").unwrap();
+        fs::write(b.join("old"), "o").unwrap();
+        let mut os = SystemOs::new(Paths::new(dir.path()), None);
+        assert!(os.exchange(&a, &b).unwrap(), "APFS exchanges folders");
+        assert!(b.join("new").exists() && !b.join("old").exists());
+        assert!(a.join("old").exists());
+        assert!(os.exchange(&a, &dir.path().join("missing")).is_err());
     }
 }

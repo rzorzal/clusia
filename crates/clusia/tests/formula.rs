@@ -57,3 +57,14 @@ fn the_formula_test_changes_nothing() {
     assert!(test.contains("--dry-run"));
     assert!(test.contains("Clusia.app"));
 }
+
+#[test]
+fn the_caveats_say_when_macos_asks_about_notifications() {
+    // The tray asks a few seconds after you open the app, not at the first notification.
+    assert!(
+        caveats().contains("after you open Clusia.app"),
+        "{}",
+        caveats()
+    );
+    assert!(!caveats().contains("has something to tell you"));
+}
