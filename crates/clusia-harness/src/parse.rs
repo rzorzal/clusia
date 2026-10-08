@@ -310,7 +310,13 @@ fn describe_tool(block: &Value, root: Option<&Path>) -> (String, String) {
 
 fn relative(path: &str, root: Option<&Path>) -> String {
     root.and_then(|root| Path::new(path).strip_prefix(root).ok())
-        .map_or_else(|| path.to_string(), |p| p.display().to_string())
+        .map_or_else(
+            || path.to_string(),
+            |p| match p.display().to_string() {
+                shown if shown.is_empty() => ".".to_string(),
+                shown => shown,
+            },
+        )
 }
 
 fn cut(text: &str) -> String {
@@ -677,6 +683,13 @@ mod tests {
                 serde_json::json!({"path": "/tmp/acme-widgets/src"})
             )),
             "Listed src"
+        );
+        assert_eq!(
+            show(block(
+                "LS",
+                serde_json::json!({"path": "/tmp/acme-widgets"})
+            )),
+            "Listed ."
         );
         assert_eq!(
             show(block("Glob", serde_json::json!({"pattern": "**/*.rs"}))),

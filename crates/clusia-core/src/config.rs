@@ -707,22 +707,23 @@ fn reserved(arg: &str) -> Option<(&'static str, Takes, bool)> {
         .or_else(|| cluster(arg))
 }
 
-/// A cluster of short flags such as `-cp` or `-xr`: Claude Code reads each letter as a flag of
-/// its own, so one holding a reserved letter is as reserved as the flag alone.
+/// A single-dash word such as `-cp`, `-xr` or `-r<uuid>`: Claude Code reads each leading letter
+/// as a flag of its own and whatever follows as the value of the last one, so a word whose
+/// leading run of letters holds a reserved letter is as reserved as the flag alone.
 fn cluster(arg: &str) -> Option<(&'static str, Takes, bool)> {
-    let letters = arg.strip_prefix('-')?;
-    if letters.len() < 2
-        || letters.starts_with('-')
-        || !letters.chars().all(|c| c.is_ascii_alphabetic())
-    {
+    let word = arg.strip_prefix('-')?;
+    if word.len() < 2 || word.starts_with('-') {
         return None;
     }
-    let (flag, takes) = letters.chars().find_map(|c| match c {
-        'p' => Some(("-p", Takes::Nothing)),
-        'c' => Some(("-c", Takes::Nothing)),
-        'r' => Some(("-r", Takes::Nothing)),
-        _ => None,
-    })?;
+    let (flag, takes) = word
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .find_map(|c| match c {
+            'p' => Some(("-p", Takes::Nothing)),
+            'c' => Some(("-c", Takes::Nothing)),
+            'r' => Some(("-r", Takes::Nothing)),
+            _ => None,
+        })?;
     Some((flag, takes, false))
 }
 
@@ -1391,7 +1392,16 @@ mod tests {
 
     #[test]
     fn short_flag_clusters_with_a_reserved_letter_are_reserved() {
-        for cluster in ["-cp", "-rx", "-pc", "-xr", "-vc"] {
+        for cluster in [
+            "-cp",
+            "-rx",
+            "-pc",
+            "-xr",
+            "-vc",
+            "-r0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+            "-pr0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+            "-cp=x",
+        ] {
             let args = vec![cluster.to_string()];
             assert!(first_reserved_flag(&args).is_some(), "{cluster}");
             assert_eq!(
