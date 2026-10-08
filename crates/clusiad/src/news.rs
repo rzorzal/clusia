@@ -9,7 +9,7 @@ use clusia_core::{
 };
 use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{Event, NewsItem, NewsKind, Outcome, Reply, SyncState, topics};
-use clusia_store::{list_reviews, read_activity};
+use clusia_store::list_reviews;
 
 use crate::handlers::{no_token, provider_error};
 use crate::reviews::{announce, files_for, load_existing, load_stored, lock, record, save};
@@ -197,7 +197,7 @@ pub(crate) async fn whats_new(shared: &Shared, pr: &PrRef) -> Outcome {
         .ok()
         .map(|c| c.label().to_string());
     let viewer = gh.viewer().await.ok().map(|v| v.login);
-    let local = match read_activity(&shared.paths) {
+    let local = match crate::activity::read_off_thread(&shared.paths).await {
         Ok((all, _)) => all.into_iter().filter(|a| &a.pr == pr).collect(),
         Err(e) => {
             tracing::warn!(error = %e, "cannot read the activity log");

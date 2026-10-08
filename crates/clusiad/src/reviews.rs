@@ -426,6 +426,15 @@ pub(crate) async fn files_for(
         Err(e) => return Err(provider_error(e)),
     };
     let files = Arc::new(gh.get_files(pr).await.map_err(provider_error)?);
+    // GitHub lists the files of whatever the head is now. A push while they loaded would store
+    // the new head's files under the old head, so the head is read again to prove it held.
+    let current = gh.get_pr(pr).await.map_err(provider_error)?;
+    if current.head_sha != head {
+        return Err(Outcome::Err(ProtocolError::new(
+            ErrorCode::Conflict,
+            "the pull request changed while its files were loading; try again",
+        )));
+    }
     shared
         .files_cache
         .lock()
