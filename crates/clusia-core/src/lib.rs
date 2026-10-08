@@ -6,6 +6,7 @@ pub mod config;
 pub mod diffmap;
 pub mod draft;
 pub mod editor;
+pub mod launch_agent;
 pub mod logging;
 pub mod media;
 pub mod notify;

@@ -9,8 +9,8 @@ use clusia_protocol::{
 };
 use serde_json::json;
 
-use crate::cli::{AuthCommand, Command, ConfigCommand, DaemonCommand};
-use crate::{review, spawn};
+use crate::cli::{AuthCommand, Command, ConfigCommand, DaemonCommand, InstallArgs};
+use crate::{install, review, spawn};
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
 pub struct Output {
@@ -81,6 +81,7 @@ pub async fn run(paths: &Paths, home: Option<&Path>, command: Command) -> Result
         Command::Open { pr } => review::open(paths, home, &pr).await,
         Command::Review(cmd) => review::run(paths, home, cmd).await,
         Command::Activity => review::activity(paths, home).await,
+        Command::Install(args) => install_command(paths, &args),
     }
 }
 
@@ -387,6 +388,31 @@ async fn worktree(paths: &Paths, home: Option<&Path>, pr: &str) -> Result<Output
         }),
         other => Err(unexpected(other)),
     }
+}
+
+fn install_command(paths: &Paths, args: &InstallArgs) -> Result<Output, CliError> {
+    let start_at_login = clusia_store::load_config(paths)
+        .map(|loaded| loaded.into_value().general.start_at_login)
+        .unwrap_or(true);
+    let env = install::system_env(paths, start_at_login).map_err(CliError::Other)?;
+    let opts = install::InstallOptions {
+        applications: args.applications.clone(),
+        bin_dir: args.bin_dir.clone(),
+        agents_dir: args.agents_dir.clone(),
+        from: args.from.clone(),
+        workspace: args.workspace.clone(),
+        no_launchctl: args.no_launchctl,
+    };
+    let plan = install::plan(&opts, &env);
+    if !args.dry_run {
+        return Err(CliError::Other(
+            "installing is not available yet; run it with --dry-run to see the plan".into(),
+        ));
+    }
+    Ok(Output {
+        human: plan.describe_full(),
+        json: plan.to_json(),
+    })
 }
 
 #[cfg(test)]

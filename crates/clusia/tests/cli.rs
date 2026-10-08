@@ -641,3 +641,31 @@ mod review_flow {
         );
     }
 }
+
+#[test]
+fn install_dry_run_prints_the_plan_and_changes_nothing() {
+    let home = Home::new();
+    let apps = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let out = home.clusia(&[
+        "install",
+        "--dry-run",
+        "--applications",
+        apps.path().to_str().unwrap(),
+        "--bin-dir",
+        bin.path().to_str().unwrap(),
+        "--from",
+        "/tmp/built",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("main executable clusia-tray"), "{text}");
+    assert!(text.contains("<key>LSUIElement</key>"), "{text}");
+    assert!(text.contains("<key>RunAtLoad</key>"), "{text}");
+    assert!(
+        text.contains(&format!("{}/clusia", bin.path().display())),
+        "{text}"
+    );
+    assert_eq!(std::fs::read_dir(apps.path()).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(bin.path()).unwrap().count(), 0);
+}

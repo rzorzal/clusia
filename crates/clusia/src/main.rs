@@ -1,4 +1,5 @@
 mod cli;
+mod install;
 mod review;
 mod run;
 mod spawn;
