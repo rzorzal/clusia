@@ -565,18 +565,55 @@ fn signal_group(pid: Option<u32>, signal: i32) {
     }
 }
 
-/// SIGTERM to the child's whole group, SIGKILL to the group after `KILL_GRACE`, then waits for
-/// the child. Once the child is reaped its group id may be reused, so nothing is sent after that.
+/// Whether the child has ended, without reaping it: until it is reaped its pid, and so the id
+/// of the group it leads, cannot be reused, so the group can still be signalled safely.
+fn has_exited(pid: u32) -> bool {
+    // SAFETY: `waitid` only writes into `info`, which is zeroed and owned here; `WNOWAIT`
+    // leaves the child waitable for `Child::wait`.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let found = libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        );
+        // Any error (the child is already reaped) also means there is nothing left to wait for.
+        found != 0 || info.si_signo == libc::SIGCHLD
+    }
+}
+
+/// Waits up to `limit` for the child to end, leaving it unreaped; whether it ended.
+async fn exited_within(pid: u32, limit: Duration) -> bool {
+    let give_up = Instant::now() + limit;
+    loop {
+        if has_exited(pid) {
+            return true;
+        }
+        if Instant::now() >= give_up {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// SIGKILL to whatever is left of the child's group (tool processes it started that outlive
+/// it), then reaps the child. Only called while the child is not yet reaped.
+async fn sweep_and_reap(child: &mut Child, pid: Option<u32>) -> Option<ExitStatus> {
+    signal_group(pid, libc::SIGKILL);
+    child.wait().await.ok()
+}
+
+/// SIGTERM to the child's whole group, SIGKILL to the group once the child ended or after
+/// `KILL_GRACE`, then reaps the child. The child is reaped last, so its group id is never
+/// reused while it is signalled.
 async fn terminate(child: &mut Child) {
     let pid = child.id();
     signal_group(pid, libc::SIGTERM);
-    if tokio::time::timeout(KILL_GRACE, child.wait())
-        .await
-        .is_err()
-    {
-        signal_group(pid, libc::SIGKILL);
-        let _ = child.wait().await;
+    if let Some(pid) = pid {
+        exited_within(pid, KILL_GRACE).await;
     }
+    sweep_and_reap(child, pid).await;
 }
 
 enum Ending {
@@ -712,7 +749,6 @@ async fn wait_for_place(shared: &Shared, pr: &PrRef, stop: &Stop) -> Option<Owne
 
 async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, stop: Arc<Stop>) {
     let mut out = Out::new(&shared, &pr, turn);
-    let harness = shared.config.read().await.harness.clone();
     let Some(_place) = wait_for_place(&shared, &pr, &stop).await else {
         out.error(
             AgentErrorKind::Interrupted,
@@ -720,6 +756,7 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         );
         return;
     };
+    let harness = shared.config.read().await.harness.clone();
     let extra_args = match harness.extra_args_list() {
         Ok(args) => args,
         Err(message) => {
@@ -764,7 +801,9 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = tokio::spawn(read_tail(child.stderr.take()));
-    let mut lines = BufReader::new(stdout).lines();
+    let mut stdout = BufReader::new(stdout);
+    // Bytes, not text: a line that is not UTF-8 is converted lossily instead of ending the read.
+    let mut line = Vec::new();
     let mut parse = ParseState::with_root(cwd);
     let mut run = Run {
         shared: &shared,
@@ -780,11 +819,13 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
     let started = Instant::now();
     let ending = loop {
         tokio::select! {
-            line = lines.next_line() => match line {
-                Ok(Some(line)) => {
-                    for event in parse_line(&line, &mut parse) {
+            read = stdout.read_until(b'\n', &mut line) => match read {
+                Ok(n) if n > 0 => {
+                    let text = String::from_utf8_lossy(&line);
+                    for event in parse_line(text.trim_end_matches(['\n', '\r']), &mut parse) {
                         run.handle(event).await;
                     }
+                    line.clear();
                 }
                 _ => break Ending::Eof,
             },
@@ -801,22 +842,31 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
     };
     match ending {
         Ending::Eof => {
-            let status = match tokio::time::timeout(KILL_GRACE, child.wait()).await {
-                Ok(status) => status.ok(),
-                Err(_) => {
+            let pid = child.id();
+            let status = match pid {
+                Some(id) if !exited_within(id, KILL_GRACE).await => {
                     terminate(&mut child).await;
                     None
                 }
+                _ => sweep_and_reap(&mut child, pid).await,
             };
             run.ended(status, &tail(stderr).await);
         }
+        // A turn that already ended (its result line came) keeps that ending: the process is
+        // stopped, but nothing more is said about the turn.
         Ending::Stopped => {
             terminate(&mut child).await;
             run.release();
-            run.out.error(
-                AgentErrorKind::Interrupted,
-                stop.why().message().to_string(),
-            );
+            if !run.saw_final && !run.failed {
+                run.out.error(
+                    AgentErrorKind::Interrupted,
+                    stop.why().message().to_string(),
+                );
+            }
+        }
+        Ending::TimedOut if run.saw_final || run.failed => {
+            terminate(&mut child).await;
+            run.release();
         }
         Ending::TimedOut => {
             terminate(&mut child).await;
@@ -968,7 +1018,7 @@ mod tests {
 
     fn shared_for(paths: Paths, config: Config) -> Arc<Shared> {
         let options = crate::options::DaemonOptions {
-            claude_program: Some("/opt/option/claude".into()),
+            claude_program: Some("/nonexistent/claude".into()),
             github_api: Some("http://127.0.0.1:9".into()),
             github_token: None,
             gh_program: "/nonexistent/gh".into(),
@@ -1230,6 +1280,161 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Writes `body` as an executable shell script in the lab's fake folder and returns its path.
+    fn script(lab: &Lab, name: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = lab.fake.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    }
+
+    /// Waits until `pid` is gone; `false` if it is still there after `limit`.
+    async fn gone_within(pid: u32, limit: Duration) -> bool {
+        let give_up = Instant::now() + limit;
+        while FakeClaude::is_running(pid) {
+            if Instant::now() > give_up {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        true
+    }
+
+    #[tokio::test]
+    async fn a_stop_after_the_answer_leaves_the_turn_done() {
+        let mut lab = lab(Script::one(Turn::answer("All good.").then_hang()));
+        let pr = pr(7);
+        lab.send(&pr, "think").await.unwrap();
+        let call = wait_calls(&lab, 1).await.remove(0);
+        let mut events = until(&mut lab.events, |e| matches!(e, Event::AgentDone { .. })).await;
+        lab.shared.sessions.cancel(&lab.shared, &pr);
+        events.extend(until(&mut lab.events, ready(&pr)).await);
+        assert_eq!(
+            error_kind(&events),
+            None,
+            "a finished turn is not interrupted"
+        );
+        assert!(
+            !FakeClaude::is_running(call.pid),
+            "the lingering process is gone"
+        );
+        let log = lab.log(&pr);
+        assert!(matches!(
+            log.last(),
+            Some(AgentLogEntry::Done { turn: 1, .. })
+        ));
+        assert!(!log.iter().any(|e| matches!(e, AgentLogEntry::Error { .. })));
+    }
+
+    #[tokio::test]
+    async fn the_timeout_after_the_answer_leaves_the_turn_done() {
+        let mut lab = lab_with(Script::one(Turn::answer("All good.").then_hang()), |c| {
+            c.harness.turn_timeout_secs = 1;
+        });
+        let pr = pr(7);
+        lab.send(&pr, "think").await.unwrap();
+        let events = until(&mut lab.events, ready(&pr)).await;
+        assert!(events.iter().any(|e| matches!(e, Event::AgentDone { .. })));
+        assert_eq!(
+            error_kind(&events),
+            None,
+            "a finished turn is not interrupted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_kills_what_the_program_started_too() {
+        let mut lab = lab(Script::one(Turn::answer("unused")));
+        let pid_file = lab.fake.path().join("grandchild.pid");
+        let program = script(
+            &lab,
+            "spawner",
+            &format!(
+                "sh -c 'trap \"\" TERM; echo $$ > {pid}; exec sleep 3600' </dev/null >/dev/null 2>&1 &\n\
+                 echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}}'\n\
+                 exec sleep 3600\n",
+                pid = pid_file.display()
+            ),
+        );
+        lab.shared.config.write().await.harness.program = Some(program);
+        let pr = pr(7);
+        lab.send(&pr, "think").await.unwrap();
+        until(&mut lab.events, state_is(&pr, SessionStateKind::Running)).await;
+        let grandchild: u32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        lab.shared.sessions.cancel(&lab.shared, &pr);
+        until(&mut lab.events, ready(&pr)).await;
+        let gone = gone_within(grandchild, Duration::from_secs(2)).await;
+        if !gone {
+            // SAFETY: only signals the stray test process this test started.
+            unsafe { libc::kill(grandchild as i32, libc::SIGKILL) };
+        }
+        assert!(gone, "the process the program started was left behind");
+    }
+
+    #[tokio::test]
+    async fn output_that_is_not_utf8_degrades_to_text() {
+        let mut lab = lab(Script::one(Turn::answer("unused")));
+        let program = script(
+            &lab,
+            "latin1",
+            concat!(
+                "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\\n'\n",
+                "printf '\\377\\376 noise\\n'\n",
+                "printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"caf\\351 ok\"}},\"session_id\":\"s\"}\\n'\n",
+                "printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":5,\"num_turns\":1,\"result\":\"ok\",\"session_id\":\"s\",\"permission_denials\":[]}\\n'\n",
+            ),
+        );
+        lab.shared.config.write().await.harness.program = Some(program);
+        let pr = pr(7);
+        lab.send(&pr, "hi").await.unwrap();
+        let events = until(&mut lab.events, ready(&pr)).await;
+        assert_eq!(error_kind(&events), None);
+        assert!(events.iter().any(|e| matches!(e, Event::AgentDone { .. })));
+        assert_eq!(
+            texts(&events),
+            "\u{fffd}\u{fffd} noise\ncaf\u{fffd} ok",
+            "a line that is not JSON shows as text, and the stream goes on"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_waited_for_a_place_runs_with_the_config_of_then() {
+        let mut lab = lab(Script::one(Turn::hanging()));
+        let all = [pr(7), pr(8), pr(9), pr(10)];
+        for pr in &all[1..] {
+            lab.add_review(pr);
+        }
+        for pr in &all[..3] {
+            lab.send(pr, "go").await.unwrap();
+        }
+        wait_calls(&lab, 3).await;
+        lab.send(&all[3], "go").await.unwrap();
+        until(&mut lab.events, state_is(&all[3], SessionStateKind::Queued)).await;
+        let later = tempfile::tempdir().unwrap();
+        let program = FakeClaude::install(later.path(), Script::one(Turn::answer("later")));
+        lab.shared.config.write().await.harness.program = Some(program.display().to_string());
+        lab.shared.sessions.cancel(&lab.shared, &all[0]);
+        let events = until(&mut lab.events, ready(&all[3])).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::AgentDone { pr, .. } if *pr == all[3])),
+            "the waiting turn ran the program set while it waited"
+        );
+        assert_eq!(FakeClaude::calls(later.path()).len(), 1);
+        lab.shared.sessions.shutdown(&lab.shared).await;
     }
 
     #[tokio::test]
@@ -1694,7 +1899,7 @@ mod tests {
         let mut harness = Harness::default();
         assert_eq!(
             program_path(&shared, &harness),
-            Path::new("/opt/option/claude"),
+            Path::new("/nonexistent/claude"),
             "no setting: the daemon's own override"
         );
         harness.program = Some(" /usr/local/bin/claude ".into());

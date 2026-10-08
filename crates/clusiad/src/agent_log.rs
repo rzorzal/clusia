@@ -49,14 +49,19 @@ pub(crate) fn append(path: &Path, entry: &AgentLogEntry) -> io::Result<()> {
     Ok(())
 }
 
-/// Drops the oldest half of the file, cutting at a line boundary.
+/// Drops the oldest half of the file, cutting at a line boundary. When the newest entry alone
+/// is longer than half the file, everything before it goes and it stays.
 fn trim(path: &Path) -> io::Result<()> {
     let bytes = fs::read(path)?;
     let middle = bytes.len() / 2;
-    let start = bytes[middle..]
+    let mut start = bytes[middle..]
         .iter()
         .position(|b| *b == b'\n')
         .map_or(bytes.len(), |i| middle + i + 1);
+    if start == bytes.len() {
+        let body = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        start = body.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    }
     let temporary = path.with_extension("jsonl.tmp");
     let mut file = OpenOptions::new()
         .create(true)
@@ -185,6 +190,22 @@ mod tests {
             "the cut falls between lines"
         );
         assert!(turn_of(&entries[0]) > 1, "the oldest went");
+    }
+
+    #[test]
+    fn an_entry_larger_than_half_the_limit_survives_the_trim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let chunk = "x".repeat(64 * 1024);
+        for turn in 1..=16 {
+            append(&path, &text(turn, &chunk)).unwrap();
+        }
+        // Longer than everything before it, so the middle of the file falls inside it.
+        let big = "y".repeat(MAX_BYTES as usize / 2 + 128 * 1024);
+        append(&path, &text(17, &big)).unwrap();
+        let entries = read(&path);
+        assert_eq!(entries.last(), Some(&text(17, &big)), "the newest stays");
+        assert!(fs::metadata(&path).unwrap().len() <= MAX_BYTES);
     }
 
     #[test]
