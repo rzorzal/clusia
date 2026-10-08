@@ -35,7 +35,7 @@ Clúsia is a Rust workspace with four programs that talk over a local Unix socke
 | Program | What it does |
 |---|---|
 | `clusiad` | The background service. It syncs with GitHub, manages worktrees, keeps review drafts and publishes reviews. It is the only part that holds state or secrets. |
-| `clusia-tray` | The menu bar icon and popover (native AppKit). The daemon starts it, and it exits when the daemon stops. |
+| `clusia-tray` | The menu bar icon and popover (native AppKit). It is the app you open (Clusia.app), the only part that posts notifications, and it keeps the daemon running. |
 | `clusia-app` | The main window (Bevy): Home, Config and the review screen (diff in Unified or Split with syntax colors, rich-text comments with one composer: formatting, emoji, Giphy GIFs, image links and a preview; finalize), plus a first run for a new machine. Opening it starts the daemon if needed, and a second launch brings the open window forward. |
 | `clusia` | The command-line interface. |
 
@@ -45,9 +45,30 @@ Clúsia is a Rust workspace with four programs that talk over a local Unix socke
 
 Your own clone is never checked out or branched: Clúsia only adds refs under `refs/clusia/` and works in separate worktrees. Your GitHub token comes from `gh` or the macOS Keychain and never appears in logs or output.
 
+## Install
+
+With [Homebrew](https://brew.sh) (it builds Clúsia from source, so the first install takes a few minutes):
+
+```sh
+brew install --HEAD rzorzal/clusia/clusia
+clusia install --from "$(brew --prefix clusia)/libexec/bin"
+```
+
+From a clone of this repository, one command builds and installs:
+
+```sh
+cargo run --release -p clusia -- install
+```
+
+`clusia install` puts **Clusia.app** in `/Applications` (or `~/Applications` when that is not writable), signs it ad hoc on this Mac (no Apple account and no keychain prompt are involved), registers the background service to start at login and restarts itself if it crashes, and links `clusia` into `/usr/local/bin` (or `~/.local/bin`, and tells you how to add that to your `PATH`). Running it again replaces the app and keeps your settings and the notification permission. `clusia install --dry-run` shows what it would do.
+
+Opening **Clusia.app** brings up the menu bar tray, the background service and the window. The first time Clúsia has something to tell you, macOS asks to allow notifications; choose **Allow**. Config › General turns *Start at login* on or off, and Config › Notifications chooses which events notify you, with which sound, and when.
+
+To remove it, run `clusia uninstall` (before `brew uninstall clusia` if you used Homebrew). Your reviews and settings stay in `~/Library/Application Support/Clusia`.
+
 ## Try it from source
 
-You need macOS, Git, and the Rust toolchain (the version is pinned in `rust-toolchain.toml`).
+You need macOS, Git, and the Rust toolchain (the version is pinned in `rust-toolchain.toml`). To work on Clúsia itself:
 
 ```sh
 cargo build --workspace
