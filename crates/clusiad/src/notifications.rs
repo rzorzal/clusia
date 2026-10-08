@@ -280,29 +280,38 @@ impl Engine {
     ) -> Batch {
         events.sort_by_key(|e| (e.at, priority(e.kind)));
         let mut changed = false;
-        let mut banners = Vec::new();
-        // Titles of the new events per pull request that would make a banner, in this batch.
-        let mut arrived: std::collections::HashMap<PrRef, Vec<String>> = Default::default();
+        // Each banner with the titles of the events it stands for: its own, then those that
+        // the grouping window folded into it.
+        let mut banners: Vec<(Event, Option<PrRef>, Vec<String>)> = Vec::new();
+        // The latest banner of each pull request in this batch.
+        let mut latest: std::collections::HashMap<PrRef, usize> = Default::default();
         for event in events {
             let pr = event.pr.clone();
             let title = event.title.clone();
             let processed = self.process(event, cfg, local);
             changed |= processed.changed;
-            if cfg.group_bursts
-                && processed.posts
-                && let Some(pr) = &pr
-            {
-                arrived.entry(pr.clone()).or_default().push(title);
+            match processed.notify {
+                Some(banner) => {
+                    if let Some(pr) = &pr {
+                        latest.insert(pr.clone(), banners.len());
+                    }
+                    banners.push((banner, pr, vec![title]));
+                }
+                None if cfg.group_bursts && processed.posts => {
+                    if let Some(&i) = pr.as_ref().and_then(|pr| latest.get(pr)) {
+                        banners[i].2.push(title);
+                    }
+                }
+                None => {}
             }
-            banners.extend(processed.notify.map(|banner| (banner, pr)));
         }
         let banners = banners
             .into_iter()
-            .map(|(mut banner, pr)| {
+            .map(|(mut banner, pr, titles)| {
                 if let (Event::Notify { title, body, .. }, Some(pr)) = (&mut banner, &pr)
-                    && let Some(titles) = arrived.get(pr).filter(|titles| titles.len() > 1)
+                    && titles.len() > 1
                 {
-                    (*title, *body) = group_banner(titles, pr.number);
+                    (*title, *body) = group_banner(&titles, pr.number);
                 }
                 banner
             })
@@ -429,6 +438,8 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
     let mut events = Vec::new();
     // Asked for once, and only when someone has to be named.
     let mut viewer: Option<Option<String>> = None;
+    // An entry left for later keeps the feed's starting point, so the next read lists it again.
+    let mut left_for_later = false;
     for n in &feed {
         let Some(mut candidate) = from_notification(n, None, now) else {
             continue;
@@ -436,11 +447,24 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
         if shared.engine.lock().await.data.has_key(&candidate.key) {
             continue;
         }
-        if let Some(by) = who(gh, n, candidate.kind).await {
+        let by = match who(gh, n, candidate.kind).await {
+            Who::Named(by) => Some(by),
+            Who::Nobody => None,
+            // It may be your own comment: not announced, and not remembered either.
+            Who::Unknown => {
+                left_for_later = true;
+                continue;
+            }
+        };
+        if let Some(by) = by {
             if viewer.is_none() {
                 viewer = Some(gh.viewer().await.ok().map(|v| v.login));
             }
-            if viewer.as_ref().is_some_and(|me| me.as_deref() == Some(&by)) {
+            let Some(Some(me)) = &viewer else {
+                left_for_later = true;
+                continue;
+            };
+            if *me == by {
                 // What you wrote yourself is no news to you; remembered so it is not looked
                 // up again.
                 shared
@@ -458,21 +482,35 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
         events.push(candidate);
     }
     deliver(shared, events).await;
-    set_feed_since(shared, now - FEED_OVERLAP_SECS).await;
+    if !left_for_later {
+        set_feed_since(shared, now - FEED_OVERLAP_SECS).await;
+    }
+}
+
+enum Who {
+    Named(String),
+    /// The entry names no one.
+    Nobody,
+    /// It names someone GitHub could not tell us about now.
+    Unknown,
 }
 
 /// Who asked for the review (the author of the pull request) or wrote the comment.
-async fn who(gh: &GitHub, n: &Notification, kind: EventKind) -> Option<String> {
-    match kind {
-        EventKind::ReviewRequested => Some(gh.get_pr(&n.pr()?).await.ok()?.summary.author),
+async fn who(gh: &GitHub, n: &Notification, kind: EventKind) -> Who {
+    let found = match kind {
+        EventKind::ReviewRequested => match n.pr() {
+            Some(pr) => gh.get_pr(&pr).await.map(|d| d.summary.author),
+            None => return Who::Nobody,
+        },
         EventKind::Mentioned | EventKind::ReplyToYou => {
-            n.comment_id()?;
-            gh.comment_author(n.latest_comment_url.as_deref()?)
-                .await
-                .ok()
+            match (n.comment_id(), n.latest_comment_url.as_deref()) {
+                (Some(_), Some(url)) => gh.comment_author(url).await,
+                _ => return Who::Nobody,
+            }
         }
-        _ => None,
-    }
+        _ => return Who::Nobody,
+    };
+    found.map_or(Who::Unknown, Who::Named)
 }
 
 async fn set_feed_since(shared: &Shared, unix: i64) {
@@ -880,6 +918,28 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn each_banner_counts_only_its_own_burst() {
+        let cfg = Notifications::default();
+        let mut engine = engine();
+        // One poll after a sleep: two bursts on one pull request, 200 s apart.
+        let events = vec![
+            mention(1, 1_000, "rzorzal/clusia#123"),
+            mention(2, 1_001, "rzorzal/clusia#123"),
+            mention(3, 1_200, "rzorzal/clusia#123"),
+        ];
+        let batch = engine.process_batch(events, &cfg, at(600));
+        let titles: Vec<&str> = batch
+            .banners
+            .iter()
+            .map(|b| match b {
+                Event::Notify { title, .. } => title.as_str(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(titles, ["2 updates on #123", "@octo mentioned you"]);
     }
 
     #[test]

@@ -531,6 +531,23 @@ async fn a_test_notification_goes_to_the_tray_and_stays_out_of_the_inbox() {
 }
 
 #[tokio::test]
+async fn a_test_notification_with_no_tray_is_refused() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let err = c
+        .request(Command::TestNotification)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("the menu bar tray is not running"), "{err}");
+    // A tray that went away does not count either.
+    drop(tray(&d).await);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(c.request(Command::TestNotification).await.is_err());
+    d.stop().await;
+}
+
+#[tokio::test]
 async fn the_permission_the_tray_reports_is_kept_and_shown() {
     let d = TestDaemon::start().await;
     let mut c = d.client().await;
@@ -712,6 +729,38 @@ async fn your_own_comments_are_not_announced() {
         ref other => panic!("{other:?}"),
     }
     assert_eq!(inbox(&mut c).await.len(), 1);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_comment_whose_author_cannot_be_read_is_not_announced() {
+    let server = github(vec![
+        entry("1", "mention", Some(900)),
+        entry("2", "mention", Some(901)),
+    ])
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/issues/comments/900"))
+        .respond_with(ResponseTemplate::new(502))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let d = TestDaemon::start_with(tempfile::tempdir().unwrap(), options(&server)).await;
+    let mut listener = tray(&d).await;
+    let mut c = d.client().await;
+    sync(&mut c).await;
+    sync(&mut c).await;
+    let events = heard(&mut listener).await;
+    match banners(&events)[..] {
+        [Event::Notify { title, .. }] => assert_eq!(title, "@octo mentioned you"),
+        ref other => panic!("it may be your own comment: {other:?}"),
+    }
+    assert_eq!(inbox(&mut c).await.len(), 1);
+    let saved = std::fs::read_to_string(d.paths.inbox()).unwrap();
+    assert!(
+        !saved.contains("900"),
+        "it is looked at again next time: {saved}"
+    );
     d.stop().await;
 }
 

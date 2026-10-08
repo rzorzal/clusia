@@ -226,8 +226,8 @@ step_notification() {
   local reply status
   reply="$(send '"test_notification"')"
   case "$reply" in
-    *'"delivered":0'* | *'"delivered": 0'*) fail "no tray took the test notification: $reply" ;;
-    *'"ok"'*'"delivered"'*) pass "a tray took the test notification" ;;
+    *'"ok":"ack"'*) pass "a tray took the test notification" ;;
+    *'tray is not running'*) fail "no tray took the test notification: $reply" ;;
     *) fail "the daemon did not answer the test notification: $reply" ;;
   esac
   status="$(send '"daemon_status"')"

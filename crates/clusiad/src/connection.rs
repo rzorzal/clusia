@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clusia_protocol::{
     ClientMessage, CodecError, Command, ErrorCode, Event, MessageReader, Outcome, PROTOCOL_VERSION,
@@ -33,12 +33,25 @@ fn bad_request(id: u64, message: impl Into<String>) -> ServerMessage {
     }
 }
 
-/// Counts its connection in `Shared::window_listeners` while it lives.
-struct WindowListener(Arc<Shared>);
+/// Counts its connection in one of `Shared`'s listener counters while it lives.
+struct Listener {
+    shared: Arc<Shared>,
+    count: fn(&Shared) -> &AtomicUsize,
+}
 
-impl Drop for WindowListener {
+impl Listener {
+    fn new(shared: &Arc<Shared>, count: fn(&Shared) -> &AtomicUsize) -> Self {
+        count(shared).fetch_add(1, Ordering::SeqCst);
+        Self {
+            shared: shared.clone(),
+            count,
+        }
+    }
+}
+
+impl Drop for Listener {
     fn drop(&mut self) {
-        self.0.window_listeners.fetch_sub(1, Ordering::SeqCst);
+        (self.count)(&self.shared).fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -116,7 +129,8 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
     let mut events = shared.events.subscribe();
     let mut shutdown = shared.shutdown.subscribe();
     let mut topics: HashSet<String> = HashSet::new();
-    let mut window: Option<WindowListener> = None;
+    let mut window: Option<Listener> = None;
+    let mut tray: Option<Listener> = None;
     // The request being handled: (id, whether it is Shutdown, the handler task, a claim on the
     // daemon staying up until the response is written). Requests stay sequential (the next line is read only once it is
     // answered), but events keep flowing.
@@ -143,8 +157,10 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                 if let Command::Subscribe { topics: wanted } = &cmd {
                     topics.extend(wanted.iter().cloned());
                     if window.is_none() && topics.contains(clusia_protocol::topics::WINDOW) {
-                        shared.window_listeners.fetch_add(1, Ordering::SeqCst);
-                        window = Some(WindowListener(shared.clone()));
+                        window = Some(Listener::new(shared, |s| &s.window_listeners));
+                    }
+                    if tray.is_none() && topics.contains(clusia_protocol::topics::TRAY) {
+                        tray = Some(Listener::new(shared, |s| &s.tray_listeners));
                     }
                 }
                 let stop = matches!(cmd, Command::Shutdown);

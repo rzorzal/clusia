@@ -130,3 +130,14 @@ fn the_crash_step_kills_a_daemon_the_app_started() {
     let killed = body.find("kill -9").expect("the daemon is killed");
     assert!(opened < killed, "{body}");
 }
+
+#[test]
+fn the_notification_step_reads_the_daemons_real_answers() {
+    let body = function_body("step_notification");
+    assert!(body.contains(r#""ok":"ack""#), "{body}");
+    assert!(body.contains("tray is not running"), "{body}");
+    assert!(
+        !body.contains("delivered"),
+        "the daemon never answers that: {body}"
+    );
+}

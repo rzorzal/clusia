@@ -76,3 +76,32 @@ async fn a_foreign_agent_file_is_refused_and_left_alone() {
     assert_eq!(std::fs::read_to_string(&agent).unwrap(), "not a plist");
     d.stop().await;
 }
+
+#[tokio::test]
+async fn setting_the_config_key_changes_the_agent_file_too() {
+    let d = TestDaemon::start().await;
+    let agent = d.paths.launch_agent();
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(&agent, agent_text(true)).unwrap();
+    let mut c = d.client().await;
+    let set = |value: &str| Command::SetConfigValue {
+        key: "general.start_at_login".into(),
+        value: value.into(),
+    };
+
+    assert_eq!(c.request(set("false")).await.unwrap(), Reply::Ack);
+    let text = std::fs::read_to_string(&agent).unwrap();
+    assert_eq!(launch_agent::start_at_login(&text), Some(false));
+    assert_eq!(c.request(set("true")).await.unwrap(), Reply::Ack);
+    let text = std::fs::read_to_string(&agent).unwrap();
+    assert_eq!(launch_agent::start_at_login(&text), Some(true));
+
+    let err = c.request(set("maybe")).await.unwrap_err().to_string();
+    assert!(err.contains("maybe"), "{err}");
+    assert_eq!(
+        launch_agent::start_at_login(&std::fs::read_to_string(&agent).unwrap()),
+        Some(true),
+        "a value that is not a boolean changes nothing"
+    );
+    d.stop().await;
+}

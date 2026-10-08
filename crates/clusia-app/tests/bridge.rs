@@ -495,16 +495,21 @@ async fn the_snapshot_carries_the_notification_permission() {
         read.notifications_permission,
         clusia_protocol::PermissionStatus::Allowed
     );
-    link.ask.send(Ask::TestNotification).unwrap();
-    match next(&link, |t| {
-        matches!(t, Tell::Notice { .. } | Tell::Refused { .. })
-    }) {
-        Tell::Notice { text, warning } => {
-            assert_eq!(text, "Test notification sent");
-            assert!(!warning);
+    let notice = |link: &Link| {
+        link.ask.send(Ask::TestNotification).unwrap();
+        match next(link, |t| matches!(t, Tell::Notice { .. })) {
+            Tell::Notice { text, warning } => (text, warning),
+            _ => unreachable!(),
         }
-        Tell::Refused { message, .. } => assert!(!message.is_empty()),
-        _ => unreachable!(),
-    }
+    };
+    let (text, warning) = notice(&link);
+    assert!(text.contains("tray is not running"), "{text}");
+    assert!(warning);
+    tray.request(Command::Subscribe {
+        topics: vec![clusia_protocol::topics::TRAY.into()],
+    })
+    .await
+    .unwrap();
+    assert_eq!(notice(&link), ("Test notification sent".into(), false));
     d.stop().await;
 }

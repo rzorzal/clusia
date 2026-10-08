@@ -44,6 +44,14 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             Ok(value) => Outcome::Ok(Reply::Value(value)),
             Err(e) => key_error(e),
         },
+        Command::SetConfigValue { key, value } if key == START_AT_LOGIN => {
+            // Parsed as the config parses it, then saved together with the login agent.
+            let parsed = set_value(&*shared.config.read().await, &key, &value);
+            match parsed {
+                Ok(c) => crate::login::set_start_at_login(shared, c.general.start_at_login).await,
+                Err(e) => key_error(e),
+            }
+        }
         Command::SetConfigValue { key, value } => set_config_value(shared, key, value).await,
         Command::ListPrs { filter } => {
             sync::wait_for_first_sync(shared).await;
@@ -121,6 +129,12 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             Outcome::Ok(Reply::Ack)
         }
         Command::TestNotification => {
+            if shared.tray_listeners.load(Ordering::SeqCst) == 0 {
+                return Outcome::Err(ProtocolError::new(
+                    ErrorCode::InvalidState,
+                    "the menu bar tray is not running; open Clusia.app and try again",
+                ));
+            }
             notifications::send_test(shared).await;
             Outcome::Ok(Reply::Ack)
         }
@@ -174,6 +188,11 @@ async fn open_in_editor(shared: &Shared, path: &str, line: Option<u32>) -> Outco
     }
 }
 
+/// The setting that is also the login agent's `RunAtLoad`.
+const START_AT_LOGIN: &str = "general.start_at_login";
+
+/// Saves one setting. `general.start_at_login` must also go to the login agent, which
+/// `login::set_start_at_login` does around this.
 pub(crate) async fn set_config_value(shared: &Shared, key: String, raw: String) -> Outcome {
     let mut config = shared.config.write().await;
     let updated = match set_value(&config, &key, &raw) {

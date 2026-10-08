@@ -60,6 +60,8 @@ pub(crate) struct Shared {
     pub harness_search_paths: Vec<PathBuf>,
     /// Connections subscribed to the `window` topic (open windows).
     pub window_listeners: AtomicUsize,
+    /// Connections subscribed to the `tray` topic (running trays).
+    pub tray_listeners: AtomicUsize,
     pub prs: RwLock<PrLists>,
     pub sync: RwLock<SyncStatus>,
     /// Wakes the sync loop early (e.g. after a new token is stored).
@@ -132,6 +134,7 @@ impl Shared {
                 .unwrap_or_else(|| "https://api.giphy.com".to_string()),
             harness_search_paths: options.harness_search_paths,
             window_listeners: AtomicUsize::new(0),
+            tray_listeners: AtomicUsize::new(0),
             prs: RwLock::new(PrLists::default()),
             sync: RwLock::new(SyncStatus::default()),
             sync_now: Notify::new(),
