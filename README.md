@@ -14,7 +14,148 @@ Clúsia is a macOS app for reviewing pull requests carefully, with your own AI t
 - **Your harness, your models.** Claude Code, Codex or a command of your own helps with diagrams, security notes, audits and tests (coming in the next sub-projects). Nothing is sent anywhere you did not choose.
 - **Always at hand.** A menu bar popover shows what is waiting for you, which saved reviews went stale and how your review activity looks over the last weeks.
 
-> **Status:** early development, not ready for daily use yet. The daemon, the GitHub sync, the review engine, the CLI, the menu bar tray and the main window work today: open a pull request, read its diff, comment on lines, reply to and resolve threads, and publish one GitHub review. The agent and the harness come next. Progress is tracked on the [project board](https://github.com/users/rzorzal/projects/1).
+> **Status:** the daemon, the GitHub sync, the review engine, the CLI, the menu bar tray, the main window, notifications and the one-command install work today. The agent and the harness come next. Progress is tracked on the [project board](https://github.com/users/rzorzal/projects/1).
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash
+```
+
+The script:
+
+- builds Clúsia with [Homebrew](https://brew.sh) when you have it, and otherwise directly with Rust (installing the Xcode command line tools and Rust first if they are missing);
+- runs `clusia install`, which puts **Clusia.app** in `/Applications` (or `~/Applications`), registers the background service to start at login, and links `clusia` into `/usr/local/bin` (or `~/.local/bin`);
+- opens the app.
+
+**Requirements:** macOS on Apple silicon or Intel, about 5 minutes and about 2 GB of free disk for the first build. Homebrew is optional. The script never uses `sudo`.
+
+**Updating:** run the same command again. It replaces the app and keeps your settings and the notification permission.
+
+| Option | Environment | What it does |
+|---|---|---|
+| `--dry-run` | `CLUSIA_DRY_RUN` | Prints every step and changes nothing |
+| `--no-brew` | `CLUSIA_NO_BREW` | Builds directly even when Homebrew is installed |
+| `--no-open` | `CLUSIA_NO_OPEN` | Does not open the app at the end |
+| `--ref REF` | `CLUSIA_REF` | Installs a branch or tag instead of `main` |
+
+Through the pipe, pass options after `bash -s --`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash -s -- --no-brew
+```
+
+**Homebrew by hand**, the same two steps the script runs:
+
+```sh
+brew install --HEAD rzorzal/clusia/clusia
+clusia install --from "$(brew --prefix clusia)/libexec/bin"
+```
+
+**Read the script first:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh -o install.sh
+less install.sh
+bash install.sh
+```
+
+**From a clone** of this repository (you need Git and the Rust toolchain pinned in `rust-toolchain.toml`):
+
+```sh
+cargo run --release -p clusia -- install
+```
+
+`clusia install --dry-run` shows what it would do.
+
+## First steps
+
+1. Open **Clusia.app**. The menu bar tray, the background service and the window come up. A few seconds later macOS asks to allow notifications; choose **Allow**.
+2. Sign in to GitHub: the window uses your `gh` login, or run `clusia auth login` and give it a personal access token on stdin.
+3. On a new machine the window opens on a short first run: connect GitHub, point Clúsia at the folders with your clones, and see which AI harness is installed. Press **Continue**.
+4. Open a pull request from the tray, from Home, or with `clusia open owner/repo#123`.
+5. Click a line to comment (Shift-click for a range) and reply to or resolve threads. Comments are rich text, with a toolbar, emoji, GIFs (add a Giphy key in Config › Media) and a preview of what GitHub will show.
+6. Press **Finalize review**. Everything goes to GitHub as one review; nothing is posted before that. Closing a tab or the window with an unpublished draft asks first.
+
+<p align="center"><img src="docs/assets/sp1-m5b-review-light.png" alt="The Clúsia review screen: PR header, sections, a syntax-highlighted diff with a thread and a draft comment, and the draft panel" width="720"></p>
+
+<p align="center"><img src="docs/assets/sp1-m4-popover.png" alt="The Clúsia menu bar popover in light and dark mode: activity heatmap, counters, search, repository chips and paginated pull request lists" width="640"></p>
+
+## Everyday commands
+
+Every `clusia` command starts the daemon when it is not running. `clusia --help` lists the rest (`sync`, `worktree`, `activity`, `review status|note|edit|rm|close|discard`). Add `--json` for machine-readable output.
+
+| Command | What it does |
+|---|---|
+| `clusia auth status` / `login` / `logout` | Show which token is used, store one in the Keychain (read from stdin), or remove it |
+| `clusia prs [--assigned] [--mine]` | List pull requests where your review is requested and the ones you opened |
+| `clusia open owner/repo#123` | Refresh, prepare the worktree and show what is new (a pull request URL works too) |
+| `clusia review comment owner/repo#123 src/lib.rs:42 "text"` | Add a line comment (`path:line` or `path:start-end`) to the draft |
+| `clusia review publish owner/repo#123 --verdict approve` | Publish the draft as one review (`approve`, `request-changes`, `comment` or `close`) |
+| `clusia config get <key>` / `set <key> <value>` | Read or change one setting, for example `github.poll_interval_secs` |
+| `clusia daemon status` / `stop` | Show whether the daemon runs, or stop it |
+| `clusia install` / `uninstall` | Put the app, the login agent and the `clusia` link in place, or remove them |
+
+## Notifications and login
+
+Clúsia notifies you when:
+
+- you are asked to review a pull request;
+- new commits arrive on a pull request you reviewed;
+- someone replies in a thread you started or joined;
+- someone mentions you;
+- CI fails on a pull request you opened;
+- syncing with GitHub has a problem (an expired token, no connection for more than 10 minutes, a rate limit);
+- a damaged settings or state file was set aside.
+
+In Config › Notifications each event has its own switches for the tray list, macOS banners and sound. There are four soft bundled sounds (with a preview), **Do not disturb** hours and weekdays, *Follow macOS Focus*, *Group bursts* (updates to one pull request within 2 minutes become one banner), and a button that sends a test notification. Do not disturb silences banners and sound, never the tray list.
+
+Config › General has **Start at login**. **Quit** in the tray stops everything (tray, window and daemon) until you open Clusia.app again.
+
+<p align="center"><img src="docs/assets/sp1-m6-config-notifications-light.png" alt="Config › Notifications: for each event, whether it reaches the tray, macOS and plays a sound, the sound, Do not disturb hours and weekdays, Follow macOS Focus, Group bursts and the macOS permission" width="720"></p>
+
+## Where things live
+
+| What | Where |
+|---|---|
+| The app | `/Applications/Clusia.app` (or `~/Applications`) |
+| The `clusia` command | a link in `/usr/local/bin` (or `~/.local/bin`) |
+| Reviews and settings | `~/Library/Application Support/Clusia` |
+| Logs | `~/Library/Logs/Clusia/daemon.log`, `app.log`, `tray.log`, and `daemon.launchd.log` for what the login agent printed |
+| The login agent | `~/Library/LaunchAgents/io.github.rzorzal.clusia.daemon.plist` |
+
+[`docs/daemon.md`](docs/daemon.md) has the environment variables, files and log rotation.
+
+**Privacy:** your GitHub token comes from `gh` or the macOS Keychain and never appears in logs or output. Clúsia talks to GitHub and, if you add a key, to Giphy, and to nothing else. Your own clone is never checked out or branched: Clúsia only adds refs under `refs/clusia/` and works in separate worktrees.
+
+## Troubleshooting
+
+**No notifications.** Check System Settings › Notifications › Clúsia. Config › Notifications shows the permission Clúsia sees and can send a test.
+
+**`clusia: command not found`.** The link went to `~/.local/bin` and that folder is not on your `PATH`. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile.
+
+**The tray is gone after a crash.** Open Clusia.app again. launchd restarts the daemon by itself after a crash.
+
+**Something looks wrong.** Read the logs in `~/Library/Logs/Clusia`, starting with `daemon.log`.
+
+**Stop everything.** Choose Quit in the tray, or run `clusia daemon stop`.
+
+**Start fresh.** Run `clusia uninstall`, move `~/Library/Application Support/Clusia` to the Trash, and install again. This deletes your saved drafts and settings.
+
+## Uninstall
+
+```sh
+clusia uninstall
+brew uninstall clusia    # only if you installed through Homebrew
+```
+
+`clusia uninstall` removes the app, the login agent and the `clusia` link. Your reviews and settings stay in `~/Library/Application Support/Clusia` until you delete that folder.
+
+Builds from before the ad hoc signing may have left a signing identity in your login keychain. Remove it with:
+
+```sh
+security delete-identity -c "Clúsia Local"
+```
 
 ## The name and the mark
 
@@ -43,83 +184,6 @@ Clúsia is a Rust workspace with four programs that talk over a local Unix socke
 
 <p align="center"><img src="docs/assets/sp1-m4-popover.png" alt="The Clúsia menu bar popover in light and dark mode: activity heatmap, counters, search, repository chips and paginated pull request lists" width="640"></p>
 
-Your own clone is never checked out or branched: Clúsia only adds refs under `refs/clusia/` and works in separate worktrees. Your GitHub token comes from `gh` or the macOS Keychain and never appears in logs or output.
-
-## Install
-
-One command builds Clúsia on your Mac (it takes a few minutes the first time), installs it and opens it. It uses [Homebrew](https://brew.sh) when you have it, and otherwise installs the Xcode command line tools and Rust if they are missing and builds directly:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash
-```
-
-Run the same command again to update. It never uses `sudo`; `--dry-run` prints every step without running it, and `--no-brew`, `--no-open` and `--ref REF` change the route (or `CLUSIA_NO_BREW`, `CLUSIA_DRY_RUN`, `CLUSIA_NO_OPEN`, `CLUSIA_REF` in the environment). Through the pipe, pass options after `bash -s --`, for example `curl -fsSL … | bash -s -- --no-brew`.
-
-Or do the two steps by hand with Homebrew:
-
-```sh
-brew install --HEAD rzorzal/clusia/clusia
-clusia install --from "$(brew --prefix clusia)/libexec/bin"
-```
-
-To read the script before running it:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh -o install.sh
-less install.sh
-bash install.sh
-```
-
-From a clone of this repository, one command builds and installs:
-
-```sh
-cargo run --release -p clusia -- install
-```
-
-`clusia install` puts **Clusia.app** in `/Applications` (or `~/Applications` when that is not writable), signs it ad hoc on this Mac (no Apple account and no keychain prompt are involved), registers the background service to start at login and restarts itself if it crashes, and links `clusia` into `/usr/local/bin` (or `~/.local/bin`, and tells you how to add that to your `PATH`). Running it again replaces the app and keeps your settings and the notification permission. `clusia install --dry-run` shows what it would do.
-
-Opening **Clusia.app** brings up the menu bar tray, the background service and the window. A few seconds after you open it, macOS asks to allow notifications; choose **Allow**. Config › General turns *Start at login* on or off, and Config › Notifications chooses which events notify you, with which sound, and when.
-
-<p align="center"><img src="docs/assets/sp1-m6-config-notifications-light.png" alt="Config › Notifications: for each event, whether it reaches the tray, macOS and plays a sound, the sound, Do not disturb hours and weekdays, Follow macOS Focus, Group bursts and the macOS permission" width="720"></p>
-<p align="center"><img src="docs/assets/sp1-m6-config-general-dark.png" alt="Config › General in the dark theme: Start at login" width="720"></p>
-
-To remove it, run `clusia uninstall` (before `brew uninstall clusia` if you used Homebrew). Your reviews and settings stay in `~/Library/Application Support/Clusia`.
-
-## Try it from source
-
-You need macOS, Git, and the Rust toolchain (the version is pinned in `rust-toolchain.toml`). To work on Clúsia itself:
-
-```sh
-cargo build --workspace
-target/debug/clusia auth status        # uses your gh login, or: clusia auth login (token on stdin)
-target/debug/clusia prs                # pull requests assigned to you and opened by you
-target/debug/clusia open owner/repo#123
-target/debug/clusia review comment owner/repo#123 src/lib.rs:42 "Is this branch reachable?"
-target/debug/clusia review publish owner/repo#123 --verdict request-changes
-```
-
-Every `clusia` command starts the daemon when it is not running.
-
-The window:
-
-```sh
-target/debug/clusia-app                                    # Home, live from the daemon
-target/debug/clusia-app --review owner/repo#123            # open a review
-target/debug/clusia-app --config                           # Config
-target/debug/clusia-app --demo --dark                      # demo data, no daemon, nothing saved
-target/debug/clusia-app --demo --review rzorzal/clusia#123 # the demo review
-```
-
-In a review, click a line to comment (Shift-click for a range), reply to or resolve threads under Comments, then **Finalize review**: everything goes to GitHub as one review, and nothing is posted before you publish. Closing a tab or the window with an unpublished draft asks first; the tray reminds you about reviews kept for later.
-
-Comments are rich text everywhere. The composer (under a line, in a reply, in the finalize form) has a toolbar for bold, italic, code, link, list, quote and suggestion, an **Emoji** picker (Twemoji, so they look the same on every Mac), a **GIF** picker backed by Giphy (add your own key in Config › Media; without one you can still paste a link) and **Image** links, and **Preview** renders exactly what GitHub will show. Pictures from other sites appear as links unless you turn on *Load images from other sites* in Config › Media.
-
-<p align="center"><img src="docs/assets/sp1-m5c-composer-light.png" alt="The Clúsia composer under line 44 with a typed comment and the formatting toolbar" width="720"></p>
-<p align="center"><img src="docs/assets/sp1-m5c-rendered-dark.png" alt="A comment in the dark theme with bold text, inline code, a code block, a link, an emoji and a playing GIF" width="720"></p>
-
-On a new machine, or whenever the GitHub login is missing, the window opens on a short first run: connect GitHub (the `gh` login or a token), point Clúsia at the folders with your clones, and see which AI harness is installed. It goes away when the login works and you press **Continue**.
-
-<p align="center"><img src="docs/assets/sp1-m5c-first-run-light.png" alt="The first-run screen: connect GitHub, where your repositories are, and the AI harness" width="720"></p>
 
 ## Development
 
@@ -129,7 +193,13 @@ Every change passes the same gate:
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
-Tests never call the real GitHub, the real `gh` or the real Keychain. Plans and specs live in the GitHub issues: the design spec is [#2](https://github.com/rzorzal/clusia/issues/2).
+Tests never call the real GitHub, the real `gh` or the real Keychain. Other scripts in `scripts/`:
+
+- `m6-check.sh`: the owner check for install, launch and notifications, run on a real Mac with someone at the keyboard (it stops the daemon and the tray);
+- `flake-hunt.sh [RUNS]`: runs the suites that talk to a daemon over and over and names the tests that failed;
+- `leak-check.sh`: runs the whole suite and fails if it leaves a `clusiad` running on a temporary home.
+
+The window runs on demo data, with no daemon and nothing saved, with `target/debug/clusia-app --demo --dark`. Plans and specs live in the GitHub issues: the design spec is [#2](https://github.com/rzorzal/clusia/issues/2).
 
 ## Credits
 
