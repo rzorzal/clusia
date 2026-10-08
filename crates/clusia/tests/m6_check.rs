@@ -69,3 +69,42 @@ fn the_script_never_asks_for_admin_rights_or_deletes_files() {
         assert!(!source.contains(forbidden), "{forbidden} in the script");
     }
 }
+
+#[test]
+fn the_default_run_asks_before_stopping_clusia() {
+    for args in [&[][..], &["--skip-install"][..]] {
+        let mut child = Command::new(script())
+            .args(args)
+            .env_clear()
+            .env("HOME", tempfile::tempdir().unwrap().path())
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Anything but "y" aborts before a single step runs.
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), b"n\n").unwrap();
+        let out = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stdout}");
+        assert!(stdout.contains("[y/N]"), "{args:?}: {stdout}");
+        assert!(
+            !stdout.contains("PASS") && !stdout.contains("FAIL"),
+            "{stdout}"
+        );
+    }
+}
+
+#[test]
+fn the_other_modes_do_not_ask() {
+    let source = std::fs::read_to_string(script()).unwrap();
+    assert!(source.contains("--yes"), "no --yes for non-interactive use");
+    let out = Command::new(script())
+        .arg("--list")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(!String::from_utf8(out.stdout).unwrap().contains("[y/N]"));
+}

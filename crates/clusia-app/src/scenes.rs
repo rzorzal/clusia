@@ -32,9 +32,14 @@ impl Plugin for ScenePlugin {
             .add_systems(PostStartup, move |world: &mut World| {
                 stage_snapshot(world, scene);
             });
-        if scene == Scene::ConfigNotificationsBottom {
-            app.add_systems(Update, scroll_to_bottom);
-        }
+        add_scroll(app, scene);
+    }
+}
+
+/// Only the scene that shows the end of the Notifications page keeps its scroll area scrolled.
+fn add_scroll(app: &mut App, scene: Scene) {
+    if scene == Scene::ConfigNotificationsBottom {
+        app.add_systems(Update, scroll_to_bottom);
     }
 }
 
@@ -260,6 +265,28 @@ pub fn stage(world: &mut World, scene: Scene) {
 
 #[cfg(test)]
 mod tests {
+    fn scroll_after_update(scene: Scene) -> f32 {
+        let mut app = App::new();
+        add_scroll(&mut app, scene);
+        let area = app
+            .world_mut()
+            .spawn((ScrollArea, ScrollPosition::default()))
+            .id();
+        app.update();
+        app.world().get::<ScrollPosition>(area).unwrap().y
+    }
+
+    #[test]
+    fn only_the_bottom_scene_scrolls_to_the_end() {
+        assert_eq!(
+            scroll_after_update(Scene::ConfigNotificationsBottom),
+            f32::MAX
+        );
+        for scene in [Scene::ConfigNotifications, Scene::ConfigGeneral] {
+            assert_eq!(scroll_after_update(scene), 0.0, "{scene:?}");
+        }
+    }
+
     use super::*;
     use crate::nav::{FirstRunScreen, Screen};
     use crate::screens::open_pr::PaletteRoot;

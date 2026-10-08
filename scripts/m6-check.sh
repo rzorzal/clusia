@@ -11,6 +11,9 @@
 #   scripts/m6-check.sh --after-login      after logging out and in again
 #   scripts/m6-check.sh --brew PREFIX      the Homebrew formula, in a Homebrew kept in PREFIX
 #   scripts/m6-check.sh --list             print the steps and exit
+#   add --yes to skip the question below, for a run without a terminal
+#
+# The runs that stop or reinstall Clusia ask once, up front; --yes answers for them.
 set -u
 
 LABEL="io.github.rzorzal.clusia.daemon"
@@ -24,6 +27,7 @@ FLAKE_RUNS="${CLUSIA_FLAKE_RUNS:-20}"
 passed=0
 failed=0
 APP=""
+ASSUME_YES=0
 
 STEPS=(
   "install: build, install, and check the app bundle, the ad hoc signature, the LaunchAgent and the CLI link"
@@ -69,6 +73,18 @@ ask() {
   case "$answer" in y | Y | yes) pass "$1" ;; *) fail "$1" ;; esac
 }
 
+# Everything below the up-front question stops or reinstalls the real Clusia.
+confirm_disruption() {
+  local answer
+  [ "$ASSUME_YES" = 1 ] && return 0
+  echo "This stops the Clusia daemon, tray and window and reinstalls over the real app."
+  printf 'Continue? [y/N] '
+  read -r answer || answer=n
+  case "$answer" in y | Y | yes) return 0 ;; *) return 1 ;; esac
+}
+
+permission_allowed() { send '"daemon_status"' | grep -q llowed; }
+
 running() { pgrep -x "$1" >/dev/null; }
 stopped() { ! pgrep -x "$1" >/dev/null; }
 replaced() {
@@ -76,6 +92,7 @@ replaced() {
   now="$(pgrep -x clusiad | head -1)"
   [ -n "$now" ] && [ "$now" != "$1" ]
 }
+all_stopped() { stopped clusiad && stopped clusia-tray && stopped clusia-app; }
 one_tray() { [ "$(pgrep -x clusia-tray | wc -l | tr -d ' ')" = 1 ]; }
 is_adhoc() { codesign -dv "$1" 2>&1 | grep -q 'Signature=adhoc'; }
 
@@ -105,7 +122,7 @@ stop_everything() {
   [ -n "$APP" ] && "$APP/Contents/MacOS/clusia" daemon stop >/dev/null 2>&1
   pkill -x clusia-app 2>/dev/null
   pkill -x clusia-tray 2>/dev/null
-  wait_for "nothing of Clusia is running" 15 stopped clusiad
+  wait_for "nothing of Clusia is running" 15 all_stopped
 }
 
 install_app() {
@@ -208,7 +225,8 @@ step_notification() {
   local reply status
   reply="$(send '"test_notification"')"
   case "$reply" in
-    *'"ok"'*) pass "the daemon accepted the test notification" ;;
+    *'"delivered":0'* | *'"delivered": 0'*) fail "no tray took the test notification: $reply" ;;
+    *'"ok"'*'"delivered"'*) pass "a tray took the test notification" ;;
     *) fail "the daemon did not answer the test notification: $reply" ;;
   esac
   status="$(send '"daemon_status"')"
@@ -216,6 +234,7 @@ step_notification() {
     *llowed*) pass "macOS permission is allowed" ;;
     *) fail "macOS permission is not allowed yet: $status" ;;
   esac
+  echo "  Take a screenshot of the banner with the Clusia icon."
   ask "Did you hear a soft sound and see a Clusia banner?"
   ask "Did clicking the banner bring Clusia forward?"
   echo "  In Config > Notifications, press the play button next to Sound."
@@ -233,18 +252,14 @@ step_reinstall() {
   wait_for "the tray is running" 30 running clusia-tray
   wait_for "the daemon is running" 30 running clusiad
   check "the bundle is still signed ad hoc" is_adhoc "$APP"
-  sleep 20
-  local status
-  status="$(send '"daemon_status"')"
-  case "$status" in
-    *llowed*) pass "macOS permission is still allowed" ;;
-    *) fail "macOS permission is not allowed after reinstalling: $status" ;;
-  esac
+  wait_for "macOS permission is still allowed" 30 permission_allowed
   ask "Did macOS NOT ask for notification permission again?"
 }
 
 step_icons() {
   say "8. The icon"
+  echo "  Take screenshots of: the icon in Finder, the Dock with the window open, Cmd-Tab,"
+  echo "  the menu bar on a light and on a dark background, and a notification."
   ask "Is the Clusia icon shown in Finder, in /Applications and in Spotlight?"
   ask "Is it in the Dock and in Cmd-Tab while the window is open?"
   ask "Is the menu bar icon right on a light and on a dark menu bar?"
@@ -305,6 +320,12 @@ summary() {
   [ "$failed" -eq 0 ]
 }
 
+rest=()
+for arg in "$@"; do
+  if [ "$arg" = --yes ]; then ASSUME_YES=1; else rest+=("$arg"); fi
+done
+set -- ${rest[@]+"${rest[@]}"}
+
 case "${1:-}" in
   --list)
     printf '%s\n' "${STEPS[@]}"
@@ -322,6 +343,10 @@ case "${1:-}" in
     summary
     ;;
   "" | --skip-install)
+    confirm_disruption || {
+      echo "Nothing was stopped."
+      exit 1
+    }
     if [ "${1:-}" = "--skip-install" ]; then
       APP="$(app_path)" || {
         echo "Clusia.app is not installed" >&2
@@ -344,7 +369,7 @@ case "${1:-}" in
     summary
     ;;
   *)
-    echo "usage: $0 [--list | --skip-install | --after-login | --brew PREFIX]" >&2
+    echo "usage: $0 [--yes] [--list | --skip-install | --after-login | --brew PREFIX]" >&2
     exit 2
     ;;
 esac
