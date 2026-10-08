@@ -10,7 +10,8 @@ use serde_json::json;
 use crate::run::{CliError, Output};
 
 const WAIT_STEP: Duration = Duration::from_millis(100);
-const WAIT_STEPS: u32 = 50;
+/// Past the daemon's own wait for a publish (10 s) and for its tray (3 s).
+const WAIT_STEPS: u32 = 150;
 
 pub async fn start(paths: &Paths, home: Option<&Path>) -> Result<Output, CliError> {
     match Client::connect(&paths.socket(), "clusia").await {
@@ -51,6 +52,17 @@ pub async fn stop(paths: &Paths) -> Result<Output, CliError> {
         tokio::time::sleep(WAIT_STEP).await;
     }
     Err(CliError::Other(
-        "clusiad acknowledged but did not stop within 5s".into(),
+        "clusiad acknowledged but did not stop within 15s".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stop_outwaits_a_publish_and_the_tray() {
+        // The daemon may finish a publish for up to 10 s, then wait up to 3 s for its tray.
+        assert!(WAIT_STEP * WAIT_STEPS >= Duration::from_secs(14));
+    }
 }

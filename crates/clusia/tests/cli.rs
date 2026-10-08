@@ -721,6 +721,27 @@ fn install_dry_run_prints_the_plan_and_changes_nothing() {
 }
 
 #[test]
+fn install_for_another_data_folder_is_refused_unless_isolated() {
+    let home = Home::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (apps, bin) = (dir.path().join("apps"), dir.path().join("bin"));
+    // A folder with no binaries: should the refusal ever go missing, nothing gets installed.
+    let from = dir.path().join("built");
+    let out = home.clusia(&[
+        "install",
+        "--applications",
+        apps.to_str().unwrap(),
+        "--bin-dir",
+        bin.to_str().unwrap(),
+        "--from",
+        from.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(stderr(&out).contains("--no-launchctl"), "{}", stderr(&out));
+    assert!(!apps.exists() && !bin.exists());
+}
+
+#[test]
 fn uninstall_removes_the_bundle_the_agent_and_the_link_in_the_given_folders() {
     let home = Home::new();
     let dir = tempfile::tempdir().unwrap();

@@ -85,9 +85,10 @@ pub fn with_start_at_login(existing: &str, on: bool) -> Result<String, LaunchAge
 
 /// The `RunAtLoad` of a rendered agent, `None` when `text` is not one of ours.
 pub fn start_at_login(text: &str) -> Option<bool> {
-    let Value::Dictionary(dict) = Value::from_reader_xml(text.as_bytes()).ok()? else {
+    let dict = parse(text).ok()?;
+    if dict.get("Label").and_then(Value::as_string) != Some(LABEL) {
         return None;
-    };
+    }
     dict.get("RunAtLoad").and_then(Value::as_boolean)
 }
 
@@ -173,5 +174,7 @@ mod tests {
         assert!(with_start_at_login(other, true).is_err());
         assert!(with_start_at_login("not a plist", true).is_err());
         assert_eq!(start_at_login("not a plist"), None);
+        let other_at_login = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Label</key><string>com.example.other</string><key>RunAtLoad</key><true/></dict></plist>";
+        assert_eq!(start_at_login(other_at_login), None);
     }
 }

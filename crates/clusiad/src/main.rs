@@ -46,8 +46,22 @@ fn init_logging(paths: &Paths) {
 fn start_failed(e: &StartError) -> ExitCode {
     eprintln!("clusiad: {e}");
     match e {
-        StartError::AlreadyRunning(_) => ExitCode::from(3),
+        StartError::AlreadyRunning(_) => ExitCode::from(already_running_status(
+            std::env::var("XPC_SERVICE_NAME").ok().as_deref(),
+        )),
         _ => ExitCode::FAILURE,
+    }
+}
+
+/// The launcher waits on 3, which tells it another daemon won. Under the login agent's job
+/// (launchd names it in `XPC_SERVICE_NAME`) any failure is a crash to restart, and another
+/// daemon running is not one: launchd would retry every few seconds while it lives, and win
+/// the lock after a Quit.
+fn already_running_status(xpc_service: Option<&str>) -> u8 {
+    if xpc_service == Some(clusia_core::launch_agent::LABEL) {
+        0
+    } else {
+        3
     }
 }
 
@@ -106,5 +120,21 @@ async fn main() -> ExitCode {
             eprintln!("clusiad: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_second_daemon_under_the_login_agent_exits_cleanly() {
+        assert_eq!(
+            already_running_status(Some("io.github.rzorzal.clusia.daemon")),
+            0
+        );
+        assert_eq!(already_running_status(None), 3);
+        assert_eq!(already_running_status(Some("0")), 3);
+        assert_eq!(already_running_status(Some("com.apple.Terminal")), 3);
     }
 }

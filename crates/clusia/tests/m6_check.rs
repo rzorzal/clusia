@@ -108,3 +108,25 @@ fn the_other_modes_do_not_ask() {
     assert!(out.status.success());
     assert!(!String::from_utf8(out.stdout).unwrap().contains("[y/N]"));
 }
+
+/// The body of the shell function `name` in the script.
+fn function_body(name: &str) -> String {
+    let text = std::fs::read_to_string(script()).unwrap();
+    let start = text
+        .find(&format!("\n{name}() {{\n"))
+        .unwrap_or_else(|| panic!("{name} is missing"));
+    let body = &text[start..];
+    body[..body.find("\n}\n").unwrap()].to_string()
+}
+
+#[test]
+fn the_crash_step_kills_a_daemon_the_app_started() {
+    let body = function_body("step_crash");
+    assert!(
+        !body.contains("kickstart"),
+        "a daemon launchctl started hides how the app starts it: {body}"
+    );
+    let opened = body.find("open -b").expect("the app is opened");
+    let killed = body.find("kill -9").expect("the daemon is killed");
+    assert!(opened < killed, "{body}");
+}

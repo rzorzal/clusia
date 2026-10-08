@@ -40,6 +40,12 @@ impl Paths {
         Self::resolve(std::env::var_os("CLUSIA_HOME"), std::env::var_os("HOME"))
     }
 
+    /// The macOS defaults for this user, whatever `CLUSIA_HOME` says: where an install keeps
+    /// its data.
+    pub fn user_default() -> Result<Self, PathsError> {
+        Self::resolve(None, std::env::var_os("HOME"))
+    }
+
     fn resolve(clusia_home: Option<OsString>, home: Option<OsString>) -> Result<Self, PathsError> {
         if let Some(dir) = clusia_home.filter(|d| !d.is_empty()) {
             let dir = PathBuf::from(dir);

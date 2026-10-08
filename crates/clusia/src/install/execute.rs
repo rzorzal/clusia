@@ -150,16 +150,23 @@ pub fn execute(plan: &Plan, os: &mut dyn InstallOs) -> Result<Report, InstallErr
     let replaced = swap(plan, os, &mut warnings).and_then(|()| write_agent(plan, os));
     let agent_now = replaced.is_ok() || had_agent;
     if plan.launchctl {
+        let mut loaded = false;
         if agent_now {
             let agent = plan.launch_agent.display().to_string();
-            if let Err(e) = os.launchctl(&["bootstrap", &plan.domain, &agent]) {
-                warnings.push(format!("launchd did not load the login agent: {e}"));
+            match os.launchctl(&["bootstrap", &plan.domain, &agent]) {
+                Ok(()) => loaded = true,
+                Err(e) => warnings.push(format!("launchd did not load the login agent: {e}")),
             }
         }
-        // A daemon that was running comes back from the bundle now in place, whether or not
-        // the agent starts at login.
-        if daemon_was_running {
-            os.start_daemon(&plan.cli.target);
+        // An agent that starts at login also starts as it loads: a second daemon started here
+        // would race it for the lock. Otherwise a daemon that was running comes back from the
+        // bundle now in place, under launchd when it can, so a crash is restarted.
+        let starts_on_load = loaded && agent_starts_at_login(plan, os);
+        if daemon_was_running && !starts_on_load {
+            let kicked = loaded && os.launchctl(&["kickstart", &plan.service_target()]).is_ok();
+            if !kicked {
+                os.start_daemon(&plan.cli.target);
+            }
         }
     }
     replaced?;
@@ -172,6 +179,14 @@ pub fn execute(plan: &Plan, os: &mut dyn InstallOs) -> Result<Report, InstallErr
         warnings,
         notes: plan.notes.clone(),
     })
+}
+
+/// The `RunAtLoad` of the agent file now in place (the new one, or the old one put back).
+fn agent_starts_at_login(plan: &Plan, os: &dyn InstallOs) -> bool {
+    os.read_file(&plan.launch_agent)
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|text| launch_agent::start_at_login(&text))
+        .unwrap_or(false)
 }
 
 fn write_agent(plan: &Plan, os: &mut dyn InstallOs) -> Result<(), InstallError> {
@@ -424,6 +439,7 @@ mod tests {
         /// codesign does.
         copies_leave_cstemp: bool,
         launchctl_fails: bool,
+        kickstart_fails: bool,
         daemon_running: bool,
         /// How many renames onto `Clusia.app` fail.
         renames_into_place_fail: u32,
@@ -573,6 +589,9 @@ mod tests {
             }
             if self.launchctl_fails && args[0] == "bootstrap" {
                 return Err(InstallError::new("Bootstrap failed: 5"));
+            }
+            if self.kickstart_fails && args[0] == "kickstart" {
+                return Err(InstallError::new("Could not find service"));
             }
             Ok(())
         }
@@ -810,10 +829,9 @@ mod tests {
                 p.launch_agent.display()
             ))
         );
-        assert!(
-            pos("launchctl bootstrap")
-                < pos("start-daemon /Applications/Clusia.app/Contents/MacOS/clusia")
-        );
+        // The old agent starts at login, so launchd brings the daemon back by itself.
+        assert!(os.calls_starting("start-daemon").is_empty(), "{calls:#?}");
+        assert!(os.calls_starting("launchctl kickstart").is_empty());
     }
 
     #[test]
@@ -852,7 +870,7 @@ mod tests {
             "{:#?}",
             os.calls
         );
-        assert_eq!(os.calls_starting("start-daemon").len(), 1);
+        assert!(os.calls_starting("start-daemon").is_empty());
         assert!(os.links.contains_key(Path::new("/usr/local/bin/clusia")));
     }
 
@@ -908,18 +926,58 @@ mod tests {
         let mut os = Fake::machine();
         os.daemon_running = true;
         execute(&plan(&from_built(), &off), &mut os).unwrap();
-        let start = "start-daemon /Applications/Clusia.app/Contents/MacOS/clusia".to_string();
+        let kickstart = "launchctl kickstart gui/501/io.github.rzorzal.clusia.daemon".to_string();
         let calls = &os.calls;
         let pos = |needle: &str| calls.iter().position(|c| c.starts_with(needle)).unwrap();
-        assert!(calls.contains(&start), "{calls:#?}");
-        assert!(pos("launchctl bootstrap") < pos("start-daemon"));
+        assert!(calls.contains(&kickstart), "{calls:#?}");
+        assert!(pos("launchctl bootstrap") < pos("launchctl kickstart"));
         assert!(pos("stop-daemon") < pos("mv /Applications/.Clusia.app.installing"));
+        assert!(
+            os.calls_starting("start-daemon").is_empty(),
+            "launchd runs it, so it is restarted after a crash"
+        );
 
         let mut os = Fake::machine();
         execute(&plan(&from_built(), &off), &mut os).unwrap();
         assert!(
-            os.calls_starting("start-daemon").is_empty(),
+            os.calls_starting("launchctl kickstart").is_empty()
+                && os.calls_starting("start-daemon").is_empty(),
             "none was running"
+        );
+    }
+
+    #[test]
+    fn with_start_at_login_launchd_alone_starts_the_daemon() {
+        let mut os = Fake::machine();
+        os.daemon_running = true;
+        execute(&plan(&from_built(), &env()), &mut os).unwrap();
+        assert!(
+            os.calls_starting("start-daemon").is_empty()
+                && os.calls_starting("launchctl kickstart").is_empty(),
+            "a second daemon would race launchd's: {:#?}",
+            os.calls
+        );
+    }
+
+    #[test]
+    fn a_daemon_launchd_cannot_start_is_started_directly() {
+        let start = "start-daemon /Applications/Clusia.app/Contents/MacOS/clusia".to_string();
+        let mut os = Fake::machine();
+        os.daemon_running = true;
+        os.launchctl_fails = true;
+        execute(&plan(&from_built(), &env()), &mut os).unwrap();
+        assert_eq!(os.calls_starting("start-daemon"), [&start], "no job loaded");
+
+        let mut off = env();
+        off.start_at_login = false;
+        let mut os = Fake::machine();
+        os.daemon_running = true;
+        os.kickstart_fails = true;
+        execute(&plan(&from_built(), &off), &mut os).unwrap();
+        assert_eq!(
+            os.calls_starting("start-daemon"),
+            [&start],
+            "kickstart refused"
         );
     }
 

@@ -210,8 +210,9 @@ step_crash() {
   wait_for "the daemon stopped cleanly" 15 stopped clusiad
   sleep 5
   check "launchd did not restart a daemon that stopped cleanly" stopped clusiad
-  launchctl kickstart "gui/$UID_NUM/$LABEL" >/dev/null 2>&1
-  wait_for "launchd started the daemon" 15 running clusiad
+  # The daemon the app starts after a Quit, not one started by hand, is the one that must come back.
+  open -b "$BUNDLE_ID" || open "$APP"
+  wait_for "the app started the daemon" 30 running clusiad
   local old
   old="$(pgrep -x clusiad | head -1)"
   kill -9 "$old"

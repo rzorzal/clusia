@@ -22,6 +22,8 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(100);
 /// The exit status of a clusiad that found another one running (`StartError::AlreadyRunning`).
 const ALREADY_RUNNING: i32 = 3;
+/// Past this size the start log is emptied before the next start appends to it.
+const START_LOG_LIMIT: u64 = 256 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
@@ -66,6 +68,51 @@ pub fn check_socket_path(paths: &Paths) -> Result<(), LaunchError> {
     })
 }
 
+/// The login agent's launchd job. A daemon launchd starts is restarted after a crash; one
+/// spawned here is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchdJob {
+    /// The agent plist; without it there is no job to start.
+    pub agent: PathBuf,
+    pub launchctl: PathBuf,
+    /// `gui/<uid>/<label>`.
+    pub target: String,
+}
+
+impl LaunchdJob {
+    /// The job of the user's own install. The agent starts clusiad without `--home`, so a
+    /// daemon for any other data folder is never its job.
+    pub fn for_paths(paths: &Paths, home: Option<&Path>) -> Option<Self> {
+        if home.is_some() || Paths::user_default().ok().as_ref() != Some(paths) {
+            return None;
+        }
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        Some(Self {
+            agent: paths.launch_agent(),
+            launchctl: PathBuf::from("/bin/launchctl"),
+            target: format!("gui/{uid}/{}", clusia_core::launch_agent::LABEL),
+        })
+    }
+
+    fn launchctl(&self, verb: &str) -> bool {
+        std::process::Command::new(&self.launchctl)
+            .arg(verb)
+            .arg(&self.target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Asks launchd to start the job; `false` when there is no loaded job or it refused.
+    /// `kickstart` without `-k` leaves a job that is already running alone.
+    pub fn start(&self) -> bool {
+        self.agent.exists() && self.launchctl("print") && self.launchctl("kickstart")
+    }
+}
+
 /// Starts clusiad and waits until it accepts connections. Returns the pid of the daemon that
 /// answered, or `None` when it cannot be told (a winner that did not answer `DaemonStatus`
 /// in time, and our own child already gone).
@@ -73,24 +120,41 @@ pub async fn start_daemon(paths: &Paths, home: Option<&Path>) -> Result<Option<u
     start_daemon_with(paths, home, &daemon_binary()?, READY_TIMEOUT).await
 }
 
-// The daemon outlives this process by design, so the child is deliberately never waited on.
-#[allow(clippy::zombie_processes)]
+/// Through the login agent's job when it is loaded, else by spawning `bin`.
 pub async fn start_daemon_with(
     paths: &Paths,
     home: Option<&Path>,
     bin: &Path,
     timeout: Duration,
 ) -> Result<Option<u32>, LaunchError> {
+    let job = LaunchdJob::for_paths(paths, home);
+    start_daemon_via(paths, home, bin, timeout, job.as_ref()).await
+}
+
+// The daemon outlives this process by design, so the child is deliberately never waited on.
+#[allow(clippy::zombie_processes)]
+pub async fn start_daemon_via(
+    paths: &Paths,
+    home: Option<&Path>,
+    bin: &Path,
+    timeout: Duration,
+    job: Option<&LaunchdJob>,
+) -> Result<Option<u32>, LaunchError> {
     check_socket_path(paths)?;
     let logs = paths.logs_dir();
     std::fs::create_dir_all(logs).map_err(io_error(format!("cannot create {}", logs.display())))?;
-    // What the daemon prints before its own log is open (a refusal to start, a panic). The
-    // running daemon writes `daemon.log` itself, so this file only keeps the latest start.
     let log = logs.join("daemon.start.log");
+    if job.is_some_and(LaunchdJob::start) {
+        return wait_for_job(paths, timeout, log).await;
+    }
+    // What the daemon prints before its own log is open (a refusal to start, a panic). Two
+    // starts may race, so each appends: the loser must not wipe what the winner printed.
+    if std::fs::metadata(&log).is_ok_and(|m| m.len() > START_LOG_LIMIT) {
+        let _ = std::fs::remove_file(&log);
+    }
     let out = OpenOptions::new()
         .create(true)
-        .write(true)
-        .truncate(true)
+        .append(true)
         .mode(0o600)
         .open(&log)
         .map_err(io_error(format!("cannot open {}", log.display())))?;
@@ -146,6 +210,25 @@ pub async fn start_daemon_with(
             let _ = child.kill();
             let _ = child.wait();
             return Err(LaunchError::Timeout { timeout, log });
+        }
+        if Instant::now() >= deadline {
+            return Err(LaunchError::Timeout { timeout, log });
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Waits for the daemon launchd was asked to start.
+async fn wait_for_job(
+    paths: &Paths,
+    timeout: Duration,
+    log: PathBuf,
+) -> Result<Option<u32>, LaunchError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(mut client) = Client::connect(&paths.socket(), "launcher").await {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            return Ok(daemon_pid(&mut client, remaining).await);
         }
         if Instant::now() >= deadline {
             return Err(LaunchError::Timeout { timeout, log });
@@ -487,7 +570,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_start_log_holds_only_the_latest_start_and_is_private() {
+    async fn a_start_never_wipes_what_an_earlier_one_printed_and_the_log_is_private() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path());
         for word in ["first", "second"] {
@@ -495,8 +578,99 @@ mod tests {
             let _ = start_daemon_with(&paths, None, &bin, Duration::from_secs(5)).await;
         }
         let log = paths.logs_dir().join("daemon.start.log");
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "second\n");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "first\nsecond\n");
         let mode = std::fs::metadata(&log).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn a_full_start_log_is_emptied_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let log = paths.logs_dir().join("daemon.start.log");
+        std::fs::create_dir_all(paths.logs_dir()).unwrap();
+        std::fs::write(&log, vec![b'x'; START_LOG_LIMIT as usize + 1]).unwrap();
+        let bin = script(dir.path(), "fake", "echo fresh >&2; exit 7");
+        let _ = start_daemon_with(&paths, None, &bin, Duration::from_secs(5)).await;
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "fresh\n");
+    }
+
+    /// A launchctl that records its arguments; `print` answers `loaded`.
+    fn fake_job(dir: &Path, loaded: bool) -> LaunchdJob {
+        let agent = dir.join("agent.plist");
+        std::fs::write(&agent, "plist").unwrap();
+        let print = if loaded { 0 } else { 113 };
+        let launchctl = script(
+            dir,
+            "launchctl",
+            &format!(
+                r#"echo "$@" >> "$(dirname "$0")/launchctl.calls"; [ "$1" = print ] && exit {print}; exit 0"#
+            ),
+        );
+        LaunchdJob {
+            agent,
+            launchctl,
+            target: "gui/501/io.github.rzorzal.clusia.daemon".into(),
+        }
+    }
+
+    fn calls(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("launchctl.calls")).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn a_loaded_login_agent_starts_the_daemon_under_launchd() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let job = fake_job(dir.path(), true);
+        let bin = script(dir.path(), "fake", r#"touch "$(dirname "$0")/spawned""#);
+        // The daemon launchd starts.
+        serve_pid(paths.socket(), 4242, Duration::from_millis(200));
+        let pid = start_daemon_via(&paths, None, &bin, Duration::from_secs(5), Some(&job))
+            .await
+            .unwrap();
+        assert_eq!(pid, Some(4242));
+        assert_eq!(
+            calls(dir.path()),
+            "print gui/501/io.github.rzorzal.clusia.daemon\nkickstart gui/501/io.github.rzorzal.clusia.daemon\n"
+        );
+        assert!(!dir.path().join("spawned").exists(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    async fn without_a_loaded_job_the_daemon_is_spawned() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let bin = script(
+            dir.path(),
+            "fake",
+            r#"touch "$(dirname "$0")/spawned"; exit 7"#,
+        );
+        let job = fake_job(dir.path(), false);
+        let _ = start_daemon_via(&paths, None, &bin, Duration::from_secs(5), Some(&job)).await;
+        assert!(dir.path().join("spawned").exists());
+        assert!(!calls(dir.path()).contains("kickstart"));
+
+        // No agent file: launchd is not even asked.
+        std::fs::remove_file(dir.path().join("launchctl.calls")).unwrap();
+        std::fs::remove_file(&job.agent).unwrap();
+        let _ = start_daemon_via(&paths, None, &bin, Duration::from_secs(5), Some(&job)).await;
+        assert_eq!(calls(dir.path()), "");
+    }
+
+    #[test]
+    fn only_the_users_own_data_folder_has_a_launchd_job() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(LaunchdJob::for_paths(&Paths::new(dir.path()), None), None);
+        if let Ok(default) = Paths::user_default() {
+            assert_eq!(
+                LaunchdJob::for_paths(&default, Some(Path::new("/x"))),
+                None,
+                "--home is never the agent's"
+            );
+            let job = LaunchdJob::for_paths(&default, None).unwrap();
+            assert_eq!(job.agent, default.launch_agent());
+            assert!(job.target.ends_with("/io.github.rzorzal.clusia.daemon"));
+        }
     }
 }

@@ -421,6 +421,14 @@ fn install_command(
             json: plan.to_json(),
         });
     }
+    // The login agent starts clusiad with no `--home`, so it would keep a daemon alive for the
+    // default data folder, not this one.
+    if !args.no_launchctl && Paths::user_default().ok().as_ref() != Some(paths) {
+        return Err(CliError::Other(format!(
+            "the login agent only serves the default data folder, not {}; add --no-launchctl to install for this one",
+            paths.root().display()
+        )));
+    }
     let mut os = install::SystemOs::new(paths.clone(), home.map(Path::to_path_buf));
     let report = install::execute(&plan, &mut os).map_err(|e| CliError::Other(e.to_string()))?;
     Ok(Output {
