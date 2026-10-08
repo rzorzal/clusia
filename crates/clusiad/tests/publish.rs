@@ -695,3 +695,137 @@ async fn a_second_publish_never_takes_the_first_review_for_its_own() {
     assert_eq!(activity_of(&w, ActivityKind::ReviewPublished).len(), 1);
     w.daemon.stop().await;
 }
+
+#[tokio::test]
+async fn a_published_review_whose_file_cannot_be_removed_is_not_posted_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    // The submit answers slowly, so the reviews folder can be locked once Finalize saved.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(
+                    json!({ "data": { "submitPullRequestReview": { "pullRequestReview": {
+                    "id": "PRR_1", "databaseId": 42, "url": REVIEW_URL, "state": "COMMENTED"
+                } } } }),
+                )
+                .set_delay(std::time::Duration::from_millis(800)),
+        )
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    mount_reviews(&w, json!([my_review(&w)])).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+
+    let dir = w.daemon.paths.reviews_dir();
+    let mut publisher = w.daemon.client().await;
+    let publishing = tokio::spawn(async move {
+        publisher
+            .request(publish(Verdict::Comment, "Please rename."))
+            .await
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while stored_review(&w).state != ReviewState::Publishing {
+        assert!(std::time::Instant::now() < deadline, "Finalize never saved");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let reply = publishing.await.unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(reply, Ok(Reply::Published(_))), "{reply:?}");
+
+    let view = view_of(c.request(Command::OpenReview { pr: pr7() }).await.unwrap());
+    assert_eq!(
+        (view.review.state, view.review.draft.items.len()),
+        (ReviewState::Active, 0),
+        "the published review is not offered again as a draft"
+    );
+    assert_eq!(
+        graphql_requests(&w.server, "submitPullRequestReview")
+            .await
+            .len(),
+        1,
+        "one submit"
+    );
+    assert_eq!(activity_of(&w, ActivityKind::ReviewPublished).len(), 1);
+    w.daemon.stop().await;
+}
+
+/// A gateway error on the submit although GitHub took the review: the pending review is gone.
+async fn submit_times_out_after_posting(w: &common::review_world::World) {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(ResponseTemplate::new(502))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    graphql_error(
+        &w.server,
+        "deletePullRequestReview",
+        "Can not delete a non-pending pull request review",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_gateway_error_on_the_submit_is_reconciled_not_posted_again() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    submit_times_out_after_posting(&w).await;
+    mount_reviews(&w, json!([my_review(&w)])).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+
+    let reply = c
+        .request(publish(Verdict::Comment, "Please rename."))
+        .await
+        .unwrap();
+    assert!(
+        matches!(&reply, Reply::Published(r) if r.url.as_deref() == Some(REVIEW_URL)),
+        "{reply:?}"
+    );
+    assert!(!w.daemon.paths.review_file(&pr7()).exists());
+    assert_eq!(activity_of(&w, ActivityKind::ReviewPublished).len(), 1);
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_gateway_error_on_the_submit_with_github_unreachable_stays_publishing() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    submit_times_out_after_posting(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(502))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "Please rename.")).await),
+        ErrorCode::Upstream
+    );
+    assert_eq!(stored_review(&w).state, ReviewState::Publishing);
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "Please rename.")).await),
+        ErrorCode::InvalidState,
+        "a retry posts nothing"
+    );
+    assert_eq!(
+        graphql_requests(&w.server, "submitPullRequestReview")
+            .await
+            .len(),
+        1
+    );
+    w.daemon.stop().await;
+}

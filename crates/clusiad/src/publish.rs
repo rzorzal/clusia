@@ -45,14 +45,23 @@ pub(crate) fn finish_published(
     client: &str,
     url: Option<String>,
 ) {
+    settle_published(shared, review, pr);
+    record(shared, ActivityKind::ReviewPublished, pr, client, url, None);
+}
+
+/// Marks the review published and removes its file. The terminal state is saved first: a file
+/// left behind by a failed delete then opens as a fresh review instead of a draft to post again.
+fn settle_published(shared: &Shared, review: &mut Review, pr: &PrRef) {
     if let Err(e) = review.apply(ReviewEvent::PublishOk, now_unix()) {
         tracing::warn!(error = %e, pr = %pr, "unexpected state after publishing");
+    }
+    if let Err(Outcome::Err(e)) = save(shared, review) {
+        tracing::warn!(error = %e.message, pr = %pr, "published, but cannot save the review as published");
     }
     if let Err(e) = clusia_store::delete_review(&shared.paths, pr) {
         tracing::warn!(error = %e, pr = %pr, "published, but cannot delete the review file");
     }
     drop_cache(shared, pr);
-    record(shared, ActivityKind::ReviewPublished, pr, client, url, None);
 }
 
 /// How far GitHub's clock may trail ours when telling whether a review was submitted after the
@@ -88,6 +97,8 @@ pub(crate) fn find_posted<'a>(
 pub(crate) enum Posted {
     /// The review is there, at this URL.
     Yes(String),
+    /// The review is there and was already recorded as published: only its file was left.
+    Recorded(String),
     No,
     /// GitHub could not be asked.
     Unknown(ProviderError),
@@ -109,21 +120,44 @@ pub(crate) async fn posted_review(
         Err(e) => return Posted::Unknown(e),
     };
     let recorded = recorded_reviews(shared, pr).await;
-    find_posted(&reviews, &viewer, head_sha, finalized_at, &recorded)
-        .map_or(Posted::No, |r| Posted::Yes(r.url.clone()))
+    match find_posted(&reviews, &viewer, head_sha, finalized_at, &recorded.earlier) {
+        Some(r) if recorded.current.contains(&r.url) => Posted::Recorded(r.url.clone()),
+        Some(r) => Posted::Yes(r.url.clone()),
+        None => Posted::No,
+    }
 }
 
-/// The URLs of the reviews on `pr` this daemon recorded as published.
-async fn recorded_reviews(shared: &Shared, pr: &PrRef) -> Vec<String> {
+/// The URLs of the reviews on `pr` this daemon recorded as published, split at the last time a
+/// fresh review was opened there.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct RecordedReviews {
+    /// Published by earlier reviews: never this one.
+    pub earlier: Vec<String>,
+    /// Published since the current review was opened: this one, already recorded.
+    pub current: Vec<String>,
+}
+
+pub(crate) fn split_recorded(activity: &[clusia_core::Activity], pr: &PrRef) -> RecordedReviews {
+    let mut out = RecordedReviews::default();
+    for a in activity.iter().filter(|a| &a.pr == pr) {
+        match a.kind {
+            ActivityKind::ReviewOpened => {
+                let current = std::mem::take(&mut out.current);
+                out.earlier.extend(current);
+            }
+            ActivityKind::ReviewPublished => out.current.extend(a.url.clone()),
+            _ => {}
+        }
+    }
+    out
+}
+
+async fn recorded_reviews(shared: &Shared, pr: &PrRef) -> RecordedReviews {
     match read_off_thread(&shared.paths).await {
-        Ok((activity, _)) => activity
-            .into_iter()
-            .filter(|a| a.kind == ActivityKind::ReviewPublished && &a.pr == pr)
-            .filter_map(|a| a.url)
-            .collect(),
+        Ok((activity, _)) => split_recorded(&activity, pr),
         Err(e) => {
             tracing::warn!(error = %e, pr = %pr, "cannot read which reviews were already published");
-            Vec::new()
+            RecordedReviews::default()
         }
     }
 }
@@ -144,6 +178,11 @@ pub(crate) async fn settle_interrupted(
         Posted::Yes(url) => {
             let pr = review.pr.clone();
             finish_published(shared, review, &pr, client, Some(url));
+            Ok(true)
+        }
+        Posted::Recorded(_) => {
+            let pr = review.pr.clone();
+            settle_published(shared, review, &pr);
             Ok(true)
         }
         Posted::No => Ok(false),
@@ -168,8 +207,8 @@ const LEFTOVER: &str =
 /// Why the review did not reach GitHub.
 struct SubmitFailure {
     error: ProviderError,
-    /// The submit was sent, its answer was lost and the pending review could not be
-    /// deleted: GitHub may have the review anyway.
+    /// The submit was sent and the pending review could not be deleted afterwards: GitHub
+    /// may have the review anyway, whatever the submit answered.
     maybe_posted: bool,
     /// A pending review we started may still be on GitHub (its cleanup failed).
     leftover: bool,
@@ -259,24 +298,23 @@ async fn submit_review(
             });
         }
     };
-    let (error, unsure) = match reply_all(gh, &pending.id, replies).await {
+    let (error, submitted) = match reply_all(gh, &pending.id, replies).await {
         Err(error) => (error, false),
         Ok(()) => match gh
             .submit_review(&pending.id, &payload.event, &payload.body)
             .await
         {
             Ok(published) => return Ok(published),
-            Err(error) => {
-                let unsure = error.is_ambiguous();
-                (error, unsure)
-            }
+            Err(error) => (error, true),
         },
     };
-    // A submitted review is no longer pending: when the delete works, nothing was posted.
+    // A submitted review is no longer pending: when the delete works, nothing was posted. A 5xx
+    // is no proof either way (a gateway may time out on a submit GitHub did take), so any failed
+    // delete after a submit means it may be posted.
     let leftover = discard_pending(gh, pr, &pending.id).await;
     Err(SubmitFailure {
         error,
-        maybe_posted: unsure && leftover,
+        maybe_posted: submitted && leftover,
         leftover,
     })
 }
@@ -436,9 +474,9 @@ pub(crate) async fn publish(
             }
             Err(failure) => {
                 // An answer that was lost or unreadable may hide a review GitHub did take.
-                let found = if failure.error.is_ambiguous() {
+                let found = if failure.error.is_ambiguous() || failure.maybe_posted {
                     match posted_review(shared, &gh, pr, &review.head_sha, finalized_at).await {
-                        Posted::Yes(found) => Some(found),
+                        Posted::Yes(found) | Posted::Recorded(found) => Some(found),
                         Posted::No => None,
                         // Back in `saved`, one click would post it a second time: the review
                         // stays `publishing` until opening it again can ask GitHub.
@@ -571,6 +609,45 @@ mod tests {
         assert_eq!(
             find_posted(&reviews, "me", "abc", FINALIZED, &[]).map(|r| r.id),
             Some(9)
+        );
+    }
+
+    fn activity(kind: ActivityKind, pr: &str, url: Option<&str>) -> clusia_core::Activity {
+        clusia_core::Activity {
+            ts: FINALIZED,
+            kind,
+            pr: pr.parse().unwrap(),
+            client: "clusia".into(),
+            url: url.map(String::from),
+            note: None,
+        }
+    }
+
+    #[test]
+    fn reviews_published_before_the_last_open_are_earlier_ones() {
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let log = [
+            activity(ActivityKind::ReviewOpened, "acme/widgets#7", None),
+            activity(ActivityKind::ReviewPublished, "acme/widgets#7", Some("u1")),
+            activity(ActivityKind::ReviewOpened, "acme/widgets#7", None),
+            activity(
+                ActivityKind::ReviewPublished,
+                "acme/widgets#8",
+                Some("other"),
+            ),
+            activity(ActivityKind::ReviewPublished, "acme/widgets#7", Some("u2")),
+        ];
+        assert_eq!(
+            split_recorded(&log, &pr),
+            RecordedReviews {
+                earlier: vec!["u1".into()],
+                current: vec!["u2".into()],
+            }
+        );
+        assert_eq!(
+            split_recorded(&log[..3], &pr).current,
+            Vec::<String>::new(),
+            "a fresh review has published nothing yet"
         );
     }
 
