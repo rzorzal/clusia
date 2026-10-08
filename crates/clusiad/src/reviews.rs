@@ -284,6 +284,7 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         }
     }
     review.title = detail.summary.title.clone();
+    review.pr_state = clusia_core::PrState::of(detail.closed, detail.merged);
     if let Err(e) = review.apply(ReviewEvent::Reopen, now) {
         return invalid_state(e.to_string());
     }

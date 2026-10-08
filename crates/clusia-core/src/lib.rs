@@ -41,4 +41,4 @@ pub use publish::{
     DEFAULT_BODY, PublishError, PublishPlan, ReplyPayload, ReviewComment, ReviewPayload,
     plan_publish,
 };
-pub use review::{InvalidTransition, Review, ReviewEvent, ReviewState, Role, Verdict};
+pub use review::{InvalidTransition, PrState, Review, ReviewEvent, ReviewState, Role, Verdict};

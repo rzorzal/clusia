@@ -13,6 +13,7 @@ use clusia_provider::GitHub;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
 use crate::inbox::InboxData;
+use crate::news::Backoff;
 use crate::notifications::Engine;
 use crate::options::DaemonOptions;
 use crate::spawner::Spawner;
@@ -74,6 +75,8 @@ pub(crate) struct Shared {
     pub review_locks: std::sync::Mutex<HashMap<PrRef, Arc<tokio::sync::Mutex<()>>>>,
     /// Parsed files per PR, keyed by the head SHA they were fetched for.
     pub files_cache: Mutex<HashMap<PrRef, CachedFiles>>,
+    /// When each saved review whose worktree would not update may be tried again.
+    pub checkout_backoff: std::sync::Mutex<HashMap<PrRef, Backoff>>,
     /// Held for the whole of a sync, so the loop, `SyncNow` and `ListPrs` never overlap.
     pub sync_lock: Mutex<()>,
     /// Becomes `true` once the first sync has finished (whatever its outcome).
@@ -138,6 +141,7 @@ impl Shared {
             touched: std::sync::Mutex::new(HashSet::new()),
             review_locks: std::sync::Mutex::new(HashMap::new()),
             files_cache: Mutex::new(HashMap::new()),
+            checkout_backoff: std::sync::Mutex::new(HashMap::new()),
             sync_lock: Mutex::new(()),
             first_sync_done,
             engine: Mutex::new(Engine::new(inbox.data)),
@@ -145,6 +149,38 @@ impl Shared {
             permission: std::sync::Mutex::new(PermissionStatus::default()),
             checks_wake: Notify::new(),
         }
+    }
+
+    /// Seconds since the daemon started; the clock `checkout_backoff` runs on.
+    pub fn uptime_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// Whether the saved review of `pr` may try to update its worktree now.
+    pub fn checkout_due(&self, pr: &PrRef) -> bool {
+        let now = self.uptime_secs();
+        self.checkout_backoff
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(pr)
+            .is_none_or(|b| b.due(now))
+    }
+
+    pub fn checkout_failed(&self, pr: &PrRef) {
+        let now = self.uptime_secs();
+        self.checkout_backoff
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(pr.clone())
+            .or_default()
+            .failed(now);
+    }
+
+    pub fn checkout_worked(&self, pr: &PrRef) {
+        self.checkout_backoff
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
     }
 
     /// Marks `pr`'s worktree as in use this session. Call before checking it out.

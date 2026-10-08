@@ -60,6 +60,32 @@ impl ReviewState {
     }
 }
 
+/// Where the pull request stands on GitHub, as the daemon last saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    #[default]
+    Open,
+    Closed,
+    Merged,
+}
+
+impl PrState {
+    pub fn of(closed: bool, merged: bool) -> Self {
+        if merged {
+            PrState::Merged
+        } else if closed {
+            PrState::Closed
+        } else {
+            PrState::Open
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        *self == PrState::Open
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Review {
     pub pr: PrRef,
@@ -79,6 +105,10 @@ pub struct Review {
     /// Harness session for running agents in a step (when available).
     #[serde(default)]
     pub harness_session: Option<String>,
+    /// Whether the pull request is still open; a closed or merged one is not checked again
+    /// in the background.
+    #[serde(default, skip_serializing_if = "PrState::is_open")]
+    pub pr_state: PrState,
 }
 
 impl Review {
@@ -95,6 +125,7 @@ impl Review {
             last_seen_at: None,
             last_checks: None,
             harness_session: None,
+            pr_state: PrState::Open,
         }
     }
 
@@ -141,6 +172,33 @@ mod tests {
     use super::*;
     use ReviewEvent as E;
     use ReviewState as S;
+
+    #[test]
+    fn pr_state_follows_closed_and_merged() {
+        assert_eq!(PrState::of(false, false), PrState::Open);
+        assert_eq!(PrState::of(true, false), PrState::Closed);
+        assert_eq!(PrState::of(true, true), PrState::Merged);
+        assert!(PrState::Open.is_open() && !PrState::Closed.is_open());
+    }
+
+    #[test]
+    fn a_stored_review_without_pr_state_is_open_and_open_is_not_written() {
+        let review = Review::new(
+            "acme/widgets#7".parse().unwrap(),
+            "t".into(),
+            "b".into(),
+            "h".into(),
+            1,
+        );
+        let json = serde_json::to_value(&review).unwrap();
+        assert!(json.get("pr_state").is_none());
+        let back: Review = serde_json::from_value(json).unwrap();
+        assert_eq!(back.pr_state, PrState::Open);
+        let mut ended = review;
+        ended.pr_state = PrState::Merged;
+        let json = serde_json::to_value(&ended).unwrap();
+        assert_eq!(json["pr_state"], "merged");
+    }
 
     #[test]
     fn transition_table() {
