@@ -586,7 +586,8 @@ mod empty_is_none {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
         let text = String::deserialize(d)?;
-        Ok((!text.trim().is_empty()).then_some(text))
+        let text = text.trim();
+        Ok((!text.is_empty()).then(|| text.to_string()))
     }
 }
 
@@ -703,6 +704,26 @@ fn reserved(arg: &str) -> Option<(&'static str, Takes, bool)> {
         .iter()
         .find(|(flag, _)| *flag == name)
         .map(|(flag, takes)| (*flag, *takes, has_value))
+        .or_else(|| cluster(arg))
+}
+
+/// A cluster of short flags such as `-cp` or `-xr`: Claude Code reads each letter as a flag of
+/// its own, so one holding a reserved letter is as reserved as the flag alone.
+fn cluster(arg: &str) -> Option<(&'static str, Takes, bool)> {
+    let letters = arg.strip_prefix('-')?;
+    if letters.len() < 2
+        || letters.starts_with('-')
+        || !letters.chars().all(|c| c.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let (flag, takes) = letters.chars().find_map(|c| match c {
+        'p' => Some(("-p", Takes::Nothing)),
+        'c' => Some(("-c", Takes::Nothing)),
+        'r' => Some(("-r", Takes::Nothing)),
+        _ => None,
+    })?;
+    Some((flag, takes, false))
 }
 
 /// The first reserved flag in `args`, if any.
@@ -1366,5 +1387,29 @@ mod tests {
             "a value-less flag does not swallow the next flag"
         );
         assert_eq!(strip_reserved_flags(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn short_flag_clusters_with_a_reserved_letter_are_reserved() {
+        for cluster in ["-cp", "-rx", "-pc", "-xr", "-vc"] {
+            let args = vec![cluster.to_string()];
+            assert!(first_reserved_flag(&args).is_some(), "{cluster}");
+            assert_eq!(
+                strip_reserved_flags(&args),
+                Vec::<String>::new(),
+                "{cluster}"
+            );
+        }
+        for fine in ["-v", "-xy", "-d", "--model", "-"] {
+            let args = vec![fine.to_string()];
+            assert_eq!(first_reserved_flag(&args), None, "{fine}");
+            assert_eq!(strip_reserved_flags(&args), args, "{fine}");
+        }
+    }
+
+    #[test]
+    fn the_program_is_trimmed_when_read() {
+        let c: Config = serde_json::from_str(r#"{"harness":{"program":" /opt/claude "}}"#).unwrap();
+        assert_eq!(c.harness.program.as_deref(), Some("/opt/claude"));
     }
 }

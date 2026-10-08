@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"/tmp/acme-widgets","session_id":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","model":"claude-opus-5-5","permissionMode":"dontAsk","claude_code_version":"2.1.294"}
+{"type":"result","subtype":"success","is_error":true,"duration_ms":300,"num_turns":1,"result":"5-hour limit reached ∙ resets 3pm","session_id":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","permission_denials":[]}

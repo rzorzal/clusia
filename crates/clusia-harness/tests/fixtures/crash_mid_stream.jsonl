@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp/acme-widgets","session_id":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","model":"claude-opus-5-5","permissionMode":"dontAsk","claude_code_version":"2.1.294"}
+{"type":"system","subtype":"status","status":"requesting","session_id":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"}
+{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}},"session_id":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","parent_tool_use_id":null}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Looking at the diff, the first"}},"session_id":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","parent_tool_use_id":null}

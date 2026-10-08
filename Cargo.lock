@@ -1828,6 +1828,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clusia-harness"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "clusia-protocol",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "clusia-highlight"
 version = "0.1.0"
 dependencies = [
