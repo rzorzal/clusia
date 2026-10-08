@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use clusia_core::launch_agent;
 
 use super::plan::{
-    BINARIES, BUNDLE_ID, Content, Plan, SIGNING_NAME, SIGNING_NAME_ASCII, Source,
-    render_info_plist, render_launch_agent,
+    BINARIES, BUNDLE_ID, Content, Plan, Source, render_info_plist, render_launch_agent,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -44,30 +43,22 @@ pub trait InstallOs {
     fn rename(&mut self, from: &Path, to: &Path) -> Result<(), InstallError>;
     fn symlink(&mut self, target: &Path, link: &Path) -> Result<(), InstallError>;
     fn link_state(&self, path: &Path) -> LinkState;
-    /// The code-signing identity named `name` in the keychain: its SHA-1.
-    fn find_identity(&mut self, name: &str) -> Option<String>;
-    /// Creates a self-signed code-signing identity named `name`; returns its SHA-1.
-    fn create_identity(&mut self, name: &str) -> Result<String, InstallError>;
+    /// Every file below `dir`, at any depth.
+    fn files_under(&self, dir: &Path) -> Vec<PathBuf>;
     /// Signs the bundle with `identity` (`-` is ad hoc) and checks the signature.
     fn codesign(&mut self, bundle: &Path, identity: &str) -> Result<(), InstallError>;
     fn launchctl(&mut self, args: &[&str]) -> Result<(), InstallError>;
-    /// Asks a running daemon to stop; `true` when one was running.
-    fn stop_daemon(&mut self) -> bool;
+    /// Whether a daemon is listening now.
+    fn daemon_running(&self) -> bool;
+    /// Asks a running daemon to stop.
+    fn stop_daemon(&mut self);
     /// Starts the daemon through `clusia` (the command inside the new bundle).
     fn start_daemon(&mut self, clusia: &Path);
-}
-
-/// How the bundle was signed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Signed {
-    Identity(String),
-    AdHoc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub app: PathBuf,
-    pub signed: Signed,
     pub launch_agent: PathBuf,
     pub cli_link: Option<PathBuf>,
     /// Things that did not work but did not stop the install.
@@ -80,10 +71,7 @@ impl Report {
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "installed": self.app,
-            "signed_with": match &self.signed {
-                Signed::Identity(name) => name.as_str(),
-                Signed::AdHoc => "ad-hoc",
-            },
+            "signed_with": "ad-hoc",
             "launch_agent": self.launch_agent,
             "cli_link": self.cli_link,
             "warnings": self.warnings,
@@ -92,10 +80,7 @@ impl Report {
 
     pub fn describe(&self) -> String {
         let mut out = format!("Installed {}\n", self.app.display());
-        out.push_str(&match &self.signed {
-            Signed::Identity(name) => format!("  signed with the local identity \"{name}\"\n"),
-            Signed::AdHoc => "  signed ad hoc (no local identity could be used)\n".into(),
-        });
+        out.push_str("  signed ad hoc\n");
         out.push_str(&format!("  login agent {}\n", self.launch_agent.display()));
         if let Some(link) = &self.cli_link {
             out.push_str(&format!("  command {}\n", link.display()));
@@ -112,8 +97,10 @@ impl Report {
 }
 
 /// Builds the bundle next to its final place, signs it there, then swaps it in. The old bundle
-/// stays until the new one is in place, and comes back if the swap fails.
+/// stays until the new one is in place, and comes back if the swap fails. Once launchd and the
+/// daemon have been stopped, a failure puts them back as they were.
 pub fn execute(plan: &Plan, os: &mut dyn InstallOs) -> Result<Report, InstallError> {
+    refuse_foreign(plan, os)?;
     let binaries = match &plan.source {
         Source::Build { workspace } => os.build_release(workspace)?,
         Source::Dir(dir) => dir.clone(),
@@ -130,8 +117,6 @@ pub fn execute(plan: &Plan, os: &mut dyn InstallOs) -> Result<Report, InstallErr
         )));
     }
 
-    refuse_foreign(plan, os)?;
-
     if os.exists(&plan.staging) {
         os.remove_dir_all(&plan.staging)?;
     }
@@ -146,18 +131,50 @@ pub fn execute(plan: &Plan, os: &mut dyn InstallOs) -> Result<Report, InstallErr
             Content::InfoPlist => os.write_file(&to, render_info_plist(plan).as_bytes(), 0o644)?,
         }
     }
+    if let Err(e) = sign(os, &plan.staging) {
+        let _ = os.remove_dir_all(&plan.staging);
+        return Err(e);
+    }
 
     let mut warnings = Vec::new();
-    let signed = sign(os, &plan.staging, &mut warnings);
-
+    // `refuse_foreign` passed, so an agent file here is ours and was loaded from this path.
+    let had_agent = os.exists(&plan.launch_agent);
     let mut daemon_was_running = false;
     if plan.launchctl {
+        // Asked before the bootout, which stops a daemon that launchd runs.
+        daemon_was_running = os.daemon_running();
         // The old daemon runs from the old bundle: unload it and stop it before the swap.
         let _ = os.launchctl(&["bootout", &plan.service_target()]);
-        daemon_was_running = os.stop_daemon();
+        os.stop_daemon();
     }
-    swap(plan, os)?;
+    let replaced = swap(plan, os, &mut warnings).and_then(|()| write_agent(plan, os));
+    let agent_now = replaced.is_ok() || had_agent;
+    if plan.launchctl {
+        if agent_now {
+            let agent = plan.launch_agent.display().to_string();
+            if let Err(e) = os.launchctl(&["bootstrap", &plan.domain, &agent]) {
+                warnings.push(format!("launchd did not load the login agent: {e}"));
+            }
+        }
+        // A daemon that was running comes back from the bundle now in place, whether or not
+        // the agent starts at login.
+        if daemon_was_running {
+            os.start_daemon(&plan.cli.target);
+        }
+    }
+    replaced?;
 
+    let cli_link = link_cli(plan, os, &mut warnings);
+    Ok(Report {
+        app: plan.app.clone(),
+        launch_agent: plan.launch_agent.clone(),
+        cli_link,
+        warnings,
+        notes: plan.notes.clone(),
+    })
+}
+
+fn write_agent(plan: &Plan, os: &mut dyn InstallOs) -> Result<(), InstallError> {
     if let Some(dir) = plan.launch_agent.parent() {
         os.create_dir_all(dir)?;
     }
@@ -165,28 +182,7 @@ pub fn execute(plan: &Plan, os: &mut dyn InstallOs) -> Result<Report, InstallErr
         &plan.launch_agent,
         render_launch_agent(plan, plan.start_at_login).as_bytes(),
         0o644,
-    )?;
-    if plan.launchctl {
-        let agent = plan.launch_agent.display().to_string();
-        if let Err(e) = os.launchctl(&["bootstrap", &plan.domain, &agent]) {
-            warnings.push(format!("launchd did not load the login agent: {e}"));
-        }
-        // A daemon that was running comes back from the new bundle, whether or not the agent
-        // starts at login.
-        if daemon_was_running {
-            os.start_daemon(&plan.cli.target);
-        }
-    }
-
-    let cli_link = link_cli(plan, os, &mut warnings)?;
-    Ok(Report {
-        app: plan.app.clone(),
-        signed,
-        launch_agent: plan.launch_agent.clone(),
-        cli_link,
-        warnings,
-        notes: plan.notes.clone(),
-    })
+    )
 }
 
 /// The `CFBundleIdentifier` of the bundle at `app`, `None` when it has no readable one.
@@ -235,34 +231,24 @@ fn refuse_foreign(plan: &Plan, os: &dyn InstallOs) -> Result<(), InstallError> {
     Ok(())
 }
 
-/// The local identity when it can be found or made and used, else ad hoc. A stable identity
-/// keeps macOS from treating each rebuild as a new app.
-fn sign(os: &mut dyn InstallOs, bundle: &Path, warnings: &mut Vec<String>) -> Signed {
-    let identity = [SIGNING_NAME, SIGNING_NAME_ASCII]
-        .into_iter()
-        .find_map(|name| {
-            os.find_identity(name)
-                .or_else(|| os.create_identity(name).ok())
-                .map(|sha| (name, sha))
-        });
-    if let Some((name, sha)) = identity {
-        match os.codesign(bundle, &sha) {
-            Ok(()) => return Signed::Identity(name.to_string()),
-            Err(e) => warnings.push(format!(
-                "signing with \"{name}\" failed ({e}); signed ad hoc"
-            )),
+/// Ad hoc: no keychain, so no prompt can stall an unattended install. An unsealed bundle never
+/// replaces a working one, because notifications need the seal over its Info.plist.
+fn sign(os: &mut dyn InstallOs, bundle: &Path) -> Result<(), InstallError> {
+    // A killed codesign leaves `*.cstemp` files, and codesign refuses a bundle holding one.
+    for stale in os.files_under(bundle) {
+        if stale.extension().is_some_and(|e| e == "cstemp") {
+            os.remove_file(&stale)?;
         }
     }
-    match os.codesign(bundle, "-") {
-        Ok(()) => Signed::AdHoc,
-        Err(e) => {
-            warnings.push(format!("the bundle could not be signed: {e}"));
-            Signed::AdHoc
-        }
-    }
+    os.codesign(bundle, "-")
+        .map_err(|e| InstallError::new(format!("the bundle could not be signed: {e}")))
 }
 
-fn swap(plan: &Plan, os: &mut dyn InstallOs) -> Result<(), InstallError> {
+fn swap(
+    plan: &Plan,
+    os: &mut dyn InstallOs,
+    warnings: &mut Vec<String>,
+) -> Result<(), InstallError> {
     let had_old = os.exists(&plan.app);
     if had_old {
         if os.exists(&plan.backup) {
@@ -271,52 +257,74 @@ fn swap(plan: &Plan, os: &mut dyn InstallOs) -> Result<(), InstallError> {
         os.rename(&plan.app, &plan.backup)?;
     }
     if let Err(e) = os.rename(&plan.staging, &plan.app) {
-        if had_old {
-            let _ = os.rename(&plan.backup, &plan.app);
+        if had_old && let Err(back) = os.rename(&plan.backup, &plan.app) {
+            return Err(InstallError::new(format!(
+                "{e}; the previous bundle could not be put back ({back}) and is in {}",
+                plan.backup.display()
+            )));
         }
         return Err(e);
     }
-    if had_old {
-        os.remove_dir_all(&plan.backup)?;
+    if had_old && let Err(e) = os.remove_dir_all(&plan.backup) {
+        warnings.push(format!(
+            "the previous bundle was left in {}: {e}",
+            plan.backup.display()
+        ));
     }
     Ok(())
 }
 
-/// The `clusia` command: our link is replaced, anything else is left alone.
-fn link_cli(
-    plan: &Plan,
-    os: &mut dyn InstallOs,
-    warnings: &mut Vec<String>,
-) -> Result<Option<PathBuf>, InstallError> {
+/// Where a Clúsia install, wherever its bundle is, points the `clusia` command.
+const OUR_LINK_SUFFIX: &str = "Clusia.app/Contents/MacOS/clusia";
+
+/// The `clusia` command: a link to a Clúsia bundle is replaced, anything else is left alone. The
+/// install is done by now, so a link that cannot be made is a warning.
+fn link_cli(plan: &Plan, os: &mut dyn InstallOs, warnings: &mut Vec<String>) -> Option<PathBuf> {
     let link = &plan.cli.link;
-    match os.link_state(link) {
-        LinkState::Link(to) if to == plan.cli.target => return Ok(Some(link.clone())),
+    let made = match os.link_state(link) {
+        LinkState::Link(to) if to == plan.cli.target => return Some(link.clone()),
+        LinkState::Link(to) if to.ends_with(OUR_LINK_SUFFIX) => os
+            .remove_file(link)
+            .and_then(|()| os.symlink(&plan.cli.target, link)),
+        LinkState::Link(to) => {
+            warnings.push(format!(
+                "{} links to {}, so it was left alone",
+                link.display(),
+                to.display()
+            ));
+            return None;
+        }
         LinkState::Other => {
             warnings.push(format!(
                 "{} exists and is not a link, so it was left alone",
                 link.display()
             ));
-            return Ok(None);
+            return None;
         }
-        LinkState::Link(_) => os.remove_file(link)?,
-        LinkState::Missing => {}
+        LinkState::Missing => link
+            .parent()
+            .map_or(Ok(()), |dir| os.create_dir_all(dir))
+            .and_then(|()| os.symlink(&plan.cli.target, link)),
+    };
+    match made {
+        Ok(()) => Some(link.clone()),
+        Err(e) => {
+            warnings.push(format!("the clusia command was not linked: {e}"));
+            None
+        }
     }
-    if let Some(dir) = link.parent() {
-        os.create_dir_all(dir)?;
-    }
-    os.symlink(&plan.cli.target, link)?;
-    Ok(Some(link.clone()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Removed {
     pub removed: Vec<PathBuf>,
     pub kept: Vec<String>,
+    pub notes: Vec<String>,
 }
 
 impl Removed {
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "removed": self.removed, "kept": self.kept })
+        serde_json::json!({ "removed": self.removed, "kept": self.kept, "notes": self.notes })
     }
 
     pub fn describe(&self) -> String {
@@ -327,18 +335,27 @@ impl Removed {
         for line in &self.kept {
             out.push_str(&format!("  kept {line}\n"));
         }
+        for note in &self.notes {
+            out.push_str(&format!("  {note}\n"));
+        }
         out
     }
 }
 
-/// Undoes `execute`: the agent, the bundle and our link. Your data and the signing identity
-/// stay.
-pub fn uninstall(plan: &Plan, os: &mut dyn InstallOs) -> Result<Removed, InstallError> {
+/// The identity earlier builds signed with; install no longer makes or uses one.
+const OLD_SIGNING_NAME: &str = "Clúsia Local";
+
+/// Undoes `execute`: the agent, the bundle and our link. Your data in `data` stays.
+pub fn uninstall(
+    plan: &Plan,
+    data: &Path,
+    os: &mut dyn InstallOs,
+) -> Result<Removed, InstallError> {
     let mut removed = Vec::new();
-    let mut kept = vec![
-        "your reviews and settings in ~/Library/Application Support/Clusia".to_string(),
-        format!("the \"{SIGNING_NAME}\" signing identity in your login keychain"),
-    ];
+    let mut kept = vec![format!("your reviews and settings in {}", data.display())];
+    let notes = vec![format!(
+        "an older Clúsia may have left a signing identity in your login keychain; remove it with: security delete-identity -c \"{OLD_SIGNING_NAME}\""
+    )];
     let agent_is_ours = os.exists(&plan.launch_agent)
         && os
             .read_file(&plan.launch_agent)
@@ -367,32 +384,26 @@ pub fn uninstall(plan: &Plan, os: &mut dyn InstallOs) -> Result<Removed, Install
         os.remove_file(&plan.cli.link)?;
         removed.push(plan.cli.link.clone());
     }
-    let ours = [
-        (&plan.app, bundle_is_ours),
-        (&plan.staging, true),
-        (&plan.backup, true),
-    ];
-    for (dir, remove) in ours {
-        if remove && os.exists(dir) {
+    if bundle_is_ours {
+        os.remove_dir_all(&plan.app)?;
+        removed.push(plan.app.clone());
+    }
+    for dir in [&plan.staging, &plan.backup] {
+        if !os.exists(dir) {
+            continue;
+        }
+        if bundle_id(os, dir).as_deref() == Some(BUNDLE_ID) {
             os.remove_dir_all(dir)?;
             removed.push(dir.clone());
+        } else {
+            kept.push(format!("{} (not a Clúsia bundle)", dir.display()));
         }
     }
-    Ok(Removed { removed, kept })
-}
-
-/// The identities `security find-identity -p codesigning` lists, as `(sha1, name)`.
-pub fn parse_identities(output: &str) -> Vec<(String, String)> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let rest = line.trim().split_once(") ")?.1;
-            let (sha, name) = rest.split_once(' ')?;
-            let name = name.trim().strip_prefix('"')?.split('"').next()?;
-            (sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()))
-                .then(|| (sha.to_string(), name.to_string()))
-        })
-        .collect()
+    Ok(Removed {
+        removed,
+        kept,
+        notes,
+    })
 }
 
 #[cfg(test)]
@@ -408,21 +419,21 @@ mod tests {
         files: BTreeMap<PathBuf, Vec<u8>>,
         dirs: BTreeSet<PathBuf>,
         links: BTreeMap<PathBuf, PathBuf>,
-        identities: Vec<(String, String)>,
-        can_create_identity: bool,
-        codesign_refuses: Vec<String>,
+        codesign_fails: bool,
+        /// Copies into `Contents/MacOS` leave a `.cstemp` next to the binary, the way a killed
+        /// codesign does.
+        copies_leave_cstemp: bool,
         launchctl_fails: bool,
         daemon_running: bool,
-        rename_into_place_fails: bool,
+        /// How many renames onto `Clusia.app` fail.
+        renames_into_place_fail: u32,
+        removing_fails: Vec<PathBuf>,
         calls: Vec<String>,
     }
 
     impl Fake {
         fn machine() -> Self {
-            let mut fake = Fake {
-                can_create_identity: true,
-                ..Fake::default()
-            };
+            let mut fake = Fake::default();
             for name in BINARIES {
                 fake.files
                     .insert(PathBuf::from("/built").join(name), name.as_bytes().to_vec());
@@ -474,10 +485,18 @@ mod tests {
             self.calls.push(format!("copy {}", to.display()));
             let bytes = self.files.get(from).cloned().unwrap_or_default();
             self.files.insert(to.to_path_buf(), bytes);
+            if self.copies_leave_cstemp && to.parent().is_some_and(|d| d.ends_with("MacOS")) {
+                let mut stale = to.as_os_str().to_owned();
+                stale.push(".cstemp");
+                self.files.insert(stale.into(), Vec::new());
+            }
             Ok(())
         }
         fn remove_dir_all(&mut self, dir: &Path) -> Result<(), InstallError> {
             self.calls.push(format!("rmdir {}", dir.display()));
+            if self.removing_fails.iter().any(|d| d == dir) {
+                return Err(InstallError::new("resource busy"));
+            }
             self.files.retain(|p, _| !p.starts_with(dir));
             self.dirs.retain(|p| !p.starts_with(dir));
             Ok(())
@@ -491,8 +510,8 @@ mod tests {
         fn rename(&mut self, from: &Path, to: &Path) -> Result<(), InstallError> {
             self.calls
                 .push(format!("mv {} {}", from.display(), to.display()));
-            if self.rename_into_place_fails && to.ends_with("Clusia.app") && from != to {
-                self.rename_into_place_fails = false;
+            if self.renames_into_place_fail > 0 && to.ends_with("Clusia.app") && from != to {
+                self.renames_into_place_fail -= 1;
                 return Err(InstallError::new("disk full"));
             }
             let moved: Vec<_> = self
@@ -522,39 +541,47 @@ mod tests {
                 LinkState::Missing
             }
         }
-        fn find_identity(&mut self, name: &str) -> Option<String> {
-            self.identities
-                .iter()
-                .find(|(_, n)| n == name)
-                .map(|(sha, _)| sha.clone())
-        }
-        fn create_identity(&mut self, name: &str) -> Result<String, InstallError> {
-            self.calls.push(format!("create-identity {name}"));
-            if !self.can_create_identity {
-                return Err(InstallError::new("keychain locked"));
-            }
-            let sha = format!("{:040x}", self.identities.len() + 1);
-            self.identities.push((sha.clone(), name.to_string()));
-            Ok(sha)
+        fn files_under(&self, dir: &Path) -> Vec<PathBuf> {
+            self.files
+                .keys()
+                .filter(|p| p.starts_with(dir))
+                .cloned()
+                .collect()
         }
         fn codesign(&mut self, bundle: &Path, identity: &str) -> Result<(), InstallError> {
             self.calls
                 .push(format!("codesign {} {identity}", bundle.display()));
-            if self.codesign_refuses.iter().any(|i| i == identity) {
+            if self.codesign_fails {
                 return Err(InstallError::new("errSecInternalComponent"));
+            }
+            if self
+                .files_under(bundle)
+                .iter()
+                .any(|f| f.extension().is_some_and(|e| e == "cstemp"))
+            {
+                return Err(InstallError::new(
+                    "invalid or unsupported format for signature",
+                ));
             }
             Ok(())
         }
         fn launchctl(&mut self, args: &[&str]) -> Result<(), InstallError> {
             self.calls.push(format!("launchctl {}", args.join(" ")));
+            if args[0] == "bootout" {
+                // launchd stops the job it unloads.
+                self.daemon_running = false;
+            }
             if self.launchctl_fails && args[0] == "bootstrap" {
                 return Err(InstallError::new("Bootstrap failed: 5"));
             }
             Ok(())
         }
-        fn stop_daemon(&mut self) -> bool {
-            self.calls.push("stop-daemon".into());
+        fn daemon_running(&self) -> bool {
             self.daemon_running
+        }
+        fn stop_daemon(&mut self) {
+            self.calls.push("stop-daemon".into());
+            self.daemon_running = false;
         }
         fn start_daemon(&mut self, clusia: &Path) {
             self.calls
@@ -601,7 +628,7 @@ mod tests {
         )
         .into_owned();
         assert!(info.contains("<string>clusia-tray</string>"));
-        assert_eq!(report.signed, Signed::Identity("Clúsia Local".into()));
+        assert_eq!(report.to_json()["signed_with"], "ad-hoc");
         assert_eq!(
             os.links[Path::new("/usr/local/bin/clusia")],
             PathBuf::from("/Applications/Clusia.app/Contents/MacOS/clusia")
@@ -648,19 +675,13 @@ mod tests {
             "the same bundle, agent and nothing else"
         );
         assert_eq!(os.links, first_links);
-        assert_eq!(
-            os.identities.len(),
-            1,
-            "the identity is made once and reused"
-        );
-        assert!(os.calls_starting("create-identity").is_empty());
         assert!(
             os.calls_starting("ln ").is_empty(),
             "our link is already right"
         );
         assert!(!os.exists(&p.backup), "the old bundle is not left behind");
         assert!(!os.exists(&p.staging));
-        assert_eq!(report.signed, Signed::Identity("Clúsia Local".into()));
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
         // The only things touched are ours.
         for call in &os.calls {
             let touches_ours = [
@@ -698,36 +719,59 @@ mod tests {
     }
 
     #[test]
-    fn signing_falls_back_to_ascii_then_to_ad_hoc() {
+    fn ad_hoc_is_the_only_signature() {
         let mut os = Fake::machine();
-        os.identities.push(("a".repeat(40), "Clusia Local".into()));
-        os.can_create_identity = false;
         let report = execute(&plan(&from_built(), &env()), &mut os).unwrap();
-        assert_eq!(report.signed, Signed::Identity("Clusia Local".into()));
-
-        let mut os = Fake::machine();
-        os.can_create_identity = false;
-        let report = execute(&plan(&from_built(), &env()), &mut os).unwrap();
-        assert_eq!(report.signed, Signed::AdHoc);
         assert_eq!(
-            os.calls_starting("codesign").len(),
-            1,
-            "ad hoc is signed once"
+            os.calls_starting("codesign"),
+            ["codesign /Applications/.Clusia.app.installing -"]
         );
-        assert!(
-            os.calls
-                .contains(&"codesign /Applications/.Clusia.app.installing -".to_string())
-        );
+        let text = report.describe();
+        assert!(text.contains("signed ad hoc\n"), "{text}");
+        assert!(!text.contains("identity"), "{text}");
     }
 
     #[test]
-    fn a_refused_identity_falls_back_to_ad_hoc_with_a_warning() {
+    fn an_unsigned_bundle_never_replaces_the_old_one() {
         let mut os = Fake::machine();
-        os.identities.push(("b".repeat(40), "Clúsia Local".into()));
-        os.codesign_refuses.push("b".repeat(40));
+        let p = plan(&from_built(), &env());
+        execute(&p, &mut os).unwrap();
+        let old = PathBuf::from("/Applications/Clusia.app/Contents/old-marker");
+        os.files.insert(old.clone(), b"old".to_vec());
+        os.daemon_running = true;
+        os.calls.clear();
+
+        os.codesign_fails = true;
+        let err = execute(&p, &mut os).unwrap_err();
+        assert!(err.0.contains("could not be signed"), "{err}");
+        assert!(err.0.contains("errSecInternalComponent"), "{err}");
+        assert!(os.files.contains_key(&old), "the old bundle stays");
+        assert!(!os.exists(&p.staging), "staging is removed");
+        assert!(os.calls_starting("launchctl").is_empty(), "{:#?}", os.calls);
+        assert!(os.calls_starting("stop-daemon").is_empty());
+        assert!(os.calls_starting("mv ").is_empty());
+        assert!(os.daemon_running);
+    }
+
+    #[test]
+    fn a_stale_cstemp_is_removed_before_signing() {
+        let mut os = Fake::machine();
+        os.copies_leave_cstemp = true;
         let report = execute(&plan(&from_built(), &env()), &mut os).unwrap();
-        assert_eq!(report.signed, Signed::AdHoc);
-        assert!(report.warnings[0].contains("signed ad hoc"));
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let rm = "rm /Applications/.Clusia.app.installing/Contents/MacOS/clusia.cstemp";
+        let pos = |needle: &str| {
+            os.calls
+                .iter()
+                .position(|c| c == needle || c.starts_with(&format!("{needle} ")))
+                .unwrap_or_else(|| panic!("no call {needle} in {:#?}", os.calls))
+        };
+        assert!(pos(rm) < pos("codesign"));
+        assert!(
+            os.under(Path::new("/Applications/Clusia.app"))
+                .iter()
+                .all(|f| f.extension().is_none_or(|e| e != "cstemp"))
+        );
     }
 
     #[test]
@@ -739,7 +783,9 @@ mod tests {
             PathBuf::from("/Applications/Clusia.app/Contents/old-marker"),
             b"old".to_vec(),
         );
-        os.rename_into_place_fails = true;
+        os.daemon_running = true;
+        os.calls.clear();
+        os.renames_into_place_fail = 1;
         let err = execute(&p, &mut os).unwrap_err();
         assert_eq!(err.0, "disk full");
         assert!(
@@ -747,6 +793,67 @@ mod tests {
                 .contains_key(Path::new("/Applications/Clusia.app/Contents/old-marker")),
             "the previous bundle is back"
         );
+        // launchd and the daemon are back as they were.
+        let calls = &os.calls;
+        let pos = |needle: &str| {
+            calls
+                .iter()
+                .rposition(|c| c.starts_with(needle))
+                .unwrap_or_else(|| panic!("no call {needle} in {calls:#?}"))
+        };
+        assert!(
+            pos(&format!(
+                "mv {} /Applications/Clusia.app",
+                p.backup.display()
+            )) < pos(&format!(
+                "launchctl bootstrap gui/501 {}",
+                p.launch_agent.display()
+            ))
+        );
+        assert!(
+            pos("launchctl bootstrap")
+                < pos("start-daemon /Applications/Clusia.app/Contents/MacOS/clusia")
+        );
+    }
+
+    #[test]
+    fn a_failed_rollback_says_where_the_old_bundle_is() {
+        let mut os = Fake::machine();
+        let p = plan(&from_built(), &env());
+        execute(&p, &mut os).unwrap();
+        os.renames_into_place_fail = 2;
+        let err = execute(&p, &mut os).unwrap_err();
+        assert!(err.0.contains("disk full"), "{err}");
+        assert!(err.0.contains(&p.backup.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn a_backup_that_cannot_be_removed_is_a_warning() {
+        let mut os = Fake::machine();
+        let p = plan(&from_built(), &env());
+        execute(&p, &mut os).unwrap();
+        os.daemon_running = true;
+        os.calls.clear();
+        os.removing_fails.push(p.backup.clone());
+        let report = execute(&p, &mut os).unwrap();
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains(&p.backup.display().to_string())),
+            "{:?}",
+            report.warnings
+        );
+        assert!(
+            os.calls.contains(&format!(
+                "launchctl bootstrap gui/501 {}",
+                p.launch_agent.display()
+            )),
+            "{:#?}",
+            os.calls
+        );
+        assert_eq!(os.calls_starting("start-daemon").len(), 1);
+        assert!(os.links.contains_key(Path::new("/usr/local/bin/clusia")));
     }
 
     const FOREIGN_BUNDLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.other</string></dict></plist>"#;
@@ -772,6 +879,12 @@ mod tests {
         let err = execute(&plan(&from_built(), &env()), &mut os).unwrap_err();
         assert!(err.0.contains("is not a Clúsia bundle"), "{err}");
         assert!(os.calls.is_empty());
+
+        // Nothing is built for a bundle that would be refused.
+        let mut os = Fake::machine();
+        os.files.insert(info, FOREIGN_BUNDLE.as_bytes().to_vec());
+        execute(&plan(&InstallOptions::default(), &env()), &mut os).unwrap_err();
+        assert!(os.calls.is_empty(), "{:?}", os.calls);
     }
 
     #[test]
@@ -849,15 +962,40 @@ mod tests {
             b"someone else's"
         );
 
+        // A link to another program is somebody else's.
         let mut os = Fake::machine();
-        os.links
-            .insert("/usr/local/bin/clusia".into(), "/elsewhere/clusia".into());
+        os.links.insert(
+            "/usr/local/bin/clusia".into(),
+            "../Cellar/clusia/1.0/bin/clusia".into(),
+        );
         let report = execute(&plan(&from_built(), &env()), &mut os).unwrap();
+        assert_eq!(report.cli_link, None);
         assert!(
-            report.cli_link.is_some(),
-            "a link to somewhere else is ours to move"
+            report.warnings[0].contains("left alone"),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(
+            os.links[Path::new("/usr/local/bin/clusia")],
+            PathBuf::from("../Cellar/clusia/1.0/bin/clusia")
+        );
+        assert!(os.calls_starting("rm /usr/local/bin/clusia").is_empty());
+
+        // A link to a Clúsia installed elsewhere is ours to move.
+        let mut os = Fake::machine();
+        os.links.insert(
+            "/usr/local/bin/clusia".into(),
+            "/Users/maria/Applications/Clusia.app/Contents/MacOS/clusia".into(),
+        );
+        let report = execute(&plan(&from_built(), &env()), &mut os).unwrap();
+        assert_eq!(report.cli_link, Some("/usr/local/bin/clusia".into()));
+        assert_eq!(
+            os.links[Path::new("/usr/local/bin/clusia")],
+            PathBuf::from("/Applications/Clusia.app/Contents/MacOS/clusia")
         );
     }
+
+    const DATA: &str = "/Users/maria/.clusia-elsewhere";
 
     #[test]
     fn uninstall_removes_only_ours() {
@@ -870,7 +1008,7 @@ mod tests {
             .insert("/Applications/Other.app/Contents/x".into(), b"x".to_vec());
         os.calls.clear();
 
-        let removed = uninstall(&p, &mut os).unwrap();
+        let removed = uninstall(&p, Path::new(DATA), &mut os).unwrap();
         assert!(os.under(Path::new("/Applications/Clusia.app")).is_empty());
         assert!(!os.files.contains_key(&p.launch_agent));
         assert!(!os.links.contains_key(Path::new("/usr/local/bin/clusia")));
@@ -880,11 +1018,16 @@ mod tests {
                 .contains_key(Path::new("/Applications/Other.app/Contents/x"))
         );
         assert!(removed.removed.contains(&p.app));
+        assert_eq!(
+            removed.kept,
+            [format!("your reviews and settings in {DATA}")]
+        );
         assert!(
             removed
-                .kept
+                .notes
                 .iter()
-                .any(|k| k.contains("Application Support"))
+                .any(|n| n.contains(r#"security delete-identity -c "Clúsia Local""#)),
+            "{removed:?}"
         );
         assert!(
             os.calls
@@ -899,7 +1042,7 @@ mod tests {
         );
         os.files
             .insert(p.launch_agent.clone(), FOREIGN_AGENT.as_bytes().to_vec());
-        let removed = uninstall(&p, &mut os).unwrap();
+        let removed = uninstall(&p, Path::new(DATA), &mut os).unwrap();
         assert!(removed.removed.is_empty(), "{removed:?}");
         assert!(
             os.files
@@ -927,32 +1070,25 @@ mod tests {
         let mut os = Fake::machine();
         os.links
             .insert("/usr/local/bin/clusia".into(), "/elsewhere/clusia".into());
-        uninstall(&p, &mut os).unwrap();
+        uninstall(&p, Path::new(DATA), &mut os).unwrap();
         assert!(os.links.contains_key(Path::new("/usr/local/bin/clusia")));
-    }
 
-    #[test]
-    fn identities_are_read_from_the_security_listing() {
-        let out = r#"  1) 1A2B3C4D5E6F708192A3B4C5D6E7F8091A2B3C4D "Clúsia Local" (CSSMERR_TP_NOT_TRUSTED)
-  2) FFEEDDCCBBAA99887766554433221100FFEEDDCC "Apple Development: maria@example.com (ABCD123456)"
-     2 identities found
-
-  Valid identities only
-  3) not-a-hash "Nope"
-"#;
-        let found = parse_identities(out);
-        assert_eq!(
-            found,
-            [
-                (
-                    "1A2B3C4D5E6F708192A3B4C5D6E7F8091A2B3C4D".to_string(),
-                    "Clúsia Local".to_string()
-                ),
-                (
-                    "FFEEDDCCBBAA99887766554433221100FFEEDDCC".to_string(),
-                    "Apple Development: maria@example.com (ABCD123456)".to_string()
-                ),
-            ]
+        // Staging and backup folders are removed only when they hold a Clúsia bundle.
+        let mut os = Fake::machine();
+        let ours = p.backup.join("Contents/Info.plist");
+        os.files.insert(ours, render_info_plist(&p).into_bytes());
+        let theirs = p.staging.join("Contents/Info.plist");
+        os.files
+            .insert(theirs.clone(), FOREIGN_BUNDLE.as_bytes().to_vec());
+        let removed = uninstall(&p, Path::new(DATA), &mut os).unwrap();
+        assert_eq!(removed.removed, std::slice::from_ref(&p.backup));
+        assert!(os.files.contains_key(&theirs));
+        assert!(
+            removed
+                .kept
+                .iter()
+                .any(|k| k.contains(".Clusia.app.installing (not a Clúsia bundle)")),
+            "{removed:?}"
         );
     }
 }

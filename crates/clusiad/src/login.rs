@@ -19,7 +19,10 @@ pub(crate) async fn set_start_at_login(shared: &Shared, on: bool) -> Outcome {
     let agent = shared.paths.launch_agent();
     match update_agent(&agent, on, std::env::current_exe().ok().as_deref(), shared) {
         Ok(()) => Outcome::Ok(Reply::Ack),
-        Err(message) => Outcome::Err(ProtocolError::new(ErrorCode::Internal, message)),
+        Err(message) => Outcome::Err(ProtocolError::new(
+            ErrorCode::Internal,
+            format!("the setting was saved; the login agent was not changed: {message}"),
+        )),
     }
 }
 

@@ -1,5 +1,4 @@
-//! The real machine behind `InstallOs`: files, `cargo`, `codesign`, `security`, `openssl` and
-//! `launchctl`.
+//! The real machine behind `InstallOs`: files, `cargo`, `codesign` and `launchctl`.
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -7,17 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clusia_core::Paths;
+use clusia_store::atomic::write_atomic;
 
-use super::execute::{InstallError, InstallOs, LinkState, parse_identities};
+use super::execute::{InstallError, InstallOs, LinkState};
 use super::plan::BUNDLE_ID;
 
-const SECURITY: &str = "/usr/bin/security";
 const CODESIGN: &str = "/usr/bin/codesign";
-/// LibreSSL, which writes the PKCS#12 flavour `security import` reads. A Homebrew OpenSSL 3 on
-/// `$PATH` does not.
-const OPENSSL: &str = "/usr/bin/openssl";
 const LAUNCHCTL: &str = "/bin/launchctl";
-const IDENTITY_PASSWORD: &str = "clusia-local";
 
 pub struct SystemOs {
     paths: Paths,
@@ -108,7 +103,8 @@ impl InstallOs for SystemOs {
     }
 
     fn write_file(&mut self, path: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError> {
-        fs::write(path, bytes).map_err(|e| io("cannot write", path, e))?;
+        // Atomic, so an interrupted install never leaves a half-written login agent behind.
+        write_atomic(path, bytes).map_err(|e| io("cannot write", path, e))?;
         fs::set_permissions(path, fs::Permissions::from_mode(mode))
             .map_err(|e| io("cannot set the mode of", path, e))
     }
@@ -145,26 +141,22 @@ impl InstallOs for SystemOs {
         }
     }
 
-    fn find_identity(&mut self, name: &str) -> Option<String> {
-        // Without `-v`: a self-signed identity is listed as not trusted, and codesign still
-        // accepts it.
-        let out = run(Command::new(SECURITY).args(["find-identity", "-p", "codesigning"])).ok()?;
-        parse_identities(&out)
-            .into_iter()
-            .find(|(_, n)| n == name)
-            .map(|(sha, _)| sha)
-    }
-
-    fn create_identity(&mut self, name: &str) -> Result<String, InstallError> {
-        let dir = std::env::temp_dir().join(format!("clusia-identity-{}", std::process::id()));
-        fs::create_dir_all(&dir).map_err(|e| io("cannot create", &dir, e))?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-            .map_err(|e| io("cannot protect", &dir, e))?;
-        let made = make_identity(&dir, name);
-        let _ = fs::remove_dir_all(&dir);
-        made?;
-        self.find_identity(name)
-            .ok_or_else(|| InstallError::new("the new identity is not in the keychain"))
+    fn files_under(&self, dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(dir) = todo.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => todo.push(entry.path()),
+                    Ok(_) => found.push(entry.path()),
+                    Err(_) => {}
+                }
+            }
+        }
+        found
     }
 
     fn codesign(&mut self, bundle: &Path, identity: &str) -> Result<(), InstallError> {
@@ -188,17 +180,19 @@ impl InstallOs for SystemOs {
         run(Command::new(LAUNCHCTL).args(args)).map(|_| ())
     }
 
-    fn stop_daemon(&mut self) -> bool {
-        // Without a socket no daemon is listening; skip spawning a process to learn that.
-        if !self.paths.socket().exists() {
-            return false;
+    fn daemon_running(&self) -> bool {
+        // The daemon removes its socket when it exits.
+        self.paths.socket().exists()
+    }
+
+    fn stop_daemon(&mut self) {
+        if !self.daemon_running() {
+            return;
         }
-        let Ok(exe) = std::env::current_exe() else {
-            return false;
-        };
-        // `daemon stop` waits for the socket to go away and fails when no daemon runs.
-        self.daemon_command(&exe, "stop")
-            .is_ok_and(|status| status.success())
+        // `daemon stop` waits for the socket to go away.
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = self.daemon_command(&exe, "stop");
+        }
     }
 
     fn start_daemon(&mut self, clusia: &Path) {
@@ -210,48 +204,4 @@ impl InstallOs for SystemOs {
             );
         }
     }
-}
-
-/// A self-signed certificate for code signing, imported with its key into the login keychain.
-fn make_identity(dir: &Path, name: &str) -> Result<(), InstallError> {
-    let config = dir.join("openssl.cnf");
-    fs::write(
-        &config,
-        format!(
-            "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\nutf8 = yes\nstring_mask = utf8only\n\
-             [dn]\nCN = {name}\n\
-             [ext]\nbasicConstraints = critical,CA:false\nkeyUsage = critical,digitalSignature\nextendedKeyUsage = critical,codeSigning\n"
-        ),
-    )
-    .map_err(|e| io("cannot write", &config, e))?;
-    let (key, cert, bundle) = (
-        dir.join("key.pem"),
-        dir.join("cert.pem"),
-        dir.join("id.p12"),
-    );
-    run(Command::new(OPENSSL)
-        .args([
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650",
-        ])
-        .arg("-config")
-        .arg(&config)
-        .arg("-keyout")
-        .arg(&key)
-        .arg("-out")
-        .arg(&cert))?;
-    run(Command::new(OPENSSL)
-        .args(["pkcs12", "-export", "-inkey"])
-        .arg(&key)
-        .arg("-in")
-        .arg(&cert)
-        .arg("-out")
-        .arg(&bundle)
-        .args(["-passout", &format!("pass:{IDENTITY_PASSWORD}")]))?;
-    run(Command::new(SECURITY).arg("import").arg(&bundle).args([
-        "-P",
-        IDENTITY_PASSWORD,
-        "-T",
-        CODESIGN,
-    ]))
-    .map(|_| ())
 }

@@ -713,11 +713,11 @@ fn uninstall_removes_the_bundle_the_agent_and_the_link_in_the_given_folders() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["removed"].as_array().unwrap().len(), 3, "{v}");
     assert!(
-        v["kept"]
-            .as_array()
+        v["kept"].as_array().unwrap().iter().any(|k| k
+            .as_str()
             .unwrap()
-            .iter()
-            .any(|k| k.as_str().unwrap().contains("Application Support"))
+            .contains(home.dir.path().to_str().unwrap())),
+        "the data folder is the one given with --home: {v}"
     );
     assert!(!apps.join("Clusia.app").exists());
     assert!(!agent.exists());

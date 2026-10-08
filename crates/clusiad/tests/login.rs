@@ -64,10 +64,14 @@ async fn a_foreign_agent_file_is_refused_and_left_alone() {
     std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
     std::fs::write(&agent, "not a plist").unwrap();
     let mut c = d.client().await;
+    let err = c
+        .request(Command::SetStartAtLogin { on: false })
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
-        c.request(Command::SetStartAtLogin { on: false })
-            .await
-            .is_err()
+        err.contains("the setting was saved; the login agent was not changed"),
+        "{err}"
     );
     assert_eq!(std::fs::read_to_string(&agent).unwrap(), "not a plist");
     d.stop().await;

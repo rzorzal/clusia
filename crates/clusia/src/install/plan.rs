@@ -16,10 +16,6 @@ pub const BUNDLE_DIR: &str = "Clusia.app";
 pub const MAIN_EXECUTABLE: &str = "clusia-tray";
 /// Everything that goes into `Contents/MacOS`.
 pub const BINARIES: [&str; 4] = ["clusia-tray", "clusiad", "clusia-app", "clusia"];
-/// The common name of the local code-signing identity.
-pub const SIGNING_NAME: &str = "Clúsia Local";
-/// Used when the keychain cannot hold the accented name.
-pub const SIGNING_NAME_ASCII: &str = "Clusia Local";
 
 /// What the user asked for on the command line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -299,9 +295,7 @@ impl Plan {
             self.staging.display(),
             self.backup.display()
         ));
-        out.push_str(&format!(
-            "  signing       local identity \"{SIGNING_NAME}\" (made once, reused); ad-hoc if that fails\n"
-        ));
+        out.push_str("  signing       ad hoc (codesign -s -)\n");
         out.push_str(&format!(
             "  launch agent  {} (RunAtLoad = {}, restarts after a crash)\n",
             self.launch_agent.display(),
@@ -528,7 +522,7 @@ mod tests {
             "cargo build --release in /Users/maria/Repos/clusia",
             "Contents/MacOS/clusia-tray",
             "Contents/Resources/leaf.aiff",
-            "local identity \"Clúsia Local\"",
+            "signing       ad hoc (codesign -s -)",
             "RunAtLoad = true",
             "bootout then bootstrap gui/501/io.github.rzorzal.clusia.daemon",
             "/usr/local/bin/clusia -> /Applications/Clusia.app/Contents/MacOS/clusia",

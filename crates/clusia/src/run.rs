@@ -445,7 +445,8 @@ fn uninstall_command(
         },
     )?;
     let mut os = install::SystemOs::new(paths.clone(), home.map(Path::to_path_buf));
-    let removed = install::uninstall(&plan, &mut os).map_err(|e| CliError::Other(e.to_string()))?;
+    let removed = install::uninstall(&plan, paths.root(), &mut os)
+        .map_err(|e| CliError::Other(e.to_string()))?;
     Ok(Output {
         human: removed.describe(),
         json: removed.to_json(),

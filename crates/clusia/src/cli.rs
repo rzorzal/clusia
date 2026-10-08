@@ -153,7 +153,8 @@ pub struct InstallArgs {
     /// Where the `clusia` link goes (default: /usr/local/bin, else ~/.local/bin).
     #[arg(long, value_name = "DIR")]
     pub bin_dir: Option<PathBuf>,
-    /// Where the login agent's plist goes (default: ~/Library/LaunchAgents).
+    /// Where the login agent's plist goes (default: ~/Library/LaunchAgents). Start at login in
+    /// Config changes only the agent in the default folder.
     #[arg(long, value_name = "DIR")]
     pub agents_dir: Option<PathBuf>,
     /// Do not touch launchd or stop the running daemon.
