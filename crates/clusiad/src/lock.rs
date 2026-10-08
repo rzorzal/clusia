@@ -47,7 +47,15 @@ mod tests {
         let first = DaemonLock::acquire(&path).unwrap().expect("free");
         assert!(DaemonLock::acquire(&path).unwrap().is_none());
         drop(first);
-        assert!(DaemonLock::acquire(&path).unwrap().is_some());
+        // A process forked by a parallel test holds the lock until it execs, so allow a moment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while DaemonLock::acquire(&path).unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "free again once the first holder let go"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]

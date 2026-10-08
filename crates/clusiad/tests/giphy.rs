@@ -2,7 +2,6 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use clusia_platform::{MemoryStore, SecretStore};
 use clusia_protocol::{Client, ClientError, Command, ErrorCode, Event, GifPage, Reply, topics};
@@ -241,7 +240,7 @@ async fn setting_and_clearing_the_key_tells_subscribers() {
         assert_eq!(event, Event::GiphyKeyChanged);
     };
     heard(
-        tokio::time::timeout(Duration::from_secs(2), watcher.next_event())
+        tokio::time::timeout(common::EVENT_WAIT, watcher.next_event())
             .await
             .unwrap()
             .unwrap(),
@@ -258,7 +257,7 @@ async fn setting_and_clearing_the_key_tells_subscribers() {
     assert_eq!(store.get("giphy").unwrap(), None);
     assert!(!configured(&mut c).await);
     heard(
-        tokio::time::timeout(Duration::from_secs(2), watcher.next_event())
+        tokio::time::timeout(common::EVENT_WAIT, watcher.next_event())
             .await
             .unwrap()
             .unwrap(),

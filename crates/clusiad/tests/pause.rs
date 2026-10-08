@@ -2,8 +2,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use clusia_protocol::{Command, Event, Reply, topics};
 use common::TestDaemon;
 
@@ -27,7 +25,7 @@ async fn pause_and_resume_change_the_status() {
     let mut c = d.client().await;
     assert!(sync_reply(c.request(Command::PauseSync).await.unwrap()).paused);
     assert!(sync_reply(c.request(Command::GetSyncStatus).await.unwrap()).paused);
-    let (_, event) = tokio::time::timeout(Duration::from_secs(5), watcher.next_event())
+    let (_, event) = tokio::time::timeout(common::EVENT_WAIT, watcher.next_event())
         .await
         .unwrap()
         .unwrap();
@@ -59,7 +57,7 @@ async fn shutdown_publishes_stopping() {
     for watcher in &mut watchers {
         let mut saw_stopping = false;
         while let Ok(Ok((_, event))) =
-            tokio::time::timeout(Duration::from_secs(5), watcher.next_event()).await
+            tokio::time::timeout(common::EVENT_WAIT, watcher.next_event()).await
         {
             if event == Event::Stopping {
                 saw_stopping = true;

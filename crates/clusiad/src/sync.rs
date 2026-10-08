@@ -336,9 +336,17 @@ mod tests {
         let paused = set_paused(&shared, true).await;
         assert!(paused.paused);
         assert_eq!(paused.next_sync_unix, None, "paused: no countdown");
-        tokio::time::sleep(Duration::from_millis(200)).await; // let the running sync finish
+        // A sync that was already running finishes; wait until the request count stops moving.
+        let mut before = hits().await;
+        loop {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let now = hits().await;
+            if now == before {
+                break;
+            }
+            before = now;
+        }
         assert_eq!(shared.sync.read().await.next_sync_unix, None);
-        let before = hits().await;
         shared.sync_now.notify_one(); // e.g. a new token was stored
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(hits().await, before, "paused: no requests");

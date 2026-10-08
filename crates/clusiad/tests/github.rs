@@ -173,7 +173,7 @@ async fn prs_updated_is_published_only_on_change() {
         .unwrap();
     let mut c = d.client().await;
     c.request(Command::SyncNow).await.unwrap();
-    let (topic, event) = tokio::time::timeout(Duration::from_secs(2), watcher.next_event())
+    let (topic, event) = tokio::time::timeout(common::EVENT_WAIT, watcher.next_event())
         .await
         .unwrap()
         .unwrap();
@@ -299,7 +299,7 @@ async fn sync_changes_are_published() {
         .await
         .unwrap();
     d.client().await.request(Command::SyncNow).await.unwrap();
-    let (topic, event) = tokio::time::timeout(Duration::from_secs(2), watcher.next_event())
+    let (topic, event) = tokio::time::timeout(common::EVENT_WAIT, watcher.next_event())
         .await
         .unwrap()
         .unwrap();
@@ -365,7 +365,7 @@ async fn changing_a_github_setting_syncs_again_at_once() {
     })
     .await
     .unwrap();
-    let (topic, event) = tokio::time::timeout(Duration::from_secs(3), watcher.next_event())
+    let (topic, event) = tokio::time::timeout(common::EVENT_WAIT, watcher.next_event())
         .await
         .expect("the sync loop woke")
         .unwrap();
