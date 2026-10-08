@@ -1,7 +1,9 @@
 //! What the window knows from the daemon, and what each event changes.
 
 use clusia_core::{ActivitySummary, Config, PrSummary, ReviewState};
-use clusia_protocol::{AuthInfo, Event, FirstRun, ReviewSummary, SyncStatus, WindowTarget};
+use clusia_protocol::{
+    AuthInfo, Event, FirstRun, PermissionStatus, ReviewSummary, SyncStatus, WindowTarget,
+};
 
 /// What the window knows about the Giphy key. The daemon's status gives `Missing` or `Set`;
 /// `Rejected` is only ever derived by the Media page from a refusal the window saw.
@@ -30,6 +32,8 @@ pub struct Snapshot {
     /// `assigned` and `mine` hold real lists, not the empty defaults before the first sync.
     pub lists_loaded: bool,
     pub daemon_version: String,
+    /// Whether macOS lets the tray post notifications, as the tray last reported it.
+    pub notifications_permission: PermissionStatus,
 }
 
 /// What must be fetched again.
@@ -42,6 +46,7 @@ pub struct Refresh {
     pub auth: bool,
     pub giphy: bool,
     pub first_run: bool,
+    pub status: bool,
 }
 
 impl Refresh {
@@ -54,6 +59,7 @@ impl Refresh {
         auth: true,
         giphy: false,
         first_run: false,
+        status: true,
     };
 
     pub fn merge(&mut self, other: Refresh) {
@@ -64,6 +70,7 @@ impl Refresh {
         self.auth |= other.auth;
         self.giphy |= other.giphy;
         self.first_run |= other.first_run;
+        self.status |= other.status;
     }
 
     pub fn any(self) -> bool {
@@ -74,6 +81,7 @@ impl Refresh {
             || self.auth
             || self.giphy
             || self.first_run
+            || self.status
     }
 }
 
@@ -292,6 +300,21 @@ mod tests {
         assert!(a.lists && a.auth && !a.config);
         let startup = Refresh::STARTUP;
         assert!(startup.config && !startup.lists);
+    }
+
+    #[test]
+    fn notification_keys_apply_locally_like_the_daemon_does() {
+        let mut c = Config::default();
+        apply_config_locally(&mut c, "notifications.events.mentioned.sound", "false").unwrap();
+        assert!(!c.notifications.events[&clusia_core::config::EventKind::Mentioned].sound);
+        apply_config_locally(&mut c, "notifications.dnd.days", r#"["sat","sun"]"#).unwrap();
+        assert_eq!(c.notifications.dnd.days.len(), 2);
+        apply_config_locally(&mut c, "notifications.dnd.from", "20:30").unwrap();
+        assert_eq!(c.notifications.dnd.from.to_string(), "20:30");
+        assert!(apply_config_locally(&mut c, "notifications.dnd.to", "25:00").is_err());
+        apply_config_locally(&mut c, "notifications.sound", "tick").unwrap();
+        apply_config_locally(&mut c, "general.start_at_login", "false").unwrap();
+        assert!(!c.general.start_at_login);
     }
 
     #[test]

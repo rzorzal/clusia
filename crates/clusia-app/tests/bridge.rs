@@ -460,3 +460,28 @@ async fn first_run_status_reaches_the_window() {
     );
     d.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_at_login_goes_through_the_daemon() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask.send(Ask::SetStartAtLogin { on: false }).unwrap();
+    let s = snapshot_where(&link, |s| !s.config.general.start_at_login);
+    assert!(!s.config.general.start_at_login);
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_snapshot_carries_the_notification_permission() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    let first = snapshot_where(&link, |_| true);
+    assert_eq!(
+        first.notifications_permission,
+        clusia_protocol::PermissionStatus::NotDetermined
+    );
+    link.ask.send(Ask::RefreshStatus).unwrap();
+    link.ask.send(Ask::TestNotification).unwrap();
+    d.stop().await;
+}

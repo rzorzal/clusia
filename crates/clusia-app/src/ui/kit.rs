@@ -310,6 +310,55 @@ pub fn toggle(on: bool) -> impl Bundle {
     )
 }
 
+fn checkbox_box(on: bool, enabled: bool) -> impl Bundle {
+    let (fill, stroke) = match (on, enabled) {
+        (true, true) => (Swatch::Green, Swatch::Green),
+        (true, false) => (Swatch::Line, Swatch::Line),
+        (false, true) => (Swatch::Surface, Swatch::Faint),
+        (false, false) => (Swatch::Chrome, Swatch::Line),
+    };
+    (
+        Node {
+            width: px(18),
+            height: px(18),
+            border: px(1).all(),
+            border_radius: BorderRadius::all(px(4)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor::default(),
+        Fill(fill),
+        BorderColor::default(),
+        Stroke(stroke),
+        children![panel(
+            Node {
+                width: px(8),
+                height: px(8),
+                border_radius: BorderRadius::all(px(2)),
+                ..default()
+            },
+            if on { Swatch::Knob } else { Swatch::Clear },
+        )],
+    )
+}
+
+/// A checkbox. Activating it should write the opposite value.
+pub fn checkbox(on: bool) -> impl Bundle {
+    (
+        checkbox_box(on, true),
+        (WidgetButton, Clickable),
+        Hovered::default(),
+        TabIndex(0),
+    )
+}
+
+/// A checkbox that cannot be changed: faint, not a button.
+pub fn disabled_checkbox(on: bool) -> impl Bundle {
+    checkbox_box(on, false)
+}
+
 pub fn chip(fonts: &UiFonts, label: &str, selected: bool) -> impl Bundle {
     let (fill, hover, t) = if selected {
         (

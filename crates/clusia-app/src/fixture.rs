@@ -9,7 +9,8 @@ use clusia_core::{
 };
 use clusia_protocol::{
     AuthInfo, FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness, HarnessKind, NewsItem,
-    NewsKind, RepoFolder, ReviewSummary, ReviewView, SyncState, SyncStatus, TokenSource,
+    NewsKind, PermissionStatus, RepoFolder, ReviewSummary, ReviewView, SyncState, SyncStatus,
+    TokenSource,
 };
 
 use crate::snapshot::{GiphyKey, Snapshot};
@@ -34,6 +35,7 @@ pub fn demo(now: i64) -> Snapshot {
     };
     let day = 86_400;
     Snapshot {
+        notifications_permission: PermissionStatus::Allowed,
         config: Config::default(),
         assigned: vec![
             pr("clusia", 123, "feat: auth refresh", "octo", 300, false),

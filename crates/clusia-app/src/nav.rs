@@ -2,6 +2,7 @@
 //! around it: the top bar, the connection banner and the toasts.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::system::NonSendMarker;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::events::{Pointer, Press};
@@ -15,12 +16,14 @@ use clusia_protocol::WindowTarget;
 use crate::app::StartTarget;
 use crate::bridge::{Ask, Asks, Connection, Model, ShowRequested, Toast, Toasts};
 use crate::fonts::UiFonts;
+use crate::platform_window::{Foregrounds, bring_forward};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{Fill, HoverFill, Stroke, Type, Variant, button, panel, text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
+    General,
     Appearance,
     GitServer,
     Repositories,
@@ -33,7 +36,8 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
+        Section::General,
         Section::Appearance,
         Section::GitServer,
         Section::Repositories,
@@ -47,6 +51,7 @@ impl Section {
 
     pub fn label(self) -> &'static str {
         match self {
+            Section::General => "General",
             Section::Appearance => "Appearance",
             Section::GitServer => "Git server",
             Section::Repositories => "Repositories",
@@ -57,6 +62,32 @@ impl Section {
             Section::Media => "Media",
             Section::About => "About",
         }
+    }
+}
+
+impl Section {
+    /// The id a deep link uses for this section.
+    pub fn page_id(self) -> &'static str {
+        match self {
+            Section::General => "general",
+            Section::Appearance => "appearance",
+            Section::GitServer => "git",
+            Section::Repositories => "repositories",
+            Section::Harness => "harness",
+            Section::Editor => "editor",
+            Section::Media => "media",
+            Section::Notifications => "notifications",
+            Section::Plugins => "plugins",
+            Section::About => "about",
+        }
+    }
+
+    /// The section a deep link names; an id nobody knows opens Appearance.
+    pub fn from_page(page: &str) -> Section {
+        Section::ALL
+            .into_iter()
+            .find(|s| s.page_id() == page)
+            .unwrap_or(Section::Appearance)
     }
 }
 
@@ -92,9 +123,11 @@ impl Nav {
     pub fn go(&mut self, target: &WindowTarget) {
         self.screen = match target {
             WindowTarget::Home => Screen::Home,
-            // The page a `ConfigPage` names is chosen by the Config screen; here it only
-            // brings Config forward.
-            WindowTarget::Config | WindowTarget::ConfigPage { .. } => Screen::Config(self.section),
+            WindowTarget::Config => Screen::Config(self.section),
+            WindowTarget::ConfigPage { page } => {
+                self.section = Section::from_page(page);
+                Screen::Config(self.section)
+            }
             WindowTarget::Review { pr } => {
                 if !self.reviews.contains(pr) {
                     self.reviews.push(pr.clone());
@@ -376,7 +409,14 @@ fn show(
     mut requests: MessageReader<ShowRequested>,
     mut nav: ResMut<Nav>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut foregrounds: Option<ResMut<Foregrounds>>,
+    main_thread: NonSendMarker,
 ) {
+    if requests.is_empty() {
+        return;
+    }
+    // One activation per frame covers any number of requests.
+    bring_forward(foregrounds.as_deref_mut(), main_thread);
     for ShowRequested(target) in requests.read() {
         nav.go(target);
         if let Ok(mut window) = windows.single_mut() {
@@ -799,6 +839,70 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<Nav>().screen, Screen::Home);
         assert_eq!(testing::count::<HomeScreen>(&mut app), 1);
+    }
+
+    #[test]
+    fn second_launch_brings_the_window_forward() {
+        let mut app = testing::app(fixture::demo(NOW));
+        assert_eq!(app.world().resource::<Foregrounds>().0, 0);
+        app.update();
+        assert_eq!(
+            app.world().resource::<Foregrounds>().0,
+            0,
+            "nothing asked: the app stays where it is"
+        );
+        // Two quick launches hand over two targets in one frame: one activation.
+        app.world_mut()
+            .write_message(ShowRequested(WindowTarget::Config));
+        app.world_mut()
+            .write_message(ShowRequested(WindowTarget::Home));
+        app.update();
+        assert_eq!(app.world().resource::<Foregrounds>().0, 1);
+        assert_eq!(app.world().resource::<Nav>().screen, Screen::Home);
+        app.world_mut()
+            .write_message(ShowRequested(WindowTarget::Config));
+        app.update();
+        assert_eq!(app.world().resource::<Foregrounds>().0, 2);
+    }
+
+    #[test]
+    fn a_config_page_target_opens_that_section_and_unknown_pages_open_appearance() {
+        let page = |id: &str| WindowTarget::ConfigPage { page: id.into() };
+        for (id, section) in [
+            ("git", Section::GitServer),
+            ("notifications", Section::Notifications),
+            ("general", Section::General),
+            ("repositories", Section::Repositories),
+            ("about", Section::About),
+        ] {
+            let mut app = testing::app(fixture::demo(NOW));
+            app.world_mut().write_message(ShowRequested(page(id)));
+            app.update();
+            assert_eq!(
+                app.world().resource::<Nav>().screen,
+                Screen::Config(section),
+                "{id}"
+            );
+            assert_eq!(app.world().resource::<Nav>().section, section, "{id}");
+        }
+        let mut app = testing::app(fixture::demo(NOW));
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::Media);
+        app.world_mut()
+            .write_message(ShowRequested(page("no-such-page")));
+        app.update();
+        assert_eq!(
+            app.world().resource::<Nav>().screen,
+            Screen::Config(Section::Appearance)
+        );
+        for section in Section::ALL {
+            assert_eq!(
+                Section::from_page(Section::page_id(section)),
+                section,
+                "every section round-trips"
+            );
+        }
     }
 
     #[test]

@@ -5,6 +5,7 @@
 pub mod about;
 pub mod appearance;
 pub mod editor;
+pub mod general;
 pub mod git;
 pub mod media;
 pub mod notifications;
@@ -38,6 +39,7 @@ use crate::ui::kit::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PageView {
+    General(general::GeneralView),
     Appearance(appearance::AppearanceView),
     Git(git::GitView),
     Repos(repos::ReposView),
@@ -56,6 +58,7 @@ pub fn page_view(
     paths: &Paths,
 ) -> PageView {
     match section {
+        Section::General => PageView::General(general::view(snap, rejected)),
         Section::Appearance => PageView::Appearance(appearance::view(snap)),
         Section::GitServer => PageView::Git(git::view(snap, rejected)),
         Section::Repositories => PageView::Repos(repos::view(snap, rejected, paths)),
@@ -116,6 +119,7 @@ impl Plugin for ConfigPlugin {
                 repos::commit_roots,
                 rebuild_config,
                 git::refresh_last_sync,
+                notifications::poll_permission,
             )
                 .chain()
                 .after(NavSystems),
@@ -136,7 +140,11 @@ pub fn link(fonts: &UiFonts, label: &str, url: &'static str) -> impl Bundle {
     )
 }
 
-fn on_link(activate: On<Activate>, links: Query<&OpenLink>, urls: Option<ResMut<OpenUrls>>) {
+pub(crate) fn on_link(
+    activate: On<Activate>,
+    links: Query<&OpenLink>,
+    urls: Option<ResMut<OpenUrls>>,
+) {
     if let Ok(OpenLink(url)) = links.get(activate.entity) {
         visit(urls, url);
     }
@@ -330,6 +338,7 @@ fn rebuild_config(
                 PageOf(section),
             ))
             .with_children(|c| match &view {
+                PageView::General(v) => general::build(c, fonts, v),
                 PageView::Appearance(v) => appearance::build(c, fonts, v),
                 PageView::Git(v) => git::build(
                     c,
@@ -593,7 +602,7 @@ mod tests {
     #[test]
     fn section_list_switches_pages() {
         let mut app = config_app(Section::Appearance);
-        assert_eq!(testing::count::<ConfigNavItem>(&mut app), 9);
+        assert_eq!(testing::count::<ConfigNavItem>(&mut app), 10);
         testing::find::<PageOf>(&mut app, |p| p.0 == Section::Appearance);
         let git = testing::find::<ConfigNavItem>(&mut app, |i| i.0 == Section::GitServer);
         testing::activate(&mut app, git);
@@ -777,17 +786,254 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    #[test]
-    fn do_not_disturb_toggles() {
+    /// The asks recorded since the last call, without the status refreshes the open page makes
+    /// on its own.
+    fn asks(app: &mut App) -> Vec<Ask> {
+        let mut asks = testing::recorded(app);
+        asks.retain(|a| *a != Ask::RefreshStatus);
+        asks
+    }
+
+    /// The Notifications page with the status refresh it asks for on opening already taken.
+    fn notifications_app() -> App {
         let mut app = config_app(Section::Notifications);
-        let dnd = testing::find::<SetValue>(&mut app, |s| s.key == "notifications.dnd.enabled");
-        testing::activate(&mut app, dnd);
+        let _ = testing::recorded(&mut app);
+        app
+    }
+
+    fn set_value_of(app: &mut App, key: &str, value: &str) -> Entity {
+        testing::find::<SetValue>(app, |s| s.key == key && s.value == value)
+    }
+
+    #[test]
+    fn general_is_the_first_section() {
+        assert_eq!(Section::ALL[0], Section::General);
+        assert_eq!(Section::General.label(), "General");
+    }
+
+    #[test]
+    fn start_at_login_asks_the_daemon_and_shows_a_refusal() {
+        let mut app = config_app(Section::General);
+        let toggle =
+            testing::find::<Sends>(&mut app, |s| s.0 == Ask::SetStartAtLogin { on: false });
+        testing::activate(&mut app, toggle);
         assert_eq!(
             testing::recorded(&mut app),
+            [Ask::SetStartAtLogin { on: false }]
+        );
+        app.world_mut().resource_mut::<Model>().rejected.insert(
+            crate::bridge::START_AT_LOGIN.into(),
+            "cannot write the login agent".into(),
+        );
+        testing::settle(&mut app);
+        testing::find::<FieldError>(&mut app, |e| e.0 == crate::bridge::START_AT_LOGIN);
+        assert!(page_texts(&mut app).contains(&"cannot write the login agent".to_string()));
+    }
+
+    #[test]
+    fn start_at_login_follows_the_saved_setting() {
+        let mut app = config_app(Section::General);
+        testing::set_config_locally(&mut app, "general.start_at_login", "false");
+        testing::find::<Sends>(&mut app, |s| s.0 == Ask::SetStartAtLogin { on: true });
+    }
+
+    #[test]
+    fn event_checkboxes_write_their_keys() {
+        let mut app = notifications_app();
+        let checks_macos =
+            set_value_of(&mut app, "notifications.events.checks_failed.macos", "true");
+        testing::activate(&mut app, checks_macos);
+        let reply_sound = set_value_of(&mut app, "notifications.events.reply_to_you.sound", "true");
+        testing::activate(&mut app, reply_sound);
+        let review_tray = set_value_of(
+            &mut app,
+            "notifications.events.review_requested.tray",
+            "false",
+        );
+        testing::activate(&mut app, review_tray);
+        let set = |key: &str, value: &str| Ask::SetConfig {
+            key: key.into(),
+            value: value.into(),
+        };
+        assert_eq!(
+            asks(&mut app),
+            [
+                set("notifications.events.checks_failed.macos", "true"),
+                set("notifications.events.reply_to_you.sound", "true"),
+                set("notifications.events.review_requested.tray", "false"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_agent_row_is_shown_but_cannot_be_changed() {
+        let mut app = notifications_app();
+        assert_eq!(
+            testing::count::<SetValue>(&mut app),
+            7 * 3 + 4 + 1 + 1 + 1 + 7,
+            "21 event boxes, 4 sounds, quiet hours on/off, follow focus, group bursts, 7 weekdays"
+        );
+        let mut q = app.world_mut().query::<&SetValue>();
+        assert!(q.iter(app.world()).all(|s| !s.key.contains("agent")));
+        let texts = page_texts(&mut app);
+        assert!(texts.contains(&"Agent finished a review".to_string()));
+        assert!(texts.contains(&"Agent needs your permission".to_string()));
+    }
+
+    #[test]
+    fn the_sound_is_chosen_and_previewed() {
+        let mut app = notifications_app();
+        let drop = set_value_of(&mut app, "notifications.sound", "drop");
+        testing::activate(&mut app, drop);
+        assert_eq!(
+            asks(&mut app),
             [Ask::SetConfig {
-                key: "notifications.dnd.enabled".into(),
-                value: "true".into()
+                key: "notifications.sound".into(),
+                value: "drop".into()
             }]
+        );
+        let play = testing::find::<notifications::PreviewSound>(&mut app, |_| true);
+        testing::activate(&mut app, play);
+        assert_eq!(
+            app.world()
+                .resource::<crate::platform_sound::PlayedSounds>()
+                .0,
+            [clusia_core::config::SoundId::Leaf]
+        );
+        testing::set_config_locally(&mut app, "notifications.sound", "chime");
+        testing::settle(&mut app);
+        let play = testing::find::<notifications::PreviewSound>(&mut app, |_| true);
+        testing::activate(&mut app, play);
+        assert_eq!(
+            app.world()
+                .resource::<crate::platform_sound::PlayedSounds>()
+                .0
+                .last(),
+            Some(&clusia_core::config::SoundId::Chime),
+            "the button plays the sound that is chosen now"
+        );
+    }
+
+    #[test]
+    fn quiet_hours_weekdays_and_times() {
+        let mut app = notifications_app();
+        // Quiet hours start off, Monday to Friday.
+        let off = set_value_of(&mut app, "notifications.dnd.enabled", "true");
+        testing::activate(&mut app, off);
+        let no_friday = set_value_of(
+            &mut app,
+            "notifications.dnd.days",
+            r#"["mon","tue","wed","thu"]"#,
+        );
+        testing::activate(&mut app, no_friday);
+        let saturday = set_value_of(
+            &mut app,
+            "notifications.dnd.days",
+            r#"["mon","tue","wed","thu","fri","sat"]"#,
+        );
+        testing::activate(&mut app, saturday);
+        let from = testing::find::<ConfigField>(&mut app, |f| f.0 == "notifications.dnd.from");
+        app.world_mut().write_message(FieldCommitted {
+            entity: from,
+            value: " 20:30 ".into(),
+        });
+        app.update();
+        let set = |key: &str, value: &str| Ask::SetConfig {
+            key: key.into(),
+            value: value.into(),
+        };
+        assert_eq!(
+            asks(&mut app),
+            [
+                set("notifications.dnd.enabled", "true"),
+                set("notifications.dnd.days", r#"["mon","tue","wed","thu"]"#),
+                set(
+                    "notifications.dnd.days",
+                    r#"["mon","tue","wed","thu","fri","sat"]"#
+                ),
+                set("notifications.dnd.from", "20:30"),
+            ]
+        );
+        app.world_mut().resource_mut::<Model>().rejected.insert(
+            "notifications.dnd.from".into(),
+            "invalid value for notifications.dnd.from: not a time".into(),
+        );
+        testing::settle(&mut app);
+        testing::find::<FieldError>(&mut app, |e| e.0 == "notifications.dnd.from");
+    }
+
+    #[test]
+    fn follow_focus_and_group_bursts_toggle() {
+        let mut app = notifications_app();
+        let focus = set_value_of(&mut app, "notifications.follow_focus", "false");
+        testing::activate(&mut app, focus);
+        let group = set_value_of(&mut app, "notifications.group_bursts", "false");
+        testing::activate(&mut app, group);
+        assert_eq!(asks(&mut app).len(), 2);
+    }
+
+    #[test]
+    fn the_permission_line_follows_the_daemon() {
+        let mut app = notifications_app();
+        let has = |app: &mut App, text: &str| page_texts(app).iter().any(|t| t == text);
+        assert!(has(&mut app, "Allowed"));
+        let status = |app: &mut App, s| {
+            app.world_mut()
+                .resource_mut::<Model>()
+                .snapshot
+                .notifications_permission = s;
+            testing::settle(app);
+        };
+        status(&mut app, clusia_protocol::PermissionStatus::Denied);
+        assert!(has(&mut app, "Off"));
+        status(&mut app, clusia_protocol::PermissionStatus::NotDetermined);
+        assert!(has(&mut app, "Not asked yet"));
+        let settings = testing::find::<OpenLink>(&mut app, |l| {
+            l.0 == crate::platform_open::NOTIFICATION_SETTINGS
+        });
+        testing::activate(&mut app, settings);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            [crate::platform_open::NOTIFICATION_SETTINGS]
+        );
+    }
+
+    #[test]
+    fn the_test_button_asks_for_a_notification() {
+        let mut app = notifications_app();
+        let _ = asks(&mut app);
+        let test = testing::find::<Sends>(&mut app, |s| s.0 == Ask::TestNotification);
+        testing::activate(&mut app, test);
+        assert_eq!(asks(&mut app), [Ask::TestNotification]);
+    }
+
+    #[test]
+    fn the_open_page_reads_the_permission_again() {
+        let mut app = testing::app(fixture::demo(NOW));
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Config);
+        let _ = testing::recorded(&mut app);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::Notifications);
+        testing::settle(&mut app);
+        let refreshes = |asks: Vec<Ask>| asks.iter().filter(|a| **a == Ask::RefreshStatus).count();
+        assert_eq!(refreshes(testing::recorded(&mut app)), 1, "once on opening");
+        testing::settle(&mut app);
+        assert_eq!(
+            refreshes(testing::recorded(&mut app)),
+            0,
+            "then every few seconds"
+        );
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::Media);
+        testing::settle(&mut app);
+        assert_eq!(
+            refreshes(testing::recorded(&mut app)),
+            0,
+            "not on other pages"
         );
     }
 

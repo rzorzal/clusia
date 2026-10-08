@@ -76,6 +76,16 @@ fn composer_editor(mode: ComposerMode) -> Editor {
 
 /// Signs the demo out and gives the first-run screen its answers.
 fn stage_snapshot(world: &mut World, scene: Scene) {
+    if scene == Scene::ConfigNotifications {
+        // The mockup shows quiet hours on.
+        world
+            .resource_mut::<Model>()
+            .snapshot
+            .config
+            .notifications
+            .dnd
+            .enabled = true;
+    }
     if scene != Scene::FirstRun {
         return;
     }
@@ -97,6 +107,8 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
 /// the first run need no review).
 pub fn stage(world: &mut World, scene: Scene) {
     let section = match scene {
+        Scene::ConfigGeneral => Some(Section::General),
+        Scene::ConfigNotifications => Some(Section::Notifications),
         Scene::ConfigMedia => Some(Section::Media),
         Scene::ConfigAbout => Some(Section::About),
         _ => None,
@@ -124,7 +136,11 @@ pub fn stage(world: &mut World, scene: Scene) {
     let mut ui = TabUi::default();
     match scene {
         Scene::Diff | Scene::Loading | Scene::Failed | Scene::Palette => {}
-        Scene::FirstRun | Scene::ConfigMedia | Scene::ConfigAbout => {}
+        Scene::FirstRun
+        | Scene::ConfigGeneral
+        | Scene::ConfigNotifications
+        | Scene::ConfigMedia
+        | Scene::ConfigAbout => {}
         Scene::Composer | Scene::Emoji | Scene::Gif => {
             ui.editor = Some(composer_editor(ComposerMode::Write));
         }
@@ -239,7 +255,11 @@ mod tests {
         for &scene in Scene::value_variants() {
             if matches!(
                 scene,
-                Scene::FirstRun | Scene::ConfigMedia | Scene::ConfigAbout
+                Scene::FirstRun
+                    | Scene::ConfigGeneral
+                    | Scene::ConfigNotifications
+                    | Scene::ConfigMedia
+                    | Scene::ConfigAbout
             ) {
                 continue;
             }
@@ -285,7 +305,11 @@ mod tests {
                 }
                 Scene::WhatsNew => assert!(modal_shown(&mut app, Modal::WhatsNew)),
                 Scene::Leave => assert_eq!(testing::count::<LeaveModal>(&mut app), 1),
-                Scene::FirstRun | Scene::ConfigMedia | Scene::ConfigAbout => {
+                Scene::FirstRun
+                | Scene::ConfigGeneral
+                | Scene::ConfigNotifications
+                | Scene::ConfigMedia
+                | Scene::ConfigAbout => {
                     unreachable!("skipped above")
                 }
                 Scene::Composer | Scene::ComposerPreview | Scene::Emoji | Scene::Gif => {
@@ -343,6 +367,8 @@ mod tests {
     #[test]
     fn config_scenes_open_their_sections() {
         for (scene, section) in [
+            (Scene::ConfigGeneral, Section::General),
+            (Scene::ConfigNotifications, Section::Notifications),
             (Scene::ConfigMedia, Section::Media),
             (Scene::ConfigAbout, Section::About),
         ] {

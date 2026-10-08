@@ -7,9 +7,14 @@ use bevy::prelude::*;
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
 pub struct OpenUrls(pub Vec<String>);
 
-/// Opens an `https://` URL; anything else is refused (and logged).
+/// The Notifications pane of System Settings.
+pub const NOTIFICATION_SETTINGS: &str =
+    "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
+
+/// Opens an `https://` URL, or the Notifications pane of System Settings; anything else is
+/// refused (and logged).
 pub fn open_url(url: &str) {
-    if !url.starts_with("https://") {
+    if !url.starts_with("https://") && url != NOTIFICATION_SETTINGS {
         tracing::warn!(url, "not opening a non-https URL");
         return;
     }

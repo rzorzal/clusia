@@ -10,13 +10,6 @@ use clusia_core::Paths;
 use clusia_core::config::Theme;
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
     let args = Args::parse();
     let target = match args.target() {
         Ok(t) => t,
@@ -32,6 +25,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    clusia_app::logging::init(&paths, args.demo);
     let launch = Launch {
         paths: paths.clone(),
         home,

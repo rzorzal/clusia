@@ -101,6 +101,7 @@ pub fn run(launch: Launch) {
         crate::screens::config::ConfigPlugin,
         crate::screens::review::ReviewPlugin,
         crate::screens::open_pr::OpenPrPlugin,
+        crate::platform_window::PlatformPlugin,
     ))
     .insert_resource(if launch.screenshot.is_some() {
         WinitSettings::continuous()
