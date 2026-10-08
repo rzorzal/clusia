@@ -23,7 +23,10 @@ class Clusia < Formula
         clusia install --from #{opt_libexec}/bin
 
       That puts Clusia.app in /Applications, registers the daemon to start at login and
-      links `clusia` for your terminal. Run it again after every `brew upgrade`.
+      links `clusia` for your terminal. Run it again after every `brew upgrade`, or update
+      and finish in one go with:
+
+        curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash
 
       A few seconds after you open Clusia.app, macOS asks to allow notifications.
       Choose Allow; you can change it later in System Settings › Notifications.

@@ -47,7 +47,21 @@ Your own clone is never checked out or branched: Clúsia only adds refs under `r
 
 ## Install
 
-With [Homebrew](https://brew.sh) (it builds Clúsia from source, so the first install takes a few minutes):
+One command builds Clúsia on your Mac (it takes a few minutes the first time), installs it and opens it. It uses [Homebrew](https://brew.sh) when you have it, and otherwise installs the Xcode command line tools and Rust if they are missing and builds directly:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash
+```
+
+Run the same command again to update. It needs no admin rights; `--dry-run` prints every step without running it, and `--no-brew`, `--no-open` and `--ref REF` change the route (or `CLUSIA_NO_BREW`, `CLUSIA_NO_OPEN`, `CLUSIA_REF` in the environment). To read the script before running it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh -o install.sh
+less install.sh
+bash install.sh
+```
+
+Or do the two steps by hand with Homebrew:
 
 ```sh
 brew install --HEAD rzorzal/clusia/clusia
