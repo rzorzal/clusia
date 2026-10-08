@@ -529,6 +529,8 @@ pub(crate) async fn publish(
     if !posted {
         finish_published(shared, &mut review, pr, client, None);
     }
+    crate::agent::stop(shared, pr).await;
+    crate::agent::forget(shared, pr);
     cleanup_checkout(shared, pr).await;
     shared.files_cache.lock().await.remove(pr);
     announce(shared, &review);

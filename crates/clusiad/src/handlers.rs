@@ -12,6 +12,7 @@ use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
 use crate::activity;
+use crate::agent;
 use crate::first_run;
 use crate::giphy;
 use crate::media;
@@ -153,16 +154,11 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         }
         Command::GetAgentLog { pr } => sessions::log(shared, &pr).await,
         Command::HarnessProbe => sessions::probe(shared).await,
-        Command::AcceptSuggestion { .. } | Command::DismissSuggestion { .. } => agent_unavailable(),
+        Command::AcceptSuggestion { pr, id, body } => {
+            agent::accept(shared, client, &pr, &id, body).await
+        }
+        Command::DismissSuggestion { pr, id } => agent::dismiss(shared, &pr, &id).await,
     }
-}
-
-/// The daemon has no agent sessions: every agent command gets this answer.
-fn agent_unavailable() -> Outcome {
-    Outcome::Err(ProtocolError::new(
-        ErrorCode::InvalidState,
-        "the review agent is not available in this daemon",
-    ))
 }
 
 fn key_error(e: ConfigKeyError) -> Outcome {

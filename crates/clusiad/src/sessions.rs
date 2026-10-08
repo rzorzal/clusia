@@ -41,6 +41,9 @@ const STDERR_TAIL: usize = 2048;
 pub(crate) struct Prompt {
     pub text: String,
     pub shown: bool,
+    /// The head a summary turn describes. When the turn ends well the daemon records it, so the
+    /// same head is not summarized twice.
+    pub summary_for: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -70,6 +73,7 @@ impl Refusal {
 enum Why {
     User,
     Shutdown,
+    Ended,
 }
 
 impl Why {
@@ -78,6 +82,7 @@ impl Why {
         match self {
             Why::User => "Stopped by you",
             Why::Shutdown => "The daemon stopped while this turn was running",
+            Why::Ended => "Stopped because the review ended",
         }
     }
 }
@@ -259,6 +264,31 @@ impl Sessions {
         }
         if let Some(stop) = stop {
             stop.fire(why);
+        }
+    }
+
+    /// Ends the session of `pr`: its turn is stopped, its queue dropped and its slot forgotten.
+    /// The log stays.
+    pub(crate) async fn end(&self, shared: &Shared, pr: &PrRef) {
+        self.stop_with(shared, pr, Why::Ended);
+        for _ in 0..40 {
+            let running = {
+                let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+                table.get(pr).is_some_and(|slot| slot.running.is_some())
+            };
+            if !running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let removed = self
+            .table
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr)
+            .is_some();
+        if removed {
+            announce(shared, pr, SessionStateKind::None);
         }
     }
 
@@ -568,18 +598,29 @@ fn signal_group(pid: Option<u32>, signal: i32) {
 /// Whether the child has ended, without reaping it: until it is reaped its pid, and so the id
 /// of the group it leads, cannot be reused, so the group can still be signalled safely.
 fn has_exited(pid: u32) -> bool {
-    // SAFETY: `waitid` only writes into `info`, which is zeroed and owned here; `WNOWAIT`
-    // leaves the child waitable for `Child::wait`.
-    unsafe {
-        let mut info: libc::siginfo_t = std::mem::zeroed();
-        let found = libc::waitid(
-            libc::P_PID,
-            pid as libc::id_t,
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        );
-        // Any error (the child is already reaped) also means there is nothing left to wait for.
-        found != 0 || info.si_signo == libc::SIGCHLD
+    loop {
+        // SAFETY: `waitid` only writes into `info`, which is zeroed and owned here; `WNOWAIT`
+        // leaves the child waitable for `Child::wait`.
+        let (found, info) = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let found = libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            );
+            (found, info)
+        };
+        if found == 0 {
+            return info.si_signo == libc::SIGCHLD;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            // A signal arrived during the call: it says nothing about the child, so ask again.
+            Some(libc::EINTR) => continue,
+            // No such child: it is already reaped, so there is nothing left to wait for.
+            Some(libc::ECHILD) => return true,
+            _ => return false,
+        }
     }
 }
 
@@ -631,6 +672,7 @@ struct Run<'a> {
     failed: bool,
     /// Some answer text already went out as chunks.
     streamed: bool,
+    summary_for: Option<String>,
 }
 
 impl Run<'_> {
@@ -691,6 +733,14 @@ impl Run<'_> {
                 }
                 if !self.failed {
                     self.out.done(duration_ms);
+                    if let Some(head) = self.summary_for.take() {
+                        crate::agent::update_state(self.shared, self.out.pr, move |state| {
+                            state.last_summary_head = Some(head);
+                        })
+                        .await;
+                    }
+                    crate::agent::refresh(self.shared, self.out.pr);
+                    crate::agent::notify_finished(self.shared, self.out.pr, self.out.turn).await;
                 }
             }
         }
@@ -812,6 +862,7 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         saw_final: false,
         failed: false,
         streamed: false,
+        summary_for: prompt.summary_for.clone(),
     };
     let limit = Duration::from_secs(u64::from(harness.turn_timeout_secs));
     let deadline = tokio::time::sleep(limit);
@@ -919,6 +970,7 @@ pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcom
     let prompt = Prompt {
         text: text.to_string(),
         shown: true,
+        summary_for: None,
     };
     match Sessions::submit(shared, pr, prompt).await {
         Ok(turn) => Outcome::Ok(Reply::AgentTurn { turn }),
@@ -1082,6 +1134,7 @@ mod tests {
             let prompt = Prompt {
                 text: text.into(),
                 shown: true,
+                summary_for: None,
             };
             Sessions::submit(&self.shared, pr, prompt).await
         }
@@ -1636,6 +1689,20 @@ mod tests {
     }
 
     #[test]
+    fn only_a_child_that_is_gone_counts_as_exited() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(!has_exited(pid), "a running child has not exited");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(has_exited(pid), "a reaped child is gone");
+        assert!(has_exited(std::process::id()), "not a child at all");
+    }
+
+    #[test]
     fn standard_error_is_classified() {
         assert_eq!(
             classify_stderr("Error: Not logged in"),
@@ -1913,5 +1980,58 @@ mod tests {
             Path::new("no-such-claude-anywhere"),
             "a name that is nowhere stays a bare name"
         );
+    }
+
+    #[tokio::test]
+    async fn a_summary_turn_records_the_head_it_described() {
+        let mut lab = lab(Script::one(Turn::answer("The summary.")));
+        let pr = pr(7);
+        let prompt = Prompt {
+            text: "Summarize".into(),
+            shown: false,
+            summary_for: Some("abc123".into()),
+        };
+        Sessions::submit(&lab.shared, &pr, prompt).await.unwrap();
+        until(&mut lab.events, ready(&pr)).await;
+        let state = clusia_store::agent::load_agent_state(&lab.shared.paths, &pr).unwrap();
+        assert_eq!(state.last_summary_head.as_deref(), Some("abc123"));
+        let log = lab.log(&pr);
+        assert!(
+            !log.iter().any(|e| matches!(e, AgentLogEntry::User { .. })),
+            "a prompt the daemon wrote is not shown as the user's"
+        );
+        assert_eq!(
+            agent_log::last_summary(&log).as_deref(),
+            Some("The summary.")
+        );
+    }
+
+    #[tokio::test]
+    async fn ending_a_session_stops_its_turn_and_dismisses_what_waited() {
+        let answer =
+            "```clusia-suggestion\n{\"file\":\"src/a.rs\",\"line\":3,\"body\":\"Why?\"}\n```\n";
+        let mut lab = lab(Script::turns(vec![Turn::answer(answer), Turn::hanging()]));
+        let pr = pr(7);
+        lab.send(&pr, "review").await.unwrap();
+        let events = until(&mut lab.events, ready(&pr)).await;
+        let id = events
+            .iter()
+            .find_map(|e| match e {
+                Event::AgentSuggestion { suggestion, .. } => Some(suggestion.id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        lab.send(&pr, "and now").await.unwrap();
+        let call = wait_calls(&lab, 2).await.remove(1);
+
+        crate::agent::stop(&lab.shared, &pr).await;
+        crate::agent::forget(&lab.shared, &pr);
+
+        assert!(!FakeClaude::is_running(call.pid));
+        assert_eq!(lab.shared.sessions.state(&pr), SessionStateKind::None);
+        let state = clusia_store::agent::load_agent_state(&lab.shared.paths, &pr).unwrap();
+        assert!(state.dismissed.contains(&id));
+        assert_eq!(state.last_summary_head, None);
+        assert!(!lab.log(&pr).is_empty(), "the log stays");
     }
 }

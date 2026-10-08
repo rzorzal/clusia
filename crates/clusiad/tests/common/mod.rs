@@ -1,5 +1,6 @@
 #![allow(dead_code)] // each test file uses a different subset
 
+pub mod agent;
 pub mod git_fixture;
 pub mod github_mock;
 pub mod review_world;

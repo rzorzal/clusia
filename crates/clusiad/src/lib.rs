@@ -1,12 +1,14 @@
 //! clusiad: the only stateful Clúsia process. Clients talk to it over a Unix socket.
 
 mod activity;
+mod agent;
 mod agent_log;
 mod agent_stream;
 mod connection;
 mod first_run;
 mod giphy;
 mod handlers;
+mod holds;
 mod inbox;
 mod lock;
 mod login;

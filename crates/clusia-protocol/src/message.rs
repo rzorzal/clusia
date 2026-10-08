@@ -1310,6 +1310,7 @@ mod tests {
             clone_url: "https://github.com/acme/widgets.git".into(),
             closed: false,
             merged: false,
+            body: String::new(),
         };
         for reply in [
             Reply::Prs(vec![summary()]),
@@ -1559,6 +1560,7 @@ mod tests {
                 clone_url: "https://github.com/acme/widgets.git".into(),
                 closed: false,
                 merged: false,
+                body: String::new(),
             },
             files: vec![],
             role: Role::Reviewer,

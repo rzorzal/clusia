@@ -325,6 +325,18 @@ impl NotifyEvent {
         )
     }
 
+    pub fn agent_finished(pr: &PrRef, pr_title: &str, key: impl Into<String>, at: i64) -> Self {
+        Self::about(
+            EventKind::AgentFinished,
+            pr,
+            key,
+            at,
+            format!("Claude Code finished on #{}", pr.number),
+            format!("{pr_title}. Its answer is ready to read."),
+            Self::review_of(pr, None),
+        )
+    }
+
     pub fn sync_problem(problem: SyncProblem, key: impl Into<String>, at: i64) -> Self {
         let (title, body) = match problem {
             SyncProblem::Unauthorized => (
@@ -416,6 +428,24 @@ mod tests {
         weekday: Weekday::Wed,
         minutes: 12 * 60,
     };
+
+    #[test]
+    fn an_agent_finishing_opens_its_review() {
+        let e = NotifyEvent::agent_finished(&pr(7), "Add feature", "k", 5);
+        assert_eq!(e.kind, EventKind::AgentFinished);
+        assert_eq!(e.pr, Some(pr(7)));
+        assert_eq!(e.title, "Claude Code finished on #7");
+        assert_eq!(e.body, "Add feature. Its answer is ready to read.");
+        assert_eq!(
+            e.open,
+            OpenTarget::Review {
+                pr: pr(7),
+                thread: None
+            }
+        );
+        let d = decide(&e, &Notifications::default(), NOON, &Recent::default());
+        assert!(d.tray && d.macos && d.sound.is_none());
+    }
 
     #[test]
     fn local_time_reads_weekday_and_minutes() {

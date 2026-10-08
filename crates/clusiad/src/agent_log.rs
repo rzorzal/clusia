@@ -111,6 +111,31 @@ pub(crate) fn unfinished_turns(entries: &[AgentLogEntry]) -> Vec<u64> {
         .collect()
 }
 
+/// What the agent said in the latest turn the daemon asked for itself (a turn with no `User`
+/// entry): the running summary that goes into the review notes.
+pub(crate) fn last_summary(entries: &[AgentLogEntry]) -> Option<String> {
+    let asked: std::collections::HashSet<u64> = entries
+        .iter()
+        .filter(|e| matches!(e, AgentLogEntry::User { .. }))
+        .map(turn_of)
+        .collect();
+    let turn = entries
+        .iter()
+        .filter(|e| matches!(e, AgentLogEntry::Text { .. }))
+        .map(turn_of)
+        .filter(|turn| !asked.contains(turn))
+        .max()?;
+    let text: String = entries
+        .iter()
+        .filter_map(|e| match e {
+            AgentLogEntry::Text { turn: t, text, .. } if *t == turn => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;
@@ -236,5 +261,33 @@ mod tests {
         ];
         assert_eq!(unfinished_turns(&entries), [2, 4]);
         assert!(unfinished_turns(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_summary_is_the_latest_turn_nobody_typed() {
+        let user = |turn| AgentLogEntry::User {
+            at: 1,
+            turn,
+            text: "q".into(),
+        };
+        let say = |turn, text: &str| AgentLogEntry::Text {
+            at: 1,
+            turn,
+            text: text.into(),
+        };
+        assert_eq!(last_summary(&[]), None);
+        assert_eq!(last_summary(&[user(1), say(1, "answer")]), None);
+        let log = [
+            say(1, "First summary. "),
+            say(1, "Second part."),
+            user(2),
+            say(2, "An answer."),
+            say(3, "Newer summary."),
+        ];
+        assert_eq!(last_summary(&log).as_deref(), Some("Newer summary."));
+        assert_eq!(
+            last_summary(&log[..4]).as_deref(),
+            Some("First summary. Second part.")
+        );
     }
 }

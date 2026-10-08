@@ -913,15 +913,25 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_row_is_shown_but_cannot_be_changed() {
+    fn agent_finished_can_be_changed_and_the_permission_row_cannot() {
         let mut app = notifications_app();
         assert_eq!(
             testing::count::<SetValue>(&mut app),
-            7 * 3 + 4 + 1 + 1 + 1 + 7,
-            "21 event boxes, 4 sounds, quiet hours on/off, follow focus, group bursts, 7 weekdays"
+            8 * 3 + 4 + 1 + 1 + 1 + 7,
+            "24 event boxes, 4 sounds, quiet hours on/off, follow focus, group bursts, 7 weekdays"
         );
         let mut q = app.world_mut().query::<&SetValue>();
-        assert!(q.iter(app.world()).all(|s| !s.key.contains("agent")));
+        let agent: Vec<String> = q
+            .iter(app.world())
+            .filter(|s| s.key.contains("agent"))
+            .map(|s| s.key.to_string())
+            .collect();
+        assert_eq!(agent.len(), 3, "{agent:?}");
+        assert!(
+            agent
+                .iter()
+                .all(|k| k.starts_with("notifications.events.agent_finished."))
+        );
         let texts = page_texts(&mut app);
         assert!(texts.contains(&"Agent finished a review".to_string()));
         assert!(texts.contains(&"Agent needs your permission".to_string()));

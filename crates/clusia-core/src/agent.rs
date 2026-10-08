@@ -124,23 +124,25 @@ fn draft_line(item: &DraftItem) -> String {
         Some(line) => format!("{path}:{line}"),
         None => path.to_string(),
     };
-    match item.kind {
-        DraftKind::LineComment => {
-            let at = item.anchor.as_ref().map_or_else(String::new, |a| {
-                let range = match a.start_line {
-                    Some(start) if start != a.line => format!("{}-{}", start, a.line),
-                    _ => a.line.to_string(),
-                };
-                format!("{}:{range}", a.path)
-            });
-            format!("`{at}`: {}", preview(&item.body))
+    // A label alone when the body has no text, never a dangling colon.
+    let with_text = |label: String| match preview(&item.body) {
+        text if text.is_empty() => label,
+        text => format!("{label}: {text}"),
+    };
+    match (item.kind, &item.anchor) {
+        (DraftKind::LineComment, Some(a)) => {
+            let range = match a.start_line {
+                Some(start) if start != a.line => format!("{}-{}", start, a.line),
+                _ => a.line.to_string(),
+            };
+            with_text(format!("`{}:{range}`", a.path))
         }
-        DraftKind::General => format!("General note: {}", preview(&item.body)),
-        DraftKind::Reply => {
+        (DraftKind::LineComment | DraftKind::General, _) => with_text("General note".into()),
+        (DraftKind::Reply, _) => {
             let (author, at) = thread_context(item, place);
-            format!("Reply to @{author}{at}: {}", preview(&item.body))
+            with_text(format!("Reply to @{author}{at}"))
         }
-        DraftKind::Resolve => {
+        (DraftKind::Resolve, _) => {
             let (author, at) = thread_context(item, place);
             format!("Resolve the thread by @{author}{at}")
         }
@@ -162,9 +164,13 @@ fn thread_context(
     }
 }
 
-/// The first line of `body`, cut to a readable length.
+/// The first line of `body` with text in it, cut to a readable length.
 fn preview(body: &str) -> String {
-    let line = body.lines().next().unwrap_or("").trim();
+    let line = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
     if line.chars().count() > BODY_PREVIEW_CHARS {
         let cut: String = line.chars().take(BODY_PREVIEW_CHARS).collect();
         format!("{cut}…")
@@ -203,6 +209,7 @@ mod tests {
             clone_url: "https://github.com/acme/widgets.git".into(),
             closed: false,
             merged: false,
+            body: String::new(),
         }
     }
 
@@ -386,5 +393,34 @@ mod tests {
             .unwrap();
         assert_eq!(line.chars().count(), "- General note: ".len() + 200 + 1);
         assert!(line.ends_with('…'));
+    }
+
+    #[test]
+    fn previews_skip_blank_lines_and_never_show_empty_parts() {
+        let mut r = review();
+        let general = item(DraftKind::General, "\n  \nSecond line counts.");
+        let empty = item(DraftKind::General, "  ");
+        let unanchored = item(DraftKind::LineComment, "No place");
+        let mut resolve = item(DraftKind::Resolve, "");
+        resolve.thread = Some(ThreadRef {
+            id: "PRRT_3".into(),
+            author: "ana".into(),
+            path: Some("src/http.rs".into()),
+            line: Some(12),
+        });
+        r.draft.items = vec![general, empty, unanchored, resolve];
+        let md = review_md(&r, &detail(), None, &AgentState::default());
+        let draft = md
+            .split("## Draft so far\n\n")
+            .nth(1)
+            .and_then(|s| s.split("\n## ").next())
+            .unwrap();
+        assert_eq!(
+            draft,
+            "- General note: Second line counts.\n\
+             - General note\n\
+             - General note: No place\n\
+             - Resolve the thread by @ana (src/http.rs:12)\n"
+        );
     }
 }

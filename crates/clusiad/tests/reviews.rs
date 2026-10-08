@@ -46,7 +46,7 @@ async fn open_creates_the_review_and_reports_load_steps() {
         (LoadStepKind::Repo, StepStatus::Done),
         (LoadStepKind::Branch, StepStatus::Done),
         (LoadStepKind::Pr, StepStatus::Done),
-        (LoadStepKind::Agent, StepStatus::Skipped),
+        (LoadStepKind::Agent, StepStatus::Done),
     ] {
         assert!(
             steps.contains(&expected),
@@ -292,7 +292,7 @@ async fn load_steps_arrive_before_the_open_response() {
         "{steps:?}"
     );
     assert!(
-        steps.contains(&(LoadStepKind::Agent, StepStatus::Skipped)),
+        steps.contains(&(LoadStepKind::Agent, StepStatus::Done)),
         "{steps:?}"
     );
     w.daemon.stop().await;

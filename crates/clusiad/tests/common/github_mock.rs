@@ -21,6 +21,8 @@ pub struct PrMock {
     pub threads: Value,
     /// The viewer's pending review on GitHub: (node id, url).
     pub pending: Option<(String, String)>,
+    /// The pull request description.
+    pub body: String,
 }
 
 impl PrMock {
@@ -36,6 +38,7 @@ impl PrMock {
             commits: json!([]),
             threads: json!([]),
             pending: None,
+            body: String::new(),
         }
     }
 }
@@ -48,13 +51,19 @@ impl PrMock {
         self.files = json!([{ "filename": "feature.txt", "status": "added", "additions": lines.len(), "deletions": 0, "patch": patch }]);
         self
     }
+
+    /// The same pull request with a description.
+    pub fn described(mut self, body: &str) -> Self {
+        self.body = body.into();
+        self
+    }
 }
 
 pub async fn mount_pr(server: &MockServer, pr: &PrMock) {
     let base = "/repos/acme/widgets";
     let ok = |body: Value| ResponseTemplate::new(200).set_body_json(body);
     Mock::given(method("GET")).and(path(format!("{base}/pulls/7"))).respond_with(ok(json!({
-        "number": 7, "title": "Add feature", "html_url": "https://github.com/acme/widgets/pull/7",
+        "number": 7, "title": "Add feature", "body": pr.body, "html_url": "https://github.com/acme/widgets/pull/7",
         "user": { "login": pr.author }, "draft": false, "updated_at": "2026-10-01T12:00:00Z",
         "comments": 0, "review_comments": 0, "additions": 3, "deletions": 0, "changed_files": 1,
         "base": { "ref": pr.base_ref, "sha": pr.base, "repo": { "clone_url": pr.clone_url } },

@@ -274,6 +274,7 @@ pub fn demo_review(now: i64) -> (ReviewView, Vec<NewsItem>) {
         clone_url: "https://github.com/rzorzal/clusia.git".into(),
         closed: false,
         merged: false,
+        body: "Refreshes the access token a minute before it expires, so a long review never meets an expired one.".into(),
     };
     let mut review = Review::new(
         pr.clone(),
