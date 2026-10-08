@@ -64,6 +64,9 @@ cargo run --release -p clusia -- install
 
 Opening **Clusia.app** brings up the menu bar tray, the background service and the window. The first time Clúsia has something to tell you, macOS asks to allow notifications; choose **Allow**. Config › General turns *Start at login* on or off, and Config › Notifications chooses which events notify you, with which sound, and when.
 
+<p align="center"><img src="docs/assets/sp1-m6-config-notifications-light.png" alt="Config › Notifications: for each event, whether it reaches the tray, macOS and plays a sound, the sound, Do not disturb hours and weekdays, Follow macOS Focus, Group bursts and the macOS permission" width="720"></p>
+<p align="center"><img src="docs/assets/sp1-m6-config-general-dark.png" alt="Config › General in the dark theme: Start at login" width="720"></p>
+
 To remove it, run `clusia uninstall` (before `brew uninstall clusia` if you used Homebrew). Your reviews and settings stay in `~/Library/Application Support/Clusia`.
 
 ## Try it from source
