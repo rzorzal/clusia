@@ -14,7 +14,8 @@ use serde_json::Value;
 use crate::state::Shared;
 
 const GH_TIMEOUT: Duration = Duration::from_secs(5);
-const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+/// A Node-based harness started cold on a busy machine can take a few seconds to answer.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// Repositories are looked for this many levels below a folder.
 const REPO_DEPTH: usize = 2;
 const SKIPPED_DIRS: [&str; 2] = ["node_modules", "target"];

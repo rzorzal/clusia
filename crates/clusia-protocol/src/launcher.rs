@@ -467,14 +467,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LaunchError::Timeout { .. }), "{err}");
-        let pid = std::fs::read_to_string(dir.path().join("pid")).expect("the script ran");
-        let alive = std::process::Command::new("kill")
-            .args(["-0", pid.trim()])
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success();
-        assert!(!alive, "the child {pid} outlived the timeout");
+        // On a loaded machine the shell may not have reached its first line before the
+        // timeout; then it still runs under the script's name, which is checked instead.
+        let alive = match std::fs::read_to_string(dir.path().join("pid")) {
+            Ok(pid) => std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+            Err(_) => std::process::Command::new("pgrep")
+                .args(["-f", &bin.display().to_string()])
+                .stdout(Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+        };
+        assert!(!alive, "the child outlived the timeout");
     }
 
     #[tokio::test]
