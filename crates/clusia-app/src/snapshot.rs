@@ -2,10 +2,8 @@
 
 use clusia_core::{ActivitySummary, Config, PrSummary, ReviewState};
 use clusia_protocol::{
-    AuthInfo, Event, FirstRun, PermissionStatus, ReviewSummary, SyncStatus, WindowTarget,
+    AuthInfo, Event, FirstRun, PermissionStatus, ReviewSummary, SyncState, SyncStatus, WindowTarget,
 };
-
-use crate::screens::home::signed_out;
 
 /// What the window knows about the Giphy key. The daemon's status gives `Missing` or `Set`;
 /// `Rejected` is only ever derived by the Media page from a refusal the window saw.
@@ -31,10 +29,10 @@ pub struct Snapshot {
     pub giphy_key: GiphyKey,
     /// What the first-run screen shows; `None` until the daemon has answered.
     pub first_run: Option<FirstRun>,
-    /// `assigned` and `mine` hold real lists, not the empty defaults before the first sync.
     /// The first-run screen may still be on screen (the login was missing and **Continue** has
     /// not been pressed), so its status keeps being asked for.
     pub first_run_open: bool,
+    /// `assigned` and `mine` hold real lists, not the empty defaults before the first sync.
     pub lists_loaded: bool,
     pub daemon_version: String,
     /// Whether macOS lets the tray post notifications, as the tray last reported it.
@@ -42,11 +40,19 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// GitHub refused the token or there is none. Unknown (nothing fetched yet) is not signed out.
+    pub fn signed_out(&self) -> bool {
+        self.sync
+            .as_ref()
+            .is_some_and(|s| s.state == SyncState::Unauthorized)
+            || self.auth.as_ref().is_some_and(|a| a.source.is_none())
+    }
+
     /// Whether the first-run status is worth asking the daemon for: while the login is missing
     /// (it opens the screen) and until **Continue** closes it. The answer costs a `gh` call and
     /// a folder scan, so it is not asked for once the screen is gone.
     pub fn first_run_wanted(&mut self) -> bool {
-        if signed_out(self) {
+        if self.signed_out() {
             self.first_run_open = true;
         }
         self.first_run_open

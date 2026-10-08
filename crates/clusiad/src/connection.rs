@@ -117,8 +117,8 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
     let mut shutdown = shared.shutdown.subscribe();
     let mut topics: HashSet<String> = HashSet::new();
     let mut window: Option<WindowListener> = None;
-    // The request being handled: (id, whether it is Shutdown, the handler task, its claim on the
-    // daemon staying up). Requests stay sequential (the next line is read only once it is
+    // The request being handled: (id, whether it is Shutdown, the handler task, a claim on the
+    // daemon staying up until the response is written). Requests stay sequential (the next line is read only once it is
     // answered), but events keep flowing.
     let mut pending: Option<(u64, bool, JoinHandle<Outcome>, Busy)> = None;
     loop {
@@ -149,9 +149,15 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                 }
                 let stop = matches!(cmd, Command::Shutdown);
                 let busy = shared.begin_work();
+                // The handler holds its own claim: a client that goes away drops `pending` and
+                // detaches the task, which still runs and must still be waited for.
+                let working = shared.begin_work();
                 let task_shared = shared.clone();
                 let client = client_name.clone();
-                let task = tokio::spawn(async move { handlers::handle(&task_shared, &client, cmd).await });
+                let task = tokio::spawn(async move {
+                    let _working = working;
+                    handlers::handle(&task_shared, &client, cmd).await
+                });
                 pending = Some((id, stop, task, busy));
             }
             joined = async { pending.as_mut().map(|(_, _, task, _)| task).expect("guarded").await }, if pending.is_some() => {

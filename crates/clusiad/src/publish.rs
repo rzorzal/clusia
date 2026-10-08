@@ -12,6 +12,7 @@ use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, PublishResult, Reply};
 use clusia_provider::{GitHub, ProviderError, PublishedReview};
 
+use crate::activity::read_off_thread;
 use crate::handlers::{no_token, provider_error};
 use crate::reviews::{
     announce, cleanup_checkout, drop_cache, files_for, invalid_state, load_existing, lock, record,
@@ -59,16 +60,20 @@ pub(crate) fn finish_published(
 const CLOCK_SKEW_SECS: i64 = 30;
 
 /// The review `viewer` submitted on `head_sha` at or after `finalized_at`, if GitHub has one:
-/// proof that an earlier publish got through although its answer was lost.
+/// proof that an earlier publish got through although its answer was lost. `recorded` holds
+/// the URLs of reviews already recorded as published: an earlier publish on the same head,
+/// within the clock-skew margin, is not this one.
 pub(crate) fn find_posted<'a>(
     reviews: &'a [ReviewInfo],
     viewer: &str,
     head_sha: &str,
     finalized_at: i64,
+    recorded: &[String],
 ) -> Option<&'a ReviewInfo> {
     reviews
         .iter()
         .filter(|r| r.author.eq_ignore_ascii_case(viewer) && r.state != "PENDING")
+        .filter(|r| !recorded.contains(&r.url))
         .filter(|r| r.commit_id.as_deref() == Some(head_sha))
         .filter(|r| {
             r.submitted_at
@@ -89,6 +94,7 @@ pub(crate) enum Posted {
 }
 
 pub(crate) async fn posted_review(
+    shared: &Shared,
     gh: &GitHub,
     pr: &PrRef,
     head_sha: &str,
@@ -98,10 +104,27 @@ pub(crate) async fn posted_review(
         Ok(v) => v.login,
         Err(e) => return Posted::Unknown(e),
     };
-    match gh.list_reviews(pr).await {
-        Ok(reviews) => find_posted(&reviews, &viewer, head_sha, finalized_at)
-            .map_or(Posted::No, |r| Posted::Yes(r.url.clone())),
-        Err(e) => Posted::Unknown(e),
+    let reviews = match gh.list_reviews(pr).await {
+        Ok(reviews) => reviews,
+        Err(e) => return Posted::Unknown(e),
+    };
+    let recorded = recorded_reviews(shared, pr).await;
+    find_posted(&reviews, &viewer, head_sha, finalized_at, &recorded)
+        .map_or(Posted::No, |r| Posted::Yes(r.url.clone()))
+}
+
+/// The URLs of the reviews on `pr` this daemon recorded as published.
+async fn recorded_reviews(shared: &Shared, pr: &PrRef) -> Vec<String> {
+    match read_off_thread(&shared.paths).await {
+        Ok((activity, _)) => activity
+            .into_iter()
+            .filter(|a| a.kind == ActivityKind::ReviewPublished && &a.pr == pr)
+            .filter_map(|a| a.url)
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, pr = %pr, "cannot read which reviews were already published");
+            Vec::new()
+        }
     }
 }
 
@@ -117,20 +140,25 @@ pub(crate) async fn settle_interrupted(
     review: &mut Review,
 ) -> Result<bool, Outcome> {
     let finalized_at = review.updated_at;
-    match posted_review(gh, &review.pr, &review.head_sha, finalized_at).await {
+    match posted_review(shared, gh, &review.pr, &review.head_sha, finalized_at).await {
         Posted::Yes(url) => {
             let pr = review.pr.clone();
             finish_published(shared, review, &pr, client, Some(url));
             Ok(true)
         }
         Posted::No => Ok(false),
-        Posted::Unknown(e) => Err(Outcome::Err(ProtocolError::new(
-            ErrorCode::Upstream,
-            format!(
-                "cannot tell whether your last publish reached GitHub ({e}); try again when you are online"
-            ),
-        ))),
+        Posted::Unknown(e) => Err(unknown_outcome(&e)),
     }
+}
+
+/// The answer for a review left `publishing` because GitHub could not say whether it has it.
+fn unknown_outcome(e: &ProviderError) -> Outcome {
+    Outcome::Err(ProtocolError::new(
+        ErrorCode::Upstream,
+        format!(
+            "cannot tell whether your last publish reached GitHub ({e}); try again when you are online"
+        ),
+    ))
 }
 
 /// Appended when a cleanup failed and GitHub may still hold our pending review.
@@ -409,9 +437,16 @@ pub(crate) async fn publish(
             Err(failure) => {
                 // An answer that was lost or unreadable may hide a review GitHub did take.
                 let found = if failure.error.is_ambiguous() {
-                    match posted_review(&gh, pr, &review.head_sha, finalized_at).await {
+                    match posted_review(shared, &gh, pr, &review.head_sha, finalized_at).await {
                         Posted::Yes(found) => Some(found),
-                        Posted::No | Posted::Unknown(_) => None,
+                        Posted::No => None,
+                        // Back in `saved`, one click would post it a second time: the review
+                        // stays `publishing` until opening it again can ask GitHub.
+                        Posted::Unknown(e) if failure.maybe_posted => {
+                            announce(shared, &review);
+                            return unknown_outcome(&e);
+                        }
+                        Posted::Unknown(_) => None,
                     }
                 } else {
                     None
@@ -495,7 +530,7 @@ mod tests {
             review(3, "ME", "COMMENTED", Some("abc"), "2026-10-07T12:00:05Z"),
         ];
         assert_eq!(
-            find_posted(&reviews, "me", "abc", FINALIZED).map(|r| r.id),
+            find_posted(&reviews, "me", "abc", FINALIZED, &[]).map(|r| r.id),
             Some(3),
             "the login is compared without case"
         );
@@ -509,14 +544,14 @@ mod tests {
             review(3, "me", "COMMENTED", None, "2026-10-07T12:00:05Z"),
             review(4, "me", "COMMENTED", Some("abc"), "not a date"),
         ];
-        assert!(find_posted(&reviews, "me", "abc", FINALIZED).is_none());
+        assert!(find_posted(&reviews, "me", "abc", FINALIZED, &[]).is_none());
     }
 
     #[test]
     fn a_clock_a_little_behind_still_matches() {
         let at = "2026-10-07T11:59:45Z"; // 15 s before the Finalize moment we recorded
         let reviews = [review(1, "me", "COMMENTED", Some("abc"), at)];
-        assert!(find_posted(&reviews, "me", "abc", FINALIZED).is_some());
+        assert!(find_posted(&reviews, "me", "abc", FINALIZED, &[]).is_some());
         let too_old = [review(
             1,
             "me",
@@ -524,7 +559,7 @@ mod tests {
             Some("abc"),
             "2026-10-07T11:59:00Z",
         )];
-        assert!(find_posted(&too_old, "me", "abc", FINALIZED).is_none());
+        assert!(find_posted(&too_old, "me", "abc", FINALIZED, &[]).is_none());
     }
 
     #[test]
@@ -534,8 +569,15 @@ mod tests {
             review(9, "me", "COMMENTED", Some("abc"), "2026-10-07T12:00:09Z"),
         ];
         assert_eq!(
-            find_posted(&reviews, "me", "abc", FINALIZED).map(|r| r.id),
+            find_posted(&reviews, "me", "abc", FINALIZED, &[]).map(|r| r.id),
             Some(9)
         );
+    }
+
+    #[test]
+    fn a_review_already_recorded_is_never_adopted_again() {
+        let first = review(5, "me", "COMMENTED", Some("abc"), "2026-10-07T12:00:05Z");
+        let recorded = [first.url.clone()];
+        assert!(find_posted(&[first], "me", "abc", FINALIZED, &recorded).is_none());
     }
 }

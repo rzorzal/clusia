@@ -58,16 +58,28 @@ fn daemons_of(home: &std::path::Path) -> Vec<String> {
 
 impl Drop for Home {
     /// Stops the daemon the test started; one that does not stop in time is killed and waited
-    /// for, so no test leaves a daemon running on a deleted home.
+    /// for, so no test leaves a daemon running on a deleted home. One that outlives the kill
+    /// too (a zombie, an unkillable process) fails the test instead of hanging it.
     fn drop(&mut self) {
         let _ = self.clusia(&["daemon", "stop"]);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let kill_after = std::time::Duration::from_secs(5);
+        let give_up = std::time::Duration::from_secs(10);
         loop {
             let left = daemons_of(self.dir.path());
             if left.is_empty() {
                 return;
             }
-            if std::time::Instant::now() > deadline {
+            if start.elapsed() > give_up {
+                let message = format!("daemons still running after kill -9: {left:?}");
+                // A panic while already unwinding would abort the whole test binary.
+                if std::thread::panicking() {
+                    eprintln!("{message}");
+                    return;
+                }
+                panic!("{message}");
+            }
+            if start.elapsed() > kill_after {
                 for pid in &left {
                     let _ = Command::new("kill").args(["-9", pid]).status();
                 }

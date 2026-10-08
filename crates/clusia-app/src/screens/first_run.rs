@@ -17,7 +17,6 @@ use crate::fonts::UiFonts;
 use crate::nav::{FirstRunScreen, Leaf, Nav, NavSystems, Screen};
 use crate::screens::config::git::token_from_clipboard;
 use crate::screens::config::{clipboard_text, link, repos, warn};
-use crate::screens::home::signed_out;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{Fill, Stroke, Type, Variant, button, card, disabled_button, text};
@@ -117,7 +116,7 @@ pub struct FirstRunView {
 
 /// The login works: GitHub accepted a token (offline counts as signed in).
 pub fn signed_in(snap: &Snapshot) -> bool {
-    snap.auth.is_some() && !signed_out(snap)
+    snap.auth.is_some() && !snap.signed_out()
 }
 
 /// `path` with the home folder written as `~`.
@@ -274,7 +273,7 @@ fn gate(
     mut nav: ResMut<Nav>,
     mut asks: ResMut<Asks>,
 ) {
-    if signed_out(&model.snapshot) {
+    if model.snapshot.signed_out() {
         ui.pending = true;
     } else if nav.screen != Screen::FirstRun && ui.pending {
         // The login came back somewhere else (Config): nothing is left to show.

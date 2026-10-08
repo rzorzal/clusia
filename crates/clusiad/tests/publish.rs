@@ -590,3 +590,108 @@ async fn an_unreadable_review_list_leaves_an_interrupted_publish_alone() {
     assert_eq!(stored_review(&w).state, ReviewState::Publishing);
     w.daemon.stop().await;
 }
+
+#[tokio::test]
+async fn a_publish_whose_outcome_is_unknown_is_never_posted_twice() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    // The connection drops right after the submit: its answer, the cleanup and the check that
+    // follows all fail, so nobody can tell whether GitHub took the review.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("deletePullRequestReview"))
+        .respond_with(ResponseTemplate::new(502))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/7/reviews"))
+        .respond_with(ResponseTemplate::new(502))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    // Once the network is back, GitHub lists the review it did take.
+    mount_reviews(&w, json!([my_review(&w)])).await;
+
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "Please rename.")).await),
+        ErrorCode::Upstream
+    );
+    assert_eq!(
+        stored_review(&w).state,
+        ReviewState::Publishing,
+        "an unknown outcome is not a failure to retry"
+    );
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "Please rename.")).await),
+        ErrorCode::InvalidState,
+        "publishing again is refused until GitHub has been asked"
+    );
+    let view = view_of(c.request(Command::OpenReview { pr: pr7() }).await.unwrap());
+    assert_eq!(
+        (view.review.state, view.review.draft.items.len()),
+        (ReviewState::Active, 0),
+        "the review GitHub took is recorded, not offered again"
+    );
+    assert_eq!(
+        graphql_requests(&w.server, "addPullRequestReview(")
+            .await
+            .len(),
+        1,
+        "one review posted"
+    );
+    let published = activity_of(&w, ActivityKind::ReviewPublished);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].url.as_deref(), Some(REVIEW_URL));
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_second_publish_never_takes_the_first_review_for_its_own() {
+    let w = world().await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    c.request(publish(Verdict::Comment, "")).await.unwrap();
+    // A moment later, on the same head, a second review loses its answer; GitHub lists only the
+    // first one, which is already recorded.
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    graphql_error(
+        &w.server,
+        "deletePullRequestReview",
+        "Could not resolve to a node",
+    )
+    .await;
+    mount_reviews(&w, json!([my_review(&w)])).await;
+
+    assert_eq!(
+        code(c.request(publish(Verdict::Comment, "")).await),
+        ErrorCode::Upstream
+    );
+    match c.request(Command::GetReview { pr: pr7() }).await.unwrap() {
+        Reply::ReviewFile(r) => assert_eq!((r.state, r.draft.items.len()), (ReviewState::Saved, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(activity_of(&w, ActivityKind::ReviewPublished).len(), 1);
+    w.daemon.stop().await;
+}
