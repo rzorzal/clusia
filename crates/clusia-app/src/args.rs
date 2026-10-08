@@ -27,6 +27,7 @@ pub enum Scene {
     FirstRun,
     ConfigGeneral,
     ConfigNotifications,
+    ConfigNotificationsBottom,
     ConfigMedia,
     ConfigAbout,
 }
@@ -167,6 +168,10 @@ mod tests {
             ("first-run", Scene::FirstRun),
             ("config-general", Scene::ConfigGeneral),
             ("config-notifications", Scene::ConfigNotifications),
+            (
+                "config-notifications-bottom",
+                Scene::ConfigNotificationsBottom,
+            ),
             ("config-media", Scene::ConfigMedia),
             ("config-about", Scene::ConfigAbout),
         ] {
