@@ -2,6 +2,7 @@
 //! the log files of `logging`.
 
 pub mod activity;
+pub mod agent;
 pub mod config;
 pub mod diffmap;
 pub mod draft;
@@ -18,6 +19,7 @@ pub mod review;
 pub mod time;
 
 pub use activity::{Activity, ActivityKind, ActivitySummary, DayCount};
+pub use agent::{AgentState, review_md};
 pub use config::{
     CODE_SIZES, Config, Density, DiffView, Dnd, EventKind, General, HourMinute, ListSort, Lists,
     Media, Notifications, Route, SoundId, Weekday,

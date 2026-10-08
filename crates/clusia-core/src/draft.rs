@@ -53,6 +53,8 @@ pub enum Origin {
     Audit,
     Security,
     Diagram,
+    /// A comment the review agent suggested; it counts once the human accepts it.
+    Agent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,6 +482,15 @@ mod tests {
             })
             .unwrap(),
             r#"{"status":"moved","from_path":"a","from_line":3}"#
+        );
+    }
+
+    #[test]
+    fn agent_origin_has_its_own_wire_name() {
+        assert_eq!(serde_json::to_string(&Origin::Agent).unwrap(), r#""agent""#);
+        assert_eq!(
+            serde_json::from_str::<Origin>(r#""human""#).unwrap(),
+            Origin::Human
         );
     }
 }

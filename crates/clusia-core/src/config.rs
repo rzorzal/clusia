@@ -20,6 +20,7 @@ pub struct Config {
     pub lists: Lists,
     pub media: Media,
     pub composer: Composer,
+    pub harness: Harness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +517,231 @@ pub struct Composer {
     pub recent_emoji: Vec<String>,
 }
 
+pub const MIN_TURN_TIMEOUT_SECS: u32 = 60;
+pub const MAX_TURN_TIMEOUT_SECS: u32 = 3600;
+
+/// The agent behind the review chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Harness {
+    pub kind: HarnessKind,
+    /// The program to run instead of the one found on `PATH`. It is written as an empty
+    /// string in `config.toml` when unset, so the key can always be read and set by name.
+    #[serde(with = "empty_is_none")]
+    pub program: Option<String>,
+    /// Appended to every turn's command line, split like a shell would.
+    pub extra_args: String,
+    pub on_open: OnOpen,
+    /// Also allow what the user's own Claude Code settings already allow.
+    pub use_cli_permissions: bool,
+    pub turn_timeout_secs: u32,
+}
+
+impl Harness {
+    pub const DEFAULT_TIMEOUT_SECS: u32 = 600;
+
+    /// `extra_args` split into words; an unbalanced quote is an error.
+    pub fn extra_args_list(&self) -> Result<Vec<String>, String> {
+        split_args(&self.extra_args)
+    }
+}
+
+impl Default for Harness {
+    fn default() -> Self {
+        Self {
+            kind: HarnessKind::ClaudeCode,
+            program: None,
+            extra_args: String::new(),
+            on_open: OnOpen::Summarize,
+            use_cli_permissions: true,
+            turn_timeout_secs: Self::DEFAULT_TIMEOUT_SECS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessKind {
+    #[default]
+    ClaudeCode,
+}
+
+/// What happens when a review opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OnOpen {
+    /// The agent summarizes the pull request on its own.
+    #[default]
+    Summarize,
+    /// The agent stays idle until the first question.
+    Wait,
+}
+
+mod empty_is_none {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(value.as_deref().unwrap_or(""))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok((!text.trim().is_empty()).then_some(text))
+    }
+}
+
+/// Splits `text` into words the way a POSIX shell does for quotes and backslashes (no
+/// expansion of any kind).
+pub fn split_args(text: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(c) => word.push(c),
+                        None => return Err("a single quote is not closed".into()),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(c @ ('"' | '\\')) => word.push(c),
+                            Some(c) => {
+                                word.push('\\');
+                                word.push(c);
+                            }
+                            None => return Err("a double quote is not closed".into()),
+                        },
+                        Some(c) => word.push(c),
+                        None => return Err("a double quote is not closed".into()),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                word.push(chars.next().ok_or("the text ends with a backslash")?);
+            }
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    Ok(words)
+}
+
+/// How many values follow a reserved flag written as `--flag value`.
+#[derive(Clone, Copy)]
+enum Takes {
+    /// A switch.
+    Nothing,
+    /// One value, unless the next word is another flag.
+    One,
+    /// Every word up to the next flag.
+    Many,
+}
+
+/// Flags that decide what the agent may do, which settings load, which session it joins, which
+/// prompt it follows and how it prints. Clúsia sets them itself, so the user's extra
+/// arguments never carry them.
+const RESERVED: [(&str, Takes); 23] = [
+    ("--dangerously-skip-permissions", Takes::Nothing),
+    ("--allow-dangerously-skip-permissions", Takes::Nothing),
+    ("--permission-mode", Takes::One),
+    ("--permission-prompt-tool", Takes::One),
+    ("--allowedTools", Takes::Many),
+    ("--allowed-tools", Takes::Many),
+    ("--tools", Takes::Many),
+    ("--settings", Takes::One),
+    ("--setting-sources", Takes::One),
+    ("--system-prompt", Takes::One),
+    ("--system-prompt-file", Takes::One),
+    ("--append-system-prompt", Takes::One),
+    ("--append-system-prompt-file", Takes::One),
+    ("--resume", Takes::One),
+    ("-r", Takes::One),
+    ("--session-id", Takes::One),
+    ("--continue", Takes::Nothing),
+    ("-c", Takes::Nothing),
+    ("--fork-session", Takes::Nothing),
+    ("-p", Takes::Nothing),
+    ("--print", Takes::Nothing),
+    ("--output-format", Takes::One),
+    ("--input-format", Takes::One),
+];
+
+/// The names of the reserved flags.
+pub fn reserved_flags() -> impl Iterator<Item = &'static str> {
+    RESERVED.iter().map(|(name, _)| *name)
+}
+
+fn reserved(arg: &str) -> Option<(&'static str, Takes, bool)> {
+    let (name, has_value) = match arg.split_once('=') {
+        Some((name, _)) => (name, true),
+        None => (arg, false),
+    };
+    RESERVED
+        .iter()
+        .find(|(flag, _)| *flag == name)
+        .map(|(flag, takes)| (*flag, *takes, has_value))
+}
+
+/// The first reserved flag in `args`, if any.
+pub fn first_reserved_flag(args: &[String]) -> Option<&'static str> {
+    args.iter()
+        .find_map(|a| reserved(a).map(|(flag, _, _)| flag))
+}
+
+/// `args` without the reserved flags and the values that follow them (`--flag value`; a
+/// `--flag=value` is one word).
+pub fn strip_reserved_flags(args: &[String]) -> Vec<String> {
+    let mut kept = Vec::with_capacity(args.len());
+    let mut rest = args.iter().peekable();
+    while let Some(arg) = rest.next() {
+        let Some((_, takes, has_value)) = reserved(arg) else {
+            kept.push(arg.clone());
+            continue;
+        };
+        if has_value {
+            continue;
+        }
+        let more = |next: Option<&&String>| next.is_some_and(|n| !n.starts_with('-'));
+        match takes {
+            Takes::Nothing => {}
+            Takes::One => {
+                if more(rest.peek()) {
+                    rest.next();
+                }
+            }
+            Takes::Many => {
+                while more(rest.peek()) {
+                    rest.next();
+                }
+            }
+        }
+    }
+    kept
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ListSort {
@@ -632,6 +858,21 @@ impl Config {
         if !CODE_SIZES.contains(&size) {
             return Err(format!(
                 "appearance.code_size must be one of 12, 13, 14, 16, got {size}"
+            ));
+        }
+        let timeout = self.harness.turn_timeout_secs;
+        if !(MIN_TURN_TIMEOUT_SECS..=MAX_TURN_TIMEOUT_SECS).contains(&timeout) {
+            return Err(format!(
+                "harness.turn_timeout_secs must be between {MIN_TURN_TIMEOUT_SECS} and {MAX_TURN_TIMEOUT_SECS}, got {timeout}"
+            ));
+        }
+        let args = self
+            .harness
+            .extra_args_list()
+            .map_err(|e| format!("harness.extra_args: {e}"))?;
+        if let Some(flag) = first_reserved_flag(&args) {
+            return Err(format!(
+                "harness.extra_args must not set {flag}: Clúsia sets permissions, settings, session, prompt and output itself"
             ));
         }
         Ok(())
@@ -969,5 +1210,161 @@ mod tests {
         assert!(c.general.start_at_login);
         let off: Config = serde_json::from_str(r#"{"general":{"start_at_login":false}}"#).unwrap();
         assert!(!off.general.start_at_login);
+    }
+
+    #[test]
+    fn harness_defaults_match_spec() {
+        let h = Config::default().harness;
+        assert_eq!(h.kind, HarnessKind::ClaudeCode);
+        assert_eq!(h.program, None);
+        assert_eq!(h.extra_args, "");
+        assert_eq!(h.on_open, OnOpen::Summarize);
+        assert!(h.use_cli_permissions);
+        assert_eq!(h.turn_timeout_secs, 600);
+        assert_eq!(Harness::DEFAULT_TIMEOUT_SECS, 600);
+    }
+
+    #[test]
+    fn harness_wire_names_and_empty_program() {
+        let c: Config = serde_json::from_str(
+            r#"{"harness":{"kind":"claude-code","program":"/opt/bin/claude","on_open":"wait","use_cli_permissions":false,"turn_timeout_secs":90}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.harness.program.as_deref(), Some("/opt/bin/claude"));
+        assert_eq!(c.harness.on_open, OnOpen::Wait);
+        assert!(!c.harness.use_cli_permissions);
+        assert_eq!(c.validate(), Ok(()));
+        let blank: Config = serde_json::from_str(r#"{"harness":{"program":"  "}}"#).unwrap();
+        assert_eq!(blank.harness.program, None, "a blank program means PATH");
+        let json = serde_json::to_value(Config::default()).unwrap();
+        assert_eq!(json["harness"]["program"], "");
+        assert_eq!(json["harness"]["on_open"], "summarize");
+        assert_eq!(json["harness"]["kind"], "claude-code");
+    }
+
+    #[test]
+    fn harness_timeout_is_bounded() {
+        let mut c = Config::default();
+        c.harness.turn_timeout_secs = 59;
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "harness.turn_timeout_secs must be between 60 and 3600, got 59"
+        );
+        c.harness.turn_timeout_secs = 3601;
+        assert!(c.validate().is_err());
+        c.harness.turn_timeout_secs = 60;
+        assert_eq!(c.validate(), Ok(()));
+        c.harness.turn_timeout_secs = 3600;
+        assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn split_args_follows_shell_quoting() {
+        let words = |s: &str| split_args(s).unwrap();
+        assert_eq!(words(""), Vec::<String>::new());
+        assert_eq!(words("  --model   opus "), ["--model", "opus"]);
+        assert_eq!(words(r#"--append "two words""#), ["--append", "two words"]);
+        assert_eq!(words("--x 'a \"b\" c'"), ["--x", "a \"b\" c"]);
+        assert_eq!(words(r#"--x "a \"b\" \\ \n""#), ["--x", "a \"b\" \\ \\n"]);
+        assert_eq!(words(r"a\ b"), ["a b"]);
+        assert_eq!(words("''"), [""], "an empty quoted word is a word");
+        assert_eq!(words("--k='v w'"), ["--k=v w"]);
+        for bad in ["--x 'open", "--x \"open", "tail\\"] {
+            assert!(split_args(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn extra_args_reject_unbalanced_quotes_and_reserved_flags() {
+        let mut c = Config::default();
+        c.harness.extra_args = "--model opus --add-dir '../shared dir'".into();
+        assert_eq!(c.validate(), Ok(()));
+        assert_eq!(
+            c.harness.extra_args_list().unwrap(),
+            ["--model", "opus", "--add-dir", "../shared dir"]
+        );
+        c.harness.extra_args = "--model 'opus".into();
+        assert!(c.validate().unwrap_err().starts_with("harness.extra_args:"));
+        for bad in [
+            "--dangerously-skip-permissions",
+            "--allow-dangerously-skip-permissions",
+            "--permission-mode bypassPermissions",
+            "--permission-mode=acceptEdits",
+            "--settings {}",
+            "--setting-sources user",
+            "--allowedTools Bash Edit",
+            "--allowed-tools=Bash",
+            "--tools Bash",
+            "--system-prompt other",
+            "--append-system-prompt=other",
+            "--resume abc",
+            "-r",
+            "--session-id abc",
+            "--continue",
+            "-c",
+            "--fork-session",
+            "-p",
+            "--print",
+            "--output-format text",
+            "--input-format stream-json",
+        ] {
+            c.harness.extra_args = bad.into();
+            assert!(c.validate().unwrap_err().contains("must not set"), "{bad}");
+        }
+        c.harness.extra_args = "--model opus --permission-mode plan".into();
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "harness.extra_args must not set --permission-mode: Clúsia sets permissions, settings, session, prompt and output itself"
+        );
+    }
+
+    #[test]
+    fn every_reserved_flag_is_refused_and_stripped() {
+        let names: Vec<&str> = reserved_flags().collect();
+        assert_eq!(names.len(), 23);
+        for name in names {
+            let args = vec![name.to_string(), "value".to_string()];
+            assert_eq!(first_reserved_flag(&args), Some(name), "{name}");
+            let kept = strip_reserved_flags(&args);
+            assert!(!kept.contains(&name.to_string()), "{name}: {kept:?}");
+            let joined = vec![format!("{name}=value")];
+            assert_eq!(
+                strip_reserved_flags(&joined),
+                Vec::<String>::new(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_flags_are_stripped_with_their_values() {
+        let args: Vec<String> = [
+            "--model",
+            "opus",
+            "--permission-mode",
+            "bypassPermissions",
+            "--dangerously-skip-permissions",
+            "--settings=x.json",
+            "--setting-sources",
+            "user",
+            "--allowedTools",
+            "Bash",
+            "Edit(*)",
+            "--verbose",
+            "--resume",
+            "--add-dir",
+            "../shared",
+            "-c",
+            "-p",
+            "--tools=Bash",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            strip_reserved_flags(&args),
+            ["--model", "opus", "--verbose", "--add-dir", "../shared"],
+            "a value-less flag does not swallow the next flag"
+        );
+        assert_eq!(strip_reserved_flags(&[]), Vec::<String>::new());
     }
 }
