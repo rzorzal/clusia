@@ -159,8 +159,7 @@ impl FakeClaude {
         fs::create_dir_all(dir.join("calls")).expect("create calls dir");
         for (i, turn) in script.turns.iter().enumerate() {
             let k = i + 1;
-            let mut body = turn.lines.join("\n");
-            body.push('\n');
+            let body: String = turn.lines.iter().map(|l| format!("{l}\n")).collect();
             fs::write(dir.join(format!("turn-{k}.jsonl")), body).expect("write turn lines");
             fs::write(dir.join(format!("turn-{k}.stderr")), &turn.stderr).expect("write stderr");
             let conf = format!(
@@ -218,7 +217,8 @@ impl FakeClaude {
         }
     }
 
-    /// Whether process `pid` is still alive.
+    /// Whether process `pid` is still alive. A child that ended but was not yet waited for (a
+    /// zombie) still counts as running, so wait for it before asserting that it is gone.
     pub fn is_running(pid: u32) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -265,7 +265,8 @@ if [ "$1" = "--version" ]; then
 fi
 n=1
 while ! mkdir "$dir/calls/$n" 2>/dev/null; do n=$((n + 1)); done
-printf '%s\0' "$@" > "$dir/calls/$n/argv"
+: > "$dir/calls/$n/argv"
+[ $# -gt 0 ] && printf '%s\0' "$@" > "$dir/calls/$n/argv"
 env > "$dir/calls/$n/env"
 pwd > "$dir/calls/$n/cwd"
 echo $$ > "$dir/calls/$n/pid"
@@ -291,7 +292,17 @@ exit "$code"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
+
+    /// Kills the child when dropped, so a failing assertion never leaves a fake running.
+    struct Running(Child);
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
 
     fn run(program: &Path, args: &[&str], cwd: &Path) -> std::process::Output {
         Command::new(program)
@@ -379,16 +390,59 @@ mod tests {
     fn a_hanging_turn_runs_until_it_is_killed() {
         let dir = tempfile::tempdir().unwrap();
         let program = FakeClaude::install(dir.path(), Script::one(Turn::hanging()));
-        let mut child = Command::new(&program)
-            .args(["-p", "x", "--session-id", "s1"])
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = Running(
+            Command::new(&program)
+                .args(["-p", "x", "--session-id", "s1"])
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
         let call = FakeClaude::wait_for_calls(dir.path(), 1, Duration::from_secs(5)).remove(0);
         assert!(FakeClaude::is_running(call.pid));
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
         assert!(!FakeClaude::is_running(call.pid));
+    }
+
+    #[test]
+    fn a_hanging_turn_dies_on_sigterm() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = FakeClaude::install(dir.path(), Script::one(Turn::hanging()));
+        let mut child = Running(
+            Command::new(&program)
+                .args(["-p", "x"])
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let call = FakeClaude::wait_for_calls(dir.path(), 1, Duration::from_secs(5)).remove(0);
+        // The recorded pid is the one that hangs (the script `exec`s its sleep).
+        assert_eq!(call.pid, child.0.id());
+        let sent = Command::new("kill")
+            .args(["-TERM", &call.pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        let status = child.0.wait().unwrap();
+        assert!(!status.success());
+        assert!(!FakeClaude::is_running(call.pid));
+    }
+
+    #[test]
+    fn a_silent_turn_prints_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = FakeClaude::install(dir.path(), Script::one(Turn::lines(&[]).exit(1)));
+        let out = run(&program, &["-p", "x"], dir.path());
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    }
+
+    #[test]
+    fn a_run_without_arguments_records_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = FakeClaude::install(dir.path(), Script::one(Turn::lines(&[])));
+        run(&program, &[], dir.path());
+        assert_eq!(FakeClaude::calls(dir.path())[0].argv, Vec::<String>::new());
     }
 
     #[test]

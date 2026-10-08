@@ -61,6 +61,7 @@ fn demo_screenshots() {
             .arg("--screenshot")
             .arg(&out)
             .env("CLUSIA_TRAY_BIN", "none")
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
             .status()
             .unwrap();
         assert!(status.success(), "{name}: {status}");

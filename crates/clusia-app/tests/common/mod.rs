@@ -45,6 +45,7 @@ impl Daemon {
             media_resolve: Vec::new(),
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
+            claude_program: Some("/nonexistent/claude".into()),
         };
         // A restart in the same home can find the lock still held: a child forked by a parallel
         // test keeps the descriptor (and so the flock) until it execs. Wait for it to let go.

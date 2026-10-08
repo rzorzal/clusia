@@ -32,6 +32,7 @@ does not hide a Homebrew install.
 | `CLUSIA_GH_BIN` | the `gh` program, overriding the lookup |
 | `CLUSIA_SECRET_STORE=memory` | keep secrets in memory instead of the Keychain (tests) |
 | `CLUSIA_TRAY_BIN` | the tray program; `none` disables it |
+| `CLUSIA_CLAUDE_BIN` | the `claude` program the review agent runs when Config › Harness names none |
 | `CLUSIA_DAEMON_BIN` | the daemon program the clients start |
 | `CLUSIA_GIPHY_API` | Giphy API base URL |
 

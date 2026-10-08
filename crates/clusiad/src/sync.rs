@@ -317,6 +317,7 @@ mod tests {
             media_resolve: Vec::new(),
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
+            claude_program: Some("/nonexistent/claude".into()),
         };
         let shared = Arc::new(Shared::new(
             clusia_core::Paths::new(dir.path()),

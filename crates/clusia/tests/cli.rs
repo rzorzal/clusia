@@ -37,6 +37,7 @@ impl Home {
             .env("CLUSIA_GH_BIN", "/nonexistent/gh")
             .env("CLUSIA_SECRET_STORE", "memory")
             .env("CLUSIA_TRAY_BIN", "none")
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
             .env_remove("CLUSIA_GITHUB_TOKEN")
             .output()
             .unwrap()
@@ -209,6 +210,7 @@ impl Home {
             .env("CLUSIA_GH_BIN", "/nonexistent/gh")
             .env("CLUSIA_SECRET_STORE", "memory")
             .env("CLUSIA_TRAY_BIN", "none")
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
             .env_remove("CLUSIA_GITHUB_TOKEN")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -384,6 +386,7 @@ fn too_long_home_fails_before_running() {
             .args(args)
             .env("CLUSIA_DAEMON_BIN", clusiad_bin())
             .env("CLUSIA_TRAY_BIN", "none")
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
             .output()
             .unwrap();
         assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));

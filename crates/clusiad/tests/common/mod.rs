@@ -32,6 +32,7 @@ pub fn test_options() -> DaemonOptions {
         media_resolve: Vec::new(),
         giphy_api: Some("http://127.0.0.1:9".into()),
         harness_search_paths: Vec::new(),
+        claude_program: Some("/nonexistent/claude".into()),
     }
 }
 
