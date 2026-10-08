@@ -5,6 +5,8 @@ mod command;
 mod parse;
 mod probe;
 mod suggestions;
+#[cfg(any(test, feature = "test-kit"))]
+pub mod testkit;
 
 pub use command::{ClaudeCode, ROLE_PROMPT, SessionArg, TurnSpec};
 pub use parse::{AgentEvent, ParseState, parse_line};

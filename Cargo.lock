@@ -1955,6 +1955,7 @@ dependencies = [
  "clusia-analytics",
  "clusia-core",
  "clusia-git",
+ "clusia-harness",
  "clusia-platform",
  "clusia-protocol",
  "clusia-provider",

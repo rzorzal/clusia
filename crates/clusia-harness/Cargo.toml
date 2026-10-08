@@ -13,6 +13,9 @@ clusia-protocol.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 
+[features]
+test-kit = []
+
 [dev-dependencies]
 tempfile.workspace = true
 
