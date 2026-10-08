@@ -1,8 +1,11 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
+use clusia_core::logging::{DailyLog, KEEP_FILES};
+use clusia_tray::launch::{self, InstanceLock, LAUNCHED_BY, LaunchReason, SystemHost};
 use clusia_tray::{fixture, layout, model::TrayModel, ui};
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSApplication;
@@ -28,6 +31,9 @@ struct Args {
     /// With --render: fill the bitmap with this color first, simulating the wallpaper behind the glass.
     #[arg(long, value_name = "#RRGGBB", value_parser = parse_hex, hide = true)]
     backdrop: Option<(f64, f64, f64)>,
+    /// The process was started by a notification click.
+    #[arg(long, hide = true)]
+    notification_click: bool,
 }
 
 fn parse_hex(s: &str) -> Result<(f64, f64, f64), String> {
@@ -50,19 +56,51 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-fn main() -> ExitCode {
+fn env_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+}
+
+fn log_to_stderr() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(env_filter())
         .with_writer(std::io::stderr)
         .init();
+}
+
+/// A tray the user started logs to `tray.log` in the logs folder; one the daemon started has its
+/// stderr redirected there already, and a terminal keeps its output. Only the tray holding the
+/// instance lock opens the file: opening it rotates it, which a second instance must not do
+/// under the running tray.
+fn init_logging(paths: &clusia_core::Paths, reason: LaunchReason, holds_lock: bool) {
+    if holds_lock && launch::logs_to_file(reason, std::io::stderr().is_terminal()) {
+        match DailyLog::open(paths.logs_dir(), "tray", KEEP_FILES) {
+            Ok(log) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter())
+                    .with_ansi(false)
+                    .with_writer(move || log.clone())
+                    .init();
+                return;
+            }
+            Err(e) => eprintln!(
+                "clusia-tray: cannot open the log in {}: {e}",
+                paths.logs_dir().display()
+            ),
+        }
+    }
+    log_to_stderr();
+}
+
+fn main() -> ExitCode {
     let args = Args::parse();
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("clusia-tray: must run on the main thread");
         return ExitCode::FAILURE;
     };
+    if args.render.is_some() || args.render_icon.is_some() {
+        log_to_stderr();
+    }
     if let Some(out) = &args.render_icon {
         return match ui::icon::render_png(args.news, out) {
             Ok(()) => ExitCode::SUCCESS,
@@ -107,6 +145,40 @@ fn main() -> ExitCode {
             }
         },
     };
-    ui::app::run(mtm, paths, clusia_tray::actions::app_binary());
+    let reason = launch::reason_from(
+        std::env::var(LAUNCHED_BY).ok().as_deref(),
+        &if args.notification_click {
+            vec!["--notification-click".to_string()]
+        } else {
+            Vec::new()
+        },
+    );
+    let app_bin = clusia_tray::actions::app_binary();
+    // The resolved home, not the argument: a daemon this tray starts runs in `/`.
+    let home = args.home.as_ref().map(|_| paths.root().to_path_buf());
+    let lock = InstanceLock::acquire_waiting(
+        &paths.root().join("tray.lock"),
+        launch::lock_attempts(reason),
+        launch::TAKEOVER_PAUSE,
+    );
+    init_logging(&paths, reason, matches!(lock, Ok(Some(_))));
+    let _lock = match lock {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => {
+            // Another tray is running: make sure the daemon and (for the user) the window are up,
+            // then leave.
+            let host = SystemHost::new(paths, app_bin, home);
+            if let Some(e) = launch::bring_up(reason, &host).error {
+                tracing::warn!(error = %e, "could not bring Clúsia up");
+            }
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => {
+            // Without the lock the tray still runs; two trays at worst.
+            tracing::warn!(error = %e, "cannot take the tray lock");
+            None
+        }
+    };
+    ui::app::run(mtm, paths, app_bin, reason, home);
     ExitCode::SUCCESS
 }

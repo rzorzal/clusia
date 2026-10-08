@@ -162,7 +162,19 @@ fn stop_for(e: ClientError) -> Stop {
 /// Runs until the daemon goes away (or the UI drops `writes`), then sends `Update::Quit`
 /// (always the last update).
 pub async fn run(socket: PathBuf, send: impl Fn(Update) + Send + Sync + 'static, writes: Writes) {
-    let stop = match session(&socket, &send, writes).await {
+    run_with(socket, send, writes, None).await;
+}
+
+/// Like [`run`]. With `login_agent` (the LaunchAgent file's path), a config that asks for
+/// start at login while that file is missing makes the tray ask the daemon to write it:
+/// opening the app is how a login item gets installed after the app was copied in by hand.
+pub async fn run_with(
+    socket: PathBuf,
+    send: impl Fn(Update) + Send + Sync + 'static,
+    writes: Writes,
+    login_agent: Option<PathBuf>,
+) {
+    let stop = match session(&socket, &send, writes, login_agent.as_deref()).await {
         Ok(()) => Stop::clean(DAEMON_GONE),
         Err(stop) => stop,
     };
@@ -176,11 +188,12 @@ async fn session(
     socket: &std::path::Path,
     send: &(impl Fn(Update) + Sync),
     mut writes: Writes,
+    login_agent: Option<&std::path::Path>,
 ) -> Result<(), Stop> {
     let mut client = Client::connect(socket, CLIENT_NAME).await.map_err(|e| {
         let reason = format!("cannot reach clusiad: {e}");
         match e {
-            // No daemon: the tray never starts one, so it just leaves.
+            // No daemon (bring-up could not start one): the tray just leaves.
             ClientError::NotRunning(_) | ClientError::Closed => Stop::clean(reason),
             _ => Stop::failure(reason),
         }
@@ -202,6 +215,11 @@ async fn session(
     if let Reply::Config(config) = request(&mut client, Command::GetConfig).await? {
         snap.host = config.github.host;
         snap.lists = config.lists;
+        if let Some(agent) = login_agent
+            && needs_login_agent(config.general.start_at_login, agent.exists())
+        {
+            request(&mut client, Command::SetStartAtLogin { on: true }).await?;
+        }
     }
     fetch(
         &mut client,
@@ -290,6 +308,11 @@ async fn session(
             last = snap.clone();
         }
     }
+}
+
+/// The config wants the app at login but no LaunchAgent exists yet.
+pub fn needs_login_agent(start_at_login: bool, agent_exists: bool) -> bool {
+    start_at_login && !agent_exists
 }
 
 async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Result<(), Stop> {

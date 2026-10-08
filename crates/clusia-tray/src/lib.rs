@@ -4,6 +4,7 @@ pub mod actions;
 pub mod data;
 pub mod fixture;
 pub use clusia_view::heatmap;
+pub mod launch;
 pub mod layout;
 pub mod model;
 pub mod notify;

@@ -25,6 +25,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::actions::{self, Action};
 use crate::data::{self, Outgoing, Update};
+use crate::launch::{self, LaunchReason, SystemHost};
 use crate::layout::{SEARCH_PLACEHOLDER, WIDTH, layout};
 use crate::model::TrayModel;
 use crate::notify::{self, Notifier, PermissionStatus, UNPoster};
@@ -243,6 +244,9 @@ struct Setup {
     paths: Paths,
     app_bin: Option<PathBuf>,
     notifier: Option<Notifier<UNPoster>>,
+    reason: LaunchReason,
+    /// The `--home` this tray was started with (resolved), passed on to a daemon it starts.
+    home: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -262,10 +266,23 @@ define_class!(
 
     // SAFETY: the method signature matches NSApplicationDelegate.
     unsafe impl NSApplicationDelegate for Delegate {
+        /// Opening the app again while it runs (Finder, Spotlight, `open`) shows the window.
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_handle_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
+            let launch = UI.with_borrow(|ui| {
+                ui.as_ref()
+                    .and_then(|ui| actions::plan(&Action::OpenHome, ui.app_bin.as_deref(), &ui.paths))
+            });
+            if let Some(launch) = launch {
+                actions::launch(&launch);
+            }
+            true
+        }
+
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
             let mtm = self.mtm();
-            let Some(Setup { paths, app_bin, notifier }) = self.ivars().setup.take() else { return };
+            let Some(Setup { paths, app_bin, notifier, reason, home }) = self.ivars().setup.take() else { return };
             let item = NSStatusBar::systemStatusBar().statusItemWithLength(icon::ITEM_LENGTH);
             if let Some(button) = item.button(mtm) {
                 button.setImage(Some(&icon::status_image(false)));
@@ -361,6 +378,9 @@ define_class!(
                 }
             }));
             let socket = paths.socket();
+            // Only a user opening the app installs the login item; the daemon's own tray never does.
+            let login_agent = (reason == LaunchReason::User).then(|| paths.launch_agent());
+            let host = SystemHost::new(paths.clone(), app_bin.clone(), home);
             let (writes, queue) = unbounded_channel();
             UI.set(Some(Ui { model, item, popover, content, search, writes, paths, app_bin, notifier }));
             UI.with_borrow(|ui| {
@@ -372,23 +392,31 @@ define_class!(
             if let Some(click) = EARLY_CLICK.take() {
                 notification_clicked(&click);
             }
-            // The permission prompt waits, so the first banner is noticed.
-            let _ = DispatchQueue::main().after(
-                dispatch2::DispatchTime::NOW.time(notify::AUTH_DELAY.as_nanos() as i64),
-                || {
-                    UI.with_borrow_mut(|ui| {
-                        if let Some(notifier) = ui.as_mut().and_then(|ui| ui.notifier.as_mut()) {
-                            notifier.authorize();
-                        }
-                    });
-                },
-            );
+            // The permission prompt waits, so the first banner is noticed. Only a user start asks:
+            // an unattended start just reads the status (above).
+            if launch::should_request_authorization(reason) {
+                let _ = DispatchQueue::main().after(
+                    dispatch2::DispatchTime::NOW.time(notify::AUTH_DELAY.as_nanos() as i64),
+                    || {
+                        UI.with_borrow_mut(|ui| {
+                            if let Some(notifier) = ui.as_mut().and_then(|ui| ui.notifier.as_mut()) {
+                                notifier.authorize();
+                            }
+                        });
+                    },
+                );
+            }
             // Start the data loop only now, so no update can arrive before `UI` exists.
             let spawned = std::thread::Builder::new().name("clusia-tray-data".into()).spawn(move || {
+                // Before the runtime exists: starting the daemon runs its own.
+                let up = launch::bring_up(reason, &host);
+                if let Some(e) = up.error {
+                    tracing::warn!(error = %e, "could not bring Clúsia up");
+                }
                 match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                     Ok(rt) => {
                         let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                            rt.block_on(data::run(socket, deliver_on_main, queue))
+                            rt.block_on(data::run_with(socket, deliver_on_main, queue, login_agent))
                         }));
                         if run.is_err() {
                             // Non-zero so the supervisor restarts us; exit 0 is reserved for "daemon gone".
@@ -522,7 +550,13 @@ impl Delegate {
 }
 
 /// Runs the menu bar tray until the daemon goes away.
-pub fn run(mtm: MainThreadMarker, paths: Paths, app_bin: Option<PathBuf>) {
+pub fn run(
+    mtm: MainThreadMarker,
+    paths: Paths,
+    app_bin: Option<PathBuf>,
+    reason: LaunchReason,
+    home: Option<PathBuf>,
+) {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     // Registered before the run loop starts, so a click that launched the app is delivered.
@@ -533,6 +567,8 @@ pub fn run(mtm: MainThreadMarker, paths: Paths, app_bin: Option<PathBuf>) {
             paths,
             app_bin,
             notifier,
+            reason,
+            home,
         },
     );
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

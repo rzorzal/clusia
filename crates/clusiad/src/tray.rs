@@ -90,6 +90,8 @@ fn spawn(program: &Path, home: &Path, log: &Path) -> std::io::Result<Child> {
     Command::new(program)
         .arg("--home")
         .arg(home)
+        // Tells the tray it was not opened by the user, so it shows no window.
+        .env("CLUSIA_LAUNCHED_BY", "daemon")
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err)

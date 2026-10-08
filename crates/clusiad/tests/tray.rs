@@ -55,3 +55,38 @@ async fn daemon_spawns_the_tray_with_its_home_and_stops_it() {
         "spawned exactly once"
     );
 }
+
+#[tokio::test]
+async fn the_tray_is_told_the_daemon_started_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let record = bin.path().join("record");
+    let prog = bin.path().join("fake-tray");
+    std::fs::write(
+        &prog,
+        format!(
+            "#!/bin/sh\necho \"$CLUSIA_LAUNCHED_BY\" >> '{}'\nexec sleep 30\n",
+            record.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut options = test_options();
+    options.tray_program = Some(prog);
+    let daemon = TestDaemon::start_with(dir, options).await;
+
+    let mut waited = Duration::ZERO;
+    let line = loop {
+        if let Ok(s) = std::fs::read_to_string(&record)
+            && let Some(l) = s.lines().next()
+        {
+            break l.to_string();
+        }
+        assert!(waited < Duration::from_secs(5), "tray never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        waited += Duration::from_millis(20);
+    };
+    assert_eq!(line, "daemon");
+    daemon.stop().await;
+}

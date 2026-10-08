@@ -212,6 +212,20 @@ fn start(socket: PathBuf) -> (Receiver<Update>, WriteQueue) {
     (rx, writes)
 }
 
+fn start_with_agent(socket: PathBuf, agent: PathBuf) -> (Receiver<Update>, WriteQueue) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (writes, queue) = mpsc::unbounded_channel();
+    tokio::spawn(data::run_with(
+        socket,
+        move |u| {
+            let _ = tx.send(u);
+        },
+        queue,
+        Some(agent),
+    ));
+    (rx, writes)
+}
+
 fn next(rx: &Receiver<Update>) -> Update {
     rx.recv_timeout(Duration::from_secs(5)).expect("an update")
 }
@@ -589,5 +603,56 @@ async fn permission_and_seen_become_commands() {
     assert_eq!(
         fake.wait_for(2).await,
         ["NotificationPermission", "MarkInboxSeen"]
+    );
+}
+
+#[test]
+fn a_login_agent_is_needed_only_when_wanted_and_missing() {
+    assert!(data::needs_login_agent(true, false));
+    assert!(!data::needs_login_agent(true, true), "already installed");
+    assert!(
+        !data::needs_login_agent(false, false),
+        "start at login is off"
+    );
+    assert!(!data::needs_login_agent(false, true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opening_the_app_installs_a_missing_login_agent() {
+    let fake = fake();
+    let dir = tempfile::tempdir().unwrap();
+    let (rx, _writes) = start_with_agent(fake.socket.clone(), dir.path().join("agent.plist"));
+    snapshot(&rx);
+    snapshot(&rx);
+    assert_eq!(
+        fake.requests(),
+        [
+            "Subscribe",
+            "GetConfig",
+            "SetStartAtLogin",
+            "ListReviews",
+            "GetActivity",
+            "GetInbox",
+            "GetSyncStatus",
+            "ListPrs",
+            "ListPrs"
+        ],
+        "the daemon is asked once, right after the config is read"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_installed_login_agent_is_left_alone() {
+    let fake = fake();
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("agent.plist");
+    std::fs::write(&agent, "").unwrap();
+    let (rx, _writes) = start_with_agent(fake.socket.clone(), agent);
+    snapshot(&rx);
+    snapshot(&rx);
+    assert!(
+        !fake.requests().iter().any(|r| r == "SetStartAtLogin"),
+        "{:?}",
+        fake.requests()
     );
 }
