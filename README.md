@@ -53,19 +53,21 @@ One command builds Clúsia on your Mac (it takes a few minutes the first time), 
 curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash
 ```
 
-Run the same command again to update. It needs no admin rights; `--dry-run` prints every step without running it, and `--no-brew`, `--no-open` and `--ref REF` change the route (or `CLUSIA_NO_BREW`, `CLUSIA_NO_OPEN`, `CLUSIA_REF` in the environment). To read the script before running it:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh -o install.sh
-less install.sh
-bash install.sh
-```
+Run the same command again to update. It never uses `sudo`; `--dry-run` prints every step without running it, and `--no-brew`, `--no-open` and `--ref REF` change the route (or `CLUSIA_NO_BREW`, `CLUSIA_DRY_RUN`, `CLUSIA_NO_OPEN`, `CLUSIA_REF` in the environment). Through the pipe, pass options after `bash -s --`, for example `curl -fsSL … | bash -s -- --no-brew`.
 
 Or do the two steps by hand with Homebrew:
 
 ```sh
 brew install --HEAD rzorzal/clusia/clusia
 clusia install --from "$(brew --prefix clusia)/libexec/bin"
+```
+
+To read the script before running it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh -o install.sh
+less install.sh
+bash install.sh
 ```
 
 From a clone of this repository, one command builds and installs:

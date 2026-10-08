@@ -20,7 +20,7 @@ impl Sandbox {
         let sandbox = Sandbox {
             dir: tempfile::tempdir().unwrap(),
         };
-        for d in ["bin", "home", "tmp", "prefix/libexec/bin"] {
+        for d in ["bin", "home", "tmp", "prefix/opt/clusia/libexec/bin"] {
             std::fs::create_dir_all(sandbox.path(d)).unwrap();
         }
         sandbox.fake("uname", r#"echo "${FAKE_UNAME:-Darwin}""#);
@@ -36,7 +36,10 @@ impl Sandbox {
         sandbox.fake(
             "brew",
             r#"case "$1" in
-  --prefix) echo "$FAKE_PREFIX" ;;
+  --prefix) if [ -n "${2:-}" ] && [ -z "${FAKE_BREW_INSTALLED:-}" ]; then
+      echo "Error: No available formula with the name \"$2\"" >&2; exit 1
+    fi
+    echo "$FAKE_PREFIX" ;;
   list) [ -n "${FAKE_BREW_INSTALLED:-}" ] ;;
 esac"#,
         );
@@ -65,7 +68,7 @@ RUSTUP"#,
             &format!("#!/bin/bash\n{}\n", recorder("clusia")),
         );
         sandbox.write_exec(
-            "prefix/libexec/bin/clusia",
+            "prefix/opt/clusia/libexec/bin/clusia",
             &format!("#!/bin/bash\n{}\n", recorder("brew-clusia")),
         );
         sandbox
@@ -146,6 +149,22 @@ fn index(log: &[String], line: &str) -> usize {
         .unwrap_or_else(|| panic!("{line:?} not in {log:#?}"))
 }
 
+/// The `clusia install` call that starts with `head`, as (position, applications folder).
+/// The folder is /Applications when it is writable and ~/Applications otherwise, so the
+/// test follows whichever the script chose and checks that `open` uses the same one.
+fn installed(log: &[String], head: &str) -> (usize, String) {
+    let at = log
+        .iter()
+        .position(|l| l.starts_with(&format!("{head} --applications ")))
+        .unwrap_or_else(|| panic!("{head:?} not in {log:#?}"));
+    let apps = log[at].rsplit(' ').next().unwrap().to_string();
+    (at, apps)
+}
+
+fn opened(log: &[String], apps: &str) -> usize {
+    index(log, &format!("open {apps}/Clusia.app"))
+}
+
 /// The clone target of a recorded `git clone`.
 fn clone_dir(log: &[String]) -> String {
     log.iter()
@@ -180,8 +199,12 @@ fn brew_not_installed_installs_the_head_formula_then_clusia_then_opens() {
     let log = s.log();
     let p = prefix(&s);
     let brew = index(&log, "brew install --HEAD rzorzal/clusia/clusia");
-    let install = index(&log, &format!("brew-clusia install --from {p}/libexec/bin"));
-    let open = index(&log, "open -a Clusia");
+    let (install, apps) = installed(
+        &log,
+        &format!("brew-clusia install --from {p}/opt/clusia/libexec/bin"),
+    );
+    let open = opened(&log, &apps);
+    assert!(!log.iter().any(|l| l.starts_with("open -a")));
     assert!(brew < install && install < open, "{log:#?}");
     assert!(!log.iter().any(|l| l.starts_with("git ")));
 }
@@ -193,9 +216,12 @@ fn brew_already_installed_upgrades_from_head() {
     assert!(out.status.success(), "{}", text(&out));
     let log = s.log();
     let upgrade = index(&log, "brew upgrade --fetch-HEAD clusia");
-    let install = index(
+    let (install, _) = installed(
         &log,
-        &format!("brew-clusia install --from {}/libexec/bin", prefix(&s)),
+        &format!(
+            "brew-clusia install --from {}/opt/clusia/libexec/bin",
+            prefix(&s)
+        ),
     );
     assert!(upgrade < install);
     assert!(!log.iter().any(|l| l.starts_with("brew install")));
@@ -215,8 +241,8 @@ fn without_brew_it_clones_builds_and_installs_from_the_build() {
         &format!("git clone --depth 1 --branch main {REPO} {dir}"),
     );
     let build = index(&log, "cargo build --release");
-    let install = index(&log, &format!("clusia install --from {dir}/target/release"));
-    let open = index(&log, "open -a Clusia");
+    let (install, apps) = installed(&log, &format!("clusia install --from {dir}/target/release"));
+    let open = opened(&log, &apps);
     assert!(
         clone < build && build < install && install < open,
         "{log:#?}"
@@ -271,6 +297,8 @@ fn a_dry_run_prints_the_plan_and_changes_nothing() {
         assert!(out.status.success(), "{}", text(&out));
         let shown = text(&out);
         assert!(shown.contains("install --from"), "{shown}");
+        assert!(shown.contains("Dry run: nothing was changed"), "{shown}");
+        assert!(!shown.contains("Done."), "{shown}");
         for line in s.log() {
             let read_only = line == "uname -s"
                 || line.starts_with("brew --prefix")
@@ -280,6 +308,29 @@ fn a_dry_run_prints_the_plan_and_changes_nothing() {
         }
         assert_eq!(std::fs::read_dir(s.path("tmp")).unwrap().count(), 0);
     }
+}
+
+#[test]
+fn a_dry_run_quotes_paths_with_spaces_so_they_can_be_pasted() {
+    let s = Sandbox::new();
+    s.remove("brew");
+    let out = s.run(&["--dry-run"], &[("HOME", "/tmp/a b")]);
+    assert!(out.status.success(), "{}", text(&out));
+    let shown = text(&out);
+    assert!(
+        shown.contains(r"+ open /tmp/a\ b/Applications/Clusia.app")
+            || shown.contains("+ open /Applications/Clusia.app"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn building_with_a_cargo_that_rustup_does_not_manage_says_so() {
+    let s = Sandbox::new();
+    s.remove("brew");
+    let out = s.run(&[], &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("Rust 1.95 or newer"), "{}", text(&out));
 }
 
 #[test]
@@ -367,7 +418,12 @@ fn the_readme_and_the_formula_lead_with_the_one_command() {
             .unwrap();
     let curl = "curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash";
     let at = readme.find(curl).expect("the README has the one-liner");
-    assert!(at < readme.find("brew install --HEAD").unwrap());
+    let brew = readme.find("brew install --HEAD").unwrap();
+    let read_first = readme.find("less install.sh").unwrap();
+    assert!(at < brew && brew < read_first);
+    assert!(readme.contains("CLUSIA_DRY_RUN"));
+    assert!(readme.contains("| bash -s -- --no-brew"));
+    assert!(!readme.contains("needs no admin rights"));
     let formula = include_str!("../../../packaging/homebrew/clusia.rb");
     assert!(formula.contains("install.sh | bash"));
 }

@@ -2,7 +2,7 @@
 # Installs or updates Clusia on this Mac and opens it:
 #   curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash
 # Options: --no-brew  --dry-run  --no-open  --ref REF   (env: CLUSIA_NO_BREW, CLUSIA_DRY_RUN,
-# CLUSIA_NO_OPEN, CLUSIA_REF). It needs no admin rights and leaves your Clusia data alone.
+# CLUSIA_NO_OPEN, CLUSIA_REF). It never asks for a password itself and leaves your Clusia data alone.
 #
 # Everything lives inside functions and `main` runs on the last line, so a download that is
 # cut short runs nothing.
@@ -16,7 +16,9 @@ die() { printf 'error: %s\n' "$*" >&2; exit "${2:-1}"; }
 # Runs a command, or only prints it under --dry-run.
 run() {
   if [ -n "$DRY_RUN" ]; then
-    printf '+ %s\n' "$*"
+    printf '+'
+    printf ' %q' "$@"
+    printf '\n'
   else
     "$@"
   fi
@@ -32,7 +34,9 @@ install_with_brew() {
     run brew install --HEAD rzorzal/clusia/clusia
   fi
   BREW=1
-  FROM="$(brew --prefix clusia)/libexec/bin"
+  # Bare `brew --prefix` works before the formula exists, which a dry run needs;
+  # opt/clusia is the stable link Homebrew keeps to the installed version.
+  FROM="$(brew --prefix)/opt/clusia/libexec/bin"
 }
 
 install_build_tools() {
@@ -56,6 +60,9 @@ install_build_tools() {
 
 build_directly() {
   install_build_tools
+  if command -v cargo >/dev/null 2>&1 && ! command -v rustup >/dev/null 2>&1; then
+    say "Building with the cargo on PATH; Clúsia needs Rust 1.95 or newer"
+  fi
   local src="<temp dir>"
   if [ -z "$DRY_RUN" ]; then
     TMP="$(mktemp -d "${TMPDIR:-/tmp}/clusia.XXXXXX")"
@@ -99,10 +106,18 @@ main() {
   fi
 
   say "Installing Clúsia.app, the login agent and the clusia command"
-  run "$FROM/clusia" install --from "$FROM"
-  [ -n "$no_open" ] || run open -a Clusia
+  # The folder is chosen here, not by `clusia install`, so `open` gets the very bundle
+  # that was just written instead of whichever app LaunchServices calls "Clusia".
+  local apps=/Applications
+  [ -w "$apps" ] || apps="$HOME/Applications"
+  run "$FROM/clusia" install --from "$FROM" --applications "$apps"
+  [ -n "$no_open" ] || run open "$apps/Clusia.app"
 
-  say "Done. Clusia.app is in /Applications (or ~/Applications)."
+  if [ -n "$DRY_RUN" ]; then
+    say "Dry run: nothing was changed."
+    return
+  fi
+  say "Done. Clusia.app is in $apps."
   if [ -n "$BREW" ]; then
     say "To remove it: clusia uninstall, then brew uninstall clusia"
   else
