@@ -43,10 +43,48 @@ impl Home {
     }
 }
 
+/// The pids of every clusiad serving `home`, whichever client started it.
+fn daemons_of(home: &std::path::Path) -> Vec<String> {
+    let name = home.file_name().unwrap().to_string_lossy();
+    let out = Command::new("pgrep")
+        .args(["-f", &format!("clusiad --home .*{name}")])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(String::from)
+        .collect()
+}
+
 impl Drop for Home {
+    /// Stops the daemon the test started; one that does not stop in time is killed and waited
+    /// for, so no test leaves a daemon running on a deleted home.
     fn drop(&mut self) {
         let _ = self.clusia(&["daemon", "stop"]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let left = daemons_of(self.dir.path());
+            if left.is_empty() {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                for pid in &left {
+                    let _ = Command::new("kill").args(["-9", pid]).status();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
+}
+
+#[test]
+fn a_dropped_home_leaves_no_daemon_behind() {
+    let h = Home::new();
+    assert!(h.clusia(&["daemon", "start"]).status.success());
+    let dir = h.dir.path().to_path_buf();
+    assert_eq!(daemons_of(&dir).len(), 1, "the started daemon is found");
+    drop(h);
+    assert!(daemons_of(&dir).is_empty());
 }
 
 fn stdout(o: &Output) -> String {
