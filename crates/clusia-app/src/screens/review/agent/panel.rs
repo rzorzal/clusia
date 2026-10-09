@@ -27,7 +27,9 @@ use crate::screens::review::editor::read_only_reason;
 use crate::screens::review::shell::{HarnessButton, RightPanel, on_harness};
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
-use crate::ui::kit::{Clickable, Fill, HoverFill, Stroke, Type, Variant, button, panel, text};
+use crate::ui::kit::{
+    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, panel, text,
+};
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown};
 use crate::ui::text_area::{Caret, growing_line_area, set_text};
@@ -116,6 +118,8 @@ pub struct ChatResize(pub PrRef);
 struct HeaderView {
     state: SessionStateKind,
     resumed: bool,
+    /// Claude Code is set up; without it the header leads to Config › Harness.
+    ready: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,6 +532,7 @@ fn footer(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef) {
 fn rebuild_header(
     mut commands: Commands,
     chats: Res<Chats>,
+    model: Res<Model>,
     fonts: Res<UiFonts>,
     mut headers: Query<(Entity, &mut ChatHeader)>,
 ) {
@@ -538,12 +543,20 @@ fn rebuild_header(
         let want = HeaderView {
             state: chat.state,
             resumed: chat.resumed,
+            ready: harness_ready(&model.snapshot),
         };
         if header.built.as_ref() == Some(&want) {
             continue;
         }
         let pr = header.pr.clone();
         commands.entity(entity).despawn_related::<Children>();
+        if !want.ready {
+            commands
+                .entity(entity)
+                .with_children(|h| not_set_up(h, &fonts));
+            header.built = Some(want);
+            continue;
+        }
         commands.entity(entity).with_children(|h| {
             h.spawn(panel(
                 Node {
@@ -590,6 +603,21 @@ fn rebuild_header(
         });
         header.built = Some(want);
     }
+}
+
+/// The header without a harness: what the tab is for, and the way to set one up.
+fn not_set_up(h: &mut ChildSpawnerCommands, fonts: &UiFonts) {
+    h.spawn(text(fonts, "Claude Code", Type::STRONG));
+    h.spawn(badge(fonts, "not set up", Tone::Neutral));
+    h.spawn(Node {
+        flex_grow: 1.0,
+        ..default()
+    });
+    h.spawn((
+        button(fonts, "Set up a harness", Variant::Secondary),
+        HarnessButton,
+        observe(on_harness),
+    ));
 }
 
 fn rebuild_transcript(
@@ -972,7 +1000,9 @@ mod tests {
 
     /// The demo review, with the Agent tab selected.
     fn open_chat() -> App {
-        let mut app = testing::app(fixture::demo(NOW));
+        let mut snap = fixture::demo(NOW);
+        snap.config.harness.program = Some("/opt/homebrew/bin/claude".into());
+        let mut app = testing::app(snap);
         testing::open_ready(&mut app, false);
         app.world_mut()
             .resource_mut::<Chats>()
@@ -1048,6 +1078,25 @@ mod tests {
         testing::activate(&mut app, draft);
         testing::settle(&mut app);
         assert_eq!(display_of::<RightPanel>(&mut app, |_| true), Display::Flex);
+    }
+
+    #[test]
+    fn without_a_harness_the_agent_tab_says_it_is_not_set_up() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        let agent = testing::find::<PanelTabButton>(&mut app, |b| b.tab == PanelTab::Agent);
+        testing::activate(&mut app, agent);
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "not set up"));
+        assert!(!testing::shows(&mut app, "knows this review"));
+        assert_eq!(testing::count::<HarnessButton>(&mut app), 1);
+        assert!(testing::shows(&mut app, "Set up a harness"));
+        let set_up = testing::find::<HarnessButton>(&mut app, |_| true);
+        testing::activate(&mut app, set_up);
+        assert_eq!(
+            app.world().resource::<Nav>().screen,
+            Screen::Config(Section::Harness)
+        );
     }
 
     #[test]
@@ -1162,6 +1211,14 @@ mod tests {
                         duration_ms: 900,
                     },
                 ],
+            },
+        );
+        // The daemon tells the session's state after the log.
+        say(
+            &mut app,
+            AgentTell::State {
+                pr: pr(),
+                state: SessionStateKind::Ready,
             },
         );
         testing::settle(&mut app);

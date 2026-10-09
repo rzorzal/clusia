@@ -736,6 +736,19 @@ pub struct Suggestion {
     pub body: String,
 }
 
+impl Suggestion {
+    /// The line a comment on this suggestion sits on, and where its range starts: the single
+    /// line when there is one, else the end of a range that has both ends. The draft item and
+    /// the window's editor both anchor here.
+    pub fn anchor_lines(&self) -> Option<(u32, Option<u32>)> {
+        match (self.line, self.start_line, self.end_line) {
+            (Some(line), _, _) => Some((line, None)),
+            (None, Some(start), Some(end)) => Some((end, Some(start))),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentErrorKind {
@@ -864,6 +877,29 @@ pub enum WindowTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_suggestion_anchors_at_its_line_first_then_at_its_range() {
+        let s = |line, start_line, end_line| Suggestion {
+            id: "sug-1".into(),
+            file: "src/a.rs".into(),
+            line,
+            start_line,
+            end_line,
+            body: "Why?".into(),
+        };
+        assert_eq!(s(Some(44), None, None).anchor_lines(), Some((44, None)));
+        assert_eq!(
+            s(Some(44), Some(40), Some(46)).anchor_lines(),
+            Some((44, None))
+        );
+        assert_eq!(
+            s(None, Some(40), Some(44)).anchor_lines(),
+            Some((44, Some(40)))
+        );
+        assert_eq!(s(None, Some(40), None).anchor_lines(), None);
+        assert_eq!(s(None, None, Some(44)).anchor_lines(), None);
+    }
 
     #[test]
     fn pause_messages_wire_format() {

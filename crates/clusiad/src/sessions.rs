@@ -156,6 +156,9 @@ pub(crate) struct Sessions {
     /// How many review drivers are running; shutdown waits for zero.
     live: watch::Sender<usize>,
     closing: AtomicBool,
+    /// The last state announced for each review, told again whenever its log is read. A lock
+    /// of its own: states are announced while `table` is held.
+    states: Mutex<HashMap<PrRef, SessionStateKind>>,
 }
 
 impl Default for Sessions {
@@ -165,6 +168,7 @@ impl Default for Sessions {
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TURNS)),
             live: watch::channel(0).0,
             closing: AtomicBool::new(false),
+            states: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -186,6 +190,18 @@ impl Drop for Live {
 }
 
 fn announce(shared: &Shared, pr: &PrRef, state: SessionStateKind) {
+    {
+        let mut states = shared
+            .sessions
+            .states
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if state == SessionStateKind::None {
+            states.remove(pr);
+        } else {
+            states.insert(pr.clone(), state);
+        }
+    }
     shared.publish(
         topics::AGENT,
         Event::SessionState {
@@ -1037,6 +1053,17 @@ pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcom
 /// The chat to replay: every entry, except the suggestions already accepted or dismissed, so a
 /// window that opens later shows only the ones still waiting.
 pub(crate) async fn log(shared: &Shared, pr: &PrRef) -> Outcome {
+    // A window that reads the log learns from it what was said, and from this where the
+    // session stands: whether a turn is running or waiting is not in the log.
+    let state = shared
+        .sessions
+        .states
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(pr)
+        .copied()
+        .unwrap_or(SessionStateKind::None);
+    announce(shared, pr, state);
     let path = shared.paths.agent_log(pr);
     let handled = clusia_store::agent::load_agent_state(&shared.paths, pr).unwrap_or_default();
     match tokio::task::spawn_blocking(move || agent_log::read(&path)).await {

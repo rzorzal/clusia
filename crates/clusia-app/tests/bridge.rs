@@ -672,3 +672,106 @@ async fn asks_for_the_agent_while_disconnected_are_answered() {
         _ => unreachable!(),
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepting_a_suggestion_that_is_no_longer_waiting_adds_nothing_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let pr = seed_agent_review(dir.path(), 9);
+    let d = common::Daemon::start_in(dir).await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask
+        .send(Ask::AcceptSuggestion {
+            pr: pr.clone(),
+            id: "sug-000000000000".into(),
+            body: Some("Edited text".into()),
+        })
+        .unwrap();
+    let answer = next(&link, |t| {
+        matches!(
+            t,
+            Tell::Agent(AgentTell::Handled { .. }) | Tell::Notice { .. }
+        )
+    });
+    match answer {
+        Tell::Notice { text, warning } => {
+            assert!(warning);
+            assert!(text.contains("no longer waiting"), "{text}");
+        }
+        other => panic!("nothing was added, yet: {other:?}"),
+    }
+    match next(&link, |t| matches!(t, Tell::AgentLog { .. })) {
+        Tell::AgentLog { pr: got, .. } => assert_eq!(got, pr, "the chat is read again"),
+        _ => unreachable!(),
+    }
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reading_one_reviews_log_keeps_another_reviews_live_answer() {
+    const CHUNKS: usize = 150;
+    let dir = tempfile::tempdir().unwrap();
+    let streaming = seed_agent_review(dir.path(), 9);
+    let other = seed_agent_review(dir.path(), 10);
+    let d = common::Daemon::start_in(dir).await;
+    let mut lines =
+        vec![r#"{"type":"system","subtype":"init","session_id":"__SESSION__"}"#.to_string()];
+    let mut expected = String::new();
+    for i in 0..CHUNKS {
+        let text = format!("{i},");
+        expected.push_str(&text);
+        lines.push(
+            serde_json::json!({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text},
+                },
+                "session_id": "__SESSION__",
+            })
+            .to_string(),
+        );
+    }
+    lines.push(
+        serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "duration_ms": 5, "num_turns": 1, "result": expected,
+            "session_id": "__SESSION__", "permission_denials": [],
+        })
+        .to_string(),
+    );
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    use_fake_claude(&d, Script::one(Turn::lines(&lines).delay_ms(4))).await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask
+        .send(Ask::AgentSend {
+            pr: streaming.clone(),
+            text: "Count for me".into(),
+        })
+        .unwrap();
+    let asks = link.ask.clone();
+    let reader = std::thread::spawn(move || {
+        for _ in 0..400 {
+            if asks.send(Ask::AgentLog { pr: other.clone() }).is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    });
+    let mut shown = String::new();
+    loop {
+        match next(
+            &link,
+            |t| matches!(t, Tell::Agent(a) if *a.pr() == streaming),
+        ) {
+            Tell::Agent(AgentTell::Chunk { text, .. }) => shown.push_str(&text),
+            Tell::Agent(AgentTell::Done { .. }) => break,
+            _ => {}
+        }
+    }
+    reader.join().unwrap();
+    assert_eq!(shown, expected, "every chunk of the other review arrived");
+    d.stop().await;
+}

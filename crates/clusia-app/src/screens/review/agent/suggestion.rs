@@ -236,14 +236,14 @@ fn on_edit(
     if let Some(reason) = read_only_reason(&tabs, &model, pr) {
         return not_sent(&mut toasts, &time, reason);
     }
-    let Some(line) = s.end_line.or(s.line) else {
+    let Some((line, start)) = s.anchor_lines() else {
         return not_sent(
             &mut toasts,
             &time,
             "This suggestion has no line to edit — accept it as it is, or dismiss it",
         );
     };
-    let start = s.start_line.filter(|start| *start < line);
+    let start = start.filter(|start| *start < line);
     let Some(tab) = tabs.0.get_mut(pr) else {
         return;
     };
@@ -297,15 +297,10 @@ fn on_edit(
     });
 }
 
-/// An accepted suggestion closes the editor that was editing it (a dismiss, or another
-/// suggestion, leaves it alone).
+/// A suggestion accepted or dismissed closes the editor that was editing it (another
+/// suggestion leaves it alone): there is nothing left to edit.
 pub(crate) fn close_edited(tabs: &mut ReviewTabs, tell: &AgentTell) {
-    let AgentTell::Handled {
-        pr,
-        id,
-        accepted: true,
-    } = tell
-    else {
+    let AgentTell::Handled { pr, id, .. } = tell else {
         return;
     };
     if let Some(tab) = tabs.0.get_mut(pr)
@@ -473,6 +468,38 @@ mod tests {
     }
 
     #[test]
+    fn a_dismiss_closes_the_editor_editing_that_suggestion() {
+        let mut app = app_with(suggestion(44));
+        let edit = testing::find::<SuggestionEdit>(&mut app, |_| true);
+        testing::activate(&mut app, edit);
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr()).ui.editor.is_some());
+        handled(&mut app, false);
+        assert!(testing::tab(&app, &pr()).ui.editor.is_none());
+    }
+
+    #[test]
+    fn edit_anchors_where_the_draft_item_will_be() {
+        let mut s = suggestion(44);
+        s.end_line = Some(46);
+        let mut app = app_with(s.clone());
+        let edit = testing::find::<SuggestionEdit>(&mut app, |_| true);
+        testing::activate(&mut app, edit);
+        testing::settle(&mut app);
+        let editor = testing::tab(&app, &pr()).ui.editor.expect("an open editor");
+        assert_eq!(
+            editor.target,
+            EditTarget::Suggestion {
+                id: ID.into(),
+                path: "src/auth/refresh.rs".into(),
+                start: None,
+                line: 44
+            }
+        );
+        assert_eq!(s.anchor_lines(), Some((44, None)));
+    }
+
+    #[test]
     fn edit_opens_the_composer_in_the_diff_and_accepts_the_edited_text() {
         let mut app = app_with(suggestion(44));
         let edit = testing::find::<SuggestionEdit>(&mut app, |_| true);
@@ -615,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn the_edited_text_is_dropped_only_by_an_accept_of_the_same_suggestion() {
+    fn the_edited_text_is_dropped_only_when_the_same_suggestion_is_handled() {
         let mut app = app_with(suggestion(44));
         let edit = testing::find::<SuggestionEdit>(&mut app, |_| true);
         testing::activate(&mut app, edit);
@@ -637,8 +664,8 @@ mod tests {
             }),
         );
         assert!(
-            testing::tab(&app, &pr()).ui.editor.is_some(),
-            "a dismiss does not close the edit"
+            testing::tab(&app, &pr()).ui.editor.is_none(),
+            "a dismissed suggestion has nothing left to edit"
         );
     }
 }

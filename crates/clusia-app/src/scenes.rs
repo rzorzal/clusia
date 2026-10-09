@@ -132,6 +132,9 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
             );
             world.resource_mut::<Model>().probe = ProbeState::Done(fixture::demo_probe());
         }
+        Scene::AgentChat => {
+            set_demo_config(world, &[("harness.program", "/opt/homebrew/bin/claude")])
+        }
         _ => {}
     }
     if scene != Scene::FirstRun {
@@ -326,6 +329,7 @@ mod tests {
     fn staged(scene: Scene) -> App {
         let mut app = testing::app(fixture::demo(NOW));
         stage(app.world_mut(), scene);
+        stage_snapshot(app.world_mut(), scene);
         testing::settle(&mut app);
         app
     }

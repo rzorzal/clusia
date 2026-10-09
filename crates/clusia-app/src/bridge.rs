@@ -1008,7 +1008,9 @@ async fn answer(
                 id: id.clone(),
                 body,
             };
-            suggestion_write(client, teller, cmd, pr, id, true).await?;
+            if suggestion_write(client, teller, cmd, pr.clone(), id, true).await? {
+                fetch_log(client, snap, open, teller, pr).await?;
+            }
         }
         Ask::DismissSuggestion { pr, id } => {
             let cmd = Command::DismissSuggestion {
@@ -1043,11 +1045,11 @@ async fn draft_write(
     Ok(())
 }
 
-/// Asks for the chat log of `pr` and tells it. The agent events that arrived while the reply
-/// was awaited are dropped: the log has what they said up to the running answer's last cut,
-/// and the chat asks the log again when that turn ends. Session states are not logged, so
-/// they are told after the log, whose guess at the state they correct. Every other buffered
-/// event is handled as usual.
+/// Asks for the chat log of `pr` and tells it. The agent events of `pr` that arrived while the
+/// reply was awaited are dropped: the log has what they said up to the running answer's last
+/// cut, and the chat asks the log again when that turn ends. Session states are not logged, so
+/// they are told after the log (the daemon tells the state of `pr` whenever its log is read).
+/// Every other buffered event, other reviews' agent events included, is handled as usual.
 async fn fetch_log(
     client: &mut Client,
     snap: &mut Snapshot,
@@ -1058,7 +1060,7 @@ async fn fetch_log(
     let reply = request(client, Command::GetAgentLog { pr: pr.clone() }).await?;
     let mut states = Vec::new();
     for (_, event) in client.take_events() {
-        if let Some(tell) = AgentTell::from_event(&event) {
+        if let Some(tell) = AgentTell::from_event(&event).filter(|tell| *tell.pr() == pr) {
             if matches!(tell, AgentTell::State { .. }) {
                 states.push(tell);
             }
@@ -1078,6 +1080,7 @@ async fn fetch_log(
 }
 
 /// `AcceptSuggestion` / `DismissSuggestion`: `Handled` when it went through, else a warning.
+/// True when an accept found the suggestion no longer waiting, so the chat must be read again.
 async fn suggestion_write(
     client: &mut Client,
     teller: &Teller,
@@ -1085,12 +1088,21 @@ async fn suggestion_write(
     pr: PrRef,
     id: String,
     accepted: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     match client.request(cmd).await {
         Ok(_) => teller.send(Tell::Agent(AgentTell::Handled { pr, id, accepted })),
-        // The daemon says `NotFound` for a suggestion that is no longer waiting (handled from
-        // another window or the CLI): for the card that is the same as done.
+        // The daemon says `NotFound` for a suggestion that is no longer waiting: accepted or
+        // dismissed from another window or the CLI. A dismiss wanted it gone, which it is; an
+        // accept added nothing, so the card must not say it did.
         Err(ClientError::Server(e)) if e.code == ErrorCode::NotFound => {
+            if accepted {
+                teller.send(Tell::Notice {
+                    text: "This suggestion is no longer waiting — nothing was added to your draft"
+                        .into(),
+                    warning: true,
+                });
+                return Ok(true);
+            }
             teller.send(Tell::Agent(AgentTell::Handled { pr, id, accepted }));
         }
         Err(ClientError::Server(e)) => teller.send(Tell::Notice {
@@ -1099,7 +1111,7 @@ async fn suggestion_write(
         }),
         Err(e) => return Err(lost(e)),
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Runs a long request on its own connection, so this one keeps reading events.
@@ -1608,10 +1620,16 @@ pub(crate) fn demo_answers(
                 }
             }
             Ask::MarkSeen(_) | Ask::RefreshStatus => {}
-            Ask::AgentLog { pr } if pr == fixture::demo_pr() => tells.push(Tell::AgentLog {
-                pr,
-                entries: fixture::demo_agent_log(now),
-            }),
+            Ask::AgentLog { pr } if pr == fixture::demo_pr() => {
+                tells.push(Tell::AgentLog {
+                    pr: pr.clone(),
+                    entries: fixture::demo_agent_log(now),
+                });
+                tells.push(Tell::Agent(AgentTell::State {
+                    pr,
+                    state: SessionStateKind::Ready,
+                }));
+            }
             Ask::AgentLog { .. } => {}
             Ask::AgentSend { pr, text } => tells.extend(demo_agent_reply(&pr, &text)),
             Ask::AgentCancel { pr } => tells.push(Tell::Agent(AgentTell::State {
@@ -2079,9 +2097,13 @@ mod tests {
             tells,
             [
                 Tell::AgentLog {
-                    pr,
+                    pr: pr.clone(),
                     entries: fixture::demo_agent_log(1_790_000_000)
                 },
+                Tell::Agent(AgentTell::State {
+                    pr,
+                    state: SessionStateKind::Ready
+                }),
                 Tell::Probe(fixture::demo_probe()),
             ]
         );

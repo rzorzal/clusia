@@ -258,11 +258,7 @@ fn waiting(shared: &Shared, pr: &PrRef, id: &str) -> Option<Suggestion> {
 
 /// Where a suggestion points: its line, or the end of its range with the start.
 fn anchor_of(suggestion: &Suggestion) -> Option<AnchorInput> {
-    let (line, start_line) = match (suggestion.line, suggestion.start_line, suggestion.end_line) {
-        (Some(line), _, _) => (line, None),
-        (None, Some(start), Some(end)) => (end, Some(start)),
-        _ => return None,
-    };
+    let (line, start_line) = suggestion.anchor_lines()?;
     Some(AnchorInput {
         path: suggestion.file.clone(),
         line,

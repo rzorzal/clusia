@@ -76,6 +76,12 @@ pub struct ChatModel {
     /// text only when the answer is cut by a tool, a suggestion or the end of the turn, so
     /// that log lacked what had streamed so far; once this turn ends the log has all of it.
     unfinished: Option<u64>,
+    /// The turn the log was last read again for: a turn whose end never reaches the log (cut
+    /// by the end of its review) is not read again a second time.
+    asked_again: Option<u64>,
+    /// Parallel to `lines`: the lines only this window has, which the log does not replay (a
+    /// refused send and why, a handled suggestion the log leaves out).
+    local: Vec<bool>,
 }
 
 impl Default for ChatModel {
@@ -92,6 +98,8 @@ impl Default for ChatModel {
             prefill: None,
             streaming: None,
             unfinished: None,
+            asked_again: None,
+            local: Vec::new(),
         }
     }
 }
@@ -144,7 +152,22 @@ impl ChatModel {
 
     fn push(&mut self, line: ChatLine) {
         self.streaming = None;
+        self.sync_local();
         self.lines.push(line);
+        self.local.push(false);
+    }
+
+    /// `lines` is public; a line added to it from outside counts as the log's.
+    fn sync_local(&mut self) {
+        self.local.resize(self.lines.len(), false);
+    }
+
+    /// A line the log will never have.
+    fn push_local(&mut self, line: ChatLine) {
+        self.push(line);
+        if let Some(last) = self.local.last_mut() {
+            *last = true;
+        }
     }
 
     pub fn push_me(&mut self, text: String) {
@@ -152,18 +175,36 @@ impl ChatModel {
     }
 
     pub fn push_error(&mut self, message: String) {
-        self.push(ChatLine::Error(message));
+        self.push_local(ChatLine::Error(message));
     }
 
-    /// Sets what became of a suggestion.
+    /// Sets what became of a suggestion. A handled suggestion leaves the log's replay, so its
+    /// line is kept as this window's own.
     pub fn mark(&mut self, id: &str, to: SuggestionState) {
-        for line in &mut self.lines {
+        self.sync_local();
+        for (line, local) in self.lines.iter_mut().zip(self.local.iter_mut()) {
             if let ChatLine::Suggestion { suggestion, state } = line
                 && suggestion.id == id
             {
                 *state = to;
+                if to != SuggestionState::Waiting {
+                    *local = true;
+                }
             }
         }
+    }
+
+    /// A send was refused: the question never reached the log either.
+    fn refused(&mut self, message: String) {
+        self.sync_local();
+        if let Some(at) = self
+            .lines
+            .iter()
+            .rposition(|l| matches!(l, ChatLine::Me(_)))
+        {
+            self.local[at] = true;
+        }
+        self.push_local(ChatLine::Error(message));
     }
 
     /// The agent speaking selects its tab, unless the user already chose one.
@@ -182,7 +223,10 @@ impl ChatModel {
                     (Some(ChatLine::Text(shown)), Some(open)) if open == *turn => {
                         shown.push_str(text);
                     }
-                    _ => self.lines.push(ChatLine::Text(text.clone())),
+                    _ => {
+                        self.lines.push(ChatLine::Text(text.clone()));
+                        self.sync_local();
+                    }
                 }
                 self.streaming = Some(*turn);
             }
@@ -223,12 +267,13 @@ impl ChatModel {
                 // The turn a replay caught running is over even when its `Done` was missed
                 // (it came while the log was being read): read the log again for the rest.
                 if matches!(state, SessionStateKind::Ready | SessionStateKind::None)
-                    && self.unfinished.take().is_some()
+                    && let Some(turn) = self.unfinished.take()
                 {
+                    self.asked_again = Some(turn);
                     return true;
                 }
             }
-            AgentTell::Refused { message, .. } => self.push(ChatLine::Error(message.clone())),
+            AgentTell::Refused { message, .. } => self.refused(message.clone()),
             AgentTell::Handled { id, accepted, .. } => self.mark(
                 id,
                 if *accepted {
@@ -245,14 +290,16 @@ impl ChatModel {
     fn ended(&mut self, turn: u64) -> bool {
         if self.unfinished == Some(turn) {
             self.unfinished = None;
+            self.asked_again = Some(turn);
             return true;
         }
         false
     }
 
-    /// Replaces the transcript with the log. A turn still running when it was read lacks the
-    /// text streamed since its last tool, suggestion or denial, so it is remembered in
-    /// `unfinished` to read the log again when it ends.
+    /// Replaces the transcript with the log, keeping this window's own lines after the log line
+    /// they followed. A turn still running when it was read lacks the text streamed since its
+    /// last tool, suggestion or denial, so it is remembered in `unfinished` to read the log
+    /// again when it ends. The state is not in the log: the daemon tells it after the log.
     fn replay(&mut self, entries: &[AgentLogEntry]) {
         let mut lines: Vec<ChatLine> = Vec::new();
         let mut streaming: Option<u64> = None;
@@ -287,7 +334,7 @@ impl ChatModel {
                 AgentLogEntry::Done { .. } | AgentLogEntry::Text { .. } => {}
             }
         }
-        self.unfinished = match entries.last() {
+        let unfinished = match entries.last() {
             None | Some(AgentLogEntry::Done { .. }) | Some(AgentLogEntry::Error { .. }) => None,
             Some(
                 AgentLogEntry::User { turn, .. }
@@ -297,15 +344,38 @@ impl ChatModel {
                 | AgentLogEntry::Suggestion { turn, .. },
             ) => Some(*turn),
         };
-        let running = self.unfinished.is_some();
-        self.state = if running {
-            SessionStateKind::Running
-        } else if entries.is_empty() {
-            SessionStateKind::None
-        } else {
-            SessionStateKind::Ready
-        };
-        self.lines = lines;
+        self.unfinished = unfinished.filter(|turn| self.asked_again != Some(*turn));
+        // Each kept line goes back after as many log lines as it followed before.
+        self.sync_local();
+        let mut kept: Vec<(usize, ChatLine)> = Vec::new();
+        let mut from_log = 0;
+        for (line, local) in self.lines.drain(..).zip(self.local.drain(..)) {
+            if local {
+                kept.push((from_log, line));
+            } else {
+                from_log += 1;
+            }
+        }
+        let mut merged = Vec::with_capacity(lines.len() + kept.len());
+        let mut flags = Vec::with_capacity(merged.capacity());
+        let mut kept = kept.into_iter().peekable();
+        for (at, line) in lines.into_iter().enumerate() {
+            while let Some((_, own)) = kept.next_if(|(after, _)| *after <= at) {
+                merged.push(own);
+                flags.push(true);
+            }
+            merged.push(line);
+            flags.push(false);
+        }
+        for (_, own) in kept {
+            merged.push(own);
+            flags.push(true);
+        }
+        if flags.last() == Some(&true) {
+            streaming = None;
+        }
+        self.lines = merged;
+        self.local = flags;
         self.streaming = streaming;
         self.resumed = !entries.is_empty();
     }
@@ -587,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_rebuilds_the_chat_and_the_state() {
+    fn replay_rebuilds_the_chat() {
         let entries = vec![
             AgentLogEntry::User {
                 at: 1,
@@ -637,23 +707,9 @@ mod tests {
             ]
         );
         assert!(chat.resumed);
-        assert_eq!(chat.state, SessionStateKind::Ready, "the last turn is done");
-
-        let mut stale = chats();
-        stale.apply(&AgentTell::State {
-            pr: pr(),
-            state: SessionStateKind::Running,
-        });
-        stale.replay(&pr(), &entries);
-        assert_eq!(
-            stale.state(&pr()),
-            SessionStateKind::Ready,
-            "the log is newer than a state seen before it"
-        );
 
         let mut running = chats();
         running.replay(&pr(), &entries[..3]);
-        assert_eq!(running.state(&pr()), SessionStateKind::Running);
         running.apply(&chunk(1, "is needed."));
         assert_eq!(
             running.0[&pr()].lines.last(),
@@ -664,7 +720,105 @@ mod tests {
         let mut empty = chats();
         empty.replay(&pr(), &[]);
         assert!(!empty.0[&pr()].resumed);
-        assert_eq!(empty.state(&pr()), SessionStateKind::None);
+    }
+
+    #[test]
+    fn a_replay_keeps_the_lines_only_this_window_has() {
+        let s = suggestion("sug-aaaaaaaaaaaa", 44);
+        let question = AgentLogEntry::User {
+            at: 1,
+            turn: 1,
+            text: "Is the lock needed?".into(),
+        };
+        let answer = AgentLogEntry::Text {
+            at: 2,
+            turn: 1,
+            text: "Yes.".into(),
+        };
+        let done = AgentLogEntry::Done {
+            at: 4,
+            turn: 1,
+            duration_ms: 900,
+        };
+        let mut chats = chats();
+        chats.replay(
+            &pr(),
+            &[
+                question.clone(),
+                answer.clone(),
+                AgentLogEntry::Suggestion {
+                    at: 3,
+                    turn: 1,
+                    suggestion: s.clone(),
+                },
+                done.clone(),
+            ],
+        );
+        chats.apply(&AgentTell::Handled {
+            pr: pr(),
+            id: s.id.clone(),
+            accepted: true,
+        });
+        chats.entry(&pr()).push_me("And now?".into());
+        chats.apply(&AgentTell::Refused {
+            pr: pr(),
+            message: "The agent is busy".into(),
+        });
+        chats.entry(&pr()).push_error("Not connected".into());
+        // The daemon's log leaves out a handled suggestion and never had the refused send.
+        chats.replay(&pr(), &[question, answer, done]);
+        assert_eq!(
+            chats.0[&pr()].lines,
+            [
+                ChatLine::Me("Is the lock needed?".into()),
+                ChatLine::Text("Yes.".into()),
+                ChatLine::Suggestion {
+                    suggestion: s,
+                    state: SuggestionState::Accepted
+                },
+                ChatLine::Me("And now?".into()),
+                ChatLine::Error("The agent is busy".into()),
+                ChatLine::Error("Not connected".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_replay_keeps_the_state_the_daemon_told() {
+        let mut chats = chats();
+        chats.apply(&AgentTell::State {
+            pr: pr(),
+            state: SessionStateKind::Queued,
+        });
+        chats.replay(
+            &pr(),
+            &[AgentLogEntry::User {
+                at: 1,
+                turn: 1,
+                text: "Is the lock needed?".into(),
+            }],
+        );
+        assert_eq!(chats.state(&pr()), SessionStateKind::Queued);
+        assert!(chats.0[&pr()].busy(), "the Stop button stays");
+    }
+
+    #[test]
+    fn a_turn_whose_end_never_reaches_the_log_is_asked_again_once() {
+        // A turn cut by the end of its review writes no end: its log stays unfinished.
+        let open = [AgentLogEntry::User {
+            at: 1,
+            turn: 1,
+            text: "Is the lock needed?".into(),
+        }];
+        let none = AgentTell::State {
+            pr: pr(),
+            state: SessionStateKind::None,
+        };
+        let mut chats = chats();
+        chats.replay(&pr(), &open);
+        assert!(chats.apply(&none));
+        chats.replay(&pr(), &open);
+        assert!(!chats.apply(&none), "no loop of log reads");
     }
 
     #[test]
@@ -790,7 +944,6 @@ mod tests {
                 },
             ],
         );
-        assert_eq!(caught.state(&pr()), SessionStateKind::Running);
         let ready = AgentTell::State {
             pr: pr(),
             state: SessionStateKind::Ready,

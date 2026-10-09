@@ -477,3 +477,33 @@ async fn closing_a_review_with_draft_items_keeps_its_session_and_its_turn() {
     );
     assert!(!FakeClaude::is_running(call.pid), "discarding ends it");
 }
+
+#[tokio::test]
+async fn reading_the_log_tells_where_the_session_stands() {
+    use clusia_protocol::SessionStateKind;
+    let state_is = |wanted: SessionStateKind| move |e: &Event| matches!(e, Event::SessionState { state, .. } if *state == wanted);
+    let w = world().await;
+    let _dir = use_fake(&w, Script::turns(vec![Turn::hanging(), Turn::answer("x")])).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    let mut watcher = watching(&w).await;
+    c.request(Command::GetAgentLog { pr: pr7() }).await.unwrap();
+    until(&mut watcher, state_is(SessionStateKind::None)).await;
+
+    c.request(send("first")).await.unwrap();
+    until(&mut watcher, state_is(SessionStateKind::Running)).await;
+    c.request(send("second")).await.unwrap();
+    until(&mut watcher, state_is(SessionStateKind::Queued)).await;
+    c.request(Command::GetAgentLog { pr: pr7() }).await.unwrap();
+    let told = until(&mut watcher, |e| matches!(e, Event::SessionState { .. })).await;
+    assert!(
+        matches!(
+            told.last(),
+            Some(Event::SessionState {
+                state: SessionStateKind::Queued,
+                ..
+            })
+        ),
+        "{told:?}"
+    );
+}
