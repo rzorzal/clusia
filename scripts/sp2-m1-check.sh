@@ -5,7 +5,8 @@
 #
 #   scripts/sp2-m1-check.sh --pr rzorzal/clusia#123     run the check (asks first)
 #   scripts/sp2-m1-check.sh --list                      print the steps and exit
-#   add --yes to skip the question below, for a run without a terminal
+#   add --yes to skip the question below; every step still asks you on the terminal, and
+#   without one each of those questions is answered no
 #
 # Needs Clusia installed (clusia on the PATH, signed in to GitHub) and Claude Code installed and
 # signed in. The window is started for you; look at it when a step says so.
@@ -18,11 +19,25 @@ passed=0
 failed=0
 ERR="$(mktemp -t sp2-m1-check.XXXXXX)"
 OLD_ON_OPEN=""
+CHANGED_ON_OPEN=0
+APP_PID=""
+# How many log entries there were before this run: only newer ones count.
+LOG_BEFORE=0
+# Set to wait at most this many seconds at every step, instead of each step's own time.
+WAIT_CAP="${SP2_CHECK_WAIT:-}"
 restore_settings() {
   # The check turns the summary on; the owner's own choice comes back when it ends.
-  if [ -n "$OLD_ON_OPEN" ]; then clusia config set harness.on_open "$OLD_ON_OPEN" >/dev/null 2>&1; fi
+  [ "$CHANGED_ON_OPEN" = 1 ] || return 0
+  if [ -n "$OLD_ON_OPEN" ]; then
+    clusia config set harness.on_open "$OLD_ON_OPEN" >/dev/null 2>&1
+  else
+    echo "harness.on_open is still 'summarize': its old value could not be read. Set it back with: clusia config set harness.on_open <wait|summarize>" >&2
+  fi
 }
-trap 'restore_settings; rm -f "$ERR" "$ERR.out"' EXIT
+close_window() {
+  if [ -n "$APP_PID" ]; then kill "$APP_PID" 2>/dev/null; fi
+}
+trap 'close_window; restore_settings; rm -f "$ERR" "$ERR.out"' EXIT
 
 STEPS=(
   "preflight: claude and clusia are installed, and the daemon answers"
@@ -46,7 +61,7 @@ check() {
 }
 
 wait_for() {
-  local what="$1" secs="$2" i=0
+  local what="$1" secs="${WAIT_CAP:-$2}" i=0
   shift 2
   while [ "$i" -lt "$secs" ]; do
     if "$@" >/dev/null 2>&1; then
@@ -87,12 +102,35 @@ confirm() {
 }
 
 log_has() { clusia --json agent log "$PR" 2>/dev/null | grep -q "$1"; }
-has_text() { log_has '"type":"text"'; }
+# The log's entries, one per line, in order.
+log_entries() {
+  clusia --json agent log "$PR" 2>/dev/null | awk '{ gsub(/\},\{"type"/, "}\n{\"type\""); print }' | grep '"type":'
+}
+log_count() { log_entries | wc -l | tr -d ' '; }
+log_grew() { [ "$(log_count)" -gt "$1" ]; }
+# An entry after the first $1 matches $2: what an earlier run left does not count.
+new_log_has() { log_entries | tail -n "+$(($1 + 1))" | grep -q "$2"; }
+has_new_text() { new_log_has "$LOG_BEFORE" '"type":"text"'; }
+# Asks the agent from the terminal; a Ctrl-C there ends the whole check.
+ask_agent() {
+  clusia ask "$PR" "$1" >"$ERR.out" 2>"$ERR"
+  local status=$?
+  if [ "$status" -eq 130 ]; then
+    echo "Interrupted: the check stops here."
+    exit 130
+  fi
+  return "$status"
+}
 has_suggestion_text() { grep -q 'Suggested comments:' "$ERR.out"; }
 agent_items() { clusia --json review status "$PR" 2>/dev/null | grep -io '"origin":"agent"' | wc -l | tr -d ' '; }
 
 app_binary() {
   local dir
+  # Set to run another window program instead of the installed one.
+  if [ -n "${SP2_CHECK_APP:-}" ]; then
+    [ -x "$SP2_CHECK_APP" ] && echo "$SP2_CHECK_APP"
+    return
+  fi
   for dir in /Applications "$HOME/Applications"; do
     if [ -x "$dir/Clusia.app/Contents/MacOS/clusia-app" ]; then
       echo "$dir/Clusia.app/Contents/MacOS/clusia-app"
@@ -108,14 +146,22 @@ step_preflight() {
   check "Claude Code answers" claude --version
   check "clusia is installed" command -v clusia
   check "the daemon answers (it is started if needed)" clusia daemon start
-  check "$PR is a pull request clusia can open" clusia open "$PR"
   OLD_ON_OPEN="$(clusia config get harness.on_open 2>/dev/null)"
-  echo "  harness.on_open is '$OLD_ON_OPEN'; it is set to summarize for this check and put back when it ends."
+  if [ -n "$OLD_ON_OPEN" ]; then
+    echo "  harness.on_open is '$OLD_ON_OPEN'; it is set to summarize for this check and put back when it ends."
+  else
+    echo "  harness.on_open could not be read; it is set to summarize for this check, and you set it back after."
+  fi
+  # Before the open, so that opening starts the summary.
   clusia config set harness.on_open summarize >/dev/null 2>&1
+  CHANGED_ON_OPEN=1
+  LOG_BEFORE="$(log_count)"
+  check "$PR is a pull request clusia can open" clusia open "$PR"
   local app
   if app="$(app_binary)"; then
     "$app" --review "$PR" >/dev/null 2>&1 &
-    pass "the window was started on $PR"
+    APP_PID=$!
+    pass "the window was started on $PR (it is closed when the check ends)"
   else
     fail "Clusia.app is installed (the window could not be started)"
   fi
@@ -124,13 +170,13 @@ step_preflight() {
 step_summary() {
   say "2. The summary"
   echo "  The agent starts by itself and summarizes the pull request."
-  wait_for "the agent wrote its summary (it is in the log)" 180 has_text
+  wait_for "the agent wrote its summary (it is in the log)" 180 has_new_text
   ask "Does the Agent tab of the window show that summary (the tab is selected when the agent speaks)?"
 }
 
 step_question() {
   say "3. A question"
-  clusia ask "$PR" "Open Cargo.toml and tell me the names of the workspace members. Be brief." >"$ERR.out" 2>"$ERR"
+  ask_agent "Open Cargo.toml and tell me the names of the workspace members. Be brief."
   check "the answer is not empty" test -s "$ERR.out"
   if grep -q '✓ Read' "$ERR"; then pass "clusia ask printed the file reads"; else fail "clusia ask printed no ✓ Read line"; fi
   ask "Did the window show the question's file reads (✓ Read …) and its answer?"
@@ -140,7 +186,7 @@ step_suggestion() {
   say "4. A suggested comment"
   local before after
   before="$(agent_items)"
-  clusia ask "$PR" "Suggest exactly one review comment on the line you find most questionable, as a clusia-suggestion block." >"$ERR.out" 2>"$ERR"
+  ask_agent "Suggest exactly one review comment on the line you find most questionable, as a clusia-suggestion block."
   if has_suggestion_text; then
     pass "the agent made a suggestion (clusia ask listed it)"
   else
@@ -160,14 +206,14 @@ step_resume() {
   say "5. Closing and reopening"
   echo "  Close the review tab (or the window), then open the review again from Home."
   ask "Did the chat come back with the earlier questions and answers?"
-  clusia ask "$PR" "In one short sentence: what was my first question in this session?" >"$ERR.out" 2>"$ERR"
+  ask_agent "In one short sentence: what was my first question in this session?"
   if [ -s "$ERR.out" ]; then pass "the agent answered after the reopen"; else fail "no answer after the reopen"; fi
   ask "Did that answer remember the earlier questions (the session continued)?"
 }
 
 step_denied() {
   say "6. A command is denied"
-  clusia ask "$PR" "Run the shell command 'cargo --version' and tell me its output." >"$ERR.out" 2>"$ERR"
+  ask_agent "Run the shell command 'cargo --version' and tell me its output."
   if grep -q '⊘ wanted to use' "$ERR"; then
     pass "clusia ask printed the denied line"
   else
@@ -190,8 +236,26 @@ step_end() {
     echo "  Skipped: the review was kept, with its draft. Discard it later with: clusia review discard $PR"
     return
   fi
-  clusia review discard "$PR" >/dev/null 2>&1
-  if clusia review status 2>/dev/null | grep -q "$PR"; then fail "the review is gone"; else pass "the review is gone"; fi
+  # A turn that is still running when the review is discarded shows that the session ends.
+  local before asking reviews
+  before="$(log_count)"
+  clusia ask "$PR" "Read every changed file of this pull request one by one, then give a one-paragraph summary of each." >/dev/null 2>&1 &
+  asking=$!
+  wait_for "a long question is running" 60 log_grew "$before"
+  if clusia review discard "$PR" >/dev/null 2>"$ERR"; then
+    pass "the review was discarded"
+  else
+    fail "the review was not discarded: $(cat "$ERR")"
+  fi
+  wait_for "the session ended: the running turn was stopped" 30 new_log_has "$before" 'Stopped because the review ended'
+  wait "$asking" 2>/dev/null
+  if ! reviews="$(clusia review status 2>"$ERR")"; then
+    fail "clusia review status answers: $(cat "$ERR")"
+  elif printf '%s\n' "$reviews" | grep -q "$PR"; then
+    fail "the review is gone"
+  else
+    pass "the review is gone"
+  fi
   if log_has '"type":"user"'; then pass "the agent log is kept"; else fail "the agent log is gone"; fi
   echo "  Opening the pull request again starts a new session with a new summary."
 }

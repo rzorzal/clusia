@@ -757,6 +757,18 @@ mod review_flow {
         fn fake_dir(&self) -> PathBuf {
             self.tmp.path().join("fake")
         }
+
+        /// Every GitHub read now takes `secs` and then fails.
+        fn slow_github(&self, secs: u64) {
+            self._rt.block_on(
+                Mock::given(method("GET"))
+                    .respond_with(
+                        ResponseTemplate::new(500).set_delay(std::time::Duration::from_secs(secs)),
+                    )
+                    .with_priority(1)
+                    .mount(&self._server),
+            );
+        }
     }
 
     #[test]
@@ -846,8 +858,6 @@ mod review_flow {
             );
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        // Past the first call the CLI is already waiting for events.
-        std::thread::sleep(std::time::Duration::from_millis(300));
         // SAFETY: signals a child this test spawned and still owns.
         assert_eq!(unsafe { libc::kill(asking.id() as i32, libc::SIGINT) }, 0);
         let asked = asking.wait_with_output().unwrap();
@@ -862,6 +872,21 @@ mod review_flow {
         // The turn lives in the daemon: it is still running until it is stopped.
         let o = w.run(&["agent", "stop", "acme/widgets#7"]);
         assert!(o.status.success(), "{}", stderr(&o));
+    }
+
+    #[test]
+    fn ctrl_c_while_the_review_opens_says_nothing_was_asked() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        w.slow_github(8);
+        let asking = w.spawn(&["ask", "acme/widgets#7", "wait for me"]);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        // SAFETY: signals a child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(asking.id() as i32, libc::SIGINT) }, 0);
+        let asked = asking.wait_with_output().unwrap();
+        let said = stderr(&asked);
+        assert_eq!(asked.status.code(), Some(130), "{said}");
+        assert!(said.contains("nothing was asked"), "{said}");
+        assert!(FakeClaude::calls(&w.fake_dir()).is_empty());
     }
 
     #[test]

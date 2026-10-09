@@ -37,11 +37,12 @@ async fn main() -> ExitCode {
     match run::run(&paths, home.as_deref(), cli.command, cli.json).await {
         Ok(out) => {
             // A command that streamed its output already printed everything.
-            if out.json.is_null() {
-            } else if cli.json {
-                println!("{}", out.json);
-            } else {
-                println!("{}", out.human);
+            if !out.json.is_null() {
+                if cli.json {
+                    println!("{}", out.json);
+                } else {
+                    println!("{}", out.human);
+                }
             }
             ExitCode::SUCCESS
         }

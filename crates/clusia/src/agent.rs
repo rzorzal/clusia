@@ -9,6 +9,7 @@ use clusia_protocol::{
     SessionStateKind, Suggestion, topics,
 };
 use serde_json::json;
+use tokio::signal::unix::{SignalKind, signal};
 
 use crate::review::parse_pr;
 use crate::run::{CliError, Output, connect, unexpected};
@@ -71,7 +72,10 @@ impl Turn {
             && !self.said_waiting
         {
             self.said_waiting = true;
-            writeln!(err, "waiting: the agent is finishing its current turn…")?;
+            writeln!(
+                err,
+                "waiting for its turn: another question is still running…"
+            )?;
         }
         let ours = match event {
             Event::AgentChunk { pr, turn, .. }
@@ -194,6 +198,14 @@ fn io_error(e: io::Error) -> CliError {
     CliError::Other(e.to_string())
 }
 
+/// The turn runs in the daemon: Ctrl-C only stops watching it.
+fn detach(pr: &PrRef) -> ! {
+    eprintln!(
+        "Detached: the agent keeps working on this turn. Stop it with: clusia agent stop {pr}"
+    );
+    std::process::exit(130);
+}
+
 pub(crate) async fn ask(
     paths: &Paths,
     home: Option<&Path>,
@@ -206,23 +218,31 @@ pub(crate) async fn ask(
     if question.trim().is_empty() {
         return Err(CliError::Other("a question is required".into()));
     }
+    // Caught from here on: a Ctrl-C that came before the first poll of a handler would end the
+    // process without a word.
+    let mut interrupt = signal(SignalKind::interrupt()).map_err(io_error)?;
     let mut client = connect(paths, home).await?;
-    client
-        .request(Request::Subscribe {
-            topics: vec![topics::AGENT.into()],
-        })
-        .await?;
-    // The agent reads the review's worktree, which opening prepares.
-    client
-        .request(Request::OpenReview { pr: pr.clone() })
-        .await?;
-    let turn = match client
-        .request(Request::AgentSend {
-            pr: pr.clone(),
-            text: question,
-        })
-        .await
-    {
+    let opened = async {
+        client
+            .request(Request::Subscribe {
+                topics: vec![topics::AGENT.into()],
+            })
+            .await?;
+        // The agent reads the review's worktree, which opening prepares.
+        client.request(Request::OpenReview { pr: pr.clone() }).await
+    };
+    tokio::select! {
+        opened = opened => { opened?; }
+        _ = interrupt.recv() => {
+            eprintln!("Interrupted: nothing was asked.");
+            std::process::exit(130);
+        }
+    }
+    let sent = tokio::select! {
+        sent = client.request(Request::AgentSend { pr: pr.clone(), text: question }) => sent,
+        _ = interrupt.recv() => detach(&pr),
+    };
+    let turn = match sent {
         Ok(Reply::AgentTurn { turn }) => turn,
         Ok(other) => return Err(unexpected(other)),
         Err(ClientError::Server(e)) if e.code == ErrorCode::Busy => {
@@ -234,18 +254,10 @@ pub(crate) async fn ask(
     };
     let mut run = Turn::new(pr, turn, json);
     let (mut out, mut err) = (io::stdout(), io::stderr());
-    // The turn runs in the daemon: Ctrl-C only stops watching it.
-    let mut interrupt = std::pin::pin!(tokio::signal::ctrl_c());
     loop {
         let (_, event) = tokio::select! {
             event = client.next_event() => event?,
-            _ = &mut interrupt => {
-                eprintln!(
-                    "Detached: the agent keeps working on this turn. Stop it with: clusia agent stop {}",
-                    run.pr()
-                );
-                std::process::exit(130);
-            }
+            _ = interrupt.recv() => detach(run.pr()),
         };
         if let Flow::Finished = run.feed(&event, &mut out, &mut err).map_err(io_error)? {
             break;
@@ -385,7 +397,7 @@ mod tests {
         turn.feed(&other, &mut out, &mut err).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
-            "waiting: the agent is finishing its current turn…\n"
+            "waiting for its turn: another question is still running…\n"
         );
         assert!(out.is_empty());
         let (mut json, mut out, mut err) = run(true);
