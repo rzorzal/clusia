@@ -170,6 +170,17 @@ impl Permissions {
             .is_some_and(|last| turn <= *last)
     }
 
+    /// The review ended: its last turn is no longer kept. Only once no turn of it runs, since
+    /// a stopped program may still ask until it is gone.
+    pub(crate) fn forget_review(&self, shared: &Shared, pr: &PrRef) {
+        if shared.sessions.running_turn(pr).is_none() {
+            self.closed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(pr);
+        }
+    }
+
     fn forget_turn(&self, pr: &PrRef, turn: u64) {
         self.told
             .lock()
@@ -1485,5 +1496,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!decision.allow);
+    }
+
+    #[tokio::test]
+    async fn the_end_of_a_review_forgets_its_last_turn_once_nothing_runs() {
+        let lab = lab();
+        cancel_turn(&lab.shared, &pr(7), 1).await;
+        // The review ends while its stopped program is still running: it may not ask.
+        agent::forget(&lab.shared, &pr(7));
+        assert!(lab.shared.permissions.is_closed(&pr(7), 1));
+        lab.shared.sessions.pretend_stopped(&pr(7));
+        agent::stop(&lab.shared, &pr(7)).await;
+        assert!(!lab.shared.permissions.is_closed(&pr(7), 1));
+        assert!(
+            lab.shared.permissions.closed.lock().unwrap().is_empty(),
+            "nothing is kept for a review that ended"
+        );
     }
 }

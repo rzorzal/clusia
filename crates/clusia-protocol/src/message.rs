@@ -257,6 +257,13 @@ pub enum Command {
     GetPermissions {
         pr: PrRef,
     },
+    /// This connection shows the review (`held`) or stopped showing it. While some connection
+    /// holds a review, its permission requests and finished turns are not sent to the tray: the
+    /// window shows them. A connection lets go of everything it held when it ends.
+    HoldReview {
+        pr: PrRef,
+        held: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2558,6 +2565,13 @@ mod tests {
             request(Command::GetPermissions { pr: acme() }),
             r#"{"type":"request","id":4,"cmd":{"get_permissions":{"pr":"acme/widgets#7"}}}"#
         );
+        assert_eq!(
+            request(Command::HoldReview {
+                pr: acme(),
+                held: true,
+            }),
+            r#"{"type":"request","id":4,"cmd":{"hold_review":{"pr":"acme/widgets#7","held":true}}}"#
+        );
         let reply = |reply| {
             wire(&ServerMessage::Response {
                 id: 4,
@@ -2693,6 +2707,10 @@ mod tests {
             },
             Command::GetRules { pr: acme() },
             Command::GetPermissions { pr: acme() },
+            Command::HoldReview {
+                pr: acme(),
+                held: false,
+            },
         ] {
             round_trip(ClientMessage::Request { id: 1, cmd });
         }

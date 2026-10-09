@@ -369,6 +369,15 @@ impl Sessions {
         });
     }
 
+    /// Forgets the running turn of `pr`, as when its program ended.
+    #[cfg(test)]
+    pub(crate) fn pretend_stopped(&self, pr: &PrRef) {
+        let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(slot) = table.get_mut(pr) {
+            slot.running = None;
+        }
+    }
+
     /// Records whether the program of `turn` runs in the sandbox, if `turn` still runs.
     pub(crate) fn set_turn_sandbox(&self, pr: &PrRef, turn: u64, sandbox: bool) {
         let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());

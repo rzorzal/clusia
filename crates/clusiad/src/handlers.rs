@@ -180,6 +180,8 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::RevokeRule { pr, rule } => permissions::revoke(shared, &pr, &rule).await,
         Command::GetRules { pr } => permissions::rules(shared, &pr),
         Command::GetPermissions { pr } => permissions::waiting_for(shared, &pr),
+        // The connection records the hold once this succeeds.
+        Command::HoldReview { .. } => Outcome::Ok(Reply::Ack),
     }
 }
 

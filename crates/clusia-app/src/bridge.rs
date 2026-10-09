@@ -706,6 +706,9 @@ async fn session(
         snap.sync = Some(s);
     }
     teller.send(Tell::Snapshot(Box::new(snap.clone())));
+    // A new connection holds nothing yet.
+    let mut held = HashSet::new();
+    hold_open_reviews(&mut client, open, &mut held).await?;
     // The daemon may have restarted while this window was away: its open reviews read again.
     let reopened: Vec<PrRef> = open_set(open).iter().cloned().collect();
     for pr in reopened {
@@ -748,11 +751,44 @@ async fn session(
             }
         }
         fetch(&mut client, &mut snap, todo).await?;
+        hold_open_reviews(&mut client, open, &mut held).await?;
         if snap != last {
             teller.send(Tell::Snapshot(Box::new(snap.clone())));
             last = snap.clone();
         }
     }
+}
+
+/// Makes this connection hold exactly the reviews open in the window, so the daemon tells the
+/// window, not the tray, about them. Opening runs on a worker connection, whose hold ends with
+/// it; this one lasts as long as the window is connected.
+async fn hold_open_reviews(
+    client: &mut Client,
+    open: &OpenSet,
+    held: &mut HashSet<PrRef>,
+) -> Result<(), String> {
+    let wanted = open_set(open).clone();
+    let changes: Vec<(PrRef, bool)> = wanted
+        .difference(held)
+        .map(|pr| (pr.clone(), true))
+        .chain(held.difference(&wanted).map(|pr| (pr.clone(), false)))
+        .collect();
+    for (pr, hold) in changes {
+        request(
+            client,
+            Command::HoldReview {
+                pr: pr.clone(),
+                held: hold,
+            },
+        )
+        .await?;
+        if hold {
+            held.insert(pr);
+        } else {
+            held.remove(&pr);
+        }
+    }
+    Ok(())
 }
 
 /// Review events for the open tabs: load steps go to Bevy as they come; a changed or outdated

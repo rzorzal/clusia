@@ -6,14 +6,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use clusia_app::bridge::{self, AgentTell, Ask, Link, Tell};
+use clusia_app::bridge::{self, AgentTell, Ask, Link, PermissionTell, Tell};
 use clusia_app::fixture;
 use clusia_app::snapshot::{GiphyKey, Snapshot};
 use clusia_core::config::Theme as ThemeChoice;
 use clusia_core::{Config, DraftKind, PrRef, Review, ReviewCache, ReviewState, Verdict};
 use clusia_harness::testkit::{FakeClaude, Script, Turn};
 use clusia_protocol::{
-    Command, GithubLogin, LoadStepKind, Reply, Secret, StepStatus, WindowTarget,
+    Command, Event, GithubLogin, LoadStepKind, PermissionAnswerKind, Reply, Secret, StepStatus,
+    WindowTarget, topics,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -773,5 +774,119 @@ async fn reading_one_reviews_log_keeps_another_reviews_live_answer() {
     }
     reader.join().unwrap();
     assert_eq!(shown, expected, "every chunk of the other review arrived");
+    d.stop().await;
+}
+
+/// Every tray event `watcher` received within `quiet` of the last one.
+async fn tray_events(watcher: &mut clusia_protocol::Client, quiet: Duration) -> Vec<Event> {
+    let mut seen = Vec::new();
+    while let Ok(Ok((_, event))) = tokio::time::timeout(quiet, watcher.next_event()).await {
+        seen.push(event);
+    }
+    seen
+}
+
+/// One turn of the agent for `pr` in the window: it asks a permission as the bridge would, the
+/// window answers it, and the turn ends.
+async fn turn_with_a_request(d: &common::Daemon, link: &Link, pr: &PrRef, turn: u64) {
+    link.ask
+        .send(Ask::AgentSend {
+            pr: pr.clone(),
+            text: "Run the tests".into(),
+        })
+        .unwrap();
+    next(link, |t| {
+        matches!(
+            t,
+            Tell::Agent(AgentTell::State {
+                state: clusia_protocol::SessionStateKind::Running,
+                ..
+            })
+        )
+    });
+    let mut asker = d.client().await;
+    let ask = Command::PermissionAsk {
+        pr: pr.clone(),
+        turn,
+        tool: "Bash".into(),
+        input: serde_json::json!({"command": "cargo test"}),
+    };
+    let asked = tokio::spawn(async move { asker.request(ask).await });
+    let id = match next(link, |t| {
+        matches!(t, Tell::Permission(PermissionTell::Requested(_)))
+    }) {
+        Tell::Permission(PermissionTell::Requested(request)) => request.id,
+        _ => unreachable!(),
+    };
+    link.ask
+        .send(Ask::PermissionAnswer {
+            id,
+            answer: PermissionAnswerKind::Once,
+        })
+        .unwrap();
+    assert!(matches!(
+        asked.await.unwrap(),
+        Ok(Reply::PermissionDecision { allow: true, .. })
+    ));
+    next(link, |t| matches!(t, Tell::Agent(AgentTell::Done { .. })));
+}
+
+async fn tray_watcher(d: &common::Daemon) -> clusia_protocol::Client {
+    let mut watcher = d.client().await;
+    watcher
+        .request(Command::Subscribe {
+            topics: vec![topics::TRAY.into()],
+        })
+        .await
+        .unwrap();
+    watcher
+}
+
+/// The notifications among `events`: a banner, or an entry the inbox counts.
+fn notified(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Notify { title, .. } => Some(title.clone()),
+            Event::InboxChanged { unseen } => Some(format!("inbox: {unseen}")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_review_open_in_the_window_sends_nothing_to_the_tray() {
+    let dir = tempfile::tempdir().unwrap();
+    let pr = seed_agent_review(dir.path(), 9);
+    let d = common::Daemon::start_in(dir).await;
+    let slow = || Turn::answer("Ran them.").delay_ms(700);
+    use_fake_claude(&d, Script::turns(vec![slow(), slow()])).await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask.send(Ask::OpenCached(pr.clone())).unwrap();
+
+    let mut watcher = tray_watcher(&d).await;
+    turn_with_a_request(&d, &link, &pr, 1).await;
+    let seen = tray_events(&mut watcher, Duration::from_millis(500)).await;
+    assert_eq!(
+        notified(&seen),
+        Vec::<String>::new(),
+        "neither the request nor the end goes to the tray"
+    );
+
+    // The daemon restarts: the window holds its reviews again.
+    let dir = d.stop().await;
+    next(&link, |t| matches!(t, Tell::Lost(_)));
+    let d = common::Daemon::start_in(dir).await;
+    link.ask.send(Ask::Reconnect).unwrap();
+    snapshot_where(&link, |s| s.lists_loaded);
+    let mut watcher = tray_watcher(&d).await;
+    turn_with_a_request(&d, &link, &pr, 2).await;
+    let seen = tray_events(&mut watcher, Duration::from_millis(500)).await;
+    assert_eq!(
+        notified(&seen),
+        Vec::<String>::new(),
+        "still held after a reconnect"
+    );
     d.stop().await;
 }

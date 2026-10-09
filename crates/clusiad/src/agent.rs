@@ -339,6 +339,7 @@ pub(crate) async fn notify_finished(shared: &Shared, pr: &PrRef, turn: u64) {
 /// may be waiting for that lock and would not see the stop while it is held.
 pub(crate) async fn stop(shared: &Shared, pr: &PrRef) {
     shared.sessions.end(shared, pr).await;
+    shared.permissions.forget_review(shared, pr);
 }
 
 /// The review is gone: what was still waiting is dismissed and the summary forgotten, so a later
@@ -356,6 +357,7 @@ pub(crate) fn forget(shared: &Shared, pr: &PrRef) {
         state.last_summary_head = None;
         state.rules.clear();
     });
+    shared.permissions.forget_review(shared, pr);
     shared.publish(
         topics::AGENT,
         Event::RulesChanged {
