@@ -76,7 +76,7 @@ async fn the_process_denies_without_a_daemon_and_exits_when_stdin_closes() {
 }
 
 #[tokio::test]
-async fn a_bad_socket_flag_set_is_refused() {
+async fn a_bad_flag_set_is_refused() {
     let output = Command::new(env!("CARGO_BIN_EXE_clusiad"))
         .args(["permission-bridge", "--turn", "x"])
         .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")

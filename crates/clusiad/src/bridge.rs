@@ -10,9 +10,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clusia_core::PrRef;
-use clusia_protocol::{Client, ClientError, Command, Reply};
+use clusia_protocol::{Client, ClientError, Command, MAX_LINE_BYTES, Reply};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
@@ -72,7 +74,7 @@ impl Forward for SocketForward {
         };
         match client.request(ask).await {
             Ok(Reply::PermissionDecision { allow, message }) => Verdict { allow, message },
-            Ok(other) => unreachable(format!("unexpected reply {other:?}")),
+            Ok(_) => unreachable("the daemon gave an unexpected answer".to_string()),
             Err(ClientError::Server(e)) => {
                 Verdict::deny(format!("Clúsia refused the request: {}", e.message))
             }
@@ -167,10 +169,17 @@ async fn answer_call<F: Forward>(forward: &F, id: Value, params: Value) -> Value
         return failure(&id, -32602, "unknown tool");
     }
     let arguments = params.get("arguments").unwrap_or(&Value::Null);
-    let input = arguments.get("input").cloned().unwrap_or_else(|| json!({}));
-    let verdict = match arguments.get("tool_name").and_then(Value::as_str) {
-        Some(tool) => forward.forward(tool, &input).await,
-        None => Verdict::deny("The request did not say which tool it is for.".into()),
+    let tool = arguments.get("tool_name").and_then(Value::as_str);
+    let (verdict, input) = match (tool, arguments.get("input")) {
+        (Some(tool), Some(input)) => (forward.forward(tool, input).await, input.clone()),
+        (None, _) => (
+            Verdict::deny("The request did not say which tool it is for.".into()),
+            json!({}),
+        ),
+        (Some(_), None) => (
+            Verdict::deny("The request did not carry the tool's input.".into()),
+            json!({}),
+        ),
     };
     let text = decision_text(&verdict, &input);
     result(&id, json!({"content": [{"type": "text", "text": text}]}))
@@ -182,6 +191,39 @@ async fn write_line<W: AsyncWrite + Unpin>(out: &Mutex<W>, value: &Value) -> io:
     let mut out = out.lock().await;
     out.write_all(line.as_bytes()).await?;
     out.flush().await
+}
+
+/// Reads one line into `line`, at most `MAX_LINE_BYTES` of it. `None` at the end of the
+/// input; `Some(false)` for a line that was too long, which is read to its end and dropped.
+async fn read_line<R: AsyncBufRead + Unpin>(
+    input: &mut R,
+    line: &mut Vec<u8>,
+) -> io::Result<Option<bool>> {
+    line.clear();
+    let n = (&mut *input)
+        .take(MAX_LINE_BYTES + 1)
+        .read_until(b'\n', line)
+        .await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    // A newline within the limit ends the line; so does the end of the input.
+    if line.ends_with(b"\n") || line.len() as u64 <= MAX_LINE_BYTES {
+        return Ok(Some(true));
+    }
+    while !line.ends_with(b"\n") {
+        line.clear();
+        if (&mut *input)
+            .take(MAX_LINE_BYTES)
+            .read_until(b'\n', line)
+            .await?
+            == 0
+        {
+            break;
+        }
+    }
+    line.clear();
+    Ok(Some(false))
 }
 
 /// Serves one MCP client until its input ends. Calls run side by side, so a request waiting
@@ -197,10 +239,9 @@ where
     let output = Arc::new(Mutex::new(output));
     let mut calls = JoinSet::new();
     let mut line = Vec::new();
-    loop {
-        line.clear();
-        if input.read_until(b'\n', &mut line).await? == 0 {
-            break;
+    while let Some(fits) = read_line(&mut input, &mut line).await? {
+        if !fits {
+            continue;
         }
         let Ok(message) = serde_json::from_slice::<Value>(&line) else {
             continue;
@@ -441,6 +482,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_line_too_long_is_skipped() {
+        let mut p = pipes(Scripted::new(true, None));
+        // A request that would be answered, were it not too long.
+        let pad = "a".repeat(MAX_LINE_BYTES as usize);
+        let long =
+            json!({"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {"pad": pad}});
+        let writer = tokio::spawn(async move {
+            p.say(long).await;
+            p
+        });
+        let mut p = writer.await.unwrap();
+        p.say(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .await;
+        assert_eq!(p.hear().await["id"], 1, "the long line got no answer");
+    }
+
+    #[tokio::test]
+    async fn a_call_without_input_is_denied_not_forwarded() {
+        let scripted = Scripted::new(true, None);
+        let mut p = pipes(scripted.clone());
+        p.say(json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+            "params": {"name": "approve", "arguments": {"tool_name": "Bash"}}}))
+            .await;
+        assert_eq!(decision(&p.hear().await)["behavior"], "deny");
+        assert!(scripted.asked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_call_waiting_for_the_reviewer_holds_nothing_else_up() {
         let mut p = pipes(Silent);
         p.say(call(1, "Bash", json!({"command": "make"}))).await;
@@ -554,7 +623,14 @@ mod tests {
     #[tokio::test]
     async fn a_reply_that_is_not_a_decision_is_a_denial() {
         let (_dir, socket, _commands) = daemon_that(|_| Outcome::Ok(Reply::Ack)).await;
-        assert!(!forwarding(socket).forward("Bash", &json!({})).await.allow);
+        let verdict = forwarding(socket).forward("Bash", &json!({})).await;
+        assert!(!verdict.allow);
+        let message = verdict.message.unwrap();
+        assert!(
+            message.contains("the daemon gave an unexpected answer"),
+            "{message}"
+        );
+        assert!(!message.contains("Ack"), "no debug output: {message}");
     }
 
     #[tokio::test]
