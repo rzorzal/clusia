@@ -201,6 +201,18 @@ impl Home {
         stdin: Option<&str>,
     ) -> Output {
         use std::io::Write;
+        let mut child = self.spawn_github(api, token, args);
+        {
+            let mut input = child.stdin.take().unwrap();
+            if let Some(s) = stdin {
+                input.write_all(s.as_bytes()).unwrap();
+            }
+        }
+        child.wait_with_output().unwrap()
+    }
+
+    /// Starts `clusia args` against `api` with piped stdio and returns it still running.
+    fn spawn_github(&self, api: &str, token: Option<&str>, args: &[&str]) -> std::process::Child {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clusia"));
         cmd.arg("--home")
             .arg(self.dir.path())
@@ -218,14 +230,7 @@ impl Home {
         if let Some(t) = token {
             cmd.env("CLUSIA_GITHUB_TOKEN", t);
         }
-        let mut child = cmd.spawn().unwrap();
-        {
-            let mut input = child.stdin.take().unwrap();
-            if let Some(s) = stdin {
-                input.write_all(s.as_bytes()).unwrap();
-            }
-        }
-        child.wait_with_output().unwrap()
+        cmd.spawn().unwrap()
     }
 }
 
@@ -744,6 +749,11 @@ mod review_flow {
             self.home.clusia_github(&self.api, Some("tok"), args, None)
         }
 
+        /// Starts `clusia args` the way `run` does and leaves it running.
+        fn spawn(&self, args: &[&str]) -> std::process::Child {
+            self.home.spawn_github(&self.api, Some("tok"), args)
+        }
+
         fn fake_dir(&self) -> PathBuf {
             self.tmp.path().join("fake")
         }
@@ -822,6 +832,36 @@ mod review_flow {
                 stderr(&asked)
             );
         });
+    }
+
+    #[test]
+    fn ctrl_c_on_ask_only_detaches_and_says_how_to_stop() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        let mut asking = w.spawn(&["ask", "acme/widgets#7", "wait for me"]);
+        let start = std::time::Instant::now();
+        while FakeClaude::calls(&w.fake_dir()).is_empty() {
+            assert!(
+                start.elapsed().as_secs() < 30,
+                "the fake claude never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Past the first call the CLI is already waiting for events.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // SAFETY: signals a child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(asking.id() as i32, libc::SIGINT) }, 0);
+        let asked = asking.wait_with_output().unwrap();
+        let hint = stderr(&asked);
+        assert_eq!(
+            hint.matches("clusia agent stop acme/widgets#7").count(),
+            1,
+            "{hint}"
+        );
+        assert!(hint.contains("keeps working"), "{hint}");
+        assert_eq!(asked.status.code(), Some(130), "{hint}");
+        // The turn lives in the daemon: it is still running until it is stopped.
+        let o = w.run(&["agent", "stop", "acme/widgets#7"]);
+        assert!(o.status.success(), "{}", stderr(&o));
     }
 
     #[test]

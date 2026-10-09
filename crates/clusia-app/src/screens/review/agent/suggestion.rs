@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
 use clusia_core::{PrRef, Side, can_comment};
 use clusia_protocol::Suggestion;
+use clusia_view::diff::{parse_patch, row_of};
 
 use super::model::{SuggestionState, place_of};
 use super::panel::pill;
@@ -246,18 +247,21 @@ fn on_edit(
     let Some(tab) = tabs.0.get_mut(pr) else {
         return;
     };
-    let in_diff = tab.ready().is_some_and(|ready| {
+    let patch = tab.ready().and_then(|ready| {
         ready
             .view
             .diff
             .iter()
             .find(|f| f.path == s.file)
             .and_then(|f| f.patch.as_deref())
-            .is_some_and(|patch| {
-                can_comment(patch, Side::Right, line)
-                    && start.is_none_or(|start| can_comment(patch, Side::Right, start))
-            })
     });
+    let in_diff = patch.is_some_and(|patch| {
+        can_comment(patch, Side::Right, line)
+            && start.is_none_or(|start| can_comment(patch, Side::Right, start))
+    });
+    // The Diff draws its rows in steps; the composer sits under the row of `line`, so that row
+    // (and the ones above it) must be among the drawn ones.
+    let row_end = patch.and_then(|patch| row_of(&parse_patch(patch), Side::Right, line));
     if !in_diff {
         return not_sent(
             &mut toasts,
@@ -276,6 +280,9 @@ fn on_edit(
         );
     }
     show_file(&mut tab.ui, &s.file);
+    if let Some(row) = row_end {
+        tab.ui.shown = tab.ui.shown.max((row + 1).div_ceil(SHOW_STEP) * SHOW_STEP);
+    }
     tab.ui.editor = Some(Editor {
         target: EditTarget::Suggestion {
             id: s.id.clone(),
@@ -515,6 +522,36 @@ mod tests {
             "the editor closes"
         );
         assert!(testing::shows(&mut app, "Added to your draft"));
+    }
+
+    #[test]
+    fn editing_a_suggestion_deep_in_a_long_diff_shows_its_row() {
+        let mut s = suggestion(1_203);
+        s.file = "src/big.rs".into();
+        let mut app = app_with(s);
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let tab = tabs.0.get_mut(&pr()).unwrap();
+            let crate::review_state::Phase::Ready(ready) = &mut tab.phase else {
+                panic!("ready")
+            };
+            let patch: String = std::iter::once("@@ -1,1300 +1,1300 @@\n".to_string())
+                .chain((1..=1_300).map(|n| format!(" line {n}\n")))
+                .collect();
+            let mut file = ready.view.diff[0].clone();
+            file.path = "src/big.rs".into();
+            file.patch = Some(patch);
+            ready.view.diff.push(file);
+        }
+        let edit = testing::find::<SuggestionEdit>(&mut app, |_| true);
+        testing::activate(&mut app, edit);
+        let tab = testing::tab(&app, &pr());
+        assert!(tab.ui.editor.is_some());
+        assert_eq!(
+            tab.ui.shown,
+            3 * SHOW_STEP,
+            "row 1203 is drawn, so the composer under it is"
+        );
     }
 
     #[test]

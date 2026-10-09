@@ -8,9 +8,9 @@ use clusia_core::{
     ReviewInfo, ReviewState, ReviewThread, Role, Side, ThreadPost,
 };
 use clusia_protocol::{
-    AuthInfo, FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness, HarnessKind, NewsItem,
-    NewsKind, PermissionStatus, RepoFolder, ReviewSummary, ReviewView, SyncState, SyncStatus,
-    TokenSource,
+    AgentLogEntry, AuthInfo, FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness,
+    HarnessKind, NewsItem, NewsKind, PermissionStatus, ProbeResult, RepoFolder, ReviewSummary,
+    ReviewView, Suggestion, SyncState, SyncStatus, TokenSource,
 };
 
 use crate::snapshot::{GiphyKey, Snapshot};
@@ -448,6 +448,101 @@ fn demo_conversation(now: i64) -> PrConversation {
     }
 }
 
+/// What the demo agent suggests (mockup `AgentChat.png`).
+pub fn demo_suggestion() -> Suggestion {
+    Suggestion {
+        id: "sug-5f0c1d2e3a4b".into(),
+        file: "src/auth/refresh.rs".into(),
+        line: Some(44),
+        start_line: None,
+        end_line: None,
+        body: "Re-check `expires_at` after taking the lock, so callers that waited reuse the token the first one fetched.".into(),
+    }
+}
+
+/// Every suggestion the demo agent can make (`--demo` accepts them by id).
+pub fn demo_suggestions() -> Vec<Suggestion> {
+    vec![demo_suggestion()]
+}
+
+/// A good harness test: Claude Code answered in 1.8 s.
+pub fn demo_probe() -> ProbeResult {
+    ProbeResult {
+        ok: true,
+        version: Some("2.1.294".into()),
+        program: "/opt/homebrew/bin/claude".into(),
+        elapsed_ms: 1800,
+        error: None,
+    }
+}
+
+/// The demo review's chat, one inner list per turn: the summary the agent wrote when the
+/// review opened (with a denied command), then the question and answer of `AgentChat.png`.
+pub fn demo_agent_turns(now: i64) -> Vec<Vec<AgentLogEntry>> {
+    let at = |ago: i64| now - ago;
+    let first = vec![
+        AgentLogEntry::ToolUse {
+            at: at(3_600),
+            turn: 1,
+            summary: "Read src/auth/refresh.rs".into(),
+        },
+        AgentLogEntry::Denied {
+            at: at(3_599),
+            turn: 1,
+            tool: "Bash".into(),
+            detail: "cargo test".into(),
+        },
+        AgentLogEntry::Text {
+            at: at(3_598),
+            turn: 1,
+            text: "**Summary.** This pull request makes `TokenStore::refresh` safe to call from several tasks at once.\n\n- the token is refreshed one minute before it expires\n- a lock stops two callers from exchanging the same refresh token\n\nI could not run the tests: running commands needs permission, which arrives later.".into(),
+        },
+        AgentLogEntry::Done {
+            at: at(3_596),
+            turn: 1,
+            duration_ms: 4_200,
+        },
+    ];
+    let second = vec![
+        AgentLogEntry::User {
+            at: at(120),
+            turn: 2,
+            text: "Is the new lock needed at all, or would re-checking the expiry be enough?".into(),
+        },
+        AgentLogEntry::ToolUse {
+            at: at(119),
+            turn: 2,
+            summary: "Read src/auth/store.rs and client/http.rs".into(),
+        },
+        AgentLogEntry::ToolUse {
+            at: at(118),
+            turn: 2,
+            summary: "Searched for refresh_lock · 3 uses".into(),
+        },
+        AgentLogEntry::Text {
+            at: at(117),
+            turn: 2,
+            text: "The lock is needed: two requests that both see an expired token would otherwise exchange the same refresh token twice, and GitHub rejects the second one.\n\nWhat's not needed is holding it during the network call. Re-check the expiry right after taking the lock; most callers will find a fresh token and leave at once.".into(),
+        },
+        AgentLogEntry::Suggestion {
+            at: at(116),
+            turn: 2,
+            suggestion: demo_suggestion(),
+        },
+        AgentLogEntry::Done {
+            at: at(115),
+            turn: 2,
+            duration_ms: 1_800,
+        },
+    ];
+    vec![first, second]
+}
+
+/// The whole demo chat, oldest first, as the daemon's log would give it.
+pub fn demo_agent_log(now: i64) -> Vec<AgentLogEntry> {
+    demo_agent_turns(now).concat()
+}
+
 /// The rows of `WhatsNew.png` ("Since you last looked, yesterday …").
 fn demo_news(now: i64) -> Vec<NewsItem> {
     let item = |kind, source: &str, who: Option<&str>, age: i64, summary: &str| NewsItem {
@@ -802,6 +897,74 @@ fn heat(now: i64) -> Vec<DayCount> {
 mod tests {
     use super::*;
     use crate::testing::NOW;
+
+    #[test]
+    fn the_demo_agent_log_has_the_mockup_chat() {
+        use clusia_protocol::AgentLogEntry;
+        let turns = demo_agent_turns(1_790_000_000);
+        assert_eq!(turns.len(), 2);
+        let all = demo_agent_log(1_790_000_000);
+        assert_eq!(all.len(), turns.iter().map(Vec::len).sum::<usize>());
+        let (first, second) = (&turns[0], &turns[1]);
+        assert!(
+            first
+                .iter()
+                .any(|e| matches!(e, AgentLogEntry::Denied { tool, .. } if tool == "Bash"))
+        );
+        assert!(
+            first
+                .iter()
+                .any(|e| matches!(e, AgentLogEntry::Text { text, .. } if text.contains("Summary")))
+        );
+        assert!(matches!(
+            &second[0],
+            AgentLogEntry::User { text, .. } if text == "Is the new lock needed at all, or would re-checking the expiry be enough?"
+        ));
+        let tools: Vec<&str> = second
+            .iter()
+            .filter_map(|e| match e {
+                AgentLogEntry::ToolUse { summary, .. } => Some(summary.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tools,
+            [
+                "Read src/auth/store.rs and client/http.rs",
+                "Searched for refresh_lock · 3 uses"
+            ]
+        );
+        let suggestion = demo_suggestion();
+        assert!(second.iter().any(
+            |e| matches!(e, AgentLogEntry::Suggestion { suggestion: s, .. } if *s == suggestion)
+        ));
+        assert_eq!(demo_suggestions(), [suggestion.clone()]);
+        assert_eq!(suggestion.file, "src/auth/refresh.rs");
+        assert_eq!(suggestion.line, Some(44));
+        assert!(suggestion.id.starts_with("sug-") && suggestion.id.len() == 16);
+        // Every turn ends the way the daemon's log does.
+        for turn in &turns {
+            assert!(matches!(turn.last(), Some(AgentLogEntry::Done { .. })));
+        }
+    }
+
+    #[test]
+    fn the_demo_suggestion_is_on_a_commentable_line() {
+        let patch = demo_diff()
+            .into_iter()
+            .find(|f| f.path == demo_suggestion().file)
+            .and_then(|f| f.patch)
+            .expect("the file is in the demo diff");
+        assert!(clusia_core::can_comment(&patch, Side::Right, 44));
+    }
+
+    #[test]
+    fn the_demo_probe_is_a_good_answer() {
+        let p = demo_probe();
+        assert!(p.ok && p.error.is_none());
+        assert_eq!(p.version.as_deref(), Some("2.1.294"));
+        assert_eq!(p.elapsed_ms, 1800);
+    }
 
     #[test]
     fn demo_uses_only_generic_data() {

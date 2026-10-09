@@ -46,6 +46,10 @@ impl Turn {
         }
     }
 
+    pub(crate) fn pr(&self) -> &PrRef {
+        &self.pr
+    }
+
     pub(crate) fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
     }
@@ -230,8 +234,19 @@ pub(crate) async fn ask(
     };
     let mut run = Turn::new(pr, turn, json);
     let (mut out, mut err) = (io::stdout(), io::stderr());
+    // The turn runs in the daemon: Ctrl-C only stops watching it.
+    let mut interrupt = std::pin::pin!(tokio::signal::ctrl_c());
     loop {
-        let (_, event) = client.next_event().await?;
+        let (_, event) = tokio::select! {
+            event = client.next_event() => event?,
+            _ = &mut interrupt => {
+                eprintln!(
+                    "Detached: the agent keeps working on this turn. Stop it with: clusia agent stop {}",
+                    run.pr()
+                );
+                std::process::exit(130);
+            }
+        };
         if let Flow::Finished = run.feed(&event, &mut out, &mut err).map_err(io_error)? {
             break;
         }

@@ -15,6 +15,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
+use clusia_core::draft::Origin;
 use clusia_core::{
     Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
 };
@@ -1606,7 +1607,26 @@ pub(crate) fn demo_answers(
                     tells.push(Tell::Conversation { pr, conversation });
                 }
             }
-            Ask::MarkSeen(_) | Ask::RefreshStatus | Ask::AgentLog { .. } => {}
+            Ask::MarkSeen(_) | Ask::RefreshStatus => {}
+            Ask::AgentLog { pr } if pr == fixture::demo_pr() => tells.push(Tell::AgentLog {
+                pr,
+                entries: fixture::demo_agent_log(now),
+            }),
+            Ask::AgentLog { .. } => {}
+            Ask::AgentSend { pr, text } => tells.extend(demo_agent_reply(&pr, &text)),
+            Ask::AgentCancel { pr } => tells.push(Tell::Agent(AgentTell::State {
+                pr,
+                state: SessionStateKind::Ready,
+            })),
+            Ask::AcceptSuggestion { pr, id, body } => {
+                tells.extend(demo_accept(&tabs, &pr, &id, body, now));
+            }
+            Ask::DismissSuggestion { pr, id } => tells.push(Tell::Agent(AgentTell::Handled {
+                pr,
+                id,
+                accepted: false,
+            })),
+            Ask::Probe => tells.push(Tell::Probe(fixture::demo_probe())),
             Ask::AddItem {
                 pr,
                 kind,
@@ -1751,6 +1771,103 @@ fn demo_open(pr: PrRef, now: i64) -> Vec<Tell> {
             news,
         },
     ]
+}
+
+/// The demo agent's answer to a question: it works, reads a file, says what it is, and is
+/// ready again. Nothing leaves the window.
+fn demo_agent_reply(pr: &PrRef, text: &str) -> Vec<Tell> {
+    let turn = 3;
+    let agent = Tell::Agent;
+    let chunk = |text: String| {
+        agent(AgentTell::Chunk {
+            pr: pr.clone(),
+            turn,
+            text,
+        })
+    };
+    vec![
+        agent(AgentTell::State {
+            pr: pr.clone(),
+            state: SessionStateKind::Running,
+        }),
+        agent(AgentTell::ToolUse {
+            pr: pr.clone(),
+            turn,
+            summary: "Read src/auth/refresh.rs".into(),
+        }),
+        chunk("This is demo data: nothing was sent to Claude Code. ".into()),
+        chunk(format!(
+            "With a real session, the answer to “{}” would stream here.",
+            text.trim()
+        )),
+        agent(AgentTell::Done {
+            pr: pr.clone(),
+            turn,
+            duration_ms: 900,
+        }),
+        agent(AgentTell::State {
+            pr: pr.clone(),
+            state: SessionStateKind::Ready,
+        }),
+    ]
+}
+
+/// Accepting a demo suggestion adds its draft item the way the daemon does: a line comment
+/// on the head side, the agent's, accepted. `body` is the edited text, if any.
+fn demo_accept(
+    tabs: &ReviewTabs,
+    pr: &PrRef,
+    id: &str,
+    body: Option<String>,
+    now: i64,
+) -> Vec<Tell> {
+    let warn = |text: String| {
+        vec![Tell::Notice {
+            text,
+            warning: true,
+        }]
+    };
+    let Some(s) = fixture::demo_suggestions().into_iter().find(|s| s.id == id) else {
+        return warn(format!("Demo mode has no suggestion {id}"));
+    };
+    let Some(ready) = tabs.0.get(pr).and_then(|t| t.ready()) else {
+        return warn("This review is not open".into());
+    };
+    let mut review = ready.view.review.clone();
+    let Some(line) = s.end_line.or(s.line) else {
+        return warn("The suggestion has no line".into());
+    };
+    let anchor = Anchor {
+        commit: review.head_sha.clone(),
+        path: s.file.clone(),
+        line,
+        start_line: s.start_line,
+        side: Side::Right,
+    };
+    let text = body.unwrap_or(s.body);
+    let added = review
+        .draft
+        .add_as(
+            Origin::Agent,
+            DraftKind::LineComment,
+            Some(anchor),
+            None,
+            &text,
+            now,
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string());
+    match added {
+        Ok(()) => vec![
+            Tell::ReviewFile(Box::new(review)),
+            Tell::Agent(AgentTell::Handled {
+                pr: pr.clone(),
+                id: id.to_string(),
+                accepted: true,
+            }),
+        ],
+        Err(message) => warn(message),
+    }
 }
 
 /// A draft write on the demo review: `ReviewFile` + `Saved`, or `Refused` with the message.
@@ -1919,6 +2036,173 @@ mod tests {
             .add_systems(Update, demo_answers);
         app.update();
         inbox.0.try_iter().collect()
+    }
+
+    /// The demo's answers to `asks`, with the demo review open and ready in the tabs.
+    fn demo_agent_tells(asks: Vec<Ask>) -> Vec<Tell> {
+        use crate::review_state::{Phase, Ready, Tab, TabUi};
+        let (inbox, outbox) = local_link();
+        let mut tabs = ReviewTabs::default();
+        tabs.0.insert(
+            fixture::demo_pr(),
+            Tab {
+                phase: Phase::Ready(Box::new(Ready {
+                    view: fixture::demo_review(1_790_000_000).0,
+                    news: Vec::new(),
+                    cached_at: None,
+                })),
+                ui: TabUi::default(),
+            },
+        );
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .insert_resource(Asks {
+                recorded: asks,
+                ..Asks::default()
+            })
+            .insert_resource(Model::default())
+            .insert_resource(Toasts::default())
+            .insert_resource(tabs)
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .insert_resource(outbox)
+            .add_systems(Update, demo_answers);
+        app.update();
+        inbox.0.try_iter().collect()
+    }
+
+    #[test]
+    fn demo_mode_replays_the_agent_log_and_the_probe() {
+        let pr = fixture::demo_pr();
+        let tells = demo_agent_tells(vec![Ask::AgentLog { pr: pr.clone() }, Ask::Probe]);
+        assert_eq!(
+            tells,
+            [
+                Tell::AgentLog {
+                    pr,
+                    entries: fixture::demo_agent_log(1_790_000_000)
+                },
+                Tell::Probe(fixture::demo_probe()),
+            ]
+        );
+        let other: PrRef = "rzorzal/other#1".parse().unwrap();
+        assert!(demo_agent_tells(vec![Ask::AgentLog { pr: other }]).is_empty());
+    }
+
+    #[test]
+    fn demo_mode_answers_a_question_with_a_streamed_demo_reply() {
+        let pr = fixture::demo_pr();
+        let tells = demo_agent_tells(vec![Ask::AgentSend {
+            pr: pr.clone(),
+            text: "Why a lock?".into(),
+        }]);
+        let agent: Vec<&AgentTell> = tells
+            .iter()
+            .filter_map(|t| match t {
+                Tell::Agent(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(
+            agent.first(),
+            Some(AgentTell::State {
+                state: SessionStateKind::Running,
+                ..
+            })
+        ));
+        assert!(matches!(
+            agent.last(),
+            Some(AgentTell::State {
+                state: SessionStateKind::Ready,
+                ..
+            })
+        ));
+        let answer: String = agent
+            .iter()
+            .filter_map(|a| match a {
+                AgentTell::Chunk { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            answer.contains("demo data") && answer.contains("Why a lock?"),
+            "{answer}"
+        );
+        assert!(agent.iter().any(|a| matches!(a, AgentTell::ToolUse { .. })));
+        assert!(agent.iter().any(|a| matches!(a, AgentTell::Done { .. })));
+        assert!(agent.iter().all(|a| a.pr() == &pr));
+    }
+
+    #[test]
+    fn demo_mode_accepts_a_suggestion_into_the_draft_as_the_agents() {
+        use clusia_core::draft::Origin;
+        let pr = fixture::demo_pr();
+        let s = fixture::demo_suggestion();
+        let before = fixture::demo_review(1_790_000_000)
+            .0
+            .review
+            .draft
+            .items
+            .len();
+        let tells = demo_agent_tells(vec![Ask::AcceptSuggestion {
+            pr: pr.clone(),
+            id: s.id.clone(),
+            body: Some("Edited text.".into()),
+        }]);
+        let Some(Tell::ReviewFile(review)) = tells.first() else {
+            panic!("{tells:?}")
+        };
+        assert_eq!(review.draft.items.len(), before + 1);
+        let item = review.draft.items.last().unwrap();
+        assert_eq!(item.origin, Origin::Agent);
+        assert!(item.accepted);
+        assert_eq!(item.body, "Edited text.");
+        let anchor = item.anchor.as_ref().unwrap();
+        assert_eq!(
+            (anchor.path.as_str(), anchor.line),
+            ("src/auth/refresh.rs", 44)
+        );
+        assert_eq!(
+            tells.last(),
+            Some(&Tell::Agent(AgentTell::Handled {
+                pr: pr.clone(),
+                id: s.id.clone(),
+                accepted: true
+            }))
+        );
+        // An unknown suggestion is a warning, not a draft item.
+        let tells = demo_agent_tells(vec![Ask::AcceptSuggestion {
+            pr,
+            id: "sug-000000000000".into(),
+            body: None,
+        }]);
+        assert!(matches!(&tells[..], [Tell::Notice { warning: true, .. }]));
+    }
+
+    #[test]
+    fn demo_mode_dismisses_and_stops() {
+        let pr = fixture::demo_pr();
+        let tells = demo_agent_tells(vec![
+            Ask::DismissSuggestion {
+                pr: pr.clone(),
+                id: "sug-5f0c1d2e3a4b".into(),
+            },
+            Ask::AgentCancel { pr: pr.clone() },
+        ]);
+        assert_eq!(
+            tells,
+            [
+                Tell::Agent(AgentTell::Handled {
+                    pr: pr.clone(),
+                    id: "sug-5f0c1d2e3a4b".into(),
+                    accepted: false
+                }),
+                Tell::Agent(AgentTell::State {
+                    pr,
+                    state: SessionStateKind::Ready
+                }),
+            ]
+        );
     }
 
     #[test]

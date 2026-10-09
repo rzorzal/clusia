@@ -92,9 +92,24 @@ Commands that talk to the daemon start it when it is not running; `daemon status
 | `clusia open owner/repo#123` | Refresh, prepare the worktree and show what is new (a pull request URL works too) |
 | `clusia review comment owner/repo#123 src/lib.rs:42 "text"` | Add a line comment (`path:line` or `path:start-end`) to the draft |
 | `clusia review publish owner/repo#123 --verdict approve` | Publish the draft as one review (`approve`, `request-changes`, `comment` or `close`) |
+| `clusia ask owner/repo#123 "Is the lock needed?"` | Ask the review's agent; the answer streams, and suggested comments are listed at the end (`file:line  text`). Ctrl-C only detaches: the turn keeps running in the daemon, and `clusia agent stop owner/repo#123` stops it |
+| `clusia agent log owner/repo#123` / `agent stop owner/repo#123` | Replay the chat of a review, or stop the turn the agent is running |
 | `clusia config get <key>` / `set <key> <value>` | Read or change one setting, for example `github.poll_interval_secs` |
 | `clusia daemon status` / `stop` | Show whether the daemon runs, or stop it |
 | `clusia install` / `uninstall` | Put the app, the login agent and the `clusia` link in place, or remove them |
+
+## Agent
+
+Clúsia can talk to **your own Claude Code** about the pull request you are reviewing. Install Claude Code and sign in (run `claude` once in a terminal); Config › Harness shows where Clúsia found it and tests it.
+
+- **A chat per review.** Open the **Agent** tab in the right column of the review (⌘\ hides the column; the **Draft** tab is one click away). When you open a review, the agent starts a session and writes a summary; ask it anything after that. The session belongs to the review: close the window and open the review again and the conversation goes on. Publishing or discarding the review ends the session; the chat log stays in the data folder.
+- **It reads, you decide.** The agent reads and searches the review's worktree. Anything else it wants (running a command, editing a file) is denied, and the chat says so. If you also allow what your Claude Code settings already allow (a switch in Config › Harness, on by default), those rules apply, and your own `deny` rules still win. Clúsia never passes a bypass flag, never gives the agent your GitHub token, and turns your Claude Code hooks off for these turns. The agent never writes to git or GitHub; only you publish.
+- **Suggested comments.** The agent can suggest a comment on a line. It stays a card in the chat until you click: **Accept into draft** adds it to your draft, **Edit** opens the composer in the diff first, **Dismiss** removes it for good. Click a line and **Ask the agent about this line** to start a question about it.
+- **Settings.** Config › Harness: the program (found on your `PATH`), extra arguments (for example `--model claude-opus-5-5`), whether to summarize when a review opens or wait for your first question, the time a turn may take, and **Test**.
+
+<p align="center"><img src="docs/assets/sp2-m1-agent-chat-light.png" alt="The Clúsia review with the agent chat: a question, file reads, an answer and a suggested comment with Accept into draft, Edit and Dismiss" width="720"></p>
+
+<p align="center"><img src="docs/assets/sp2-m1-config-harness-light.png" alt="Config › Harness: Claude Code selected, the program, extra arguments, when to summarize, the turn timeout, a good test result and what the agent may do without asking" width="720"></p>
 
 ## Notifications and login
 
@@ -122,11 +137,12 @@ Config › General has **Start at login**. **Quit** in the tray stops everything
 | The `clusia` command | a link in `/usr/local/bin` (or `~/.local/bin`) |
 | Reviews and settings | `~/Library/Application Support/Clusia` |
 | Logs | `~/Library/Logs/Clusia/daemon.log`, `app.log`, `tray.log`, and `daemon.launchd.log` for what the login agent printed |
+| The agent's chat logs | `~/Library/Application Support/Clusia/agent/` (one `.jsonl` log and one `.state.json` per review); the agent reads `.clusia/review.md` in each worktree |
 | The login agent | `~/Library/LaunchAgents/io.github.rzorzal.clusia.daemon.plist` |
 
 [`docs/daemon.md`](docs/daemon.md) has the environment variables, files and log rotation.
 
-**Privacy:** your GitHub token comes from `gh` or the macOS Keychain and never appears in logs or output. Clúsia talks to GitHub and, if you add a key, to Giphy, and to nothing else. Your own clone is never checked out or branched: Clúsia only adds refs under `refs/clusia/` and works in separate worktrees.
+**Privacy:** your GitHub token comes from `gh` or the macOS Keychain and never appears in logs or output. Clúsia talks to GitHub and, if you add a key, to Giphy, and to nothing else (the agent is your own Claude Code, which talks to Anthropic under your account). Your own clone is never checked out or branched: Clúsia only adds refs under `refs/clusia/` and works in separate worktrees.
 
 ## Troubleshooting
 
@@ -135,6 +151,12 @@ Config › General has **Start at login**. **Quit** in the tray stops everything
 **`clusia: command not found`.** The link went to `~/.local/bin` and that folder is not on your `PATH`. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile.
 
 **The tray is gone after a crash.** Open Clusia.app again. launchd restarts the daemon by itself after a crash.
+
+**The agent says "Install Claude Code or set its path".** Config › Harness › Program: leave it empty to look on your `PATH`, or give the full path of `claude`, then press **Test**.
+
+**The agent says "Run `claude` once in a terminal".** Claude Code is not signed in. Run `claude` in a terminal and sign in, then ask again.
+
+**Hooks do not run in the agent's chat.** On purpose: your Claude Code hooks (notifiers, sounds) are off for turns Clúsia starts in the background.
 
 **Something looks wrong.** Read the logs in `~/Library/Logs/Clusia`, starting with `daemon.log`.
 
@@ -191,6 +213,7 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 Tests never call the real GitHub, the real `gh` or the real Keychain. Other scripts in `scripts/`:
 
 - `m6-check.sh`: the owner check for install, launch and notifications, run on a real Mac with someone at the keyboard (it stops the daemon and the tray);
+- `sp2-m1-check.sh --pr owner/repo#N`: the owner check for the agent chat, run on a real pull request with your own Claude Code (it asks first, spends a little of your usage and publishes nothing);
 - `flake-hunt.sh [RUNS]`: runs the suites that talk to a daemon over and over and names the tests that failed;
 - `leak-check.sh`: runs the whole suite and fails if it leaves a `clusiad` running on a temporary home.
 

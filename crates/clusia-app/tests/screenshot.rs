@@ -42,6 +42,8 @@ fn demo_screenshots() {
         "config-general",
         "config-notifications",
         "config-notifications-bottom",
+        "agent-chat",
+        "config-harness",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((
