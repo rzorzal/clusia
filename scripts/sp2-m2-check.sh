@@ -59,7 +59,7 @@ STEPS=(
   "expire: an unanswered request is denied when its time runs out"
   "slow: an answer after about 100 seconds still works, at the default 120 second wait"
   "notification: with the window closed, the notification opens the window on the question"
-  "sandbox: with the sandbox on, a command that needs the network is blocked"
+  "sandbox: with the sandbox on, a command that needs the network is blocked, is not retried outside the sandbox, and cannot reach clusiad.sock"
   "terminal: clusia ask asks at the terminal and the answer there works"
   "end: discarding the review ends the session and keeps the log"
 )
@@ -118,6 +118,7 @@ confirm() {
 
 # The chat of the review, as the terminal prints it (permission lines start with ✓ or ⊘).
 log_has() { clusia agent log "$PR" 2>/dev/null | grep -qF "$1"; }
+count_lines() { clusia agent log "$PR" 2>/dev/null | grep -cF "$1"; }
 
 # Asks the agent without a keyboard, so a request waits for the window or the notification and
 # the script can never answer it. `wait_ask` ends it.
@@ -257,12 +258,26 @@ step_notification() {
 }
 
 step_sandbox() {
+  local sock
   say "8. The sandbox"
   ask_agent_detached "Try to fetch https://example.com with the curl program, using --max-time 5, and tell me whether it worked."
-  echo "  The modal says 'no network'. Click Allow once."
+  echo "  The modal says 'no network'. Click Allow once. If a second modal for curl appears, click Deny."
   wait_for "the command was allowed once" 90 log_has "✓ ran curl"
   wait_ask
   ask "Did the agent say the request failed (no network), and did the modal name the sandbox?"
+  # Claude Code may retry a blocked command outside the sandbox; Clúsia refuses that retry
+  # without asking, so curl runs once.
+  if [ "$(count_lines "✓ ran curl")" = 1 ]; then pass "curl ran once: no unsandboxed retry ran"; else fail "curl ran more than once: a retry ran outside the sandbox"; fi
+  ask "Was there no second modal for curl (a retry outside the sandbox is refused without asking)?"
+  sock="${CLUSIA_HOME:-$HOME/Library/Application Support/Clusia}/clusiad.sock"
+  ask_agent_detached "Run exactly this shell command in the worktree and nothing else: nc -U \"$sock\" </dev/null && echo reachable || echo blocked. Then answer with only the word it printed."
+  echo "  This command tries to reach Clúsia's own socket. Click Allow once."
+  wait_ask
+  if grep -qi "blocked" "$ERR.out" && ! grep -qi "reachable" "$ERR.out"; then
+    pass "a command in the sandbox cannot reach clusiad.sock"
+  else
+    fail "a command in the sandbox reached clusiad.sock (or gave no answer): $(cat "$ERR.out")"
+  fi
 }
 
 step_terminal() {

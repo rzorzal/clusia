@@ -1382,6 +1382,18 @@ mod tests {
     }
 
     #[test]
+    fn with_the_sandbox_off_the_harness_page_says_what_a_command_can_do() {
+        const HINT: &str = "With the sandbox off, an allowed command can reach the network, write outside the worktree and act through Clúsia as you: answer its own requests, change the draft or publish.";
+        let mut app = config_app(Section::Harness);
+        assert!(!page_texts(&mut app).iter().any(|t| t == HINT));
+        let mut snap = app.world().resource::<Model>().snapshot.clone();
+        snap.config.harness.sandbox = false;
+        testing::tell(&mut app, Tell::Snapshot(Box::new(snap)));
+        testing::settle(&mut app);
+        assert!(page_texts(&mut app).iter().any(|t| t == HINT));
+    }
+
+    #[test]
     fn a_refused_harness_key_shows_under_its_row() {
         let mut app = config_app(Section::Harness);
         app.world_mut().resource_mut::<Model>().rejected.insert(

@@ -16,6 +16,7 @@ use clusia_view::lists::is_saved;
 use crate::bridge::Model;
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, NavSystems, pr_title};
+use crate::screens::review::agent::permission::PermissionModal;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{Clickable, Fill, HoverFill, Stroke, Type, panel, text, text_field};
@@ -253,15 +254,18 @@ fn live_query(
     }
 }
 
-fn palette_keys(
+/// The palette's keys. A permission modal over it owns the keyboard: Enter there must never
+/// open a pull request and hide the question.
+pub(crate) fn palette_keys(
     keys: Res<ButtonInput<KeyCode>>,
     model: Res<Model>,
     fields: Query<&EditableText, With<PaletteField>>,
+    modals: Query<(), With<PermissionModal>>,
     mut palette: ResMut<Palette>,
     mut nav: ResMut<Nav>,
 ) {
     // Keys typed into an input method's composition are not commands.
-    if !palette.open || fields.iter().any(EditableText::is_composing) {
+    if !palette.open || fields.iter().any(EditableText::is_composing) || !modals.is_empty() {
         return;
     }
     if escape_pressed(&keys) {

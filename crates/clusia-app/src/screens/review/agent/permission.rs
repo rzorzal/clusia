@@ -315,8 +315,14 @@ pub struct PermissionPlugin;
 impl Plugin for PermissionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PermissionQueue>()
-            // Before the dialogs that close on Esc, so the press that answers is theirs no more.
-            .add_systems(Update, escape_denies.before(ReviewSystems))
+            // Before the dialogs and the palette that close on Esc, so the press that answers
+            // is theirs no more.
+            .add_systems(
+                Update,
+                escape_denies
+                    .before(ReviewSystems)
+                    .before(crate::screens::open_pr::palette_keys),
+            )
             .add_systems(
                 Update,
                 (
@@ -1616,5 +1622,45 @@ mod tests {
             "you denied a\\u{2028}b"
         );
         assert_eq!(rule_label("Bash(c\u{200b}:*)"), "c\\u{200b}");
+    }
+
+    #[test]
+    fn the_palette_under_the_modal_hears_no_keys() {
+        use crate::nav::Nav;
+        use crate::screens::open_pr::Palette;
+        let palette = || Palette {
+            open: true,
+            query: "rzorzal/site#12".into(),
+            cursor: 0,
+        };
+        let mut app = open();
+        *app.world_mut().resource_mut::<Palette>() = palette();
+        testing::settle(&mut app);
+        ask(&mut app, bash("perm-1"));
+        testing::recorded(&mut app);
+        age(&mut app);
+        let nav = app.world().resource::<Nav>().clone();
+        press(&mut app, KeyCode::Escape);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::PermissionAnswer {
+                id: "perm-1".into(),
+                answer: PermissionAnswerKind::Deny
+            }]
+        );
+        assert!(
+            app.world().resource::<Palette>().open,
+            "the Esc that denies does not also close the palette"
+        );
+        for key in [KeyCode::ArrowDown, KeyCode::Enter] {
+            press(&mut app, key);
+        }
+        assert_eq!(*app.world().resource::<Palette>(), palette());
+        assert_eq!(
+            *app.world().resource::<Nav>(),
+            nav,
+            "Enter does not open a pull request from under the modal"
+        );
+        assert_eq!(testing::count::<PermissionModal>(&mut app), 1);
     }
 }

@@ -325,6 +325,11 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
                 Type::BODY,
             ));
         });
+        if !v.sandbox {
+            // Outside the sandbox a command also reaches clusiad's socket, which trusts any
+            // program of the user.
+            c.spawn(text(fonts, SANDBOX_OFF, Type::MUTED));
+        }
         if let Some(message) = &v.sandbox_error {
             c.spawn((
                 super::FieldError("harness.sandbox"),
@@ -333,6 +338,9 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
         }
     });
 }
+
+/// What turning the sandbox off lets an allowed command do.
+const SANDBOX_OFF: &str = "With the sandbox off, an allowed command can reach the network, write outside the worktree and act through Clúsia as you: answer its own requests, change the draft or publish.";
 
 fn probe_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, state: &ProbeCard) {
     let (fill, stroke) = match state {

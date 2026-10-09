@@ -436,8 +436,9 @@ pub(crate) async fn ask(
         detail: detail_for(&tool, &input),
     };
     let outcome = register(shared, request, rule)?;
-    // The bridge may go away while this waits: then nobody hears the answer, so the request
-    // must not stay listed (nor log an answer that allows nothing).
+    // A bridge that goes away does not end this: the connection detaches its handler, so the
+    // request waits for an answer, the deadline or the end of the turn. Only a dropped task
+    // (the runtime going down) ends it early, and then it must not stay listed.
     let _abandoned = Abandoned { shared, id: &id };
     if !shared.holds.is_held(&pr) {
         notify(shared, &pr, &id, &tool, &summary).await;

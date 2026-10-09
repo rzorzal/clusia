@@ -150,3 +150,20 @@ fn the_run_asks_before_it_spends_anything_and_stops_on_no() {
     assert!(said.contains("answer every request yourself"), "{said}");
     assert!(said.contains("Nothing was run"), "{said}");
 }
+
+#[test]
+fn the_sandbox_step_checks_the_retry_outside_it_and_the_socket() {
+    let source = source();
+    let step = source
+        .split("step_sandbox() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("the sandbox step");
+    // A blocked command must not come back as a retry outside the sandbox.
+    assert!(step.contains("count_lines \"✓ ran curl\""), "{step}");
+    assert!(step.contains("no second modal"), "{step}");
+    // An allowed command inside the sandbox cannot reach the daemon's socket.
+    assert!(step.contains("clusiad.sock"), "{step}");
+    assert!(step.contains("nc -U"), "{step}");
+    assert!(step.contains("blocked"), "{step}");
+}
