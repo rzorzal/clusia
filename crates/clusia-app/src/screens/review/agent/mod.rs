@@ -3,6 +3,7 @@
 
 pub mod model;
 pub mod panel;
+pub mod suggestion;
 
 pub use model::{
     ChatLine, ChatModel, Chats, DEFAULT_WIDTH, MAX_WIDTH, MIN_WIDTH, PanelTab, SuggestionState,

@@ -214,15 +214,8 @@ fn short(sha: &str) -> &str {
 
 /// Rows under the line editor's range: side and first/last line.
 fn selection(ui: &TabUi, path: &str) -> Option<(Side, u32, u32)> {
-    match ui.editor.as_ref().map(|e| &e.target) {
-        Some(EditTarget::Line {
-            path: p,
-            side,
-            start,
-            line,
-        }) if p == path => Some((*side, start.unwrap_or(*line), *line)),
-        _ => None,
-    }
+    let (p, side, start, line) = ui.editor.as_ref()?.target.line_place()?;
+    (p == path).then(|| (side, start.unwrap_or(line), line))
 }
 
 fn is_selected(sel: Option<(Side, u32, u32)>, anchor: Option<(Side, u32)>) -> bool {
@@ -332,15 +325,10 @@ fn placements(ready: &Ready, ui: &TabUi, path: &str, rows: &[Row]) -> Placements
         };
         out.put(rows, anchor.side, anchor.line, below);
     }
-    if let Some(EditTarget::Line {
-        path: p,
-        side,
-        line,
-        ..
-    }) = target
+    if let Some((p, side, _, line)) = target.and_then(|t| t.line_place())
         && p == path
     {
-        out.put(rows, *side, *line, Below::Editor);
+        out.put(rows, side, line, Below::Editor);
     }
     out
 }

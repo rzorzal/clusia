@@ -46,29 +46,6 @@ fn arrives(p: &mut ChildSpawnerCommands, fonts: &UiFonts, message: &str) {
     });
 }
 
-pub fn harness(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    page_header(
-        p,
-        fonts,
-        "Harness",
-        "Connect the AI tool you already use. Clúsia drives it with that tool's own permissions and never passes it your GitHub token.",
-    );
-    dimmed_cards(
-        p,
-        fonts,
-        &[
-            ("Claude Code", "claude, stream-json"),
-            ("Codex", "codex, JSON mode"),
-            ("Custom command", "Clúsia's agent protocol"),
-        ],
-    );
-    arrives(
-        p,
-        fonts,
-        "Arrives with SP2 (#7): one agent session per review, the review chat, permission prompts, and the Security and Audits tabs.",
-    );
-}
-
 pub fn plugins(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
     page_header(
         p,

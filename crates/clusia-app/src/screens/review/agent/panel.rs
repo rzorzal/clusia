@@ -17,7 +17,7 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_protocol::{HarnessKind, SessionStateKind};
 
-use super::model::{ChatLine, Chats, DEFAULT_WIDTH, PanelTab, display_text, place_of};
+use super::model::{ChatLine, Chats, DEFAULT_WIDTH, PanelTab, display_text};
 use crate::bridge::{Ask, Asks, Model};
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, Screen};
@@ -27,9 +27,7 @@ use crate::screens::review::editor::read_only_reason;
 use crate::screens::review::shell::{HarnessButton, RightPanel, on_harness};
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
-use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, card, panel, text,
-};
+use crate::ui::kit::{Clickable, Fill, HoverFill, Stroke, Type, Variant, button, panel, text};
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown};
 use crate::ui::text_area::{Caret, growing_line_area, set_text};
@@ -667,7 +665,7 @@ fn at_bottom(node: &ComputedNode) -> bool {
 fn chat_line(
     p: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
-    _pr: &PrRef,
+    pr: &PrRef,
     line: &ChatLine,
     opts: &RenderOpts,
 ) {
@@ -720,26 +718,8 @@ fn chat_line(
         ChatLine::Error(message) => {
             p.spawn(text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange)));
         }
-        ChatLine::Suggestion { suggestion, .. } => {
-            p.spawn(card(Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: px(8),
-                padding: px(12).all(),
-                ..default()
-            }))
-            .insert(Stroke(Swatch::Green))
-            .with_children(|c| {
-                c.spawn(Node {
-                    column_gap: px(8),
-                    align_items: AlignItems::Center,
-                    ..default()
-                })
-                .with_children(|h| {
-                    h.spawn(badge(fonts, "Suggested comment", Tone::Green));
-                    h.spawn(text(fonts, place_of(suggestion), Type::MONO));
-                });
-                markdown(c, fonts, &parse(&suggestion.body), opts);
-            });
+        ChatLine::Suggestion { suggestion, state } => {
+            super::suggestion::card(p, fonts, pr, suggestion, *state, opts);
         }
     }
 }

@@ -1541,6 +1541,7 @@ pub(crate) fn pump(
             }),
             Tell::Media { url, file } => media.arrive(url, file),
             Tell::Agent(agent) => {
+                crate::screens::review::agent::suggestion::close_edited(&mut tabs, &agent);
                 if chats.apply(&agent) {
                     asks.send(Ask::AgentLog {
                         pr: agent.pr().clone(),

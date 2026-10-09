@@ -218,7 +218,16 @@ impl ChatModel {
                 self.push(ChatLine::Error(error_text(*kind, message)));
                 return self.ended(*turn);
             }
-            AgentTell::State { state, .. } => self.state = *state,
+            AgentTell::State { state, .. } => {
+                self.state = *state;
+                // The turn a replay caught running is over even when its `Done` was missed
+                // (it came while the log was being read): read the log again for the rest.
+                if matches!(state, SessionStateKind::Ready | SessionStateKind::None)
+                    && self.unfinished.take().is_some()
+                {
+                    return true;
+                }
+            }
             AgentTell::Refused { message, .. } => self.push(ChatLine::Error(message.clone())),
             AgentTell::Handled { id, accepted, .. } => self.mark(
                 id,
@@ -758,6 +767,68 @@ mod tests {
             pr: pr(),
             turn: 2,
             duration_ms: 900,
+        }));
+    }
+
+    #[test]
+    fn a_ready_state_ends_a_replay_caught_running_whose_end_was_missed() {
+        // The log was read before the turn's end was written, and its `Done` came while the
+        // log was in flight: only the state says the turn is over.
+        let mut caught = chats();
+        caught.replay(
+            &pr(),
+            &[
+                AgentLogEntry::User {
+                    at: 1,
+                    turn: 1,
+                    text: "Is the lock needed?".into(),
+                },
+                AgentLogEntry::Text {
+                    at: 2,
+                    turn: 1,
+                    text: "Yes, because".into(),
+                },
+            ],
+        );
+        assert_eq!(caught.state(&pr()), SessionStateKind::Running);
+        let ready = AgentTell::State {
+            pr: pr(),
+            state: SessionStateKind::Ready,
+        };
+        assert!(
+            caught.apply(&ready),
+            "the log is read again for the whole answer"
+        );
+        assert_eq!(caught.state(&pr()), SessionStateKind::Ready);
+        assert!(!caught.apply(&ready), "asked once");
+        assert!(
+            !caught.apply(&AgentTell::Done {
+                pr: pr(),
+                turn: 1,
+                duration_ms: 900,
+            }),
+            "a late end of that turn asks nothing more"
+        );
+
+        let mut queued = chats();
+        queued.replay(
+            &pr(),
+            &[AgentLogEntry::User {
+                at: 1,
+                turn: 2,
+                text: "And the refresh?".into(),
+            }],
+        );
+        assert!(
+            !queued.apply(&AgentTell::State {
+                pr: pr(),
+                state: SessionStateKind::Queued,
+            }),
+            "a turn still waiting keeps its marker"
+        );
+        assert!(queued.apply(&AgentTell::State {
+            pr: pr(),
+            state: SessionStateKind::None,
         }));
     }
 }
