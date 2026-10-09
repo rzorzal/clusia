@@ -1784,6 +1784,7 @@ pub(crate) fn demo_answers(
     clock: Res<Clock>,
     time: Res<Time>,
     mut redraw: MessageWriter<RequestRedraw>,
+    mut rule_granted: Local<bool>,
 ) {
     if asks.recorded.is_empty() {
         return;
@@ -1835,14 +1836,20 @@ pub(crate) fn demo_answers(
                 }));
             }
             Ask::AgentLog { .. } => {}
-            Ask::AgentSend { pr, text } => tells.extend(demo_agent_reply(&pr, &text, now * 1000)),
+            Ask::AgentSend { pr, text } => {
+                tells.extend(demo_agent_reply(&pr, &text, now * 1000, *rule_granted));
+            }
             Ask::PermissionAnswer { id, answer } => {
+                *rule_granted |= answer == PermissionAnswerKind::Review && queue.get(&id).is_some();
                 tells.extend(demo_permission_answer(&queue, &id, answer));
             }
-            Ask::RevokeRule { pr, .. } => tells.push(Tell::Permission(PermissionTell::Rules {
-                pr,
-                rules: Vec::new(),
-            })),
+            Ask::RevokeRule { pr, .. } => {
+                *rule_granted = false;
+                tells.push(Tell::Permission(PermissionTell::Rules {
+                    pr,
+                    rules: Vec::new(),
+                }));
+            }
             Ask::AgentCancel { pr } => tells.push(Tell::Agent(AgentTell::State {
                 pr,
                 state: SessionStateKind::Ready,
@@ -2004,8 +2011,8 @@ fn demo_open(pr: PrRef, now: i64) -> Vec<Tell> {
 
 /// The demo agent's answer to a question: it works, reads a file, says what it is, and is
 /// ready again. Nothing leaves the window. A question about tests stops at the permission
-/// request instead.
-fn demo_agent_reply(pr: &PrRef, text: &str, now_ms: i64) -> Vec<Tell> {
+/// request instead, unless a rule granted for the review covers it.
+fn demo_agent_reply(pr: &PrRef, text: &str, now_ms: i64, rule_granted: bool) -> Vec<Tell> {
     let turn = 3;
     let agent = Tell::Agent;
     let mut tells = vec![
@@ -2019,7 +2026,8 @@ fn demo_agent_reply(pr: &PrRef, text: &str, now_ms: i64) -> Vec<Tell> {
             summary: "Read src/auth/refresh.rs".into(),
         }),
     ];
-    if text.to_lowercase().contains("test") {
+    // A rule granted for the review already covers `cargo test`, so nothing is asked again.
+    if text.to_lowercase().contains("test") && !rule_granted {
         // The turn waits here until `demo_permission_answer` says how the request ended.
         tells.push(Tell::Permission(PermissionTell::Requested(
             fixture::demo_permission_request(now_ms),
@@ -2577,6 +2585,41 @@ mod tests {
             permission_tells(&plain).is_empty(),
             "other questions answer as before"
         );
+    }
+
+    #[test]
+    fn a_granted_rule_covers_the_next_demo_question_about_tests() {
+        use clusia_protocol::PermissionAnswerKind;
+        let pr = fixture::demo_pr();
+        let ask_tests = || Ask::AgentSend {
+            pr: fixture::demo_pr(),
+            text: "Run the tests".into(),
+        };
+        let covered = demo_agent_tells(vec![
+            Ask::PermissionAnswer {
+                id: fixture::demo_permission_request(0).id,
+                answer: PermissionAnswerKind::Review,
+            },
+            ask_tests(),
+        ]);
+        let requested = |tells: &[Tell]| {
+            permission_tells(tells)
+                .iter()
+                .any(|p| matches!(p, PermissionTell::Requested(_)))
+        };
+        assert!(!requested(&covered), "the rule already allows cargo test");
+        let revoked = demo_agent_tells(vec![
+            Ask::PermissionAnswer {
+                id: fixture::demo_permission_request(0).id,
+                answer: PermissionAnswerKind::Review,
+            },
+            Ask::RevokeRule {
+                pr,
+                rule: "Bash(cargo test:*)".into(),
+            },
+            ask_tests(),
+        ]);
+        assert!(requested(&revoked), "a revoked rule asks again");
     }
 
     #[test]

@@ -276,10 +276,12 @@ pub fn stage(world: &mut World, scene: Scene) {
     if scene == Scene::Permission {
         // A frozen clock keeps the countdown at 1:52 for as long as the render takes.
         *world.resource_mut::<Clock>() = Clock(Some(now));
-        let asked = now * 1000;
+        // Asked 8 s ago of a 2-minute wait, so the bar is a little short of full, as the
+        // mockup's is.
+        let now_ms = now * 1000;
         world
             .resource_mut::<PermissionQueue>()
-            .push(fixture::demo_permission_request(asked), asked);
+            .push(fixture::demo_permission_request(now_ms), now_ms - 8_000);
     }
     if scene == Scene::Palette {
         *world.resource_mut::<Palette>() = Palette {
@@ -567,6 +569,17 @@ mod tests {
             clock,
             crate::clock::Clock(Some(NOW)),
             "the countdown must not drift in a render"
+        );
+        let queue = app.world().resource::<PermissionQueue>();
+        let pending = &queue.0[0];
+        let left = crate::screens::review::agent::permission::countdown_fraction(
+            pending.request.deadline,
+            pending.asked_ms,
+            NOW * 1000,
+        );
+        assert!(
+            (left - 112.0 / 120.0).abs() < 0.001,
+            "the bar shows time already passed, not a full bar: {left}"
         );
     }
 

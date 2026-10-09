@@ -461,7 +461,6 @@ pub fn demo_suggestion() -> Suggestion {
     }
 }
 
-/// Every suggestion the demo agent can make (`--demo` accepts them by id).
 /// What the demo agent asks to run (mockup `Permission.png`): 1:52 left when it is asked.
 pub fn demo_permission_request(now_ms: i64) -> PermissionRequest {
     PermissionRequest {
@@ -483,6 +482,7 @@ pub fn demo_permission_rules() -> Vec<String> {
     vec!["Bash(cargo test:*)".into()]
 }
 
+/// Every suggestion the demo agent can make (`--demo` accepts them by id).
 pub fn demo_suggestions() -> Vec<Suggestion> {
     vec![demo_suggestion()]
 }

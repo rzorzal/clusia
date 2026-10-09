@@ -274,7 +274,7 @@ step_terminal() {
     echo "Interrupted: the check stops here."
     exit 130
   fi
-  ask "Did it print 'Claude Code wants to run: mkdir …  [o]nce / [d]eny? ' and run the command after your o?"
+  ask "Did it print 'Claude Code wants to run: mkdir …  [o]nce / [r]eview (mkdir) / [d]eny? ' and run the command after your o?"
   if log_has "✓ ran mkdir clusia-check-$RUN-tty.d (you allowed it)"; then pass "the log says you allowed it"; else fail "the log has no 'you allowed it' line for the terminal answer"; fi
   if clusia agent log "$PR" | grep -q '^  [✓⊘] '; then pass "agent log prints the permission lines"; else fail "agent log prints no permission lines"; fi
 }
