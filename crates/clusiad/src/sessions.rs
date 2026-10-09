@@ -120,6 +120,8 @@ impl Stop {
 struct Active {
     turn: u64,
     stop: Arc<Stop>,
+    /// Whether the program of this turn runs in the sandbox; set once its command is built.
+    sandbox: Option<bool>,
 }
 
 struct Queued {
@@ -266,6 +268,7 @@ impl Sessions {
                 slot.running = Some(Active {
                     turn,
                     stop: stop.clone(),
+                    sandbox: None,
                 });
                 // Counted before the lock is released, so a shutdown that follows waits for it.
                 (turn, Some((stop, Live::new(shared))))
@@ -362,7 +365,32 @@ impl Sessions {
         table.entry(pr.clone()).or_default().running = Some(Active {
             turn,
             stop: Stop::new(),
+            sandbox: None,
         });
+    }
+
+    /// Records whether the program of `turn` runs in the sandbox, if `turn` still runs.
+    pub(crate) fn set_turn_sandbox(&self, pr: &PrRef, turn: u64, sandbox: bool) {
+        let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(active) = table
+            .get_mut(pr)
+            .and_then(|slot| slot.running.as_mut())
+            .filter(|active| active.turn == turn)
+        {
+            active.sandbox = Some(sandbox);
+        }
+    }
+
+    /// Whether the program of `turn` runs in the sandbox; `None` before its command is built
+    /// or once it no longer runs.
+    pub(crate) fn turn_sandbox(&self, pr: &PrRef, turn: u64) -> Option<bool> {
+        let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        table
+            .get(pr)?
+            .running
+            .as_ref()
+            .filter(|active| active.turn == turn)?
+            .sandbox
     }
 
     /// Where the session of `pr` stands right now.
@@ -423,6 +451,7 @@ impl Sessions {
                 slot.running = Some(Active {
                     turn: queued.turn,
                     stop: stop.clone(),
+                    sandbox: None,
                 });
                 Some((queued.turn, queued.prompt, stop))
             }
@@ -947,6 +976,9 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
             .to_string()
             .into(),
     ));
+    // Requests of this turn show, and are judged by, the sandbox its program runs with, even
+    // when the setting changes before the turn ends.
+    shared.sessions.set_turn_sandbox(&pr, turn, harness.sandbox);
     let spec = TurnSpec {
         program: program_path(&shared, &harness),
         prompt: prompt.text,

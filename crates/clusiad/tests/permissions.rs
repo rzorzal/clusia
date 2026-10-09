@@ -484,3 +484,59 @@ async fn clients(c: &mut Client) -> usize {
         other => panic!("a status, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn a_retry_outside_the_sandbox_is_denied_with_no_prompt() {
+    let turn = Turn::answer("Tried.").ask_permission(
+        "Bash",
+        json!({"command": "curl https://example.com", "dangerouslyDisableSandbox": true}),
+    );
+    let (_w, dir, mut c, mut watcher) = started(Script::one(turn)).await;
+    c.request(send("fetch it")).await.unwrap();
+    let events = until(&mut watcher, ready).await;
+    assert_eq!(requested(&events), None);
+    assert_eq!(resolutions(&events), [PermissionOutcome::Denied]);
+    let answers = FakeClaude::permission_answers(&dir);
+    assert!(!answers[0].allow);
+    assert!(
+        answers[0]
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("keeps commands in the sandbox"),
+        "{:?}",
+        answers[0].message
+    );
+}
+
+#[tokio::test]
+async fn the_sandbox_shown_is_the_one_the_turn_runs_with() {
+    let turn = run_tests().ask_permission("Bash", json!({"command": "cargo build"}));
+    let (_w, _dir, mut c, mut watcher) = started(Script::one(turn)).await;
+    c.request(send("run the tests")).await.unwrap();
+    let first = waiting_request(&mut watcher).await;
+    // Switched off while the turn runs: the running program keeps its sandbox.
+    let set = Command::SetConfigValue {
+        key: "harness.sandbox".into(),
+        value: "false".into(),
+    };
+    c.request(set).await.unwrap();
+    answer(&mut c, &first, PermissionAnswerKind::Once).await;
+    let events = until(
+        &mut watcher,
+        |e| matches!(e, Event::PermissionRequested { id, .. } if *id != first),
+    )
+    .await;
+    let second = events
+        .iter()
+        .find_map(|e| match e {
+            Event::PermissionRequested { id, sandbox, .. } if *id != first => {
+                Some((id.clone(), *sandbox))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(second.1, "the second request still says sandboxed");
+    answer(&mut c, &second.0, PermissionAnswerKind::Deny).await;
+    until(&mut watcher, ready).await;
+}

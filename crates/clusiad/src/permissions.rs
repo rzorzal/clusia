@@ -42,6 +42,10 @@ const CANCELLED: &str = "The request was cancelled because the turn ended.";
 /// What the agent is told when it asks for a file outside the review's worktree.
 const OUTSIDE: &str = "Clúsia does not let the agent change files outside the review's worktree.";
 
+/// What the agent is told when it asks to run a command outside the sandbox while it is on.
+const UNSANDBOXED: &str =
+    "Clúsia keeps commands in the sandbox; turn the sandbox off in Config › Harness to allow this";
+
 /// One tool request, as the bridge forwards it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PermissionAsk {
@@ -335,6 +339,37 @@ pub(crate) async fn ask(
     may_ask(shared, &pr, turn)?;
     let worktree = shared.paths.worktree_for(&pr);
     let summary = summary_for(&tool, &input);
+    let (timeout, configured_sandbox) = {
+        let config = shared.config.read().await;
+        (
+            u64::from(config.harness.permission_timeout_secs),
+            config.harness.sandbox,
+        )
+    };
+    let sandbox = shared
+        .sessions
+        .turn_sandbox(&pr, turn)
+        .unwrap_or(configured_sandbox);
+
+    // A command that asks to run outside the sandbox would step over the boundary the
+    // reviewer chose: no rule covers it and nobody is asked.
+    if sandbox
+        && tool == "Bash"
+        && input
+            .get("dangerouslyDisableSandbox")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        decided_at_once(
+            shared,
+            &pr,
+            turn,
+            &tool,
+            &summary,
+            PermissionOutcome::Denied,
+        );
+        return Ok(PermissionDecision::denied(UNSANDBOXED));
+    }
 
     if FILE_TOOLS.contains(&tool.as_str())
         && !file_path(&input).is_some_and(|path| inside_worktree(&path, &worktree))
@@ -368,13 +403,6 @@ pub(crate) async fn ask(
         "Bash" => rule_for_bash(prefix),
         _ => rule_for_tool(&tool),
     });
-    let (timeout, sandbox) = {
-        let config = shared.config.read().await;
-        (
-            u64::from(config.harness.permission_timeout_secs),
-            config.harness.sandbox,
-        )
-    };
     let id = new_id();
     // One instant for the deadline the windows count down to and the one that expires the
     // request, taken before anything that may take a while (the tray).
@@ -1388,5 +1416,74 @@ mod tests {
         permissions.note_denial(&pr(7), 1, "Bash");
         permissions.forget_turn(&pr(7), 1);
         assert!(!permissions.already_told(&pr(7), 1, "Bash"));
+    }
+
+    fn unsandboxed(command: &str) -> Value {
+        json!({"command": command, "dangerouslyDisableSandbox": true})
+    }
+
+    #[tokio::test]
+    async fn a_command_that_leaves_the_sandbox_is_denied_while_the_sandbox_is_on() {
+        let mut lab = lab();
+        lab.shared.sessions.set_turn_sandbox(&pr(7), 1, true);
+        assert!(add_rule(&lab.shared, &pr(7), "Bash(cargo test:*)").await);
+        lab.events.recv().await.unwrap();
+        let decision = lab
+            .ask("Bash", unsandboxed("cargo test"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::denied(UNSANDBOXED));
+        assert_eq!(
+            UNSANDBOXED,
+            "Clúsia keeps commands in the sandbox; turn the sandbox off in Config › Harness to allow this"
+        );
+        let told = lab.events.recv().await.unwrap().1;
+        assert!(
+            matches!(
+                &told,
+                Event::PermissionResolved { tool, summary, outcome: PermissionOutcome::Denied, .. }
+                    if tool == "Bash" && summary == "cargo test"
+            ),
+            "no rule covers it and nobody is asked: {told:?}"
+        );
+        assert_eq!(outcomes(&lab.log()), [PermissionOutcome::Denied]);
+        assert_eq!(lab.shared.permissions.waiting(), 0);
+    }
+
+    #[tokio::test]
+    async fn without_the_sandbox_leaving_it_is_asked_as_usual() {
+        let mut lab = lab();
+        lab.shared.sessions.set_turn_sandbox(&pr(7), 1, false);
+        let asked = lab.ask("Bash", unsandboxed("curl https://example.com"));
+        let (id, requested) = lab.requested().await;
+        assert!(
+            matches!(requested, Event::PermissionRequested { sandbox: false, .. }),
+            "the modal says the network is allowed"
+        );
+        answer(&lab.shared, &id, PermissionAnswerKind::Once).await;
+        assert!(asked.await.unwrap().unwrap().allow);
+    }
+
+    #[tokio::test]
+    async fn a_request_tells_the_sandbox_its_turn_started_with() {
+        let mut lab = lab();
+        lab.shared.sessions.set_turn_sandbox(&pr(7), 1, true);
+        lab.shared.config.write().await.harness.sandbox = false;
+        let asked = lab.ask("Bash", bash("cargo test"));
+        let (id, requested) = lab.requested().await;
+        assert!(matches!(
+            requested,
+            Event::PermissionRequested { sandbox: true, .. }
+        ));
+        answer(&lab.shared, &id, PermissionAnswerKind::Deny).await;
+        asked.await.unwrap().unwrap();
+        // The switch changed after the turn started: leaving the sandbox is still refused.
+        let decision = lab
+            .ask("Bash", unsandboxed("cargo test"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!decision.allow);
     }
 }

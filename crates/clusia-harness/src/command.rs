@@ -22,10 +22,12 @@ const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "LS"];
 const PROMPT_TOOL: &str = "mcp__clusia__approve";
 
 /// Hooks off; with `sandbox`, also no network and writes only in the working folder. Commands
-/// the sandbox would allow still ask: `autoAllowBashIfSandboxed` stays off.
+/// the sandbox would allow still ask: `autoAllowBashIfSandboxed` stays off. Bash's own
+/// `dangerouslyDisableSandbox` would run a command outside it: `allowUnsandboxedCommands`
+/// turns that off.
 fn settings(sandbox: bool) -> &'static str {
     if sandbox {
-        r#"{"disableAllHooks":true,"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":false}}"#
+        r#"{"disableAllHooks":true,"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":false,"allowUnsandboxedCommands":false}}"#
     } else {
         r#"{"disableAllHooks":true}"#
     }
@@ -354,7 +356,11 @@ mod tests {
             on,
             serde_json::json!({
                 "disableAllHooks": true,
-                "sandbox": { "enabled": true, "autoAllowBashIfSandboxed": false }
+                "sandbox": {
+                    "enabled": true,
+                    "autoAllowBashIfSandboxed": false,
+                    "allowUnsandboxedCommands": false
+                }
             })
         );
     }
