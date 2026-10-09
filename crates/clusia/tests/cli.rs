@@ -944,11 +944,21 @@ mod review_flow {
 
     /// Collects what `reader` produces, as it comes (a prompt has no line end to wait for).
     fn collect(
-        mut reader: impl std::io::Read + Send + 'static,
+        reader: impl std::io::Read + Send + 'static,
     ) -> std::sync::Arc<std::sync::Mutex<String>> {
+        collect_joinable(reader).0
+    }
+
+    /// Like `collect`, with the thread to join once the pipe is closed.
+    fn collect_joinable(
+        mut reader: impl std::io::Read + Send + 'static,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<String>>,
+        std::thread::JoinHandle<()>,
+    ) {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let sink = seen.clone();
-        std::thread::spawn(move || {
+        let reading = std::thread::spawn(move || {
             let mut buffer = [0u8; 512];
             while let Ok(n) = reader.read(&mut buffer) {
                 if n == 0 {
@@ -959,7 +969,7 @@ mod review_flow {
                     .push_str(&String::from_utf8_lossy(&buffer[..n]));
             }
         });
-        seen
+        (seen, reading)
     }
 
     fn wait_until(seen: &std::sync::Mutex<String>, needle: &str) {
@@ -985,14 +995,14 @@ mod review_flow {
             &["ask", "acme/widgets#7", "run the tests"],
             slave,
         );
-        let out = collect(child.stdout.take().unwrap());
-        let err = collect(child.stderr.take().unwrap());
+        let (out, out_thread) = collect_joinable(child.stdout.take().unwrap());
+        let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
         wait_until(&err, "/ [d]eny? ");
         master.write_all(typed.as_bytes()).unwrap();
         let status = child.wait().unwrap();
         assert!(status.success(), "{}", err.lock().unwrap());
-        // The readers end with the pipes; give them the last bytes.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        out_thread.join().unwrap();
+        err_thread.join().unwrap();
         let (out, err) = (out.lock().unwrap().clone(), err.lock().unwrap().clone());
         (out, err)
     }
@@ -1050,6 +1060,16 @@ mod review_flow {
     /// arrives, then ends the turn when the answer comes. It stands where the real one would,
     /// so the terminal side is tested on its own.
     fn daemon_that_asks(rt: &tokio::runtime::Runtime, socket: &Path) -> Answers {
+        daemon_that_asks_after(rt, socket, None)
+    }
+
+    /// Like `daemon_that_asks`, but the request is only announced once `gate` is released.
+    fn daemon_that_asks_after(
+        rt: &tokio::runtime::Runtime,
+        socket: &Path,
+        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> Answers {
+        let mut gate = gate;
         use clusia_protocol::{
             ClientMessage, Command as Request, Event, MessageReader, Outcome, PROTOCOL_VERSION,
             PermissionAnswerKind, PermissionOutcome, Reply, ServerMessage, write_message,
@@ -1082,6 +1102,7 @@ mod review_flow {
             while let Ok(Some(ClientMessage::Request { id, cmd })) =
                 read.next::<ClientMessage>().await
             {
+                let is_send = matches!(cmd, Request::AgentSend { .. });
                 let (reply, then) = match cmd {
                     Request::AgentSend { .. } => (
                         Reply::AgentTurn { turn: 1 },
@@ -1135,6 +1156,9 @@ mod review_flow {
                     result: Outcome::Ok(reply),
                 };
                 write_message(&mut write, &response).await.unwrap();
+                if is_send && let Some(gate) = gate.take() {
+                    let _ = gate.await;
+                }
                 for message in then {
                     write_message(&mut write, &message).await.unwrap();
                 }
@@ -1152,31 +1176,90 @@ mod review_flow {
         String,
         Vec<(String, clusia_protocol::PermissionAnswerKind)>,
     ) {
+        ask_the_fake_daemon_after(None, typed)
+    }
+
+    /// Like `ask_the_fake_daemon`, with `stray` typed while no question is open yet.
+    fn ask_the_fake_daemon_after(
+        stray: Option<&str>,
+        typed: &str,
+    ) -> (
+        String,
+        String,
+        Vec<(String, clusia_protocol::PermissionAnswerKind)>,
+    ) {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let answers = daemon_that_asks(&rt, &clusia_core::Paths::new(dir.path()).socket());
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let answers = daemon_that_asks_after(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            stray.map(|_| gate),
+        );
         let (mut master, slave) = pty();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_clusia"))
-            .arg("--home")
-            .arg(dir.path())
-            .args(["ask", "acme/widgets#7", "run the tests"])
-            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
-            .stdin(slave)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let out = collect(child.stdout.take().unwrap());
-        let err = collect(child.stderr.take().unwrap());
+        let mut child = fake_daemon_ask(dir.path(), slave);
+        let (out, out_thread) = collect_joinable(child.stdout.take().unwrap());
+        let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
+        if let Some(stray) = stray {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            master.write_all(stray.as_bytes()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            release.send(()).unwrap();
+        }
         wait_until(&err, "/ [d]eny? ");
         master.write_all(typed.as_bytes()).unwrap();
         let status = child.wait().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        out_thread.join().unwrap();
+        err_thread.join().unwrap();
         let (out, err) = (out.lock().unwrap().clone(), err.lock().unwrap().clone());
         assert!(status.success(), "{err}");
         let told = answers.lock().unwrap().clone();
         (out, err, told)
+    }
+
+    fn fake_daemon_ask(home: &Path, stdin: std::process::Stdio) -> std::process::Child {
+        Command::new(env!("CARGO_BIN_EXE_clusia"))
+            .arg("--home")
+            .arg(home)
+            .args(["ask", "acme/widgets#7", "run the tests"])
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .stdin(stdin)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_line_typed_before_the_question_is_shown_never_answers_it() {
+        use clusia_protocol::PermissionAnswerKind::Deny;
+        let (_, err, told) = ask_the_fake_daemon_after(Some("o\n"), "\n");
+        assert_eq!(told, [("perm-1".to_string(), Deny)], "{err}");
+    }
+
+    #[test]
+    fn ctrl_c_at_the_prompt_detaches_and_answers_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let answers = daemon_that_asks(&rt, &clusia_core::Paths::new(dir.path()).socket());
+        let (_master, slave) = pty();
+        let mut child = fake_daemon_ask(dir.path(), slave);
+        let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
+        wait_until(&err, "/ [d]eny? ");
+        // SAFETY: the child is ours and still running (it waits at the prompt).
+        unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+        let status = child.wait().unwrap();
+        err_thread.join().unwrap();
+        assert_eq!(status.code(), Some(130), "{}", err.lock().unwrap());
+        assert!(
+            err.lock()
+                .unwrap()
+                .contains("Detached: the agent keeps working"),
+            "{}",
+            err.lock().unwrap()
+        );
+        assert!(answers.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1258,6 +1341,61 @@ mod review_flow {
                 .contains("✓ ran cargo test -p clusia-core (you allowed it)"),
             "{}",
             err.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_prompt_closes_when_the_request_is_answered_in_the_window() {
+        use clusia_protocol::{Client, Command as Request, Event, PermissionAnswerKind, topics};
+        let w = AgentWorld::new(asks_to_run_the_tests());
+        let socket = clusia_core::Paths::new(w.home.dir.path()).socket();
+        let mut window = w._rt.block_on(async {
+            let mut client = Client::connect(&socket, "test-window").await.unwrap();
+            client
+                .request(Request::Subscribe {
+                    topics: vec![topics::AGENT.into()],
+                })
+                .await
+                .unwrap();
+            client
+        });
+        let (_master, slave) = pty();
+        let mut child = w.home.spawn_with_stdin(
+            &w.api,
+            Some("tok"),
+            &["ask", "acme/widgets#7", "run the tests"],
+            slave,
+        );
+        let (out, out_thread) = collect_joinable(child.stdout.take().unwrap());
+        let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
+        wait_until(&err, "/ [d]eny? ");
+        w._rt.block_on(async {
+            loop {
+                let (_, event) =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), window.next_event())
+                        .await
+                        .expect("the request is announced")
+                        .unwrap();
+                if let Event::PermissionRequested { id, .. } = event {
+                    window
+                        .request(Request::PermissionAnswer {
+                            id,
+                            answer: PermissionAnswerKind::Once,
+                        })
+                        .await
+                        .unwrap();
+                    return;
+                }
+            }
+        });
+        assert!(child.wait().unwrap().success());
+        out_thread.join().unwrap();
+        err_thread.join().unwrap();
+        let (out, err) = (out.lock().unwrap().clone(), err.lock().unwrap().clone());
+        assert!(out.contains("Done."), "{out}");
+        assert!(
+            err.contains("/ [d]eny? \n✓ ran cargo test -p clusia-core (you allowed it)"),
+            "{err}"
         );
     }
 }

@@ -46,13 +46,13 @@ impl Waiting {
     /// The question on a terminal, ending where the answer is typed.
     fn prompt(&self) -> String {
         let choices = match &self.prefix {
-            Some(prefix) => format!("[o]nce / [r]eview ({prefix}) / [d]eny? "),
+            Some(prefix) => format!("[o]nce / [r]eview ({}) / [d]eny? ", printable(prefix)),
             None => "[o]nce / [d]eny? ".to_string(),
         };
         format!(
             "Claude Code wants to {}: {}  {choices}",
             self.verb(),
-            self.summary
+            printable(&self.summary)
         )
     }
 
@@ -61,9 +61,23 @@ impl Waiting {
         format!(
             "waiting for an answer in the window: Claude Code wants to {}: {}",
             self.verb(),
-            self.summary
+            printable(&self.summary)
         )
     }
+}
+
+/// `text` as one safe line: a control character (a carriage return, an escape sequence) would
+/// let a command rewrite the question the reviewer reads, so it is shown as an escape.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// What a typed line means for a request. Only a clear yes allows: an empty line, a typo and
@@ -132,6 +146,12 @@ impl Turn {
         let front = self.waiting.first_mut().filter(|w| !w.answered)?;
         front.answered = true;
         Some((front.id.clone(), parse_answer(line, front.prefix.is_some())))
+    }
+
+    /// Whether `event` ends the request that is asked now.
+    pub(crate) fn ends_the_question(&self, event: &Event) -> bool {
+        matches!(event, Event::PermissionResolved { id, .. }
+            if self.waiting.first().is_some_and(|w| w.id == *id))
     }
 
     pub(crate) fn pr(&self) -> &PrRef {
@@ -225,11 +245,14 @@ impl Turn {
                 outcome,
                 ..
             } => {
-                let was_front = self.waiting.first().is_some_and(|w| w.id == *id);
+                let front = self.waiting.first();
+                let was_front = front.is_some_and(|w| w.id == *id);
+                let answered_here = front.is_some_and(|w| w.id == *id && w.answered);
                 self.waiting.retain(|w| w.id != *id);
                 if !self.json {
-                    // The prompt may still wait for a line: end it first.
-                    if self.interactive && was_front {
+                    // A prompt nobody answered here still waits for a line: end it first. An
+                    // answer typed here already ended it with the reviewer's Enter.
+                    if self.interactive && was_front && !answered_here {
                         writeln!(err)?;
                     }
                     writeln!(
@@ -355,6 +378,7 @@ pub(crate) fn log_lines(entries: &[AgentLogEntry]) -> Vec<String> {
 /// How the chat reports a request that needed the reviewer: what was done to what, and who
 /// decided.
 pub(crate) fn permission_line(tool: &str, summary: &str, outcome: PermissionOutcome) -> String {
+    let summary = &printable(summary);
     let verb = match tool {
         "Bash" => "ran",
         "Edit" | "MultiEdit" | "NotebookEdit" => "edited",
@@ -399,6 +423,13 @@ fn stdin_lines() -> tokio::sync::mpsc::UnboundedReceiver<String> {
     lines
 }
 
+/// Drops the lines already typed.
+fn discard_typed(typed: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>) {
+    if let Some(lines) = typed {
+        while lines.try_recv().is_ok() {}
+    }
+}
+
 /// The next typed line; with no terminal, or once it is closed, never.
 async fn typed_line(
     typed: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
@@ -407,6 +438,24 @@ async fn typed_line(
         Some(lines) => lines.recv().await,
         None => std::future::pending().await,
     }
+}
+
+/// Says once that a question is open on a terminal whose input has ended: nothing can answer
+/// it, so it will be denied when its time runs out.
+fn note_end_of_input(
+    run: &Turn,
+    typed: &Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    noted: &mut bool,
+    err: &mut dyn Write,
+) -> io::Result<()> {
+    if typed.is_none() && run.asking() && !*noted {
+        *noted = true;
+        writeln!(
+            err,
+            "\nno more input: the request is denied when its time runs out"
+        )?;
+    }
+    Ok(())
 }
 
 /// Sends the reviewer's answer. A request that already ended (answered in the window, or out
@@ -475,21 +524,35 @@ pub(crate) async fn ask(
     let interactive = io::stdin().is_terminal() && !json;
     let mut run = Turn::new(pr, turn, json).interactive(interactive);
     let mut typed = interactive.then(stdin_lines);
+    let mut noted_end_of_input = false;
     let (mut out, mut err) = (io::stdout(), io::stderr());
     loop {
         let (_, event) = tokio::select! {
             event = client.next_event() => event?,
-            Some(line) = typed_line(&mut typed), if run.asking() => {
-                if let Some((id, answer)) = run.answer_line(&line) {
-                    send_answer(&mut client, id, answer).await?;
+            line = typed_line(&mut typed) => {
+                match line {
+                    // A line typed while no question is open answers nothing.
+                    Some(line) => {
+                        if let Some((id, answer)) = run.answer_line(&line) {
+                            send_answer(&mut client, id, answer).await?;
+                        }
+                    }
+                    None => typed = None,
                 }
+                note_end_of_input(&run, &typed, &mut noted_end_of_input, &mut err)
+                    .map_err(io_error)?;
                 continue;
             }
             _ = interrupt.recv() => detach(run.pr()),
         };
+        // What was typed before a question is shown is not its answer.
+        if !run.asking() || run.ends_the_question(&event) {
+            discard_typed(&mut typed);
+        }
         if let Flow::Finished = run.feed(&event, &mut out, &mut err).map_err(io_error)? {
             break;
         }
+        note_end_of_input(&run, &typed, &mut noted_end_of_input, &mut err).map_err(io_error)?;
     }
     run.finish(&mut out).map_err(io_error)?;
     match run.failure() {
@@ -999,7 +1062,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             said(&err),
-            "\n✓ ran cargo test -p clusia-core (allowed for this review)\n"
+            "✓ ran cargo test -p clusia-core (allowed for this review)\n"
         );
     }
 
@@ -1065,6 +1128,52 @@ mod tests {
             turn.answer_line("o"),
             Some(("p2".into(), PermissionAnswerKind::Once))
         );
+    }
+
+    #[test]
+    fn a_command_cannot_rewrite_the_question_or_its_ending() {
+        let nasty = "make\r\u{1b}[2K";
+        let shown = "make\\r\\u{1b}[2K";
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        let ask = requested("p1", 2, "Bash", nasty, Some("make\r"));
+        turn.feed(&ask, &mut out, &mut err).unwrap();
+        assert_eq!(
+            said(&err),
+            format!("Claude Code wants to run: {shown}  [o]nce / [r]eview (make\\r) / [d]eny? ")
+        );
+        err.clear();
+        let done = resolved_for("p1", "Bash", nasty, PermissionOutcome::Denied);
+        turn.feed(&done, &mut out, &mut err).unwrap();
+        assert_eq!(said(&err), format!("\n⊘ you denied {shown}\n"));
+
+        let (mut elsewhere, mut out, mut err) = run(false);
+        elsewhere
+            .feed(&requested("p2", 2, "Bash", nasty, None), &mut out, &mut err)
+            .unwrap();
+        assert_eq!(
+            said(&err),
+            format!("waiting for an answer in the window: Claude Code wants to run: {shown}\n")
+        );
+        let allowed = permission_line("Bash", nasty, PermissionOutcome::Allowed);
+        assert_eq!(allowed, format!("  ✓ ran {shown} (you allowed it)"));
+    }
+
+    #[test]
+    fn an_answer_typed_here_has_already_ended_the_prompt_line() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        turn.feed(
+            &requested("p1", 2, "Bash", "make", None),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        turn.answer_line("o");
+        err.clear();
+        let allowed = resolved("p1", PermissionOutcome::Allowed);
+        turn.feed(&allowed, &mut out, &mut err).unwrap();
+        assert_eq!(said(&err), "✓ ran make (you allowed it)\n");
     }
 
     #[test]
