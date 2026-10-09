@@ -133,6 +133,9 @@ impl Turn {
     /// server of `--mcp-config` and waits for the answer. Asks run in the order they were added.
     /// An allowed ask changes nothing; a denied one adds itself to the result's
     /// `permission_denials`. Without `--mcp-config` the asks are skipped.
+    ///
+    /// The fake reads `command` and `args` out of the config text without un-escaping it, so
+    /// the program and its arguments must not hold `"` or `\`.
     pub fn ask_permission(mut self, tool: &str, input: serde_json::Value) -> Self {
         self.asks.push((tool.to_string(), input));
         self
@@ -434,13 +437,19 @@ if [ "${asks:-0}" -gt 0 ] && [ -n "$cfg" ]; then
     ask "$(cat "$dir/turn-$k.ask-$i.call")"
     printf '%s\t%s\n' "$(cat "$dir/turn-$k.ask-$i.tool")" "${reply:-null}" >> "$dir/calls/$n/answers"
     case "$reply" in
-      *'\"behavior\":\"allow\"'*) ;;
+      *'"text":"{\"behavior\":\"allow\"'*) ;;
       *) denials="${denials:+$denials,}$(cat "$dir/turn-$k.ask-$i.denial")" ;;
     esac
     i=$((i + 1))
   done
   exec 3>&-
   exec 4<&-
+  w=0
+  while kill -0 "$bridge" 2>/dev/null && [ "$w" -lt 50 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  kill -9 "$bridge" 2>/dev/null
   wait "$bridge" 2>/dev/null
 fi
 denial_repl="\"permission_denials\":[$denials]"
@@ -663,6 +672,11 @@ mod tests {
     /// `tools/call`, which it allows when the request mentions `cargo test` and denies with
     /// "The reviewer said no." otherwise. It ends when its input does.
     fn stub_bridge(dir: &Path) -> PathBuf {
+        stub_bridge_then(dir, "")
+    }
+
+    /// The stub bridge, running `after` once its input has ended.
+    fn stub_bridge_then(dir: &Path, after: &str) -> PathBuf {
         let script = dir.join("bridge");
         fs::write(
             &script,
@@ -681,7 +695,9 @@ while IFS= read -r line; do
     *) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
   esac
 done
-"#,
+__AFTER__
+"#
+            .replace("__AFTER__", after),
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
@@ -787,6 +803,28 @@ done
                 .unwrap()
                 .contains(r#""permission_denials":[]"#)
         );
+        assert_eq!(FakeClaude::permission_answers(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn a_bridge_that_ignores_the_end_of_its_input_does_not_hang_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = stub_bridge_then(dir.path(), "sleep 60");
+        let program = FakeClaude::install(
+            dir.path(),
+            Script::one(
+                Turn::answer("done")
+                    .ask_permission("Bash", serde_json::json!({"command": "cargo test"})),
+            ),
+        );
+        let started = std::time::Instant::now();
+        let out = run(
+            &program,
+            &["-p", "x", "--mcp-config", &mcp_config(&bridge)],
+            dir.path(),
+        );
+        assert!(out.status.success());
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
         assert_eq!(FakeClaude::permission_answers(dir.path()).len(), 1);
     }
 

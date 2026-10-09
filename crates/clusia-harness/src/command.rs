@@ -31,20 +31,6 @@ fn settings(sandbox: bool) -> &'static str {
     }
 }
 
-/// `Bash(<prefix>:*)` with a prefix of plain words: the only rules `--allowedTools` may carry.
-fn is_command_rule(rule: &str) -> bool {
-    rule.strip_prefix("Bash(")
-        .and_then(|r| r.strip_suffix(":*)"))
-        .is_some_and(|prefix| {
-            !prefix.trim().is_empty()
-                && prefix.split(' ').all(|w| {
-                    !w.is_empty()
-                        && w.chars()
-                            .all(|c| c.is_ascii_alphanumeric() || "_.+-".contains(c))
-                })
-        })
-}
-
 /// The `--mcp-config` JSON that starts the bridge: one server, named `clusia`.
 fn mcp_config(bridge: &BridgeSpec) -> String {
     let text = |s: &str| serde_json::Value::String(s.to_string()).to_string();
@@ -107,8 +93,9 @@ pub struct TurnSpec {
     pub bridge: Option<BridgeSpec>,
     /// Run commands with no network and writes only in the worktree.
     pub sandbox: bool,
-    /// What the reviewer allowed for this review (`Bash(cargo test:*)`). Only command rules
-    /// reach the command line; file-tool rules stay with the daemon, which checks the path.
+    /// What the reviewer allowed for this review (`Bash(cargo test:*)`). Never put on the command
+    /// line: `claude` would allow by its own prefix match and skip the daemon's checks, so every
+    /// such request goes through the bridge, where the daemon decides.
     pub rules: Vec<String>,
 }
 
@@ -137,8 +124,7 @@ impl ClaudeCode {
             .arg("--include-partial-messages")
             .args(["--permission-mode", "default"])
             .arg("--allowedTools")
-            .args(READ_ONLY_TOOLS)
-            .args(spec.rules.iter().filter(|r| is_command_rule(r)));
+            .args(READ_ONLY_TOOLS);
         if let Some(bridge) = &spec.bridge {
             cmd.args(["--permission-prompt-tool", PROMPT_TOOL])
                 .args(["--mcp-config", &mcp_config(bridge)])
@@ -287,10 +273,9 @@ mod tests {
     fn a_turn_with_a_bridge_asks_the_reviewer() {
         let mut s = spec();
         s.bridge = Some(bridge());
-        s.rules = vec!["Bash(cargo test:*)".into()];
         let args = argv(&ClaudeCode::command(&s));
         assert_eq!(
-            args[..22],
+            args[..21],
             [
                 "-p",
                 "Is the expiry checked?",
@@ -305,7 +290,6 @@ mod tests {
                 "Grep",
                 "Glob",
                 "LS",
-                "Bash(cargo test:*)",
                 "--permission-prompt-tool",
                 "mcp__clusia__approve",
                 "--mcp-config",
@@ -316,7 +300,7 @@ mod tests {
                 "--session-id",
             ]
         );
-        let config: serde_json::Value = serde_json::from_str(&args[17]).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&args[16]).unwrap();
         assert_eq!(
             config["mcpServers"]["clusia"]["args"][2],
             "/tmp/clusia/clusiad.sock"
@@ -376,35 +360,25 @@ mod tests {
     }
 
     #[test]
-    fn only_command_rules_reach_allowed_tools() {
+    fn review_rules_never_reach_the_command_line() {
         let mut s = spec();
         s.rules = [
             "Bash(cargo test:*)",
+            "Bash(rm:*)",
+            "Bash(bash:*)",
             "Bash(npm run:*)",
             "Edit",
             "Write",
             "Bash",
-            "Bash(:*)",
-            "Bash(cargo test; rm -rf /:*)",
-            "Bash(cargo $(id):*)",
-            "Bash(cargo test)",
-            "Read",
-            "WebFetch",
         ]
         .map(String::from)
         .to_vec();
         let args = argv(&ClaudeCode::command(&s));
         assert_eq!(
             values_of(&args, "--allowedTools"),
-            [
-                "Read",
-                "Grep",
-                "Glob",
-                "LS",
-                "Bash(cargo test:*)",
-                "Bash(npm run:*)"
-            ]
+            ["Read", "Grep", "Glob", "LS"]
         );
+        assert!(!args.iter().any(|a| a.starts_with("Bash")));
     }
 
     #[test]
