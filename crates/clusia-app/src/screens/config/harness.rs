@@ -109,6 +109,49 @@ pub fn program_hint(v: &HarnessView) -> String {
     }
 }
 
+/// A card title led by its radio mark: filled green when selected, an empty grey ring otherwise.
+fn title_with_radio(
+    c: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    name: &str,
+    ty: Type,
+    selected: bool,
+) {
+    c.spawn(Node {
+        align_items: AlignItems::Center,
+        column_gap: px(8),
+        ..default()
+    })
+    .with_children(|t| {
+        t.spawn((
+            Node {
+                width: px(14),
+                height: px(14),
+                flex_shrink: 0.0,
+                border: px(if selected { 4 } else { 1 }).all(),
+                border_radius: BorderRadius::MAX,
+                ..default()
+            },
+            BackgroundColor::default(),
+            Fill(Swatch::Surface),
+            BorderColor::default(),
+            Stroke(if selected {
+                Swatch::Green
+            } else {
+                Swatch::Line
+            }),
+            RadioMark { selected },
+        ));
+        t.spawn(text(fonts, name, ty));
+    });
+}
+
+/// The circle before a harness card's title.
+#[derive(Component, Debug)]
+pub struct RadioMark {
+    pub selected: bool,
+}
+
 pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
     page_header(
         p,
@@ -122,7 +165,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
     })
     .with_children(|r| {
         r.spawn(option_card(true, 250.0)).with_children(|c| {
-            c.spawn(text(fonts, "Claude Code", Type::STRONG));
+            title_with_radio(c, fonts, "Claude Code", Type::STRONG, true);
             c.spawn(text(fonts, "claude, with your settings", Type::META));
         });
         for (name, about) in [
@@ -137,7 +180,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
                 ..default()
             }))
             .with_children(|c| {
-                c.spawn(text(fonts, name, Type::STRONG.ink(Swatch::Faint)));
+                title_with_radio(c, fonts, name, Type::STRONG.ink(Swatch::Faint), false);
                 c.spawn(text(fonts, about, Type::META));
                 c.spawn(text(fonts, "Arrives in a later milestone", Type::META));
             });

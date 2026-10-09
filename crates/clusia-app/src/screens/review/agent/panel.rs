@@ -571,19 +571,31 @@ fn rebuild_header(
                     Swatch::Green
                 },
             ));
-            h.spawn(text(&fonts, "Claude Code", Type::STRONG));
-            h.spawn(text(
-                &fonts,
-                if want.resumed {
-                    "session resumed · knows this review"
-                } else {
-                    "knows this review"
+            h.spawn((
+                text(&fonts, "Claude Code", Type::STRONG),
+                TextLayout::no_wrap(),
+                Node {
+                    flex_shrink: 0.0,
+                    ..default()
                 },
-                Type::META,
             ));
+            // The status text takes the width left over and wraps under the name's row.
             h.spawn(Node {
                 flex_grow: 1.0,
+                flex_shrink: 1.0,
+                min_width: px(0),
                 ..default()
+            })
+            .with_children(|s| {
+                s.spawn(text(
+                    &fonts,
+                    if want.resumed {
+                        "session resumed · knows this review"
+                    } else {
+                        "knows this review"
+                    },
+                    Type::META,
+                ));
             });
             if matches!(
                 want.state,
@@ -985,7 +997,7 @@ mod tests {
     use crate::fixture;
     use crate::nav::{Nav, Screen, Section};
     use crate::screens::review::agent::PanelTab;
-    use crate::screens::review::shell::{HarnessButton, RightPanel};
+    use crate::screens::review::shell::{FinalizeButton, HarnessButton, RightPanel};
     use crate::snapshot::Snapshot;
     use crate::testing::{self, NOW};
     use bevy::input::ButtonInput;
@@ -996,6 +1008,28 @@ mod tests {
 
     fn pr() -> PrRef {
         fixture::demo_pr()
+    }
+
+    #[test]
+    fn the_name_keeps_one_line_and_the_toggle_sits_before_finalize() {
+        let mut app = open_chat();
+        testing::settle(&mut app);
+        let world = app.world_mut();
+        let mut names = world.query::<(&Text, &TextLayout)>();
+        let (_, layout) = names
+            .iter(world)
+            .find(|(t, _)| t.0 == "Claude Code")
+            .expect("the header name");
+        assert_eq!(layout.linebreak, LineBreak::NoWrap);
+
+        let toggle = testing::find::<PanelToggle>(&mut app, |_| true);
+        let finalize = testing::find::<FinalizeButton>(&mut app, |_| true);
+        let world = app.world();
+        let parent = world.get::<ChildOf>(toggle).unwrap().parent();
+        assert_eq!(world.get::<ChildOf>(finalize).unwrap().parent(), parent);
+        let siblings = world.get::<Children>(parent).unwrap();
+        let at = |e: Entity| siblings.iter().position(|c| c == e).unwrap();
+        assert_eq!(at(toggle) + 1, at(finalize));
     }
 
     /// The demo review, with the Agent tab selected.

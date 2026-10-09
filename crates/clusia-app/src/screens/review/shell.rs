@@ -1184,23 +1184,35 @@ fn rebuild_status(
                 a.spawn(text(&fonts, status.agent.clone(), Type::MUTED));
             });
             p.spawn(text(&fonts, status.draft.clone(), Type::META));
-            p.spawn((
-                button(
-                    &fonts,
-                    if status.panel_open {
-                        "Hide panel"
-                    } else {
-                        "Show panel"
-                    },
-                    Variant::Ghost,
-                ),
-                PanelToggle(pr.clone()),
-                observe(on_panel_toggle),
-            ));
             p.spawn(Node {
                 flex_grow: 1.0,
                 ..default()
             });
+            p.spawn((
+                Node {
+                    padding: UiRect::horizontal(px(8)),
+                    align_items: AlignItems::Center,
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                (WidgetButton, Clickable),
+                Hovered::default(),
+                TabIndex(0),
+                PanelToggle(pr.clone()),
+                observe(on_panel_toggle),
+                children![(
+                    text(
+                        &fonts,
+                        if status.panel_open {
+                            "Hide panel"
+                        } else {
+                            "Show panel"
+                        },
+                        Type::MUTED,
+                    ),
+                    TextLayout::no_wrap(),
+                )],
+            ));
             if status.finalize {
                 p.spawn((
                     button(&fonts, "Finalize review", Variant::Primary),

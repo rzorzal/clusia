@@ -558,6 +558,19 @@ mod tests {
         app
     }
 
+    #[test]
+    fn harness_cards_lead_with_a_radio_mark() {
+        let mut app = config_app(Section::Harness);
+        let marks: Vec<bool> = app
+            .world_mut()
+            .query::<&harness::RadioMark>()
+            .iter(app.world())
+            .map(|m| m.selected)
+            .collect();
+        assert_eq!(marks.iter().filter(|s| **s).count(), 1);
+        assert_eq!(marks.len(), 3);
+    }
+
     fn field_value(app: &mut App, key: &str) -> String {
         let e = testing::find::<ConfigField>(app, |f| f.0 == key);
         app.world().get::<Field>(e).unwrap().committed.clone()
