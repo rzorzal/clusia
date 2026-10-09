@@ -2,9 +2,9 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
-use clusia_core::Paths;
+use clap::{Parser, Subcommand};
 use clusia_core::logging::{DailyLog, KEEP_FILES};
+use clusia_core::{Paths, PrRef};
 use clusiad::{Daemon, DaemonOptions, StartError};
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -17,6 +17,26 @@ struct Args {
     /// Data directory (defaults to $CLUSIA_HOME or ~/Library/Application Support/Clusia).
     #[arg(long, value_name = "DIR")]
     home: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Mode>,
+}
+
+#[derive(Subcommand)]
+enum Mode {
+    /// The stdio MCP server `claude` starts to ask the reviewer for permission. Started by
+    /// the daemon's own command line, never by hand.
+    #[command(hide = true)]
+    PermissionBridge {
+        /// The daemon's Unix socket.
+        #[arg(long, value_name = "PATH")]
+        socket: PathBuf,
+        /// The review the turn belongs to, as `owner/repo#number`.
+        #[arg(long)]
+        pr: PrRef,
+        /// The agent turn that asks.
+        #[arg(long)]
+        turn: u64,
+    },
 }
 
 /// Logs go to `daemon.log` in the logs folder; a daemon started from a terminal logs there.
@@ -68,6 +88,16 @@ fn already_running_status(xpc_service: Option<&str>) -> u8 {
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
+    // The bridge speaks MCP on standard output, so it neither logs there nor takes the lock.
+    if let Some(Mode::PermissionBridge { socket, pr, turn }) = args.command {
+        return match clusiad::run_permission_bridge(socket, pr, turn).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("clusiad permission-bridge: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let paths = match args.home {
         Some(home) => match std::path::absolute(&home) {
             Ok(home) => Paths::new(home),

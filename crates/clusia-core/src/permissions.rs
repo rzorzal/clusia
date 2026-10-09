@@ -165,8 +165,8 @@ pub fn prefix_for(tool: &str, input: &Value, worktree: &Path) -> Option<String> 
 /// A Bash rule covers a command that starts with the rule's words, word for word
 /// (`cargo test` covers `cargo test -p x`, not `cargo testx`), and only a single simple
 /// command whose arguments stay inside the worktree. A Bash rule that [`prefix_for`] could not
-/// have made (`Bash(rm:*)` in an edited state file) covers nothing. A file-tool rule covers its tool for paths inside the
-/// worktree. The bare `Bash` is never a rule.
+/// have made (`Bash(rm:*)` in an edited state file) covers nothing. A file-tool rule covers its
+/// tool for paths inside the worktree. The bare `Bash` is never a rule.
 pub fn covers(rules: &BTreeSet<String>, tool: &str, input: &Value, worktree: &Path) -> bool {
     if tool == "Bash" {
         let Some(words) = input

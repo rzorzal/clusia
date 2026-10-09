@@ -4,6 +4,7 @@ mod activity;
 mod agent;
 mod agent_log;
 mod agent_stream;
+mod bridge;
 mod connection;
 mod first_run;
 mod giphy;
@@ -28,6 +29,7 @@ mod sync;
 mod tray;
 mod worktrees;
 
+pub use bridge::run_permission_bridge;
 pub use lock::DaemonLock;
 pub use options::DaemonOptions;
 pub use server::{Daemon, ShutdownHandle, StartError};
