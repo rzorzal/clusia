@@ -13,9 +13,12 @@ const FILE_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// allowed with. This allow-list is the gate: any program not in it gets only Allow once, so a
 /// new wrapper, interpreter or runner never slips through the way it would past a deny-list.
 /// An empty list means the program alone (`make`), with any arguments; otherwise the rule is
-/// the program and one listed subcommand (`cargo test`). To allow another command, add it
-/// here only if no subcommand or argument of it runs other code, deletes outside the
-/// worktree, or reaches the network (so `cargo run`, `npm exec` and `git push` stay out).
+/// the program and one listed subcommand (`cargo test`). Every entry lists its subcommands:
+/// there is no wildcard. To allow another command, add it here only if no subcommand or
+/// argument of it runs other code, deletes outside the worktree, or reaches the network (so
+/// `cargo run`, `npm exec`, `git fetch` and `rake` stay out). Arguments that name a path
+/// outside the worktree are refused separately, by [`stays_inside`]. `git branch` and
+/// `git stash` act on refs every worktree of the repository shares.
 const RULE_COMMANDS: &[(&str, &[&str])] = &[
     (
         "cargo",
@@ -23,12 +26,11 @@ const RULE_COMMANDS: &[(&str, &[&str])] = &[
             "test", "build", "check", "clippy", "fmt", "nextest", "bench", "doc", "tree",
         ],
     ),
-    ("npm", &["test", "ci", "run"]),
-    ("pnpm", &["test", "install", "run"]),
-    ("yarn", &["test", "install", "run"]),
-    ("bun", &["test", "install", "run"]),
+    ("npm", &["test", "run"]),
+    ("pnpm", &["test", "run"]),
+    ("yarn", &["test", "run"]),
+    ("bun", &["test", "run"]),
     ("make", &[]),
-    ("just", &[]),
     ("go", &["test", "build", "vet"]),
     ("mvn", &["test", "verify", "package", "compile"]),
     ("pytest", &[]),
@@ -43,27 +45,23 @@ const RULE_COMMANDS: &[(&str, &[&str])] = &[
     ("xcodebuild", &["test", "build"]),
     ("dotnet", &["test", "build"]),
     ("mix", &["test", "compile"]),
-    ("rake", &[]),
     ("tsc", &[]),
     ("eslint", &[]),
     ("prettier", &[]),
     ("ruff", &["check", "format"]),
     ("black", &[]),
     ("mypy", &[]),
-    ("cmake", &[]),
     ("ninja", &[]),
     ("bazel", &["test", "build"]),
     (
         "git",
         &[
             "status", "diff", "log", "show", "branch", "add", "stash", "checkout", "switch",
-            "restore", "worktree", "fetch",
+            "restore",
         ],
     ),
     ("mkdir", &[]),
     ("touch", &[]),
-    ("cp", &[]),
-    ("mv", &[]),
 ];
 
 /// Characters that chain, redirect or substitute: a command holding one is more than one
@@ -144,11 +142,15 @@ pub fn detail_for(tool: &str, input: &Value) -> Option<String> {
 ///
 /// Bash: only a command in [`RULE_COMMANDS`], as the program alone (`make`) or the program
 /// and its subcommand (`cargo test`); anything else, including a flag or a path where the
-/// subcommand goes (`cargo -p x test`), gives no prefix. File tools: the tool name, only for a
+/// subcommand goes (`cargo -p x test`) or an argument outside the worktree (see
+/// [`stays_inside`]), gives no prefix. File tools: the tool name, only for a
 /// path inside `worktree`.
 pub fn prefix_for(tool: &str, input: &Value, worktree: &Path) -> Option<String> {
     if tool == "Bash" {
-        return allowed_prefix(&simple_words(input.get("command")?.as_str()?)?);
+        let words = simple_words(input.get("command")?.as_str()?)?;
+        return stays_inside(&words)
+            .then(|| allowed_prefix(&words))
+            .flatten();
     }
     if FILE_TOOLS.contains(&tool)
         && file_path(tool, input).is_some_and(|p| inside_worktree(&p, worktree))
@@ -162,7 +164,7 @@ pub fn prefix_for(tool: &str, input: &Value, worktree: &Path) -> Option<String> 
 ///
 /// A Bash rule covers a command that starts with the rule's words, word for word
 /// (`cargo test` covers `cargo test -p x`, not `cargo testx`), and only a single simple
-/// command. A Bash rule that [`prefix_for`] could not have made (`Bash(rm:*)` in an edited
+/// command whose arguments stay inside the worktree. A Bash rule that [`prefix_for`] could not have made (`Bash(rm:*)` in an edited
 /// state file) covers nothing. A file-tool rule covers its tool for paths inside the
 /// worktree. The bare `Bash` is never a rule.
 pub fn covers(rules: &BTreeSet<String>, tool: &str, input: &Value, worktree: &Path) -> bool {
@@ -171,6 +173,7 @@ pub fn covers(rules: &BTreeSet<String>, tool: &str, input: &Value, worktree: &Pa
             .get("command")
             .and_then(Value::as_str)
             .and_then(simple_words)
+            .filter(|words| stays_inside(words))
         else {
             return false;
         };
@@ -203,6 +206,34 @@ fn simple_words(command: &str) -> Option<Vec<&str>> {
         .filter(|w| !w.is_empty())
         .collect();
     (!words.is_empty()).then_some(words)
+}
+
+/// Whether no word after the program points outside the worktree. Each word is read with its
+/// quotes and backslashes removed, as the shell passes it, and checked whole, after its first
+/// `=` (`--basetemp=/x`) and, for a short flag, after the flag (`-C/`, `-o/x`): a form that
+/// starts at `/` or `~`, or holds a `..` segment, points outside (`...` is not `..`, so
+/// `go test ./...` stays). For git, `--output` writes a file anywhere and `--upload-pack`
+/// (which git accepts abbreviated down to `--up`) runs a program.
+fn stays_inside(words: &[&str]) -> bool {
+    let git = words.first() == Some(&"git");
+    words.iter().skip(1).all(|word| {
+        let word: String = word
+            .chars()
+            .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+            .collect();
+        let after_eq = word.split_once('=').map(|(_, value)| value);
+        let after_flag = (word.starts_with('-') && !word.starts_with("--"))
+            .then(|| word.get(2..))
+            .flatten();
+        [Some(word.as_str()), after_eq, after_flag]
+            .into_iter()
+            .flatten()
+            .all(|form| {
+                !(form.starts_with(['/', '~'])
+                    || form.split('/').any(|segment| segment == "..")
+                    || git && (form.starts_with("--output") || form.starts_with("--up")))
+            })
+    })
 }
 
 /// The rule prefix [`RULE_COMMANDS`] grants for a command's words, matched exactly (so
@@ -368,6 +399,18 @@ mod tests {
             "unlink x",
             "rmdir x",
             "shred x",
+            "git fetch --upload-pack=x .",
+            "git fetch origin",
+            "git worktree add /outside",
+            "rake -e x",
+            "just --command rm",
+            "cmake -E rm -rf x",
+            "pnpm install cowsay",
+            "yarn install",
+            "bun install cowsay",
+            "npm ci",
+            "cp a b",
+            "mv a b",
             "cargo run",
             "cargo install x",
             "git push",
@@ -393,6 +436,15 @@ mod tests {
             ("Bash(git:*)", "git push"),
             ("Bash(make clean:*)", "make clean"),
             ("Bash(npm exec:*)", "npm exec cowsay"),
+            ("Bash(git fetch:*)", "git fetch origin"),
+            ("Bash(git worktree:*)", "git worktree list"),
+            ("Bash(rake:*)", "rake test"),
+            ("Bash(just:*)", "just test"),
+            ("Bash(cmake:*)", "cmake --build build"),
+            ("Bash(pnpm install:*)", "pnpm install"),
+            ("Bash(npm ci:*)", "npm ci"),
+            ("Bash(cp:*)", "cp a b"),
+            ("Bash(mv:*)", "mv a b"),
         ] {
             assert!(
                 !covers(&rules(&[rule]), "Bash", &bash(command), &wt()),
@@ -411,6 +463,57 @@ mod tests {
             &bash("touch a"),
             &wt()
         ));
+    }
+
+    #[test]
+    fn arguments_that_point_outside_the_worktree_get_nothing() {
+        for (command, rule) in [
+            ("git log --output=/x", "Bash(git log:*)"),
+            ("git show --output=x", "Bash(git show:*)"),
+            ("git status --up=x", "Bash(git status:*)"),
+            ("pytest --basetemp=/Users/x", "Bash(pytest:*)"),
+            ("pytest '--basetemp=/Users/x'", "Bash(pytest:*)"),
+            ("pytest --basetemp='/Users/x'", "Bash(pytest:*)"),
+            ("make -C/", "Bash(make:*)"),
+            ("make -C /", "Bash(make:*)"),
+            ("make -f ../x", "Bash(make:*)"),
+            ("make -fa/../../x", "Bash(make:*)"),
+            ("touch ~/x", "Bash(touch:*)"),
+            ("touch \"~/x\"", "Bash(touch:*)"),
+            ("touch a/..", "Bash(touch:*)"),
+            ("go build -o /x", "Bash(go build:*)"),
+            ("cargo build --target-dir=~/x", "Bash(cargo build:*)"),
+        ] {
+            assert_eq!(prefix(command), None, "{command:?}");
+            assert!(
+                !covers(&rules(&[rule]), "Bash", &bash(command), &wt()),
+                "{rule} covered {command:?}"
+            );
+        }
+        assert_eq!(
+            prefix("git fetch --upload-pack=x"),
+            None,
+            "not a rule command"
+        );
+        assert_eq!(prefix("cp a b"), None);
+        for (command, wanted) in [
+            ("go test ./...", "go test"),
+            ("cargo test -p x", "cargo test"),
+            ("make -C sub", "make"),
+            ("touch a..b", "touch"),
+            ("pytest --basetemp=tmp/x", "pytest"),
+        ] {
+            assert_eq!(prefix(command), Some(wanted.into()), "{command:?}");
+            assert!(
+                covers(
+                    &rules(&[&rule_for_bash(wanted)]),
+                    "Bash",
+                    &bash(command),
+                    &wt()
+                ),
+                "{command:?}"
+            );
+        }
     }
 
     #[test]
