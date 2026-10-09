@@ -331,7 +331,9 @@ impl ChatModel {
                 AgentLogEntry::Error { kind, message, .. } => {
                     lines.push(ChatLine::Error(error_text(*kind, message)));
                 }
-                AgentLogEntry::Done { .. } | AgentLogEntry::Text { .. } => {}
+                AgentLogEntry::Done { .. }
+                | AgentLogEntry::Text { .. }
+                | AgentLogEntry::Permission { .. } => {}
             }
         }
         let unfinished = match entries.last() {
@@ -341,7 +343,8 @@ impl ChatModel {
                 | AgentLogEntry::Text { turn, .. }
                 | AgentLogEntry::ToolUse { turn, .. }
                 | AgentLogEntry::Denied { turn, .. }
-                | AgentLogEntry::Suggestion { turn, .. },
+                | AgentLogEntry::Suggestion { turn, .. }
+                | AgentLogEntry::Permission { turn, .. },
             ) => Some(*turn),
         };
         self.unfinished = unfinished.filter(|turn| self.asked_again != Some(*turn));

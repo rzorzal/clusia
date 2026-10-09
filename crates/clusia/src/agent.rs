@@ -5,8 +5,8 @@ use std::path::Path;
 
 use clusia_core::{Paths, PrRef};
 use clusia_protocol::{
-    AgentErrorKind, AgentLogEntry, ClientError, Command as Request, ErrorCode, Event, Reply,
-    SessionStateKind, Suggestion, topics,
+    AgentErrorKind, AgentLogEntry, ClientError, Command as Request, ErrorCode, Event,
+    PermissionOutcome, Reply, SessionStateKind, Suggestion, topics,
 };
 use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
@@ -188,10 +188,36 @@ pub(crate) fn log_lines(entries: &[AgentLogEntry]) -> Vec<String> {
             AgentLogEntry::Error { kind, message, .. } => {
                 format!("  error: {}", failure_message(*kind, message))
             }
+            AgentLogEntry::Permission {
+                tool,
+                summary,
+                outcome,
+                ..
+            } => permission_line(tool, summary, *outcome),
             AgentLogEntry::Text { .. } => unreachable!("handled above"),
         });
     }
     lines
+}
+
+/// How the chat reports a request that needed the reviewer: what was done to what, and who
+/// decided.
+pub(crate) fn permission_line(tool: &str, summary: &str, outcome: PermissionOutcome) -> String {
+    let verb = match tool {
+        "Bash" => "ran",
+        "Edit" | "MultiEdit" | "NotebookEdit" => "edited",
+        "Write" => "wrote",
+        _ => "used",
+    };
+    match outcome {
+        PermissionOutcome::Allowed => format!("  ✓ {verb} {summary} (you allowed it)"),
+        PermissionOutcome::AllowedForReview => {
+            format!("  ✓ {verb} {summary} (allowed for this review)")
+        }
+        PermissionOutcome::Denied => format!("  ⊘ you denied {summary}"),
+        PermissionOutcome::Expired => format!("  ⊘ denied {summary}: no answer in time"),
+        PermissionOutcome::Cancelled => format!("  ⊘ {summary} was not run: the turn ended"),
+    }
 }
 
 fn io_error(e: io::Error) -> CliError {
@@ -503,6 +529,63 @@ mod tests {
         assert_eq!(lines[0]["agent_chunk"]["text"], "mine");
         assert_eq!(lines[1]["agent_tool_use"]["summary"], "Read a.rs");
         assert!(err.is_empty(), "nothing else is printed in JSON mode");
+    }
+
+    #[test]
+    fn permission_lines_say_who_decided() {
+        let line = |tool: &str, summary: &str, outcome| {
+            log_lines(&[AgentLogEntry::Permission {
+                at: 1,
+                turn: 1,
+                tool: tool.into(),
+                summary: summary.into(),
+                outcome,
+            }])
+            .remove(0)
+        };
+        let bash = |outcome| line("Bash", "cargo test", outcome);
+        assert_eq!(
+            bash(PermissionOutcome::Allowed),
+            "  ✓ ran cargo test (you allowed it)"
+        );
+        assert_eq!(
+            bash(PermissionOutcome::AllowedForReview),
+            "  ✓ ran cargo test (allowed for this review)"
+        );
+        assert_eq!(bash(PermissionOutcome::Denied), "  ⊘ you denied cargo test");
+        assert_eq!(
+            bash(PermissionOutcome::Expired),
+            "  ⊘ denied cargo test: no answer in time"
+        );
+        assert_eq!(
+            bash(PermissionOutcome::Cancelled),
+            "  ⊘ cargo test was not run: the turn ended"
+        );
+    }
+
+    #[test]
+    fn permission_lines_name_the_verb_of_the_tool() {
+        let allowed = |tool, summary| permission_line(tool, summary, PermissionOutcome::Allowed);
+        assert_eq!(
+            allowed("Edit", "src/a.rs"),
+            "  ✓ edited src/a.rs (you allowed it)"
+        );
+        assert_eq!(
+            allowed("MultiEdit", "src/a.rs"),
+            "  ✓ edited src/a.rs (you allowed it)"
+        );
+        assert_eq!(
+            allowed("NotebookEdit", "n.ipynb"),
+            "  ✓ edited n.ipynb (you allowed it)"
+        );
+        assert_eq!(
+            allowed("Write", "notes.md"),
+            "  ✓ wrote notes.md (you allowed it)"
+        );
+        assert_eq!(
+            allowed("WebFetch", "WebFetch"),
+            "  ✓ used WebFetch (you allowed it)"
+        );
     }
 
     #[test]

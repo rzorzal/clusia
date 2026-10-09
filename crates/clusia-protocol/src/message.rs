@@ -229,6 +229,34 @@ pub enum Command {
     },
     /// Ask the configured agent program for its version.
     HarnessProbe,
+    /// The agent wants to use a tool it is not already allowed to use. Sent only by
+    /// `clusiad permission-bridge`; answered with `Reply::PermissionDecision`.
+    PermissionAsk {
+        pr: PrRef,
+        turn: u64,
+        tool: String,
+        input: serde_json::Value,
+    },
+    /// The reviewer's answer to a `PermissionRequested`. The first answer wins; a later one is
+    /// refused with `ErrorCode::NotFound`.
+    PermissionAnswer {
+        id: String,
+        answer: PermissionAnswerKind,
+    },
+    /// Stop allowing what a rule of this review allowed (`Bash(cargo test:*)`).
+    RevokeRule {
+        pr: PrRef,
+        rule: String,
+    },
+    /// The rules this review's reviewer allowed so far.
+    GetRules {
+        pr: PrRef,
+    },
+    /// The requests of this review that still wait for an answer, for a window that was not
+    /// listening when they were made.
+    GetPermissions {
+        pr: PrRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -273,6 +301,16 @@ pub enum Reply {
     },
     AgentLog(Vec<AgentLogEntry>),
     Probe(ProbeResult),
+    /// What the bridge tells the agent: run the tool, or refuse it with `message`.
+    PermissionDecision {
+        allow: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    /// The rule strings of `GetRules`, in name order.
+    Rules(Vec<String>),
+    /// The waiting requests of `GetPermissions`, oldest first.
+    Permissions(Vec<PermissionRequest>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -526,6 +564,41 @@ pub enum Event {
     SessionState {
         pr: PrRef,
         state: SessionStateKind,
+    },
+    /// The agent waits for the reviewer to decide (topic `agent`).
+    PermissionRequested {
+        id: String,
+        pr: PrRef,
+        turn: u64,
+        tool: String,
+        /// The exact command, or the path of the file.
+        summary: String,
+        /// Why the agent wants it, when it said.
+        reason: Option<String>,
+        /// What "Allow for this review" would grant; `None` when only Allow once is offered.
+        prefix: Option<String>,
+        /// Whether the turn runs in the sandbox.
+        sandbox: bool,
+        /// When the request is denied for lack of an answer, in Unix milliseconds.
+        deadline: i64,
+        /// An excerpt of what the tool would do (for an edit, the old and the new text), at
+        /// most 2000 characters.
+        detail: Option<String>,
+    },
+    /// A request ended, whoever or whatever ended it, or a rule or the worktree check decided
+    /// it without asking (topic `agent`).
+    PermissionResolved {
+        id: String,
+        pr: PrRef,
+        tool: String,
+        /// The command or the path, as in `PermissionRequested`.
+        summary: String,
+        outcome: PermissionOutcome,
+    },
+    /// The review's rules changed (topic `agent`).
+    RulesChanged {
+        pr: PrRef,
+        rules: Vec<String>,
     },
 }
 
@@ -836,6 +909,55 @@ pub enum AgentLogEntry {
         kind: AgentErrorKind,
         message: String,
     },
+    /// A tool request that needed the reviewer, or a rule, to decide.
+    Permission {
+        at: i64,
+        turn: u64,
+        tool: String,
+        /// The command or the path.
+        summary: String,
+        outcome: PermissionOutcome,
+    },
+}
+
+/// A permission request waiting for the reviewer: the fields of `Event::PermissionRequested`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionRequest {
+    pub id: String,
+    pub pr: PrRef,
+    pub turn: u64,
+    pub tool: String,
+    pub summary: String,
+    pub reason: Option<String>,
+    pub prefix: Option<String>,
+    pub sandbox: bool,
+    /// Unix milliseconds.
+    pub deadline: i64,
+    pub detail: Option<String>,
+}
+
+/// What the reviewer chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionAnswerKind {
+    /// Allow this request only.
+    Once,
+    /// Allow it and everything its prefix covers for the rest of the review.
+    Review,
+    Deny,
+}
+
+/// How a permission request ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionOutcome {
+    Allowed,
+    AllowedForReview,
+    Denied,
+    /// Nobody answered before the deadline.
+    Expired,
+    /// The turn or the review ended first.
+    Cancelled,
 }
 
 /// The answer to `HarnessProbe`.
@@ -2394,6 +2516,223 @@ mod tests {
                 elapsed_ms: 3,
                 error: Some("not found".into()),
             }),
+        ] {
+            round_trip(ServerMessage::Response {
+                id: 2,
+                result: Outcome::Ok(reply),
+            });
+        }
+    }
+
+    #[test]
+    fn permission_messages_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 4, cmd });
+        assert_eq!(
+            request(Command::PermissionAsk {
+                pr: acme(),
+                turn: 3,
+                tool: "Bash".into(),
+                input: serde_json::json!({"command": "cargo test"}),
+            }),
+            r#"{"type":"request","id":4,"cmd":{"permission_ask":{"pr":"acme/widgets#7","turn":3,"tool":"Bash","input":{"command":"cargo test"}}}}"#
+        );
+        assert_eq!(
+            request(Command::PermissionAnswer {
+                id: "perm-1".into(),
+                answer: PermissionAnswerKind::Review,
+            }),
+            r#"{"type":"request","id":4,"cmd":{"permission_answer":{"id":"perm-1","answer":"review"}}}"#
+        );
+        assert_eq!(
+            request(Command::RevokeRule {
+                pr: acme(),
+                rule: "Bash(cargo test:*)".into(),
+            }),
+            r#"{"type":"request","id":4,"cmd":{"revoke_rule":{"pr":"acme/widgets#7","rule":"Bash(cargo test:*)"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetRules { pr: acme() }),
+            r#"{"type":"request","id":4,"cmd":{"get_rules":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetPermissions { pr: acme() }),
+            r#"{"type":"request","id":4,"cmd":{"get_permissions":{"pr":"acme/widgets#7"}}}"#
+        );
+        let reply = |reply| {
+            wire(&ServerMessage::Response {
+                id: 4,
+                result: Outcome::Ok(reply),
+            })
+        };
+        assert_eq!(
+            reply(Reply::PermissionDecision {
+                allow: true,
+                message: None
+            }),
+            r#"{"type":"response","id":4,"result":{"ok":{"permission_decision":{"allow":true}}}}"#
+        );
+        assert_eq!(
+            reply(Reply::PermissionDecision {
+                allow: false,
+                message: Some("The reviewer said no.".into())
+            }),
+            r#"{"type":"response","id":4,"result":{"ok":{"permission_decision":{"allow":false,"message":"The reviewer said no."}}}}"#
+        );
+        assert_eq!(
+            reply(Reply::Rules(vec!["Edit".into()])),
+            r#"{"type":"response","id":4,"result":{"ok":{"rules":["Edit"]}}}"#
+        );
+        assert_eq!(
+            reply(Reply::Permissions(vec![PermissionRequest {
+                id: "perm-1".into(),
+                pr: acme(),
+                turn: 3,
+                tool: "Edit".into(),
+                summary: "src/lib.rs".into(),
+                reason: None,
+                prefix: Some("Edit".into()),
+                sandbox: false,
+                deadline: 5,
+                detail: Some("a\n→\nb".into()),
+            }])),
+            r#"{"type":"response","id":4,"result":{"ok":{"permissions":[{"id":"perm-1","pr":"acme/widgets#7","turn":3,"tool":"Edit","summary":"src/lib.rs","reason":null,"prefix":"Edit","sandbox":false,"deadline":5,"detail":"a\n→\nb"}]}}}"#
+        );
+    }
+
+    #[test]
+    fn permission_events_wire_format() {
+        let event = |event| {
+            wire(&ServerMessage::Event {
+                topic: topics::AGENT.into(),
+                event,
+            })
+        };
+        assert_eq!(
+            event(Event::PermissionRequested {
+                id: "perm-1".into(),
+                pr: acme(),
+                turn: 3,
+                tool: "Bash".into(),
+                summary: "cargo test -p clusia-core".into(),
+                reason: Some("To check the expiry test.".into()),
+                prefix: Some("cargo test".into()),
+                sandbox: true,
+                deadline: 1_760_000_120_000,
+                detail: None,
+            }),
+            r#"{"type":"event","topic":"agent","event":{"permission_requested":{"id":"perm-1","pr":"acme/widgets#7","turn":3,"tool":"Bash","summary":"cargo test -p clusia-core","reason":"To check the expiry test.","prefix":"cargo test","sandbox":true,"deadline":1760000120000,"detail":null}}}"#
+        );
+        assert_eq!(
+            event(Event::PermissionResolved {
+                id: "perm-1".into(),
+                pr: acme(),
+                tool: "Bash".into(),
+                summary: "cargo test".into(),
+                outcome: PermissionOutcome::AllowedForReview,
+            }),
+            r#"{"type":"event","topic":"agent","event":{"permission_resolved":{"id":"perm-1","pr":"acme/widgets#7","tool":"Bash","summary":"cargo test","outcome":"allowed_for_review"}}}"#
+        );
+        assert_eq!(
+            event(Event::RulesChanged {
+                pr: acme(),
+                rules: vec!["Bash(cargo test:*)".into()],
+            }),
+            r#"{"type":"event","topic":"agent","event":{"rules_changed":{"pr":"acme/widgets#7","rules":["Bash(cargo test:*)"]}}}"#
+        );
+    }
+
+    #[test]
+    fn permission_enums_and_log_line_wire_format() {
+        for (kind, text) in [
+            (PermissionAnswerKind::Once, "once"),
+            (PermissionAnswerKind::Review, "review"),
+            (PermissionAnswerKind::Deny, "deny"),
+        ] {
+            assert_eq!(wire(&kind), format!("\"{text}\""));
+        }
+        for (outcome, text) in [
+            (PermissionOutcome::Allowed, "allowed"),
+            (PermissionOutcome::AllowedForReview, "allowed_for_review"),
+            (PermissionOutcome::Denied, "denied"),
+            (PermissionOutcome::Expired, "expired"),
+            (PermissionOutcome::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(wire(&outcome), format!("\"{text}\""));
+        }
+        assert_eq!(
+            wire(&ServerMessage::Response {
+                id: 5,
+                result: Outcome::Ok(Reply::AgentLog(vec![AgentLogEntry::Permission {
+                    at: 100,
+                    turn: 1,
+                    tool: "Bash".into(),
+                    summary: "cargo test".into(),
+                    outcome: PermissionOutcome::Expired,
+                }]))
+            }),
+            r#"{"type":"response","id":5,"result":{"ok":{"agent_log":[{"type":"permission","at":100,"turn":1,"tool":"Bash","summary":"cargo test","outcome":"expired"}]}}}"#
+        );
+    }
+
+    #[test]
+    fn every_permission_message_round_trips() {
+        for cmd in [
+            Command::PermissionAsk {
+                pr: acme(),
+                turn: 1,
+                tool: "Edit".into(),
+                input: serde_json::json!({"file_path": "src/lib.rs"}),
+            },
+            Command::PermissionAnswer {
+                id: "p".into(),
+                answer: PermissionAnswerKind::Once,
+            },
+            Command::RevokeRule {
+                pr: acme(),
+                rule: "Edit".into(),
+            },
+            Command::GetRules { pr: acme() },
+            Command::GetPermissions { pr: acme() },
+        ] {
+            round_trip(ClientMessage::Request { id: 1, cmd });
+        }
+        for event in [
+            Event::PermissionRequested {
+                id: "p".into(),
+                pr: acme(),
+                turn: 1,
+                tool: "Bash".into(),
+                summary: "ls".into(),
+                reason: None,
+                prefix: None,
+                sandbox: false,
+                deadline: 5,
+                detail: Some("x".into()),
+            },
+            Event::PermissionResolved {
+                id: "p".into(),
+                pr: acme(),
+                tool: "Edit".into(),
+                summary: "src/lib.rs".into(),
+                outcome: PermissionOutcome::Cancelled,
+            },
+            Event::RulesChanged {
+                pr: acme(),
+                rules: vec![],
+            },
+        ] {
+            round_trip(ServerMessage::Event {
+                topic: topics::AGENT.into(),
+                event,
+            });
+        }
+        for reply in [
+            Reply::PermissionDecision {
+                allow: false,
+                message: Some("no".into()),
+            },
+            Reply::Rules(vec!["Edit".into()]),
+            Reply::Permissions(Vec::new()),
         ] {
             round_trip(ServerMessage::Response {
                 id: 2,

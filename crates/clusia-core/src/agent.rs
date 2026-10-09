@@ -17,6 +17,9 @@ pub struct AgentState {
     pub accepted: BTreeSet<String>,
     /// The head commit the last summary was written for.
     pub last_summary_head: Option<String>,
+    /// What the human allowed for this review: `Bash(<prefix>:*)` or a bare file tool name.
+    /// They end with the session.
+    pub rules: BTreeSet<String>,
 }
 
 impl AgentState {
@@ -265,9 +268,13 @@ mod tests {
         let s: AgentState = serde_json::from_str(r#"{"dismissed":["sug-1"]}"#).unwrap();
         assert!(s.dismissed.contains("sug-1"));
         assert!(s.accepted.is_empty());
+        assert!(s.rules.is_empty());
+        let with_rules: AgentState =
+            serde_json::from_str(r#"{"rules":["Bash(cargo test:*)","Edit"]}"#).unwrap();
+        assert_eq!(with_rules.rules.len(), 2);
         assert_eq!(
             serde_json::to_string(&AgentState::default()).unwrap(),
-            r#"{"dismissed":[],"accepted":[],"last_summary_head":null}"#
+            r#"{"dismissed":[],"accepted":[],"last_summary_head":null,"rules":[]}"#
         );
     }
 

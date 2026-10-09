@@ -158,6 +158,16 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
             agent::accept(shared, client, &pr, &id, body).await
         }
         Command::DismissSuggestion { pr, id } => agent::dismiss(shared, &pr, &id).await,
+        // Nothing decides permissions yet: the bridge is told no, never yes.
+        Command::PermissionAsk { .. } => Outcome::Ok(Reply::PermissionDecision {
+            allow: false,
+            message: Some("Permissions are not available yet.".into()),
+        }),
+        Command::PermissionAnswer { .. } | Command::RevokeRule { .. } => Outcome::Err(
+            ProtocolError::new(ErrorCode::NotFound, "there is no such permission request"),
+        ),
+        Command::GetRules { .. } => Outcome::Ok(Reply::Rules(Vec::new())),
+        Command::GetPermissions { .. } => Outcome::Ok(Reply::Permissions(Vec::new())),
     }
 }
 

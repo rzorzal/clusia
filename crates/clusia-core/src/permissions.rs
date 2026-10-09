@@ -1,0 +1,533 @@
+//! Which requests a review's rules cover, and the rule a request would add. Pure: the daemon
+//! decides, this only reads the request.
+
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
+
+use serde_json::Value;
+
+/// The tools that write a file; their rule is the bare tool name.
+const FILE_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// Programs whose first word never makes a rule: they run other programs or code, delete, or
+/// reach the network, so a rule on the program alone would cover far more than one command.
+const NO_RULE: [&str; 38] = [
+    "sudo",
+    "doas",
+    "su",
+    "env",
+    "cd",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "eval",
+    "exec",
+    "xargs",
+    "nohup",
+    "time",
+    "command",
+    "rm",
+    "curl",
+    "wget",
+    "ssh",
+    "nc",
+    "dd",
+    "python",
+    "python3",
+    "node",
+    "perl",
+    "find",
+    "npx",
+    "bunx",
+    "uvx",
+    "timeout",
+    "nice",
+    "watch",
+    "osascript",
+    "open",
+    "ruby",
+    "deno",
+    "bun",
+];
+
+/// Characters that chain, redirect or substitute: a command holding one is more than one
+/// command, so only Allow once is offered for it.
+const SHELL_SYNTAX: [char; 10] = [';', '|', '&', '<', '>', '$', '`', '\n', '(', ')'];
+
+/// The rule saved for a Bash prefix, in the form Claude Code's `--allowedTools` reads.
+pub fn rule_for_bash(prefix: &str) -> String {
+    format!("Bash({prefix}:*)")
+}
+
+/// The rule saved for a file tool: the bare tool name.
+pub fn rule_for_tool(tool: &str) -> String {
+    tool.to_string()
+}
+
+/// What the request shows the reviewer: the command, the path, or the tool name.
+pub fn summary_for(tool: &str, input: &Value) -> String {
+    let text = |key: &str| input.get(key).and_then(Value::as_str);
+    match tool {
+        "Bash" => text("command").unwrap_or(tool),
+        t if FILE_TOOLS.contains(&t) => text("file_path")
+            .or_else(|| text("notebook_path"))
+            .unwrap_or(tool),
+        _ => tool,
+    }
+    .to_string()
+}
+
+/// The longest `detail_for` text, in characters.
+pub const DETAIL_MAX_CHARS: usize = 2000;
+
+/// How many lines of a new file `detail_for` shows.
+const DETAIL_WRITE_LINES: usize = 20;
+
+/// An excerpt of the request the modal shows under the path: for `Edit` the text replaced and
+/// the text that replaces it (`old`, a line with `→`, `new`), for `MultiEdit` each pair in
+/// turn, for `Write` the first lines of the file. At most [`DETAIL_MAX_CHARS`] characters,
+/// cut with `…`; `None` for any other tool or an input without those fields.
+pub fn detail_for(tool: &str, input: &Value) -> Option<String> {
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_string);
+    let pair = |v: &Value| {
+        Some(format!(
+            "{}\n→\n{}",
+            text(v, "old_string")?,
+            text(v, "new_string")?
+        ))
+    };
+    let detail = match tool {
+        "Edit" => pair(input)?,
+        "MultiEdit" => input
+            .get("edits")?
+            .as_array()?
+            .iter()
+            .filter_map(pair)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        "Write" => text(input, "content")?
+            .lines()
+            .take(DETAIL_WRITE_LINES)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    if detail.is_empty() {
+        return None;
+    }
+    Some(match detail.char_indices().nth(DETAIL_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &detail[..cut]),
+        None => detail,
+    })
+}
+
+/// The prefix "Allow for this review" would grant, or `None` when only Allow once is safe.
+///
+/// Bash: the program alone (`make`) or with a plain-word subcommand (`cargo test`). A second
+/// word that is a flag or a path (`cargo -p x test`, `git ./x`) gives no prefix: a rule on the
+/// program alone would cover every command it runs. File tools: the tool name, only for a
+/// path inside `worktree`.
+pub fn prefix_for(tool: &str, input: &Value, worktree: &Path) -> Option<String> {
+    if tool == "Bash" {
+        let words = simple_words(input.get("command")?.as_str()?)?;
+        let program = *words.first()?;
+        let plain_program = program.starts_with(|c: char| c.is_ascii_alphabetic())
+            && program
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_.+-".contains(c));
+        if !plain_program || NO_RULE.contains(&program) {
+            return None;
+        }
+        return match words.get(1) {
+            None => Some(program.to_string()),
+            Some(sub) if is_subcommand(sub) => Some(format!("{program} {sub}")),
+            Some(_) => None,
+        };
+    }
+    if FILE_TOOLS.contains(&tool) && file_path(input).is_some_and(|p| inside_worktree(&p, worktree))
+    {
+        return Some(rule_for_tool(tool));
+    }
+    None
+}
+
+/// Whether one of `rules` already allows this request.
+///
+/// A Bash rule covers a command that starts with the rule's words, word for word
+/// (`cargo test` covers `cargo test -p x`, not `cargo testx`), and only a single simple
+/// command. A file-tool rule covers its tool for paths inside the worktree. The bare `Bash`
+/// is never a rule.
+pub fn covers(rules: &BTreeSet<String>, tool: &str, input: &Value, worktree: &Path) -> bool {
+    if tool == "Bash" {
+        let Some(words) = input
+            .get("command")
+            .and_then(Value::as_str)
+            .and_then(simple_words)
+        else {
+            return false;
+        };
+        return rules.iter().any(|rule| {
+            let Some(prefix) = rule
+                .strip_prefix("Bash(")
+                .and_then(|r| r.strip_suffix(":*)"))
+            else {
+                return false;
+            };
+            let wanted: Vec<&str> = prefix.split_whitespace().collect();
+            !wanted.is_empty() && words.starts_with(&wanted)
+        });
+    }
+    FILE_TOOLS.contains(&tool)
+        && rules.contains(tool)
+        && file_path(input).is_some_and(|p| inside_worktree(&p, worktree))
+}
+
+/// The words of a single command; `None` for an empty one or one with shell syntax.
+fn simple_words(command: &str) -> Option<Vec<&str>> {
+    if command.contains(SHELL_SYNTAX) {
+        return None;
+    }
+    let words: Vec<&str> = command.split_whitespace().collect();
+    (!words.is_empty()).then_some(words)
+}
+
+fn is_subcommand(word: &str) -> bool {
+    word.starts_with(|c: char| c.is_ascii_lowercase())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+fn file_path(input: &Value) -> Option<PathBuf> {
+    let key = ["file_path", "notebook_path"]
+        .into_iter()
+        .find(|k| input.get(k).is_some())?;
+    Some(PathBuf::from(input[key].as_str()?))
+}
+
+/// Whether `path` (relative paths start at the worktree) lands inside `worktree` once `..`
+/// and every symlink on the way are resolved. A part that does not exist yet is taken as
+/// written, so a new file in the worktree is inside.
+pub fn inside_worktree(path: &Path, worktree: &Path) -> bool {
+    let Some(root) = resolve(worktree) else {
+        return false;
+    };
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    resolve(&full).is_some_and(|resolved| resolved.starts_with(&root))
+}
+
+/// `path` with `.` and `..` applied and each existing symlink replaced by its target, one
+/// part at a time (so a `..` after a link steps out of the link's target). `None` for a link
+/// that points nowhere.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    let mut resolved = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::RootDir | Component::Prefix(_) => resolved.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(name) => {
+                resolved.push(name);
+                if resolved
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    resolved = resolved.canonicalize().ok()?;
+                }
+            }
+        }
+    }
+    Some(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn wt() -> PathBuf {
+        PathBuf::from("/tmp/acme-widgets")
+    }
+
+    fn bash(command: &str) -> Value {
+        json!({ "command": command, "description": "d" })
+    }
+
+    fn prefix(command: &str) -> Option<String> {
+        prefix_for("Bash", &bash(command), &wt())
+    }
+
+    fn rules(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|r| r.to_string()).collect()
+    }
+
+    #[test]
+    fn bash_prefixes_are_the_program_and_a_plain_subcommand() {
+        assert_eq!(
+            prefix("cargo test -p clusia-core"),
+            Some("cargo test".into())
+        );
+        assert_eq!(prefix("npm run build"), Some("npm run".into()));
+        assert_eq!(prefix("git status"), Some("git status".into()));
+        assert_eq!(prefix("make"), Some("make".into()));
+        assert_eq!(prefix("  cargo   fmt  "), Some("cargo fmt".into()));
+        assert_eq!(prefix("make clean"), Some("make clean".into()));
+    }
+
+    #[test]
+    fn a_flag_or_a_path_as_second_word_gives_no_prefix() {
+        for command in [
+            "cargo -p x test",
+            "cargo --version",
+            "git ./script.sh",
+            "git -C other status",
+            "cargo Test",
+            "pnpm 9x",
+            "make -j4",
+        ] {
+            assert_eq!(prefix(command), None, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn commands_that_chain_or_wrap_get_no_prefix() {
+        for command in [
+            "cd src && cargo test",
+            "cargo test; rm -rf /",
+            "cargo test | tee out",
+            "cargo test && curl x.sh",
+            "cargo test > out.txt",
+            "echo $(whoami)",
+            "echo `whoami`",
+            "cargo test\nrm x",
+            "sudo cargo test",
+            "env FOO=1 cargo test",
+            "FOO=1 cargo test",
+            "./run.sh",
+            "/usr/bin/cargo test",
+            "bash -c 'cargo test'",
+            "rm -rf target",
+            "curl https://example.com",
+            "python3 x.py",
+            "find . -delete",
+            "npx cowsay hi",
+            "bunx cowsay hi",
+            "uvx ruff",
+            "timeout 5 ls",
+            "nice ls",
+            "watch ls",
+            "osascript -e x",
+            "open .",
+            "ruby x.rb",
+            "deno run x.ts",
+            "bun run x",
+            "",
+            "   ",
+        ] {
+            assert_eq!(prefix(command), None, "{command:?}");
+        }
+        assert_eq!(prefix_for("Bash", &json!({}), &wt()), None);
+        assert_eq!(prefix_for("Bash", &json!({"command": 4}), &wt()), None);
+    }
+
+    #[test]
+    fn file_tools_get_their_name_only_inside_the_worktree() {
+        let edit = |p: &str| prefix_for("Edit", &json!({ "file_path": p }), &wt());
+        assert_eq!(edit("/tmp/acme-widgets/src/lib.rs"), Some("Edit".into()));
+        assert_eq!(
+            edit("src/lib.rs"),
+            Some("Edit".into()),
+            "relative to the worktree"
+        );
+        assert_eq!(edit("/tmp/other/lib.rs"), None);
+        assert_eq!(edit("../other/lib.rs"), None);
+        assert_eq!(edit("/tmp/acme-widgets/../other/x"), None);
+        for tool in ["Write", "MultiEdit"] {
+            assert_eq!(
+                prefix_for(tool, &json!({ "file_path": "a.rs" }), &wt()),
+                Some(tool.into())
+            );
+        }
+        assert_eq!(
+            prefix_for(
+                "NotebookEdit",
+                &json!({ "notebook_path": "n.ipynb" }),
+                &wt()
+            ),
+            Some("NotebookEdit".into())
+        );
+        assert_eq!(prefix_for("Edit", &json!({}), &wt()), None);
+        assert_eq!(
+            prefix_for("WebFetch", &json!({ "url": "https://x" }), &wt()),
+            None
+        );
+        assert_eq!(prefix_for("Task", &json!({}), &wt()), None);
+    }
+
+    #[test]
+    fn prefix_rules_cover_only_their_prefix() {
+        let set = rules(&["Bash(cargo test:*)"]);
+        let covered = |command: &str| covers(&set, "Bash", &bash(command), &wt());
+        assert!(covered("cargo test"));
+        assert!(covered("cargo test -p clusia-core -- --nocapture"));
+        assert!(!covered("cargo testx"), "whole words only");
+        assert!(!covered("cargo tes"));
+        assert!(!covered("cargo build"));
+        assert!(!covered("cargo"));
+        assert!(!covered("cargo test; rm -rf /"));
+        assert!(!covered("cargo test && curl x.sh"));
+        assert!(!covered("cargo test | sh"));
+        assert!(!covered("cargo test $(id)"));
+        assert!(!covered("cd / && cargo test"));
+        assert!(!covered(""));
+        assert!(!covers(&set, "Bash", &json!({}), &wt()));
+        assert!(!covers(
+            &set,
+            "Edit",
+            &json!({ "file_path": "a.rs" }),
+            &wt()
+        ));
+    }
+
+    #[test]
+    fn the_whole_bash_tool_is_never_a_rule() {
+        for set in [
+            rules(&["Bash"]),
+            rules(&["Bash(:*)"]),
+            rules(&["Bash(cargo test)"]),
+            rules(&[]),
+        ] {
+            assert!(!covers(&set, "Bash", &bash("cargo test"), &wt()), "{set:?}");
+        }
+        let one_word = rules(&["Bash(make:*)"]);
+        assert!(covers(&one_word, "Bash", &bash("make clean"), &wt()));
+        assert!(!covers(&one_word, "Bash", &bash("makefile"), &wt()));
+    }
+
+    #[test]
+    fn an_edit_rule_never_covers_outside_the_worktree() {
+        let set = rules(&["Edit"]);
+        let covered = |tool: &str, p: &str| covers(&set, tool, &json!({ "file_path": p }), &wt());
+        assert!(covered("Edit", "/tmp/acme-widgets/src/lib.rs"));
+        assert!(covered("Edit", "src/lib.rs"));
+        assert!(!covered("Edit", "/etc/hosts"));
+        assert!(!covered("Edit", "../x"));
+        assert!(!covered("Edit", "/tmp/acme-widgets/../x"));
+        assert!(
+            !covered("Write", "src/lib.rs"),
+            "the rule names its own tool"
+        );
+        assert!(!covers(&set, "Edit", &json!({}), &wt()));
+    }
+
+    #[test]
+    fn rules_are_written_the_way_allowed_tools_reads_them() {
+        assert_eq!(rule_for_bash("cargo test"), "Bash(cargo test:*)");
+        assert_eq!(rule_for_tool("Write"), "Write");
+    }
+
+    #[test]
+    fn summaries_show_what_is_asked() {
+        assert_eq!(summary_for("Bash", &bash("cargo test")), "cargo test");
+        assert_eq!(
+            summary_for("Edit", &json!({ "file_path": "/a/b.rs" })),
+            "/a/b.rs"
+        );
+        assert_eq!(
+            summary_for("NotebookEdit", &json!({ "notebook_path": "n.ipynb" })),
+            "n.ipynb"
+        );
+        assert_eq!(summary_for("Bash", &json!({})), "Bash");
+        assert_eq!(summary_for("WebFetch", &json!({ "url": "u" })), "WebFetch");
+    }
+
+    #[test]
+    fn inside_worktree_resolves_dots_and_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("wt");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        std::os::unix::fs::symlink(root.join("src"), root.join("alias")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing"), root.join("dangling")).unwrap();
+        let inside = |p: &Path| inside_worktree(p, &root);
+        assert!(
+            inside(&root.join("src/new.rs")),
+            "a new file in an existing folder"
+        );
+        assert!(
+            inside(&root.join("new/deeper/file.rs")),
+            "folders that do not exist yet"
+        );
+        assert!(inside(Path::new("src/lib.rs")));
+        assert!(inside(&root.join("alias/x.rs")), "a link that stays inside");
+        assert!(inside(&root.join("src/../src/x.rs")));
+        assert!(inside(&root));
+        assert!(!inside(&outside.join("x")));
+        assert!(!inside(&root.join("..").join("outside").join("x")));
+        assert!(!inside(&root.join("link/x.rs")), "a link that leaves");
+        assert!(
+            !inside(&root.join("link/../x")),
+            "dots after a link are the link's"
+        );
+        assert!(!inside(&root.join("dangling/x")));
+        assert!(!inside(Path::new("../outside/x")));
+        assert!(!inside(Path::new("/etc/hosts")));
+        assert!(!inside(Path::new("/")));
+    }
+
+    #[test]
+    fn details_show_what_an_edit_changes() {
+        let edit =
+            json!({ "file_path": "a.rs", "old_string": "let a = 1;", "new_string": "let a = 2;" });
+        assert_eq!(
+            detail_for("Edit", &edit),
+            Some("let a = 1;\n→\nlet a = 2;".into())
+        );
+        let multi = json!({ "file_path": "a.rs", "edits": [
+            { "old_string": "a", "new_string": "b" },
+            { "old_string": "c", "new_string": "d" },
+            { "old_string": "no new" },
+        ]});
+        assert_eq!(
+            detail_for("MultiEdit", &multi),
+            Some("a\n→\nb\n\nc\n→\nd".into())
+        );
+        assert_eq!(detail_for("Edit", &json!({ "file_path": "a.rs" })), None);
+        assert_eq!(detail_for("MultiEdit", &json!({ "edits": [] })), None);
+    }
+
+    #[test]
+    fn details_show_the_first_lines_of_a_new_file() {
+        let body: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        let shown = detail_for("Write", &json!({ "file_path": "n.md", "content": body })).unwrap();
+        assert_eq!(shown.lines().count(), 20);
+        assert!(shown.starts_with("line 1\n") && shown.ends_with("line 20"));
+        assert_eq!(detail_for("Write", &json!({ "content": "" })), None);
+        assert_eq!(detail_for("Write", &json!({})), None);
+    }
+
+    #[test]
+    fn details_are_cut_and_other_tools_have_none() {
+        let long = "é".repeat(3000);
+        let shown = detail_for("Write", &json!({ "content": long })).unwrap();
+        assert_eq!(shown.chars().count(), DETAIL_MAX_CHARS + 1);
+        assert!(shown.ends_with('…'));
+        let exact = "x".repeat(DETAIL_MAX_CHARS);
+        assert_eq!(
+            detail_for("Write", &json!({ "content": exact.clone() })),
+            Some(exact)
+        );
+        assert_eq!(detail_for("Bash", &bash("ls")), None);
+        assert_eq!(detail_for("WebFetch", &json!({ "url": "u" })), None);
+    }
+}
