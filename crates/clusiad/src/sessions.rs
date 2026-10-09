@@ -386,8 +386,8 @@ impl Sessions {
         .await;
     }
 
-    /// Called when a turn ended: the queued turn takes over, or the session is ready.
-    /// What runs once `finished` is over: the waiting turn, or nothing.
+    /// Called when the turn `finished` ended: returns the queued turn, which takes over, or
+    /// `None` when the session is ready.
     fn next_after(
         &self,
         shared: &Shared,
@@ -794,6 +794,9 @@ impl Run<'_> {
                     }
                 }
                 if !self.failed {
+                    // Read before the end is told: a terminal that watched the answer leaves
+                    // as soon as it hears the end, and was still watching.
+                    let watched = self.shared.holds.is_held(self.out.pr);
                     self.out.done(duration_ms);
                     if let Some(head) = self.summary_for.take() {
                         // Checked under the review lock: the end of a review stops the turn
@@ -808,7 +811,7 @@ impl Run<'_> {
                         .await;
                     }
                     crate::agent::refresh(self.shared, self.out.pr);
-                    if self.stop.why() != Why::Ended {
+                    if self.stop.why() != Why::Ended && !watched {
                         crate::agent::notify_finished(self.shared, self.out.pr, self.out.turn)
                             .await;
                     }
@@ -2167,6 +2170,63 @@ mod tests {
         );
         let review = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
         assert_eq!(review.draft.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_dismiss_waiting_behind_an_accept_finds_the_suggestion_gone() {
+        let answer =
+            "```clusia-suggestion\n{\"file\":\"src/a.rs\",\"line\":2,\"body\":\"Why?\"}\n```\n";
+        let mut lab = lab(Script::one(Turn::answer(answer)));
+        let pr = pr(7);
+        lab.send(&pr, "review").await.unwrap();
+        let events = until(&mut lab.events, ready(&pr)).await;
+        let id = events
+            .iter()
+            .find_map(|e| match e {
+                Event::AgentSuggestion { suggestion, .. } => Some(suggestion.id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let files = vec![clusia_core::FileDiff {
+            path: "src/a.rs".into(),
+            previous_path: None,
+            status: "added".into(),
+            additions: 3,
+            deletions: 0,
+            patch: Some("@@ -0,0 +1,3 @@\n+a\n+b\n+c".into()),
+        }];
+        lab.shared
+            .files_cache
+            .lock()
+            .await
+            .insert(pr.clone(), ("h".into(), Arc::new(files)));
+
+        // The accept waits for the review first; the dismiss comes while it waits.
+        let guard = reviews::lock(&lab.shared, &pr).await;
+        let accept = tokio::spawn({
+            let (shared, pr, id) = (lab.shared.clone(), pr.clone(), id.clone());
+            async move { crate::agent::accept(&shared, "test", &pr, &id, None).await }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let dismiss = tokio::spawn({
+            let (shared, pr, id) = (lab.shared.clone(), pr.clone(), id.clone());
+            async move { crate::agent::dismiss(&shared, &pr, &id).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(guard);
+        assert!(matches!(
+            accept.await.unwrap(),
+            Outcome::Ok(Reply::DraftItem(_))
+        ));
+        assert!(
+            matches!(dismiss.await.unwrap(), Outcome::Err(ref e) if e.code == ErrorCode::NotFound)
+        );
+        let state = clusia_store::agent::load_agent_state(&lab.shared.paths, &pr).unwrap();
+        assert!(state.accepted.contains(&id));
+        assert!(
+            !state.dismissed.contains(&id),
+            "accepted, never also dismissed"
+        );
     }
 
     #[tokio::test]

@@ -306,24 +306,23 @@ pub(crate) async fn accept(
     outcome
 }
 
-/// Records that a waiting suggestion was dismissed: it is not shown or proposed again.
+/// Records that a waiting suggestion was dismissed: it is not shown or proposed again. Checked
+/// and recorded under one review lock, so an accept cannot land in between.
 pub(crate) async fn dismiss(shared: &Shared, pr: &PrRef, id: &str) -> Outcome {
+    let guard = reviews::lock(shared, pr).await;
     if waiting(shared, pr, id).is_none() {
         return not_waiting(id);
     }
-    update_state(shared, pr, |state| {
+    write_state(shared, pr, |state| {
         state.dismissed.insert(id.to_string());
-    })
-    .await;
+    });
+    drop(guard);
     refresh(shared, pr);
     Outcome::Ok(Reply::Ack)
 }
 
-/// A turn ended well. Tells the user when no window shows the review.
+/// A turn ended well and no window or terminal was watching the review: tells the user.
 pub(crate) async fn notify_finished(shared: &Shared, pr: &PrRef, turn: u64) {
-    if shared.holds.is_held(pr) {
-        return;
-    }
     let title = match reviews::load_stored(shared, pr) {
         Ok(Some(review)) => review.title,
         _ => String::new(),
@@ -334,9 +333,9 @@ pub(crate) async fn notify_finished(shared: &Shared, pr: &PrRef, turn: u64) {
     notifications::deliver(shared, vec![event]).await;
 }
 
-/// The review is being published or discarded: its turn is stopped, its queue dropped and its
+/// The review is being published, discarded or closed empty: its turn is stopped, its queue dropped and its
 /// session slot forgotten. The log stays. Called before the review lock is taken, because a turn
-/// may be waiting for that lock.
+/// may be waiting for that lock and would not see the stop while it is held.
 pub(crate) async fn stop(shared: &Shared, pr: &PrRef) {
     shared.sessions.end(shared, pr).await;
 }

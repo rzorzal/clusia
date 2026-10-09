@@ -507,3 +507,132 @@ async fn reading_the_log_tells_where_the_session_stands() {
         "{told:?}"
     );
 }
+
+#[tokio::test]
+async fn publish_stops_the_agent_before_it_holds_the_review() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let w = world().await;
+    // A slow submit keeps the review locked while the agent's session is confirmed, which
+    // needs that lock.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("submitPullRequestReview"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "data": { "submitPullRequestReview": {
+                    "pullRequestReview": {
+                        "id": "PRR_1", "databaseId": 42, "url": REVIEW_URL, "state": "COMMENTED"
+                    }
+                } } }))
+                .set_delay(Duration::from_millis(1500)),
+        )
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    let late_session = Turn::lines(&[
+        r#"{"type":"system","subtype":"hook_started"}"#,
+        r#"{"type":"system","subtype":"init","session_id":"__SESSION__"}"#,
+    ])
+    .delay_ms(500)
+    .then_hang();
+    let dir = use_fake(&w, Script::one(late_session)).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    let mut watcher = watching(&w).await;
+    c.request(send("think about it")).await.unwrap();
+    let call = calls(&dir, 1).await.remove(0);
+
+    let started = std::time::Instant::now();
+    let published = c
+        .request(Command::Publish {
+            pr: pr7(),
+            verdict: Verdict::RequestChanges,
+            summary: "Please rename.".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(published, Reply::Published(_)), "{published:?}");
+    until(&mut watcher, session_ended).await;
+    assert!(
+        !FakeClaude::is_running(call.pid),
+        "the turn was stopped before the session was forgotten"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "publish never waited for a turn stuck on the review: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_terminal_that_watched_the_answer_to_its_end_gets_no_notification() {
+    let w = world().await;
+    use_fake(&w, Script::one(Turn::answer("Done reading."))).await;
+    let mut watcher = watching(&w).await;
+    for _ in 0..5 {
+        // As `clusia ask` does: open, ask, watch, and leave as soon as the answer is done.
+        let mut cli = watching(&w).await;
+        open(&mut cli).await;
+        cli.request(send("what changed?")).await.unwrap();
+        until(&mut cli, |e| matches!(e, Event::AgentDone { .. })).await;
+        drop(cli);
+        until(&mut watcher, ready).await;
+        use_fake(&w, Script::one(Turn::answer("Done reading."))).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut c = w.daemon.client().await;
+    let Reply::Inbox(items) = c.request(Command::GetInbox).await.unwrap() else {
+        panic!("an inbox");
+    };
+    assert!(items.is_empty(), "{items:?}");
+}
+
+#[tokio::test]
+async fn closing_an_empty_review_ends_its_session() {
+    let w = world().await;
+    let dir = use_fake(&w, Script::one(Turn::hanging())).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    let mut watcher = watching(&w).await;
+    c.request(send("think about it")).await.unwrap();
+    let call = calls(&dir, 1).await.remove(0);
+    c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
+    until(&mut watcher, session_ended).await;
+    assert!(!FakeClaude::is_running(call.pid));
+    assert!(!w.daemon.paths.review_file(&pr7()).exists());
+}
+
+#[tokio::test]
+async fn a_failed_publish_leaves_the_session_to_resume() {
+    let w = world().await;
+    common::github_mock::graphql_error(&w.server, "addPullRequestReview(", "no permission").await;
+    mount_publish(&w.server, REVIEW_URL).await;
+    let dir = use_fake(
+        &w,
+        Script::turns(vec![Turn::answer("one"), Turn::answer("two")]),
+    )
+    .await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    let mut watcher = watching(&w).await;
+    c.request(send("first")).await.unwrap();
+    until(&mut watcher, ready).await;
+    let session = value_of(&calls(&dir, 1).await[0].argv, "--session-id").unwrap();
+
+    let failed = c
+        .request(Command::Publish {
+            pr: pr7(),
+            verdict: Verdict::RequestChanges,
+            summary: "Please rename.".into(),
+        })
+        .await;
+    assert!(failed.is_err(), "{failed:?}");
+    c.request(send("still there?")).await.unwrap();
+    until(&mut watcher, ready).await;
+    let second = calls(&dir, 2).await.remove(1);
+    assert_eq!(value_of(&second.argv, "--resume"), Some(session));
+}

@@ -48,7 +48,7 @@ does not hide a Homebrew install. The agent's turns start the program of `harnes
 | `~/Library/Logs/Clusia/daemon.start.log` | what each start printed before the log opened; appended to, emptied once past 256 KiB |
 | `<data>/agent/<owner>~<repo>~<n>.jsonl` | the agent's chat log of a review (every event; 0600; at most 2 MB, then the oldest half is dropped) |
 | `<data>/agent/<owner>~<repo>~<n>.state.json` | the suggestions you accepted or dismissed and the head the last summary saw |
-| `<worktree>/.clusia/review.md` | what the agent reads first: the pull request, the draft, the summary (excluded from git through the worktree's `info/exclude`) |
+| `<worktree>/.clusia/review.md` | what the agent reads first: the pull request, the draft, the summary (excluded from git through the worktree's `info/exclude`). Never written through a symlink: when the pull request makes `.clusia` anything but a folder, the notes are not written |
 | `~/Library/Logs/Clusia/daemon.launchd.log` | what a daemon launchd started printed (the login agent's output); not rotated |
 
 Each log starts a new file every day: yesterday's becomes `daemon.YYYY-MM-DD.log`, and the

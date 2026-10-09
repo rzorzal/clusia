@@ -630,7 +630,7 @@ pub(crate) async fn remove_item(shared: &Shared, pr: &PrRef, id: &str) -> Outcom
 }
 
 pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
-    let _guard = lock(shared, pr).await;
+    let guard = lock(shared, pr).await;
     let mut review = match load_stored(shared, pr) {
         Ok(Some(r)) => r,
         Ok(None) => return Outcome::Ok(Reply::Ack),
@@ -649,6 +649,10 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
         drop_cache(shared, pr);
         shared.sessions.cancel_ended(shared, pr);
         crate::agent::forget(shared, pr);
+        // Out of the lock, the stopped turn can finish; then the session slot goes and the
+        // windows hear it ended.
+        drop(guard);
+        crate::agent::stop(shared, pr).await;
         return Outcome::Ok(Reply::Ack);
     }
     if let Err(e) = review.apply(ReviewEvent::Leave, now_unix()) {
