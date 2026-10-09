@@ -972,6 +972,12 @@ mod review_flow {
         (seen, reading)
     }
 
+    /// A line typed at once after a question appears is ignored on purpose: wait it out, as a
+    /// reader who has read the question would.
+    fn let_the_question_settle() {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+
     fn wait_until(seen: &std::sync::Mutex<String>, needle: &str) {
         let start = std::time::Instant::now();
         while !seen.lock().unwrap().contains(needle) {
@@ -998,6 +1004,7 @@ mod review_flow {
         let (out, out_thread) = collect_joinable(child.stdout.take().unwrap());
         let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
         wait_until(&err, "/ [d]eny? ");
+        let_the_question_settle();
         master.write_all(typed.as_bytes()).unwrap();
         let status = child.wait().unwrap();
         assert!(status.success(), "{}", err.lock().unwrap());
@@ -1060,16 +1067,19 @@ mod review_flow {
     /// arrives, then ends the turn when the answer comes. It stands where the real one would,
     /// so the terminal side is tested on its own.
     fn daemon_that_asks(rt: &tokio::runtime::Runtime, socket: &Path) -> Answers {
-        daemon_that_asks_after(rt, socket, None)
+        daemon_that_asks_after(rt, socket, None, None)
     }
 
     /// Like `daemon_that_asks`, but the request is only announced once `gate` is released.
+    /// `connected` fires when the question has been accepted: the client is connected and about
+    /// to read its terminal.
     fn daemon_that_asks_after(
         rt: &tokio::runtime::Runtime,
         socket: &Path,
         gate: Option<tokio::sync::oneshot::Receiver<()>>,
+        connected: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Answers {
-        let mut gate = gate;
+        let (mut gate, mut connected) = (gate, connected);
         use clusia_protocol::{
             ClientMessage, Command as Request, Event, MessageReader, Outcome, PROTOCOL_VERSION,
             PermissionAnswerKind, PermissionOutcome, Reply, ServerMessage, write_message,
@@ -1156,6 +1166,9 @@ mod review_flow {
                     result: Outcome::Ok(reply),
                 };
                 write_message(&mut write, &response).await.unwrap();
+                if is_send && let Some(connected) = connected.take() {
+                    let _ = connected.send(());
+                }
                 if is_send && let Some(gate) = gate.take() {
                     let _ = gate.await;
                 }
@@ -1192,22 +1205,24 @@ mod review_flow {
         let dir = tempfile::tempdir().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (release, gate) = tokio::sync::oneshot::channel();
+        let (connected, is_connected) = tokio::sync::oneshot::channel();
         let answers = daemon_that_asks_after(
             &rt,
             &clusia_core::Paths::new(dir.path()).socket(),
             stray.map(|_| gate),
+            stray.map(|_| connected),
         );
         let (mut master, slave) = pty();
         let mut child = fake_daemon_ask(dir.path(), slave);
         let (out, out_thread) = collect_joinable(child.stdout.take().unwrap());
         let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
         if let Some(stray) = stray {
-            std::thread::sleep(std::time::Duration::from_millis(600));
+            is_connected.blocking_recv().unwrap();
             master.write_all(stray.as_bytes()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(600));
             release.send(()).unwrap();
         }
         wait_until(&err, "/ [d]eny? ");
+        let_the_question_settle();
         master.write_all(typed.as_bytes()).unwrap();
         let status = child.wait().unwrap();
         out_thread.join().unwrap();

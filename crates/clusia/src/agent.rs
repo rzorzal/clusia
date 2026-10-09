@@ -66,12 +66,25 @@ impl Waiting {
     }
 }
 
-/// `text` as one safe line: a control character (a carriage return, an escape sequence) would
-/// let a command rewrite the question the reviewer reads, so it is shown as an escape.
+/// Characters that draw nothing or reorder what is drawn: Unicode categories Cf, Zl and Zp
+/// (bidi controls, zero-width characters, the BOM, tags, line and paragraph separators).
+/// `char` has no category lookup, so the Cf ranges are listed.
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{AD}' | '\u{600}'..='\u{605}' | '\u{61C}' | '\u{6DD}' | '\u{70F}'
+        | '\u{890}'..='\u{891}' | '\u{8E2}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
+        | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}'
+        | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}'
+        | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E007F}')
+}
+
+/// `text` as one safe line: a control character (a carriage return, an escape sequence) or an
+/// invisible one (a bidi override, a zero-width character) would let a command rewrite or
+/// disguise what the reviewer reads, so each is shown as an escape.
 fn printable(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if c.is_control() {
+            if c.is_control() || is_invisible(c) {
                 c.escape_default().to_string()
             } else {
                 c.to_string()
@@ -79,6 +92,18 @@ fn printable(text: &str) -> String {
         })
         .collect()
 }
+
+/// The agent's streamed text without what could repaint the terminal or disguise it: it keeps
+/// line breaks and tabs and drops every other control and invisible character.
+fn streamed(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c == '\n' || c == '\t' || !(c.is_control() || is_invisible(c)))
+        .collect()
+}
+
+/// A line typed this soon after a question is shown is not an answer to it: it was aimed at
+/// whatever was asked before, or typed before the question was seen.
+pub(crate) const QUIET_AFTER_PROMPT: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// What a typed line means for a request. Only a clear yes allows: an empty line, a typo and
 /// `[r]eview` for a request that offers no prefix all deny.
@@ -107,6 +132,10 @@ pub(crate) struct Turn {
     waiting: Vec<Waiting>,
     /// The review's turn is the one that runs: what it decides at once may be told here.
     running: bool,
+    /// The question is on the screen and its line has not been ended yet.
+    prompt_open: bool,
+    /// When the question now on the screen was printed.
+    prompted_at: Option<std::time::Instant>,
 }
 
 impl Turn {
@@ -123,6 +152,8 @@ impl Turn {
             interactive: false,
             waiting: Vec::new(),
             running: false,
+            prompt_open: false,
+            prompted_at: None,
         }
     }
 
@@ -137,6 +168,28 @@ impl Turn {
         self.interactive && self.waiting.first().is_some_and(|w| !w.answered)
     }
 
+    /// Whether the question was printed so recently that a line typed now cannot be its answer.
+    pub(crate) fn just_asked(&self) -> bool {
+        self.prompted_at
+            .is_some_and(|at| at.elapsed() < QUIET_AFTER_PROMPT)
+    }
+
+    /// Notes that the question's line has been ended by something other than an answer.
+    fn end_prompt_line(&mut self) {
+        self.prompt_open = false;
+    }
+
+    /// Prints the question of the first waiting request.
+    fn show_prompt(&mut self, err: &mut dyn Write) -> io::Result<()> {
+        if let Some(front) = self.waiting.first() {
+            write!(err, "{}", front.prompt())?;
+            err.flush()?;
+            self.prompt_open = true;
+            self.prompted_at = Some(std::time::Instant::now());
+        }
+        Ok(())
+    }
+
     /// A line typed at the prompt: the answer it gives to the question that is open, or `None`
     /// when none is. The request stays until the daemon says it ended.
     pub(crate) fn answer_line(&mut self, line: &str) -> Option<(String, PermissionAnswerKind)> {
@@ -145,6 +198,8 @@ impl Turn {
         }
         let front = self.waiting.first_mut().filter(|w| !w.answered)?;
         front.answered = true;
+        // The reviewer's Enter ended the question's line.
+        self.prompt_open = false;
         Some((front.id.clone(), parse_answer(line, front.prefix.is_some())))
     }
 
@@ -233,8 +288,7 @@ impl Turn {
                         let said = self.waiting.last().map(Waiting::elsewhere);
                         writeln!(err, "{}", said.unwrap_or_default())?;
                     } else if self.waiting.len() == 1 {
-                        write!(err, "{}", self.waiting[0].prompt())?;
-                        err.flush()?;
+                        self.show_prompt(err)?;
                     }
                 }
             }
@@ -245,31 +299,27 @@ impl Turn {
                 outcome,
                 ..
             } => {
-                let front = self.waiting.first();
-                let was_front = front.is_some_and(|w| w.id == *id);
-                let answered_here = front.is_some_and(|w| w.id == *id && w.answered);
+                let was_front = self.waiting.first().is_some_and(|w| w.id == *id);
                 self.waiting.retain(|w| w.id != *id);
                 if !self.json {
-                    // A prompt nobody answered here still waits for a line: end it first. An
-                    // answer typed here already ended it with the reviewer's Enter.
-                    if self.interactive && was_front && !answered_here {
+                    // A question whose line is still open ends first; an answer typed here (or
+                    // the note that input ended) already ended it.
+                    if self.interactive && was_front && self.prompt_open {
                         writeln!(err)?;
+                        self.end_prompt_line();
                     }
                     writeln!(
                         err,
                         "{}",
                         permission_line(tool, summary, *outcome).trim_start()
                     )?;
-                    if self.interactive
-                        && was_front
-                        && let Some(next) = self.waiting.first()
-                    {
-                        write!(err, "{}", next.prompt())?;
-                        err.flush()?;
+                    if self.interactive && was_front {
+                        self.show_prompt(err)?;
                     }
                 }
             }
             Event::AgentChunk { text, .. } if !self.json => {
+                let text = streamed(text);
                 out.write_all(text.as_bytes())?;
                 out.flush()?;
                 if !text.is_empty() {
@@ -278,10 +328,15 @@ impl Turn {
                 }
             }
             Event::AgentToolUse { summary, .. } if !self.json => {
-                writeln!(err, "✓ {summary}")?;
+                writeln!(err, "✓ {}", printable(summary))?;
             }
             Event::AgentDenied { tool, detail, .. } if !self.json => {
-                writeln!(err, "⊘ wanted to use {tool}: {detail} (denied)")?;
+                writeln!(
+                    err,
+                    "⊘ wanted to use {}: {} (denied)",
+                    printable(tool),
+                    printable(detail)
+                )?;
             }
             Event::AgentSuggestion { suggestion, .. } => {
                 self.suggestions.push(suggestion.clone());
@@ -443,7 +498,7 @@ async fn typed_line(
 /// Says once that a question is open on a terminal whose input has ended: nothing can answer
 /// it, so it will be denied when its time runs out.
 fn note_end_of_input(
-    run: &Turn,
+    run: &mut Turn,
     typed: &Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     noted: &mut bool,
     err: &mut dyn Write,
@@ -454,6 +509,7 @@ fn note_end_of_input(
             err,
             "\nno more input: the request is denied when its time runs out"
         )?;
+        run.end_prompt_line();
     }
     Ok(())
 }
@@ -532,6 +588,7 @@ pub(crate) async fn ask(
             line = typed_line(&mut typed) => {
                 match line {
                     // A line typed while no question is open answers nothing.
+                    Some(line) if run.just_asked() => drop(line),
                     Some(line) => {
                         if let Some((id, answer)) = run.answer_line(&line) {
                             send_answer(&mut client, id, answer).await?;
@@ -539,7 +596,7 @@ pub(crate) async fn ask(
                     }
                     None => typed = None,
                 }
-                note_end_of_input(&run, &typed, &mut noted_end_of_input, &mut err)
+                note_end_of_input(&mut run, &typed, &mut noted_end_of_input, &mut err)
                     .map_err(io_error)?;
                 continue;
             }
@@ -552,7 +609,7 @@ pub(crate) async fn ask(
         if let Flow::Finished = run.feed(&event, &mut out, &mut err).map_err(io_error)? {
             break;
         }
-        note_end_of_input(&run, &typed, &mut noted_end_of_input, &mut err).map_err(io_error)?;
+        note_end_of_input(&mut run, &typed, &mut noted_end_of_input, &mut err).map_err(io_error)?;
     }
     run.finish(&mut out).map_err(io_error)?;
     match run.failure() {
@@ -1263,5 +1320,86 @@ mod tests {
         assert_eq!(lines[0]["permission_requested"]["summary"], "make");
         assert!(lines[1].get("permission_resolved").is_some());
         assert!(err.is_empty() && !turn.asking());
+    }
+
+    #[test]
+    fn invisible_characters_are_shown_as_escapes() {
+        assert_eq!(printable("echo ok #\u{202e}x"), "echo ok #\\u{202e}x");
+        assert_eq!(
+            printable("ls\u{200b}-la\u{feff}"),
+            "ls\\u{200b}-la\\u{feff}"
+        );
+        assert_eq!(printable("a\u{2028}b\u{2029}c"), "a\\u{2028}b\\u{2029}c");
+        assert_eq!(printable("naïve ✓ 日本"), "naïve ✓ 日本");
+    }
+
+    #[test]
+    fn what_the_agent_writes_cannot_repaint_the_terminal() {
+        let (mut turn, mut out, mut err) = run(false);
+        let events = [
+            Event::AgentToolUse {
+                pr: pr(),
+                turn: 2,
+                summary: "Read a.rs\r\u{1b}[2K\u{202e}".into(),
+            },
+            Event::AgentDenied {
+                pr: pr(),
+                turn: 2,
+                tool: "Ba\u{1b}sh".into(),
+                detail: "rm\u{9b}2K\u{200b}".into(),
+            },
+            chunk(2, "a\u{1b}[2Kb\u{9b}c\u{202e}d\u{2028}e\u{200b}f\tg\r\nh\n"),
+        ];
+        for e in &events {
+            turn.feed(e, &mut out, &mut err).unwrap();
+        }
+        assert_eq!(
+            said(&err),
+            "✓ Read a.rs\\r\\u{1b}[2K\\u{202e}\n\
+             ⊘ wanted to use Ba\\u{1b}sh: rm\\u{9b}2K\\u{200b} (denied)\n"
+        );
+        assert_eq!(said(&out), "a[2Kbcdef\tg\nh\n");
+    }
+
+    #[test]
+    fn the_ending_after_end_of_input_has_no_blank_line() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        turn.feed(
+            &requested("p1", 2, "Bash", "make", None),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        err.clear();
+        let mut noted = false;
+        let none: Option<tokio::sync::mpsc::UnboundedReceiver<String>> = None;
+        note_end_of_input(&mut turn, &none, &mut noted, &mut err).unwrap();
+        turn.feed(
+            &resolved("p1", PermissionOutcome::Expired),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(
+            said(&err),
+            "\nno more input: the request is denied when its time runs out\n⊘ denied make: no answer in time\n"
+        );
+    }
+
+    #[test]
+    fn a_new_question_is_quiet_for_a_moment() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        assert!(!turn.just_asked());
+        turn.feed(
+            &requested("p1", 2, "Bash", "make", None),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(turn.just_asked());
+        std::thread::sleep(QUIET_AFTER_PROMPT + std::time::Duration::from_millis(50));
+        assert!(!turn.just_asked());
     }
 }
