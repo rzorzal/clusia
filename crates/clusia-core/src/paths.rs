@@ -93,6 +93,22 @@ impl Paths {
         self.root.join("cache/media")
     }
 
+    /// The review agent's logs and state, one pair of files per pull request.
+    pub fn agent_dir(&self) -> PathBuf {
+        self.root.join("agent")
+    }
+
+    /// Every event of the agent chat for `pr`, one JSON object per line.
+    pub fn agent_log(&self, pr: &crate::PrRef) -> PathBuf {
+        self.agent_dir().join(format!("{}.jsonl", pr.file_key()))
+    }
+
+    /// What the agent session remembers about `pr` between turns.
+    pub fn agent_state(&self, pr: &crate::PrRef) -> PathBuf {
+        self.agent_dir()
+            .join(format!("{}.state.json", pr.file_key()))
+    }
+
     pub fn activity_file(&self) -> PathBuf {
         self.root.join("activity.jsonl")
     }
@@ -152,6 +168,21 @@ mod tests {
     fn app_lock_lives_in_the_root() {
         let p = Paths::new("/tmp/clusia-home");
         assert_eq!(p.app_lock(), PathBuf::from("/tmp/clusia-home/app.lock"));
+    }
+
+    #[test]
+    fn agent_files_are_keyed_by_pull_request() {
+        let p = Paths::new("/tmp/c");
+        let pr = crate::PrRef::new("acme", "widgets", 7).unwrap();
+        assert_eq!(p.agent_dir(), PathBuf::from("/tmp/c/agent"));
+        assert_eq!(
+            p.agent_log(&pr),
+            PathBuf::from("/tmp/c/agent/acme~widgets~7.jsonl")
+        );
+        assert_eq!(
+            p.agent_state(&pr),
+            PathBuf::from("/tmp/c/agent/acme~widgets~7.state.json")
+        );
     }
 
     #[test]

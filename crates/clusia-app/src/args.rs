@@ -30,6 +30,8 @@ pub enum Scene {
     ConfigNotificationsBottom,
     ConfigMedia,
     ConfigAbout,
+    AgentChat,
+    ConfigHarness,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -174,6 +176,8 @@ mod tests {
             ),
             ("config-media", Scene::ConfigMedia),
             ("config-about", Scene::ConfigAbout),
+            ("agent-chat", Scene::AgentChat),
+            ("config-harness", Scene::ConfigHarness),
         ] {
             assert_eq!(
                 parse(&["--demo", "--scene", name]).unwrap().scene,

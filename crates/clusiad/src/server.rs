@@ -141,6 +141,11 @@ impl Daemon {
     pub async fn run(self) -> io::Result<()> {
         let mut shutdown = self.shared.shutdown.subscribe();
         tracing::info!(socket = %self.socket.display(), version = crate::VERSION, "clusiad listening");
+        {
+            let shared = self.shared.clone();
+            let _ = tokio::task::spawn_blocking(move || crate::sessions::close_unfinished(&shared))
+                .await;
+        }
         if self.shared.background_sync {
             tokio::spawn(sync::run_loop(self.shared.clone()));
         }
@@ -213,6 +218,7 @@ impl Daemon {
         if !self.shared.wait_idle(SHUTDOWN_GRACE).await {
             tracing::warn!("stopping with requests still running after {SHUTDOWN_GRACE:?}");
         }
+        self.shared.sessions.shutdown(&self.shared).await;
         if let Some(tray) = tray {
             // The supervisor kills the tray on shutdown; give it a moment to reap it.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), tray).await;

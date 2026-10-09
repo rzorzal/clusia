@@ -6,11 +6,12 @@ use bevy::ui_widgets::ScrollArea;
 use clusia_core::draft::{DraftKind, ThreadRef};
 use clusia_core::{Side, Verdict};
 use clusia_protocol::{
-    AuthInfo, LoadStep, LoadStepKind, StepStatus, SyncState, SyncStatus, WindowTarget,
+    AuthInfo, LoadStep, LoadStepKind, SessionStateKind, StepStatus, SyncState, SyncStatus,
+    WindowTarget,
 };
 
 use crate::args::Scene;
-use crate::bridge::Model;
+use crate::bridge::{Model, ProbeState};
 use crate::clock::Clock;
 use crate::fixture;
 use crate::nav::{Nav, Section};
@@ -18,6 +19,7 @@ use crate::review_state::{
     DiffMode, EditTarget, Editor, Modal, Phase, Ready, ReviewSection, ReviewTabs, Tab, TabUi,
 };
 use crate::screens::open_pr::Palette;
+use crate::screens::review::agent::{Chats, PanelTab};
 use crate::ui::composer::popover::{PopoverKind, Popovers};
 use crate::ui::composer::{ComposerKey, ComposerMode, Slot};
 
@@ -120,6 +122,19 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
         Scene::ConfigNotifications | Scene::ConfigNotificationsBottom => {
             set_demo_config(world, &NOTIFICATION_SETTINGS);
         }
+        Scene::ConfigHarness => {
+            set_demo_config(
+                world,
+                &[
+                    ("harness.program", "/opt/homebrew/bin/claude"),
+                    ("harness.extra_args", "--model claude-opus-5-5"),
+                ],
+            );
+            world.resource_mut::<Model>().probe = ProbeState::Done(fixture::demo_probe());
+        }
+        Scene::AgentChat => {
+            set_demo_config(world, &[("harness.program", "/opt/homebrew/bin/claude")])
+        }
         _ => {}
     }
     if scene != Scene::FirstRun {
@@ -149,6 +164,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         }
         Scene::ConfigMedia => Some(Section::Media),
         Scene::ConfigAbout => Some(Section::About),
+        Scene::ConfigHarness => Some(Section::Harness),
         _ => None,
     };
     if let Some(section) = section {
@@ -179,7 +195,9 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::ConfigNotifications
         | Scene::ConfigNotificationsBottom
         | Scene::ConfigMedia
-        | Scene::ConfigAbout => {}
+        | Scene::ConfigAbout
+        | Scene::ConfigHarness => {}
+        Scene::AgentChat => ui.file = Some("src/auth/refresh.rs".into()),
         Scene::Composer | Scene::Emoji | Scene::Gif => {
             ui.editor = Some(composer_editor(ComposerMode::Write));
         }
@@ -245,6 +263,16 @@ pub fn stage(world: &mut World, scene: Scene) {
             nav.go(&WindowTarget::Home);
         }
     }
+    if scene == Scene::AgentChat {
+        // As in the mockup, only the question turn: the log is not asked for again.
+        let question = fixture::demo_agent_turns(now).remove(1);
+        let mut chats = world.resource_mut::<Chats>();
+        let chat = chats.entry(&pr);
+        chat.show(PanelTab::Agent);
+        chat.log_asked = true;
+        chats.replay(&pr, &question);
+        chats.entry(&pr).state = SessionStateKind::Running;
+    }
     if scene == Scene::Palette {
         *world.resource_mut::<Palette>() = Palette {
             open: true,
@@ -301,6 +329,7 @@ mod tests {
     fn staged(scene: Scene) -> App {
         let mut app = testing::app(fixture::demo(NOW));
         stage(app.world_mut(), scene);
+        stage_snapshot(app.world_mut(), scene);
         testing::settle(&mut app);
         app
     }
@@ -322,6 +351,7 @@ mod tests {
                     | Scene::ConfigNotificationsBottom
                     | Scene::ConfigMedia
                     | Scene::ConfigAbout
+                    | Scene::ConfigHarness
             ) {
                 continue;
             }
@@ -372,8 +402,21 @@ mod tests {
                 | Scene::ConfigNotifications
                 | Scene::ConfigNotificationsBottom
                 | Scene::ConfigMedia
-                | Scene::ConfigAbout => {
+                | Scene::ConfigAbout
+                | Scene::ConfigHarness => {
                     unreachable!("skipped above")
+                }
+                Scene::AgentChat => {
+                    assert_eq!(tab.ui.file.as_deref(), Some("src/auth/refresh.rs"));
+                    let chats = app
+                        .world()
+                        .resource::<crate::screens::review::agent::Chats>();
+                    let chat = &chats.0[&pr];
+                    assert!(
+                        chat.tab == crate::screens::review::agent::PanelTab::Agent
+                            && chat.log_asked
+                    );
+                    assert_eq!(chat.state, clusia_protocol::SessionStateKind::Running);
                 }
                 Scene::Composer | Scene::ComposerPreview | Scene::Emoji | Scene::Gif => {
                     let editor = tab.ui.editor.as_ref().expect("an open composer");
@@ -435,6 +478,7 @@ mod tests {
             (Scene::ConfigNotificationsBottom, Section::Notifications),
             (Scene::ConfigMedia, Section::Media),
             (Scene::ConfigAbout, Section::About),
+            (Scene::ConfigHarness, Section::Harness),
         ] {
             let mut app = staged_outside_review(scene);
             assert_eq!(
@@ -449,6 +493,53 @@ mod tests {
         let app = staged_outside_review(scene);
         let config = &app.world().resource::<Model>().snapshot.config;
         serde_json::to_value(config).unwrap()
+    }
+
+    #[test]
+    fn the_agent_chat_scene_shows_the_mockup_chat() {
+        let mut app = staged(Scene::AgentChat);
+        for needle in [
+            "Is the new lock needed at all, or would re-checking the expiry be enough?",
+            "Read src/auth/store.rs and client/http.rs",
+            "Searched for refresh_lock · 3 uses",
+            "The lock is needed",
+            "What's not needed is holding it during the network call",
+            "Suggested comment",
+            "refresh.rs:44",
+            "Accept into draft",
+            "Stop",
+            "Claude Code · thinking…",
+            "session resumed · knows this review",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        assert!(
+            !testing::shows(&mut app, "Summary"),
+            "only the question turn, as in the mockup"
+        );
+        let region =
+            testing::find::<crate::screens::review::agent::AgentRegion>(&mut app, |_| true);
+        assert_eq!(
+            app.world().get::<Node>(region).unwrap().display,
+            Display::Flex
+        );
+    }
+
+    #[test]
+    fn the_harness_scene_shows_the_mockup_settings() {
+        let config = demo_config(Scene::ConfigHarness);
+        assert_eq!(config["harness"]["program"], "/opt/homebrew/bin/claude");
+        assert_eq!(config["harness"]["extra_args"], "--model claude-opus-5-5");
+        let mut app = staged_outside_review(Scene::ConfigHarness);
+        assert!(testing::shows(
+            &mut app,
+            "Claude Code 2.1.294 answered in 1.8 s"
+        ));
+        assert!(testing::shows(
+            &mut app,
+            "Found at /opt/homebrew/bin/claude"
+        ));
+        assert!(testing::shows(&mut app, "Test again"));
     }
 
     #[test]

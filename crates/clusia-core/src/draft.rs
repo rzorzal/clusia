@@ -53,6 +53,8 @@ pub enum Origin {
     Audit,
     Security,
     Diagram,
+    /// A comment the review agent suggested; it counts once the human accepts it.
+    Agent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,12 +116,25 @@ impl Draft {
         self.items.is_empty()
     }
 
-    /// Adds a human-written item and returns it.
+    /// Adds a human-written item and returns it. See [`Draft::add_as`] for the rules.
+    pub fn add(
+        &mut self,
+        kind: DraftKind,
+        anchor: Option<Anchor>,
+        thread: Option<ThreadRef>,
+        body: &str,
+        now: i64,
+    ) -> Result<&DraftItem, DraftError> {
+        self.add_as(Origin::Human, kind, anchor, thread, body, now)
+    }
+
+    /// Adds an item written by `origin` and returns it.
     ///
     /// Line comments need an anchor, replies and resolves a thread; a resolve has no text and
     /// is accepted once per thread.
-    pub fn add(
+    pub fn add_as(
         &mut self,
+        origin: Origin,
         kind: DraftKind,
         anchor: Option<Anchor>,
         thread: Option<ThreadRef>,
@@ -164,7 +179,7 @@ impl Draft {
         self.items.push(DraftItem {
             id: format!("i{}", self.next_id),
             kind,
-            origin: Origin::Human,
+            origin,
             anchor,
             thread,
             body: body.to_string(),
@@ -226,6 +241,28 @@ mod tests {
             side: Side::Right,
             commit: "h1".into(),
         }
+    }
+
+    #[test]
+    fn add_as_keeps_who_wrote_the_item() {
+        let mut d = Draft::default();
+        let agent = d
+            .add_as(
+                Origin::Agent,
+                DraftKind::LineComment,
+                Some(anchor(3, None)),
+                None,
+                "Why a minute?",
+                10,
+            )
+            .unwrap()
+            .clone();
+        assert_eq!(agent.origin, Origin::Agent);
+        assert!(agent.accepted);
+        assert_eq!(agent.id, "i1");
+        let human = d.add(DraftKind::General, None, None, "Fine", 11).unwrap();
+        assert_eq!(human.origin, Origin::Human);
+        assert_eq!(human.id, "i2");
     }
 
     #[test]
@@ -480,6 +517,15 @@ mod tests {
             })
             .unwrap(),
             r#"{"status":"moved","from_path":"a","from_line":3}"#
+        );
+    }
+
+    #[test]
+    fn agent_origin_has_its_own_wire_name() {
+        assert_eq!(serde_json::to_string(&Origin::Agent).unwrap(), r#""agent""#);
+        assert_eq!(
+            serde_json::from_str::<Origin>(r#""human""#).unwrap(),
+            Origin::Human
         );
     }
 }

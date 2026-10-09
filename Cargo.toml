@@ -20,6 +20,7 @@ clusia-git = { path = "crates/clusia-git" }
 clusia-analytics = { path = "crates/clusia-analytics" }
 clusia-view = { path = "crates/clusia-view" }
 clusia-highlight = { path = "crates/clusia-highlight" }
+clusia-harness = { path = "crates/clusia-harness" }
 clusiad = { path = "crates/clusiad" }
 security-framework = "3.7.0"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -42,6 +43,7 @@ objc2-app-kit = "0.3.2"
 objc2-user-notifications = "0.3.2"
 block2 = "0.6.2"
 plist = "1.10.1"
+uuid = { version = "1.27.0", features = ["v4"] }
 dispatch2 = "0.3.1"
 bevy = { version = "=0.19.1", default-features = false, features = ["default_app", "std", "bevy_winit", "multi_threaded", "ui_api", "ui_bevy_render", "ui_picking", "bevy_picking", "bevy_ui_widgets", "png", "system_clipboard", "default_font"] }
 image = { version = "0.25.10", default-features = false, features = ["gif", "png", "jpeg"] }

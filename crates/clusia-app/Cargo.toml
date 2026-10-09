@@ -12,6 +12,7 @@ clusia-core.workspace = true
 clusia-protocol.workspace = true
 clusia-view.workspace = true
 clusia-highlight.workspace = true
+clusia-harness.workspace = true
 bevy.workspace = true
 crossbeam-channel.workspace = true
 rfd.workspace = true
@@ -30,6 +31,7 @@ pulldown-cmark.workspace = true
 [dev-dependencies]
 clusiad.workspace = true
 clusia-platform.workspace = true
+clusia-harness = { workspace = true, features = ["test-kit"] }
 tempfile.workspace = true
 wiremock.workspace = true
 

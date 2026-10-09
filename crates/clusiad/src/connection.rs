@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use clusia_core::PrRef;
 use clusia_protocol::{
     ClientMessage, CodecError, Command, ErrorCode, Event, MessageReader, Outcome, PROTOCOL_VERSION,
     ProtocolError, ServerMessage, write_message,
@@ -52,6 +53,38 @@ impl Listener {
 impl Drop for Listener {
     fn drop(&mut self) {
         (self.count)(&self.shared).fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Lets go of every review a connection had open when the connection ends.
+struct Holder {
+    shared: Arc<Shared>,
+    id: u64,
+}
+
+impl Holder {
+    fn new(shared: &Arc<Shared>) -> Self {
+        Self {
+            shared: shared.clone(),
+            id: shared.holds.new_holder(),
+        }
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        self.shared.holds.release_all(self.id);
+    }
+}
+
+/// The review a command opens (`true`) or closes (`false`) for the connection that sent it.
+fn hold_change(cmd: &Command) -> Option<(PrRef, bool)> {
+    match cmd {
+        Command::OpenReview { pr } => Some((pr.clone(), true)),
+        Command::CloseReview { pr }
+        | Command::DiscardReview { pr }
+        | Command::Publish { pr, .. } => Some((pr.clone(), false)),
+        _ => None,
     }
 }
 
@@ -126,6 +159,7 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
         Err(e) => return Err(e),
     }
 
+    let holder = Holder::new(shared);
     let mut events = shared.events.subscribe();
     let mut shutdown = shared.shutdown.subscribe();
     let mut topics: HashSet<String> = HashSet::new();
@@ -170,9 +204,15 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                 let working = shared.begin_work();
                 let task_shared = shared.clone();
                 let client = client_name.clone();
+                let hold = hold_change(&cmd);
+                let holder_id = holder.id;
                 let task = tokio::spawn(async move {
                     let _working = working;
-                    handlers::handle(&task_shared, &client, cmd).await
+                    let outcome = handlers::handle(&task_shared, &client, cmd).await;
+                    if let (Outcome::Ok(_), Some((pr, held))) = (&outcome, hold) {
+                        task_shared.holds.set(&pr, holder_id, held);
+                    }
+                    outcome
                 });
                 pending = Some((id, stop, task, busy));
             }
@@ -206,5 +246,28 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                 return drain_events(&mut events, &topics, &mut w).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_and_closing_a_review_changes_what_a_connection_holds() {
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        assert_eq!(
+            hold_change(&Command::OpenReview { pr: pr.clone() }),
+            Some((pr.clone(), true))
+        );
+        assert_eq!(
+            hold_change(&Command::CloseReview { pr: pr.clone() }),
+            Some((pr.clone(), false))
+        );
+        assert_eq!(
+            hold_change(&Command::DiscardReview { pr: pr.clone() }),
+            Some((pr, false))
+        );
+        assert_eq!(hold_change(&Command::GetConfig), None);
     }
 }

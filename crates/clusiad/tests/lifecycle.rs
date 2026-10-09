@@ -321,6 +321,7 @@ fn a_daemon_that_loses_the_lock_leaves_the_logs_alone() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_clusiad"))
         .arg("--home")
         .arg(dir.path())
+        .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap();

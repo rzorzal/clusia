@@ -213,7 +213,7 @@ pub fn set_value(cfg: &Config, key: &str, raw: &str) -> Result<Config, ConfigKey
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clusia_core::config::{Dnd, EventKind, SoundId, Theme, Weekday};
+    use clusia_core::config::{Dnd, EventKind, OnOpen, SoundId, Theme, Weekday};
 
     #[test]
     fn recent_emoji_are_set_as_a_list() {
@@ -561,5 +561,74 @@ mod tests {
         fs::create_dir_all(p.root()).unwrap();
         fs::write(p.config_file(), "[notifications.dnd]\nfrom = \"late\"\n").unwrap();
         assert!(matches!(load_config(&p).unwrap(), Loaded::Recovered { .. }));
+    }
+
+    #[test]
+    fn harness_keys_are_read_and_set_by_name() {
+        let c = Config::default();
+        assert_eq!(get_value(&c, "harness.kind").unwrap(), "claude-code");
+        assert_eq!(get_value(&c, "harness.program").unwrap(), "");
+        assert_eq!(get_value(&c, "harness.extra_args").unwrap(), "");
+        assert_eq!(get_value(&c, "harness.on_open").unwrap(), "summarize");
+        assert_eq!(
+            get_value(&c, "harness.use_cli_permissions").unwrap(),
+            "true"
+        );
+        assert_eq!(get_value(&c, "harness.turn_timeout_secs").unwrap(), "600");
+
+        let c = set_value(&c, "harness.program", "/opt/bin/claude").unwrap();
+        assert_eq!(c.harness.program.as_deref(), Some("/opt/bin/claude"));
+        let c = set_value(&c, "harness.program", "").unwrap();
+        assert_eq!(c.harness.program, None, "an empty value goes back to PATH");
+        let c = set_value(&c, "harness.extra_args", "--model opus").unwrap();
+        assert_eq!(c.harness.extra_args, "--model opus");
+        let c = set_value(&c, "harness.on_open", "wait").unwrap();
+        assert_eq!(c.harness.on_open, OnOpen::Wait);
+        let c = set_value(&c, "harness.use_cli_permissions", "false").unwrap();
+        assert!(!c.harness.use_cli_permissions);
+        let c = set_value(&c, "harness.turn_timeout_secs", "120").unwrap();
+        assert_eq!(c.harness.turn_timeout_secs, 120);
+    }
+
+    #[test]
+    fn harness_values_are_validated() {
+        let c = Config::default();
+        for (key, value) in [
+            ("harness.turn_timeout_secs", "59"),
+            ("harness.turn_timeout_secs", "3601"),
+            ("harness.turn_timeout_secs", "soon"),
+            ("harness.on_open", "sometimes"),
+            ("harness.kind", "codex"),
+            ("harness.extra_args", "--x 'open"),
+            ("harness.extra_args", "--dangerously-skip-permissions"),
+            ("harness.use_cli_permissions", "maybe"),
+        ] {
+            assert!(
+                matches!(
+                    set_value(&c, key, value),
+                    Err(ConfigKeyError::Invalid { .. })
+                ),
+                "{key}={value}"
+            );
+        }
+        assert!(matches!(
+            set_value(&c, "harness.nope", "1"),
+            Err(ConfigKeyError::Unknown(_))
+        ));
+    }
+
+    #[test]
+    fn harness_section_survives_save_and_load() {
+        let (_d, p) = paths();
+        let mut c = Config::default();
+        c.harness.program = Some("/opt/bin/claude".into());
+        c.harness.on_open = OnOpen::Wait;
+        save_config(&p, &c).unwrap();
+        assert_eq!(load_config(&p).unwrap(), Loaded::Read(c));
+        let defaults = Config::default();
+        save_config(&p, &defaults).unwrap();
+        let text = fs::read_to_string(p.config_file()).unwrap();
+        assert!(text.contains("program = \"\""), "{text}");
+        assert_eq!(load_config(&p).unwrap(), Loaded::Read(defaults));
     }
 }

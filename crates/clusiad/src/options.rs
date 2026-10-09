@@ -38,6 +38,8 @@ pub struct DaemonOptions {
     /// Folders searched, in order, for the `claude` and `codex` commands. A window started from
     /// the Dock has a bare `PATH`, so `from_env` adds the usual install folders after it.
     pub harness_search_paths: Vec<PathBuf>,
+    /// The `claude` program used when `harness.program` is empty. Env: `CLUSIA_CLAUDE_BIN`.
+    pub claude_program: Option<PathBuf>,
 }
 
 impl DaemonOptions {
@@ -66,6 +68,7 @@ impl DaemonOptions {
             media_resolve: Vec::new(),
             giphy_api: var("CLUSIA_GIPHY_API"),
             harness_search_paths: search_paths,
+            claude_program: var("CLUSIA_CLAUDE_BIN").map(PathBuf::from),
         }
     }
 }

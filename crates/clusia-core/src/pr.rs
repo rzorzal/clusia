@@ -156,6 +156,9 @@ pub struct PrDetail {
     pub closed: bool,
     #[serde(default)]
     pub merged: bool,
+    /// The description of the pull request, as GitHub sends it (Markdown).
+    #[serde(default)]
+    pub body: String,
 }
 
 #[cfg(test)]
@@ -243,6 +246,7 @@ mod tests {
             "changed_files":1,"clone_url":"c"}"#;
         let d: PrDetail = serde_json::from_str(json).unwrap();
         assert_eq!((d.closed, d.merged), (false, false));
+        assert_eq!(d.body, "");
     }
 
     #[test]

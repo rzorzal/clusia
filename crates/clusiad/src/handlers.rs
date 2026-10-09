@@ -1,5 +1,6 @@
 //! Command → reply. Connection handling lives in `connection`.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use clusia_core::PrFilter;
@@ -11,6 +12,7 @@ use clusia_provider::{ProviderError, TokenOrigin};
 use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
 use crate::activity;
+use crate::agent;
 use crate::first_run;
 use crate::giphy;
 use crate::media;
@@ -18,11 +20,12 @@ use crate::news;
 use crate::notifications;
 use crate::publish;
 use crate::reviews;
+use crate::sessions;
 use crate::state::Shared;
 use crate::sync;
 use crate::worktrees;
 
-pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outcome {
+pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> Outcome {
     match cmd {
         Command::DaemonStatus => Outcome::Ok(Reply::Status(DaemonStatus {
             version: crate::VERSION.to_string(),
@@ -144,6 +147,17 @@ pub(crate) async fn handle(shared: &Shared, client: &str, cmd: Command) -> Outco
             notifications::mark_seen(shared, &ids).await;
             Outcome::Ok(Reply::Ack)
         }
+        Command::AgentSend { pr, text } => sessions::send(shared, &pr, &text).await,
+        Command::AgentCancel { pr } => {
+            shared.sessions.cancel(shared, &pr);
+            Outcome::Ok(Reply::Ack)
+        }
+        Command::GetAgentLog { pr } => sessions::log(shared, &pr).await,
+        Command::HarnessProbe => sessions::probe(shared).await,
+        Command::AcceptSuggestion { pr, id, body } => {
+            agent::accept(shared, client, &pr, &id, body).await
+        }
+        Command::DismissSuggestion { pr, id } => agent::dismiss(shared, &pr, &id).await,
     }
 }
 

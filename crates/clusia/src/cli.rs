@@ -54,6 +54,17 @@ pub enum Command {
     Review(ReviewCommand),
     /// Your review activity: heatmap and stats.
     Activity,
+    /// Ask the review's agent a question and stream its answer.
+    Ask {
+        /// `owner/repo#number` or a pull request URL.
+        pr: String,
+        /// The question; several words need no quotes.
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+    },
+    /// The review's agent: show its chat log or stop its turn.
+    #[command(subcommand)]
+    Agent(AgentCommand),
     /// Put Clúsia.app, the login agent and the `clusia` command in place.
     Install(InstallArgs),
     /// Remove Clúsia.app, the login agent and the `clusia` link; your data stays.
@@ -68,6 +79,14 @@ pub enum DaemonCommand {
     Stop,
     /// Show whether clusiad is running.
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentCommand {
+    /// Print the chat log of a review's agent.
+    Log { pr: String },
+    /// Stop the turn the review's agent is running.
+    Stop { pr: String },
 }
 
 #[derive(Debug, Subcommand)]

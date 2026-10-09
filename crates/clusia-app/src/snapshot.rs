@@ -134,7 +134,15 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         Event::LoadStep(_)
         | Event::Stopping
         | Event::Notify { .. }
-        | Event::InboxChanged { .. } => {}
+        | Event::InboxChanged { .. }
+        // The chat keeps its own state; nothing in the snapshot depends on it.
+        | Event::AgentChunk { .. }
+        | Event::AgentToolUse { .. }
+        | Event::AgentDenied { .. }
+        | Event::AgentSuggestion { .. }
+        | Event::AgentDone { .. }
+        | Event::AgentError { .. }
+        | Event::SessionState { .. } => {}
     }
     (r, None)
 }

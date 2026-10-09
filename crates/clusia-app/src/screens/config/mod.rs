@@ -7,6 +7,7 @@ pub mod appearance;
 pub mod editor;
 pub mod general;
 pub mod git;
+pub mod harness;
 pub mod media;
 pub mod notifications;
 mod placeholders;
@@ -25,7 +26,7 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::Paths;
 
 use crate::app::AppPaths;
-use crate::bridge::{Ask, Asks, Model, TOAST_SECS, Toast, Toasts, set_config};
+use crate::bridge::{Ask, Asks, Model, ProbeState, TOAST_SECS, Toast, Toasts, set_config};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::nav::{ConfigScreen, Nav, NavSystems, Screen, Section};
@@ -47,7 +48,7 @@ pub enum PageView {
     Media(media::MediaView),
     About(about::AboutView),
     Notifications(notifications::NotificationsView),
-    Harness,
+    Harness(harness::HarnessView),
     Plugins,
 }
 
@@ -56,6 +57,7 @@ pub fn page_view(
     snap: &Snapshot,
     rejected: &HashMap<String, String>,
     paths: &Paths,
+    probe: &ProbeState,
 ) -> PageView {
     match section {
         Section::General => PageView::General(general::view(snap, rejected)),
@@ -66,7 +68,7 @@ pub fn page_view(
         Section::Media => PageView::Media(media::view(snap, rejected)),
         Section::About => PageView::About(about::view(snap)),
         Section::Notifications => PageView::Notifications(notifications::view(snap, rejected)),
-        Section::Harness => PageView::Harness,
+        Section::Harness => PageView::Harness(harness::view(snap, rejected, probe)),
         Section::Plugins => PageView::Plugins,
     }
 }
@@ -317,7 +319,13 @@ fn rebuild_config(
         });
         part.built = Some(section);
     }
-    let view = page_view(section, &model.snapshot, &model.rejected, &paths.0);
+    let view = page_view(
+        section,
+        &model.snapshot,
+        &model.rejected,
+        &paths.0,
+        &model.probe,
+    );
     // Half-typed input survives: a rebuild of the same page waits until the focused field is
     // committed (or reverted) so the field entity is not despawned under the cursor.
     let typing = focus
@@ -360,7 +368,7 @@ fn rebuild_config(
                 PageView::Media(v) => media::build(c, fonts, v),
                 PageView::About(v) => about::build(c, fonts, v),
                 PageView::Notifications(v) => notifications::build(c, fonts, v),
-                PageView::Harness => placeholders::harness(c, fonts),
+                PageView::Harness(v) => harness::build(c, fonts, v),
                 PageView::Plugins => placeholders::plugins(c, fonts),
             });
         });
@@ -548,6 +556,19 @@ mod tests {
         app.world_mut().resource_mut::<Nav>().open_section(section);
         testing::settle(&mut app);
         app
+    }
+
+    #[test]
+    fn harness_cards_lead_with_a_radio_mark() {
+        let mut app = config_app(Section::Harness);
+        let marks: Vec<bool> = app
+            .world_mut()
+            .query::<&harness::RadioMark>()
+            .iter(app.world())
+            .map(|m| m.selected)
+            .collect();
+        assert_eq!(marks.iter().filter(|s| **s).count(), 1);
+        assert_eq!(marks.len(), 3);
     }
 
     fn field_value(app: &mut App, key: &str) -> String {
@@ -913,15 +934,25 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_row_is_shown_but_cannot_be_changed() {
+    fn agent_finished_can_be_changed_and_the_permission_row_cannot() {
         let mut app = notifications_app();
         assert_eq!(
             testing::count::<SetValue>(&mut app),
-            7 * 3 + 4 + 1 + 1 + 1 + 7,
-            "21 event boxes, 4 sounds, quiet hours on/off, follow focus, group bursts, 7 weekdays"
+            8 * 3 + 4 + 1 + 1 + 1 + 7,
+            "24 event boxes, 4 sounds, quiet hours on/off, follow focus, group bursts, 7 weekdays"
         );
         let mut q = app.world_mut().query::<&SetValue>();
-        assert!(q.iter(app.world()).all(|s| !s.key.contains("agent")));
+        let agent: Vec<String> = q
+            .iter(app.world())
+            .filter(|s| s.key.contains("agent"))
+            .map(|s| s.key.to_string())
+            .collect();
+        assert_eq!(agent.len(), 3, "{agent:?}");
+        assert!(
+            agent
+                .iter()
+                .all(|k| k.starts_with("notifications.events.agent_finished."))
+        );
         let texts = page_texts(&mut app);
         assert!(texts.contains(&"Agent finished a review".to_string()));
         assert!(texts.contains(&"Agent needs your permission".to_string()));
@@ -1249,10 +1280,151 @@ mod tests {
             .resource_mut::<Nav>()
             .open_section(Section::Harness);
         testing::settle(&mut app);
+        testing::find::<ConfigField>(&mut app, |f| f.0 == "harness.program");
+    }
+
+    #[test]
+    fn the_harness_page_matches_the_mockup() {
+        let mut app = config_app(Section::Harness);
+        let texts = page_texts(&mut app);
+        for needle in [
+            "Harness",
+            "The AI tool you already use. Clúsia starts one session per review and keeps its memory separate from your other work.",
+            "Claude Code",
+            "claude, with your settings",
+            "Codex",
+            "Custom command",
+            "Program",
+            "Extra arguments",
+            "When I open a review",
+            "Turn timeout",
+            "Not tested yet",
+            "What the agent may do without asking",
+            "Read and search the review worktree",
+            "Also allow what my Claude Code settings already allow",
+        ] {
+            assert!(texts.iter().any(|t| t == needle), "{needle}\n{texts:?}");
+        }
         assert_eq!(
-            testing::count::<ConfigField>(&mut app),
-            0,
-            "Harness has no live settings yet"
+            texts
+                .iter()
+                .filter(|t| *t == "Arrives in a later milestone")
+                .count(),
+            2,
+            "Codex and Custom command"
         );
+        for key in [
+            "harness.program",
+            "harness.extra_args",
+            "harness.turn_timeout_secs",
+        ] {
+            testing::find::<ConfigField>(&mut app, |f| f.0 == key);
+        }
+        assert_eq!(field_value(&mut app, "harness.turn_timeout_secs"), "600");
+    }
+
+    #[test]
+    fn harness_settings_are_written_through_their_keys() {
+        let mut app = config_app(Section::Harness);
+        let args = testing::find::<ConfigField>(&mut app, |f| f.0 == "harness.extra_args");
+        app.world_mut().write_message(FieldCommitted {
+            entity: args,
+            value: " --model claude-opus-5-5 ".into(),
+        });
+        app.update();
+        let wait = testing::find::<SetValue>(&mut app, |s| {
+            s.key == "harness.on_open" && s.value == "wait"
+        });
+        testing::activate(&mut app, wait);
+        let perms = testing::find::<SetValue>(&mut app, |s| s.key == "harness.use_cli_permissions");
+        testing::activate(&mut app, perms);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [
+                Ask::SetConfig {
+                    key: "harness.extra_args".into(),
+                    value: "--model claude-opus-5-5".into()
+                },
+                Ask::SetConfig {
+                    key: "harness.on_open".into(),
+                    value: "wait".into()
+                },
+                Ask::SetConfig {
+                    key: "harness.use_cli_permissions".into(),
+                    value: "false".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refused_harness_key_shows_under_its_row() {
+        let mut app = config_app(Section::Harness);
+        app.world_mut().resource_mut::<Model>().rejected.insert(
+            "harness.turn_timeout_secs".into(),
+            "harness.turn_timeout_secs must be between 60 and 3600, got 5".into(),
+        );
+        testing::settle(&mut app);
+        testing::find::<FieldError>(&mut app, |e| e.0 == "harness.turn_timeout_secs");
+    }
+
+    #[test]
+    fn the_probe_card_runs_the_test_and_shows_the_answer() {
+        let mut app = config_app(Section::Harness);
+        assert!(app.world().resource::<Model>().probe == crate::bridge::ProbeState::Idle);
+        let test = testing::find::<harness::TestHarness>(&mut app, |_| true);
+        testing::activate(&mut app, test);
+        assert_eq!(testing::recorded(&mut app), [Ask::Probe]);
+        testing::settle(&mut app);
+        assert!(page_texts(&mut app).contains(&"Testing Claude Code…".to_string()));
+        assert_eq!(
+            testing::count::<harness::TestHarness>(&mut app),
+            0,
+            "no second test while one runs"
+        );
+
+        testing::tell(
+            &mut app,
+            Tell::Probe(clusia_protocol::ProbeResult {
+                ok: true,
+                version: Some("2.1.294".into()),
+                program: "/opt/homebrew/bin/claude".into(),
+                elapsed_ms: 1800,
+                error: None,
+            }),
+        );
+        testing::settle(&mut app);
+        let texts = page_texts(&mut app);
+        assert!(
+            texts.contains(&"Claude Code 2.1.294 answered in 1.8 s".to_string()),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .filter(|t| *t == "Found at /opt/homebrew/bin/claude")
+                .count()
+                == 2,
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"Test again".to_string()));
+
+        testing::tell(
+            &mut app,
+            Tell::Probe(clusia_protocol::ProbeResult {
+                ok: false,
+                version: None,
+                program: String::new(),
+                elapsed_ms: 0,
+                error: Some("Install Claude Code or set its path".into()),
+            }),
+        );
+        testing::settle(&mut app);
+        let texts = page_texts(&mut app);
+        assert!(texts.contains(&"Claude Code did not answer".to_string()));
+        assert!(texts.contains(&"Install Claude Code or set its path".to_string()));
+        let again = testing::find::<harness::TestHarness>(&mut app, |_| true);
+        testing::activate(&mut app, again);
+        assert_eq!(testing::recorded(&mut app), [Ask::Probe]);
     }
 }

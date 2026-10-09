@@ -1,6 +1,6 @@
 //! The review shell (mockup `Review.png`): the pull request header, the section tabs, the
 //! center `SectionBody` (Diff and Comments fill it; the four sections that arrive later show a
-//! placeholder), the right panel (agent empty state and the draft) and the status bar.
+//! placeholder), the right column (its **Agent** and **Draft** tabs) and the status bar.
 //!
 //! The shell is read-only while the connection is lost or when it shows the cached copy.
 
@@ -10,7 +10,7 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::{DraftItem, DraftKind, ItemStatus, PrRef};
-use clusia_protocol::ReviewView;
+use clusia_protocol::{ReviewView, SessionStateKind};
 
 use crate::bridge::{Ask, Asks, Connection, Model, Toasts};
 use crate::clock::Clock;
@@ -22,6 +22,10 @@ use crate::review_state::{
 };
 use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
+use crate::screens::review::agent::{
+    AgentRegion, Chats, DEFAULT_WIDTH, PanelColumn, PanelTabs, PanelToggle, on_panel_toggle,
+    resize_edge,
+};
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason, sync_editor_text};
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
@@ -81,9 +85,23 @@ pub struct DraftCard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusView {
     pub agent: String,
+    /// The agent's dot is lit.
+    pub agent_live: bool,
     /// `Draft saved · 3 items`
     pub draft: String,
+    /// The right column is shown (the button says **Hide panel**, else **Show panel**).
+    pub panel_open: bool,
     pub finalize: bool,
+}
+
+/// The status bar's agent text, and whether its dot is lit.
+pub fn agent_status(state: SessionStateKind) -> (String, bool) {
+    match state {
+        SessionStateKind::None => ("Claude Code · no session yet".into(), false),
+        SessionStateKind::Ready => ("Claude Code · ready".into(), true),
+        SessionStateKind::Running => ("Claude Code · thinking…".into(), true),
+        SessionStateKind::Queued => ("Claude Code · waiting for its turn".into(), true),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,8 +200,8 @@ struct ShellTop {
 }
 
 #[derive(Component)]
-struct RightPanel {
-    pr: PrRef,
+pub(crate) struct RightPanel {
+    pub(crate) pr: PrRef,
     built: Option<RightView>,
 }
 
@@ -423,12 +441,14 @@ pub fn shell_view(
         sections,
         draft: items.iter().map(draft_card).collect(),
         status: StatusView {
-            agent: "Agent not connected".into(),
+            agent: agent_status(SessionStateKind::None).0,
+            agent_live: false,
             draft: if items.is_empty() {
                 "Draft empty".into()
             } else {
                 format!("Draft saved · {}", plural(items.len(), "item"))
             },
+            panel_open: true,
             finalize: read_only.is_none(),
         },
         read_only,
@@ -549,7 +569,7 @@ fn shell_frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
             ));
             body.spawn((
                 Node {
-                    width: px(300),
+                    width: px(DEFAULT_WIDTH),
                     flex_shrink: 0.0,
                     flex_direction: FlexDirection::Column,
                     min_height: px(0),
@@ -559,11 +579,47 @@ fn shell_frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
                 },
                 BorderColor::default(),
                 Stroke(Swatch::Line),
-                RightPanel {
-                    pr: pr.clone(),
-                    built: None,
-                },
-            ));
+                PanelColumn::new(pr.clone()),
+            ))
+            .with_children(|column| {
+                column.spawn((
+                    Node {
+                        flex_shrink: 0.0,
+                        padding: UiRect::horizontal(px(12)),
+                        column_gap: px(4),
+                        border: UiRect::bottom(px(1)),
+                        ..default()
+                    },
+                    BorderColor::default(),
+                    Stroke(Swatch::Line),
+                    PanelTabs::new(pr.clone()),
+                ));
+                column.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        flex_direction: FlexDirection::Column,
+                        min_height: px(0),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    RightPanel {
+                        pr: pr.clone(),
+                        built: None,
+                    },
+                ));
+                column.spawn((
+                    Node {
+                        display: Display::None,
+                        flex_grow: 1.0,
+                        flex_direction: FlexDirection::Column,
+                        min_height: px(0),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    AgentRegion::new(pr.clone()),
+                ));
+                resize_edge(column, pr);
+            });
         });
         c.spawn((
             panel(
@@ -920,37 +976,6 @@ fn right_region(
 ) {
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
-        flex_shrink: 0.0,
-        row_gap: px(10),
-        padding: px(16).all(),
-        border: UiRect::bottom(px(1)),
-        ..default()
-    })
-    .insert((BorderColor::default(), Stroke(Swatch::Line)))
-    .with_children(|agent| {
-        agent
-            .spawn(Node {
-                column_gap: px(8),
-                align_items: AlignItems::Center,
-                ..default()
-            })
-            .with_children(|h| {
-                h.spawn(text(fonts, "Agent", Type::STRONG));
-                h.spawn(badge(fonts, "not set up", Tone::Neutral));
-            });
-        agent.spawn(text(
-            fonts,
-            "Connect Claude Code, Codex or your own command to talk through this pull request. Your draft works without it.",
-            Type::MUTED,
-        ));
-        agent.spawn((
-            button(fonts, "Set up a harness", Variant::Secondary),
-            HarnessButton,
-            observe(on_harness),
-        ));
-    });
-    p.spawn(Node {
-        flex_direction: FlexDirection::Column,
         flex_grow: 1.0,
         min_height: px(0),
         row_gap: px(8),
@@ -1119,17 +1144,23 @@ fn rebuild_status(
     model: Res<Model>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
+    chats: Res<Chats>,
     mut bars: Query<(Entity, &mut StatusBar)>,
 ) {
     for (entity, mut bar) in &mut bars {
         let Some((v, _)) = current_view(&tabs, &model, &bar.pr, clock.now()) else {
             continue;
         };
-        if bar.built.as_ref() == Some(&v.status) {
+        let (agent, agent_live) = agent_status(chats.state(&bar.pr));
+        let mut status = v.status.clone();
+        status.agent = agent;
+        status.agent_live = agent_live;
+        status.panel_open = chats.0.get(&bar.pr).is_none_or(|c| c.open);
+        if bar.built.as_ref() == Some(&status) {
             continue;
         }
         let pr = bar.pr.clone();
-        let status = v.status.clone();
+        let built = status.clone();
         refill(&mut commands, entity, |p| {
             p.spawn(Node {
                 column_gap: px(8),
@@ -1144,7 +1175,11 @@ fn rebuild_status(
                         border_radius: BorderRadius::MAX,
                         ..default()
                     },
-                    Swatch::Faint,
+                    if status.agent_live {
+                        Swatch::Green
+                    } else {
+                        Swatch::Faint
+                    },
                 ));
                 a.spawn(text(&fonts, status.agent.clone(), Type::MUTED));
             });
@@ -1153,6 +1188,31 @@ fn rebuild_status(
                 flex_grow: 1.0,
                 ..default()
             });
+            p.spawn((
+                Node {
+                    padding: UiRect::horizontal(px(8)),
+                    align_items: AlignItems::Center,
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                (WidgetButton, Clickable),
+                Hovered::default(),
+                TabIndex(0),
+                PanelToggle(pr.clone()),
+                observe(on_panel_toggle),
+                children![(
+                    text(
+                        &fonts,
+                        if status.panel_open {
+                            "Hide panel"
+                        } else {
+                            "Show panel"
+                        },
+                        Type::MUTED,
+                    ),
+                    TextLayout::no_wrap(),
+                )],
+            ));
             if status.finalize {
                 p.spawn((
                     button(&fonts, "Finalize review", Variant::Primary),
@@ -1163,7 +1223,7 @@ fn rebuild_status(
                 p.spawn(disabled_button(&fonts, "Finalize review"));
             }
         });
-        bar.built = Some(v.status);
+        bar.built = Some(built);
     }
 }
 
@@ -1238,7 +1298,7 @@ pub fn on_try_again(
     }
 }
 
-fn on_harness(_activate: On<Activate>, mut nav: ResMut<Nav>) {
+pub(crate) fn on_harness(_activate: On<Activate>, mut nav: ResMut<Nav>) {
     nav.open_section(Section::Harness);
 }
 
@@ -1409,8 +1469,10 @@ mod tests {
         assert_eq!(
             v.status,
             StatusView {
-                agent: "Agent not connected".into(),
+                agent: "Claude Code · no session yet".into(),
+                agent_live: false,
                 draft: "Draft saved · 3 items".into(),
+                panel_open: true,
                 finalize: true,
             }
         );
@@ -1630,6 +1692,11 @@ mod tests {
             app.world().resource::<OpenUrls>().0,
             ["https://github.com/rzorzal/clusia/pull/123"]
         );
+        app.world_mut()
+            .resource_mut::<crate::screens::review::agent::Chats>()
+            .entry(&fixture::demo_pr())
+            .show(crate::screens::review::agent::PanelTab::Agent);
+        testing::settle(&mut app);
         let harness = testing::find::<HarnessButton>(&mut app, |_| true);
         testing::activate(&mut app, harness);
         assert_eq!(

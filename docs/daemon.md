@@ -22,7 +22,7 @@ the variable is set.
 
 `gh` and the agent tools (`claude`, `codex`) are looked up in order: the folders of `PATH`,
 `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`. A bare `PATH` therefore
-does not hide a Homebrew install.
+does not hide a Homebrew install. The agent's turns start the program of `harness.program` (default: `claude` on the `PATH`) with the daemon's environment minus `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and every `CLUSIA_*` variable.
 
 | Variable | Meaning |
 |---|---|
@@ -32,6 +32,7 @@ does not hide a Homebrew install.
 | `CLUSIA_GH_BIN` | the `gh` program, overriding the lookup |
 | `CLUSIA_SECRET_STORE=memory` | keep secrets in memory instead of the Keychain (tests) |
 | `CLUSIA_TRAY_BIN` | the tray program; `none` disables it |
+| `CLUSIA_CLAUDE_BIN` | the `claude` program the review agent runs when Config › Harness names none |
 | `CLUSIA_DAEMON_BIN` | the daemon program the clients start |
 | `CLUSIA_GIPHY_API` | Giphy API base URL |
 
@@ -45,6 +46,9 @@ does not hide a Homebrew install.
 | `~/Library/Logs/Clusia/tray.log` | the tray's output |
 | `~/Library/Logs/Clusia/app.log` | the window's log |
 | `~/Library/Logs/Clusia/daemon.start.log` | what each start printed before the log opened; appended to, emptied once past 256 KiB |
+| `<data>/agent/<owner>~<repo>~<n>.jsonl` | the agent's chat log of a review (every event; 0600; at most 2 MB, then the oldest half is dropped) |
+| `<data>/agent/<owner>~<repo>~<n>.state.json` | the suggestions you accepted or dismissed and the head the last summary saw |
+| `<worktree>/.clusia/review.md` | what the agent reads first: the pull request, the draft, the summary (excluded from git through the worktree's `info/exclude`). Never written through a symlink: when the pull request makes `.clusia` anything but a folder, the notes are not written |
 | `~/Library/Logs/Clusia/daemon.launchd.log` | what a daemon launchd started printed (the login agent's output); not rotated |
 
 Each log starts a new file every day: yesterday's becomes `daemon.YYYY-MM-DD.log`, and the

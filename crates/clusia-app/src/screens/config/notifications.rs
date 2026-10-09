@@ -56,7 +56,7 @@ impl Column {
 }
 
 /// The config keys of the events you can change, one per column.
-const KEYS: [(EventKind, [&str; 3]); 7] = [
+const KEYS: [(EventKind, [&str; 3]); 8] = [
     (
         EventKind::ReviewRequested,
         [
@@ -87,6 +87,14 @@ const KEYS: [(EventKind, [&str; 3]); 7] = [
             "notifications.events.mentioned.tray",
             "notifications.events.mentioned.macos",
             "notifications.events.mentioned.sound",
+        ],
+    ),
+    (
+        EventKind::AgentFinished,
+        [
+            "notifications.events.agent_finished.tray",
+            "notifications.events.agent_finished.macos",
+            "notifications.events.agent_finished.sound",
         ],
     ),
     (
@@ -198,7 +206,7 @@ pub fn view(snap: &Snapshot, rejected: &HashMap<String, String>) -> Notification
         (
             EventKind::AgentFinished,
             "Agent finished a review",
-            "Harness pre-review is ready to read · arrives with the agent".into(),
+            "Harness pre-review is ready to read".into(),
         ),
         (
             EventKind::AgentPermission,
@@ -642,8 +650,8 @@ mod tests {
             ]
         );
         assert!(
-            !v.rows[4].live && !v.rows[5].live,
-            "the agent's rows wait for the agent"
+            v.rows[4].live && !v.rows[5].live,
+            "Agent finished is live; the permission row waits for the permission bridge"
         );
         assert_eq!(v.rows[3].hint, "@you in a PR or comment");
         assert_eq!(v.dnd_from, "19:00");

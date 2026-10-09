@@ -39,6 +39,18 @@ pub struct EditorSubmit(pub PrRef);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct EditorCancel(pub PrRef);
 
+/// **Ask the agent about this line** in a line comment's editor.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct AskAgentButton(pub PrRef);
+
+/// What the chat input starts with when the user asks about a line (or a range).
+pub fn ask_prompt(path: &str, start: Option<u32>, line: u32) -> String {
+    match start.filter(|s| *s < line) {
+        Some(start) => format!("About `{path}:{start}-{line}`: "),
+        None => format!("About `{path}:{line}`: "),
+    }
+}
+
 /// What the text area was drawn for. Its text is copied back only into an editor with the same
 /// target, so opening another editor (an item's body, say) is not overwritten by the old area.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -100,6 +112,13 @@ pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor
                     flex_grow: 1.0,
                     ..default()
                 });
+                if matches!(editor.target, EditTarget::Line { .. }) {
+                    row.spawn((
+                        button(fonts, "Ask the agent about this line", Variant::Ghost),
+                        AskAgentButton(pr.clone()),
+                        observe(on_ask_agent),
+                    ));
+                }
                 row.spawn((
                     button(fonts, "Cancel", Variant::Ghost),
                     EditorCancel(pr.clone()),
@@ -107,6 +126,7 @@ pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor
                 ));
                 let label = match editor.target {
                     EditTarget::Item(_) => "Save",
+                    EditTarget::Suggestion { .. } => "Accept into draft",
                     _ => "Add to draft",
                 };
                 if editor.ticket.is_some() {
@@ -196,6 +216,16 @@ pub fn submit_editor(
             body,
             ticket,
         },
+        EditTarget::Suggestion { id, .. } => {
+            // The daemon answers an accept with `Handled`, not with this ticket: the editor
+            // stays (with its text) until then, and its button is not left on "Saving…".
+            editor.ticket = None;
+            Ask::AcceptSuggestion {
+                pr,
+                id: id.clone(),
+                body: Some(body),
+            }
+        }
     };
     asks.send(ask);
     true
@@ -308,6 +338,37 @@ fn on_cancel(activate: On<Activate>, buttons: Query<&EditorCancel>, mut tabs: Re
     if let Ok(EditorCancel(pr)) = buttons.get(activate.entity)
         && let Some(tab) = tabs.0.get_mut(pr)
     {
+        tab.ui.editor = None;
+    }
+}
+
+/// Puts a question about the editor's line in the chat input, on the Agent tab. Nothing is
+/// sent; an editor with nothing typed in it closes.
+fn on_ask_agent(
+    activate: On<Activate>,
+    buttons: Query<&AskAgentButton>,
+    mut tabs: ResMut<ReviewTabs>,
+    mut chats: ResMut<crate::screens::review::agent::Chats>,
+) {
+    let Ok(AskAgentButton(pr)) = buttons.get(activate.entity) else {
+        return;
+    };
+    let Some(tab) = tabs.0.get_mut(pr) else {
+        return;
+    };
+    let Some(editor) = tab.ui.editor.as_ref() else {
+        return;
+    };
+    let EditTarget::Line {
+        path, start, line, ..
+    } = &editor.target
+    else {
+        return;
+    };
+    let prompt = ask_prompt(path, *start, *line);
+    let empty = editor.text.trim().is_empty();
+    chats.entry(pr).ask_about(prompt);
+    if empty {
         tab.ui.editor = None;
     }
 }
@@ -732,5 +793,118 @@ mod tests {
         testing::activate(&mut app, cancel);
         assert_eq!(text(&app), None);
         assert!(testing::recorded(&mut app).is_empty());
+    }
+
+    #[test]
+    fn the_ask_prompt_names_the_place() {
+        assert_eq!(
+            ask_prompt("src/auth/refresh.rs", None, 44),
+            "About `src/auth/refresh.rs:44`: "
+        );
+        assert_eq!(
+            ask_prompt("src/auth/refresh.rs", Some(40), 44),
+            "About `src/auth/refresh.rs:40-44`: "
+        );
+        assert_eq!(
+            ask_prompt("src/a.rs", Some(7), 7),
+            "About `src/a.rs:7`: ",
+            "a one-line range is one line"
+        );
+    }
+
+    #[test]
+    fn asking_about_a_line_prefills_the_chat_and_keeps_typed_comments() {
+        use crate::screens::review::agent::{ChatInput, Chats};
+        use bevy::text::EditableText;
+        let mut app = testing::app(crate::fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        let line = |text: &str| Editor {
+            target: EditTarget::Line {
+                path: "src/auth/refresh.rs".into(),
+                side: Side::Right,
+                start: None,
+                line: 44,
+            },
+            text: text.into(),
+            error: None,
+            ticket: None,
+            mode: crate::ui::composer::ComposerMode::Write,
+        };
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .editor = Some(line(""));
+        testing::settle(&mut app);
+        let ask = testing::find::<AskAgentButton>(&mut app, |b| b.0 == pr);
+        testing::activate(&mut app, ask);
+        testing::settle(&mut app);
+        let input = testing::find::<ChatInput>(&mut app, |i| i.0 == pr);
+        assert_eq!(
+            app.world()
+                .get::<EditableText>(input)
+                .unwrap()
+                .value()
+                .to_string(),
+            "About `src/auth/refresh.rs:44`: "
+        );
+        assert_eq!(
+            app.world().resource::<Chats>().0[&pr].tab,
+            crate::screens::review::agent::PanelTab::Agent,
+            "the Agent tab is selected"
+        );
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_none(),
+            "an empty editor closes"
+        );
+        assert!(testing::recorded(&mut app).is_empty(), "nothing is sent");
+
+        // With a comment typed, the editor stays; a question already typed is kept.
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .editor = Some(line("rename this"));
+        testing::settle(&mut app);
+        let ask = testing::find::<AskAgentButton>(&mut app, |b| b.0 == pr);
+        testing::activate(&mut app, ask);
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ui.editor.is_some());
+        assert_eq!(
+            app.world()
+                .get::<EditableText>(input)
+                .unwrap()
+                .value()
+                .to_string(),
+            "About `src/auth/refresh.rs:44`: \nAbout `src/auth/refresh.rs:44`: "
+        );
+    }
+
+    #[test]
+    fn only_line_comments_offer_to_ask_the_agent() {
+        let mut app = testing::app(crate::fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        let editor = |target| Editor {
+            target,
+            text: String::new(),
+            error: None,
+            ticket: None,
+            mode: crate::ui::composer::ComposerMode::Write,
+        };
+        for target in [EditTarget::General, EditTarget::Item("i1".into())] {
+            app.world_mut()
+                .resource_mut::<ReviewTabs>()
+                .0
+                .get_mut(&pr)
+                .unwrap()
+                .ui
+                .editor = Some(editor(target));
+            testing::settle(&mut app);
+            assert_eq!(testing::count::<AskAgentButton>(&mut app), 0);
+        }
     }
 }

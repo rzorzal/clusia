@@ -42,6 +42,8 @@ fn demo_screenshots() {
         "config-general",
         "config-notifications",
         "config-notifications-bottom",
+        "agent-chat",
+        "config-harness",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((
@@ -61,6 +63,7 @@ fn demo_screenshots() {
             .arg("--screenshot")
             .arg(&out)
             .env("CLUSIA_TRAY_BIN", "none")
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
             .status()
             .unwrap();
         assert!(status.success(), "{name}: {status}");

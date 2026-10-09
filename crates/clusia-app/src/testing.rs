@@ -114,6 +114,12 @@ pub fn type_into(app: &mut App, entity: Entity, text: &str) {
         .get_mut::<EditableText>(entity)
         .expect("an editable text")
         .queue_edit(TextEdit::Insert(text.into()));
+    apply_edits(app, entity);
+}
+
+/// Applies the edits queued on the `EditableText` on `entity`, as the window's text plugin does
+/// each frame (the headless app has no such plugin).
+pub fn apply_edits(app: &mut App, entity: Entity) {
     // The app's own text contexts, when it has them, so moves that need a layout (to the start
     // of the text) work as in the window.
     let own_fonts = app.world_mut().remove_resource::<FontCx>();
@@ -274,4 +280,13 @@ pub fn tree_signature(app: &App, root: Entity) -> String {
     let mut out = String::new();
     walk(app.world(), root, &mut out);
     out
+}
+
+/// Shows `rzorzal/clusia#123` (its tab starts loading) without answering the open.
+pub fn app_show_review(app: &mut App) {
+    let pr = fixture::demo_pr();
+    app.world_mut()
+        .write_message(ShowRequested(WindowTarget::Review { pr }));
+    app.update();
+    recorded(app);
 }

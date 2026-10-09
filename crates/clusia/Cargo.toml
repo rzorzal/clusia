@@ -28,6 +28,7 @@ toml.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true
 tokio.workspace = true
+clusia-harness = { workspace = true, features = ["test-kit"] }
 
 [lints]
 workspace = true

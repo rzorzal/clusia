@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clusia_core::{
-    Activity, ActivityKind, Anchor, DraftKind, FileDiff, PrRef, Review, ReviewCache, ReviewEvent,
-    ReviewState, Role, Side, ThreadRef, can_comment,
+    Activity, ActivityKind, Anchor, DraftKind, FileDiff, Origin, PrRef, Review, ReviewCache,
+    ReviewEvent, ReviewState, Role, Side, ThreadRef, can_comment,
 };
 use clusia_git::{
     base_pin_ref, pin_commit, remove_worktree, repo_of_worktree, reviewed_ref, unpin,
@@ -78,6 +78,7 @@ pub(crate) fn announce(shared: &Shared, review: &Review) {
             items: review.draft.items.len(),
         },
     );
+    crate::agent::refresh_review_md(shared, review);
 }
 
 fn step(
@@ -102,7 +103,7 @@ pub(crate) fn invalid_state(message: impl Into<String>) -> Outcome {
     Outcome::Err(ProtocolError::new(ErrorCode::InvalidState, message))
 }
 
-pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
+pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outcome {
     let gh = match github_client(shared).await {
         Ok(Some(gh)) => gh,
         Ok(None) => return no_token(),
@@ -208,13 +209,6 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
         StepStatus::Done,
         Some(format!("{} files", files.len())),
     );
-    step(
-        shared,
-        pr,
-        LoadStepKind::Agent,
-        StepStatus::Skipped,
-        Some("arrives with the harness (SP2)".into()),
-    );
 
     let viewer = gh.viewer().await.ok().map(|v| v.login);
 
@@ -313,6 +307,9 @@ pub(crate) async fn open(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
     if let Err(e) = save_review_cache(&shared.paths, pr, &cache) {
         tracing::warn!(error = %e, pr = %pr, "cannot write the review cache");
     }
+    crate::agent::refresh_review_md(shared, &review);
+    let (status, note) = crate::agent::on_open(shared, pr, &review.head_sha).await;
+    step(shared, pr, LoadStepKind::Agent, status, Some(note));
     Outcome::Ok(Reply::Review(Box::new(view_of(review, cache))))
 }
 
@@ -501,6 +498,14 @@ pub(crate) async fn get(shared: &Shared, pr: &PrRef) -> Outcome {
     }
 }
 
+/// What a new draft item says; `add_item_as` adds it for whoever wrote it.
+pub(crate) struct NewItem<'a> {
+    pub kind: DraftKind,
+    pub anchor: Option<AnchorInput>,
+    pub thread: Option<ThreadRef>,
+    pub body: &'a str,
+}
+
 pub(crate) async fn add_item(
     shared: &Shared,
     client: &str,
@@ -510,7 +515,40 @@ pub(crate) async fn add_item(
     thread: Option<ThreadRef>,
     body: &str,
 ) -> Outcome {
+    let item = NewItem {
+        kind,
+        anchor,
+        thread,
+        body,
+    };
+    add_item_as(shared, client, pr, Origin::Human, item).await
+}
+
+pub(crate) async fn add_item_as(
+    shared: &Shared,
+    client: &str,
+    pr: &PrRef,
+    origin: Origin,
+    new: NewItem<'_>,
+) -> Outcome {
     let _guard = lock(shared, pr).await;
+    add_item_locked(shared, client, pr, origin, new).await
+}
+
+/// [`add_item_as`] for a caller that already holds the review lock.
+pub(crate) async fn add_item_locked(
+    shared: &Shared,
+    client: &str,
+    pr: &PrRef,
+    origin: Origin,
+    new: NewItem<'_>,
+) -> Outcome {
+    let NewItem {
+        kind,
+        anchor,
+        thread,
+        body,
+    } = new;
     let mut review = match load_existing(shared, pr) {
         Ok(r) => r,
         Err(out) => return out,
@@ -529,7 +567,7 @@ pub(crate) async fn add_item(
         None => None,
     };
     let now = now_unix();
-    let item = match review.draft.add(kind, anchor, thread, body, now) {
+    let item = match review.draft.add_as(origin, kind, anchor, thread, body, now) {
         Ok(item) => item.clone(),
         Err(e) => return bad_request(e.to_string()),
     };
@@ -592,7 +630,7 @@ pub(crate) async fn remove_item(shared: &Shared, pr: &PrRef, id: &str) -> Outcom
 }
 
 pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
-    let _guard = lock(shared, pr).await;
+    let guard = lock(shared, pr).await;
     let mut review = match load_stored(shared, pr) {
         Ok(Some(r)) => r,
         Ok(None) => return Outcome::Ok(Reply::Ack),
@@ -609,6 +647,12 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
             ));
         }
         drop_cache(shared, pr);
+        shared.sessions.cancel_ended(shared, pr);
+        crate::agent::forget(shared, pr);
+        // Out of the lock, the stopped turn can finish; then the session slot goes and the
+        // windows hear it ended.
+        drop(guard);
+        crate::agent::stop(shared, pr).await;
         return Outcome::Ok(Reply::Ack);
     }
     if let Err(e) = review.apply(ReviewEvent::Leave, now_unix()) {
@@ -638,6 +682,17 @@ pub(crate) async fn cleanup_checkout(shared: &Shared, pr: &PrRef) {
 }
 
 pub(crate) async fn discard(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
+    // A discard that will be refused must not end the agent. Checked without the lock, which a
+    // running turn may be waiting for, and again under it below.
+    match load_existing(shared, pr) {
+        Ok(review) => {
+            if let Err(e) = review.state.apply(ReviewEvent::Discard) {
+                return invalid_state(e.to_string());
+            }
+        }
+        Err(out) => return out,
+    }
+    crate::agent::stop(shared, pr).await;
     let _guard = lock(shared, pr).await;
     let mut review = match load_existing(shared, pr) {
         Ok(r) => r,
@@ -653,6 +708,7 @@ pub(crate) async fn discard(shared: &Shared, client: &str, pr: &PrRef) -> Outcom
         ));
     }
     drop_cache(shared, pr);
+    crate::agent::forget(shared, pr);
     cleanup_checkout(shared, pr).await;
     record(
         shared,

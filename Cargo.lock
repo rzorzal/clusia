@@ -1757,6 +1757,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clusia-core",
+ "clusia-harness",
  "clusia-protocol",
  "clusia-store",
  "libc",
@@ -1784,6 +1785,7 @@ dependencies = [
  "bevy",
  "clap",
  "clusia-core",
+ "clusia-harness",
  "clusia-highlight",
  "clusia-platform",
  "clusia-protocol",
@@ -1825,6 +1827,17 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "clusia-harness"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "clusia-protocol",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -1944,6 +1957,7 @@ dependencies = [
  "clusia-analytics",
  "clusia-core",
  "clusia-git",
+ "clusia-harness",
  "clusia-platform",
  "clusia-protocol",
  "clusia-provider",
@@ -1957,6 +1971,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wiremock",
 ]
 

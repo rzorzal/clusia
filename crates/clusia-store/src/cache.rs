@@ -72,6 +72,7 @@ mod tests {
                 clone_url: "https://github.com/acme/widgets.git".into(),
                 closed: false,
                 merged: false,
+                body: String::new(),
             },
             files: vec![FileDiff {
                 path: "src/a.rs".into(),

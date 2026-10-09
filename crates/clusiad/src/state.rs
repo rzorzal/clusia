@@ -12,10 +12,12 @@ use clusia_protocol::{Event, PermissionStatus, SyncStatus};
 use clusia_provider::GitHub;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
+use crate::holds::Holds;
 use crate::inbox::InboxData;
 use crate::news::Backoff;
 use crate::notifications::Engine;
 use crate::options::DaemonOptions;
+use crate::sessions::Sessions;
 use crate::spawner::Spawner;
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -58,6 +60,12 @@ pub(crate) struct Shared {
     pub media_http: reqwest::Client,
     pub giphy_api: String,
     pub harness_search_paths: Vec<PathBuf>,
+    /// The `claude` program of `DaemonOptions` (see `sessions::program_path`).
+    pub claude_program: Option<PathBuf>,
+    /// The running agent turns of every review.
+    pub sessions: Sessions,
+    /// Which reviews a connected client has open, so the daemon knows when no window shows one.
+    pub holds: Holds,
     /// Connections subscribed to the `window` topic (open windows).
     pub window_listeners: AtomicUsize,
     /// Connections subscribed to the `tray` topic (running trays).
@@ -133,6 +141,9 @@ impl Shared {
                 .giphy_api
                 .unwrap_or_else(|| "https://api.giphy.com".to_string()),
             harness_search_paths: options.harness_search_paths,
+            claude_program: options.claude_program,
+            sessions: Sessions::default(),
+            holds: Holds::default(),
             window_listeners: AtomicUsize::new(0),
             tray_listeners: AtomicUsize::new(0),
             prs: RwLock::new(PrLists::default()),

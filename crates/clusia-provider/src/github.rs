@@ -268,6 +268,8 @@ struct IssueItem {
 #[derive(Deserialize)]
 struct PullResponse {
     title: String,
+    #[serde(default)]
+    body: Option<String>,
     html_url: String,
     user: UserRef,
     #[serde(default)]
@@ -806,6 +808,7 @@ impl GitHub {
             clone_url,
             closed: p.state == "closed",
             merged: p.merged,
+            body: p.body.unwrap_or_default(),
         })
     }
 }
@@ -1041,7 +1044,7 @@ mod tests {
                 "number": 7, "title": "Fix cache", "html_url": "https://github.com/acme/widgets/pull/7",
                 "user": { "login": "maria" }, "draft": true, "updated_at": "2026-10-01T12:00:00Z",
                 "comments": 2, "review_comments": 5, "additions": 120, "deletions": 34, "changed_files": 7,
-                "state": "open", "merged": false,
+                "state": "open", "merged": false, "body": "Keeps the cache small.",
                 "base": { "ref": "main", "sha": "aaa", "repo": { "clone_url": "https://github.com/acme/widgets.git" } },
                 "head": { "ref": "fix-cache", "sha": "bbb", "repo": null }
             })))
@@ -1061,6 +1064,7 @@ mod tests {
         assert!(d.summary.draft);
         assert_eq!(d.clone_url, "https://github.com/acme/widgets.git");
         assert_eq!((d.closed, d.merged), (false, false));
+        assert_eq!(d.body, "Keeps the cache small.");
     }
 
     #[tokio::test]
@@ -1072,6 +1076,7 @@ mod tests {
                 "number": 7, "title": "Fix cache", "html_url": "https://github.com/acme/widgets/pull/7",
                 "user": { "login": "maria" }, "updated_at": "2026-10-01T12:00:00Z",
                 "additions": 1, "deletions": 0, "changed_files": 1, "state": "closed", "merged": true,
+                "body": null,
                 "base": { "ref": "main", "sha": "aaa", "repo": { "clone_url": "https://github.com/acme/widgets.git" } },
                 "head": { "ref": "fix-cache", "sha": "bbb", "repo": null }
             })))
@@ -1079,6 +1084,7 @@ mod tests {
             .await;
         let d = gh(&server).get_pr(&pr7()).await.unwrap();
         assert_eq!((d.closed, d.merged), (true, true));
+        assert_eq!(d.body, "", "GitHub sends null for no description");
     }
 
     #[tokio::test]

@@ -37,6 +37,7 @@ impl Home {
             .env("CLUSIA_GH_BIN", "/nonexistent/gh")
             .env("CLUSIA_SECRET_STORE", "memory")
             .env("CLUSIA_TRAY_BIN", "none")
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
             .env_remove("CLUSIA_GITHUB_TOKEN")
             .output()
             .unwrap()
@@ -200,6 +201,18 @@ impl Home {
         stdin: Option<&str>,
     ) -> Output {
         use std::io::Write;
+        let mut child = self.spawn_github(api, token, args);
+        {
+            let mut input = child.stdin.take().unwrap();
+            if let Some(s) = stdin {
+                input.write_all(s.as_bytes()).unwrap();
+            }
+        }
+        child.wait_with_output().unwrap()
+    }
+
+    /// Starts `clusia args` against `api` with piped stdio and returns it still running.
+    fn spawn_github(&self, api: &str, token: Option<&str>, args: &[&str]) -> std::process::Child {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clusia"));
         cmd.arg("--home")
             .arg(self.dir.path())
@@ -209,6 +222,7 @@ impl Home {
             .env("CLUSIA_GH_BIN", "/nonexistent/gh")
             .env("CLUSIA_SECRET_STORE", "memory")
             .env("CLUSIA_TRAY_BIN", "none")
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
             .env_remove("CLUSIA_GITHUB_TOKEN")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -216,14 +230,7 @@ impl Home {
         if let Some(t) = token {
             cmd.env("CLUSIA_GITHUB_TOKEN", t);
         }
-        let mut child = cmd.spawn().unwrap();
-        {
-            let mut input = child.stdin.take().unwrap();
-            if let Some(s) = stdin {
-                input.write_all(s.as_bytes()).unwrap();
-            }
-        }
-        child.wait_with_output().unwrap()
+        cmd.spawn().unwrap()
     }
 }
 
@@ -384,6 +391,7 @@ fn too_long_home_fails_before_running() {
             .args(args)
             .env("CLUSIA_DAEMON_BIN", clusiad_bin())
             .env("CLUSIA_TRAY_BIN", "none")
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
             .output()
             .unwrap();
         assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
@@ -393,6 +401,7 @@ fn too_long_home_fails_before_running() {
 
 mod review_flow {
     use super::*;
+    use clusia_harness::testkit::{FakeClaude, Script, Turn};
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
@@ -689,6 +698,204 @@ mod review_flow {
             Some(3),
             "no daemon was started"
         );
+    }
+
+    /// The fake `claude` answer: some text and one valid suggestion block.
+    const ANSWER: &str = "The rename is needed.\n\n```clusia-suggestion\n{\"file\":\"feature.txt\",\"line\":2,\"body\":\"Rename this variable.\"}\n```\n";
+
+    /// acme/widgets#7 on a mock GitHub and a local origin, a daemon that waits for the first
+    /// question (no summary turn), and a fake `claude` running `script`.
+    struct AgentWorld {
+        home: Home,
+        _server: MockServer,
+        _rt: tokio::runtime::Runtime,
+        tmp: tempfile::TempDir,
+        api: String,
+    }
+
+    impl AgentWorld {
+        fn new(script: Script) -> Self {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let (origin, base, head) = origin(tmp.path());
+            let clone_url = origin.to_str().unwrap().to_string();
+            let server = rt.block_on(async {
+                let s = MockServer::start().await;
+                mount(&s, &head, &base, &clone_url).await;
+                s
+            });
+            let roots = tmp.path().join("roots");
+            std::fs::create_dir_all(&roots).unwrap();
+            let fake = FakeClaude::install(&tmp.path().join("fake"), script);
+            let world = Self {
+                home: Home::new(),
+                api: server.uri(),
+                _server: server,
+                _rt: rt,
+                tmp,
+            };
+            for (key, value) in [
+                ("repositories.roots", format!("[\"{}\"]", roots.display())),
+                ("harness.on_open", "wait".to_string()),
+                ("harness.program", fake.display().to_string()),
+            ] {
+                let o = world.run(&["config", "set", key, &value]);
+                assert!(o.status.success(), "{key}: {}", stderr(&o));
+            }
+            world
+        }
+
+        fn run(&self, args: &[&str]) -> Output {
+            self.home.clusia_github(&self.api, Some("tok"), args, None)
+        }
+
+        /// Starts `clusia args` the way `run` does and leaves it running.
+        fn spawn(&self, args: &[&str]) -> std::process::Child {
+            self.home.spawn_github(&self.api, Some("tok"), args)
+        }
+
+        fn fake_dir(&self) -> PathBuf {
+            self.tmp.path().join("fake")
+        }
+
+        /// Every GitHub read now takes `secs` and then fails.
+        fn slow_github(&self, secs: u64) {
+            self._rt.block_on(
+                Mock::given(method("GET"))
+                    .respond_with(
+                        ResponseTemplate::new(500).set_delay(std::time::Duration::from_secs(secs)),
+                    )
+                    .with_priority(1)
+                    .mount(&self._server),
+            );
+        }
+    }
+
+    #[test]
+    fn ask_streams_the_answer_and_lists_the_suggestions() {
+        let w = AgentWorld::new(Script::one(Turn::answer(ANSWER)));
+        let o = w.run(&["ask", "acme/widgets#7", "Is", "the", "rename", "needed?"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = stdout(&o);
+        assert!(out.contains("The rename is needed."), "{out}");
+        assert!(out.contains("Suggested comments:"), "{out}");
+        assert!(
+            out.contains("feature.txt:2  Rename this variable."),
+            "{out}"
+        );
+
+        let calls = FakeClaude::calls(&w.fake_dir());
+        assert_eq!(calls.len(), 1, "one turn, one process");
+        assert!(calls[0].argv.iter().any(|a| a == "Is the rename needed?"));
+        assert!(calls[0].argv.iter().any(|a| a == "--session-id"));
+        assert!(
+            calls[0].cwd.to_string_lossy().contains("worktrees"),
+            "{:?}",
+            calls[0].cwd
+        );
+
+        let log = stdout(&w.run(&["agent", "log", "acme/widgets#7"]));
+        assert!(log.contains("you: Is the rename needed?"), "{log}");
+        assert!(log.contains("The rename is needed."), "{log}");
+        assert!(
+            log.contains("suggestion feature.txt:2  Rename this variable."),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn ask_json_prints_one_event_per_line() {
+        let w = AgentWorld::new(Script::one(Turn::answer(ANSWER)));
+        let o = w.run(&["--json", "ask", "acme/widgets#7", "Is it needed?"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let events: Vec<serde_json::Value> = stdout(&o)
+            .lines()
+            .map(|l| serde_json::from_str(l).expect(l))
+            .collect();
+        let has = |name: &str| events.iter().any(|e| e.get(name).is_some());
+        assert!(has("agent_chunk") && has("agent_suggestion"), "{events:?}");
+        assert!(
+            events.last().unwrap().get("agent_done").is_some(),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn stop_ends_a_turn_that_hangs() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        std::thread::scope(|s| {
+            let asking = s.spawn(|| w.run(&["ask", "acme/widgets#7", "wait for me"]));
+            let start = std::time::Instant::now();
+            while FakeClaude::calls(&w.fake_dir()).is_empty() {
+                assert!(
+                    start.elapsed().as_secs() < 30,
+                    "the fake claude never started"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let o = w.run(&["agent", "stop", "acme/widgets#7"]);
+            assert!(o.status.success(), "{}", stderr(&o));
+            assert_eq!(stdout(&o), "Asked the agent to stop");
+            let asked = asking.join().unwrap();
+            assert!(!asked.status.success());
+            assert!(
+                stderr(&asked).contains("Stopped by you"),
+                "{}",
+                stderr(&asked)
+            );
+        });
+    }
+
+    #[test]
+    fn ctrl_c_on_ask_only_detaches_and_says_how_to_stop() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        let asking = w.spawn(&["ask", "acme/widgets#7", "wait for me"]);
+        let start = std::time::Instant::now();
+        while FakeClaude::calls(&w.fake_dir()).is_empty() {
+            assert!(
+                start.elapsed().as_secs() < 30,
+                "the fake claude never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // SAFETY: signals a child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(asking.id() as i32, libc::SIGINT) }, 0);
+        let asked = asking.wait_with_output().unwrap();
+        let hint = stderr(&asked);
+        assert_eq!(
+            hint.matches("clusia agent stop acme/widgets#7").count(),
+            1,
+            "{hint}"
+        );
+        assert!(hint.contains("keeps working"), "{hint}");
+        assert_eq!(asked.status.code(), Some(130), "{hint}");
+        // The turn lives in the daemon: it is still running until it is stopped.
+        let o = w.run(&["agent", "stop", "acme/widgets#7"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+    }
+
+    #[test]
+    fn ctrl_c_while_the_review_opens_says_nothing_was_asked() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        w.slow_github(8);
+        let asking = w.spawn(&["ask", "acme/widgets#7", "wait for me"]);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        // SAFETY: signals a child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(asking.id() as i32, libc::SIGINT) }, 0);
+        let asked = asking.wait_with_output().unwrap();
+        let said = stderr(&asked);
+        assert_eq!(asked.status.code(), Some(130), "{said}");
+        assert!(said.contains("nothing was asked"), "{said}");
+        assert!(FakeClaude::calls(&w.fake_dir()).is_empty());
+    }
+
+    #[test]
+    fn an_empty_question_fails_before_the_daemon() {
+        let h = Home::new();
+        let o = h.clusia(&["ask", "acme/widgets#7", " "]);
+        assert_eq!(o.status.code(), Some(1));
+        assert!(stderr(&o).contains("question"), "{}", stderr(&o));
+        assert_eq!(h.clusia(&["daemon", "status"]).status.code(), Some(3));
     }
 }
 

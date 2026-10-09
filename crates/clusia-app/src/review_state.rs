@@ -103,6 +103,33 @@ pub enum EditTarget {
     General,
     /// An existing draft item, by id.
     Item(String),
+    /// A waiting suggestion of the agent, being edited before it joins the draft. It is drawn
+    /// in the diff under its line, like a line comment, on the head side.
+    Suggestion {
+        id: String,
+        path: String,
+        start: Option<u32>,
+        line: u32,
+    },
+}
+
+impl EditTarget {
+    /// Where the editor sits in a diff: the place of a line comment, or of the suggestion being
+    /// edited (always the head side). `None` for the other targets.
+    pub fn line_place(&self) -> Option<(&str, Side, Option<u32>, u32)> {
+        match self {
+            EditTarget::Line {
+                path,
+                side,
+                start,
+                line,
+            } => Some((path, *side, *start, *line)),
+            EditTarget::Suggestion {
+                path, start, line, ..
+            } => Some((path, Side::Right, *start, *line)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +310,7 @@ impl Plugin for ReviewStatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ReviewTabs>()
             .init_resource::<Tickets>()
+            .init_resource::<crate::screens::review::agent::Chats>()
             .add_message::<ReviewEvent>()
             .add_systems(Update, open_new_tabs.after(NavSystems));
     }
@@ -978,5 +1006,28 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn line_places_cover_line_comments_and_suggestion_edits() {
+        let line = EditTarget::Line {
+            path: "a.rs".into(),
+            side: Side::Left,
+            start: Some(3),
+            line: 5,
+        };
+        assert_eq!(line.line_place(), Some(("a.rs", Side::Left, Some(3), 5)));
+        let suggestion = EditTarget::Suggestion {
+            id: "sug-0123456789ab".into(),
+            path: "b.rs".into(),
+            start: None,
+            line: 9,
+        };
+        assert_eq!(
+            suggestion.line_place(),
+            Some(("b.rs", Side::Right, None, 9))
+        );
+        assert_eq!(EditTarget::General.line_place(), None);
+        assert_eq!(EditTarget::Item("i1".into()).line_place(), None);
     }
 }
