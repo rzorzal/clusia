@@ -22,8 +22,8 @@ use clusia_core::{
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, AnchorInput, Client, ClientError, Command, ErrorCode, Event,
     GifPage, LoadStep, LoadStepKind, MediaFile, NewsItem, PermissionAnswerKind, PermissionOutcome,
-    ProbeResult, PublishResult, Reply, ReviewView, Secret, SessionStateKind, StepStatus,
-    Suggestion, WindowTarget, topics,
+    ProbeResult, ProtocolError, PublishResult, Reply, ReviewView, Secret, SessionStateKind,
+    StepStatus, Suggestion, WindowTarget, topics,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -298,6 +298,10 @@ pub enum PermissionTell {
     Pending {
         pr: PrRef,
         requests: Vec<PermissionRequest>,
+    },
+    /// The daemon refused the answer for `id` (and it is still waiting): it may be given again.
+    AnswerRefused {
+        id: String,
     },
 }
 
@@ -1111,22 +1115,41 @@ async fn answer(
         Ask::Probe => spawn_worker(paths, teller, open, Ask::Probe),
         Ask::PermissionAnswer { id, answer } => {
             match client
-                .request(Command::PermissionAnswer { id, answer })
+                .request(Command::PermissionAnswer {
+                    id: id.clone(),
+                    answer,
+                })
                 .await
             {
                 Ok(_) => {}
-                // Another window or the deadline answered first: the modal closes on the
-                // `PermissionResolved` that is already on its way.
-                Err(ClientError::Server(e)) if e.code == ErrorCode::NotFound => {}
-                Err(ClientError::Server(e)) => teller.send(Tell::Notice {
-                    text: e.message,
-                    warning: true,
-                }),
+                Err(ClientError::Server(e)) => {
+                    for tell in refused_answer(&id, &e) {
+                        teller.send(tell);
+                    }
+                }
                 Err(e) => return Err(lost(e)),
             }
         }
         Ask::RevokeRule { pr, rule } => {
-            notify(client, teller, Command::RevokeRule { pr, rule }, "").await?;
+            match client
+                .request(Command::RevokeRule {
+                    pr: pr.clone(),
+                    rule,
+                })
+                .await
+            {
+                Ok(_) => {}
+                // The chip is gone from the footer but the rule may still apply: show what the
+                // daemon holds.
+                Err(ClientError::Server(e)) => {
+                    teller.send(Tell::Notice {
+                        text: e.message,
+                        warning: true,
+                    });
+                    send_rules(client, snap, open, teller, &pr).await?;
+                }
+                Err(e) => return Err(lost(e)),
+            }
         }
     }
     Ok(())
@@ -1190,6 +1213,25 @@ async fn fetch_log(
     for state in states {
         teller.send(Tell::Agent(state));
     }
+    send_rules(client, snap, open, teller, &pr).await?;
+    let waiting = request(client, Command::GetPermissions { pr: pr.clone() }).await?;
+    handle_buffered(client, snap, open, teller).await?;
+    // A window that was not listening (the notification started it, or it reconnected) learns
+    // what is still waiting here; this is also how its modal opens.
+    if let Some(Reply::Permissions(requests)) = waiting {
+        teller.send(Tell::Permission(PermissionTell::Pending { pr, requests }));
+    }
+    Ok(())
+}
+
+/// Tells the rules the daemon holds for `pr`, after the events that arrived before the reply.
+async fn send_rules(
+    client: &mut Client,
+    snap: &mut Snapshot,
+    open: &OpenSet,
+    teller: &Teller,
+    pr: &PrRef,
+) -> Result<(), String> {
     let rules = request(client, Command::GetRules { pr: pr.clone() }).await?;
     handle_buffered(client, snap, open, teller).await?;
     if let Some(Reply::Rules(rules)) = rules {
@@ -1197,13 +1239,6 @@ async fn fetch_log(
             pr: pr.clone(),
             rules,
         }));
-    }
-    let waiting = request(client, Command::GetPermissions { pr: pr.clone() }).await?;
-    handle_buffered(client, snap, open, teller).await?;
-    // A window that was not listening (the notification started it, or it reconnected) learns
-    // what is still waiting here; this is also how its modal opens.
-    if let Some(Reply::Permissions(requests)) = waiting {
-        teller.send(Tell::Permission(PermissionTell::Pending { pr, requests }));
     }
     Ok(())
 }
@@ -1462,6 +1497,22 @@ async fn publish(socket: &Path, pr: PrRef, verdict: Verdict, summary: String) ->
     }
 }
 
+/// What an answer the daemon refused tells the window.
+fn refused_answer(id: &str, e: &ProtocolError) -> Vec<Tell> {
+    if e.code == ErrorCode::NotFound {
+        // Another window or the deadline answered first: the modal closes on the
+        // `PermissionResolved` that is already on its way.
+        return Vec::new();
+    }
+    vec![
+        Tell::Permission(PermissionTell::AnswerRefused { id: id.into() }),
+        Tell::Notice {
+            text: e.message.clone(),
+            warning: true,
+        },
+    ]
+}
+
 /// Sends `cmd`. A refusal becomes a warning notice, and success shows `ok` (when not empty).
 async fn notify(
     client: &mut Client,
@@ -1689,7 +1740,12 @@ pub(crate) fn pump(
             Tell::Show(target) => {
                 show.write(ShowRequested(target));
             }
-            Tell::Lost(reason) => model.connection = Connection::Lost(reason),
+            Tell::Lost(reason) => {
+                model.connection = Connection::Lost(reason);
+                // The daemon denied what it held; a reconnect in this same batch must not
+                // meet requests that no longer exist.
+                permissions.0.clear();
+            }
             Tell::Quit => {
                 exit.write(AppExit::Success);
             }
@@ -2069,6 +2125,25 @@ fn demo_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_answer_can_be_tried_again_unless_the_request_is_gone() {
+        let gone = ProtocolError::new(ErrorCode::NotFound, "no such request");
+        assert!(refused_answer("perm-1", &gone).is_empty());
+        let busy = ProtocolError::new(ErrorCode::Busy, "try later");
+        assert_eq!(
+            refused_answer("perm-1", &busy),
+            [
+                Tell::Permission(PermissionTell::AnswerRefused {
+                    id: "perm-1".into()
+                }),
+                Tell::Notice {
+                    text: "try later".into(),
+                    warning: true
+                },
+            ]
+        );
+    }
 
     #[test]
     fn every_gif_search_gets_an_answer() {

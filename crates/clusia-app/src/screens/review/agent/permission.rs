@@ -11,7 +11,6 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::ButtonInput;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
-use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, observe};
 use clusia_core::PrRef;
 use clusia_core::printable::{printable, printable_lines};
@@ -96,8 +95,8 @@ impl PermissionQueue {
         Some(self.0.remove(at))
     }
 
-    /// Applies what the daemon said; a finished request becomes a chat line, and the requests the
-    /// daemon lists as waiting join the queue (a repeated id is one request).
+    /// Applies what the daemon said; a finished request becomes a chat line, and the list of what
+    /// waits for a review replaces what this window held for it (a repeated id is one request).
     pub fn apply(&mut self, tell: PermissionTell, chats: &mut Chats, now_ms: i64) {
         match tell {
             PermissionTell::Requested(request) => self.push(request, now_ms),
@@ -115,9 +114,28 @@ impl PermissionQueue {
                 chats.permission(&pr, &tool, &summary, outcome);
             }
             PermissionTell::Rules { pr, rules } => chats.set_rules(&pr, rules),
-            PermissionTell::Pending { requests, .. } => {
+            // The daemon's list is the truth for its review, in its order: a request it no longer
+            // lists is over, and one heard live before the list keeps what happened to it here.
+            PermissionTell::Pending { pr, requests } => {
+                let (held, mut kept): (Vec<Pending>, Vec<Pending>) = std::mem::take(&mut self.0)
+                    .into_iter()
+                    .partition(|p| p.request.pr == pr);
                 for request in requests {
-                    self.push(request, now_ms);
+                    if kept.iter().any(|p| p.request.id == request.id) {
+                        continue;
+                    }
+                    let before = held.iter().find(|p| p.request.id == request.id);
+                    kept.push(Pending {
+                        asked_ms: before.map_or(now_ms, |p| p.asked_ms),
+                        answered: before.is_some_and(|p| p.answered),
+                        request,
+                    });
+                }
+                self.0 = kept;
+            }
+            PermissionTell::AnswerRefused { id } => {
+                if let Some(p) = self.0.iter_mut().find(|p| p.request.id == id) {
+                    p.answered = false;
                 }
             }
         }
@@ -296,18 +314,21 @@ pub struct PermissionPlugin;
 
 impl Plugin for PermissionPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PermissionQueue>().add_systems(
-            Update,
-            (
-                drop_when_lost,
-                sync_modal,
-                rebuild_body,
-                tick_countdown,
-                answer_with_keys,
-            )
-                .chain()
-                .after(ReviewSystems),
-        );
+        app.init_resource::<PermissionQueue>()
+            // Before the dialogs that close on Esc, so the press that answers is theirs no more.
+            .add_systems(Update, escape_denies.before(ReviewSystems))
+            .add_systems(
+                Update,
+                (
+                    drop_when_lost,
+                    sync_modal,
+                    rebuild_body,
+                    tick_countdown,
+                    allow_with_enter,
+                )
+                    .chain()
+                    .after(ReviewSystems),
+            );
     }
 }
 
@@ -596,12 +617,11 @@ fn tick_countdown(
     }
 }
 
-/// Esc denies; Enter allows once, under `enter_allows`.
-fn answer_with_keys(
-    keys: Res<ButtonInput<KeyCode>>,
+/// Esc denies. The press is taken even when it does not count (the quiet moments), so it never
+/// also closes the dialog under the modal.
+fn escape_denies(
+    mut keys: ResMut<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    focus: Res<InputFocus>,
-    editable: Query<(), With<EditableText>>,
     modals: Query<&PermissionModal>,
     mut queue: ResMut<PermissionQueue>,
     mut asks: ResMut<Asks>,
@@ -609,16 +629,38 @@ fn answer_with_keys(
     let Some(modal) = modals.iter().next() else {
         return;
     };
+    if !escape_pressed(&keys) {
+        return;
+    }
+    keys.clear_just_pressed(KeyCode::Escape);
+    if answer_counts(time.elapsed_secs_f64(), modal.shown_at) {
+        send_answer(&mut queue, &mut asks, &modal.id, PermissionAnswerKind::Deny);
+    }
+}
+
+/// Enter allows once, under `enter_allows`. Keyboard focus anywhere but the modal (a chat input,
+/// a button behind it that Enter would also activate) counts as someone else using the key.
+fn allow_with_enter(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    focus: Res<InputFocus>,
+    parents: Query<&ChildOf>,
+    modals: Query<(Entity, &PermissionModal)>,
+    mut queue: ResMut<PermissionQueue>,
+    mut asks: ResMut<Asks>,
+) {
+    let Some((root, modal)) = modals.iter().next() else {
+        return;
+    };
     if !answer_counts(time.elapsed_secs_f64(), modal.shown_at) {
         return;
     }
-    if escape_pressed(&keys) {
-        send_answer(&mut queue, &mut asks, &modal.id, PermissionAnswerKind::Deny);
-        return;
-    }
     let enter = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
-    let typing = focus.get().is_some_and(|e| editable.contains(e));
-    if enter && enter_allows(time.elapsed_secs_f64(), modal.shown_at, typing) {
+    let elsewhere = focus.get().is_some_and(|e| {
+        !std::iter::successors(Some(e), |e| parents.get(*e).ok().map(ChildOf::parent))
+            .any(|e| e == root)
+    });
+    if enter && enter_allows(time.elapsed_secs_f64(), modal.shown_at, elsewhere) {
         send_answer(&mut queue, &mut asks, &modal.id, PermissionAnswerKind::Once);
     }
 }
@@ -1059,6 +1101,140 @@ mod tests {
                 .iter()
                 .all(|a| !matches!(a, Ask::PermissionAnswer { .. })),
             "an Enter typed into the chat must never allow a command"
+        );
+    }
+
+    #[test]
+    fn enter_does_not_allow_while_a_widget_behind_the_modal_has_the_keyboard() {
+        let mut app = open();
+        ask(&mut app, bash("perm-1"));
+        testing::recorded(&mut app);
+        age(&mut app);
+        let behind = app.world_mut().spawn(Node::default()).id();
+        app.world_mut()
+            .resource_mut::<bevy::input_focus::InputFocus>()
+            .set(behind, bevy::input_focus::FocusCause::Navigated);
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "an Enter that activates a button behind the modal must not also allow a command"
+        );
+
+        let own = answer_button(&mut app, PermissionAnswerKind::Deny);
+        app.world_mut()
+            .resource_mut::<bevy::input_focus::InputFocus>()
+            .set(own, bevy::input_focus::FocusCause::Navigated);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::PermissionAnswer {
+                id: "perm-1".into(),
+                answer: PermissionAnswerKind::Once
+            }],
+            "focus inside the modal is the modal's own"
+        );
+    }
+
+    #[test]
+    fn the_escape_that_denies_does_not_close_the_dialog_under_the_modal() {
+        use crate::review_state::{Modal, ReviewTabs};
+        let mut app = open();
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr())
+            .unwrap()
+            .ui
+            .modal = Some(Modal::Finalize);
+        testing::settle(&mut app);
+        ask(&mut app, bash("perm-1"));
+        testing::recorded(&mut app);
+        age(&mut app);
+        press(&mut app, KeyCode::Escape);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::PermissionAnswer {
+                id: "perm-1".into(),
+                answer: PermissionAnswerKind::Deny
+            }]
+        );
+        assert_eq!(
+            testing::tab(&app, &pr()).ui.modal,
+            Some(Modal::Finalize),
+            "one Escape answers one thing"
+        );
+    }
+
+    #[test]
+    fn what_the_daemon_lists_replaces_what_this_window_held() {
+        let mut app = open();
+        // A live request for a newer id is heard before the list that also holds older ones.
+        ask(&mut app, request("new", "Write", "notes/new.md"));
+        ask(&mut app, request("gone", "Write", "notes/gone.md"));
+        let mut other = request("elsewhere", "Write", "notes/other.md");
+        other.pr = PrRef::new("rzorzal", "other", 9).unwrap();
+        app.world_mut()
+            .resource_mut::<PermissionQueue>()
+            .push(other, NOW);
+        app.world_mut()
+            .resource_mut::<PermissionQueue>()
+            .mark_answered("new");
+        testing::tell(
+            &mut app,
+            Tell::Permission(PermissionTell::Pending {
+                pr: pr(),
+                requests: vec![bash("old"), request("new", "Write", "notes/new.md")],
+            }),
+        );
+        let queue = &app.world().resource::<PermissionQueue>().0;
+        let held: Vec<(&str, bool)> = queue
+            .iter()
+            .map(|p| (p.request.id.as_str(), p.answered))
+            .collect();
+        assert_eq!(
+            held,
+            [("elsewhere", false), ("old", false), ("new", true)],
+            "the daemon's order and its list for this review, the other review untouched"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_drops_and_returns_at_once_leaves_no_dead_request() {
+        let mut app = open();
+        ask(&mut app, bash("perm-1"));
+        let snapshot = app.world().resource::<Model>().snapshot.clone();
+        let outbox = app.world().resource::<crate::bridge::Outbox>().0.clone();
+        let _ = outbox.send(Tell::Lost("gone".into()));
+        let _ = outbox.send(Tell::Snapshot(Box::new(snapshot)));
+        app.update();
+        assert!(app.world().resource::<PermissionQueue>().0.is_empty());
+    }
+
+    #[test]
+    fn an_answer_the_daemon_refused_can_be_given_again() {
+        let mut app = open();
+        ask(&mut app, bash("perm-1"));
+        testing::recorded(&mut app);
+        age(&mut app);
+        let once = answer_button(&mut app, PermissionAnswerKind::Once);
+        testing::activate(&mut app, once);
+        assert_eq!(testing::recorded(&mut app).len(), 1);
+        testing::tell(
+            &mut app,
+            Tell::Permission(PermissionTell::AnswerRefused {
+                id: "perm-1".into(),
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(!app.world().resource::<PermissionQueue>().0[0].answered);
+        let once = answer_button(&mut app, PermissionAnswerKind::Once);
+        testing::activate(&mut app, once);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::PermissionAnswer {
+                id: "perm-1".into(),
+                answer: PermissionAnswerKind::Once
+            }]
         );
     }
 
