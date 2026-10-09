@@ -24,6 +24,8 @@ the variable is set.
 `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`. A bare `PATH` therefore
 does not hide a Homebrew install. The agent's turns start the program of `harness.program` (default: `claude` on the `PATH`) with the daemon's environment minus `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and every `CLUSIA_*` variable.
 
+The agent's turns run in `--permission-mode default` and ask `clusiad permission-bridge`, a small stdio server that `claude` itself starts (from `--mcp-config`, with `--strict-mcp-config`, so your own MCP servers are not loaded in those turns). The bridge forwards each request over the daemon's socket and only the daemon decides: no answer, an error or a bridge that cannot reach it means deny. With `harness.sandbox` on (default), the turn also gets `--settings` with the sandbox enabled (no network, writes only in the worktree). `harness.permission_timeout_secs` (default 120, 30 to 600) is how long a request waits.
+
 | Variable | Meaning |
 |---|---|
 | `CLUSIA_HOME` | the data folder (default `~/Library/Application Support/Clusia`) |
@@ -47,7 +49,7 @@ does not hide a Homebrew install. The agent's turns start the program of `harnes
 | `~/Library/Logs/Clusia/app.log` | the window's log |
 | `~/Library/Logs/Clusia/daemon.start.log` | what each start printed before the log opened; appended to, emptied once past 256 KiB |
 | `<data>/agent/<owner>~<repo>~<n>.jsonl` | the agent's chat log of a review (every event; 0600; at most 2 MB, then the oldest half is dropped) |
-| `<data>/agent/<owner>~<repo>~<n>.state.json` | the suggestions you accepted or dismissed and the head the last summary saw |
+| `<data>/agent/<owner>~<repo>~<n>.state.json` | the suggestions you accepted or dismissed, the head the last summary saw and the review's permission rules (`Bash(cargo test:*)`, `Edit`), which end with the session |
 | `<worktree>/.clusia/review.md` | what the agent reads first: the pull request, the draft, the summary (excluded from git through the worktree's `info/exclude`). Never written through a symlink: when the pull request makes `.clusia` anything but a folder, the notes are not written |
 | `~/Library/Logs/Clusia/daemon.launchd.log` | what a daemon launchd started printed (the login agent's output); not rotated |
 
