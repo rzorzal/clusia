@@ -376,15 +376,18 @@ pub(crate) async fn ask(
         )
     };
     let id = new_id();
+    // One instant for the deadline the windows count down to and the one that expires the
+    // request, taken before anything that may take a while (the tray).
+    let expires = tokio::time::Instant::now() + Duration::from_secs(timeout);
     let request = PermissionRequest {
         id: id.clone(),
         pr: pr.clone(),
         turn,
         tool: tool.clone(),
         summary: summary.clone(),
-        reason: input
-            .get("description")
-            .and_then(Value::as_str)
+        reason: (tool == "Bash")
+            .then(|| input.get("description").and_then(Value::as_str))
+            .flatten()
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
             .map(str::to_string),
@@ -394,13 +397,16 @@ pub(crate) async fn ask(
         detail: detail_for(&tool, &input),
     };
     let outcome = register(shared, request, rule)?;
+    // The bridge may go away while this waits: then nobody hears the answer, so the request
+    // must not stay listed (nor log an answer that allows nothing).
+    let _abandoned = Abandoned { shared, id: &id };
     if !shared.holds.is_held(&pr) {
         notify(shared, &pr, &id, &tool, &summary).await;
     }
     tokio::pin!(outcome);
     let outcome = tokio::select! {
         answered = &mut outcome => answered,
-        _ = tokio::time::sleep(Duration::from_secs(timeout)) => {
+        _ = tokio::time::sleep_until(expires) => {
             // An answer that landed first has already taken the request out: then it is the
             // one that decides, and the channel holds it.
             settle(shared, &id, PermissionOutcome::Expired).await;
@@ -410,6 +416,21 @@ pub(crate) async fn ask(
     Ok(PermissionDecision::of(
         outcome.unwrap_or(PermissionOutcome::Cancelled),
     ))
+}
+
+/// Cancels the request when `ask` is dropped before it was decided; once decided, the request
+/// is no longer pending and this does nothing.
+struct Abandoned<'a> {
+    shared: &'a Shared,
+    id: &'a str,
+}
+
+impl Drop for Abandoned<'_> {
+    fn drop(&mut self) {
+        if let Some(pending) = self.shared.permissions.take(self.id) {
+            finish(self.shared, self.id, pending, PermissionOutcome::Cancelled);
+        }
+    }
 }
 
 /// Tells the tray, because no window holds the review to show the question.
@@ -436,16 +457,25 @@ async fn settle(shared: &Shared, id: &str, outcome: PermissionOutcome) -> bool {
     let Some(pending) = shared.permissions.take(id) else {
         return false;
     };
-    let request = &pending.request;
     let outcome = match (&pending.rule, outcome) {
         (Some(rule), PermissionOutcome::AllowedForReview) => {
-            add_rule(shared, &request.pr, rule).await;
-            outcome
+            if add_rule(shared, &pending.request.pr, rule).await {
+                outcome
+            } else {
+                PermissionOutcome::Allowed
+            }
         }
         // Allow for this review without a prefix to grant is Allow once.
         (None, PermissionOutcome::AllowedForReview) => PermissionOutcome::Allowed,
         _ => outcome,
     };
+    finish(shared, id, pending, outcome);
+    true
+}
+
+/// Logs and announces how the request `id`, already taken out, ended, and tells the agent.
+fn finish(shared: &Shared, id: &str, pending: Pending, outcome: PermissionOutcome) {
+    let request = &pending.request;
     log(
         shared,
         &request.pr,
@@ -473,7 +503,6 @@ async fn settle(shared: &Shared, id: &str, outcome: PermissionOutcome) -> bool {
         },
     );
     let _ = pending.done.send(outcome);
-    true
 }
 
 /// The reviewer's answer. The first one wins; a later one (another window, the terminal, the
@@ -537,13 +566,21 @@ fn sorted(rules: &std::collections::BTreeSet<String>) -> Vec<String> {
     rules.iter().cloned().collect()
 }
 
-async fn add_rule(shared: &Shared, pr: &PrRef, rule: &str) {
-    let mut rules = Vec::new();
+/// Saves `rule` for the review, unless the review is gone: an answer that comes while the
+/// review ends must not bring back a rule its end just dropped. The check runs under the review
+/// lock, which the review's end holds while it drops the rules.
+async fn add_rule(shared: &Shared, pr: &PrRef, rule: &str) -> bool {
+    let mut rules = None;
     agent::update_state(shared, pr, |state| {
-        state.rules.insert(rule.to_string());
-        rules = sorted(&state.rules);
+        if matches!(reviews::load_stored(shared, pr), Ok(Some(_))) {
+            state.rules.insert(rule.to_string());
+            rules = Some(sorted(&state.rules));
+        }
     })
     .await;
+    let Some(rules) = rules else {
+        return false;
+    };
     shared.publish(
         topics::AGENT,
         Event::RulesChanged {
@@ -551,6 +588,7 @@ async fn add_rule(shared: &Shared, pr: &PrRef, rule: &str) {
             rules,
         },
     );
+    true
 }
 
 /// Stops allowing what `rule` allowed. Revoking a rule the review does not have is fine.
@@ -1063,6 +1101,100 @@ mod tests {
         cancel_all(&lab.shared).await;
         assert!(!asked.await.unwrap().unwrap().allow);
         assert_eq!(lab.shared.permissions.waiting(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_answer_for_the_review_after_it_ended_saves_no_rule() {
+        let mut lab = lab();
+        let asked = lab.ask("Bash", bash("cargo test"));
+        let (id, _) = lab.requested().await;
+        // The review closes empty under its lock while the answer comes in.
+        let guard = reviews::lock(&lab.shared, &pr(7)).await;
+        let answering = {
+            let shared = lab.shared.clone();
+            let id = id.clone();
+            tokio::spawn(async move { answer(&shared, &id, PermissionAnswerKind::Review).await })
+        };
+        while lab.shared.permissions.waiting() > 0 {
+            tokio::task::yield_now().await;
+        }
+        clusia_store::delete_review(&lab.shared.paths, &pr(7)).unwrap();
+        agent::forget(&lab.shared, &pr(7));
+        drop(guard);
+        assert_eq!(answering.await.unwrap(), Outcome::Ok(Reply::Ack));
+        assert!(
+            asked.await.unwrap().unwrap().allow,
+            "the answer still allows"
+        );
+        assert!(lab.rules().is_empty(), "no rule outlives the review");
+        assert_eq!(outcomes(&lab.log()), [PermissionOutcome::Allowed]);
+        let seen = lab.until_resolved(&id).await;
+        assert!(
+            !seen
+                .iter()
+                .any(|(_, e)| matches!(e, Event::RulesChanged { rules, .. } if !rules.is_empty())),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_whose_asker_went_away_is_cancelled() {
+        let mut lab = lab();
+        let asked = lab.ask("Bash", bash("make"));
+        let (id, _) = lab.requested().await;
+        asked.abort();
+        assert!(asked.await.unwrap_err().is_cancelled());
+        assert_eq!(lab.shared.permissions.waiting(), 0);
+        let seen = lab.until_resolved(&id).await;
+        assert!(matches!(
+            &seen.last().unwrap().1,
+            Event::PermissionResolved {
+                outcome: PermissionOutcome::Cancelled,
+                ..
+            }
+        ));
+        assert_eq!(outcomes(&lab.log()), [PermissionOutcome::Cancelled]);
+        assert!(refused_as_not_found(
+            answer(&lab.shared, &id, PermissionAnswerKind::Once).await
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_request_expires_when_the_announced_deadline_passes() {
+        let mut lab = lab();
+        lab.shared
+            .config
+            .write()
+            .await
+            .harness
+            .permission_timeout_secs = 30;
+        let started = tokio::time::Instant::now();
+        // The tray is slow to take the notification.
+        let shared = lab.shared.clone();
+        let inbox = shared.engine.lock().await;
+        let asked = lab.ask("Bash", bash("make"));
+        lab.requested().await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        drop(inbox);
+        assert_eq!(
+            asked.await.unwrap().unwrap(),
+            PermissionDecision::denied(EXPIRED)
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn only_a_command_gives_a_reason() {
+        let mut lab = lab();
+        let path = lab.worktree().join("src/a.rs").display().to_string();
+        let asked = lab.ask("Edit", json!({"file_path": path, "description": "tidy up"}));
+        let (id, requested) = lab.requested().await;
+        assert!(matches!(
+            requested,
+            Event::PermissionRequested { reason: None, .. }
+        ));
+        answer(&lab.shared, &id, PermissionAnswerKind::Deny).await;
+        asked.await.unwrap().unwrap();
     }
 
     #[tokio::test]

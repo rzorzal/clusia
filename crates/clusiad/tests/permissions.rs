@@ -385,10 +385,18 @@ async fn the_tray_is_told_when_no_window_holds_the_review() {
     use_fake(&w, Script::one(run_tests())).await;
     let mut opener = w.daemon.client().await;
     open(&mut opener).await;
+    let mut watcher = w.daemon.client().await;
+    let connected = clients(&mut watcher).await;
     // The window that opened it goes away: nothing holds the review any more.
     drop(opener);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let mut watcher = w.daemon.client().await;
+    let deadline = std::time::Instant::now() + common::EVENT_WAIT;
+    while clients(&mut watcher).await >= connected {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon notices the window left"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     watcher
         .request(Command::Subscribe {
             topics: vec![topics::AGENT.into(), topics::TRAY.into()],
@@ -438,14 +446,41 @@ async fn stopping_the_daemon_does_not_wait_out_a_request() {
     let (w, dir, mut c, mut watcher) = started(Script::one(run_tests())).await;
     c.request(send("run the tests")).await.unwrap();
     waiting_request(&mut watcher).await;
+    let log = w.daemon.paths.agent_log(&pr7());
     let started = std::time::Instant::now();
-    tokio::time::timeout(Duration::from_secs(20), w.daemon.stop())
+    let _home = tokio::time::timeout(Duration::from_secs(20), w.daemon.stop())
         .await
         .expect("the daemon stops");
+    // Well under the grace the daemon gives its work before it kills what is left.
     assert!(
-        started.elapsed() < Duration::from_secs(15),
-        "the request was denied, not waited for"
+        started.elapsed() < Duration::from_secs(5),
+        "the request was denied, not waited for: {:?}",
+        started.elapsed()
+    );
+    // The program is killed right after, so it may not get to read the denial; the log
+    // says how the request ended.
+    let text = std::fs::read_to_string(&log).unwrap();
+    let ended: Vec<PermissionOutcome> = text
+        .lines()
+        .filter_map(|line| match serde_json::from_str(line) {
+            Ok(AgentLogEntry::Permission { outcome, .. }) => Some(outcome),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended, [PermissionOutcome::Cancelled]);
+    assert!(
+        FakeClaude::permission_answers(&dir).iter().all(|a| !a.allow
+            && a.message.as_deref() == Some("The request was cancelled because the turn ended.")),
+        "whatever the agent heard was the cancellation"
     );
     let call = FakeClaude::calls(&dir).remove(0);
     assert!(!FakeClaude::is_running(call.pid));
+}
+
+/// How many clients the daemon counts as connected.
+async fn clients(c: &mut Client) -> usize {
+    match c.request(Command::DaemonStatus).await.unwrap() {
+        Reply::Status(status) => status.clients,
+        other => panic!("a status, got {other:?}"),
+    }
 }

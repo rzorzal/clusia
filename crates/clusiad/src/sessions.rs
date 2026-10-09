@@ -937,9 +937,6 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         );
         return;
     };
-    let rules = clusia_store::agent::load_agent_state(&shared.paths, &pr)
-        .unwrap_or_default()
-        .rules;
     // Claude Code gives up on a tool call after `MCP_TOOL_TIMEOUT`; the question to the
     // reviewer may take until our own deadline.
     let mut base_env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
@@ -965,13 +962,9 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
             turn,
         }),
         sandbox: harness.sandbox,
-        // The command line never carries a rule (every request comes to the daemon, which
-        // decides it with `covers`); a file rule is not even listed, as its path is checked on
-        // every request.
-        rules: rules
-            .into_iter()
-            .filter(|rule| rule.starts_with("Bash("))
-            .collect(),
+        // No rule goes on the command line: every request comes to the daemon, which decides
+        // it with the review's rules.
+        rules: Vec::new(),
     };
     let mut command = Command::from(ClaudeCode::command(&spec));
     command
