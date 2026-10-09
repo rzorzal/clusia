@@ -81,7 +81,7 @@ fn is_invisible(c: char) -> bool {
 /// `text` as one safe line: a control character (a carriage return, an escape sequence) or an
 /// invisible one (a bidi override, a zero-width character) would let a command rewrite or
 /// disguise what the reviewer reads, so each is shown as an escape.
-fn printable(text: &str) -> String {
+pub(crate) fn printable(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() || is_invisible(c) {
@@ -95,7 +95,7 @@ fn printable(text: &str) -> String {
 
 /// The agent's streamed text without what could repaint the terminal or disguise it: it keeps
 /// line breaks and tabs and drops every other control and invisible character.
-fn streamed(text: &str) -> String {
+pub(crate) fn streamed(text: &str) -> String {
     text.chars()
         .filter(|&c| c == '\n' || c == '\t' || !(c.is_control() || is_invisible(c)))
         .collect()
@@ -201,6 +201,27 @@ impl Turn {
         // The reviewer's Enter ended the question's line.
         self.prompt_open = false;
         Some((front.id.clone(), parse_answer(line, front.prefix.is_some())))
+    }
+
+    /// A line typed on the terminal: the answer it gives, as `answer_line`. A line that comes
+    /// too soon after the question was shown answers nothing; while that question is still open
+    /// the reviewer is told and it is asked again, which starts its quiet moment over.
+    pub(crate) fn typed(
+        &mut self,
+        line: &str,
+        err: &mut dyn Write,
+    ) -> io::Result<Option<(String, PermissionAnswerKind)>> {
+        if !self.just_asked() {
+            return Ok(self.answer_line(line));
+        }
+        if self.asking() {
+            writeln!(
+                err,
+                "\n(answer ignored: typed before the question was shown)"
+            )?;
+            self.show_prompt(err)?;
+        }
+        Ok(None)
     }
 
     /// Whether `event` ends the request that is asked now.
@@ -374,19 +395,19 @@ fn failure_message(kind: AgentErrorKind, message: &str) -> String {
     if message.trim().is_empty() {
         kind.to_string()
     } else {
-        message.to_string()
+        printable(message)
     }
 }
 
 /// `file:line  body`, `file:3-5  body` for a range, `file  body` for none; the body on one line.
 pub(crate) fn suggestion_line(s: &Suggestion) -> String {
     let place = match (s.line, s.start_line, s.end_line) {
-        (Some(line), _, _) => format!("{}:{line}", s.file),
-        (None, Some(from), Some(to)) => format!("{}:{from}-{to}", s.file),
-        _ => s.file.clone(),
+        (Some(line), _, _) => format!("{}:{line}", printable(&s.file)),
+        (None, Some(from), Some(to)) => format!("{}:{from}-{to}", printable(&s.file)),
+        _ => printable(&s.file),
     };
     let body = s.body.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!("{place}  {body}")
+    format!("{place}  {}", printable(&body))
 }
 
 /// The chat as lines: consecutive text entries of one turn are one answer.
@@ -396,18 +417,22 @@ pub(crate) fn log_lines(entries: &[AgentLogEntry]) -> Vec<String> {
     for entry in entries {
         if let AgentLogEntry::Text { turn, text, .. } = entry {
             match (joining, lines.last_mut()) {
-                (Some(open), Some(last)) if open == *turn => last.push_str(text),
-                _ => lines.push(text.clone()),
+                (Some(open), Some(last)) if open == *turn => last.push_str(&streamed(text)),
+                _ => lines.push(streamed(text)),
             }
             joining = Some(*turn);
             continue;
         }
         joining = None;
         lines.push(match entry {
-            AgentLogEntry::User { text, .. } => format!("you: {text}"),
-            AgentLogEntry::ToolUse { summary, .. } => format!("  ✓ {summary}"),
+            AgentLogEntry::User { text, .. } => format!("you: {}", printable(text)),
+            AgentLogEntry::ToolUse { summary, .. } => format!("  ✓ {}", printable(summary)),
             AgentLogEntry::Denied { tool, detail, .. } => {
-                format!("  ⊘ wanted to use {tool}: {detail}")
+                format!(
+                    "  ⊘ wanted to use {}: {}",
+                    printable(tool),
+                    printable(detail)
+                )
             }
             AgentLogEntry::Suggestion { suggestion, .. } => {
                 format!("  suggestion {}", suggestion_line(suggestion))
@@ -587,10 +612,8 @@ pub(crate) async fn ask(
             event = client.next_event() => event?,
             line = typed_line(&mut typed) => {
                 match line {
-                    // A line typed while no question is open answers nothing.
-                    Some(line) if run.just_asked() => drop(line),
                     Some(line) => {
-                        if let Some((id, answer)) = run.answer_line(&line) {
+                        if let Some((id, answer)) = run.typed(&line, &mut err).map_err(io_error)? {
                             send_answer(&mut client, id, answer).await?;
                         }
                     }
@@ -1359,6 +1382,139 @@ mod tests {
              ⊘ wanted to use Ba\\u{1b}sh: rm\\u{9b}2K\\u{200b} (denied)\n"
         );
         assert_eq!(said(&out), "a[2Kbcdef\tg\nh\n");
+    }
+
+    const NASTY: &str = "x\u{1b}[2K\u{202e}y";
+    const SHOWN: &str = "x\\u{1b}[2K\\u{202e}y";
+
+    #[test]
+    fn a_suggestion_cannot_repaint_the_terminal() {
+        let mut s = suggestion(Some(4), None, NASTY);
+        s.file = NASTY.into();
+        assert_eq!(suggestion_line(&s), format!("{SHOWN}:4  {SHOWN}"));
+
+        let (mut turn, mut out, mut err) = run(false);
+        let suggested = Event::AgentSuggestion {
+            pr: pr(),
+            turn: 2,
+            suggestion: s,
+        };
+        turn.feed(&suggested, &mut out, &mut err).unwrap();
+        turn.finish(&mut out).unwrap();
+        assert_eq!(
+            said(&out),
+            format!("\nSuggested comments:\n{SHOWN}:4  {SHOWN}\n")
+        );
+    }
+
+    #[test]
+    fn no_log_entry_can_repaint_the_terminal() {
+        let mut s = suggestion(None, None, NASTY);
+        s.file = NASTY.into();
+        let entries = vec![
+            AgentLogEntry::User {
+                at: 1,
+                turn: 1,
+                text: NASTY.into(),
+            },
+            AgentLogEntry::ToolUse {
+                at: 2,
+                turn: 1,
+                summary: NASTY.into(),
+            },
+            AgentLogEntry::Text {
+                at: 3,
+                turn: 1,
+                text: format!("{NASTY}\n"),
+            },
+            AgentLogEntry::Denied {
+                at: 4,
+                turn: 1,
+                tool: NASTY.into(),
+                detail: NASTY.into(),
+            },
+            AgentLogEntry::Suggestion {
+                at: 5,
+                turn: 1,
+                suggestion: s,
+            },
+            AgentLogEntry::Error {
+                at: 6,
+                turn: 1,
+                kind: AgentErrorKind::Interrupted,
+                message: NASTY.into(),
+            },
+        ];
+        assert_eq!(
+            log_lines(&entries),
+            [
+                format!("you: {SHOWN}"),
+                format!("  ✓ {SHOWN}"),
+                "x[2Ky\n".to_string(),
+                format!("  ⊘ wanted to use {SHOWN}: {SHOWN}"),
+                format!("  suggestion {SHOWN}  {SHOWN}"),
+                format!("  error: {SHOWN}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_error_message_cannot_repaint_the_terminal() {
+        let (mut turn, mut out, mut err) = run(false);
+        let error = Event::AgentError {
+            pr: pr(),
+            turn: 2,
+            kind: AgentErrorKind::Interrupted,
+            message: NASTY.into(),
+        };
+        turn.feed(&error, &mut out, &mut err).unwrap();
+        assert_eq!(turn.failure(), Some(SHOWN));
+    }
+
+    #[test]
+    fn an_answer_typed_before_the_question_was_shown_is_asked_again() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        turn.feed(
+            &requested("p1", 2, "Bash", "make", None),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        err.clear();
+        assert_eq!(turn.typed("o", &mut err).unwrap(), None);
+        assert_eq!(
+            said(&err),
+            "\n(answer ignored: typed before the question was shown)\n\
+             Claude Code wants to run: make  [o]nce / [d]eny? "
+        );
+        assert!(
+            turn.asking() && turn.just_asked(),
+            "the window starts again"
+        );
+        std::thread::sleep(QUIET_AFTER_PROMPT + std::time::Duration::from_millis(50));
+        err.clear();
+        assert_eq!(
+            turn.typed("o", &mut err).unwrap(),
+            Some(("p1".into(), PermissionAnswerKind::Once))
+        );
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn a_line_typed_just_after_an_answer_is_dropped_quietly() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        turn.feed(
+            &requested("p1", 2, "Bash", "make", None),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        turn.answer_line("o");
+        err.clear();
+        assert_eq!(turn.typed("d", &mut err).unwrap(), None);
+        assert!(err.is_empty(), "no question is open: {}", said(&err));
     }
 
     #[test]

@@ -8,6 +8,7 @@ use clusia_protocol::{
 };
 use serde_json::json;
 
+use crate::agent::printable;
 use crate::cli::{ReviewCommand, VerdictArg};
 use crate::run::{CliError, Output, connect, unexpected, uptime};
 
@@ -45,6 +46,15 @@ fn step_name(step: LoadStepKind) -> &'static str {
     }
 }
 
+/// One load step as `open` reports it; the message is the daemon's and may quote git or GitHub.
+fn step_line(mark: &str, step: LoadStepKind, message: Option<&str>) -> String {
+    format!(
+        "{mark} {} {}",
+        step_name(step),
+        printable(message.unwrap_or_default())
+    )
+}
+
 fn news_line(n: &NewsItem) -> String {
     match &n.who {
         Some(who) => format!("  • {} — {} ({})", n.summary, who, n.source),
@@ -65,11 +75,7 @@ fn print_steps(client: &mut clusia_protocol::Client, pr: &clusia_core::PrRef) {
                 StepStatus::Failed => "✗",
                 StepStatus::Running => continue,
             };
-            eprintln!(
-                "{mark} {} {}",
-                step_name(s.step),
-                s.message.unwrap_or_default()
-            );
+            eprintln!("{}", step_line(mark, s.step, s.message.as_deref()));
         }
     }
 }
@@ -436,6 +442,14 @@ pub(crate) async fn activity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_step_message_cannot_repaint_the_terminal() {
+        assert_eq!(
+            step_line("✗", LoadStepKind::Repo, Some("x\u{1b}[2K\u{202e}y")),
+            "✗ repo x\\u{1b}[2K\\u{202e}y"
+        );
+    }
 
     #[test]
     fn parses_locations() {
