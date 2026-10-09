@@ -900,6 +900,9 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         use_cli_permissions: harness.use_cli_permissions,
         extra_args,
         base_env: std::env::vars_os().collect(),
+        bridge: None,
+        sandbox: false,
+        rules: Vec::new(),
     };
     let mut command = Command::from(ClaudeCode::command(&spec));
     command

@@ -4,6 +4,11 @@
 //! script records its arguments, environment, working folder and process id under
 //! `calls/<n>/`, then replays the [`Turn`] of that call (the n-th call plays the n-th turn, and
 //! the last turn repeats). `--version` is answered without being recorded.
+//!
+//! A turn can ask permissions: when the run has `--mcp-config`, the fake starts the MCP server
+//! named there, calls its `approve` tool once per ask and records every answer under
+//! `calls/<n>/answers`. Asks that were not allowed are listed in the result line's
+//! `permission_denials`, as the real program does.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -24,6 +29,7 @@ pub struct Turn {
     stderr: String,
     hang: bool,
     ignore_term: bool,
+    asks: Vec<(String, serde_json::Value)>,
 }
 
 impl Turn {
@@ -36,6 +42,7 @@ impl Turn {
             stderr: String::new(),
             hang: false,
             ignore_term: false,
+            asks: Vec::new(),
         }
     }
 
@@ -121,6 +128,15 @@ impl Turn {
         self.ignore_term = true;
         self
     }
+
+    /// Before the first printed line, asks permission for `tool` with `input` through the MCP
+    /// server of `--mcp-config` and waits for the answer. Asks run in the order they were added.
+    /// An allowed ask changes nothing; a denied one adds itself to the result's
+    /// `permission_denials`. Without `--mcp-config` the asks are skipped.
+    pub fn ask_permission(mut self, tool: &str, input: serde_json::Value) -> Self {
+        self.asks.push((tool.to_string(), input));
+        self
+    }
 }
 
 /// The turns the fake plays, one per call.
@@ -151,6 +167,16 @@ pub struct Call {
     pub pid: u32,
 }
 
+/// What the permission bridge answered to one ask of a [`Turn`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionAnswer {
+    pub tool: String,
+    pub allow: bool,
+    /// The refusal the agent reads; `None` when allowed. A bridge that never answered counts
+    /// as a denial with the message `no answer from the bridge`.
+    pub message: Option<String>,
+}
+
 pub struct FakeClaude;
 
 impl FakeClaude {
@@ -163,13 +189,44 @@ impl FakeClaude {
             fs::write(dir.join(format!("turn-{k}.jsonl")), body).expect("write turn lines");
             fs::write(dir.join(format!("turn-{k}.stderr")), &turn.stderr).expect("write stderr");
             let conf = format!(
-                "delay={}.{:03}\ncode={}\nhang={}\nignore_term={}\n",
+                "delay={}.{:03}\ncode={}\nhang={}\nignore_term={}\nasks={}\n",
                 turn.delay_ms / 1000,
                 turn.delay_ms % 1000,
                 turn.exit,
                 if turn.hang { "1" } else { "" },
                 if turn.ignore_term { "1" } else { "" },
+                turn.asks.len(),
             );
+            for (n, (tool, input)) in turn.asks.iter().enumerate() {
+                let n = n + 1;
+                let call = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": n + 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "approve",
+                        "arguments": {
+                            "tool_name": tool,
+                            "input": input,
+                            "tool_use_id": format!("toolu_fake_{k}_{n}"),
+                        },
+                    },
+                });
+                fs::write(dir.join(format!("turn-{k}.ask-{n}.call")), call.to_string())
+                    .expect("write ask call");
+                fs::write(dir.join(format!("turn-{k}.ask-{n}.tool")), tool)
+                    .expect("write ask tool");
+                let denial = serde_json::json!({
+                    "tool_name": tool,
+                    "tool_use_id": format!("toolu_fake_{k}_{n}"),
+                    "tool_input": input,
+                });
+                fs::write(
+                    dir.join(format!("turn-{k}.ask-{n}.denial")),
+                    denial.to_string(),
+                )
+                .expect("write ask denial");
+            }
             fs::write(dir.join(format!("turn-{k}.conf")), conf).expect("write turn conf");
         }
         let program = dir.join("claude");
@@ -198,6 +255,42 @@ impl FakeClaude {
             .into_iter()
             .filter_map(|n| read_call(&dir.join("calls").join(n.to_string())))
             .collect()
+    }
+
+    /// What the bridge answered, in run order and then ask order.
+    pub fn permission_answers(dir: &Path) -> Vec<PermissionAnswer> {
+        let mut numbers: Vec<u32> = fs::read_dir(dir.join("calls"))
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        numbers.sort_unstable();
+        let mut answers = Vec::new();
+        for n in numbers {
+            let text = fs::read_to_string(dir.join("calls").join(n.to_string()).join("answers"))
+                .unwrap_or_default();
+            answers.extend(text.lines().filter_map(read_answer));
+        }
+        answers
+    }
+
+    /// Waits until at least `count` permission answers are recorded; panics after `limit`.
+    pub fn wait_for_answers(dir: &Path, count: usize, limit: Duration) -> Vec<PermissionAnswer> {
+        let give_up = Instant::now() + limit;
+        loop {
+            let answers = Self::permission_answers(dir);
+            if answers.len() >= count {
+                return answers;
+            }
+            assert!(
+                Instant::now() < give_up,
+                "expected {count} permission answers, saw {}",
+                answers.len()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Waits until at least `count` runs are recorded; panics after `limit`.
@@ -257,7 +350,35 @@ fn read_call(dir: &Path) -> Option<Call> {
     })
 }
 
-const SCRIPT: &str = r#"#!/bin/sh
+/// One `answers` line: the tool, a tab, and the raw reply of the `tools/call` (or `null`).
+fn read_answer(line: &str) -> Option<PermissionAnswer> {
+    let (tool, raw) = line.split_once('\t')?;
+    let verdict = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|reply| {
+            let text = reply["result"]["content"][0]["text"].as_str()?.to_string();
+            serde_json::from_str::<serde_json::Value>(&text).ok()
+        });
+    Some(match verdict {
+        Some(v) if v["behavior"] == "allow" => PermissionAnswer {
+            tool: tool.to_string(),
+            allow: true,
+            message: None,
+        },
+        Some(v) => PermissionAnswer {
+            tool: tool.to_string(),
+            allow: false,
+            message: v["message"].as_str().map(str::to_string),
+        },
+        None => PermissionAnswer {
+            tool: tool.to_string(),
+            allow: false,
+            message: Some("no answer from the bridge".into()),
+        },
+    })
+}
+
+const SCRIPT: &str = r#"#!/bin/bash
 dir=$(cd "$(dirname "$0")" && pwd)
 if [ "$1" = "--version" ]; then
   echo "2.1.294 (Claude Code)"
@@ -274,17 +395,61 @@ k=$n
 [ "$k" -gt __TOTAL__ ] && k=__TOTAL__
 sid=""
 prev=""
+cfg=""
 for a in "$@"; do
   if [ "$prev" = "--session-id" ] || [ "$prev" = "--resume" ]; then sid=$a; fi
+  if [ "$prev" = "--mcp-config" ]; then cfg=$a; fi
   prev=$a
 done
 . "$dir/turn-$k.conf"
 [ -n "$ignore_term" ] && trap '' TERM
 [ -s "$dir/turn-$k.stderr" ] && cat "$dir/turn-$k.stderr" >&2
-sed "s/__SESSION__/$sid/g" "$dir/turn-$k.jsonl" | while IFS= read -r line; do
+shopt -u patsub_replacement 2>/dev/null
+denials=""
+denial_pat='"permission_denials":[]'
+if [ "${asks:-0}" -gt 0 ] && [ -n "$cfg" ]; then
+  bcmd=${cfg#*'"command":"'}
+  bcmd=${bcmd%%'"'*}
+  bargs=${cfg#*'"args":["'}
+  bargs=${bargs%%'"]'*}
+  bargs=${bargs//'","'/$'\t'}
+  IFS=$'\t' read -r -a bargv <<< "$bargs"
+  trap '' PIPE
+  mkfifo "$dir/calls/$n/to-bridge" "$dir/calls/$n/from-bridge"
+  "$bcmd" "${bargv[@]}" < "$dir/calls/$n/to-bridge" > "$dir/calls/$n/from-bridge" 2> "$dir/calls/$n/bridge.stderr" &
+  bridge=$!
+  exec 3> "$dir/calls/$n/to-bridge"
+  exec 4< "$dir/calls/$n/from-bridge"
+  ask() {
+    printf '%s\n' "$1" >&3 2>/dev/null
+    reply=""
+    read -r -t 30 reply <&4 || reply=""
+  }
+  ask '{"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover","params":{}}'
+  ask '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":true}},"clientInfo":{"name":"claude-code","version":"2.1.295"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}' >&3 2>/dev/null
+  ask '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  i=1
+  while [ "$i" -le "$asks" ]; do
+    ask "$(cat "$dir/turn-$k.ask-$i.call")"
+    printf '%s\t%s\n' "$(cat "$dir/turn-$k.ask-$i.tool")" "${reply:-null}" >> "$dir/calls/$n/answers"
+    case "$reply" in
+      *'\"behavior\":\"allow\"'*) ;;
+      *) denials="${denials:+$denials,}$(cat "$dir/turn-$k.ask-$i.denial")" ;;
+    esac
+    i=$((i + 1))
+  done
+  exec 3>&-
+  exec 4<&-
+  wait "$bridge" 2>/dev/null
+fi
+denial_repl="\"permission_denials\":[$denials]"
+while IFS= read -r line; do
+  line=${line//__SESSION__/$sid}
+  line=${line//"$denial_pat"/$denial_repl}
   printf '%s\n' "$line"
   [ "$delay" != "0.000" ] && sleep "$delay"
-done
+done < "$dir/turn-$k.jsonl"
 [ -n "$hang" ] && exec sleep 3600
 exit "$code"
 "#;
@@ -492,5 +657,179 @@ mod tests {
         pids.sort_unstable();
         pids.dedup();
         assert_eq!(pids.len(), 4);
+    }
+
+    /// A stand-in for the bridge: answers every request with an empty result, except
+    /// `tools/call`, which it allows when the request mentions `cargo test` and denies with
+    /// "The reviewer said no." otherwise. It ends when its input does.
+    fn stub_bridge(dir: &Path) -> PathBuf {
+        let script = dir.join("bridge");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in *'"id":'*) ;; *) continue ;; esac
+  id=${line#*'"id":'}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"tools/call"'*)
+      case "$line" in
+        *'cargo test'*) text='{\"behavior\":\"allow\",\"updatedInput\":{}}' ;;
+        *) text='{\"behavior\":\"deny\",\"message\":\"The reviewer said no.\"}' ;;
+      esac
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"%s"}]}}\n' "$id" "$text" ;;
+    *) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    fn mcp_config(bridge: &Path) -> String {
+        serde_json::json!({
+            "mcpServers": {"clusia": {"command": bridge, "args": ["permission-bridge", "--turn", "1"]}}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn asks_go_through_the_bridge_in_order_and_denials_reach_the_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = stub_bridge(dir.path());
+        let program = FakeClaude::install(
+            dir.path(),
+            Script::one(
+                Turn::answer("done")
+                    .ask_permission("Bash", serde_json::json!({"command": "cargo test -p x"}))
+                    .ask_permission(
+                        "Bash",
+                        serde_json::json!({"command": "rm -rf target & more"}),
+                    )
+                    .ask_permission("Edit", serde_json::json!({"file_path": "src/lib.rs"})),
+            ),
+        );
+        let out = run(
+            &program,
+            &[
+                "-p",
+                "x",
+                "--session-id",
+                "s1",
+                "--mcp-config",
+                &mcp_config(&bridge),
+            ],
+            dir.path(),
+        );
+        assert!(out.status.success());
+        assert_eq!(
+            FakeClaude::permission_answers(dir.path()),
+            [
+                PermissionAnswer {
+                    tool: "Bash".into(),
+                    allow: true,
+                    message: None
+                },
+                PermissionAnswer {
+                    tool: "Bash".into(),
+                    allow: false,
+                    message: Some("The reviewer said no.".into())
+                },
+                PermissionAnswer {
+                    tool: "Edit".into(),
+                    allow: false,
+                    message: Some("The reviewer said no.".into())
+                },
+            ]
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        let result: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(
+            result["permission_denials"],
+            serde_json::json!([
+                {
+                    "tool_name": "Bash",
+                    "tool_use_id": "toolu_fake_1_2",
+                    "tool_input": {"command": "rm -rf target & more"}
+                },
+                {
+                    "tool_name": "Edit",
+                    "tool_use_id": "toolu_fake_1_3",
+                    "tool_input": {"file_path": "src/lib.rs"}
+                },
+            ])
+        );
+        assert_eq!(result["session_id"], "s1");
+    }
+
+    #[test]
+    fn an_allowed_ask_leaves_the_result_alone_and_the_bridge_ends_with_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = stub_bridge(dir.path());
+        let program = FakeClaude::install(
+            dir.path(),
+            Script::one(
+                Turn::answer("done")
+                    .ask_permission("Bash", serde_json::json!({"command": "cargo test"})),
+            ),
+        );
+        let out = run(
+            &program,
+            &["-p", "x", "--mcp-config", &mcp_config(&bridge)],
+            dir.path(),
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            text.lines()
+                .last()
+                .unwrap()
+                .contains(r#""permission_denials":[]"#)
+        );
+        assert_eq!(FakeClaude::permission_answers(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn a_bridge_that_does_not_exist_is_recorded_as_no_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = FakeClaude::install(
+            dir.path(),
+            Script::one(
+                Turn::answer("done")
+                    .ask_permission("Bash", serde_json::json!({"command": "cargo test"})),
+            ),
+        );
+        let config = mcp_config(&dir.path().join("missing-bridge"));
+        let out = run(&program, &["-p", "x", "--mcp-config", &config], dir.path());
+        assert!(out.status.success());
+        let answers = FakeClaude::permission_answers(dir.path());
+        assert_eq!(
+            answers,
+            [PermissionAnswer {
+                tool: "Bash".into(),
+                allow: false,
+                message: Some("no answer from the bridge".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn asks_are_skipped_without_an_mcp_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = FakeClaude::install(
+            dir.path(),
+            Script::one(
+                Turn::answer("done").ask_permission("Bash", serde_json::json!({"command": "ls"})),
+            ),
+        );
+        let out = run(&program, &["-p", "x"], dir.path());
+        assert!(out.status.success());
+        assert!(FakeClaude::permission_answers(dir.path()).is_empty());
+        assert!(
+            String::from_utf8(out.stdout)
+                .unwrap()
+                .contains(r#""permission_denials":[]"#)
+        );
     }
 }

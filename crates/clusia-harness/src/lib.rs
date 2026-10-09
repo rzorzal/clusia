@@ -8,7 +8,7 @@ mod suggestions;
 #[cfg(any(test, feature = "test-kit"))]
 pub mod testkit;
 
-pub use command::{ClaudeCode, ROLE_PROMPT, SessionArg, TurnSpec};
+pub use command::{BridgeSpec, ClaudeCode, ROLE_PROMPT, SessionArg, TurnSpec};
 pub use parse::{AgentEvent, ParseState, parse_line};
 pub use probe::{parse_probe, probe_command};
 pub use suggestions::extract_suggestions;
