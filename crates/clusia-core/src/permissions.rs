@@ -11,7 +11,8 @@ const FILE_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 /// Programs whose first word never makes a rule: they run other programs or code, delete, or
 /// reach the network, so a rule on the program alone would cover far more than one command.
-const NO_RULE: [&str; 38] = [
+/// Matched with a trailing version removed (`python3.12` and `node22` are `python` and `node`).
+const NO_RULE: [&str; 54] = [
     "sudo",
     "doas",
     "su",
@@ -50,10 +51,28 @@ const NO_RULE: [&str; 38] = [
     "ruby",
     "deno",
     "bun",
+    "ksh",
+    "csh",
+    "tcsh",
+    "pwsh",
+    "nu",
+    "busybox",
+    "xcrun",
+    "caffeinate",
+    "stdbuf",
+    "setsid",
+    "script",
+    "php",
+    "lua",
+    "awk",
+    "gawk",
+    "pypy",
 ];
 
 /// Characters that chain, redirect or substitute: a command holding one is more than one
-/// command, so only Allow once is offered for it.
+/// command, so only Allow once is offered for it. Any character outside printable ASCII, other
+/// than a tab, counts too: the shell does not split on Unicode spaces, and escapes would
+/// rewrite what a terminal shows.
 const SHELL_SYNTAX: [char; 10] = [';', '|', '&', '<', '>', '$', '`', '\n', '(', ')'];
 
 /// The rule saved for a Bash prefix, in the form Claude Code's `--allowedTools` reads.
@@ -71,9 +90,7 @@ pub fn summary_for(tool: &str, input: &Value) -> String {
     let text = |key: &str| input.get(key).and_then(Value::as_str);
     match tool {
         "Bash" => text("command").unwrap_or(tool),
-        t if FILE_TOOLS.contains(&t) => text("file_path")
-            .or_else(|| text("notebook_path"))
-            .unwrap_or(tool),
+        t if FILE_TOOLS.contains(&t) => text(path_key(t)).unwrap_or(tool),
         _ => tool,
     }
     .to_string()
@@ -88,7 +105,7 @@ const DETAIL_WRITE_LINES: usize = 20;
 /// An excerpt of the request the modal shows under the path: for `Edit` the text replaced and
 /// the text that replaces it (`old`, a line with `→`, `new`), for `MultiEdit` each pair in
 /// turn, for `Write` the first lines of the file. At most [`DETAIL_MAX_CHARS`] characters,
-/// cut with `…`; `None` for any other tool or an input without those fields.
+/// the `…` included; `None` for any other tool or an input without those fields.
 pub fn detail_for(tool: &str, input: &Value) -> Option<String> {
     let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_string);
     let pair = |v: &Value| {
@@ -118,7 +135,10 @@ pub fn detail_for(tool: &str, input: &Value) -> Option<String> {
         return None;
     }
     Some(match detail.char_indices().nth(DETAIL_MAX_CHARS) {
-        Some((cut, _)) => format!("{}…", &detail[..cut]),
+        Some(_) => {
+            let (cut, _) = detail.char_indices().nth(DETAIL_MAX_CHARS - 1)?;
+            format!("{}…", &detail[..cut])
+        }
         None => detail,
     })
 }
@@ -133,11 +153,13 @@ pub fn prefix_for(tool: &str, input: &Value, worktree: &Path) -> Option<String> 
     if tool == "Bash" {
         let words = simple_words(input.get("command")?.as_str()?)?;
         let program = *words.first()?;
-        let plain_program = program.starts_with(|c: char| c.is_ascii_alphabetic())
+        // Lower case only: macOS finds `SUDO` and `Bash` as `sudo` and `bash`.
+        let plain_program = program.starts_with(|c: char| c.is_ascii_lowercase())
             && program
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "_.+-".contains(c));
-        if !plain_program || NO_RULE.contains(&program) {
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.+-".contains(c));
+        let unversioned = program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        if !plain_program || NO_RULE.contains(&unversioned) {
             return None;
         }
         return match words.get(1) {
@@ -146,7 +168,8 @@ pub fn prefix_for(tool: &str, input: &Value, worktree: &Path) -> Option<String> 
             Some(_) => None,
         };
     }
-    if FILE_TOOLS.contains(&tool) && file_path(input).is_some_and(|p| inside_worktree(&p, worktree))
+    if FILE_TOOLS.contains(&tool)
+        && file_path(tool, input).is_some_and(|p| inside_worktree(&p, worktree))
     {
         return Some(rule_for_tool(tool));
     }
@@ -175,21 +198,26 @@ pub fn covers(rules: &BTreeSet<String>, tool: &str, input: &Value, worktree: &Pa
             else {
                 return false;
             };
-            let wanted: Vec<&str> = prefix.split_whitespace().collect();
+            let wanted: Vec<&str> = prefix.split(' ').filter(|w| !w.is_empty()).collect();
             !wanted.is_empty() && words.starts_with(&wanted)
         });
     }
     FILE_TOOLS.contains(&tool)
         && rules.contains(tool)
-        && file_path(input).is_some_and(|p| inside_worktree(&p, worktree))
+        && file_path(tool, input).is_some_and(|p| inside_worktree(&p, worktree))
 }
 
 /// The words of a single command; `None` for an empty one or one with shell syntax.
 fn simple_words(command: &str) -> Option<Vec<&str>> {
-    if command.contains(SHELL_SYNTAX) {
+    if command.contains(SHELL_SYNTAX)
+        || command.contains(|c: char| c != '\t' && !(' '..='~').contains(&c))
+    {
         return None;
     }
-    let words: Vec<&str> = command.split_whitespace().collect();
+    let words: Vec<&str> = command
+        .split([' ', '\t'])
+        .filter(|w| !w.is_empty())
+        .collect();
     (!words.is_empty()).then_some(words)
 }
 
@@ -200,11 +228,17 @@ fn is_subcommand(word: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-fn file_path(input: &Value) -> Option<PathBuf> {
-    let key = ["file_path", "notebook_path"]
-        .into_iter()
-        .find(|k| input.get(k).is_some())?;
-    Some(PathBuf::from(input[key].as_str()?))
+/// The input field that names the file a file tool writes.
+fn path_key(tool: &str) -> &'static str {
+    if tool == "NotebookEdit" {
+        "notebook_path"
+    } else {
+        "file_path"
+    }
+}
+
+fn file_path(tool: &str, input: &Value) -> Option<PathBuf> {
+    Some(PathBuf::from(input.get(path_key(tool))?.as_str()?))
 }
 
 /// Whether `path` (relative paths start at the worktree) lands inside `worktree` once `..`
@@ -329,6 +363,36 @@ mod tests {
             "ruby x.rb",
             "deno run x.ts",
             "bun run x",
+            "SUDO make",
+            "Bash",
+            "BASH -c x",
+            "Rm -rf x",
+            "Make clean",
+            "python3.12 evil.py",
+            "python2 x.py",
+            "pypy3 x.py",
+            "node22 x.js",
+            "perl5.34 x.pl",
+            "ruby3.3 x.rb",
+            "pwsh -c x",
+            "ksh -c x",
+            "tcsh",
+            "nu",
+            "busybox sh",
+            "xcrun clang",
+            "caffeinate make",
+            "stdbuf -o0 make",
+            "setsid make",
+            "script out make",
+            "php x.php",
+            "lua x.lua",
+            "awk '{print}' x",
+            "gawk x",
+            "cargo\u{a0}evil test",
+            "cargo\u{2003}test",
+            "cargo test\r",
+            "cargo test \u{1b}[2K",
+            "cargo tést",
             "",
             "   ",
         ] {
@@ -364,6 +428,20 @@ mod tests {
             ),
             Some("NotebookEdit".into())
         );
+        let notebook_outside = json!({ "file_path": "n.ipynb", "notebook_path": "/etc/n.ipynb" });
+        assert_eq!(
+            prefix_for("NotebookEdit", &notebook_outside, &wt()),
+            None,
+            "a notebook edit writes notebook_path"
+        );
+        assert!(!covers(
+            &rules(&["NotebookEdit"]),
+            "NotebookEdit",
+            &notebook_outside,
+            &wt()
+        ));
+        let edit_outside = json!({ "file_path": "/etc/hosts", "notebook_path": "n.ipynb" });
+        assert_eq!(prefix_for("Edit", &edit_outside, &wt()), None);
         assert_eq!(prefix_for("Edit", &json!({}), &wt()), None);
         assert_eq!(
             prefix_for("WebFetch", &json!({ "url": "https://x" }), &wt()),
@@ -387,6 +465,11 @@ mod tests {
         assert!(!covered("cargo test | sh"));
         assert!(!covered("cargo test $(id)"));
         assert!(!covered("cd / && cargo test"));
+        assert!(
+            !covered("cargo test\u{a0}x"),
+            "only spaces and tabs split words"
+        );
+        assert!(covered("cargo\ttest"));
         assert!(!covered(""));
         assert!(!covers(&set, "Bash", &json!({}), &wt()));
         assert!(!covers(
@@ -445,6 +528,9 @@ mod tests {
             summary_for("NotebookEdit", &json!({ "notebook_path": "n.ipynb" })),
             "n.ipynb"
         );
+        let both = json!({ "file_path": "a.rs", "notebook_path": "/etc/n.ipynb" });
+        assert_eq!(summary_for("NotebookEdit", &both), "/etc/n.ipynb");
+        assert_eq!(summary_for("Write", &both), "a.rs");
         assert_eq!(summary_for("Bash", &json!({})), "Bash");
         assert_eq!(summary_for("WebFetch", &json!({ "url": "u" })), "WebFetch");
     }
@@ -520,7 +606,11 @@ mod tests {
     fn details_are_cut_and_other_tools_have_none() {
         let long = "é".repeat(3000);
         let shown = detail_for("Write", &json!({ "content": long })).unwrap();
-        assert_eq!(shown.chars().count(), DETAIL_MAX_CHARS + 1);
+        assert_eq!(shown.chars().count(), DETAIL_MAX_CHARS);
+        assert!(shown.ends_with('…'));
+        let longer = "x".repeat(5000);
+        let shown = detail_for("Write", &json!({ "content": longer })).unwrap();
+        assert_eq!(shown.chars().count(), DETAIL_MAX_CHARS);
         assert!(shown.ends_with('…'));
         let exact = "x".repeat(DETAIL_MAX_CHARS);
         assert_eq!(
