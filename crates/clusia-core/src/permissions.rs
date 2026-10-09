@@ -9,64 +9,61 @@ use serde_json::Value;
 /// The tools that write a file; their rule is the bare tool name.
 const FILE_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
-/// Programs whose first word never makes a rule: they run other programs or code, delete, or
-/// reach the network, so a rule on the program alone would cover far more than one command.
-/// Matched with a trailing version removed (`python3.12` and `node22` are `python` and `node`).
-const NO_RULE: [&str; 54] = [
-    "sudo",
-    "doas",
-    "su",
-    "env",
-    "cd",
-    "sh",
-    "bash",
-    "zsh",
-    "fish",
-    "dash",
-    "eval",
-    "exec",
-    "xargs",
-    "nohup",
-    "time",
-    "command",
-    "rm",
-    "curl",
-    "wget",
-    "ssh",
-    "nc",
-    "dd",
-    "python",
-    "python3",
-    "node",
-    "perl",
-    "find",
-    "npx",
-    "bunx",
-    "uvx",
-    "timeout",
-    "nice",
-    "watch",
-    "osascript",
-    "open",
-    "ruby",
-    "deno",
-    "bun",
-    "ksh",
-    "csh",
-    "tcsh",
-    "pwsh",
-    "nu",
-    "busybox",
-    "xcrun",
-    "caffeinate",
-    "stdbuf",
-    "setsid",
-    "script",
-    "php",
-    "lua",
-    "awk",
-    "gawk",
-    "pypy",
+/// The commands "Allow for this review" can grant: a program and the subcommands it may be
+/// allowed with. This allow-list is the gate: any program not in it gets only Allow once, so a
+/// new wrapper, interpreter or runner never slips through the way it would past a deny-list.
+/// An empty list means the program alone (`make`), with any arguments; otherwise the rule is
+/// the program and one listed subcommand (`cargo test`). To allow another command, add it
+/// here only if no subcommand or argument of it runs other code, deletes outside the
+/// worktree, or reaches the network (so `cargo run`, `npm exec` and `git push` stay out).
+const RULE_COMMANDS: &[(&str, &[&str])] = &[
+    (
+        "cargo",
+        &[
+            "test", "build", "check", "clippy", "fmt", "nextest", "bench", "doc", "tree",
+        ],
+    ),
+    ("npm", &["test", "ci", "run"]),
+    ("pnpm", &["test", "install", "run"]),
+    ("yarn", &["test", "install", "run"]),
+    ("bun", &["test", "install", "run"]),
+    ("make", &[]),
+    ("just", &[]),
+    ("go", &["test", "build", "vet"]),
+    ("mvn", &["test", "verify", "package", "compile"]),
+    ("pytest", &[]),
+    ("jest", &[]),
+    ("vitest", &[]),
+    ("mocha", &[]),
+    ("rspec", &[]),
+    ("phpunit", &[]),
+    ("tox", &[]),
+    ("nox", &[]),
+    ("swift", &["test", "build"]),
+    ("xcodebuild", &["test", "build"]),
+    ("dotnet", &["test", "build"]),
+    ("mix", &["test", "compile"]),
+    ("rake", &[]),
+    ("tsc", &[]),
+    ("eslint", &[]),
+    ("prettier", &[]),
+    ("ruff", &["check", "format"]),
+    ("black", &[]),
+    ("mypy", &[]),
+    ("cmake", &[]),
+    ("ninja", &[]),
+    ("bazel", &["test", "build"]),
+    (
+        "git",
+        &[
+            "status", "diff", "log", "show", "branch", "add", "stash", "checkout", "switch",
+            "restore", "worktree", "fetch",
+        ],
+    ),
+    ("mkdir", &[]),
+    ("touch", &[]),
+    ("cp", &[]),
+    ("mv", &[]),
 ];
 
 /// Characters that chain, redirect or substitute: a command holding one is more than one
@@ -145,28 +142,13 @@ pub fn detail_for(tool: &str, input: &Value) -> Option<String> {
 
 /// The prefix "Allow for this review" would grant, or `None` when only Allow once is safe.
 ///
-/// Bash: the program alone (`make`) or with a plain-word subcommand (`cargo test`). A second
-/// word that is a flag or a path (`cargo -p x test`, `git ./x`) gives no prefix: a rule on the
-/// program alone would cover every command it runs. File tools: the tool name, only for a
+/// Bash: only a command in [`RULE_COMMANDS`], as the program alone (`make`) or the program
+/// and its subcommand (`cargo test`); anything else, including a flag or a path where the
+/// subcommand goes (`cargo -p x test`), gives no prefix. File tools: the tool name, only for a
 /// path inside `worktree`.
 pub fn prefix_for(tool: &str, input: &Value, worktree: &Path) -> Option<String> {
     if tool == "Bash" {
-        let words = simple_words(input.get("command")?.as_str()?)?;
-        let program = *words.first()?;
-        // Lower case only: macOS finds `SUDO` and `Bash` as `sudo` and `bash`.
-        let plain_program = program.starts_with(|c: char| c.is_ascii_lowercase())
-            && program
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.+-".contains(c));
-        let unversioned = program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-        if !plain_program || NO_RULE.contains(&unversioned) {
-            return None;
-        }
-        return match words.get(1) {
-            None => Some(program.to_string()),
-            Some(sub) if is_subcommand(sub) => Some(format!("{program} {sub}")),
-            Some(_) => None,
-        };
+        return allowed_prefix(&simple_words(input.get("command")?.as_str()?)?);
     }
     if FILE_TOOLS.contains(&tool)
         && file_path(tool, input).is_some_and(|p| inside_worktree(&p, worktree))
@@ -180,8 +162,9 @@ pub fn prefix_for(tool: &str, input: &Value, worktree: &Path) -> Option<String> 
 ///
 /// A Bash rule covers a command that starts with the rule's words, word for word
 /// (`cargo test` covers `cargo test -p x`, not `cargo testx`), and only a single simple
-/// command. A file-tool rule covers its tool for paths inside the worktree. The bare `Bash`
-/// is never a rule.
+/// command. A Bash rule that [`prefix_for`] could not have made (`Bash(rm:*)` in an edited
+/// state file) covers nothing. A file-tool rule covers its tool for paths inside the
+/// worktree. The bare `Bash` is never a rule.
 pub fn covers(rules: &BTreeSet<String>, tool: &str, input: &Value, worktree: &Path) -> bool {
     if tool == "Bash" {
         let Some(words) = input
@@ -199,7 +182,8 @@ pub fn covers(rules: &BTreeSet<String>, tool: &str, input: &Value, worktree: &Pa
                 return false;
             };
             let wanted: Vec<&str> = prefix.split(' ').filter(|w| !w.is_empty()).collect();
-            !wanted.is_empty() && words.starts_with(&wanted)
+            allowed_prefix(&wanted).is_some_and(|p| p == wanted.join(" "))
+                && words.starts_with(&wanted)
         });
     }
     FILE_TOOLS.contains(&tool)
@@ -221,11 +205,18 @@ fn simple_words(command: &str) -> Option<Vec<&str>> {
     (!words.is_empty()).then_some(words)
 }
 
-fn is_subcommand(word: &str) -> bool {
-    word.starts_with(|c: char| c.is_ascii_lowercase())
-        && word
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+/// The rule prefix [`RULE_COMMANDS`] grants for a command's words, matched exactly (so
+/// `Cargo`, `/usr/bin/cargo` and `cargo Test` match nothing).
+fn allowed_prefix(words: &[&str]) -> Option<String> {
+    let program = *words.first()?;
+    let (_, subcommands) = RULE_COMMANDS.iter().find(|(p, _)| *p == program)?;
+    if subcommands.is_empty() {
+        return Some(program.to_string());
+    }
+    let sub = *words.get(1)?;
+    subcommands
+        .contains(&sub)
+        .then(|| format!("{program} {sub}"))
 }
 
 /// The input field that names the file a file tool writes.
@@ -313,7 +304,113 @@ mod tests {
         assert_eq!(prefix("git status"), Some("git status".into()));
         assert_eq!(prefix("make"), Some("make".into()));
         assert_eq!(prefix("  cargo   fmt  "), Some("cargo fmt".into()));
-        assert_eq!(prefix("make clean"), Some("make clean".into()));
+        assert_eq!(
+            prefix("make clean"),
+            Some("make".into()),
+            "make takes any args"
+        );
+        assert_eq!(prefix("make -j4"), Some("make".into()));
+        assert_eq!(prefix("touch a.txt"), Some("touch".into()));
+        assert_eq!(prefix("mkdir -p out"), Some("mkdir".into()));
+        assert_eq!(prefix("pytest -k x"), Some("pytest".into()));
+        assert_eq!(prefix("ruff check ."), Some("ruff check".into()));
+        assert_eq!(prefix("go test ./..."), Some("go test".into()));
+        assert_eq!(prefix("bun run x"), Some("bun run".into()));
+    }
+
+    #[test]
+    fn only_known_build_and_test_commands_get_a_prefix() {
+        for command in [
+            "builtin",
+            "builtin eval x",
+            "trap 'rm -rf x' EXIT",
+            "trap",
+            "source",
+            "source script",
+            "coproc rm x",
+            "arch",
+            "arch -arm64 rm x",
+            "sandbox-exec -p x echo",
+            "launchctl list",
+            "shortcuts run x",
+            "genv",
+            "gnice ls",
+            "gtimeout 5 ls",
+            "gstdbuf -o0 ls",
+            "gxargs rm",
+            "gfind . -delete",
+            "python3.13t",
+            "python3-intel64",
+            "python3.12-intel64",
+            "pythonw",
+            "pythonw3",
+            "rubyw",
+            "nodejs",
+            "node-22",
+            "tclsh",
+            "tclsh8.5",
+            "expect",
+            "swift",
+            "swift run",
+            "npm exec cowsay",
+            "npm install x",
+            "pnpm dlx cowsay",
+            "yarn dlx cowsay",
+            "uv run x.py",
+            "pip install x",
+            "pip3.12 install x",
+            "scp a b:",
+            "sftp host",
+            "rsync -a a b:",
+            "socat - tcp:x",
+            "ncat x 1",
+            "telnet x",
+            "unlink x",
+            "rmdir x",
+            "shred x",
+            "cargo run",
+            "cargo install x",
+            "git push",
+            "git config core.pager x",
+            "git -c x=y status",
+            "bundle exec rake",
+            "gradle test",
+            "ls",
+            "echo hi",
+        ] {
+            assert_eq!(prefix(command), None, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn rules_outside_the_known_commands_cover_nothing() {
+        for (rule, command) in [
+            ("Bash(rm:*)", "rm -rf x"),
+            ("Bash(builtin:*)", "builtin eval x"),
+            ("Bash(arch:*)", "arch -arm64 rm x"),
+            ("Bash(cargo:*)", "cargo run"),
+            ("Bash(cargo run:*)", "cargo run"),
+            ("Bash(git:*)", "git push"),
+            ("Bash(make clean:*)", "make clean"),
+            ("Bash(npm exec:*)", "npm exec cowsay"),
+        ] {
+            assert!(
+                !covers(&rules(&[rule]), "Bash", &bash(command), &wt()),
+                "{rule} covered {command:?}"
+            );
+        }
+        assert!(covers(
+            &rules(&["Bash(git status:*)"]),
+            "Bash",
+            &bash("git status -s"),
+            &wt()
+        ));
+        assert!(covers(
+            &rules(&["Bash(touch:*)"]),
+            "Bash",
+            &bash("touch a"),
+            &wt()
+        ));
     }
 
     #[test]
@@ -325,7 +422,6 @@ mod tests {
             "git -C other status",
             "cargo Test",
             "pnpm 9x",
-            "make -j4",
         ] {
             assert_eq!(prefix(command), None, "{command:?}");
         }
@@ -362,7 +458,6 @@ mod tests {
             "open .",
             "ruby x.rb",
             "deno run x.ts",
-            "bun run x",
             "SUDO make",
             "Bash",
             "BASH -c x",
