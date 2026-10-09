@@ -5,7 +5,9 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use clusia_core::PrRef;
-use clusia_protocol::{AgentErrorKind, AgentLogEntry, SessionStateKind, Suggestion};
+use clusia_protocol::{
+    AgentErrorKind, AgentLogEntry, PermissionOutcome, SessionStateKind, Suggestion,
+};
 
 use crate::bridge::AgentTell;
 
@@ -44,6 +46,12 @@ pub enum ChatLine {
         tool: String,
         detail: String,
     },
+    /// A permission request that ended: what was asked and how it ended.
+    Permission {
+        tool: String,
+        summary: String,
+        outcome: PermissionOutcome,
+    },
     Error(String),
     Suggestion {
         suggestion: Suggestion,
@@ -70,6 +78,8 @@ pub struct ChatModel {
     /// A question to put in the input (from "Ask the agent about this line"); the panel
     /// does it on the next frame.
     pub prefill: Option<String>,
+    /// The rules granted for this review, as the daemon told them (`Bash(cargo test:*)`, `Edit`).
+    pub rules: Vec<String>,
     /// The turn whose answer the last `Text` line is still receiving.
     streaming: Option<u64>,
     /// The turn that was still running when the log was read. The daemon logs an answer's
@@ -96,6 +106,7 @@ impl Default for ChatModel {
             resumed: false,
             log_asked: false,
             prefill: None,
+            rules: Vec::new(),
             streaming: None,
             unfinished: None,
             asked_again: None,
@@ -286,6 +297,16 @@ impl ChatModel {
         false
     }
 
+    /// A permission request of this review ended. The log has the same line, so it is the log's.
+    fn permission(&mut self, tool: &str, summary: &str, outcome: PermissionOutcome) {
+        self.spoke();
+        self.push(ChatLine::Permission {
+            tool: tool.to_string(),
+            summary: summary.to_string(),
+            outcome,
+        });
+    }
+
     /// `turn` ended: true when it is the turn the last replay caught running.
     fn ended(&mut self, turn: u64) -> bool {
         if self.unfinished == Some(turn) {
@@ -331,9 +352,17 @@ impl ChatModel {
                 AgentLogEntry::Error { kind, message, .. } => {
                     lines.push(ChatLine::Error(error_text(*kind, message)));
                 }
-                AgentLogEntry::Done { .. }
-                | AgentLogEntry::Text { .. }
-                | AgentLogEntry::Permission { .. } => {}
+                AgentLogEntry::Permission {
+                    tool,
+                    summary,
+                    outcome,
+                    ..
+                } => lines.push(ChatLine::Permission {
+                    tool: tool.clone(),
+                    summary: summary.clone(),
+                    outcome: *outcome,
+                }),
+                AgentLogEntry::Done { .. } | AgentLogEntry::Text { .. } => {}
             }
         }
         let unfinished = match entries.last() {
@@ -448,6 +477,26 @@ impl Chats {
     pub fn replay(&mut self, pr: &PrRef, entries: &[AgentLogEntry]) {
         if let Some(chat) = self.0.get_mut(pr) {
             chat.replay(entries);
+        }
+    }
+
+    /// A permission request of `pr` ended; a review without a chat ignores it (its log has it).
+    pub fn permission(
+        &mut self,
+        pr: &PrRef,
+        tool: &str,
+        summary: &str,
+        outcome: PermissionOutcome,
+    ) {
+        if let Some(chat) = self.0.get_mut(pr) {
+            chat.permission(tool, summary, outcome);
+        }
+    }
+
+    /// The rules the daemon says `pr` has granted.
+    pub fn set_rules(&mut self, pr: &PrRef, rules: Vec<String>) {
+        if let Some(chat) = self.0.get_mut(pr) {
+            chat.rules = rules;
         }
     }
 }
@@ -986,5 +1035,91 @@ mod tests {
             pr: pr(),
             state: SessionStateKind::None,
         }));
+    }
+
+    #[test]
+    fn the_log_replays_permission_lines_in_order() {
+        use clusia_protocol::PermissionOutcome;
+        let mut chats = chats();
+        chats.replay(
+            &pr(),
+            &[
+                AgentLogEntry::User {
+                    at: 1,
+                    turn: 1,
+                    text: "Run the tests".into(),
+                },
+                AgentLogEntry::Permission {
+                    at: 2,
+                    turn: 1,
+                    tool: "Bash".into(),
+                    summary: "cargo test".into(),
+                    outcome: PermissionOutcome::AllowedForReview,
+                },
+                AgentLogEntry::Done {
+                    at: 3,
+                    turn: 1,
+                    duration_ms: 10,
+                },
+            ],
+        );
+        assert_eq!(
+            chats.0[&pr()].lines,
+            [
+                ChatLine::Me("Run the tests".into()),
+                ChatLine::Permission {
+                    tool: "Bash".into(),
+                    summary: "cargo test".into(),
+                    outcome: PermissionOutcome::AllowedForReview,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ends_on_a_permission_line_is_still_running_for_the_replay() {
+        use clusia_protocol::PermissionOutcome;
+        let mut chats = chats();
+        chats.replay(
+            &pr(),
+            &[AgentLogEntry::Permission {
+                at: 2,
+                turn: 4,
+                tool: "Bash".into(),
+                summary: "cargo test".into(),
+                outcome: PermissionOutcome::Allowed,
+            }],
+        );
+        // Its `Done` arrives later: the log is read again once.
+        assert!(chats.apply(&AgentTell::Done {
+            pr: pr(),
+            turn: 4,
+            duration_ms: 5
+        }));
+    }
+
+    #[test]
+    fn live_permission_lines_and_rules_belong_to_an_open_chat() {
+        use clusia_protocol::PermissionOutcome;
+        let mut chats = Chats::default();
+        chats.permission(&pr(), "Bash", "cargo test", PermissionOutcome::Denied);
+        chats.set_rules(&pr(), vec!["Bash(cargo test:*)".into()]);
+        assert!(
+            chats.0.is_empty(),
+            "no chat, nothing kept: its log has them"
+        );
+        chats.entry(&pr());
+        chats.permission(&pr(), "Bash", "cargo test", PermissionOutcome::Denied);
+        chats.set_rules(&pr(), vec!["Bash(cargo test:*)".into()]);
+        let chat = &chats.0[&pr()];
+        assert_eq!(
+            chat.lines,
+            [ChatLine::Permission {
+                tool: "Bash".into(),
+                summary: "cargo test".into(),
+                outcome: PermissionOutcome::Denied,
+            }]
+        );
+        assert_eq!(chat.rules, ["Bash(cargo test:*)"]);
     }
 }

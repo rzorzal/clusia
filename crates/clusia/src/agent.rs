@@ -3,6 +3,8 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
+use clusia_core::printable::is_invisible;
+pub(crate) use clusia_core::printable::printable;
 use clusia_core::{Paths, PrRef};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, Client, ClientError, Command as Request, ErrorCode, Event,
@@ -64,33 +66,6 @@ impl Waiting {
             printable(&self.summary)
         )
     }
-}
-
-/// Characters that draw nothing or reorder what is drawn: Unicode categories Cf, Zl and Zp
-/// (bidi controls, zero-width characters, the BOM, tags, line and paragraph separators).
-/// `char` has no category lookup, so the Cf ranges are listed.
-fn is_invisible(c: char) -> bool {
-    matches!(c,
-        '\u{AD}' | '\u{600}'..='\u{605}' | '\u{61C}' | '\u{6DD}' | '\u{70F}'
-        | '\u{890}'..='\u{891}' | '\u{8E2}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
-        | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}'
-        | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}'
-        | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E007F}')
-}
-
-/// `text` as one safe line: a control character (a carriage return, an escape sequence) or an
-/// invisible one (a bidi override, a zero-width character) would let a command rewrite or
-/// disguise what the reviewer reads, so each is shown as an escape.
-pub(crate) fn printable(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_control() || is_invisible(c) {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
 }
 
 /// The agent's streamed text without what could repaint the terminal or disguise it: it keeps

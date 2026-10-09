@@ -15,6 +15,7 @@ pub mod paths;
 pub mod permissions;
 pub mod pr;
 pub mod prdata;
+pub mod printable;
 pub mod publish;
 pub mod review;
 pub mod time;

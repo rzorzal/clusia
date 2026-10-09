@@ -21,8 +21,9 @@ use clusia_core::{
 };
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, AnchorInput, Client, ClientError, Command, ErrorCode, Event,
-    GifPage, LoadStep, LoadStepKind, MediaFile, NewsItem, ProbeResult, PublishResult, Reply,
-    ReviewView, Secret, SessionStateKind, StepStatus, Suggestion, WindowTarget, topics,
+    GifPage, LoadStep, LoadStepKind, MediaFile, NewsItem, PermissionAnswerKind, PermissionOutcome,
+    ProbeResult, PublishResult, Reply, ReviewView, Secret, SessionStateKind, StepStatus,
+    Suggestion, WindowTarget, topics,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -31,7 +32,7 @@ use crate::app::Mode;
 use crate::clock::Clock;
 use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
-use crate::screens::review::agent::Chats;
+use crate::screens::review::agent::{Chats, PermissionQueue};
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::ui::media::MediaCache;
 
@@ -142,6 +143,16 @@ pub enum Ask {
     },
     /// Tests the harness on a worker connection: `Tell::Probe`.
     Probe,
+    /// The reviewer's answer to a permission request (first answer wins; a late one is ignored).
+    PermissionAnswer {
+        id: String,
+        answer: PermissionAnswerKind,
+    },
+    /// Takes a rule granted for this review back.
+    RevokeRule {
+        pr: PrRef,
+        rule: String,
+    },
 }
 
 /// What the agent did, for the review's chat. Built from the daemon's agent events, or by the
@@ -258,6 +269,79 @@ impl AgentTell {
                 message,
             },
             Event::SessionState { pr, state } => AgentTell::State { pr, state },
+            _ => return None,
+        })
+    }
+}
+
+/// A permission request as the daemon published it (also what `GetPermissions` lists).
+pub use clusia_protocol::PermissionRequest;
+
+/// What the daemon says about permissions, for the modal, the chat and the rules list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PermissionTell {
+    Requested(PermissionRequest),
+    Resolved {
+        id: String,
+        pr: PrRef,
+        /// What was asked, so the chat can say it even for a request this window never queued.
+        tool: String,
+        summary: String,
+        outcome: PermissionOutcome,
+    },
+    /// The rules granted for the review, in full.
+    Rules {
+        pr: PrRef,
+        rules: Vec<String>,
+    },
+    /// The requests still waiting for `pr`, as `GetPermissions` lists them.
+    Pending {
+        pr: PrRef,
+        requests: Vec<PermissionRequest>,
+    },
+}
+
+impl PermissionTell {
+    /// The tell for a permission event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<PermissionTell> {
+        Some(match event.clone() {
+            Event::PermissionRequested {
+                id,
+                pr,
+                turn,
+                tool,
+                summary,
+                reason,
+                prefix,
+                sandbox,
+                deadline,
+                detail,
+            } => PermissionTell::Requested(PermissionRequest {
+                id,
+                pr,
+                turn,
+                tool,
+                summary,
+                reason,
+                prefix,
+                sandbox,
+                deadline,
+                detail,
+            }),
+            Event::PermissionResolved {
+                id,
+                pr,
+                tool,
+                summary,
+                outcome,
+            } => PermissionTell::Resolved {
+                id,
+                pr,
+                tool,
+                summary,
+                outcome,
+            },
+            Event::RulesChanged { pr, rules } => PermissionTell::Rules { pr, rules },
             _ => return None,
         })
     }
@@ -395,6 +479,8 @@ pub enum Tell {
     Left(PrRef),
     /// What the agent of a review did.
     Agent(AgentTell),
+    /// A permission request, its end, or the review's rules.
+    Permission(PermissionTell),
     /// The review's chat log, in answer to `Ask::AgentLog`.
     AgentLog {
         pr: PrRef,
@@ -683,6 +769,8 @@ async fn follow(
         other => {
             if let Some(tell) = AgentTell::from_event(other) {
                 teller.send(Tell::Agent(tell));
+            } else if let Some(tell) = PermissionTell::from_event(other) {
+                teller.send(Tell::Permission(tell));
             }
         }
     }
@@ -1021,6 +1109,25 @@ async fn answer(
         }
         Ask::AgentLog { pr } => fetch_log(client, snap, open, teller, pr).await?,
         Ask::Probe => spawn_worker(paths, teller, open, Ask::Probe),
+        Ask::PermissionAnswer { id, answer } => {
+            match client
+                .request(Command::PermissionAnswer { id, answer })
+                .await
+            {
+                Ok(_) => {}
+                // Another window or the deadline answered first: the modal closes on the
+                // `PermissionResolved` that is already on its way.
+                Err(ClientError::Server(e)) if e.code == ErrorCode::NotFound => {}
+                Err(ClientError::Server(e)) => teller.send(Tell::Notice {
+                    text: e.message,
+                    warning: true,
+                }),
+                Err(e) => return Err(lost(e)),
+            }
+        }
+        Ask::RevokeRule { pr, rule } => {
+            notify(client, teller, Command::RevokeRule { pr, rule }, "").await?;
+        }
     }
     Ok(())
 }
@@ -1050,6 +1157,10 @@ async fn draft_write(
 /// cut, and the chat asks the log again when that turn ends. Session states are not logged, so
 /// they are told after the log (the daemon tells the state of `pr` whenever its log is read).
 /// Every other buffered event, other reviews' agent events included, is handled as usual.
+///
+/// The review's rules and the permission requests still waiting are read next. Each of those
+/// replies is told after the events that came before it, so an older list never replaces what
+/// a later `RulesChanged` or `PermissionResolved` said.
 async fn fetch_log(
     client: &mut Client,
     snap: &mut Snapshot,
@@ -1071,10 +1182,43 @@ async fn fetch_log(
         fetch(client, snap, todo).await?;
     }
     if let Some(Reply::AgentLog(entries)) = reply {
-        teller.send(Tell::AgentLog { pr, entries });
+        teller.send(Tell::AgentLog {
+            pr: pr.clone(),
+            entries,
+        });
     }
     for state in states {
         teller.send(Tell::Agent(state));
+    }
+    let rules = request(client, Command::GetRules { pr: pr.clone() }).await?;
+    handle_buffered(client, snap, open, teller).await?;
+    if let Some(Reply::Rules(rules)) = rules {
+        teller.send(Tell::Permission(PermissionTell::Rules {
+            pr: pr.clone(),
+            rules,
+        }));
+    }
+    let waiting = request(client, Command::GetPermissions { pr: pr.clone() }).await?;
+    handle_buffered(client, snap, open, teller).await?;
+    // A window that was not listening (the notification started it, or it reconnected) learns
+    // what is still waiting here; this is also how its modal opens.
+    if let Some(Reply::Permissions(requests)) = waiting {
+        teller.send(Tell::Permission(PermissionTell::Pending { pr, requests }));
+    }
+    Ok(())
+}
+
+/// Handles the events that arrived while a reply was awaited, as the event loop would.
+async fn handle_buffered(
+    client: &mut Client,
+    snap: &mut Snapshot,
+    open: &OpenSet,
+    teller: &Teller,
+) -> Result<(), String> {
+    for (_, event) in client.take_events() {
+        follow(client, open, &event, teller).await?;
+        let todo = take(snap, event, teller);
+        fetch(client, snap, todo).await?;
     }
     Ok(())
 }
@@ -1498,6 +1642,8 @@ pub(crate) fn pump(
     mut media: ResMut<MediaCache>,
     mut gifs: MessageWriter<GifsArrived>,
     mut chats: ResMut<Chats>,
+    mut permissions: ResMut<PermissionQueue>,
+    clock: Res<Clock>,
     time: Res<Time>,
 ) {
     let Some(inbox) = inbox else { return };
@@ -1562,6 +1708,7 @@ pub(crate) fn pump(
                 }
             }
             Tell::AgentLog { pr, entries } => chats.replay(&pr, &entries),
+            Tell::Permission(tell) => permissions.apply(tell, &mut chats, clock.now_ms()),
             Tell::Probe(result) => model.probe = ProbeState::Done(result),
             _ => {} // the other review tells were applied above
         }
@@ -2288,6 +2435,71 @@ mod tests {
     }
 
     #[test]
+    fn permission_events_become_permission_tells() {
+        use clusia_protocol::PermissionOutcome;
+        let pr = fixture::demo_pr();
+        let requested = Event::PermissionRequested {
+            id: "perm-1".into(),
+            pr: pr.clone(),
+            turn: 3,
+            tool: "Bash".into(),
+            summary: "cargo test -p clusia-auth".into(),
+            reason: Some("To check the race".into()),
+            prefix: Some("cargo test".into()),
+            sandbox: true,
+            deadline: 1_790_000_112_000,
+            detail: Some("old\n→\nnew".into()),
+        };
+        assert_eq!(
+            PermissionTell::from_event(&requested),
+            Some(PermissionTell::Requested(PermissionRequest {
+                id: "perm-1".into(),
+                pr: pr.clone(),
+                turn: 3,
+                tool: "Bash".into(),
+                summary: "cargo test -p clusia-auth".into(),
+                reason: Some("To check the race".into()),
+                prefix: Some("cargo test".into()),
+                sandbox: true,
+                deadline: 1_790_000_112_000,
+                detail: Some("old\n→\nnew".into()),
+            }))
+        );
+        assert_eq!(
+            PermissionTell::from_event(&Event::PermissionResolved {
+                id: "perm-1".into(),
+                pr: pr.clone(),
+                tool: "Bash".into(),
+                summary: "cargo test -p clusia-auth".into(),
+                outcome: PermissionOutcome::Expired,
+            }),
+            Some(PermissionTell::Resolved {
+                id: "perm-1".into(),
+                pr: pr.clone(),
+                tool: "Bash".into(),
+                summary: "cargo test -p clusia-auth".into(),
+                outcome: PermissionOutcome::Expired,
+            })
+        );
+        assert_eq!(
+            PermissionTell::from_event(&Event::RulesChanged {
+                pr: pr.clone(),
+                rules: vec!["Bash(cargo test:*)".into()],
+            }),
+            Some(PermissionTell::Rules {
+                pr,
+                rules: vec!["Bash(cargo test:*)".into()],
+            })
+        );
+        assert_eq!(PermissionTell::from_event(&Event::Stopping), None);
+        assert_eq!(
+            AgentTell::from_event(&requested),
+            None,
+            "permission events are not chat events"
+        );
+    }
+
+    #[test]
     fn demo_mode_writes_the_forced_theme_into_the_snapshot() {
         use clusia_core::config::Theme;
         for (forced, want) in [
@@ -2305,6 +2517,7 @@ mod tests {
                 .init_resource::<MediaCache>()
                 .insert_resource(ReviewTabs::default())
                 .init_resource::<Chats>()
+                .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
                     mode: Mode::Demo { theme: forced },
                     paths: Paths::new(home.path()),
