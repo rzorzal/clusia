@@ -1,12 +1,12 @@
 //! `clusia ask`, `clusia agent log` and `clusia agent stop`.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use clusia_core::{Paths, PrRef};
 use clusia_protocol::{
-    AgentErrorKind, AgentLogEntry, ClientError, Command as Request, ErrorCode, Event,
-    PermissionOutcome, Reply, SessionStateKind, Suggestion, topics,
+    AgentErrorKind, AgentLogEntry, Client, ClientError, Command as Request, ErrorCode, Event,
+    PermissionAnswerKind, PermissionOutcome, Reply, SessionStateKind, Suggestion, topics,
 };
 use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
@@ -20,6 +20,62 @@ pub(crate) enum Flow {
     Finished,
 }
 
+/// A permission request the agent waits on, as the terminal shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Waiting {
+    id: String,
+    tool: String,
+    summary: String,
+    /// What `[r]eview` would allow; `None` offers only `[o]nce` and `[d]eny`.
+    prefix: Option<String>,
+    /// An answer is on its way: the daemon's `PermissionResolved` has not come yet.
+    answered: bool,
+}
+
+impl Waiting {
+    /// What the agent wants to do: `run`, `edit`, `write`.
+    fn verb(&self) -> &'static str {
+        match self.tool.as_str() {
+            "Bash" => "run",
+            "Edit" | "MultiEdit" | "NotebookEdit" => "edit",
+            "Write" => "write",
+            _ => "use",
+        }
+    }
+
+    /// The question on a terminal, ending where the answer is typed.
+    fn prompt(&self) -> String {
+        let choices = match &self.prefix {
+            Some(prefix) => format!("[o]nce / [r]eview ({prefix}) / [d]eny? "),
+            None => "[o]nce / [d]eny? ".to_string(),
+        };
+        format!(
+            "Claude Code wants to {}: {}  {choices}",
+            self.verb(),
+            self.summary
+        )
+    }
+
+    /// What is said when nobody can answer here: the window or the notification does.
+    fn elsewhere(&self) -> String {
+        format!(
+            "waiting for an answer in the window: Claude Code wants to {}: {}",
+            self.verb(),
+            self.summary
+        )
+    }
+}
+
+/// What a typed line means for a request. Only a clear yes allows: an empty line, a typo and
+/// `[r]eview` for a request that offers no prefix all deny.
+fn parse_answer(line: &str, has_prefix: bool) -> PermissionAnswerKind {
+    match line.trim().to_lowercase().as_str() {
+        "o" | "once" => PermissionAnswerKind::Once,
+        "r" | "review" if has_prefix => PermissionAnswerKind::Review,
+        _ => PermissionAnswerKind::Deny,
+    }
+}
+
 /// One question's turn: filters the daemon's events down to this review and this turn, prints
 /// them, and remembers the suggestions and the failure for the end.
 pub(crate) struct Turn {
@@ -31,6 +87,12 @@ pub(crate) struct Turn {
     wrote: bool,
     at_line_start: bool,
     said_waiting: bool,
+    /// Whether this terminal answers permission requests (a TTY, and not `--json`).
+    interactive: bool,
+    /// The requests that wait for an answer, oldest first: the first one is being asked.
+    waiting: Vec<Waiting>,
+    /// The review's turn is the one that runs: what it decides at once may be told here.
+    running: bool,
 }
 
 impl Turn {
@@ -44,7 +106,32 @@ impl Turn {
             wrote: false,
             at_line_start: true,
             said_waiting: false,
+            interactive: false,
+            waiting: Vec::new(),
+            running: false,
         }
+    }
+
+    /// Lets this terminal answer permission requests.
+    pub(crate) fn interactive(mut self, yes: bool) -> Self {
+        self.interactive = yes && !self.json;
+        self
+    }
+
+    /// Whether a question is open on the terminal and its answer is still to be typed.
+    pub(crate) fn asking(&self) -> bool {
+        self.interactive && self.waiting.first().is_some_and(|w| !w.answered)
+    }
+
+    /// A line typed at the prompt: the answer it gives to the question that is open, or `None`
+    /// when none is. The request stays until the daemon says it ended.
+    pub(crate) fn answer_line(&mut self, line: &str) -> Option<(String, PermissionAnswerKind)> {
+        if !self.interactive {
+            return None;
+        }
+        let front = self.waiting.first_mut().filter(|w| !w.answered)?;
+        front.answered = true;
+        Some((front.id.clone(), parse_answer(line, front.prefix.is_some())))
     }
 
     pub(crate) fn pr(&self) -> &PrRef {
@@ -77,7 +164,19 @@ impl Turn {
                 "waiting for its turn: another question is still running…"
             )?;
         }
+        if let Event::SessionState {
+            pr,
+            state: SessionStateKind::Running,
+        } = event
+            && *pr == self.pr
+        {
+            self.running = true;
+        }
         let ours = match event {
+            Event::PermissionRequested { pr, turn, .. } => *pr == self.pr && *turn == self.turn,
+            // What a rule or the worktree decides at once has no request of ours to match: it
+            // belongs to this turn once the review's turn is the one that runs.
+            Event::PermissionResolved { pr, .. } => *pr == self.pr && self.running,
             Event::AgentChunk { pr, turn, .. }
             | Event::AgentToolUse { pr, turn, .. }
             | Event::AgentDenied { pr, turn, .. }
@@ -94,6 +193,59 @@ impl Turn {
             out.flush()?;
         }
         match event {
+            Event::PermissionRequested {
+                id,
+                tool,
+                summary,
+                prefix,
+                ..
+            } => {
+                self.running = true;
+                self.waiting.push(Waiting {
+                    id: id.clone(),
+                    tool: tool.clone(),
+                    summary: summary.clone(),
+                    prefix: prefix.clone(),
+                    answered: false,
+                });
+                if !self.json {
+                    if !self.interactive {
+                        let said = self.waiting.last().map(Waiting::elsewhere);
+                        writeln!(err, "{}", said.unwrap_or_default())?;
+                    } else if self.waiting.len() == 1 {
+                        write!(err, "{}", self.waiting[0].prompt())?;
+                        err.flush()?;
+                    }
+                }
+            }
+            Event::PermissionResolved {
+                id,
+                tool,
+                summary,
+                outcome,
+                ..
+            } => {
+                let was_front = self.waiting.first().is_some_and(|w| w.id == *id);
+                self.waiting.retain(|w| w.id != *id);
+                if !self.json {
+                    // The prompt may still wait for a line: end it first.
+                    if self.interactive && was_front {
+                        writeln!(err)?;
+                    }
+                    writeln!(
+                        err,
+                        "{}",
+                        permission_line(tool, summary, *outcome).trim_start()
+                    )?;
+                    if self.interactive
+                        && was_front
+                        && let Some(next) = self.waiting.first()
+                    {
+                        write!(err, "{}", next.prompt())?;
+                        err.flush()?;
+                    }
+                }
+            }
             Event::AgentChunk { text, .. } if !self.json => {
                 out.write_all(text.as_bytes())?;
                 out.flush()?;
@@ -232,6 +384,48 @@ fn detach(pr: &PrRef) -> ! {
     std::process::exit(130);
 }
 
+/// The lines typed on the terminal, read on a thread of their own: a read cannot be given up,
+/// and one left waiting must not keep the process from ending.
+fn stdin_lines() -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    let (send, lines) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        for line in io::stdin().lines() {
+            let Ok(line) = line else { return };
+            if send.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    lines
+}
+
+/// The next typed line; with no terminal, or once it is closed, never.
+async fn typed_line(
+    typed: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+) -> Option<String> {
+    match typed {
+        Some(lines) => lines.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Sends the reviewer's answer. A request that already ended (answered in the window, or out
+/// of time) is not an error: its ending is on its way as an event.
+async fn send_answer(
+    client: &mut Client,
+    id: String,
+    answer: PermissionAnswerKind,
+) -> Result<(), CliError> {
+    match client
+        .request(Request::PermissionAnswer { id, answer })
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(ClientError::Server(e)) if e.code == ErrorCode::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub(crate) async fn ask(
     paths: &Paths,
     home: Option<&Path>,
@@ -278,11 +472,19 @@ pub(crate) async fn ask(
         }
         Err(e) => return Err(e.into()),
     };
-    let mut run = Turn::new(pr, turn, json);
+    let interactive = io::stdin().is_terminal() && !json;
+    let mut run = Turn::new(pr, turn, json).interactive(interactive);
+    let mut typed = interactive.then(stdin_lines);
     let (mut out, mut err) = (io::stdout(), io::stderr());
     loop {
         let (_, event) = tokio::select! {
             event = client.next_event() => event?,
+            Some(line) = typed_line(&mut typed), if run.asking() => {
+                if let Some((id, answer)) = run.answer_line(&line) {
+                    send_answer(&mut client, id, answer).await?;
+                }
+                continue;
+            }
             _ = interrupt.recv() => detach(run.pr()),
         };
         if let Flow::Finished = run.feed(&event, &mut out, &mut err).map_err(io_error)? {
@@ -658,5 +860,299 @@ mod tests {
                 "  error: The turn was interrupted",
             ]
         );
+    }
+
+    fn requested(id: &str, turn: u64, tool: &str, summary: &str, prefix: Option<&str>) -> Event {
+        requested_in(pr(), id, turn, tool, summary, prefix)
+    }
+
+    fn requested_in(
+        pr: PrRef,
+        id: &str,
+        turn: u64,
+        tool: &str,
+        summary: &str,
+        prefix: Option<&str>,
+    ) -> Event {
+        Event::PermissionRequested {
+            id: id.into(),
+            pr,
+            turn,
+            tool: tool.into(),
+            summary: summary.into(),
+            reason: None,
+            prefix: prefix.map(str::to_string),
+            sandbox: true,
+            deadline: 0,
+            detail: None,
+        }
+    }
+
+    fn resolved(id: &str, outcome: PermissionOutcome) -> Event {
+        resolved_for(id, "Bash", "make", outcome)
+    }
+
+    fn resolved_for(id: &str, tool: &str, summary: &str, outcome: PermissionOutcome) -> Event {
+        Event::PermissionResolved {
+            id: id.into(),
+            pr: pr(),
+            tool: tool.into(),
+            summary: summary.into(),
+            outcome,
+        }
+    }
+
+    fn said(bytes: &[u8]) -> String {
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn only_a_clear_yes_allows() {
+        use PermissionAnswerKind::{Deny, Once, Review};
+        for (line, prefix, want) in [
+            ("o", true, Once),
+            ("O\n", true, Once),
+            (" once ", false, Once),
+            ("r", true, Review),
+            ("review", true, Review),
+            ("r", false, Deny),
+            ("d", true, Deny),
+            ("deny", false, Deny),
+            ("", true, Deny),
+            ("yes please", true, Deny),
+            ("oo", true, Deny),
+        ] {
+            assert_eq!(parse_answer(line, prefix), want, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn without_a_terminal_it_says_where_to_answer() {
+        let (mut turn, mut out, mut err) = run(false);
+        let ask = requested(
+            "p1",
+            2,
+            "Bash",
+            "cargo test -p clusia-core",
+            Some("cargo test"),
+        );
+        turn.feed(&ask, &mut out, &mut err).unwrap();
+        assert_eq!(
+            said(&err),
+            "waiting for an answer in the window: Claude Code wants to run: cargo test -p clusia-core\n"
+        );
+        assert!(!turn.asking());
+        assert_eq!(turn.answer_line("o"), None, "nothing to type at");
+        err.clear();
+        turn.feed(
+            &resolved_for(
+                "p1",
+                "Bash",
+                "cargo test -p clusia-core",
+                PermissionOutcome::AllowedForReview,
+            ),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(
+            said(&err),
+            "✓ ran cargo test -p clusia-core (allowed for this review)\n"
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn on_a_terminal_it_asks_and_takes_one_answer() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        let ask = requested(
+            "p1",
+            2,
+            "Bash",
+            "cargo test -p clusia-core",
+            Some("cargo test"),
+        );
+        turn.feed(&ask, &mut out, &mut err).unwrap();
+        assert_eq!(
+            said(&err),
+            "Claude Code wants to run: cargo test -p clusia-core  [o]nce / [r]eview (cargo test) / [d]eny? "
+        );
+        assert!(turn.asking());
+        assert_eq!(
+            turn.answer_line("r"),
+            Some(("p1".into(), PermissionAnswerKind::Review))
+        );
+        assert!(!turn.asking(), "an answer is on its way");
+        assert_eq!(turn.answer_line("d"), None, "the first line is the answer");
+        err.clear();
+        turn.feed(
+            &resolved_for(
+                "p1",
+                "Bash",
+                "cargo test -p clusia-core",
+                PermissionOutcome::AllowedForReview,
+            ),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(
+            said(&err),
+            "\n✓ ran cargo test -p clusia-core (allowed for this review)\n"
+        );
+    }
+
+    #[test]
+    fn a_request_with_no_prefix_offers_two_choices_and_review_denies() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        let ask = requested("p1", 2, "Bash", "cd src && cargo test", None);
+        turn.feed(&ask, &mut out, &mut err).unwrap();
+        assert_eq!(
+            said(&err),
+            "Claude Code wants to run: cd src && cargo test  [o]nce / [d]eny? "
+        );
+        assert_eq!(
+            turn.answer_line("r"),
+            Some(("p1".into(), PermissionAnswerKind::Deny))
+        );
+    }
+
+    #[test]
+    fn edits_and_writes_say_so() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        let edit = requested("p1", 2, "Edit", "src/a.rs", Some("Edit"));
+        turn.feed(&edit, &mut out, &mut err).unwrap();
+        assert!(said(&err).starts_with("Claude Code wants to edit: src/a.rs  "));
+        turn.answer_line("o");
+        let allowed = resolved_for("p1", "Edit", "src/a.rs", PermissionOutcome::Allowed);
+        turn.feed(&allowed, &mut out, &mut err).unwrap();
+        assert!(
+            said(&err).ends_with("✓ edited src/a.rs (you allowed it)\n"),
+            "{}",
+            said(&err)
+        );
+        err.clear();
+        let write = requested("p2", 2, "Write", "notes.md", None);
+        turn.feed(&write, &mut out, &mut err).unwrap();
+        assert!(said(&err).starts_with("Claude Code wants to write: notes.md  "));
+    }
+
+    #[test]
+    fn requests_queue_and_the_next_one_is_asked_when_the_first_ends() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        let first = requested("p1", 2, "Bash", "make", None);
+        let second = requested("p2", 2, "Bash", "make test", None);
+        turn.feed(&first, &mut out, &mut err).unwrap();
+        turn.feed(&second, &mut out, &mut err).unwrap();
+        assert_eq!(
+            said(&err),
+            "Claude Code wants to run: make  [o]nce / [d]eny? ",
+            "only the first is asked"
+        );
+        err.clear();
+        // Answered in the window: the terminal moves on to the next question.
+        let denied = resolved("p1", PermissionOutcome::Denied);
+        turn.feed(&denied, &mut out, &mut err).unwrap();
+        assert_eq!(
+            said(&err),
+            "\n⊘ you denied make\nClaude Code wants to run: make test  [o]nce / [d]eny? "
+        );
+        assert_eq!(
+            turn.answer_line("o"),
+            Some(("p2".into(), PermissionAnswerKind::Once))
+        );
+    }
+
+    #[test]
+    fn the_ending_is_told_for_every_outcome() {
+        for (outcome, line) in [
+            (PermissionOutcome::Allowed, "✓ ran make (you allowed it)"),
+            (PermissionOutcome::Denied, "⊘ you denied make"),
+            (
+                PermissionOutcome::Expired,
+                "⊘ denied make: no answer in time",
+            ),
+            (
+                PermissionOutcome::Cancelled,
+                "⊘ make was not run: the turn ended",
+            ),
+        ] {
+            let (mut turn, mut out, mut err) = run(false);
+            let ask = requested("p1", 2, "Bash", "make", None);
+            turn.feed(&ask, &mut out, &mut err).unwrap();
+            err.clear();
+            turn.feed(&resolved("p1", outcome), &mut out, &mut err)
+                .unwrap();
+            assert_eq!(said(&err), format!("{line}\n"));
+        }
+    }
+
+    #[test]
+    fn requests_of_other_turns_and_reviews_are_not_ours() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.interactive(true);
+        let later_turn = requested("p1", 3, "Bash", "make", None);
+        turn.feed(&later_turn, &mut out, &mut err).unwrap();
+        let other_review = requested_in(
+            "acme/widgets#9".parse().unwrap(),
+            "p2",
+            2,
+            "Bash",
+            "make",
+            None,
+        );
+        turn.feed(&other_review, &mut out, &mut err).unwrap();
+        let unknown = resolved("p1", PermissionOutcome::Denied);
+        turn.feed(&unknown, &mut out, &mut err).unwrap();
+        assert!(err.is_empty(), "{}", said(&err));
+        assert!(!turn.asking());
+    }
+
+    #[test]
+    fn what_is_decided_at_once_is_told_while_this_turn_runs() {
+        let (mut turn, mut out, mut err) = run(false);
+        let covered = resolved_for(
+            "p9",
+            "Bash",
+            "cargo test --workspace",
+            PermissionOutcome::AllowedForReview,
+        );
+        // Another turn of the review may be the one running: nothing is said yet.
+        turn.feed(&covered, &mut out, &mut err).unwrap();
+        assert!(err.is_empty());
+        let running = Event::SessionState {
+            pr: pr(),
+            state: SessionStateKind::Running,
+        };
+        turn.feed(&running, &mut out, &mut err).unwrap();
+        turn.feed(&covered, &mut out, &mut err).unwrap();
+        let outside = resolved_for("p10", "Edit", "/etc/hosts", PermissionOutcome::Denied);
+        turn.feed(&outside, &mut out, &mut err).unwrap();
+        assert_eq!(
+            said(&err),
+            "✓ ran cargo test --workspace (allowed for this review)\n⊘ you denied /etc/hosts\n"
+        );
+    }
+
+    #[test]
+    fn json_mode_prints_the_events_and_never_asks() {
+        let (turn, mut out, mut err) = run(true);
+        let mut turn = turn.interactive(true);
+        let ask = requested("p1", 2, "Bash", "make", None);
+        turn.feed(&ask, &mut out, &mut err).unwrap();
+        let allowed = resolved("p1", PermissionOutcome::Allowed);
+        turn.feed(&allowed, &mut out, &mut err).unwrap();
+        let lines: Vec<serde_json::Value> = said(&out)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["permission_requested"]["summary"], "make");
+        assert!(lines[1].get("permission_resolved").is_some());
+        assert!(err.is_empty() && !turn.asking());
     }
 }
