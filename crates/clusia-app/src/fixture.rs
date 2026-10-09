@@ -938,7 +938,7 @@ mod tests {
         assert!(second.iter().any(
             |e| matches!(e, AgentLogEntry::Suggestion { suggestion: s, .. } if *s == suggestion)
         ));
-        assert_eq!(demo_suggestions(), [suggestion.clone()]);
+        assert_eq!(demo_suggestions(), std::slice::from_ref(&suggestion));
         assert_eq!(suggestion.file, "src/auth/refresh.rs");
         assert_eq!(suggestion.line, Some(44));
         assert!(suggestion.id.starts_with("sug-") && suggestion.id.len() == 16);

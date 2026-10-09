@@ -121,12 +121,42 @@ pub(crate) fn notes_path(shared: &Shared, pr: &PrRef) -> PathBuf {
         .join("review.md")
 }
 
+/// Writes the notes without following a symlink: the worktree is the pull request's, so a
+/// tracked `.clusia` (or a file in it) can point anywhere the reviewer can write, such as a
+/// slash-command folder. A `.clusia` that is not a real folder is refused, and the notes are not
+/// written for that review.
 fn write_notes(path: &Path, text: &str) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("the notes have no folder"))?;
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(io::Error::other(format!(
+                "{} is not a folder",
+                dir.display()
+            )));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(dir)?,
+        Err(e) => return Err(e),
     }
     let temporary = path.with_extension("md.tmp");
-    fs::write(&temporary, text)?;
+    // Removing a symlink removes the link, never its target.
+    match fs::remove_file(&temporary) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)?;
+    file.write_all(text.as_bytes())?;
+    drop(file);
+    // A rename replaces a symlink at `path` itself instead of writing through it.
     fs::rename(&temporary, path)
 }
 
@@ -346,6 +376,58 @@ mod tests {
             end_line: end,
             body: "Why?".into(),
         }
+    }
+
+    #[test]
+    fn the_notes_never_follow_a_symlinked_clusia_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().join("worktree");
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, worktree.join(".clusia")).unwrap();
+        let path = worktree.join(".clusia").join("review.md");
+        assert!(write_notes(&path, "from the pull request").is_err());
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_notes_are_skipped_when_clusia_is_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join(".clusia"), "tracked").unwrap();
+        let path = tmp.path().join(".clusia").join("review.md");
+        assert!(write_notes(&path, "notes").is_err());
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(".clusia")).unwrap(),
+            "tracked"
+        );
+    }
+
+    #[test]
+    fn the_notes_never_follow_a_symlinked_file_in_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside.md");
+        fs::write(&outside, "keep").unwrap();
+        let dir = tmp.path().join(".clusia");
+        fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("review.md.tmp")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("review.md")).unwrap();
+        write_notes(&dir.join("review.md"), "notes").unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
+        assert!(
+            !fs::symlink_metadata(dir.join("review.md"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(dir.join("review.md")).unwrap(), "notes");
+    }
+
+    #[test]
+    fn the_notes_folder_is_made_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".clusia").join("review.md");
+        write_notes(&path, "notes").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "notes");
     }
 
     #[test]

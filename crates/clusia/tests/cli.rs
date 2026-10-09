@@ -837,7 +837,7 @@ mod review_flow {
     #[test]
     fn ctrl_c_on_ask_only_detaches_and_says_how_to_stop() {
         let w = AgentWorld::new(Script::one(Turn::hanging()));
-        let mut asking = w.spawn(&["ask", "acme/widgets#7", "wait for me"]);
+        let asking = w.spawn(&["ask", "acme/widgets#7", "wait for me"]);
         let start = std::time::Instant::now();
         while FakeClaude::calls(&w.fake_dir()).is_empty() {
             assert!(
