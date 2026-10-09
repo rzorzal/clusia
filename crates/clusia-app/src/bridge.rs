@@ -1043,8 +1043,10 @@ async fn draft_write(
 }
 
 /// Asks for the chat log of `pr` and tells it. The agent events that arrived while the reply
-/// was awaited were written to the log before it was read, so they are dropped (they would
-/// show twice); every other buffered event is handled as usual.
+/// was awaited are dropped: the log has what they said up to the running answer's last cut,
+/// and the chat asks the log again when that turn ends. Session states are not logged, so
+/// they are told after the log, whose guess at the state they correct. Every other buffered
+/// event is handled as usual.
 async fn fetch_log(
     client: &mut Client,
     snap: &mut Snapshot,
@@ -1053,8 +1055,12 @@ async fn fetch_log(
     pr: PrRef,
 ) -> Result<(), String> {
     let reply = request(client, Command::GetAgentLog { pr: pr.clone() }).await?;
+    let mut states = Vec::new();
     for (_, event) in client.take_events() {
-        if AgentTell::from_event(&event).is_some() {
+        if let Some(tell) = AgentTell::from_event(&event) {
+            if matches!(tell, AgentTell::State { .. }) {
+                states.push(tell);
+            }
             continue;
         }
         follow(client, open, &event, teller).await?;
@@ -1063,6 +1069,9 @@ async fn fetch_log(
     }
     if let Some(Reply::AgentLog(entries)) = reply {
         teller.send(Tell::AgentLog { pr, entries });
+    }
+    for state in states {
+        teller.send(Tell::Agent(state));
     }
     Ok(())
 }
@@ -1531,7 +1540,13 @@ pub(crate) fn pump(
                 until: time.elapsed_secs_f64() + TOAST_SECS,
             }),
             Tell::Media { url, file } => media.arrive(url, file),
-            Tell::Agent(agent) => chats.apply(&agent),
+            Tell::Agent(agent) => {
+                if chats.apply(&agent) {
+                    asks.send(Ask::AgentLog {
+                        pr: agent.pr().clone(),
+                    });
+                }
+            }
             Tell::AgentLog { pr, entries } => chats.replay(&pr, &entries),
             Tell::Probe(result) => model.probe = ProbeState::Done(result),
             _ => {} // the other review tells were applied above

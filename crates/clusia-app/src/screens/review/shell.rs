@@ -1,6 +1,6 @@
 //! The review shell (mockup `Review.png`): the pull request header, the section tabs, the
 //! center `SectionBody` (Diff and Comments fill it; the four sections that arrive later show a
-//! placeholder), the right panel (agent empty state and the draft) and the status bar.
+//! placeholder), the right column (its **Agent** and **Draft** tabs) and the status bar.
 //!
 //! The shell is read-only while the connection is lost or when it shows the cached copy.
 
@@ -24,6 +24,7 @@ use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::agent::{
     AgentRegion, Chats, DEFAULT_WIDTH, PanelColumn, PanelTabs, PanelToggle, on_panel_toggle,
+    resize_edge,
 };
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason, sync_editor_text};
 use crate::snapshot::Snapshot;
@@ -617,6 +618,7 @@ fn shell_frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
                     },
                     AgentRegion::new(pr.clone()),
                 ));
+                resize_edge(column, pr);
             });
         });
         c.spawn((

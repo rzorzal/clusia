@@ -10,5 +10,5 @@ pub use model::{
 };
 pub use panel::{
     AgentPanel, AgentRegion, CHAT_INPUT, ChatInput, PanelColumn, PanelTabs, PanelToggle,
-    harness_ready, on_panel_toggle, send_message,
+    harness_ready, on_panel_toggle, resize_edge, send_message,
 };

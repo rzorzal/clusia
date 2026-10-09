@@ -224,7 +224,9 @@ fn drop_closed_chats(tabs: Res<ReviewTabs>, mut chats: ResMut<Chats>) {
 }
 
 /// Every review that is ready (not the cached copy) gets a chat, its first tab (Agent when a
-/// harness is set up, Draft otherwise), and its log is asked once.
+/// harness is set up, Draft otherwise), and its log is asked once. The first tab follows the
+/// harness until the user picks a tab or the chat has a line: `claude` found on the PATH
+/// arrives with a scan that can end after the review opened.
 fn open_chats(
     tabs: Res<ReviewTabs>,
     model: Res<Model>,
@@ -237,15 +239,18 @@ fn open_chats(
             continue;
         }
         let chat = chats.entry(pr);
+        if !chat.tab_set && chat.lines.is_empty() {
+            let first = if harness_ready(&model.snapshot) {
+                PanelTab::Agent
+            } else {
+                PanelTab::Draft
+            };
+            if chat.tab != first {
+                chat.tab = first;
+            }
+        }
         if !chat.log_asked {
             chat.log_asked = true;
-            if !chat.tab_set {
-                chat.tab = if harness_ready(&model.snapshot) {
-                    PanelTab::Agent
-                } else {
-                    PanelTab::Draft
-                };
-            }
             asks.send(Ask::AgentLog { pr: pr.clone() });
         }
     }
@@ -378,7 +383,7 @@ fn rebuild_tabs(
     }
 }
 
-/// Gives a new region its header, transcript, footer and resize edge (once).
+/// Gives a new region its header, transcript and footer (once).
 fn fill_region(
     mut commands: Commands,
     fonts: Res<UiFonts>,
@@ -391,18 +396,6 @@ fn fill_region(
         region.filled = true;
         let pr = region.pr.clone();
         commands.entity(entity).with_children(|p| {
-            p.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(0),
-                    top: px(0),
-                    bottom: px(0),
-                    width: px(6),
-                    ..default()
-                },
-                ChatResize(pr.clone()),
-                observe(on_resize),
-            ));
             p.spawn((
                 Node {
                     flex_shrink: 0.0,
@@ -439,6 +432,22 @@ fn fill_region(
             footer(p, &fonts, &pr);
         });
     }
+}
+
+/// The column's left edge, which the user drags to resize it (on either tab).
+pub fn resize_edge(column: &mut ChildSpawnerCommands, pr: &PrRef) {
+    column.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            top: px(0),
+            bottom: px(0),
+            width: px(6),
+            ..default()
+        },
+        ChatResize(pr.clone()),
+        observe(on_resize),
+    ));
 }
 
 fn footer(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef) {
@@ -591,10 +600,16 @@ fn rebuild_transcript(
     fonts: Res<UiFonts>,
     theme: Res<Theme>,
     model: Res<Model>,
-    mut parts: Query<(Entity, &mut Transcript, &mut ScrollPosition)>,
+    mut parts: Query<(
+        Entity,
+        &mut Transcript,
+        &mut ScrollPosition,
+        &ComputedNode,
+        Option<&Children>,
+    )>,
 ) {
     let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
-    for (entity, mut part, mut scroll) in &mut parts {
+    for (entity, mut part, mut scroll, node, children) in &mut parts {
         let Some(chat) = chats.0.get(&part.pr).filter(|c| c.tab == PanelTab::Agent) else {
             continue;
         };
@@ -602,16 +617,51 @@ fn rebuild_transcript(
             continue;
         }
         let pr = part.pr.clone();
-        commands.entity(entity).despawn_related::<Children>();
-        commands.entity(entity).with_children(|t| {
-            for line in &chat.lines {
-                chat_line(t, &fonts, &pr, line, &opts);
+        let follow = part.built.is_none() || at_bottom(node);
+        let last = children.and_then(|c| c.last()).copied();
+        match (last, part.built.as_deref()) {
+            (Some(last), Some(built)) if only_the_answer_grew(built, &chat.lines) => {
+                // Each line is one child, so the answer's line is the last one.
+                commands.entity(last).despawn();
+                commands.entity(entity).with_children(|t| {
+                    if let Some(line) = chat.lines.last() {
+                        chat_line(t, &fonts, &pr, line, &opts);
+                    }
+                });
             }
-        });
-        // The layout clamps this to the end of the content: the newest line stays in view.
-        scroll.y = f32::MAX;
+            _ => {
+                commands.entity(entity).despawn_related::<Children>();
+                commands.entity(entity).with_children(|t| {
+                    for line in &chat.lines {
+                        chat_line(t, &fonts, &pr, line, &opts);
+                    }
+                });
+            }
+        }
+        if follow {
+            // The layout clamps this to the end of the content: the newest line stays in view.
+            scroll.y = f32::MAX;
+        }
         part.built = Some(chat.lines.clone());
     }
+}
+
+/// The lines differ only in the text of the last one, an answer still arriving.
+fn only_the_answer_grew(built: &[ChatLine], lines: &[ChatLine]) -> bool {
+    let n = lines.len();
+    n > 0
+        && built.len() == n
+        && built[..n - 1] == lines[..n - 1]
+        && matches!(
+            (&built[n - 1], &lines[n - 1]),
+            (ChatLine::Text(_), ChatLine::Text(_))
+        )
+}
+
+/// The view shows the end of its content (or has nothing to scroll), as of the last layout.
+fn at_bottom(node: &ComputedNode) -> bool {
+    let end = (node.content_size.y - node.size.y + node.scrollbar_size.y).max(0.0);
+    node.scroll_position.y >= end.floor() - 1.0
 }
 
 fn chat_line(
@@ -639,7 +689,13 @@ fn chat_line(
         }
         ChatLine::Text(raw) => {
             let shown = display_text(raw);
-            if !shown.is_empty() {
+            if shown.is_empty() {
+                // Every line is one child, even one with nothing to show yet.
+                p.spawn(Node {
+                    display: Display::None,
+                    ..default()
+                });
+            } else {
                 markdown(p, fonts, &parse(&shown), opts);
             }
         }
@@ -927,6 +983,7 @@ mod tests {
     use bevy::input::ButtonInput;
     use bevy::input_focus::{FocusCause, InputFocus};
     use bevy::text::EditableText;
+    use bevy::ui::ComputedNode;
     use clusia_protocol::{AgentErrorKind, AgentLogEntry, SessionStateKind, Suggestion};
 
     fn pr() -> PrRef {
@@ -1277,8 +1334,17 @@ mod tests {
         testing::type_into(&mut app, area, "Why a lock?");
         focus(&mut app, area);
         press(&mut app, &[KeyCode::Enter]);
+        app.update();
+        // The headless app has no input plugin to end the press after one frame.
+        press(&mut app, &[]);
         testing::settle(&mut app);
         assert!(testing::recorded(&mut app).is_empty());
+        let refused = app.world().resource::<Chats>().0[&pr()]
+            .lines
+            .iter()
+            .filter(|l| matches!(l, ChatLine::Error(_)))
+            .count();
+        assert_eq!(refused, 1, "one refusal for one Enter");
         assert_eq!(
             app.world()
                 .get::<EditableText>(area)
@@ -1431,5 +1497,161 @@ mod tests {
             .close_review(&pr());
         testing::settle(&mut app);
         assert!(app.world().resource::<Chats>().0.is_empty());
+    }
+
+    #[test]
+    fn a_turn_running_when_the_log_was_read_asks_the_log_again_when_it_ends() {
+        let mut app = open_chat();
+        testing::tell(
+            &mut app,
+            Tell::AgentLog {
+                pr: pr(),
+                entries: vec![
+                    AgentLogEntry::User {
+                        at: 1,
+                        turn: 1,
+                        text: "Is the new lock needed at all?".into(),
+                    },
+                    AgentLogEntry::ToolUse {
+                        at: 2,
+                        turn: 1,
+                        summary: "Read src/auth/store.rs".into(),
+                    },
+                ],
+            },
+        );
+        say(
+            &mut app,
+            AgentTell::Chunk {
+                pr: pr(),
+                turn: 1,
+                text: "the tail of the answer".into(),
+            },
+        );
+        say(
+            &mut app,
+            AgentTell::Done {
+                pr: pr(),
+                turn: 1,
+                duration_ms: 900,
+            },
+        );
+        testing::settle(&mut app);
+        assert_eq!(testing::recorded(&mut app), [Ask::AgentLog { pr: pr() }]);
+    }
+
+    fn transcript(app: &mut App) -> Entity {
+        testing::find::<Transcript>(app, |t| t.pr == pr())
+    }
+
+    fn first_line(app: &mut App) -> Entity {
+        let t = transcript(app);
+        app.world().get::<Children>(t).unwrap()[0]
+    }
+
+    #[test]
+    fn a_growing_answer_rebuilds_only_its_own_line() {
+        let mut app = open_chat();
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .push_me("Is the lock needed?".into());
+        say(
+            &mut app,
+            AgentTell::Chunk {
+                pr: pr(),
+                turn: 1,
+                text: "The lock ".into(),
+            },
+        );
+        testing::settle(&mut app);
+        let question = first_line(&mut app);
+        say(
+            &mut app,
+            AgentTell::Chunk {
+                pr: pr(),
+                turn: 1,
+                text: "is needed.".into(),
+            },
+        );
+        testing::settle(&mut app);
+        assert_eq!(
+            first_line(&mut app),
+            question,
+            "the question was not redrawn"
+        );
+        let t = transcript(&mut app);
+        assert_eq!(app.world().get::<Children>(t).unwrap().len(), 2);
+        assert!(testing::shows(&mut app, "The lock is needed."));
+    }
+
+    #[test]
+    fn new_lines_follow_the_bottom_only_for_a_reader_already_there() {
+        let mut app = open_chat();
+        say(
+            &mut app,
+            AgentTell::Chunk {
+                pr: pr(),
+                turn: 1,
+                text: "The lock ".into(),
+            },
+        );
+        testing::settle(&mut app);
+        let t = transcript(&mut app);
+        assert_eq!(app.world().get::<ScrollPosition>(t).unwrap().y, f32::MAX);
+
+        // The reader scrolled up to 100 of 800 px.
+        app.world_mut().get_mut::<ScrollPosition>(t).unwrap().y = 100.0;
+        let mut node = app.world_mut().get_mut::<ComputedNode>(t).unwrap();
+        node.size = Vec2::new(400.0, 200.0);
+        node.content_size = Vec2::new(400.0, 1000.0);
+        node.scroll_position = Vec2::new(0.0, 100.0);
+        say(
+            &mut app,
+            AgentTell::Chunk {
+                pr: pr(),
+                turn: 1,
+                text: "is needed.".into(),
+            },
+        );
+        testing::settle(&mut app);
+        assert_eq!(app.world().get::<ScrollPosition>(t).unwrap().y, 100.0);
+
+        // Back at the bottom, the next line is followed again.
+        app.world_mut()
+            .get_mut::<ComputedNode>(t)
+            .unwrap()
+            .scroll_position = Vec2::new(0.0, 800.0);
+        say(
+            &mut app,
+            AgentTell::ToolUse {
+                pr: pr(),
+                turn: 1,
+                summary: "Read src/auth/store.rs".into(),
+            },
+        );
+        testing::settle(&mut app);
+        assert_eq!(app.world().get::<ScrollPosition>(t).unwrap().y, f32::MAX);
+    }
+
+    #[test]
+    fn a_harness_found_after_the_review_opened_still_picks_the_first_tab() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        assert_eq!(tab_of(&app), PanelTab::Draft);
+        app.world_mut().resource_mut::<Model>().snapshot.first_run =
+            Some(fixture::demo_first_run());
+        testing::settle(&mut app);
+        assert_eq!(tab_of(&app), PanelTab::Agent);
+    }
+
+    #[test]
+    fn the_column_resizes_from_either_tab() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        assert_eq!(tab_of(&app), PanelTab::Draft);
+        let edge = testing::find::<ChatResize>(&mut app, |r| r.0 == pr());
+        let parent = app.world().get::<ChildOf>(edge).unwrap().parent();
+        assert!(app.world().get::<PanelColumn>(parent).is_some());
     }
 }

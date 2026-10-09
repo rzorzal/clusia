@@ -72,6 +72,10 @@ pub struct ChatModel {
     pub prefill: Option<String>,
     /// The turn whose answer the last `Text` line is still receiving.
     streaming: Option<u64>,
+    /// The turn that was still running when the log was read. The daemon logs an answer's
+    /// text only when the answer is cut by a tool, a suggestion or the end of the turn, so
+    /// that log lacked what had streamed so far; once this turn ends the log has all of it.
+    unfinished: Option<u64>,
 }
 
 impl Default for ChatModel {
@@ -87,6 +91,7 @@ impl Default for ChatModel {
             log_asked: false,
             prefill: None,
             streaming: None,
+            unfinished: None,
         }
     }
 }
@@ -168,7 +173,8 @@ impl ChatModel {
         }
     }
 
-    fn apply(&mut self, tell: &AgentTell) {
+    /// Applies `tell`; true when the log must be asked again (see `unfinished`).
+    fn apply(&mut self, tell: &AgentTell) -> bool {
         match tell {
             AgentTell::Chunk { turn, text, .. } => {
                 self.spoke();
@@ -198,10 +204,19 @@ impl ChatModel {
                     state: SuggestionState::Waiting,
                 });
             }
-            AgentTell::Done { .. } => self.streaming = None,
-            AgentTell::Error { kind, message, .. } => {
+            AgentTell::Done { turn, .. } => {
+                self.streaming = None;
+                return self.ended(*turn);
+            }
+            AgentTell::Error {
+                turn,
+                kind,
+                message,
+                ..
+            } => {
                 self.spoke();
                 self.push(ChatLine::Error(error_text(*kind, message)));
+                return self.ended(*turn);
             }
             AgentTell::State { state, .. } => self.state = *state,
             AgentTell::Refused { message, .. } => self.push(ChatLine::Error(message.clone())),
@@ -214,9 +229,21 @@ impl ChatModel {
                 },
             ),
         }
+        false
     }
 
-    /// Replaces the transcript with the log. Events that arrived before it are in it already.
+    /// `turn` ended: true when it is the turn the last replay caught running.
+    fn ended(&mut self, turn: u64) -> bool {
+        if self.unfinished == Some(turn) {
+            self.unfinished = None;
+            return true;
+        }
+        false
+    }
+
+    /// Replaces the transcript with the log. A turn still running when it was read lacks the
+    /// text streamed since its last tool, suggestion or denial, so it is remembered in
+    /// `unfinished` to read the log again when it ends.
     fn replay(&mut self, entries: &[AgentLogEntry]) {
         let mut lines: Vec<ChatLine> = Vec::new();
         let mut streaming: Option<u64> = None;
@@ -251,10 +278,17 @@ impl ChatModel {
                 AgentLogEntry::Done { .. } | AgentLogEntry::Text { .. } => {}
             }
         }
-        let running = !matches!(
-            entries.last(),
-            None | Some(AgentLogEntry::Done { .. }) | Some(AgentLogEntry::Error { .. })
-        );
+        self.unfinished = match entries.last() {
+            None | Some(AgentLogEntry::Done { .. }) | Some(AgentLogEntry::Error { .. }) => None,
+            Some(
+                AgentLogEntry::User { turn, .. }
+                | AgentLogEntry::Text { turn, .. }
+                | AgentLogEntry::ToolUse { turn, .. }
+                | AgentLogEntry::Denied { turn, .. }
+                | AgentLogEntry::Suggestion { turn, .. },
+            ) => Some(*turn),
+        };
+        let running = self.unfinished.is_some();
         self.state = if running {
             SessionStateKind::Running
         } else if entries.is_empty() {
@@ -321,11 +355,12 @@ impl Chats {
     }
 
     /// Applies an agent tell to its review's chat; a review without a chat (not open here, or
-    /// still loading) ignores it, and its log carries the same events.
-    pub fn apply(&mut self, tell: &AgentTell) {
-        if let Some(chat) = self.0.get_mut(tell.pr()) {
-            chat.apply(tell);
-        }
+    /// still loading) ignores it, and its log carries the same events. True when the review's
+    /// log must be asked again: the turn its last replay caught running has ended.
+    pub fn apply(&mut self, tell: &AgentTell) -> bool {
+        self.0
+            .get_mut(tell.pr())
+            .is_some_and(|chat| chat.apply(tell))
     }
 
     pub fn replay(&mut self, pr: &PrRef, entries: &[AgentLogEntry]) {
@@ -655,5 +690,74 @@ mod tests {
         assert_eq!(resized(DEFAULT_WIDTH, -30.0), DEFAULT_WIDTH + 30.0);
         assert_eq!(resized(DEFAULT_WIDTH, 10_000.0), MIN_WIDTH);
         assert_eq!(resized(DEFAULT_WIDTH, -10_000.0), MAX_WIDTH);
+    }
+
+    #[test]
+    fn the_end_of_the_turn_a_replay_caught_running_asks_the_log_again_once() {
+        let mut caught = chats();
+        caught.replay(
+            &pr(),
+            &[
+                AgentLogEntry::User {
+                    at: 1,
+                    turn: 1,
+                    text: "Is the lock needed?".into(),
+                },
+                AgentLogEntry::ToolUse {
+                    at: 2,
+                    turn: 1,
+                    summary: "Read src/auth/store.rs".into(),
+                },
+            ],
+        );
+        assert!(!caught.apply(&chunk(1, "only the tail of the answer")));
+        let done = AgentTell::Done {
+            pr: pr(),
+            turn: 1,
+            duration_ms: 900,
+        };
+        assert!(caught.apply(&done), "the log now has the whole answer");
+        assert!(!caught.apply(&done), "asked once");
+
+        let mut errored = chats();
+        errored.replay(
+            &pr(),
+            &[AgentLogEntry::User {
+                at: 1,
+                turn: 2,
+                text: "And the refresh?".into(),
+            }],
+        );
+        assert!(errored.apply(&AgentTell::Error {
+            pr: pr(),
+            turn: 2,
+            kind: AgentErrorKind::Crashed,
+            message: String::new(),
+        }));
+    }
+
+    #[test]
+    fn a_finished_replay_or_another_turn_ending_asks_nothing() {
+        let mut chats = chats();
+        chats.replay(
+            &pr(),
+            &[
+                AgentLogEntry::User {
+                    at: 1,
+                    turn: 1,
+                    text: "Is the lock needed?".into(),
+                },
+                AgentLogEntry::Done {
+                    at: 2,
+                    turn: 1,
+                    duration_ms: 900,
+                },
+            ],
+        );
+        assert!(!chats.apply(&AgentTell::Done {
+            pr: pr(),
+            turn: 2,
+            duration_ms: 900,
+        }));
     }
 }
