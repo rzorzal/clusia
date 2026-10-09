@@ -40,6 +40,9 @@ pub struct DaemonOptions {
     pub harness_search_paths: Vec<PathBuf>,
     /// The `claude` program used when `harness.program` is empty. Env: `CLUSIA_CLAUDE_BIN`.
     pub claude_program: Option<PathBuf>,
+    /// The `clusiad` that `claude` starts as the permission bridge. Env: `CLUSIA_BRIDGE_BIN`;
+    /// default: this executable.
+    pub bridge_program: Option<PathBuf>,
 }
 
 impl DaemonOptions {
@@ -69,6 +72,7 @@ impl DaemonOptions {
             giphy_api: var("CLUSIA_GIPHY_API"),
             harness_search_paths: search_paths,
             claude_program: var("CLUSIA_CLAUDE_BIN").map(PathBuf::from),
+            bridge_program: var("CLUSIA_BRIDGE_BIN").map(PathBuf::from),
         }
     }
 }

@@ -12,7 +12,8 @@ use clusia_core::config::OnOpen;
 use clusia_core::notify::NotifyEvent;
 use clusia_core::{AgentState, DraftKind, Origin, PrConversation, PrDetail, PrRef, Review, Side};
 use clusia_protocol::{
-    AgentLogEntry, AnchorInput, ErrorCode, Outcome, ProtocolError, Reply, StepStatus, Suggestion,
+    AgentLogEntry, AnchorInput, ErrorCode, Event, Outcome, ProtocolError, Reply, StepStatus,
+    Suggestion, topics,
 };
 use clusia_store::agent::{load_agent_state, save_agent_state};
 use clusia_store::load_review_cache;
@@ -353,7 +354,15 @@ pub(crate) fn forget(shared: &Shared, pr: &PrRef) {
     write_state(shared, pr, |state| {
         state.dismissed.extend(waiting);
         state.last_summary_head = None;
+        state.rules.clear();
     });
+    shared.publish(
+        topics::AGENT,
+        Event::RulesChanged {
+            pr: pr.clone(),
+            rules: Vec::new(),
+        },
+    );
 }
 
 #[cfg(test)]

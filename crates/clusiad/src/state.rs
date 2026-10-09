@@ -17,6 +17,7 @@ use crate::inbox::InboxData;
 use crate::news::Backoff;
 use crate::notifications::Engine;
 use crate::options::DaemonOptions;
+use crate::permissions::Permissions;
 use crate::sessions::Sessions;
 use crate::spawner::Spawner;
 
@@ -62,6 +63,10 @@ pub(crate) struct Shared {
     pub harness_search_paths: Vec<PathBuf>,
     /// The `claude` program of `DaemonOptions` (see `sessions::program_path`).
     pub claude_program: Option<PathBuf>,
+    /// The `clusiad` that runs as the permission bridge; this executable when `None`.
+    pub bridge_program: Option<PathBuf>,
+    /// The permission requests waiting for the reviewer.
+    pub permissions: Permissions,
     /// The running agent turns of every review.
     pub sessions: Sessions,
     /// Which reviews a connected client has open, so the daemon knows when no window shows one.
@@ -142,6 +147,8 @@ impl Shared {
                 .unwrap_or_else(|| "https://api.giphy.com".to_string()),
             harness_search_paths: options.harness_search_paths,
             claude_program: options.claude_program,
+            bridge_program: options.bridge_program,
+            permissions: Permissions::default(),
             sessions: Sessions::default(),
             holds: Holds::default(),
             window_listeners: AtomicUsize::new(0),

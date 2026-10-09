@@ -45,6 +45,7 @@ impl Daemon {
             media_resolve: Vec::new(),
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
+            bridge_program: None,
             claude_program: Some("/nonexistent/claude".into()),
         };
         // A restart in the same home can find the lock still held: a child forked by a parallel

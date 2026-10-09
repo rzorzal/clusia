@@ -35,6 +35,7 @@ clusia-harness.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 clusia-harness = { workspace = true, features = ["test-kit"] }
 tempfile.workspace = true
 wiremock.workspace = true

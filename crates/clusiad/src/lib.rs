@@ -17,6 +17,7 @@ mod media;
 mod news;
 mod notifications;
 mod options;
+mod permissions;
 mod publish;
 mod relocate;
 mod retention;
