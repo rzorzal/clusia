@@ -748,6 +748,8 @@ mod review_flow {
             for (key, value) in [
                 ("repositories.roots", format!("[\"{}\"]", roots.display())),
                 ("harness.on_open", "wait".to_string()),
+                ("harness.check_security", "false".to_string()),
+                ("harness.audit", "false".to_string()),
                 ("harness.program", fake.display().to_string()),
             ] {
                 let o = world.run(&["config", "set", key, &value]);

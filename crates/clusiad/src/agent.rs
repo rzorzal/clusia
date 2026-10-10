@@ -188,7 +188,7 @@ pub(crate) fn refresh(shared: &Shared, pr: &PrRef) {
 }
 
 /// Changes the agent state of `pr` and saves it. The caller holds the review lock.
-fn write_state(shared: &Shared, pr: &PrRef, change: impl FnOnce(&mut AgentState)) {
+pub(crate) fn write_state(shared: &Shared, pr: &PrRef, change: impl FnOnce(&mut AgentState)) {
     let mut state = load_agent_state(&shared.paths, pr).unwrap_or_default();
     change(&mut state);
     if let Err(e) = save_agent_state(&shared.paths, pr, &state) {
@@ -338,8 +338,19 @@ pub(crate) async fn notify_finished(shared: &Shared, pr: &PrRef, turn: u64) {
 /// session slot forgotten. The log stays. Called before the review lock is taken, because a turn
 /// may be waiting for that lock and would not see the stop while it is held.
 pub(crate) async fn stop(shared: &Shared, pr: &PrRef) {
+    crate::checks::stop_all(shared, pr, crate::turns::Why::Ended).await;
     shared.sessions.end(shared, pr).await;
     shared.permissions.forget_review(shared, pr);
+}
+
+/// The review was published or discarded: its check results and the finding ids go with it. The
+/// caller holds the review lock.
+pub(crate) fn forget_checks(shared: &Shared, pr: &PrRef) {
+    write_state(shared, pr, |state| {
+        state.dismissed_findings.clear();
+        state.accepted_findings.clear();
+    });
+    crate::checks::forget(shared, pr);
 }
 
 /// The review is gone: what was still waiting is dismissed and the summary forgotten, so a later

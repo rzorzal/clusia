@@ -256,7 +256,6 @@ pub(crate) enum SessionSource {
     /// A copy of the review's session that the chat never sees: `--resume <session>
     /// --fork-session --session-id <new id>`, or a session of its own when the review has none.
     /// Never recorded as the review's session.
-    #[allow(dead_code)]
     Fork,
     /// This session, whatever the review holds.
     #[allow(dead_code)]

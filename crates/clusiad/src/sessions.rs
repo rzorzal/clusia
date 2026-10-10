@@ -21,7 +21,7 @@ use crate::reviews;
 use crate::state::Shared;
 use crate::sync::now_unix;
 use crate::turns::{
-    self, Boxed, KILL_GRACE, SessionSource, Stop, TurnRun, TurnSink, Why, program_path,
+    self, Boxed, KILL_GRACE, SessionSource, Stop, TurnEnd, TurnRun, TurnSink, Why, program_path,
 };
 
 /// Turns running at the same time across all reviews; the rest wait.
@@ -319,7 +319,6 @@ impl Sessions {
 
     /// A turn id for something that is not a chat message (a check), from the counter the chat
     /// uses, so no two turns of a review share an id.
-    #[allow(dead_code)]
     pub(crate) async fn next_turn(&self, shared: &Shared, pr: &PrRef) -> u64 {
         let log = shared.paths.agent_log(pr);
         let floor = tokio::task::spawn_blocking(move || agent_log::last_turn(&log))
@@ -369,6 +368,11 @@ impl Sessions {
     }
 
     /// Whether any turn of `pr`, the chat's or a check's, runs now.
+    pub(crate) fn summarizing(&self, pr: &PrRef) -> bool {
+        let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        table.get(pr).is_some_and(|slot| slot.summarizing.is_some())
+    }
+
     pub(crate) fn any_running(&self, pr: &PrRef) -> bool {
         let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
         table
@@ -508,7 +512,6 @@ impl Sessions {
     /// A session a check runs in: a fork of the review's session, which keeps the chat's
     /// history out of reach of the check and the check's out of the chat's, or a new session of
     /// its own when the review has none yet. Neither is ever recorded as the review's session.
-    #[allow(dead_code)]
     pub(crate) fn fork_session(&self, shared: &Shared, pr: &PrRef) -> SessionArg {
         let id = uuid::Uuid::new_v4().to_string();
         match reviews::load_stored(shared, pr) {
@@ -840,6 +843,7 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         summary_for: prompt.summary_for.clone(),
         stop: stop.clone(),
     };
+    let is_summary = prompt.summary_for.is_some();
     let run = TurnRun {
         pr: pr.clone(),
         turn,
@@ -851,7 +855,10 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         limit: None,
         stop,
     };
-    turns::run(&shared, run, &mut sink).await;
+    let end = turns::run(&shared, run, &mut sink).await;
+    if is_summary && !matches!(end, TurnEnd::Stopped(Why::Ended | Why::Shutdown)) {
+        crate::checks::on_summary_over(&shared, &pr).await;
+    }
 }
 
 /// Closes the turns a stopped daemon left without an ending, so a replayed chat never shows one

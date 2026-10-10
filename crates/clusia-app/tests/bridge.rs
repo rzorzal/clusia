@@ -576,6 +576,8 @@ async fn use_fake_claude(d: &common::Daemon, script: Script) {
     for (key, value) in [
         ("harness.program", program.display().to_string()),
         ("harness.on_open", "wait".to_string()),
+        ("harness.check_security", "false".to_string()),
+        ("harness.audit", "false".to_string()),
     ] {
         d.client()
             .await

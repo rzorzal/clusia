@@ -5,6 +5,7 @@ mod agent;
 mod agent_log;
 mod agent_stream;
 mod bridge;
+mod checks;
 mod connection;
 mod first_run;
 mod giphy;

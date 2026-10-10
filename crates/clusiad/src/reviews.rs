@@ -262,6 +262,14 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     }
     crate::agent::refresh_review_md(shared, &review);
     let (status, note) = crate::agent::on_open(shared, pr, &review.head_sha).await;
+    // Read under the review lock `open` holds: a summary that is running now ends after the checks
+    // have been told to wait for it.
+    let summarizing = shared.sessions.summarizing(pr);
+    let plan = crate::checks::on_open(shared, pr, &review.head_sha, summarizing).await;
+    let (status, note) = match crate::checks::note(summarizing, &plan) {
+        Some(note) => (StepStatus::Done, note),
+        None => (status, note),
+    };
     step(shared, pr, LoadStepKind::Agent, status, Some(note));
     Outcome::Ok(Reply::Review(Box::new(view_of(review, cache))))
 }
@@ -551,6 +559,7 @@ pub(crate) fn drop_cache(shared: &Shared, pr: &PrRef) {
     if let Err(e) = delete_review_cache(&shared.paths, pr) {
         tracing::warn!(error = %e, pr = %pr, "cannot delete the review cache");
     }
+    crate::checks::drop_results(shared, pr);
 }
 
 /// Loads the stored review; `Ok(None)` when there is none (or it was quarantined).
@@ -852,6 +861,9 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
     }
     record(shared, ActivityKind::ReviewSaved, pr, client, None, None);
     announce(shared, &review);
+    // Out of the lock: a run that is finishing needs it to store its result.
+    drop(guard);
+    crate::checks::stop_all(shared, pr, crate::turns::Why::User).await;
     Outcome::Ok(Reply::Ack)
 }
 
@@ -898,6 +910,7 @@ pub(crate) async fn discard(shared: &Shared, client: &str, pr: &PrRef) -> Outcom
     }
     drop_cache(shared, pr);
     crate::agent::forget(shared, pr);
+    crate::agent::forget_checks(shared, pr);
     cleanup_checkout(shared, pr).await;
     record(
         shared,

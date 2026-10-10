@@ -12,6 +12,7 @@ use clusia_protocol::{Event, PermissionStatus, SyncStatus};
 use clusia_provider::GitHub;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
+use crate::checks::Checks;
 use crate::holds::Holds;
 use crate::inbox::InboxData;
 use crate::news::Backoff;
@@ -69,6 +70,9 @@ pub(crate) struct Shared {
     pub permissions: Permissions,
     /// The running agent turns of every review.
     pub sessions: Sessions,
+    /// The running security and audit checks of every review. Not `checks_wake`, which wakes
+    /// the task that looks at the continuous-integration checks of your pull requests.
+    pub checks: Checks,
     /// Which reviews a connected client has open, so the daemon knows when no window shows one.
     pub holds: Holds,
     /// Connections subscribed to the `window` topic (open windows).
@@ -150,6 +154,7 @@ impl Shared {
             bridge_program: options.bridge_program,
             permissions: Permissions::default(),
             sessions: Sessions::default(),
+            checks: Checks::default(),
             holds: Holds::default(),
             window_listeners: AtomicUsize::new(0),
             tray_listeners: AtomicUsize::new(0),
