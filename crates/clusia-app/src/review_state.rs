@@ -167,6 +167,10 @@ pub struct TabUi {
     pub finalize: FinalizeForm,
     /// Diff threads shown in full instead of as their first line (thread ids).
     pub expanded: BTreeSet<String>,
+    /// An `OpenReview` for this tab is in flight.
+    pub opening: bool,
+    /// Why the last refresh of a tab that already shows a copy failed.
+    pub open_error: Option<String>,
 }
 
 impl Default for TabUi {
@@ -181,6 +185,8 @@ impl Default for TabUi {
             shown: SHOW_STEP,
             finalize: FinalizeForm::default(),
             expanded: BTreeSet::new(),
+            opening: false,
+            open_error: None,
         }
     }
 }
@@ -197,16 +203,14 @@ pub struct Ready {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
-    /// Opening; `steps` as the daemon reports them, `cached` once the cache answered.
+    /// Opening with no cached copy to show; `steps` as the daemon reports them.
     Loading {
         steps: Vec<LoadStep>,
-        cached: Option<Box<Ready>>,
     },
     /// `step`: the step that failed, when the daemon said which.
     Failed {
         step: Option<LoadStepKind>,
         message: String,
-        cached: Option<Box<Ready>>,
     },
     Ready(Box<Ready>),
 }
@@ -220,12 +224,10 @@ pub struct Tab {
 impl Tab {
     pub fn loading(mode: DiffMode) -> Self {
         Self {
-            phase: Phase::Loading {
-                steps: Vec::new(),
-                cached: None,
-            },
+            phase: Phase::Loading { steps: Vec::new() },
             ui: TabUi {
                 mode,
+                opening: true,
                 ..TabUi::default()
             },
         }
@@ -250,28 +252,20 @@ impl Tab {
 pub struct ReviewTabs(pub HashMap<PrRef, Tab>);
 
 impl ReviewTabs {
-    /// *Try again*: back to loading (keeping any cached copy to show underneath) and opens
-    /// again.
+    /// *Try again*: opens again. A tab that shows a cached copy keeps showing it while the
+    /// open runs; any other goes back to loading. Nothing happens while an open is running.
     pub fn retry(&mut self, pr: &PrRef, asks: &mut Asks) {
         let Some(tab) = self.0.get_mut(pr) else {
             return;
         };
-        let previous = std::mem::replace(
-            &mut tab.phase,
-            Phase::Loading {
-                steps: Vec::new(),
-                cached: None,
-            },
-        );
-        let cached = match previous {
-            Phase::Loading { cached, .. } | Phase::Failed { cached, .. } => cached,
-            Phase::Ready(r) if r.cached_at.is_some() => Some(r),
-            Phase::Ready(_) => None,
-        };
-        tab.phase = Phase::Loading {
-            steps: Vec::new(),
-            cached,
-        };
+        if tab.ui.opening {
+            return;
+        }
+        tab.ui.opening = true;
+        tab.ui.open_error = None;
+        if !tab.ready().is_some_and(|r| r.cached_at.is_some()) {
+            tab.phase = Phase::Loading { steps: Vec::new() };
+        }
         asks.send(Ask::OpenReview(pr.clone()));
     }
 }
@@ -362,23 +356,10 @@ pub(crate) fn apply(
                 }
             }
         }
-        Tell::CachedAvailable {
-            pr,
-            view,
-            fetched_at,
-        } => {
-            if let Some(tab) = tabs.0.get_mut(&pr)
-                && let Phase::Loading { cached, .. } | Phase::Failed { cached, .. } = &mut tab.phase
-            {
-                *cached = Some(Box::new(Ready {
-                    view: *view,
-                    news: Vec::new(),
-                    cached_at: Some(fetched_at),
-                }));
-            }
-        }
         Tell::Opened { pr, view, news } => match tabs.0.get_mut(&pr) {
             Some(tab) => {
+                tab.ui.opening = false;
+                tab.ui.open_error = None;
                 tab.phase = Phase::Ready(Box::new(Ready {
                     view: *view,
                     news,
@@ -393,6 +374,8 @@ pub(crate) fn apply(
             view,
             fetched_at,
         } => match tabs.0.get_mut(&pr) {
+            // A fresh copy is never replaced by an older one.
+            Some(tab) if tab.ready().is_some_and(|r| r.cached_at.is_none()) => {}
             Some(tab) => {
                 tab.phase = Phase::Ready(Box::new(Ready {
                     view: *view,
@@ -404,22 +387,24 @@ pub(crate) fn apply(
         },
         Tell::OpenFailed { pr, message, .. } => {
             if let Some(tab) = tabs.0.get_mut(&pr) {
-                // A copy opened from the cache meanwhile stays; it offers *Try again*.
+                tab.ui.opening = false;
+                // A copy opened from the cache stays; it offers *Try again*.
                 let failed = match &mut tab.phase {
-                    Phase::Loading { steps, cached } => Some(Phase::Failed {
+                    Phase::Loading { steps } => Some(Phase::Failed {
                         step: steps
                             .iter()
                             .find(|s| s.status == StepStatus::Failed)
                             .map(|s| s.step),
                         message,
-                        cached: cached.take(),
                     }),
-                    Phase::Failed { cached, step, .. } => Some(Phase::Failed {
+                    Phase::Failed { step, .. } => Some(Phase::Failed {
                         step: *step,
                         message,
-                        cached: cached.take(),
                     }),
-                    Phase::Ready(_) => None,
+                    Phase::Ready(_) => {
+                        tab.ui.open_error = Some(message);
+                        None
+                    }
                 };
                 if let Some(phase) = failed {
                     tab.phase = phase;
@@ -554,13 +539,7 @@ mod tests {
             .go(&WindowTarget::Review { pr: pr() });
         app.update();
         let tab = testing::tab(&app, &pr());
-        assert_eq!(
-            tab.phase,
-            Phase::Loading {
-                steps: vec![],
-                cached: None
-            }
-        );
+        assert_eq!(tab.phase, Phase::Loading { steps: vec![] });
         assert_eq!(
             tab.ui.mode,
             DiffMode::Split,
@@ -577,20 +556,12 @@ mod tests {
     }
 
     #[test]
-    fn steps_then_cache_then_opened() {
+    fn steps_then_opened() {
         let mut app = loading_app();
         testing::tell(&mut app, step(LoadStepKind::Repo, StepStatus::Running));
         testing::tell(&mut app, step(LoadStepKind::Repo, StepStatus::Done));
         testing::tell(&mut app, step(LoadStepKind::Branch, StepStatus::Running));
-        testing::tell(
-            &mut app,
-            Tell::CachedAvailable {
-                pr: pr(),
-                view: view(),
-                fetched_at: NOW - 3600,
-            },
-        );
-        let Phase::Loading { steps, cached } = testing::tab(&app, &pr()).phase else {
+        let Phase::Loading { steps, .. } = testing::tab(&app, &pr()).phase else {
             panic!("still loading");
         };
         let seen: Vec<(LoadStepKind, StepStatus)> =
@@ -603,7 +574,6 @@ mod tests {
             ],
             "a later status replaces the step's earlier one"
         );
-        assert_eq!(cached.unwrap().cached_at, Some(NOW - 3600));
         let (fresh, news) = fixture::demo_review(NOW);
         // Only `pump` (PreUpdate): the screen opens What's new later in the frame.
         let _ = app
@@ -629,41 +599,34 @@ mod tests {
     }
 
     #[test]
-    fn failure_names_the_step_and_keeps_the_cache() {
+    fn failure_names_the_step() {
         let mut app = loading_app();
         testing::tell(&mut app, step(LoadStepKind::Repo, StepStatus::Done));
         testing::tell(&mut app, step(LoadStepKind::Branch, StepStatus::Failed));
         testing::tell(
             &mut app,
-            Tell::CachedAvailable {
-                pr: pr(),
-                view: view(),
-                fetched_at: NOW - 3600,
-            },
-        );
-        testing::tell(
-            &mut app,
             Tell::OpenFailed {
                 pr: pr(),
                 message: "fatal: couldn't find remote ref".into(),
-                cache: true,
+                cache: false,
             },
         );
-        let Phase::Failed {
-            step,
-            message,
-            cached,
-        } = testing::tab(&app, &pr()).phase
-        else {
+        let Phase::Failed { step, message } = testing::tab(&app, &pr()).phase else {
             panic!("failed");
         };
         assert_eq!(step, Some(LoadStepKind::Branch));
         assert_eq!(message, "fatal: couldn't find remote ref");
-        assert!(cached.is_some());
+    }
+
+    fn retry(app: &mut App) {
+        app.world_mut()
+            .resource_scope(|world, mut tabs: Mut<ReviewTabs>| {
+                tabs.retry(&pr(), &mut world.resource_mut::<Asks>());
+            });
     }
 
     #[test]
-    fn retry_loads_again_with_the_cached_copy_underneath() {
+    fn a_cached_review_opens_ready_without_loading() {
         let mut app = loading_app();
         testing::recorded(&mut app);
         testing::tell(
@@ -677,20 +640,61 @@ mod tests {
         assert_eq!(
             testing::ready(&app, &pr()).cached_at,
             Some(NOW - 7200),
-            "read-only cached copy"
+            "Ready from the cache before Opened arrives"
         );
-        {
-            let world = app.world_mut();
-            world.resource_scope(|world, mut tabs: Mut<ReviewTabs>| {
-                tabs.retry(&pr(), &mut world.resource_mut::<Asks>());
-            });
-        }
-        let Phase::Loading { steps, cached } = testing::tab(&app, &pr()).phase else {
-            panic!("loading again");
-        };
-        assert!(steps.is_empty());
-        assert_eq!(cached.unwrap().cached_at, Some(NOW - 7200));
-        assert_eq!(testing::recorded(&mut app), [Ask::OpenReview(pr())]);
+        assert!(testing::tab(&app, &pr()).ui.opening, "the refresh runs");
+    }
+
+    #[test]
+    fn opened_replaces_the_cached_copy() {
+        let mut app = loading_app();
+        testing::tell(
+            &mut app,
+            Tell::OpenedFromCache {
+                pr: pr(),
+                view: view(),
+                fetched_at: NOW - 7200,
+            },
+        );
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr())
+            .unwrap()
+            .ui
+            .section = ReviewSection::Comments;
+        let (fresh, news) = fixture::demo_review(NOW);
+        testing::tell(
+            &mut app,
+            Tell::Opened {
+                pr: pr(),
+                view: Box::new(fresh.clone()),
+                news,
+            },
+        );
+        let tab = testing::tab(&app, &pr());
+        assert_eq!(tab.ready().map(|r| r.cached_at), Some(None));
+        assert_eq!(tab.ready().map(|r| &r.view), Some(&fresh));
+        assert!(!tab.ui.opening);
+        assert_eq!(
+            tab.ui.section,
+            ReviewSection::Comments,
+            "the user's place stays"
+        );
+    }
+
+    #[test]
+    fn open_failed_keeps_the_cached_tab() {
+        let mut app = loading_app();
+        testing::recorded(&mut app);
+        testing::tell(
+            &mut app,
+            Tell::OpenedFromCache {
+                pr: pr(),
+                view: view(),
+                fetched_at: NOW - 7200,
+            },
+        );
         testing::tell(
             &mut app,
             Tell::OpenFailed {
@@ -699,19 +703,55 @@ mod tests {
                 cache: true,
             },
         );
-        {
-            let world = app.world_mut();
-            world.resource_scope(|world, mut tabs: Mut<ReviewTabs>| {
-                tabs.retry(&pr(), &mut world.resource_mut::<Asks>());
-            });
-        }
+        let tab = testing::tab(&app, &pr());
+        assert_eq!(tab.ready().and_then(|r| r.cached_at), Some(NOW - 7200));
+        assert!(!tab.ui.opening);
+        assert_eq!(tab.ui.open_error.as_deref(), Some("offline"));
+        retry(&mut app);
+        let tab = testing::tab(&app, &pr());
+        assert!(
+            tab.ready().is_some(),
+            "try again never drops back to Loading"
+        );
+        assert!(tab.ui.opening);
+        assert_eq!(tab.ui.open_error, None);
+        assert_eq!(testing::recorded(&mut app), [Ask::OpenReview(pr())]);
+    }
+
+    #[test]
+    fn no_second_open_while_one_runs() {
+        let mut app = loading_app();
+        testing::recorded(&mut app);
+        testing::tell(
+            &mut app,
+            Tell::OpenedFromCache {
+                pr: pr(),
+                view: view(),
+                fetched_at: NOW - 7200,
+            },
+        );
+        retry(&mut app);
+        assert!(testing::recorded(&mut app).is_empty());
+    }
+
+    #[test]
+    fn retry_from_a_failed_open_loads_again() {
+        let mut app = loading_app();
+        testing::recorded(&mut app);
+        testing::tell(
+            &mut app,
+            Tell::OpenFailed {
+                pr: pr(),
+                message: "offline".into(),
+                cache: false,
+            },
+        );
+        retry(&mut app);
         assert!(matches!(
             testing::tab(&app, &pr()).phase,
-            Phase::Loading {
-                cached: Some(_),
-                ..
-            }
+            Phase::Loading { .. }
         ));
+        assert_eq!(testing::recorded(&mut app), [Ask::OpenReview(pr())]);
     }
 
     #[test]

@@ -23,6 +23,10 @@ pub struct PrMock {
     pub pending: Option<(String, String)>,
     /// The pull request description.
     pub body: String,
+    pub title: String,
+    pub draft: bool,
+    pub closed: bool,
+    pub merged: bool,
 }
 
 impl PrMock {
@@ -39,6 +43,10 @@ impl PrMock {
             threads: json!([]),
             pending: None,
             body: String::new(),
+            title: "Add feature".into(),
+            draft: false,
+            closed: false,
+            merged: false,
         }
     }
 }
@@ -49,6 +57,27 @@ impl PrMock {
         let lines: Vec<String> = content.lines().map(|l| format!("+{l}")).collect();
         let patch = format!("@@ -0,0 +1,{} @@\n{}", lines.len(), lines.join("\n"));
         self.files = json!([{ "filename": "feature.txt", "status": "added", "additions": lines.len(), "deletions": 0, "patch": patch }]);
+        self
+    }
+
+    pub fn titled(mut self, title: &str) -> Self {
+        self.title = title.into();
+        self
+    }
+
+    pub fn drafted(mut self) -> Self {
+        self.draft = true;
+        self
+    }
+
+    pub fn closed(mut self) -> Self {
+        self.closed = true;
+        self
+    }
+
+    pub fn merged(mut self) -> Self {
+        self.closed = true;
+        self.merged = true;
         self
     }
 
@@ -63,8 +92,9 @@ pub async fn mount_pr(server: &MockServer, pr: &PrMock) {
     let base = "/repos/acme/widgets";
     let ok = |body: Value| ResponseTemplate::new(200).set_body_json(body);
     Mock::given(method("GET")).and(path(format!("{base}/pulls/7"))).respond_with(ok(json!({
-        "number": 7, "title": "Add feature", "body": pr.body, "html_url": "https://github.com/acme/widgets/pull/7",
-        "user": { "login": pr.author }, "draft": false, "updated_at": "2026-10-01T12:00:00Z",
+        "number": 7, "title": pr.title, "body": pr.body,
+        "state": if pr.closed { "closed" } else { "open" }, "merged": pr.merged, "html_url": "https://github.com/acme/widgets/pull/7",
+        "user": { "login": pr.author }, "draft": pr.draft, "updated_at": "2026-10-01T12:00:00Z",
         "comments": 0, "review_comments": 0, "additions": 3, "deletions": 0, "changed_files": 1,
         "base": { "ref": pr.base_ref, "sha": pr.base, "repo": { "clone_url": pr.clone_url } },
         "head": { "ref": "feature", "sha": pr.head, "repo": null }

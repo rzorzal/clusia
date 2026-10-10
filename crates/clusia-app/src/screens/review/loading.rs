@@ -1,24 +1,21 @@
 //! Opening a review (mockups `Loading.png`, `LoadFailed.png`): four leaves grow as the daemon
-//! reports its load steps (repository → branch → pull request → agent). When a cached copy
-//! exists it shows dimmed underneath and **Open from cache** reads it at once. A failed step
-//! turns its leaf orange and shows what git or GitHub said, with **Try again**.
+//! reports its load steps (repository → branch → pull request → agent). A failed step turns its
+//! leaf orange and shows what git or GitHub said, with **Try again**.
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, observe};
+use bevy::ui_widgets::observe;
 use clusia_core::PrRef;
 use clusia_protocol::{LoadStep, LoadStepKind, StepStatus};
 
-use crate::bridge::{Ask, Asks, Model};
+use crate::bridge::Model;
 use crate::fonts::UiFonts;
 use crate::nav::pr_title;
 use crate::review_state::{Phase, ReviewTabs};
 use crate::screens::review::ReviewSystems;
-use crate::screens::review::shell::{
-    HeaderView, OpeningRegion, TryAgain, header_block, header_view, on_try_again, section_tabs,
-};
+use crate::screens::review::shell::{OpeningRegion, TryAgain, on_try_again};
 use crate::theme::Swatch;
-use crate::ui::kit::{Fill, Stroke, Type, Variant, button, disabled_button, panel, text};
+use crate::ui::kit::{Fill, Stroke, Type, Variant, button, panel, text};
 use crate::ui::leaf::{LeafState, leaf, pulsing_dot};
 use crate::ui::modal::modal_card;
 
@@ -40,14 +37,6 @@ pub struct StepRow {
     pub current: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheButton {
-    Hidden,
-    Available,
-    /// Shown disabled with "No cached copy yet" (failures only).
-    Missing,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureView {
     /// `Couldn't get the branch for #98`
@@ -67,10 +56,7 @@ pub struct LoadingView {
     /// Empty when failed.
     pub rows: Vec<StepRow>,
     pub failure: Option<FailureView>,
-    pub cache: CacheButton,
-    /// The cached header, drawn dimmed underneath.
-    pub backdrop: Option<HeaderView>,
-    /// (repository, title) above the skeleton when there is no cached copy.
+    /// (repository, title) above the skeleton.
     pub skeleton: (String, String),
 }
 
@@ -191,39 +177,21 @@ fn failure(pr: &PrRef, step: Option<LoadStepKind>, message: &str) -> FailureView
 /// `title` is the pull request's title when known (from the lists), for the skeleton.
 pub fn loading_view(phase: &Phase, pr: &PrRef, title: &str) -> Option<LoadingView> {
     let opening = format!("Opening {} #{}", pr.slug(), pr.number);
-    let (view, cached) = match phase {
+    Some(match phase {
         Phase::Ready(_) => return None,
-        Phase::Loading { steps, cached } => {
+        Phase::Loading { steps } => {
             let last = |k: LoadStepKind| steps.iter().rev().find(|s| s.step == k);
             let rows: Vec<StepRow> = KINDS.iter().map(|&k| row(pr, k, last(k))).collect();
-            (
-                LoadingView {
-                    leaves: rows.iter().map(|r| r.state).collect(),
-                    title: opening,
-                    subtitle: if cached.is_some() {
-                        "Fresh data from GitHub. You can keep reading the cached version below."
-                            .into()
-                    } else {
-                        "Getting fresh data from GitHub…".into()
-                    },
-                    rows,
-                    failure: None,
-                    cache: if cached.is_some() {
-                        CacheButton::Available
-                    } else {
-                        CacheButton::Hidden
-                    },
-                    backdrop: None,
-                    skeleton: (pr.slug(), title.to_string()),
-                },
-                cached,
-            )
+            LoadingView {
+                leaves: rows.iter().map(|r| r.state).collect(),
+                title: opening,
+                subtitle: "Getting fresh data from GitHub…".into(),
+                rows,
+                failure: None,
+                skeleton: (pr.slug(), title.to_string()),
+            }
         }
-        Phase::Failed {
-            step,
-            message,
-            cached,
-        } => {
+        Phase::Failed { step, message } => {
             let failed = step.and_then(|s| KINDS.iter().position(|&k| k == s));
             let leaves = (0..KINDS.len())
                 .map(|i| match failed {
@@ -233,34 +201,17 @@ pub fn loading_view(phase: &Phase, pr: &PrRef, title: &str) -> Option<LoadingVie
                 })
                 .collect();
             let f = failure(pr, *step, message);
-            (
-                LoadingView {
-                    leaves,
-                    title: f.heading.clone(),
-                    subtitle: f.explanation.to_string(),
-                    rows: Vec::new(),
-                    failure: Some(f),
-                    cache: if cached.is_some() {
-                        CacheButton::Available
-                    } else {
-                        CacheButton::Missing
-                    },
-                    backdrop: None,
-                    skeleton: (pr.slug(), title.to_string()),
-                },
-                cached,
-            )
+            LoadingView {
+                leaves,
+                title: f.heading.clone(),
+                subtitle: f.explanation.to_string(),
+                rows: Vec::new(),
+                failure: Some(f),
+                skeleton: (pr.slug(), title.to_string()),
+            }
         }
-    };
-    Some(LoadingView {
-        backdrop: cached.as_ref().map(|c| header_view(&c.view)),
-        ..view
     })
 }
-
-/// **Open from cache**.
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub struct OpenFromCache(pub PrRef);
 
 /// The row of leaves (children in step order).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +257,7 @@ fn rebuild_opening(
 }
 
 fn opening(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &LoadingView) {
-    // Underneath: the cached header, or the title over a skeleton.
+    // Underneath: the title over a skeleton.
     p.spawn(Node {
         width: percent(100),
         flex_grow: 1.0,
@@ -314,32 +265,20 @@ fn opening(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &Loadin
         ..default()
     })
     .with_children(|under| {
-        if v.failure.is_some() && v.backdrop.is_none() {
+        if v.failure.is_some() {
             return; // The failure card stands alone (LoadFailed.png).
         }
-        match &v.backdrop {
-            Some(header) => {
-                header_block(under, fonts, pr, header);
-                let sections: Vec<_> = crate::review_state::ReviewSection::ALL
-                    .iter()
-                    .map(|&s| (s, s.label().to_string(), s == Default::default()))
-                    .collect();
-                section_tabs(under, fonts, pr, &sections, false);
-            }
-            None => {
-                under
-                    .spawn(Node {
-                        padding: UiRect::axes(px(20), px(16)),
-                        column_gap: px(10),
-                        align_items: AlignItems::Baseline,
-                        ..default()
-                    })
-                    .with_children(|t| {
-                        t.spawn(text(fonts, v.skeleton.0.clone(), Type::MUTED));
-                        t.spawn(text(fonts, v.skeleton.1.clone(), Type::TITLE.size(17.0)));
-                    });
-            }
-        }
+        under
+            .spawn(Node {
+                padding: UiRect::axes(px(20), px(16)),
+                column_gap: px(10),
+                align_items: AlignItems::Baseline,
+                ..default()
+            })
+            .with_children(|t| {
+                t.spawn(text(fonts, v.skeleton.0.clone(), Type::MUTED));
+                t.spawn(text(fonts, v.skeleton.1.clone(), Type::TITLE.size(17.0)));
+            });
         skeleton(under);
     });
     // On top: the scrim and the card.
@@ -355,7 +294,7 @@ fn opening(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &Loadin
             ..default()
         },
         BackgroundColor::default(),
-        Fill(if v.failure.is_some() && v.backdrop.is_none() {
+        Fill(if v.failure.is_some() {
             Swatch::Clear
         } else {
             Swatch::Scrim
@@ -528,19 +467,6 @@ fn card(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &LoadingVi
         ..default()
     })
     .with_children(|b| {
-        match v.cache {
-            CacheButton::Hidden => {}
-            CacheButton::Available => {
-                b.spawn((
-                    button(fonts, "Open from cache", Variant::Secondary),
-                    OpenFromCache(pr.clone()),
-                    observe(on_open_from_cache),
-                ));
-            }
-            CacheButton::Missing => {
-                b.spawn(disabled_button(fonts, "Open from cache"));
-            }
-        }
         if v.failure.is_some() {
             b.spawn((
                 button(fonts, "Try again", Variant::Primary),
@@ -549,9 +475,6 @@ fn card(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &LoadingVi
             ));
         }
     });
-    if v.cache == CacheButton::Missing {
-        c.spawn(text(fonts, "No cached copy yet", Type::META));
-    }
 }
 
 fn step_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, r: &StepRow) {
@@ -624,20 +547,10 @@ fn step_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, r: &StepRow) {
     });
 }
 
-fn on_open_from_cache(
-    activate: On<Activate>,
-    buttons: Query<&OpenFromCache>,
-    mut asks: ResMut<Asks>,
-) {
-    if let Ok(OpenFromCache(pr)) = buttons.get(activate.entity) {
-        asks.send(Ask::OpenCached(pr.clone()));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::{ShowRequested, Tell};
+    use crate::bridge::{Ask, ShowRequested, Tell};
     use crate::fixture;
     use crate::review_state::Ready;
     use crate::testing::{self, NOW};
@@ -655,15 +568,6 @@ mod tests {
             status,
             message: message.map(String::from),
         }
-    }
-
-    fn cached() -> Option<Box<Ready>> {
-        let (view, _) = fixture::demo_review(NOW);
-        Some(Box::new(Ready {
-            view,
-            news: vec![],
-            cached_at: Some(NOW - 3600),
-        }))
     }
 
     #[test]
@@ -690,14 +594,10 @@ mod tests {
                     Some("arrives with the harness (SP2)"),
                 ),
             ],
-            cached: cached(),
         };
         let v = loading_view(&phase, &pr(), "feat: auth refresh").unwrap();
         assert_eq!(v.title, "Opening rzorzal/clusia #123");
-        assert_eq!(
-            v.subtitle,
-            "Fresh data from GitHub. You can keep reading the cached version below."
-        );
+        assert_eq!(v.subtitle, "Getting fresh data from GitHub…");
         let rows: Vec<(&str, LeafState, &str, bool, bool)> = v
             .rows
             .iter()
@@ -745,38 +645,30 @@ mod tests {
                 LeafState::Skipped
             ]
         );
-        assert_eq!(v.cache, CacheButton::Available);
-        assert_eq!(v.backdrop.as_ref().unwrap().title, "feat: auth refresh");
         assert_eq!(v.failure, None);
     }
 
     #[test]
-    fn a_fresh_open_has_no_cache_button() {
-        let phase = Phase::Loading {
-            steps: vec![],
-            cached: None,
-        };
+    fn a_fresh_open_shows_the_skeleton() {
+        let phase = Phase::Loading { steps: vec![] };
         let v = loading_view(&phase, &pr(), "feat: auth refresh").unwrap();
         assert_eq!(v.subtitle, "Getting fresh data from GitHub…");
-        assert_eq!(v.cache, CacheButton::Hidden);
         assert_eq!(v.leaves, [LeafState::Waiting; 4]);
         assert_eq!(v.rows[0].detail, "Your clone of rzorzal/clusia");
         assert_eq!(
             v.skeleton,
             ("rzorzal/clusia".into(), "feat: auth refresh".into())
         );
-        assert!(v.backdrop.is_none());
     }
 
     #[test]
     fn failures_are_titled_by_step() {
         let pr98: PrRef = "rzorzal/clusia#98".parse().unwrap();
-        let failed = |step, cached| Phase::Failed {
+        let failed = |step| Phase::Failed {
             step,
             message: "fatal: couldn't find remote ref refs/pull/98/head".into(),
-            cached,
         };
-        let v = loading_view(&failed(Some(LoadStepKind::Branch), None), &pr98, "").unwrap();
+        let v = loading_view(&failed(Some(LoadStepKind::Branch)), &pr98, "").unwrap();
         let f = v.failure.as_ref().unwrap();
         assert_eq!(f.heading, "Couldn't get the branch for #98");
         assert_eq!(v.title, f.heading);
@@ -794,7 +686,6 @@ mod tests {
                 LeafState::Waiting
             ]
         );
-        assert_eq!(v.cache, CacheButton::Missing);
         assert!(v.rows.is_empty());
         let cases = [
             (
@@ -810,12 +701,16 @@ mod tests {
             (None, "Couldn't open #98", "What clusiad said"),
         ];
         for (step, heading, said) in cases {
-            let v = loading_view(&failed(step, cached()), &pr98, "").unwrap();
+            let v = loading_view(&failed(step), &pr98, "").unwrap();
             let f = v.failure.unwrap();
             assert_eq!((f.heading.as_str(), f.said), (heading, said));
-            assert_eq!(v.cache, CacheButton::Available);
         }
-        let ready = Phase::Ready(cached().unwrap());
+        let (view, _) = fixture::demo_review(NOW);
+        let ready = Phase::Ready(Box::new(Ready {
+            view,
+            news: vec![],
+            cached_at: None,
+        }));
         assert_eq!(loading_view(&ready, &pr98, ""), None);
         assert_eq!(tilde("/opt/clusia"), "/opt/clusia");
         assert_eq!(short_worktree("/Users/octo/x"), "~/x");
@@ -892,12 +787,6 @@ mod tests {
         };
         assert!(has(&mut app, "Couldn't load #123 from GitHub"));
         assert!(has(&mut app, "What GitHub said"));
-        assert!(has(&mut app, "No cached copy yet"));
-        assert_eq!(
-            testing::count::<OpenFromCache>(&mut app),
-            0,
-            "disabled without a cache"
-        );
     }
 
     /// The status dot of the row named `name`.
@@ -1012,46 +901,25 @@ mod tests {
     }
 
     #[test]
-    fn open_from_cache_and_try_again() {
+    fn try_again_after_a_failure_loads_again() {
         let mut app = testing::app(fixture::demo(NOW));
         show(&mut app);
-        let (view, _) = fixture::demo_review(NOW);
-        testing::tell(
-            &mut app,
-            Tell::CachedAvailable {
-                pr: pr(),
-                view: Box::new(view.clone()),
-                fetched_at: NOW - 3600,
-            },
-        );
-        testing::settle(&mut app);
-        let cache = testing::find::<OpenFromCache>(&mut app, |_| true);
-        testing::activate(&mut app, cache);
-        assert_eq!(testing::recorded(&mut app), [Ask::OpenCached(pr())]);
         testing::tell(
             &mut app,
             Tell::OpenFailed {
                 pr: pr(),
                 message: "fatal: couldn't find remote ref refs/pull/123/head".into(),
-                cache: true,
+                cache: false,
             },
         );
         testing::settle(&mut app);
-        assert_eq!(
-            testing::count::<OpenFromCache>(&mut app),
-            1,
-            "the cache still opens"
-        );
         let again = testing::find::<TryAgain>(&mut app, |_| true);
         testing::activate(&mut app, again);
         assert_eq!(testing::recorded(&mut app), [Ask::OpenReview(pr())]);
         testing::settle(&mut app);
         assert!(matches!(
             app.world().resource::<ReviewTabs>().0[&pr()].phase,
-            Phase::Loading {
-                cached: Some(_),
-                ..
-            }
+            Phase::Loading { .. }
         ));
         assert_eq!(leaves(&mut app), [LeafState::Waiting; 4]);
     }

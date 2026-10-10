@@ -437,10 +437,7 @@ mod tests {
 
     fn tab_with(target: EditTarget) -> Tab {
         let mut tab = Tab {
-            phase: crate::review_state::Phase::Loading {
-                steps: vec![],
-                cached: None,
-            },
+            phase: crate::review_state::Phase::Loading { steps: vec![] },
             ui: Default::default(),
         };
         tab.ui.editor = Some(Editor {

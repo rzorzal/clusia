@@ -46,6 +46,8 @@ fn needed(shared: &Shared, pr: &PrRef, dir: &Path, cutoff: i64) -> bool {
     }
 }
 
+/// Removes stale worktrees, and cached pull request data nobody claims any more. Answers how
+/// many worktrees went.
 pub(crate) async fn sweep(shared: &Shared) -> usize {
     let days = i64::from(
         shared
@@ -56,6 +58,38 @@ pub(crate) async fn sweep(shared: &Shared) -> usize {
             .worktree_retention_days,
     );
     let cutoff = now_unix() - days * 86_400;
+    let removed = sweep_worktrees(shared, cutoff).await;
+    sweep_caches(shared, cutoff).await;
+    removed
+}
+
+/// Removes the cached data of pull requests with no review file that is older than `cutoff`.
+/// A review closed empty keeps its cache so it reopens at once; this is where it ends.
+async fn sweep_caches(shared: &Shared, cutoff: i64) {
+    let Ok(mut entries) = tokio::fs::read_dir(shared.paths.review_cache_dir()).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pr) = name.strip_suffix(".json").and_then(PrRef::from_file_key) else {
+            continue;
+        };
+        if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
+            continue;
+        }
+        // The review lock: an open may be writing this cache and its review right now, so what
+        // was true before waiting for it is checked again.
+        let _guard = lock(shared, &pr).await;
+        if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
+            continue;
+        }
+        if !shared.paths.review_file(&pr).exists() {
+            crate::reviews::drop_cache(shared, &pr);
+        }
+    }
+}
+
+async fn sweep_worktrees(shared: &Shared, cutoff: i64) -> usize {
     let Ok(mut entries) = tokio::fs::read_dir(shared.paths.worktrees_dir()).await else {
         return 0;
     };
@@ -79,6 +113,9 @@ pub(crate) async fn sweep(shared: &Shared) -> usize {
                 continue;
             }
             removed += 1;
+            if !shared.paths.review_file(&pr).exists() {
+                crate::reviews::drop_cache(shared, &pr);
+            }
             continue;
         }
         // Not one of ours (e.g. an old key format): no review can claim it, so only age counts.
@@ -242,6 +279,65 @@ mod tests {
         assert!(!shared.paths.worktree_for(&stale).exists());
         assert!(shared.paths.worktree_for(&active).exists());
         assert!(shared.paths.worktree_for(&publishing).exists());
+    }
+
+    fn cache_for(shared: &Shared, n: u64, days_old: u64) -> PathBuf {
+        let pr: PrRef = format!("acme/widgets#{n}").parse().unwrap();
+        let file = shared.paths.review_cache_file(&pr);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"{}").unwrap();
+        age(&file, days_old);
+        file
+    }
+
+    #[tokio::test]
+    async fn sweep_drops_the_cache_with_the_worktree_of_a_forgotten_review() {
+        let (_dir, shared) = shared();
+        let pr: PrRef = "acme/widgets#6".parse().unwrap();
+        std::fs::create_dir_all(shared.paths.worktree_for(&pr)).unwrap();
+        age(&shared.paths.worktree_for(&pr), 100);
+        let cache = cache_for(&shared, 6, 1);
+        sweep(&shared).await;
+        assert!(!cache.exists());
+    }
+
+    #[tokio::test]
+    async fn sweep_drops_old_caches_that_have_no_review_and_keeps_the_rest() {
+        let (_dir, shared) = shared();
+        let old = cache_for(&shared, 1, 100);
+        let fresh = cache_for(&shared, 2, 1);
+        let saved = old_review(&shared, 3, ReviewState::Saved);
+        let kept = {
+            let file = shared.paths.review_cache_file(&saved);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"{}").unwrap();
+            age(&file, 100);
+            file
+        };
+        let touched = cache_for(&shared, 4, 100);
+        shared.touch(&"acme/widgets#4".parse().unwrap());
+        sweep(&shared).await;
+        assert!(!old.exists(), "no review, older than the retention");
+        assert!(fresh.exists(), "recent");
+        assert!(kept.exists(), "its review still exists");
+        assert!(touched.exists(), "open this session");
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_a_cache_an_open_rewrote_while_it_waited_for_the_lock() {
+        let (_dir, shared) = shared();
+        let cache = cache_for(&shared, 7, 100);
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let guard = lock(&shared, &pr).await;
+        let cutoff = now_unix() - 14 * 86_400;
+        let open = async {
+            // The sweep is now waiting for the lock; the open writes a fresh cache.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            age(&cache, 0);
+            drop(guard);
+        };
+        tokio::join!(sweep_caches(&shared, cutoff), open);
+        assert!(cache.exists());
     }
 
     fn media_file(dir: &std::path::Path, name: &str, bytes: usize, days_old: u64) -> PathBuf {
