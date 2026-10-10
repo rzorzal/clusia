@@ -26,6 +26,7 @@ use crate::screens::review::shell::on_harness;
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{Variant, button};
 
+pub mod audits;
 pub mod security;
 
 /// One kind's state and what its last run found.
@@ -637,7 +638,7 @@ impl Plugin for ChecksPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (load_checks, security::fill_security)
+            (load_checks, security::fill_security, audits::fill_audits)
                 .chain()
                 .after(ReviewSystems),
         );

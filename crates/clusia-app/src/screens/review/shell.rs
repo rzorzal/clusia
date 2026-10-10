@@ -234,7 +234,10 @@ struct RightView {
 fn is_placeholder(section: ReviewSection) -> bool {
     !matches!(
         section,
-        ReviewSection::Diff | ReviewSection::Comments | ReviewSection::Security
+        ReviewSection::Diff
+            | ReviewSection::Comments
+            | ReviewSection::Security
+            | ReviewSection::Audits
     )
 }
 
@@ -245,10 +248,7 @@ pub fn placeholder_text(section: ReviewSection) -> (&'static str, &'static str) 
             "Diagrams",
             "Arrives with SP3 (#8): class, sequence and data-flow diagrams of this change.",
         ),
-        ReviewSection::Audits => (
-            "Audits",
-            "Arrives with the harness (SP2, #7): audits your agent runs on this change.",
-        ),
+        ReviewSection::Audits => ("", ""),
         ReviewSection::Tests => (
             "Tests",
             "Arrives with SP4 (#9): run and read the tests this change touches.",
@@ -1163,6 +1163,7 @@ fn rebuild_status(
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
     chats: Res<Chats>,
+    checks: Res<crate::screens::review::checks::Checks>,
     mut bars: Query<(Entity, &mut StatusBar)>,
 ) {
     for (entity, mut bar) in &mut bars {
@@ -1174,6 +1175,10 @@ fn rebuild_status(
         status.agent = agent;
         status.agent_live = agent_live;
         status.panel_open = chats.0.get(&bar.pr).is_none_or(|c| c.open);
+        let waiting = checks.0.get(&bar.pr).map_or(0, |m| m.waiting_ok());
+        if waiting > 0 {
+            status.draft = format!("{} · {waiting} waiting for your OK", status.draft);
+        }
         if bar.built.as_ref() == Some(&status) {
             continue;
         }

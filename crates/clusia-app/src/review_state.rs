@@ -174,6 +174,8 @@ pub struct TabUi {
     pub opening: bool,
     /// Why the last refresh of a tab that already shows a copy failed.
     pub open_error: Option<String>,
+    /// The area selected in Audits (its id); `None`: the first area with findings, else the first.
+    pub audit_area: Option<String>,
 }
 
 impl Default for TabUi {
@@ -190,6 +192,7 @@ impl Default for TabUi {
             expanded: BTreeSet::new(),
             opening: false,
             open_error: None,
+            audit_area: None,
         }
     }
 }
