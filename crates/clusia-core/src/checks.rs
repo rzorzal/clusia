@@ -61,6 +61,8 @@ pub struct AuditArea {
     pub instruction: String,
     #[serde(default = "enabled")]
     pub enabled: bool,
+    /// Display only: whether an area can be removed is decided by `BUILTIN_AREA_IDS`, never by
+    /// this flag, which a hand-edited file can set either way.
     #[serde(default)]
     pub builtin: bool,
 }
@@ -297,9 +299,13 @@ pub enum AreaStatus {
 /// The status of `area` in `result`, not counting the findings in `dismissed`. Callers pass the
 /// dismissed and the accepted ids together: an accepted finding already waits in the draft, so it
 /// is not one the reviewer still has to answer. A Security
-/// result has one area; with no findings it is clean. An audit area counts as checked only when
+/// result has one area, `security`; with no findings it is clean, and any other area is not
+/// checked by it. An audit area counts as checked only when
 /// the run asked for it and the agent wrote a finding or a pass for it.
 pub fn area_status(result: &CheckResult, area: &str, dismissed: &BTreeSet<String>) -> AreaStatus {
+    if result.kind == CheckKind::Security && area != SECURITY_AREA {
+        return AreaStatus::NotChecked;
+    }
     let in_area = || result.findings.iter().filter(|f| f.area == area);
     let open = in_area().filter(|f| !dismissed.contains(&f.id)).count() as u32;
     if open > 0 {
@@ -655,6 +661,15 @@ mod tests {
             area_status(&r, "performance", &dismissed),
             AreaStatus::NotChecked,
             "an area the run did not ask about"
+        );
+    }
+
+    #[test]
+    fn a_security_result_knows_only_the_security_area() {
+        let r = result(CheckKind::Security, &[]);
+        assert_eq!(
+            area_status(&r, "correctness", &BTreeSet::new()),
+            AreaStatus::NotChecked
         );
     }
 

@@ -129,8 +129,9 @@ pub(crate) fn unfinished_turns(entries: &[AgentLogEntry]) -> Vec<u64> {
 }
 
 /// What the agent said in the latest turn the daemon asked for itself (a turn with no `User`
-/// entry): the running summary that goes into the review notes.
+/// entry and no `Check` entry): the running summary that goes into the review notes.
 pub(crate) fn last_summary(entries: &[AgentLogEntry]) -> Option<String> {
+    let checks = check_turns(entries);
     let asked: std::collections::HashSet<u64> = entries
         .iter()
         .filter(|e| matches!(e, AgentLogEntry::User { .. }))
@@ -140,7 +141,7 @@ pub(crate) fn last_summary(entries: &[AgentLogEntry]) -> Option<String> {
         .iter()
         .filter(|e| matches!(e, AgentLogEntry::Text { .. }))
         .map(turn_of)
-        .filter(|turn| !asked.contains(turn))
+        .filter(|turn| !asked.contains(turn) && !checks.contains(turn))
         .max()?;
     let text: String = entries
         .iter()
@@ -358,5 +359,26 @@ mod tests {
             last_summary(&log[..4]).as_deref(),
             Some("First summary. Second part.")
         );
+    }
+
+    #[test]
+    fn a_check_is_never_the_summary() {
+        let say = |turn, text: &str| AgentLogEntry::Text {
+            at: 1,
+            turn,
+            text: text.into(),
+        };
+        let log = [
+            say(1, "The summary."),
+            AgentLogEntry::Check {
+                at: 2,
+                turn: 2,
+                kind: clusia_core::CheckKind::Audit,
+                state: "running".into(),
+            },
+            say(2, "A finding block."),
+        ];
+        assert_eq!(last_summary(&log).as_deref(), Some("The summary."));
+        assert_eq!(last_summary(&log[1..]), None);
     }
 }
