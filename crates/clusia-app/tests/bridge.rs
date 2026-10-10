@@ -336,6 +336,29 @@ fn seed_demo_review(dir: &std::path::Path) -> PrRef {
     pr
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cached_review_opens_ready_without_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    let pr = seed_demo_review(dir.path());
+    let d = common::Daemon::start_in(dir).await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask.send(Ask::OpenReview(pr.clone())).unwrap();
+    // The daemon has no token, so the refresh fails; the cached copy came first.
+    let first = next(&link, |t| {
+        matches!(t, Tell::OpenedFromCache { .. } | Tell::OpenFailed { .. })
+    });
+    assert!(
+        matches!(first, Tell::OpenedFromCache { pr: ref got, .. } if *got == pr),
+        "the cached copy opens the tab, got {first:?}"
+    );
+    assert!(matches!(
+        next(&link, |t| matches!(t, Tell::OpenFailed { .. })),
+        Tell::OpenFailed { cache: true, .. }
+    ));
+    d.stop().await;
+}
+
 fn general(pr: &PrRef, body: &str, ticket: u64) -> Ask {
     Ask::AddItem {
         pr: pr.clone(),

@@ -54,9 +54,13 @@ pub async fn ensure_worktree(repo: &Path, path: &Path, sha: &str) -> Result<(), 
         tokio::fs::create_dir_all(parent).await?;
     }
     let target = path.to_string_lossy();
+    // `--force`: a worktree whose directory was deleted stays registered and would otherwise
+    // block `add` at the same path. Unlike `prune`, it touches no other worktree.
     git(
         repo,
-        &["worktree", "add", "--quiet", "--detach", &target, sha],
+        &[
+            "worktree", "add", "--quiet", "--force", "--detach", &target, sha,
+        ],
     )
     .await?;
     restore_clusia_dir(path).await?;

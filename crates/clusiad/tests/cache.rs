@@ -4,7 +4,8 @@ mod common;
 
 use clusia_core::{DraftKind, Side, Verdict};
 use clusia_protocol::{AnchorInput, CachedReview, ClientError, Command, ErrorCode, Reply};
-use common::github_mock::mount_publish;
+use common::git_fixture::advance_pr;
+use common::github_mock::{PrMock, mount_pr, mount_publish};
 use common::review_world::{open, pr7, world};
 
 const REVIEW_URL: &str = "https://github.com/acme/widgets/pull/7#pullrequestreview-42";
@@ -108,16 +109,6 @@ async fn no_cache_is_not_found() {
             "no cached copy of acme/widgets#7".into()
         )
     );
-    open(&mut c).await;
-    clusia_store::delete_review(&w.daemon.paths, &pr7()).unwrap();
-    assert_eq!(
-        not_found(c.request(Command::GetCachedReview { pr: pr7() }).await),
-        (
-            ErrorCode::NotFound,
-            "no cached copy of acme/widgets#7".into()
-        ),
-        "a cache without its review file is not served"
-    );
     w.daemon.stop().await;
 }
 
@@ -150,18 +141,103 @@ async fn publish_and_discard_drop_the_cache() {
 }
 
 #[tokio::test]
-async fn closing_an_empty_review_drops_the_cache() {
+async fn closing_an_empty_review_keeps_the_cache() {
     let w = world().await;
     let file = w.daemon.paths.review_cache_file(&pr7());
     let mut c = w.daemon.client().await;
     open(&mut c).await;
-    assert!(file.exists());
     c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
-    assert!(!file.exists(), "a forgotten review leaves no cache behind");
+    assert!(
+        file.exists(),
+        "the pull request's data outlives the empty review"
+    );
 
+    let got = cached(
+        c.request(Command::GetCachedReview { pr: pr7() })
+            .await
+            .unwrap(),
+    );
+    assert_eq!(got.view.pr.head_sha, w.head);
+    assert!(got.view.review.draft.is_empty());
+    w.daemon.stop().await;
+}
+
+fn count(requests: &[wiremock::Request], suffix: &str) -> usize {
+    requests
+        .iter()
+        .filter(|r| r.method.as_str() == "GET" && r.url.path().ends_with(suffix))
+        .count()
+}
+
+#[tokio::test]
+async fn reopen_with_unchanged_head_skips_git_and_files() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    let first = open(&mut c).await;
+    comment_on_line_2(&mut c).await;
+    // A full open would fetch from the origin; with it gone, only the fast path can succeed.
+    std::fs::remove_dir_all(&w.origin).unwrap();
+    w.server.reset().await;
+    mount_pr(&w.server, &PrMock::new(&w.head, &w.base, &w.origin)).await;
+
+    let second = open(&mut c).await;
+    let requests = w.server.received_requests().await.unwrap();
+    assert_eq!(count(&requests, "/pulls/7"), 1, "one get_pr");
+    assert_eq!(count(&requests, "/pulls/7/files"), 0);
+    assert_eq!(
+        count(&requests, "/issues/7/comments"),
+        1,
+        "the conversation is read again"
+    );
+    assert_eq!(count(&requests, "/check-runs"), 1, "so are the checks");
+    assert_eq!(second.diff, first.diff);
+    assert_eq!(second.worktree, first.worktree);
+    assert_eq!(second.review.draft.items.len(), 1, "the draft is untouched");
+    let diff = c.request(Command::GetDiff { pr: pr7() }).await.unwrap();
+    assert!(
+        matches!(diff, Reply::Diff(_)),
+        "files_for still works: {diff:?}"
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn reopen_with_new_head_takes_the_full_path() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
     open(&mut c).await;
     comment_on_line_2(&mut c).await;
-    c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
-    assert!(file.exists(), "a saved review keeps its cache");
+    let new_head = advance_pr(w.tmp.path(), 7, "feature.txt", "zero\none\ntwo\nthree\n");
+    w.server.reset().await;
+    mount_pr(
+        &w.server,
+        &PrMock::new(&new_head, &w.base, &w.origin).adding_feature("zero\none\ntwo\nthree\n"),
+    )
+    .await;
+
+    let view = open(&mut c).await;
+    let requests = w.server.received_requests().await.unwrap();
+    assert_eq!(count(&requests, "/pulls/7/files"), 1);
+    assert_eq!(view.pr.head_sha, new_head);
+    assert_eq!(
+        view.review.head_sha, new_head,
+        "the draft follows the new head"
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn reopen_when_the_worktree_is_gone_takes_the_full_path() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    let first = open(&mut c).await;
+    std::fs::remove_dir_all(first.worktree.as_deref().unwrap()).unwrap();
+    w.server.reset().await;
+    mount_pr(&w.server, &PrMock::new(&w.head, &w.base, &w.origin)).await;
+
+    let again = open(&mut c).await;
+    let requests = w.server.received_requests().await.unwrap();
+    assert_eq!(count(&requests, "/pulls/7/files"), 1);
+    assert!(std::path::Path::new(again.worktree.as_deref().unwrap()).exists());
     w.daemon.stop().await;
 }

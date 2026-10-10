@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clusia_core::{
-    Activity, ActivityKind, Anchor, DraftKind, FileDiff, Origin, PrRef, Review, ReviewCache,
-    ReviewEvent, ReviewState, Role, Side, ThreadRef, can_comment,
+    Activity, ActivityKind, Anchor, ChecksSummary, DraftKind, FileDiff, Origin, PrConversation,
+    PrDetail, PrRef, Review, ReviewCache, ReviewEvent, ReviewState, Role, Side, ThreadRef,
+    can_comment,
 };
 use clusia_git::{
-    base_pin_ref, pin_commit, remove_worktree, repo_of_worktree, reviewed_ref, unpin,
+    base_pin_ref, git, pin_commit, remove_worktree, repo_of_worktree, reviewed_ref, unpin,
 };
 use clusia_protocol::{
     AnchorInput, CachedReview, ErrorCode, Event, FileSummary, LoadStep, LoadStepKind, Outcome,
@@ -18,6 +19,8 @@ use clusia_store::{
     ReviewLoad, append_activity, delete_review, delete_review_cache, list_reviews, load_review,
     load_review_cache, save_review, save_review_cache,
 };
+
+use clusia_provider::GitHub;
 
 use crate::handlers::{no_token, provider_error};
 use crate::state::Shared;
@@ -110,7 +113,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         Err(e) => return provider_error(e),
     };
     step(shared, pr, LoadStepKind::Repo, StepStatus::Running, None);
-    let mut detail = match gh.get_pr(pr).await {
+    let detail = match gh.get_pr(pr).await {
         Ok(d) => d,
         Err(e) => {
             step(
@@ -124,93 +127,45 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         }
     };
     shared.touch(pr);
-    let checkout = {
-        let _serialized = shared.worktree_lock.lock().await;
-        worktrees::checkout(shared, pr, &detail).await
-    };
-    let (info, remote) = match checkout {
-        Ok(x) => x,
-        Err(e) => {
+    let fast = unchanged_open(shared, &gh, pr, &detail).await;
+    let (opened, detail) = match fast {
+        Some(opened) => {
             step(
                 shared,
                 pr,
                 LoadStepKind::Repo,
-                StepStatus::Failed,
-                Some(e.to_string()),
+                StepStatus::Done,
+                Some(opened.repo.display().to_string()),
             );
-            return Outcome::Err(ProtocolError::new(ErrorCode::Git, e.to_string()));
-        }
-    };
-    if info.head_sha != detail.head_sha {
-        // A push landed between get_pr and the fetch; accept it only if GitHub now agrees.
-        match gh.get_pr(pr).await {
-            Ok(d) if d.head_sha == info.head_sha => detail = d,
-            _ => {
-                let msg = "the pull request changed while opening; try again";
-                step(
-                    shared,
-                    pr,
-                    LoadStepKind::Repo,
-                    StepStatus::Failed,
-                    Some(msg.into()),
-                );
-                return Outcome::Err(ProtocolError::new(ErrorCode::Conflict, msg));
-            }
-        }
-    }
-    step(
-        shared,
-        pr,
-        LoadStepKind::Repo,
-        StepStatus::Done,
-        Some(info.clone.clone()),
-    );
-    step(
-        shared,
-        pr,
-        LoadStepKind::Branch,
-        StepStatus::Done,
-        Some(info.path.clone()),
-    );
-    let repo = PathBuf::from(&info.clone);
-    relocate::refresh_base(&repo, &remote, pr, &detail.base_ref).await;
-
-    step(shared, pr, LoadStepKind::Pr, StepStatus::Running, None);
-    let (files, conversation, checks) = tokio::join!(
-        gh.get_files(pr),
-        gh.get_conversation(pr),
-        gh.get_checks(pr, &detail.head_sha),
-    );
-    let checks = checks
-        .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the checks"))
-        .ok();
-    let (files, conversation) = match files.and_then(|f| Ok((f, conversation?))) {
-        Ok((f, c)) => (Arc::new(f), c),
-        Err(e) => {
+            step(
+                shared,
+                pr,
+                LoadStepKind::Branch,
+                StepStatus::Done,
+                Some(opened.worktree.clone()),
+            );
             step(
                 shared,
                 pr,
                 LoadStepKind::Pr,
-                StepStatus::Failed,
-                Some(e.to_string()),
+                StepStatus::Done,
+                Some(format!("{} files", opened.files.len())),
             );
-            return provider_error(e);
+            (opened, detail)
         }
+        None => match full_open(shared, &gh, pr, detail).await {
+            Ok(x) => x,
+            Err(out) => return out,
+        },
     };
-    shared
-        .files_cache
-        .lock()
-        .await
-        .insert(pr.clone(), (detail.head_sha.clone(), files.clone()));
-    step(
-        shared,
-        pr,
-        LoadStepKind::Pr,
-        StepStatus::Done,
-        Some(format!("{} files", files.len())),
-    );
-
-    let viewer = gh.viewer().await.ok().map(|v| v.login);
+    let Opened {
+        worktree,
+        repo,
+        files,
+        conversation,
+        checks,
+        viewer,
+    } = opened;
 
     let _guard = lock(shared, pr).await;
     let now = now_unix();
@@ -301,7 +256,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         checks,
         role,
         viewer,
-        worktree: Some(info.path),
+        worktree: Some(worktree),
         fetched_at: now,
     };
     if let Err(e) = save_review_cache(&shared.paths, pr, &cache) {
@@ -311,6 +266,193 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     let (status, note) = crate::agent::on_open(shared, pr, &review.head_sha).await;
     step(shared, pr, LoadStepKind::Agent, status, Some(note));
     Outcome::Ok(Reply::Review(Box::new(view_of(review, cache))))
+}
+
+/// What an open needs from the checkout and from GitHub, however it got them.
+struct Opened {
+    worktree: String,
+    repo: PathBuf,
+    files: Arc<Vec<FileDiff>>,
+    conversation: PrConversation,
+    checks: Option<ChecksSummary>,
+    viewer: Option<String>,
+}
+
+/// The open that skips git and the file list: the cached copy still describes this very pull
+/// request (same head, base, state, title and draft flag) and its worktree is on that head.
+/// Only the conversation and the checks, which change without a push, are read again. `None`
+/// on any mismatch or error, so the caller takes the full path.
+async fn unchanged_open(
+    shared: &Shared,
+    gh: &GitHub,
+    pr: &PrRef,
+    detail: &PrDetail,
+) -> Option<Opened> {
+    let cache = match load_review_cache(&shared.paths, pr) {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, pr = %pr, "cannot read the review cache");
+            return None;
+        }
+    };
+    let before = &cache.pr;
+    if before.head_sha != detail.head_sha
+        || before.base_sha != detail.base_sha
+        || before.closed != detail.closed
+        || before.merged != detail.merged
+        || before.summary.title != detail.summary.title
+        || before.summary.draft != detail.summary.draft
+    {
+        return None;
+    }
+    let worktree = shared.paths.worktree_for(pr);
+    if cache.worktree.as_deref() != Some(worktree.to_string_lossy().as_ref())
+        || !worktree.join(".git").exists()
+    {
+        return None;
+    }
+    if git(&worktree, &["rev-parse", "HEAD"]).await.ok()? != detail.head_sha {
+        return None;
+    }
+    let repo = repo_of_worktree(&worktree).await.ok()?;
+    let (conversation, checks) =
+        tokio::join!(gh.get_conversation(pr), gh.get_checks(pr, &detail.head_sha));
+    let conversation = conversation
+        .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the conversation"))
+        .ok()?;
+    let checks = checks
+        .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the checks"))
+        .ok();
+    let viewer = match cache.viewer {
+        Some(v) => Some(v),
+        None => gh.viewer().await.ok().map(|v| v.login),
+    };
+    let files = Arc::new(cache.files);
+    shared
+        .files_cache
+        .lock()
+        .await
+        .insert(pr.clone(), (detail.head_sha.clone(), files.clone()));
+    Some(Opened {
+        worktree: worktree.display().to_string(),
+        repo,
+        files,
+        conversation,
+        checks,
+        viewer,
+    })
+}
+
+/// The open that fetches the pull request's head, checks it out and reads everything again.
+#[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
+async fn full_open(
+    shared: &Shared,
+    gh: &GitHub,
+    pr: &PrRef,
+    mut detail: PrDetail,
+) -> Result<(Opened, PrDetail), Outcome> {
+    let checkout = {
+        let _serialized = shared.worktree_lock.lock().await;
+        worktrees::checkout(shared, pr, &detail).await
+    };
+    let (info, remote) = match checkout {
+        Ok(x) => x,
+        Err(e) => {
+            step(
+                shared,
+                pr,
+                LoadStepKind::Repo,
+                StepStatus::Failed,
+                Some(e.to_string()),
+            );
+            return Err(Outcome::Err(ProtocolError::new(
+                ErrorCode::Git,
+                e.to_string(),
+            )));
+        }
+    };
+    if info.head_sha != detail.head_sha {
+        // A push landed between get_pr and the fetch; accept it only if GitHub now agrees.
+        match gh.get_pr(pr).await {
+            Ok(d) if d.head_sha == info.head_sha => detail = d,
+            _ => {
+                let msg = "the pull request changed while opening; try again";
+                step(
+                    shared,
+                    pr,
+                    LoadStepKind::Repo,
+                    StepStatus::Failed,
+                    Some(msg.into()),
+                );
+                return Err(Outcome::Err(ProtocolError::new(ErrorCode::Conflict, msg)));
+            }
+        }
+    }
+    step(
+        shared,
+        pr,
+        LoadStepKind::Repo,
+        StepStatus::Done,
+        Some(info.clone.clone()),
+    );
+    step(
+        shared,
+        pr,
+        LoadStepKind::Branch,
+        StepStatus::Done,
+        Some(info.path.clone()),
+    );
+    let repo = PathBuf::from(&info.clone);
+    relocate::refresh_base(&repo, &remote, pr, &detail.base_ref).await;
+
+    step(shared, pr, LoadStepKind::Pr, StepStatus::Running, None);
+    let (files, conversation, checks) = tokio::join!(
+        gh.get_files(pr),
+        gh.get_conversation(pr),
+        gh.get_checks(pr, &detail.head_sha),
+    );
+    let checks = checks
+        .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the checks"))
+        .ok();
+    let (files, conversation) = match files.and_then(|f| Ok((f, conversation?))) {
+        Ok((f, c)) => (Arc::new(f), c),
+        Err(e) => {
+            step(
+                shared,
+                pr,
+                LoadStepKind::Pr,
+                StepStatus::Failed,
+                Some(e.to_string()),
+            );
+            return Err(provider_error(e));
+        }
+    };
+    shared
+        .files_cache
+        .lock()
+        .await
+        .insert(pr.clone(), (detail.head_sha.clone(), files.clone()));
+    step(
+        shared,
+        pr,
+        LoadStepKind::Pr,
+        StepStatus::Done,
+        Some(format!("{} files", files.len())),
+    );
+
+    let viewer = gh.viewer().await.ok().map(|v| v.login);
+    Ok((
+        Opened {
+            worktree: info.path,
+            repo,
+            files,
+            conversation,
+            checks,
+            viewer,
+        },
+        detail,
+    ))
 }
 
 /// The view the window shows, from a review and what GitHub said about its pull request.
@@ -344,9 +486,17 @@ pub(crate) async fn cached(shared: &Shared, pr: &PrRef) -> Outcome {
             return not_found();
         }
     };
+    // A review closed with an empty draft leaves no file but keeps its cache: it reopens as a
+    // fresh review of the cached pull request.
     let review = match load_stored(shared, pr) {
-        Ok(Some(r)) => r,
-        Ok(None) => return not_found(),
+        Ok(Some(r)) if !r.state.is_terminal() => r,
+        Ok(_) => Review::new(
+            pr.clone(),
+            cache.pr.summary.title.clone(),
+            cache.pr.base_sha.clone(),
+            cache.pr.head_sha.clone(),
+            cache.fetched_at,
+        ),
         Err(out) => return out,
     };
     let fetched_at = cache.fetched_at;
@@ -646,7 +796,6 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
                 format!("could not delete the review file: {e}"),
             ));
         }
-        drop_cache(shared, pr);
         shared.sessions.cancel_ended(shared, pr);
         crate::agent::forget(shared, pr);
         // Out of the lock, the stopped turn can finish; then the session slot goes and the

@@ -1016,14 +1016,20 @@ mod tests {
         let mut app = testing::app(fixture::demo(NOW));
         show(&mut app);
         let (view, _) = fixture::demo_review(NOW);
-        testing::tell(
-            &mut app,
-            Tell::CachedAvailable {
-                pr: pr(),
-                view: Box::new(view.clone()),
-                fetched_at: NOW - 3600,
-            },
-        );
+        if let Phase::Loading { cached, .. } = &mut app
+            .world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr())
+            .unwrap()
+            .phase
+        {
+            *cached = Some(Box::new(Ready {
+                view: view.clone(),
+                news: Vec::new(),
+                cached_at: Some(NOW - 3600),
+            }));
+        }
         testing::settle(&mut app);
         let cache = testing::find::<OpenFromCache>(&mut app, |_| true);
         testing::activate(&mut app, cache);

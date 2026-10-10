@@ -67,7 +67,7 @@ pub enum Ask {
     },
     /// After `Tell::Lost`: connect again.
     Reconnect,
-    /// Worker connection: the cache first (`CachedAvailable`), then `OpenReview` and
+    /// Worker connection: the cache first (`OpenedFromCache`), then `OpenReview` and
     /// `GetWhatsNew` (`Opened` or `OpenFailed`).
     OpenReview(PrRef),
     /// Worker connection: the cached copy (`OpenedFromCache`).
@@ -431,12 +431,6 @@ pub enum Tell {
     Quit,
     /// A `LoadStep` event, live while a review opens.
     Step(LoadStep),
-    /// The cached copy, shown dimmed while the fresh one loads.
-    CachedAvailable {
-        pr: PrRef,
-        view: Box<ReviewView>,
-        fetched_at: i64,
-    },
     Opened {
         pr: PrRef,
         view: Box<ReviewView>,
@@ -1390,7 +1384,7 @@ fn message_of(e: ClientError) -> String {
     }
 }
 
-/// Sends `CachedAvailable` when there is a cached copy; gives back `Opened` or `OpenFailed`.
+/// Sends `OpenedFromCache` when there is a cached copy, so the tab shows it at once; gives back `Opened` or `OpenFailed`.
 async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
     let mut client = match worker(socket).await {
         Ok(c) => c,
@@ -1409,7 +1403,7 @@ async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
     {
         cache = true;
         let cached = *cached;
-        teller.send(Tell::CachedAvailable {
+        teller.send(Tell::OpenedFromCache {
             pr: pr.clone(),
             view: Box::new(cached.view),
             fetched_at: cached.fetched_at,

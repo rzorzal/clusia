@@ -381,16 +381,22 @@ pub fn draft_card(item: &DraftItem) -> DraftCard {
 }
 
 /// Why the review cannot be changed right now, if it cannot.
-fn read_only(ready: &Ready, connection: &Connection, now: i64) -> Option<String> {
+fn read_only(tab: &Tab, ready: &Ready, connection: &Connection, now: i64) -> Option<String> {
     if *connection != Connection::Live {
         return Some(
             "Not connected to clusiad: showing the last data. Changes are off until it reconnects."
                 .into(),
         );
     }
-    ready
-        .cached_at
-        .map(|at| format!("Showing the cached copy from {} ago.", long_age(now - at)))
+    let at = ready.cached_at?;
+    if tab.ui.opening {
+        return Some("Refreshing from GitHub…".into());
+    }
+    let ago = long_age(now - at);
+    Some(match &tab.ui.open_error {
+        Some(why) => format!("Showing the cached copy from {ago} ago. Refreshing failed: {why}"),
+        None => format!("Showing the cached copy from {ago} ago."),
+    })
 }
 
 pub fn shell_view(
@@ -428,7 +434,7 @@ pub fn shell_view(
         })
         .collect();
     let items = &view.review.draft.items;
-    let read_only = read_only(ready, connection, now);
+    let read_only = read_only(tab, ready, connection, now);
     let closed = if view.pr.merged {
         Some("This pull request is merged — publishing is off; you can still discard the review.")
     } else if view.pr.closed {
@@ -658,7 +664,7 @@ fn current_view(
 ) -> Option<(ShellView, bool)> {
     let tab = tabs.0.get(pr)?;
     let view = shell_view(tab, &model.snapshot, &model.connection, now)?;
-    let cached = tab.ready().is_some_and(|r| r.cached_at.is_some());
+    let cached = tab.ready().is_some_and(|r| r.cached_at.is_some()) && !tab.ui.opening;
     Some((view, cached))
 }
 
@@ -1831,16 +1837,40 @@ mod tests {
         testing::activate(&mut app, again);
         assert_eq!(testing::recorded(&mut app), [Ask::OpenReview(pr.clone())]);
         testing::settle(&mut app);
-        let tabs = app.world().resource::<ReviewTabs>();
+        let tab = &app.world().resource::<ReviewTabs>().0[&pr];
         assert!(
-            matches!(
-                &tabs.0[&pr].phase,
-                Phase::Loading {
-                    cached: Some(_),
-                    ..
-                }
-            ),
-            "reloads, keeping the cached copy to show meanwhile"
+            tab.ready().is_some_and(|r| r.cached_at.is_some()),
+            "the cached copy stays on screen while it refreshes"
+        );
+        assert!(tab.ui.opening);
+        assert_eq!(
+            testing::count::<TryAgain>(&mut app),
+            0,
+            "one open at a time"
+        );
+    }
+
+    #[test]
+    fn the_banner_says_what_the_cached_copy_is_doing() {
+        let mut tab = ready_tab();
+        tab.ready_mut().unwrap().cached_at = Some(NOW - 3600);
+        let snap = fixture::demo(NOW);
+        let banner = |tab: &Tab| {
+            shell_view(tab, &snap, &Connection::Live, NOW)
+                .unwrap()
+                .read_only
+        };
+        tab.ui.opening = true;
+        assert_eq!(banner(&tab).as_deref(), Some("Refreshing from GitHub…"));
+        tab.ui.opening = false;
+        assert_eq!(
+            banner(&tab).as_deref(),
+            Some("Showing the cached copy from 1 hour ago.")
+        );
+        tab.ui.open_error = Some("offline".into());
+        assert_eq!(
+            banner(&tab).as_deref(),
+            Some("Showing the cached copy from 1 hour ago. Refreshing failed: offline")
         );
     }
 
