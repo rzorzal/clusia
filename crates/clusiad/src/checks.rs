@@ -933,7 +933,8 @@ pub(crate) async fn accept(
         Err(out) => return out,
     };
     let edited = body.is_some();
-    let text = body.unwrap_or_else(|| finding.comment.clone());
+    // The agent wrote the comment: what the window shows and what is added are both printable.
+    let text = body.unwrap_or_else(|| clusia_core::printable::printable_lines(&finding.comment));
     let (kind, anchor, text) = match anchor_of(&finding).filter(|_| finding.anchored) {
         Some(anchor) => (DraftKind::LineComment, Some(anchor), text),
         None if edited => (DraftKind::General, None, text),

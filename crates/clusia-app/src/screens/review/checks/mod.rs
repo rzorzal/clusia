@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, observe};
 use clusia_core::PrRef;
 use clusia_core::checks::{CheckKind, CheckResult, Finding, Severity};
-use clusia_core::printable::printable;
+use clusia_core::printable::{printable, printable_lines};
 use clusia_protocol::CheckState;
 
 use crate::bridge::{Ask, Asks, ChecksTell, Connection, Model, Toasts};
@@ -189,10 +189,15 @@ impl ChecksModel {
             .collect()
     }
 
-    /// The tab label's mark: `●` while the check waits or runs, else the open findings.
+    /// The tab label's mark: `●` while the check waits or runs, else the open findings of a
+    /// result the tab lists (done, or stale). A failed or stopped check shows its notice.
     pub fn badge(&self, kind: CheckKind) -> Option<String> {
-        if active(&self.kind(kind).state) {
+        let state = &self.kind(kind).state;
+        if active(state) {
             return Some("●".to_string());
+        }
+        if !matches!(state, CheckState::Done | CheckState::Stale) {
+            return None;
         }
         let n = self.open(kind).len();
         (n > 0).then(|| n.to_string())
@@ -594,7 +599,7 @@ fn on_edit(
         .0
         .get(pr)
         .and_then(|m| m.find(id))
-        .map(proposed_comment)
+        .map(|f| printable_lines(&proposed_comment(f)))
     else {
         return;
     };
@@ -1224,6 +1229,53 @@ mod tests {
             }),
         );
         assert!(testing::tab(&app, &pr).ui.editor.is_none());
+    }
+
+    #[test]
+    fn edit_first_prefills_what_the_card_shows() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_security(&mut app);
+        let id = security_ids()[0].clone();
+        app.world_mut()
+            .resource_mut::<Checks>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .security
+            .result
+            .as_mut()
+            .unwrap()
+            .findings[0]
+            .comment = "Log less\u{1b}[31m please\u{202e}.\nThanks".into();
+        testing::settle(&mut app);
+        let edit = testing::find::<FindingEdit>(&mut app, |b| b.id == id);
+        testing::activate(&mut app, edit);
+        let editor = testing::tab(&app, &pr).ui.editor.expect("an editor");
+        assert!(
+            !editor.text.contains('\u{1b}') && !editor.text.contains('\u{202e}'),
+            "{:?}",
+            editor.text
+        );
+        assert!(editor.text.starts_with("Log less") && editor.text.contains('\n'));
+    }
+
+    #[test]
+    fn the_badge_counts_only_a_result_the_tab_lists() {
+        let mut m = loaded();
+        for (state, want) in [
+            (CheckState::Done, Some("3")),
+            (CheckState::Stale, Some("3")),
+            (CheckState::NotRun, None),
+            (
+                CheckState::Failed {
+                    message: "timed out".into(),
+                },
+                None,
+            ),
+        ] {
+            m.security.state = state;
+            assert_eq!(m.badge(CheckKind::Security).as_deref(), want);
+        }
     }
 
     #[test]

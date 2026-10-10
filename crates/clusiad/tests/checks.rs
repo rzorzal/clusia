@@ -694,6 +694,64 @@ async fn accepting_a_finding_adds_a_draft_item_with_its_origin() {
 }
 
 #[tokio::test]
+async fn an_accept_without_a_body_adds_printable_text() {
+    let w = world().await;
+    use_fake(
+        &w,
+        Script::one(Turn::answer_blocks(
+            "Two things.",
+            &[
+                finding_block(json!({
+                    "area": "security", "severity": "high", "title": "Token in the log",
+                    "file": "feature.txt", "line": 2, "body": "b",
+                    "comment": "Do not\u{1b}[31m log\u{202e} it."
+                })),
+                finding_block(json!({
+                    "area": "security", "severity": "low", "title": "Loose parse",
+                    "file": "feature.txt", "line": 99, "body": "b",
+                    "comment": "Line\u{1b}[2J 99\nsecond line"
+                })),
+            ],
+        )),
+    )
+    .await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(run_check(CheckKind::Security)).await.unwrap();
+    until(&mut watcher, done(CheckKind::Security)).await;
+    let checks = checks_of(&mut c).await;
+    let mut bodies = Vec::new();
+    for title in ["Token in the log", "Loose parse"] {
+        let Reply::DraftItem(item) = c
+            .request(Command::AcceptFinding {
+                pr: pr7(),
+                id: checks.finding(CheckKind::Security, title).id.clone(),
+                body: None,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("a draft item");
+        };
+        bodies.push(item.body);
+    }
+    for body in &bodies {
+        assert!(
+            !body.contains('\u{1b}') && !body.contains('\u{202e}'),
+            "{body:?}"
+        );
+    }
+    assert!(bodies[0].starts_with("Do not"), "{}", bodies[0]);
+    assert!(
+        bodies[1].starts_with("feature.txt:99: Line"),
+        "the place stays: {}",
+        bodies[1]
+    );
+    assert!(bodies[1].contains('\n'), "line breaks stay");
+}
+
+#[tokio::test]
 async fn a_new_head_makes_results_stale() {
     let w = world().await;
     use_fake(&w, Script::one(security_answer())).await;

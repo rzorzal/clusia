@@ -1826,7 +1826,6 @@ impl Plugin for BridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Model>()
             .init_resource::<Toasts>()
-            .init_resource::<Checks>()
             .add_message::<ShowRequested>()
             .add_message::<GifsArrived>()
             .add_systems(PreUpdate, pump);
@@ -2348,11 +2347,18 @@ fn demo_accept_finding(
     body: Option<String>,
     now: i64,
 ) -> Vec<Tell> {
+    // The card waits for the answer: a refusal frees it.
     let warn = |text: String| {
-        vec![Tell::Notice {
-            text,
-            warning: true,
-        }]
+        vec![
+            Tell::Notice {
+                text,
+                warning: true,
+            },
+            Tell::Checks(ChecksTell::Refused {
+                pr: pr.clone(),
+                id: id.to_string(),
+            }),
+        ]
     };
     let (results, _) = fixture::demo_checks(now);
     let Some(finding) = results
@@ -3179,6 +3185,7 @@ mod tests {
                 .init_resource::<MediaCache>()
                 .insert_resource(ReviewTabs::default())
                 .init_resource::<Chats>()
+                .init_resource::<Checks>()
                 .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
                     mode: Mode::Demo { theme: forced },
@@ -3520,6 +3527,36 @@ mod tests {
             tells.as_slice(),
             [Tell::Checks(ChecksTell::Settled { accepted: false, id: got, .. })] if *got == id
         ));
+    }
+
+    #[test]
+    fn a_demo_accept_that_fails_frees_the_card() {
+        let pr = fixture::demo_pr();
+        let tells = demo_agent_tells(vec![Ask::AcceptFinding {
+            pr: pr.clone(),
+            id: "no-such-finding".into(),
+            body: None,
+        }]);
+        assert!(
+            tells
+                .iter()
+                .any(|t| matches!(t, Tell::Notice { warning: true, .. }))
+        );
+        assert!(tells.iter().any(|t| matches!(
+            t,
+            Tell::Checks(ChecksTell::Refused { id, .. }) if id == "no-such-finding"
+        )));
+        let tells = demo_tells(vec![Ask::AcceptFinding {
+            pr,
+            id: demo_finding_ids()[0].clone(),
+            body: None,
+        }]);
+        assert!(
+            tells
+                .iter()
+                .any(|t| matches!(t, Tell::Checks(ChecksTell::Refused { .. }))),
+            "a review that is not open refuses too"
+        );
     }
 
     #[test]
