@@ -203,16 +203,14 @@ pub struct Ready {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
-    /// Opening; `steps` as the daemon reports them, `cached` once the cache answered.
+    /// Opening with no cached copy to show; `steps` as the daemon reports them.
     Loading {
         steps: Vec<LoadStep>,
-        cached: Option<Box<Ready>>,
     },
     /// `step`: the step that failed, when the daemon said which.
     Failed {
         step: Option<LoadStepKind>,
         message: String,
-        cached: Option<Box<Ready>>,
     },
     Ready(Box<Ready>),
 }
@@ -226,10 +224,7 @@ pub struct Tab {
 impl Tab {
     pub fn loading(mode: DiffMode) -> Self {
         Self {
-            phase: Phase::Loading {
-                steps: Vec::new(),
-                cached: None,
-            },
+            phase: Phase::Loading { steps: Vec::new() },
             ui: TabUi {
                 mode,
                 opening: true,
@@ -257,8 +252,8 @@ impl Tab {
 pub struct ReviewTabs(pub HashMap<PrRef, Tab>);
 
 impl ReviewTabs {
-    /// *Try again*: opens again. A tab that already shows a cached copy keeps showing it while
-    /// the open runs; any other goes back to loading. Nothing happens while an open is running.
+    /// *Try again*: opens again. A tab that shows a cached copy keeps showing it while the
+    /// open runs; any other goes back to loading. Nothing happens while an open is running.
     pub fn retry(&mut self, pr: &PrRef, asks: &mut Asks) {
         let Some(tab) = self.0.get_mut(pr) else {
             return;
@@ -268,18 +263,9 @@ impl ReviewTabs {
         }
         tab.ui.opening = true;
         tab.ui.open_error = None;
-        let cached = match &mut tab.phase {
-            Phase::Ready(r) if r.cached_at.is_some() => {
-                asks.send(Ask::OpenReview(pr.clone()));
-                return;
-            }
-            Phase::Loading { cached, .. } | Phase::Failed { cached, .. } => cached.take(),
-            Phase::Ready(_) => None,
-        };
-        tab.phase = Phase::Loading {
-            steps: Vec::new(),
-            cached,
-        };
+        if !tab.ready().is_some_and(|r| r.cached_at.is_some()) {
+            tab.phase = Phase::Loading { steps: Vec::new() };
+        }
         asks.send(Ask::OpenReview(pr.clone()));
     }
 }
@@ -404,18 +390,16 @@ pub(crate) fn apply(
                 tab.ui.opening = false;
                 // A copy opened from the cache stays; it offers *Try again*.
                 let failed = match &mut tab.phase {
-                    Phase::Loading { steps, cached } => Some(Phase::Failed {
+                    Phase::Loading { steps } => Some(Phase::Failed {
                         step: steps
                             .iter()
                             .find(|s| s.status == StepStatus::Failed)
                             .map(|s| s.step),
                         message,
-                        cached: cached.take(),
                     }),
-                    Phase::Failed { cached, step, .. } => Some(Phase::Failed {
+                    Phase::Failed { step, .. } => Some(Phase::Failed {
                         step: *step,
                         message,
-                        cached: cached.take(),
                     }),
                     Phase::Ready(_) => {
                         tab.ui.open_error = Some(message);
@@ -555,13 +539,7 @@ mod tests {
             .go(&WindowTarget::Review { pr: pr() });
         app.update();
         let tab = testing::tab(&app, &pr());
-        assert_eq!(
-            tab.phase,
-            Phase::Loading {
-                steps: vec![],
-                cached: None
-            }
-        );
+        assert_eq!(tab.phase, Phase::Loading { steps: vec![] });
         assert_eq!(
             tab.ui.mode,
             DiffMode::Split,
@@ -621,44 +599,23 @@ mod tests {
     }
 
     #[test]
-    fn failure_names_the_step_and_keeps_the_cache() {
+    fn failure_names_the_step() {
         let mut app = loading_app();
         testing::tell(&mut app, step(LoadStepKind::Repo, StepStatus::Done));
         testing::tell(&mut app, step(LoadStepKind::Branch, StepStatus::Failed));
-        if let Some(Tab {
-            phase: Phase::Loading { cached, .. },
-            ..
-        }) = app
-            .world_mut()
-            .resource_mut::<ReviewTabs>()
-            .0
-            .get_mut(&pr())
-        {
-            *cached = Some(Box::new(Ready {
-                view: *view(),
-                news: Vec::new(),
-                cached_at: Some(NOW - 3600),
-            }));
-        }
         testing::tell(
             &mut app,
             Tell::OpenFailed {
                 pr: pr(),
                 message: "fatal: couldn't find remote ref".into(),
-                cache: true,
+                cache: false,
             },
         );
-        let Phase::Failed {
-            step,
-            message,
-            cached,
-        } = testing::tab(&app, &pr()).phase
-        else {
+        let Phase::Failed { step, message } = testing::tab(&app, &pr()).phase else {
             panic!("failed");
         };
         assert_eq!(step, Some(LoadStepKind::Branch));
         assert_eq!(message, "fatal: couldn't find remote ref");
-        assert!(cached.is_some());
     }
 
     fn retry(app: &mut App) {

@@ -384,7 +384,7 @@ async fn open_reviews_follow_changes_across_reconnects() {
     let d = common::Daemon::start_in(dir).await;
     let link = bridge::spawn(d.paths.clone(), None, || {});
     snapshot_where(&link, |s| s.lists_loaded);
-    link.ask.send(Ask::OpenCached(pr.clone())).unwrap();
+    link.ask.send(Ask::OpenReview(pr.clone())).unwrap();
     assert!(matches!(
         next(&link, |t| matches!(t, Tell::OpenedFromCache { .. })),
         Tell::OpenedFromCache { .. }
@@ -537,6 +537,24 @@ async fn the_snapshot_carries_the_notification_permission() {
     .unwrap();
     assert_eq!(notice(&link), ("Test notification sent".into(), false));
     d.stop().await;
+}
+
+/// Writes a cache for `pr` (the demo review's data), so opening it shows a cached copy.
+fn seed_cache(dir: &std::path::Path, pr: &PrRef) {
+    let (view, _) = fixture::demo_review(1_790_000_000);
+    let cache = ReviewCache {
+        pr: view.pr,
+        files: view.diff,
+        conversation: view.conversation.unwrap_or_default(),
+        checks: view.checks,
+        role: view.role,
+        viewer: view.viewer,
+        worktree: view.worktree,
+        fetched_at: 1_790_000_000 - 3600,
+    };
+    let file = clusia_core::Paths::new(dir).review_cache_file(pr);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, serde_json::to_vec(&cache).unwrap()).unwrap();
 }
 
 /// A stored review whose worktree is a real, empty git repository, so the agent can run in it.
@@ -881,12 +899,13 @@ fn notified(events: &[Event]) -> Vec<String> {
 async fn a_review_open_in_the_window_sends_nothing_to_the_tray() {
     let dir = tempfile::tempdir().unwrap();
     let pr = seed_agent_review(dir.path(), 9);
+    seed_cache(dir.path(), &pr);
     let d = common::Daemon::start_in(dir).await;
     let slow = || Turn::answer("Ran them.").delay_ms(700);
     use_fake_claude(&d, Script::turns(vec![slow(), slow()])).await;
     let link = bridge::spawn(d.paths.clone(), None, || {});
     snapshot_where(&link, |s| s.lists_loaded);
-    link.ask.send(Ask::OpenCached(pr.clone())).unwrap();
+    link.ask.send(Ask::OpenReview(pr.clone())).unwrap();
 
     let mut watcher = tray_watcher(&d).await;
     turn_with_a_request(&d, &link, &pr, 1).await;

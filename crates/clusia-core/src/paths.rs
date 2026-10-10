@@ -80,10 +80,13 @@ impl Paths {
         self.reviews_dir().join(format!("{}.json", pr.file_key()))
     }
 
+    pub fn review_cache_dir(&self) -> PathBuf {
+        self.root.join("cache/reviews")
+    }
+
     /// What the last successful open fetched for `pr`, for "Open from cache".
     pub fn review_cache_file(&self, pr: &crate::PrRef) -> PathBuf {
-        self.root
-            .join("cache/reviews")
+        self.review_cache_dir()
             .join(format!("{}.json", pr.file_key()))
     }
 

@@ -70,8 +70,6 @@ pub enum Ask {
     /// Worker connection: the cache first (`OpenedFromCache`), then `OpenReview` and
     /// `GetWhatsNew` (`Opened` or `OpenFailed`).
     OpenReview(PrRef),
-    /// Worker connection: the cached copy (`OpenedFromCache`).
-    OpenCached(PrRef),
     LoadConversation(PrRef),
     MarkSeen(PrRef),
     /// Answered by `Saved` or `Refused` with the same ticket.
@@ -1016,7 +1014,7 @@ async fn answer(
             notify(client, teller, Command::OpenInEditor { path, line }, "").await?;
         }
         Ask::Reconnect => {}
-        Ask::OpenReview(ref pr) | Ask::OpenCached(ref pr) => {
+        Ask::OpenReview(ref pr) => {
             open_set(open).insert(pr.clone());
             spawn_worker(paths, teller, open, ask);
         }
@@ -1331,8 +1329,13 @@ fn spawn_worker(paths: &Paths, teller: &Teller, open: &OpenSet, ask: Ask) {
 /// Stops following a review that is no longer open on the daemon: it failed to open, was
 /// published (its file is gone), or was left.
 fn forget_finished(open: &OpenSet, tell: &Tell) {
-    if let Tell::OpenFailed { pr, .. } | Tell::Published { pr, .. } | Tell::Left(pr) = tell {
-        open_set(open).remove(pr);
+    match tell {
+        // A failed refresh leaves the cached copy on screen, and that copy still follows changes.
+        Tell::OpenFailed { cache: true, .. } => {}
+        Tell::OpenFailed { pr, .. } | Tell::Published { pr, .. } | Tell::Left(pr) => {
+            open_set(open).remove(pr);
+        }
+        _ => {}
     }
 }
 
@@ -1343,7 +1346,6 @@ async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
             forget_finished(&open, &tell);
             teller.send(tell);
         }
-        Ask::OpenCached(pr) => open_cached(&socket, &teller, pr).await,
         Ask::FetchMedia(url) => teller.send(fetch_media(&socket, url).await),
         Ask::Publish {
             pr,
@@ -1430,31 +1432,6 @@ async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
             message: message_of(e),
             cache,
         },
-    }
-}
-
-async fn open_cached(socket: &Path, teller: &Teller, pr: PrRef) {
-    let reply = match worker(socket).await {
-        Ok(mut client) => client
-            .request(Command::GetCachedReview { pr: pr.clone() })
-            .await
-            .map_err(message_of),
-        Err(message) => Err(message),
-    };
-    match reply {
-        Ok(Reply::Cached(cached)) => {
-            let cached = *cached;
-            teller.send(Tell::OpenedFromCache {
-                pr,
-                view: Box::new(cached.view),
-                fetched_at: cached.fetched_at,
-            });
-        }
-        Ok(_) => {}
-        Err(text) => teller.send(Tell::Notice {
-            text,
-            warning: true,
-        }),
     }
 }
 
@@ -1842,13 +1819,6 @@ pub(crate) fn demo_answers(
             Ask::SetGiphyKey(_) => model.snapshot.giphy_key = GiphyKey::Set,
             Ask::ClearGiphyKey => model.snapshot.giphy_key = GiphyKey::Missing,
             Ask::OpenReview(pr) => tells.extend(demo_open(pr, now)),
-            Ask::OpenCached(pr) if pr == fixture::demo_pr() => {
-                tells.push(Tell::OpenedFromCache {
-                    pr,
-                    view: Box::new(fixture::demo_review(now).0),
-                    fetched_at: now - 3600,
-                });
-            }
             Ask::LoadConversation(pr) if pr == fixture::demo_pr() => {
                 if let Some(conversation) = fixture::demo_review(now).0.conversation {
                     tells.push(Tell::Conversation { pr, conversation });

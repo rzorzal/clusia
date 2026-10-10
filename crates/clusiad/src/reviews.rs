@@ -165,6 +165,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         conversation,
         checks,
         viewer,
+        cache_saved,
     } = opened;
 
     let _guard = lock(shared, pr).await;
@@ -245,10 +246,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     }
     announce(shared, &review);
 
-    let role = match &viewer {
-        Some(login) if login.eq_ignore_ascii_case(&detail.summary.author) => Role::Author,
-        _ => Role::Reviewer,
-    };
+    let role = role_of(viewer.as_deref(), &detail);
     let cache = ReviewCache {
         pr: detail,
         files: files.to_vec(),
@@ -259,7 +257,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         worktree: Some(worktree),
         fetched_at: now,
     };
-    if let Err(e) = save_review_cache(&shared.paths, pr, &cache) {
+    if !cache_saved && let Err(e) = save_review_cache(&shared.paths, pr, &cache) {
         tracing::warn!(error = %e, pr = %pr, "cannot write the review cache");
     }
     crate::agent::refresh_review_md(shared, &review);
@@ -276,6 +274,8 @@ struct Opened {
     conversation: PrConversation,
     checks: Option<ChecksSummary>,
     viewer: Option<String>,
+    /// The cache was already written, next to a worktree verified under the worktree lock.
+    cache_saved: bool,
 }
 
 /// The open that skips git and the file list: the cached copy still describes this very pull
@@ -299,6 +299,7 @@ async fn unchanged_open(
     let before = &cache.pr;
     if before.head_sha != detail.head_sha
         || before.base_sha != detail.base_sha
+        || before.base_ref != detail.base_ref
         || before.closed != detail.closed
         || before.merged != detail.merged
         || before.summary.title != detail.summary.title
@@ -307,15 +308,16 @@ async fn unchanged_open(
         return None;
     }
     let worktree = shared.paths.worktree_for(pr);
-    if cache.worktree.as_deref() != Some(worktree.to_string_lossy().as_ref())
-        || !worktree.join(".git").exists()
-    {
+    if cache.worktree.as_deref() != Some(worktree.to_string_lossy().as_ref()) {
         return None;
     }
-    if git(&worktree, &["rev-parse", "HEAD"]).await.ok()? != detail.head_sha {
-        return None;
-    }
-    let repo = repo_of_worktree(&worktree).await.ok()?;
+    let repo = {
+        let _serialized = shared.worktree_lock.lock().await;
+        if !on_head(&worktree, &detail.head_sha).await {
+            return None;
+        }
+        repo_of_worktree(&worktree).await.ok()?
+    };
     let (conversation, checks) =
         tokio::join!(gh.get_conversation(pr), gh.get_checks(pr, &detail.head_sha));
     let conversation = conversation
@@ -329,6 +331,27 @@ async fn unchanged_open(
         None => gh.viewer().await.ok().map(|v| v.login),
     };
     let files = Arc::new(cache.files);
+    let fresh = ReviewCache {
+        pr: detail.clone(),
+        files: files.to_vec(),
+        conversation: conversation.clone(),
+        checks,
+        role: role_of(viewer.as_deref(), detail),
+        viewer: viewer.clone(),
+        worktree: cache.worktree,
+        fetched_at: now_unix(),
+    };
+    {
+        // A full open in another window moves the worktree under this lock; the files kept here
+        // are only written next to a worktree that is still on their head.
+        let _serialized = shared.worktree_lock.lock().await;
+        if !on_head(&worktree, &detail.head_sha).await {
+            return None;
+        }
+        if let Err(e) = save_review_cache(&shared.paths, pr, &fresh) {
+            tracing::warn!(error = %e, pr = %pr, "cannot write the review cache");
+        }
+    }
     shared
         .files_cache
         .lock()
@@ -341,7 +364,23 @@ async fn unchanged_open(
         conversation,
         checks,
         viewer,
+        cache_saved: true,
     })
+}
+
+/// Whether `worktree` is a checkout whose `HEAD` is `head`.
+async fn on_head(worktree: &std::path::Path, head: &str) -> bool {
+    worktree.join(".git").exists()
+        && git(worktree, &["rev-parse", "HEAD"])
+            .await
+            .is_ok_and(|found| found == head)
+}
+
+fn role_of(viewer: Option<&str>, detail: &PrDetail) -> Role {
+    match viewer {
+        Some(login) if login.eq_ignore_ascii_case(&detail.summary.author) => Role::Author,
+        _ => Role::Reviewer,
+    }
 }
 
 /// The open that fetches the pull request's head, checks it out and reads everything again.
@@ -450,6 +489,7 @@ async fn full_open(
             conversation,
             checks,
             viewer,
+            cache_saved: false,
         },
         detail,
     ))

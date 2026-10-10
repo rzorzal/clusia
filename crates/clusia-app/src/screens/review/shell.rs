@@ -1557,10 +1557,7 @@ mod tests {
             Some("Showing the cached copy from 3 hours ago.")
         );
         assert!(!cached.status.finalize);
-        tab.phase = Phase::Loading {
-            steps: vec![],
-            cached: None,
-        };
+        tab.phase = Phase::Loading { steps: vec![] };
         assert!(shell_view(&tab, &Snapshot::default(), &Connection::Live, NOW).is_none());
     }
 

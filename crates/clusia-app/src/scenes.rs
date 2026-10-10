@@ -236,19 +236,11 @@ pub fn stage(world: &mut World, scene: Scene) {
         Scene::WhatsNew => ui.modal = Some(Modal::WhatsNew),
         Scene::Leave => ui.modal = Some(Modal::Leave { window: false }),
     }
-    if matches!(scene, Scene::Loading | Scene::Failed) {
-        // The copy under a load is the cached one: read-only, nothing is sent from it.
-        ready.cached_at = Some(now - 3600);
-    }
     let phase = match scene {
-        Scene::Loading => Phase::Loading {
-            steps: steps(&pr),
-            cached: Some(Box::new(ready)),
-        },
+        Scene::Loading => Phase::Loading { steps: steps(&pr) },
         Scene::Failed => Phase::Failed {
             step: Some(LoadStepKind::Branch),
             message: "fatal: couldn't find remote ref refs/pull/123/head".into(),
-            cached: Some(Box::new(ready)),
         },
         _ => Phase::Ready(Box::new(ready)),
     };
@@ -441,22 +433,15 @@ mod tests {
                 }
                 Scene::Rendered => assert_eq!(tab.ui.section, ReviewSection::Comments),
                 Scene::Loading => {
-                    let Phase::Loading { steps, cached } = &tab.phase else {
+                    let Phase::Loading { steps } = &tab.phase else {
                         panic!("loading")
                     };
                     assert_eq!(steps.len(), 3);
-                    assert!(cached.as_ref().is_some_and(|c| c.cached_at.is_some()));
                 }
                 Scene::Failed => {
-                    let Phase::Failed {
-                        step,
-                        message,
-                        cached,
-                    } = &tab.phase
-                    else {
+                    let Phase::Failed { step, message } = &tab.phase else {
                         panic!("failed")
                     };
-                    assert!(cached.as_ref().is_some_and(|c| c.cached_at.is_some()));
                     assert_eq!(*step, Some(LoadStepKind::Branch));
                     assert!(message.starts_with("fatal: couldn't find remote ref"));
                 }
