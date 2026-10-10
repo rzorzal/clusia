@@ -253,7 +253,7 @@ pub fn permission_line(
             true,
             format!("{verb} {summary} (allowed for this review)"),
         ),
-        PermissionOutcome::Denied => ("⊘", false, format!("you denied {summary}")),
+        PermissionOutcome::Denied => ("⊘", false, format!("Denied: {summary}")),
         PermissionOutcome::Expired => ("⊘", false, format!("denied {summary}: no answer in time")),
         PermissionOutcome::Cancelled => {
             ("⊘", false, format!("{summary} was not run: the turn ended"))
@@ -886,7 +886,7 @@ mod tests {
         );
         assert_eq!(
             line("Bash", Denied),
-            ("⊘", false, "you denied cargo test".into())
+            ("⊘", false, "Denied: cargo test".into())
         );
         assert_eq!(
             line("Bash", Expired),
@@ -1463,7 +1463,7 @@ mod tests {
         for needle in [
             "ran cargo test -p clusia-auth refresh_race -- --nocapture (you allowed it)",
             "(allowed for this review)",
-            "you denied cargo test -p clusia-auth refresh_race -- --nocapture",
+            "Denied: cargo test -p clusia-auth refresh_race -- --nocapture",
             "no answer in time",
             "was not run: the turn ended",
         ] {
@@ -1619,7 +1619,7 @@ mod tests {
         ));
         assert_eq!(
             permission_line("Bash", "a\u{2028}b", PermissionOutcome::Denied).2,
-            "you denied a\\u{2028}b"
+            "Denied: a\\u{2028}b"
         );
         assert_eq!(rule_label("Bash(c\u{200b}:*)"), "c\\u{200b}");
     }

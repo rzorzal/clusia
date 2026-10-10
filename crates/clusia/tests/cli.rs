@@ -1051,10 +1051,7 @@ mod review_flow {
 
         let denying = AgentWorld::new(asks_to_run_the_tests());
         let (out, err) = ask_on_a_terminal(&denying, "\n");
-        assert!(
-            err.contains("⊘ you denied cargo test -p clusia-core"),
-            "{err}"
-        );
+        assert!(err.contains("⊘ Denied: cargo test -p clusia-core"), "{err}");
         assert!(out.contains("Done."), "the agent goes on without it: {out}");
         assert!(!FakeClaude::permission_answers(&denying.fake_dir())[0].allow);
     }
@@ -1291,8 +1288,8 @@ mod review_flow {
                 Review,
                 "✓ ran cargo test -p clusia-core (allowed for this review)",
             ),
-            ("\n", Deny, "⊘ you denied cargo test -p clusia-core"),
-            ("sure\n", Deny, "⊘ you denied cargo test -p clusia-core"),
+            ("\n", Deny, "⊘ Denied: cargo test -p clusia-core"),
+            ("sure\n", Deny, "⊘ Denied: cargo test -p clusia-core"),
         ] {
             let (out, err, told) = ask_the_fake_daemon(typed);
             assert_eq!(told, [("perm-1".to_string(), answer)], "{typed:?}");

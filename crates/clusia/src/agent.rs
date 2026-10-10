@@ -445,7 +445,7 @@ pub(crate) fn permission_line(tool: &str, summary: &str, outcome: PermissionOutc
         PermissionOutcome::AllowedForReview => {
             format!("  ✓ {verb} {summary} (allowed for this review)")
         }
-        PermissionOutcome::Denied => format!("  ⊘ you denied {summary}"),
+        PermissionOutcome::Denied => format!("  ⊘ Denied: {summary}"),
         PermissionOutcome::Expired => format!("  ⊘ denied {summary}: no answer in time"),
         PermissionOutcome::Cancelled => format!("  ⊘ {summary} was not run: the turn ended"),
     }
@@ -872,7 +872,7 @@ mod tests {
             bash(PermissionOutcome::AllowedForReview),
             "  ✓ ran cargo test (allowed for this review)"
         );
-        assert_eq!(bash(PermissionOutcome::Denied), "  ⊘ you denied cargo test");
+        assert_eq!(bash(PermissionOutcome::Denied), "  ⊘ Denied: cargo test");
         assert_eq!(
             bash(PermissionOutcome::Expired),
             "  ⊘ denied cargo test: no answer in time"
@@ -1177,7 +1177,7 @@ mod tests {
         turn.feed(&denied, &mut out, &mut err).unwrap();
         assert_eq!(
             said(&err),
-            "\n⊘ you denied make\nClaude Code wants to run: make test  [o]nce / [d]eny? "
+            "\n⊘ Denied: make\nClaude Code wants to run: make test  [o]nce / [d]eny? "
         );
         assert_eq!(
             turn.answer_line("o"),
@@ -1200,7 +1200,7 @@ mod tests {
         err.clear();
         let done = resolved_for("p1", "Bash", nasty, PermissionOutcome::Denied);
         turn.feed(&done, &mut out, &mut err).unwrap();
-        assert_eq!(said(&err), format!("\n⊘ you denied {shown}\n"));
+        assert_eq!(said(&err), format!("\n⊘ Denied: {shown}\n"));
 
         let (mut elsewhere, mut out, mut err) = run(false);
         elsewhere
@@ -1235,7 +1235,7 @@ mod tests {
     fn the_ending_is_told_for_every_outcome() {
         for (outcome, line) in [
             (PermissionOutcome::Allowed, "✓ ran make (you allowed it)"),
-            (PermissionOutcome::Denied, "⊘ you denied make"),
+            (PermissionOutcome::Denied, "⊘ Denied: make"),
             (
                 PermissionOutcome::Expired,
                 "⊘ denied make: no answer in time",
@@ -1298,7 +1298,7 @@ mod tests {
         turn.feed(&outside, &mut out, &mut err).unwrap();
         assert_eq!(
             said(&err),
-            "✓ ran cargo test --workspace (allowed for this review)\n⊘ you denied /etc/hosts\n"
+            "✓ ran cargo test --workspace (allowed for this review)\n⊘ Denied: /etc/hosts\n"
         );
     }
 

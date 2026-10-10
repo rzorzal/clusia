@@ -366,10 +366,10 @@ pub(crate) async fn ask(
     // reviewer chose: no rule covers it and nobody is asked.
     if sandbox
         && tool == "Bash"
-        && input
-            .get("dangerouslyDisableSandbox")
-            .and_then(Value::as_bool)
-            == Some(true)
+        && !matches!(
+            input.get("dangerouslyDisableSandbox"),
+            None | Some(Value::Null | Value::Bool(false))
+        )
     {
         decided_at_once(
             shared,
@@ -1432,6 +1432,23 @@ mod tests {
 
     fn unsandboxed(command: &str) -> Value {
         json!({"command": command, "dangerouslyDisableSandbox": true})
+    }
+
+    #[tokio::test]
+    async fn any_flag_value_but_false_or_null_leaves_the_sandbox() {
+        for flag in [json!("true"), json!(1), json!("yes"), json!("false")] {
+            let lab = lab();
+            lab.shared.sessions.set_turn_sandbox(&pr(7), 1, true);
+            let decision = lab
+                .ask(
+                    "Bash",
+                    json!({"command": "cargo test", "dangerouslyDisableSandbox": flag}),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(decision, PermissionDecision::denied(UNSANDBOXED), "{flag}");
+        }
     }
 
     #[tokio::test]

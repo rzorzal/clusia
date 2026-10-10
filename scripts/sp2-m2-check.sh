@@ -209,7 +209,7 @@ step_review() {
   ask "Did the chip go away?"
   ask_agent_detached "$(command_prompt "git branch clusia-check-$RUN-c")"
   echo "  With the rule gone the modal comes back. Click Deny."
-  wait_for "the request came back and was denied" 90 log_has "⊘ you denied git branch clusia-check-$RUN-c"
+  wait_for "the request came back and was denied" 90 log_has "⊘ Denied: git branch clusia-check-$RUN-c"
   wait_ask
 }
 
@@ -217,9 +217,9 @@ step_deny() {
   say "4. Deny"
   ask_agent_detached "$(command_prompt "mkdir clusia-check-$RUN-dir.d")"
   echo "  Click Deny in the modal."
-  wait_for "the log says you denied it" 90 log_has "⊘ you denied mkdir clusia-check-$RUN-dir.d"
+  wait_for "the log says Denied" 90 log_has "⊘ Denied: mkdir clusia-check-$RUN-dir.d"
   wait_ask
-  ask "Did the chat show '⊘ you denied …' and did the agent answer without the command?"
+  ask "Did the chat show '⊘ Denied: …' and did the agent answer without the command?"
 }
 
 step_expire() {
@@ -252,7 +252,7 @@ step_notification() {
   echo "  A notification 'Agent needs your permission' should appear. Click it."
   ask "Did the notification appear, and did clicking it open the window on the question (the modal is there)?"
   echo "  Click Deny in the modal."
-  wait_for "the request was denied" 120 log_has "⊘ you denied chmod 644 clusia-check-$RUN-once.txt"
+  wait_for "the request was denied" 120 log_has "⊘ Denied: chmod 644 clusia-check-$RUN-once.txt"
   wait_ask
   echo "  Close the window yourself when you are done looking at it."
 }
