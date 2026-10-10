@@ -4,6 +4,7 @@
 
 pub mod about;
 pub mod appearance;
+pub mod areas;
 pub mod editor;
 pub mod general;
 pub mod git;
@@ -48,7 +49,7 @@ pub enum PageView {
     Media(media::MediaView),
     About(about::AboutView),
     Notifications(notifications::NotificationsView),
-    Harness(harness::HarnessView),
+    Harness(Box<harness::HarnessView>),
     Plugins,
 }
 
@@ -58,6 +59,7 @@ pub fn page_view(
     rejected: &HashMap<String, String>,
     paths: &Paths,
     probe: &ProbeState,
+    form: &areas::AreaForm,
 ) -> PageView {
     match section {
         Section::General => PageView::General(general::view(snap, rejected)),
@@ -68,7 +70,9 @@ pub fn page_view(
         Section::Media => PageView::Media(media::view(snap, rejected)),
         Section::About => PageView::About(about::view(snap)),
         Section::Notifications => PageView::Notifications(notifications::view(snap, rejected)),
-        Section::Harness => PageView::Harness(harness::view(snap, rejected, probe)),
+        Section::Harness => PageView::Harness(Box::new(
+            harness::view(snap, rejected, probe).with_form(form),
+        )),
         Section::Plugins => PageView::Plugins,
     }
 }
@@ -113,11 +117,12 @@ pub struct ConfigPlugin;
 
 impl Plugin for ConfigPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<areas::AreaForm>().add_systems(
             Update,
             (
                 build_config,
                 commit_fields,
+                areas::keep_form_text,
                 repos::commit_roots,
                 rebuild_config,
                 git::refresh_last_sync,
@@ -274,6 +279,7 @@ fn rebuild_config(
     mut commands: Commands,
     nav: Res<Nav>,
     model: Res<Model>,
+    area_form: Res<areas::AreaForm>,
     paths: Res<AppPaths>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
@@ -325,6 +331,7 @@ fn rebuild_config(
         &model.rejected,
         &paths.0,
         &model.probe,
+        &area_form,
     );
     // Half-typed input survives: a rebuild of the same page waits until the focused field is
     // committed (or reverted) so the field entity is not despawned under the cursor.

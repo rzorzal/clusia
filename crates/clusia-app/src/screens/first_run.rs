@@ -8,18 +8,23 @@ use std::path::PathBuf;
 use bevy::clipboard::Clipboard;
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::ecs::system::NonSendMarker;
+use bevy::input_focus::tab_navigation::TabIndex;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, ScrollArea, observe};
+use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_protocol::{FirstRun, GithubLogin, Harness, HarnessKind, RepoFolder};
 
 use crate::bridge::{Ask, Asks, Model, Toasts};
 use crate::fonts::UiFonts;
 use crate::nav::{FirstRunScreen, Leaf, Nav, NavSystems, Screen};
 use crate::screens::config::git::token_from_clipboard;
-use crate::screens::config::{clipboard_text, link, repos, warn};
+use crate::screens::config::harness::{OpenChecks, open_checkboxes, open_checks};
+use crate::screens::config::{clipboard_text, link, repos, setter, warn};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
-use crate::ui::kit::{Fill, Stroke, Type, Variant, button, card, disabled_button, text};
+use crate::ui::kit::{
+    Clickable, Fill, HoverFill, Stroke, Type, Variant, button, card, disabled_button, text,
+};
 
 /// What this window has done with the first-run screen.
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
@@ -28,6 +33,8 @@ pub struct FirstRunUi {
     pub pending: bool,
     /// "use a token instead" was pressed.
     pub token_open: bool,
+    /// **Skip for now** was pressed on step 3; **Continue** clears it.
+    pub harness_skipped: bool,
 }
 
 /// The user's home folder, to write `~/…` the way the config does.
@@ -71,9 +78,13 @@ pub struct AddFolder;
 #[derive(Component, Debug)]
 pub struct Continue;
 
-/// A harness card; the harness step only reports what was found.
+/// A harness card of step 3.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct HarnessCard(pub &'static str);
+
+/// **Skip for now**: folds step 3. It changes no setting.
+#[derive(Component, Debug)]
+pub struct SkipHarness;
 
 #[derive(Component)]
 struct FirstRunPart {
@@ -100,6 +111,10 @@ pub struct FolderChip {
 pub struct HarnessView {
     pub name: &'static str,
     pub found: bool,
+    /// The harness Clúsia will use.
+    pub selected: bool,
+    /// A click can choose it: only a harness that was found and is supported.
+    pub selectable: bool,
     pub line: String,
 }
 
@@ -110,6 +125,8 @@ pub struct FirstRunView {
     /// `None` while the daemon has not answered.
     pub folders: Option<Vec<FolderChip>>,
     pub harnesses: Vec<HarnessView>,
+    pub open: OpenChecks,
+    pub harness_skipped: bool,
     /// Why **Continue** is off, or `None` when it is on.
     pub blocked: Option<&'static str>,
 }
@@ -146,23 +163,33 @@ fn folder_note(f: &RepoFolder) -> String {
 }
 
 fn harness_view(kind: HarnessKind, found: Option<&Harness>) -> HarnessView {
-    let name = match kind {
-        HarnessKind::ClaudeCode => "Claude Code",
-        HarnessKind::Codex => "Codex",
-    };
-    match found {
-        Some(h) => HarnessView {
-            name,
-            found: true,
-            line: match &h.path {
-                Some(path) => format!("Found · {path}"),
-                None => "Found".to_string(),
-            },
-        },
-        None => HarnessView {
-            name,
+    match kind {
+        HarnessKind::Codex => HarnessView {
+            name: "Codex",
             found: false,
-            line: "Not found on your PATH".to_string(),
+            selected: false,
+            selectable: false,
+            line: "Coming soon".to_string(),
+        },
+        HarnessKind::ClaudeCode => match found {
+            Some(h) => HarnessView {
+                name: "Claude Code",
+                found: true,
+                // Claude Code is the only harness the config can name.
+                selected: true,
+                selectable: true,
+                line: match &h.path {
+                    Some(path) => format!("Found · {path}"),
+                    None => "Found".to_string(),
+                },
+            },
+            None => HarnessView {
+                name: "Claude Code",
+                found: false,
+                selected: false,
+                selectable: false,
+                line: "Not found on your PATH".to_string(),
+            },
         },
     }
 }
@@ -218,6 +245,8 @@ pub fn view(snap: &Snapshot, ui: &FirstRunUi, home: Option<&str>) -> FirstRunVie
             harness_view(HarnessKind::ClaudeCode, found(HarnessKind::ClaudeCode)),
             harness_view(HarnessKind::Codex, found(HarnessKind::Codex)),
         ],
+        open: open_checks(&snap.config.harness),
+        harness_skipped: ui.harness_skipped,
         blocked,
     }
 }
@@ -638,6 +667,24 @@ fn folders_step(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &FirstRunView)
 
 fn harness_step(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &FirstRunView) {
     let connected = matches!(v.github, GithubStep::Connected { .. });
+    if v.harness_skipped {
+        step_card(
+            p,
+            fonts,
+            3,
+            connected,
+            "Connect your AI harness",
+            true,
+            |c| {
+                c.spawn(text(
+                    fonts,
+                    "Skipped. You can set it up later in Config › Harness.",
+                    Type::MUTED,
+                ));
+            },
+        );
+        return;
+    }
     step_card(
         p,
         fonts,
@@ -647,56 +694,119 @@ fn harness_step(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &FirstRunView)
         true,
         |c| {
             c.spawn(text(
-            fonts,
-            "The agent draws diagrams, checks security and audits each review with the tool you already use. Reviewing works without it.",
-            Type::MUTED,
-        ));
+                fonts,
+                "The agent draws diagrams, checks security and audits each review with the tool you already use. Reviewing works without it.",
+                Type::MUTED,
+            ));
             c.spawn(Node {
                 column_gap: px(8),
                 ..default()
             })
             .with_children(|r| {
-                let cards = v
-                    .harnesses
-                    .iter()
-                    .map(|h| (h.name, h.found, h.line.as_str()))
-                    .chain([("Custom command", false, "Any tool that speaks JSON")]);
-                for (name, found, line) in cards {
-                    let (fill, stroke, ink) = if found {
-                        (Swatch::GreenSoft, Swatch::Green, Swatch::Green)
-                    } else {
-                        (Swatch::Surface, Swatch::Line, Swatch::Faint)
-                    };
-                    r.spawn((
-                        Node {
-                            flex_basis: px(0),
-                            flex_grow: 1.0,
-                            flex_direction: FlexDirection::Column,
-                            row_gap: px(4),
-                            padding: UiRect::axes(px(14), px(12)),
-                            border: px(if found { 2 } else { 1 }).all(),
-                            border_radius: BorderRadius::all(px(6)),
-                            ..default()
-                        },
-                        BackgroundColor::default(),
-                        Fill(fill),
-                        BorderColor::default(),
-                        Stroke(stroke),
-                        HarnessCard(name),
-                    ))
-                    .with_children(|b| {
-                        b.spawn(text(fonts, name, Type::STRONG));
-                        b.spawn(text(fonts, line.to_string(), Type::META.ink(ink)));
-                    });
+                for h in &v.harnesses {
+                    harness_card(r, fonts, h.name, &h.line, h.selected, h.selectable);
                 }
+                harness_card(
+                    r,
+                    fonts,
+                    "Custom command",
+                    "Any tool that speaks JSON",
+                    false,
+                    false,
+                );
             });
-            c.spawn(text(
-            fonts,
-            "Connecting a harness arrives with the agent. You can set it up later in Config › Harness.",
-            Type::META,
-        ));
+            c.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                ..default()
+            })
+            .with_children(|o| {
+                o.spawn(text(fonts, "When I open a review", Type::STRONG));
+                open_checkboxes(o, fonts, &v.open);
+                o.spawn(text(
+                    fonts,
+                    crate::screens::config::harness::COST_NOTE,
+                    Type::META,
+                ));
+            });
+            c.spawn(Node {
+                column_gap: px(4),
+                align_items: AlignItems::Center,
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn(text(
+                    fonts,
+                    "You can change this later in Config › Harness.",
+                    Type::META,
+                ));
+                // The mockup shows it as an inline link, so it keeps no side padding.
+                r.spawn((
+                    button(fonts, "Skip for now", Variant::Ghost),
+                    SkipHarness,
+                    observe(on_skip_harness),
+                ))
+                .entry::<Node>()
+                .and_modify(|mut node| node.padding = UiRect::ZERO);
+            });
         },
     );
+}
+
+/// A harness card: green when it is the chosen one, a plain box otherwise. Only a selectable
+/// card can be clicked.
+fn harness_card(
+    r: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    name: &'static str,
+    line: &str,
+    selected: bool,
+    selectable: bool,
+) {
+    let (fill, stroke, ink) = if selected {
+        (Swatch::GreenSoft, Swatch::Green, Swatch::Green)
+    } else {
+        (Swatch::Surface, Swatch::Line, Swatch::Faint)
+    };
+    let mut card = r.spawn((
+        Node {
+            flex_basis: px(0),
+            flex_grow: 1.0,
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            padding: UiRect::axes(px(14), px(12)),
+            border: px(if selected { 2 } else { 1 }).all(),
+            border_radius: BorderRadius::all(px(6)),
+            ..default()
+        },
+        BackgroundColor::default(),
+        Fill(fill),
+        BorderColor::default(),
+        Stroke(stroke),
+        HarnessCard(name),
+    ));
+    if selectable {
+        card.insert((
+            WidgetButton,
+            Clickable,
+            Hovered::default(),
+            TabIndex(0),
+            HoverFill(if selected {
+                Swatch::GreenSoft
+            } else {
+                Swatch::Hover
+            }),
+            setter("harness.kind", "claude-code"),
+        ));
+    }
+    card.with_children(|b| {
+        b.spawn(text(fonts, name, Type::STRONG));
+        b.spawn(text(fonts, line.to_string(), Type::META.ink(ink)));
+    });
+}
+
+fn on_skip_harness(_activate: On<Activate>, mut ui: ResMut<FirstRunUi>) {
+    ui.harness_skipped = true;
 }
 
 fn on_use_gh(_activate: On<Activate>, mut asks: ResMut<Asks>) {
@@ -747,6 +857,7 @@ fn on_add_folder(_activate: On<Activate>, mut picks: MessageWriter<PickFolder>) 
 }
 
 fn on_continue(_activate: On<Activate>, mut ui: ResMut<FirstRunUi>, mut asks: ResMut<Asks>) {
+    ui.harness_skipped = false;
     ui.pending = false;
     asks.send(Ask::FirstRunDone);
 }
@@ -1156,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn harness_step_is_later() {
+    fn harness_step_shows_what_was_found() {
         let first_run = status(
             GithubLogin::SignedOut,
             Vec::new(),
@@ -1170,28 +1281,135 @@ mod tests {
                 HarnessView {
                     name: "Claude Code",
                     found: true,
+                    selected: true,
+                    selectable: true,
                     line: "Found · /opt/homebrew/bin/claude".into()
                 },
                 HarnessView {
                     name: "Codex",
                     found: false,
-                    line: "Not found on your PATH".into()
+                    selected: false,
+                    selectable: false,
+                    line: "Coming soon".into()
                 },
             ]
         );
-        let mut app = testing::app(snap);
+        assert_eq!(
+            v.open,
+            OpenChecks {
+                summarize: true,
+                security: true,
+                audit: true
+            }
+        );
+        let none = status(GithubLogin::SignedOut, Vec::new(), vec![absent_codex()]);
+        let v = view(&signed_out_snap(Some(none)), &FirstRunUi::default(), None);
+        assert_eq!(
+            v.harnesses[0],
+            HarnessView {
+                name: "Claude Code",
+                found: false,
+                selected: false,
+                selectable: false,
+                line: "Not found on your PATH".into()
+            }
+        );
+    }
+
+    fn step_three_app() -> App {
+        let first_run = status(
+            GithubLogin::SignedOut,
+            Vec::new(),
+            vec![claude(), absent_codex()],
+        );
+        let mut app = testing::app(signed_out_snap(Some(first_run)));
         testing::settle(&mut app);
+        app
+    }
+
+    #[test]
+    fn the_found_harness_is_selected_and_the_others_wait() {
+        let mut app = step_three_app();
         let mut names: Vec<&str> = {
             let mut q = app.world_mut().query::<&HarnessCard>();
             q.iter(app.world()).map(|c| c.0).collect()
         };
         names.sort_unstable();
         assert_eq!(names, ["Claude Code", "Codex", "Custom command"]);
-        let card = testing::find::<HarnessCard>(&mut app, |c| c.0 == "Claude Code");
-        testing::activate(&mut app, card);
-        assert!(
-            testing::recorded(&mut app).is_empty(),
-            "nothing connects before the agent exists"
+        assert!(testing::shows(&mut app, "Coming soon"));
+        let claude = testing::find::<HarnessCard>(&mut app, |c| c.0 == "Claude Code");
+        testing::activate(&mut app, claude);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.kind".into(),
+                value: "claude-code".into()
+            }]
         );
+        for name in ["Codex", "Custom command"] {
+            let card = testing::find::<HarnessCard>(&mut app, |c| c.0 == name);
+            testing::activate(&mut app, card);
+            assert!(
+                testing::recorded(&mut app).is_empty(),
+                "{name} cannot be chosen"
+            );
+        }
+    }
+
+    #[test]
+    fn step_three_has_the_checks_and_no_placeholder() {
+        use crate::screens::config::SetValue;
+        let mut app = step_three_app();
+        for needle in [
+            "When I open a review",
+            "Summarize it",
+            "Check security",
+            "Audit the change",
+            "You can change this later in Config › Harness.",
+            "Skip for now",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        assert!(!testing::shows(&mut app, "Connecting a harness arrives"));
+        let security = testing::find::<SetValue>(&mut app, |s| s.key == "harness.check_security");
+        testing::activate(&mut app, security);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.check_security".into(),
+                value: "false".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn skipping_changes_no_setting() {
+        let mut app = step_three_app();
+        let before = app.world().resource::<Model>().snapshot.config.clone();
+        let skip = testing::find::<SkipHarness>(&mut app, |_| true);
+        testing::activate(&mut app, skip);
+        testing::settle(&mut app);
+        assert!(testing::recorded(&mut app).is_empty());
+        assert_eq!(app.world().resource::<Model>().snapshot.config, before);
+        assert!(app.world().resource::<FirstRunUi>().harness_skipped);
+        assert!(testing::shows(
+            &mut app,
+            "Skipped. You can set it up later in Config › Harness."
+        ));
+        assert!(!testing::shows(&mut app, "Check security"));
+        assert!(!testing::shows(&mut app, "Skip for now"));
+    }
+
+    #[test]
+    fn continue_brings_step_three_back() {
+        let mut app = testing::app(signed_out_snap(Some(with_clones())));
+        testing::settle(&mut app);
+        app.world_mut().resource_mut::<FirstRunUi>().harness_skipped = true;
+        let mut signed_in = fixture::demo(NOW);
+        signed_in.first_run = Some(with_clones());
+        set_snapshot(&mut app, signed_in);
+        let go = testing::find::<Continue>(&mut app, |_| true);
+        testing::activate(&mut app, go);
+        assert!(!app.world().resource::<FirstRunUi>().harness_skipped);
     }
 }

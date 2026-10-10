@@ -172,6 +172,12 @@ fn parse_like(current: &toml::Value, raw: &str) -> toml::Value {
     toml::from_str::<toml::Table>(&format!("v = {raw}"))
         .ok()
         .and_then(|mut t| t.remove("v"))
+        .or_else(|| {
+            // JSON is not TOML (`{"a": 1}`), and the window sends lists of records as JSON.
+            serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|json| toml::Value::try_from(json).ok())
+        })
         .unwrap_or_else(|| toml::Value::String(raw.to_string()))
 }
 
@@ -722,5 +728,61 @@ mod tests {
         let text = fs::read_to_string(p.config_file()).unwrap();
         assert!(text.contains("program = \"\""), "{text}");
         assert_eq!(load_config(&p).unwrap(), Loaded::Read(defaults));
+    }
+
+    #[test]
+    fn audit_areas_are_set_from_json_or_toml() {
+        use clusia_core::checks::default_areas;
+        let c = Config::default();
+        let mut areas = default_areas();
+        areas.push(clusia_core::checks::AuditArea {
+            id: "migrations".into(),
+            name: "Migrations".into(),
+            instruction: "Check every migration can be undone.".into(),
+            enabled: true,
+            builtin: false,
+        });
+        let json = serde_json::to_string(&areas).unwrap();
+        let set = set_value(&c, "harness.audit_areas", &json).unwrap();
+        assert_eq!(set.harness.audit_areas.len(), 7);
+        assert_eq!(set.harness.audit_areas[6].id, "migrations");
+        let mut off = default_areas();
+        off[5].enabled = false;
+        let toml: Vec<String> = off
+            .iter()
+            .map(|a| {
+                format!(
+                    r#"{{id="{}",name="{}",instruction="{}",enabled={},builtin=true}}"#,
+                    a.id, a.name, a.instruction, a.enabled
+                )
+            })
+            .collect();
+        let set = set_value(&c, "harness.audit_areas", &format!("[{}]", toml.join(","))).unwrap();
+        assert!(!set.harness.audit_areas[5].enabled);
+        let mut blank = default_areas();
+        blank.push(clusia_core::checks::AuditArea {
+            id: "x".into(),
+            name: String::new(),
+            instruction: "i".into(),
+            enabled: true,
+            builtin: false,
+        });
+        let error = set_value(
+            &c,
+            "harness.audit_areas",
+            &serde_json::to_string(&blank).unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("the name is empty"), "{error}");
+        let without_docs = serde_json::to_string(&default_areas()[..5]).unwrap();
+        assert!(
+            set_value(&c, "harness.audit_areas", &without_docs).is_err(),
+            "a built-in area can be switched off but not dropped"
+        );
+        assert!(set_value(&c, "harness.audit_areas", "not a list").is_err());
+        let set = set_value(&c, "harness.check_timeout_secs", "300").unwrap();
+        assert_eq!(set.harness.check_timeout_secs, 300);
+        assert!(set_value(&c, "harness.check_timeout_secs", "30").is_err());
     }
 }
