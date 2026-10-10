@@ -106,6 +106,7 @@ impl PermissionQueue {
                 tool,
                 summary,
                 outcome,
+                ..
             } => {
                 // A request that was answered here is gone from the queue; one that was decided
                 // at once (a rule covered it, or it was outside the worktree) never was in it.
@@ -720,6 +721,7 @@ mod tests {
             sandbox: true,
             deadline: NOW * 1000 + 112_000,
             detail: None,
+            origin: clusia_protocol::TurnOrigin::Chat,
         }
     }
 
@@ -760,6 +762,7 @@ mod tests {
                 tool: tool.into(),
                 summary: summary.into(),
                 outcome,
+                origin: clusia_protocol::TurnOrigin::Chat,
             }),
         );
         testing::settle(app);

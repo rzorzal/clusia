@@ -1128,12 +1128,26 @@ pub(crate) fn close_unfinished(shared: &Shared) {
         if path.extension().is_none_or(|ext| ext != "jsonl") {
             continue;
         }
-        for turn in agent_log::unfinished_turns(&agent_log::read(&path)) {
-            let entry = AgentLogEntry::Error {
-                at: now_unix(),
-                turn,
-                kind: AgentErrorKind::Interrupted,
-                message: Why::Shutdown.message().to_string(),
+        let entries = agent_log::read(&path);
+        for turn in agent_log::unfinished_turns(&entries) {
+            // A check's turn ends in its own kind of line: the chat never sees it.
+            let check = entries.iter().find_map(|entry| match entry {
+                AgentLogEntry::Check { turn: t, kind, .. } if *t == turn => Some(*kind),
+                _ => None,
+            });
+            let entry = match check {
+                Some(kind) => AgentLogEntry::Check {
+                    at: now_unix(),
+                    turn,
+                    kind,
+                    state: "stopped".into(),
+                },
+                None => AgentLogEntry::Error {
+                    at: now_unix(),
+                    turn,
+                    kind: AgentErrorKind::Interrupted,
+                    message: Why::Shutdown.message().to_string(),
+                },
             };
             if let Err(e) = agent_log::append(&path, &entry) {
                 tracing::warn!(error = %e, file = %path.display(), "cannot close an unfinished turn");
@@ -1178,18 +1192,23 @@ pub(crate) async fn log(shared: &Shared, pr: &PrRef) -> Outcome {
     let path = shared.paths.agent_log(pr);
     let handled = clusia_store::agent::load_agent_state(&shared.paths, pr).unwrap_or_default();
     match tokio::task::spawn_blocking(move || agent_log::read(&path)).await {
-        Ok(entries) => Outcome::Ok(Reply::AgentLog(
-            entries
-                .into_iter()
-                .filter(|entry| match entry {
-                    AgentLogEntry::Suggestion { suggestion, .. } => {
-                        !handled.accepted.contains(&suggestion.id)
-                            && !handled.dismissed.contains(&suggestion.id)
-                    }
-                    _ => true,
-                })
-                .collect(),
-        )),
+        Ok(entries) => {
+            // The checks keep their own results: nothing a check's turn did is part of the chat.
+            let checks = agent_log::check_turns(&entries);
+            Outcome::Ok(Reply::AgentLog(
+                entries
+                    .into_iter()
+                    .filter(|entry| !checks.contains(&agent_log::turn_of(entry)))
+                    .filter(|entry| match entry {
+                        AgentLogEntry::Suggestion { suggestion, .. } => {
+                            !handled.accepted.contains(&suggestion.id)
+                                && !handled.dismissed.contains(&suggestion.id)
+                        }
+                        _ => true,
+                    })
+                    .collect(),
+            ))
+        }
         Err(e) => Outcome::Err(ProtocolError::new(
             ErrorCode::Internal,
             format!("cannot read the agent log: {e}"),
@@ -2108,6 +2127,87 @@ mod tests {
         };
         assert_eq!(entries.len(), 3);
         assert!(matches!(&entries[0], AgentLogEntry::User { .. }));
+    }
+
+    #[tokio::test]
+    async fn the_log_command_leaves_out_the_checks() {
+        let mut lab = lab(Script::one(Turn::answer("hello")));
+        let pr = pr(7);
+        lab.send(&pr, "hi").await.unwrap();
+        until(&mut lab.events, ready(&pr)).await;
+        agent_log::append(
+            &lab.shared.paths.agent_log(&pr),
+            &AgentLogEntry::Check {
+                at: 5,
+                turn: 2,
+                kind: clusia_core::CheckKind::Security,
+                state: "running".into(),
+            },
+        )
+        .unwrap();
+        // What the check's turn did is not part of the chat either: its tools, its permission
+        // lines and its end.
+        let path = lab.shared.paths.agent_log(&pr);
+        agent_log::append(
+            &path,
+            &AgentLogEntry::Permission {
+                at: 6,
+                turn: 2,
+                tool: "Bash".into(),
+                summary: "cargo test".into(),
+                outcome: clusia_protocol::PermissionOutcome::Cancelled,
+            },
+        )
+        .unwrap();
+        agent_log::append(
+            &path,
+            &AgentLogEntry::ToolUse {
+                at: 7,
+                turn: 2,
+                summary: "Read src/a.rs".into(),
+            },
+        )
+        .unwrap();
+        let Outcome::Ok(Reply::AgentLog(entries)) = log(&lab.shared, &pr).await else {
+            panic!("a log reply");
+        };
+        assert_eq!(entries.len(), 3, "the chat's own turn is all that is left");
+        assert!(entries.iter().all(|e| agent_log::turn_of(e) == 1));
+    }
+
+    #[tokio::test]
+    async fn a_check_turn_a_stopped_daemon_left_unfinished_ends_as_a_check() {
+        let home = tempfile::tempdir().unwrap();
+        let shared = shared_for(Paths::new(home.path()), Config::default());
+        let pr = pr(7);
+        let path = shared.paths.agent_log(&pr);
+        agent_log::append(
+            &path,
+            &AgentLogEntry::Check {
+                at: 1,
+                turn: 2,
+                kind: clusia_core::CheckKind::Audit,
+                state: "running".into(),
+            },
+        )
+        .unwrap();
+        close_unfinished(&shared);
+        let log = agent_log::read(&path);
+        assert!(
+            matches!(
+                log.last(),
+                Some(AgentLogEntry::Check { turn: 2, kind: clusia_core::CheckKind::Audit, state, .. })
+                    if state == "stopped"
+            ),
+            "{log:?}"
+        );
+        assert!(
+            !log.iter().any(|e| matches!(e, AgentLogEntry::Error { .. })),
+            "the chat never gets an error line for a check"
+        );
+        let count = log.len();
+        close_unfinished(&shared);
+        assert_eq!(agent_log::read(&path).len(), count, "closed only once");
     }
 
     #[tokio::test]

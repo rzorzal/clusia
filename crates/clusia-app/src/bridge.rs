@@ -286,6 +286,8 @@ pub enum PermissionTell {
         tool: String,
         summary: String,
         outcome: PermissionOutcome,
+        /// Who asked: a check's requests are not part of the chat.
+        origin: clusia_protocol::TurnOrigin,
     },
     /// The rules granted for the review, in full.
     Rules {
@@ -318,6 +320,7 @@ impl PermissionTell {
                 sandbox,
                 deadline,
                 detail,
+                origin,
             } => PermissionTell::Requested(PermissionRequest {
                 id,
                 pr,
@@ -329,6 +332,7 @@ impl PermissionTell {
                 sandbox,
                 deadline,
                 detail,
+                origin,
             }),
             Event::PermissionResolved {
                 id,
@@ -336,12 +340,14 @@ impl PermissionTell {
                 tool,
                 summary,
                 outcome,
+                origin,
             } => PermissionTell::Resolved {
                 id,
                 pr,
                 tool,
                 summary,
                 outcome,
+                origin,
             },
             Event::RulesChanged { pr, rules } => PermissionTell::Rules { pr, rules },
             _ => return None,
@@ -2082,6 +2088,7 @@ fn demo_permission_answer(
         tool: pending.request.tool.clone(),
         summary: pending.request.summary.clone(),
         outcome,
+        origin: pending.request.origin,
     })];
     if answer == PermissionAnswerKind::Review {
         tells.push(Tell::Permission(PermissionTell::Rules {
@@ -2641,7 +2648,8 @@ mod tests {
                 pr: pr.clone(),
                 tool: "Bash".into(),
                 summary: DEMO_COMMAND.into(),
-                outcome: PermissionOutcome::Allowed
+                outcome: PermissionOutcome::Allowed,
+                origin: clusia_protocol::TurnOrigin::Chat,
             }]
         );
         let said: String = once
@@ -2669,7 +2677,8 @@ mod tests {
                     pr: pr.clone(),
                     tool: "Bash".into(),
                     summary: DEMO_COMMAND.into(),
-                    outcome: PermissionOutcome::AllowedForReview
+                    outcome: PermissionOutcome::AllowedForReview,
+                    origin: clusia_protocol::TurnOrigin::Chat,
                 },
                 &PermissionTell::Rules {
                     pr: pr.clone(),
@@ -2686,7 +2695,8 @@ mod tests {
                 pr,
                 tool: "Bash".into(),
                 summary: DEMO_COMMAND.into(),
-                outcome: PermissionOutcome::Denied
+                outcome: PermissionOutcome::Denied,
+                origin: clusia_protocol::TurnOrigin::Chat,
             }]
         );
         let said: String = deny
@@ -2780,6 +2790,27 @@ mod tests {
     }
 
     #[test]
+    fn a_resolved_request_keeps_who_asked() {
+        use clusia_protocol::{PermissionOutcome, TurnOrigin};
+        let resolved = |origin| Event::PermissionResolved {
+            id: "perm-1".into(),
+            pr: fixture::demo_pr(),
+            tool: "Bash".into(),
+            summary: "cargo test".into(),
+            outcome: PermissionOutcome::Cancelled,
+            origin,
+        };
+        for origin in [TurnOrigin::Chat, TurnOrigin::Security, TurnOrigin::Audit] {
+            let Some(PermissionTell::Resolved { origin: told, .. }) =
+                PermissionTell::from_event(&resolved(origin))
+            else {
+                panic!("a resolved tell");
+            };
+            assert_eq!(told, origin);
+        }
+    }
+
+    #[test]
     fn permission_events_become_permission_tells() {
         use clusia_protocol::PermissionOutcome;
         let pr = fixture::demo_pr();
@@ -2794,6 +2825,7 @@ mod tests {
             sandbox: true,
             deadline: 1_790_000_112_000,
             detail: Some("old\n→\nnew".into()),
+            origin: clusia_protocol::TurnOrigin::Chat,
         };
         assert_eq!(
             PermissionTell::from_event(&requested),
@@ -2808,6 +2840,7 @@ mod tests {
                 sandbox: true,
                 deadline: 1_790_000_112_000,
                 detail: Some("old\n→\nnew".into()),
+                origin: clusia_protocol::TurnOrigin::Chat,
             }))
         );
         assert_eq!(
@@ -2817,6 +2850,7 @@ mod tests {
                 tool: "Bash".into(),
                 summary: "cargo test -p clusia-auth".into(),
                 outcome: PermissionOutcome::Expired,
+                origin: clusia_protocol::TurnOrigin::Chat,
             }),
             Some(PermissionTell::Resolved {
                 id: "perm-1".into(),
@@ -2824,6 +2858,7 @@ mod tests {
                 tool: "Bash".into(),
                 summary: "cargo test -p clusia-auth".into(),
                 outcome: PermissionOutcome::Expired,
+                origin: clusia_protocol::TurnOrigin::Chat,
             })
         );
         assert_eq!(

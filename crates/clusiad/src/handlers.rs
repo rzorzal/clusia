@@ -182,6 +182,14 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::GetPermissions { pr } => permissions::waiting_for(shared, &pr),
         // The connection records the hold once this succeeds.
         Command::HoldReview { .. } => Outcome::Ok(Reply::Ack),
+        Command::RunCheck { .. }
+        | Command::StopCheck { .. }
+        | Command::GetChecks { .. }
+        | Command::AcceptFinding { .. }
+        | Command::DismissFinding { .. } => Outcome::Err(ProtocolError::new(
+            ErrorCode::InvalidState,
+            "Checks are not available yet".to_string(),
+        )),
     }
 }
 

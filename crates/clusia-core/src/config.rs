@@ -5,6 +5,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::checks::{AuditArea, BUILTIN_AREA_IDS, default_areas, validate_area};
+
 pub const MIN_POLL_SECS: u64 = 15;
 pub const MAX_POLL_SECS: u64 = 3600;
 
@@ -521,6 +523,8 @@ pub const MIN_TURN_TIMEOUT_SECS: u32 = 60;
 pub const MAX_TURN_TIMEOUT_SECS: u32 = 3600;
 pub const MIN_PERMISSION_TIMEOUT_SECS: u32 = 30;
 pub const MAX_PERMISSION_TIMEOUT_SECS: u32 = 600;
+pub const DEFAULT_CHECK_TIMEOUT_SECS: u32 = 600;
+pub const CHECK_TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 60..=1800;
 
 /// The agent behind the review chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,6 +545,14 @@ pub struct Harness {
     pub sandbox: bool,
     /// How long a permission request waits for an answer before it is denied.
     pub permission_timeout_secs: u32,
+    /// Check the change for security problems when a review opens.
+    pub check_security: bool,
+    /// Audit the change by area when a review opens.
+    pub audit: bool,
+    /// What the audit looks at: the six built-in areas and the user's own.
+    pub audit_areas: Vec<AuditArea>,
+    /// How long one security check or audit may run before it is stopped.
+    pub check_timeout_secs: u32,
 }
 
 impl Harness {
@@ -564,6 +576,10 @@ impl Default for Harness {
             turn_timeout_secs: Self::DEFAULT_TIMEOUT_SECS,
             sandbox: true,
             permission_timeout_secs: Self::DEFAULT_PERMISSION_TIMEOUT_SECS,
+            check_security: true,
+            audit: true,
+            audit_areas: default_areas(),
+            check_timeout_secs: DEFAULT_CHECK_TIMEOUT_SECS,
         }
     }
 }
@@ -904,6 +920,26 @@ impl Config {
         if !(MIN_PERMISSION_TIMEOUT_SECS..=MAX_PERMISSION_TIMEOUT_SECS).contains(&wait) {
             return Err(format!(
                 "harness.permission_timeout_secs must be between {MIN_PERMISSION_TIMEOUT_SECS} and {MAX_PERMISSION_TIMEOUT_SECS}, got {wait}"
+            ));
+        }
+        let limit = self.harness.check_timeout_secs;
+        if !CHECK_TIMEOUT_RANGE.contains(&limit) {
+            return Err(format!(
+                "harness.check_timeout_secs must be between {} and {}, got {limit}",
+                CHECK_TIMEOUT_RANGE.start(),
+                CHECK_TIMEOUT_RANGE.end()
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for area in &self.harness.audit_areas {
+            validate_area(area).map_err(|e| format!("harness.audit_areas: {e}"))?;
+            if !seen.insert(area.id.as_str()) {
+                return Err(format!("harness.audit_areas: duplicate id {}", area.id));
+            }
+        }
+        if let Some(id) = BUILTIN_AREA_IDS.iter().find(|id| !seen.contains(**id)) {
+            return Err(format!(
+                "harness.audit_areas: the built-in area {id} cannot be removed; switch it off instead"
             ));
         }
         let args = self
@@ -1264,6 +1300,98 @@ mod tests {
         assert_eq!(Harness::DEFAULT_TIMEOUT_SECS, 600);
         assert!(h.sandbox);
         assert_eq!(h.permission_timeout_secs, 120);
+    }
+
+    #[test]
+    fn check_defaults_are_on_with_the_six_areas() {
+        let h = Config::default().harness;
+        assert!(h.check_security && h.audit);
+        assert_eq!(h.check_timeout_secs, 600);
+        assert_eq!(DEFAULT_CHECK_TIMEOUT_SECS, 600);
+        assert_eq!(CHECK_TIMEOUT_RANGE, 60..=1800);
+        assert_eq!(h.audit_areas, default_areas());
+        assert_eq!(h.audit_areas.len(), 6);
+    }
+
+    #[test]
+    fn a_config_without_check_fields_gets_their_defaults() {
+        let c: Config = serde_json::from_str(r#"{"harness":{"on_open":"wait"}}"#).unwrap();
+        assert!(c.harness.check_security && c.harness.audit);
+        assert_eq!(c.harness.audit_areas, default_areas());
+        assert_eq!(c.harness.check_timeout_secs, 600);
+        let off: Config = serde_json::from_str(
+            r#"{"harness":{"check_security":false,"audit":false,"check_timeout_secs":90}}"#,
+        )
+        .unwrap();
+        assert!(!off.harness.check_security && !off.harness.audit);
+        assert_eq!(off.harness.check_timeout_secs, 90);
+        assert_eq!(off.harness.audit_areas, default_areas());
+        assert_eq!(off.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_check_timeout_is_bounded() {
+        let mut c = Config::default();
+        for bad in [0, 59, 1801] {
+            c.harness.check_timeout_secs = bad;
+            assert_eq!(
+                c.validate().unwrap_err(),
+                format!("harness.check_timeout_secs must be between 60 and 1800, got {bad}")
+            );
+        }
+        for ok in [60, 600, 1800] {
+            c.harness.check_timeout_secs = ok;
+            assert_eq!(c.validate(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_built_in_area_cannot_be_removed_only_switched_off() {
+        let mut c = Config::default();
+        c.harness.audit_areas.retain(|a| a.id != "concurrency");
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "harness.audit_areas: the built-in area concurrency cannot be removed; switch it off instead"
+        );
+        c.harness.audit_areas.clear();
+        assert!(c.validate().unwrap_err().contains("correctness"));
+        let mut c = Config::default();
+        for area in &mut c.harness.audit_areas {
+            area.enabled = false;
+        }
+        assert_eq!(c.validate(), Ok(()), "every area off is allowed");
+    }
+
+    #[test]
+    fn audit_areas_are_validated() {
+        let custom = |id: &str, name: &str| AuditArea {
+            id: id.into(),
+            name: name.into(),
+            instruction: "Breaking changes.".into(),
+            enabled: true,
+            builtin: false,
+        };
+        let mut c = Config::default();
+        c.harness.audit_areas.push(custom("api", "Public API"));
+        assert_eq!(c.validate(), Ok(()));
+        c.harness.audit_areas.push(custom("api", "Public API 2"));
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "harness.audit_areas: duplicate id api"
+        );
+        c.harness.audit_areas.pop();
+        c.harness.audit_areas.push(custom("blank", " "));
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "harness.audit_areas: the name is empty"
+        );
+        c.harness.audit_areas.pop();
+        c.harness.audit_areas.push(custom("Not A Slug", "Odd"));
+        assert!(
+            c.validate()
+                .unwrap_err()
+                .starts_with("harness.audit_areas: the id")
+        );
     }
 
     #[test]

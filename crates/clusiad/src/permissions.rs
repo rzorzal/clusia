@@ -17,7 +17,7 @@ use clusia_core::permissions::{
 };
 use clusia_protocol::{
     AgentLogEntry, ErrorCode, Event, Outcome, PermissionAnswerKind, PermissionOutcome,
-    PermissionRequest, ProtocolError, Reply, topics,
+    PermissionRequest, ProtocolError, Reply, TurnOrigin, topics,
 };
 use clusia_store::agent::load_agent_state;
 use serde_json::Value;
@@ -259,6 +259,7 @@ fn decided_at_once(
     tool: &str,
     summary: &str,
     outcome: PermissionOutcome,
+    origin: TurnOrigin,
 ) {
     log(shared, pr, turn, tool, summary, outcome);
     if outcome == PermissionOutcome::Denied {
@@ -272,6 +273,7 @@ fn decided_at_once(
             tool: tool.to_string(),
             summary: summary.to_string(),
             outcome,
+            origin,
         },
     );
 }
@@ -316,6 +318,7 @@ fn register(
         sandbox,
         deadline,
         detail,
+        origin,
     } = request;
     shared.publish(
         topics::AGENT,
@@ -330,6 +333,7 @@ fn register(
             sandbox,
             deadline,
             detail,
+            origin,
         },
     );
     Ok(outcome)
@@ -378,6 +382,7 @@ pub(crate) async fn ask(
             &tool,
             &summary,
             PermissionOutcome::Denied,
+            TurnOrigin::Chat,
         );
         return Ok(PermissionDecision::denied(UNSANDBOXED));
     }
@@ -392,6 +397,7 @@ pub(crate) async fn ask(
             &tool,
             &summary,
             PermissionOutcome::Denied,
+            TurnOrigin::Chat,
         );
         return Ok(PermissionDecision::denied(OUTSIDE));
     }
@@ -405,6 +411,7 @@ pub(crate) async fn ask(
             &tool,
             &summary,
             PermissionOutcome::AllowedForReview,
+            TurnOrigin::Chat,
         );
         return Ok(PermissionDecision::allowed());
     }
@@ -434,6 +441,7 @@ pub(crate) async fn ask(
         sandbox,
         deadline: now_ms() + (timeout * 1000) as i64,
         detail: detail_for(&tool, &input),
+        origin: TurnOrigin::Chat,
     };
     let outcome = register(shared, request, rule)?;
     // A bridge that goes away does not end this: the connection detaches its handler, so the
@@ -540,6 +548,7 @@ fn finish(shared: &Shared, id: &str, pending: Pending, outcome: PermissionOutcom
             tool: request.tool.clone(),
             summary: request.summary.clone(),
             outcome,
+            origin: request.origin,
         },
     );
     let _ = pending.done.send(outcome);
@@ -1379,6 +1388,7 @@ mod tests {
             sandbox: true,
             deadline: now_ms() + 120_000,
             detail: None,
+            origin: TurnOrigin::Chat,
         }
     }
 

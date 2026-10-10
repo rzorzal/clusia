@@ -24,7 +24,8 @@ pub(crate) fn turn_of(entry: &AgentLogEntry) -> u64 {
         | AgentLogEntry::Suggestion { turn, .. }
         | AgentLogEntry::Done { turn, .. }
         | AgentLogEntry::Error { turn, .. }
-        | AgentLogEntry::Permission { turn, .. } => *turn,
+        | AgentLogEntry::Permission { turn, .. }
+        | AgentLogEntry::Check { turn, .. } => *turn,
     }
 }
 
@@ -90,7 +91,18 @@ pub(crate) fn last_turn(path: &Path) -> u64 {
     read(path).iter().map(turn_of).max().unwrap_or(0)
 }
 
-/// The turns that started but have neither a `Done` nor an `Error` entry, oldest first.
+/// The turns that belong to a check, not to the chat: those with a `Check` entry. Every entry
+/// of such a turn (its tools, its permission lines, its end) stays out of the chat.
+pub(crate) fn check_turns(entries: &[AgentLogEntry]) -> std::collections::HashSet<u64> {
+    entries
+        .iter()
+        .filter(|entry| matches!(entry, AgentLogEntry::Check { .. }))
+        .map(turn_of)
+        .collect()
+}
+
+/// The turns that started but have no ending, oldest first: a chat turn ends with `Done` or
+/// `Error`, a check's with a `Check` entry that is `done`, `failed` or `stopped`.
 pub(crate) fn unfinished_turns(entries: &[AgentLogEntry]) -> Vec<u64> {
     let mut started = Vec::new();
     let mut ended = std::collections::HashSet::new();
@@ -99,10 +111,14 @@ pub(crate) fn unfinished_turns(entries: &[AgentLogEntry]) -> Vec<u64> {
         if !started.contains(&turn) {
             started.push(turn);
         }
-        if matches!(
-            entry,
-            AgentLogEntry::Done { .. } | AgentLogEntry::Error { .. }
-        ) {
+        let over = match entry {
+            AgentLogEntry::Done { .. } | AgentLogEntry::Error { .. } => true,
+            AgentLogEntry::Check { state, .. } => {
+                matches!(state.as_str(), "done" | "failed" | "stopped")
+            }
+            _ => false,
+        };
+        if over {
             ended.insert(turn);
         }
     }
@@ -232,6 +248,58 @@ mod tests {
         let entries = read(&path);
         assert_eq!(entries.last(), Some(&text(17, &big)), "the newest stays");
         assert!(fs::metadata(&path).unwrap().len() <= MAX_BYTES);
+    }
+
+    #[test]
+    fn a_check_turn_is_every_turn_with_a_check_entry() {
+        let permission = |turn| AgentLogEntry::Permission {
+            at: 1,
+            turn,
+            tool: "Bash".into(),
+            summary: "make".into(),
+            outcome: clusia_protocol::PermissionOutcome::Allowed,
+        };
+        let entries = [
+            text(1, "chat"),
+            permission(1),
+            AgentLogEntry::Check {
+                at: 1,
+                turn: 2,
+                kind: clusia_core::CheckKind::Security,
+                state: "running".into(),
+            },
+            permission(2),
+        ];
+        assert_eq!(check_turns(&entries), [2].into_iter().collect());
+        assert!(check_turns(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_check_turn_ends_with_done_failed_or_stopped() {
+        let check = |turn: u64, state: &str| AgentLogEntry::Check {
+            at: 1,
+            turn,
+            kind: clusia_core::CheckKind::Audit,
+            state: state.into(),
+        };
+        let entries = [
+            check(1, "waiting"),
+            check(1, "running"),
+            check(1, "done"),
+            check(2, "running"),
+            check(2, "failed"),
+            check(3, "running"),
+            check(3, "stopped"),
+            check(4, "waiting"),
+            check(4, "running"),
+        ];
+        assert_eq!(unfinished_turns(&entries), [4]);
+        assert_eq!(turn_of(&entries[0]), 1);
+        assert_eq!(last_turn_of(&entries), 4);
+    }
+
+    fn last_turn_of(entries: &[AgentLogEntry]) -> u64 {
+        entries.iter().map(turn_of).max().unwrap_or(0)
     }
 
     #[test]

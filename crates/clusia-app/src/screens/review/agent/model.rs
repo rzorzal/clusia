@@ -362,11 +362,16 @@ impl ChatModel {
                     summary: summary.clone(),
                     outcome: *outcome,
                 }),
-                AgentLogEntry::Done { .. } | AgentLogEntry::Text { .. } => {}
+                AgentLogEntry::Done { .. }
+                | AgentLogEntry::Text { .. }
+                | AgentLogEntry::Check { .. } => {}
             }
         }
         let unfinished = match entries.last() {
-            None | Some(AgentLogEntry::Done { .. }) | Some(AgentLogEntry::Error { .. }) => None,
+            None
+            | Some(AgentLogEntry::Done { .. })
+            | Some(AgentLogEntry::Error { .. })
+            | Some(AgentLogEntry::Check { .. }) => None,
             Some(
                 AgentLogEntry::User { turn, .. }
                 | AgentLogEntry::Text { turn, .. }

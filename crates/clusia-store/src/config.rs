@@ -265,6 +265,70 @@ mod tests {
     }
 
     #[test]
+    fn the_check_settings_round_trip_through_the_file() {
+        let (_d, p) = paths();
+        let mut c = Config::default();
+        c.harness.check_security = false;
+        c.harness.check_timeout_secs = 900;
+        c.harness.audit_areas.push(clusia_core::AuditArea {
+            id: "api".into(),
+            name: "Public API".into(),
+            instruction: "Breaking changes.\nRenamed items.".into(),
+            enabled: false,
+            builtin: false,
+        });
+        save_config(&p, &c).unwrap();
+        let text = fs::read_to_string(p.config_file()).unwrap();
+        assert!(text.contains("[[harness.audit_areas]]"), "{text}");
+        assert_eq!(load_config(&p).unwrap(), Loaded::Read(c));
+    }
+
+    #[test]
+    fn the_check_keys_are_read_and_set_by_name() {
+        let c = Config::default();
+        assert_eq!(get_value(&c, "harness.check_security").unwrap(), "true");
+        let c = set_value(&c, "harness.audit", "false").unwrap();
+        assert!(!c.harness.audit);
+        let c = set_value(&c, "harness.check_timeout_secs", "300").unwrap();
+        assert_eq!(c.harness.check_timeout_secs, 300);
+        assert!(set_value(&c, "harness.check_timeout_secs", "59").is_err());
+        let inline = |areas: &[clusia_core::AuditArea]| -> String {
+            let items: Vec<String> = areas
+                .iter()
+                .map(|a| {
+                    format!(
+                        r#"{{id="{}",name="{}",instruction="{}",enabled={},builtin={}}}"#,
+                        a.id, a.name, a.instruction, a.enabled, a.builtin
+                    )
+                })
+                .collect();
+            format!("[{}]", items.join(","))
+        };
+        let mut areas = clusia_core::checks::default_areas();
+        areas.push(clusia_core::AuditArea {
+            id: "api".into(),
+            name: "Public API".into(),
+            instruction: "Breaking changes.".into(),
+            enabled: true,
+            builtin: false,
+        });
+        let c = set_value(&c, "harness.audit_areas", &inline(&areas)).unwrap();
+        assert_eq!(c.harness.audit_areas.len(), 7);
+        assert_eq!(c.harness.audit_areas[6].id, "api");
+        areas[6].name = String::new();
+        assert!(set_value(&c, "harness.audit_areas", &inline(&areas)).is_err());
+        let mut fewer = clusia_core::checks::default_areas();
+        fewer.retain(|a| a.id != "tests");
+        let refused = set_value(&c, "harness.audit_areas", &inline(&fewer)).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("built-in area tests cannot be removed"),
+            "{refused}"
+        );
+    }
+
+    #[test]
     fn partial_file_fills_defaults() {
         let (_d, p) = paths();
         fs::create_dir_all(p.root()).unwrap();

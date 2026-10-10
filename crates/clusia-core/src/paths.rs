@@ -112,6 +112,16 @@ impl Paths {
             .join(format!("{}.state.json", pr.file_key()))
     }
 
+    /// The results of the security checks and audits, one file per pull request.
+    pub fn checks_dir(&self) -> PathBuf {
+        self.root.join("checks")
+    }
+
+    /// What the checks of `pr` found, for as long as the review lasts.
+    pub fn checks_file(&self, pr: &crate::PrRef) -> PathBuf {
+        self.checks_dir().join(format!("{}.json", pr.file_key()))
+    }
+
     pub fn activity_file(&self) -> PathBuf {
         self.root.join("activity.jsonl")
     }
@@ -185,6 +195,17 @@ mod tests {
         assert_eq!(
             p.agent_state(&pr),
             PathBuf::from("/tmp/c/agent/acme~widgets~7.state.json")
+        );
+    }
+
+    #[test]
+    fn check_results_are_keyed_by_pull_request() {
+        let p = Paths::new("/tmp/c");
+        let pr = crate::PrRef::new("acme", "widgets", 7).unwrap();
+        assert_eq!(p.checks_dir(), PathBuf::from("/tmp/c/checks"));
+        assert_eq!(
+            p.checks_file(&pr),
+            PathBuf::from("/tmp/c/checks/acme~widgets~7.json")
         );
     }
 

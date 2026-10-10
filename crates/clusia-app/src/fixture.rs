@@ -474,6 +474,7 @@ pub fn demo_permission_request(now_ms: i64) -> PermissionRequest {
         sandbox: true,
         deadline: now_ms + 112_000,
         detail: None,
+        origin: clusia_protocol::TurnOrigin::Chat,
     }
 }
 

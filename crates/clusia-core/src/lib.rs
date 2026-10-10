@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod agent;
+pub mod checks;
 pub mod config;
 pub mod diffmap;
 pub mod draft;
@@ -22,6 +23,10 @@ pub mod time;
 
 pub use activity::{Activity, ActivityKind, ActivitySummary, DayCount};
 pub use agent::{AgentState, review_md};
+pub use checks::{
+    AreaStatus, AuditArea, CheckKind, CheckResult, Finding, Pass, PromptContext, Severity,
+    area_status, default_areas,
+};
 pub use config::{
     CODE_SIZES, Config, Density, DiffView, Dnd, EventKind, General, HourMinute, ListSort, Lists,
     Media, Notifications, Route, SoundId, Weekday,

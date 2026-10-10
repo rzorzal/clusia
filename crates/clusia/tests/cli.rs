@@ -1124,6 +1124,7 @@ mod review_flow {
                             sandbox: true,
                             deadline: 0,
                             detail: None,
+                            origin: clusia_protocol::TurnOrigin::Chat,
                         })],
                     ),
                     Request::PermissionAnswer { id: asked, answer } => {
@@ -1137,6 +1138,7 @@ mod review_flow {
                             Reply::Ack,
                             vec![
                                 event(Event::PermissionResolved {
+                                    origin: clusia_protocol::TurnOrigin::Chat,
                                     id: asked,
                                     pr: pr.clone(),
                                     tool: "Bash".into(),
