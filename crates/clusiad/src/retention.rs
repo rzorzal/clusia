@@ -77,8 +77,12 @@ async fn sweep_caches(shared: &Shared, cutoff: i64) {
         if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
             continue;
         }
-        // The review lock: an open may be writing this cache and its review right now.
+        // The review lock: an open may be writing this cache and its review right now, so what
+        // was true before waiting for it is checked again.
         let _guard = lock(shared, &pr).await;
+        if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
+            continue;
+        }
         if !shared.paths.review_file(&pr).exists() {
             crate::reviews::drop_cache(shared, &pr);
         }
@@ -317,6 +321,23 @@ mod tests {
         assert!(fresh.exists(), "recent");
         assert!(kept.exists(), "its review still exists");
         assert!(touched.exists(), "open this session");
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_a_cache_an_open_rewrote_while_it_waited_for_the_lock() {
+        let (_dir, shared) = shared();
+        let cache = cache_for(&shared, 7, 100);
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let guard = lock(&shared, &pr).await;
+        let cutoff = now_unix() - 14 * 86_400;
+        let open = async {
+            // The sweep is now waiting for the lock; the open writes a fresh cache.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            age(&cache, 0);
+            drop(guard);
+        };
+        tokio::join!(sweep_caches(&shared, cutoff), open);
+        assert!(cache.exists());
     }
 
     fn media_file(dir: &std::path::Path, name: &str, bytes: usize, days_old: u64) -> PathBuf {
