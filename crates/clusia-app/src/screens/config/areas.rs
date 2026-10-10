@@ -6,11 +6,14 @@ use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, observe};
-use clusia_core::checks::{AREA_INSTRUCTION_MAX, AREA_NAME_MAX, AuditArea, slug_id, validate_area};
+use clusia_core::checks::{
+    AREA_INSTRUCTION_MAX, AREA_NAME_MAX, AuditArea, is_builtin, slug_id, validate_area,
+};
 
 use super::{FieldError, row, setter};
 use crate::bridge::{Asks, Model, set_config};
 use crate::fonts::UiFonts;
+use crate::nav::{Nav, Screen, Section};
 use crate::theme::Swatch;
 use crate::ui::kit::{FieldCommitted, Type, Variant, button, card, checkbox, text, text_field};
 
@@ -77,11 +80,11 @@ pub fn toggled(areas: &[AuditArea], id: &str) -> Vec<AuditArea> {
     next
 }
 
-/// `areas` without the custom area `id`; a built-in area always stays.
+/// `areas` without the custom area `id`; a built-in area (by id) always stays.
 pub fn without(areas: &[AuditArea], id: &str) -> Vec<AuditArea> {
     areas
         .iter()
-        .filter(|a| a.builtin || a.id != id)
+        .filter(|a| is_builtin(&a.id) || a.id != id)
         .cloned()
         .collect()
 }
@@ -111,7 +114,7 @@ pub fn saved(
         FormTarget::Edit(id) => {
             let area = next
                 .iter_mut()
-                .find(|a| a.id == *id && !a.builtin)
+                .find(|a| a.id == *id && !is_builtin(&a.id))
                 .ok_or_else(|| "that area no longer exists".to_string())?;
             area.name = name.to_string();
             area.instruction = instruction.to_string();
@@ -207,7 +210,7 @@ fn area_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, area: &AuditArea, all
                 Type::META,
             ));
         });
-        if !area.builtin {
+        if !is_builtin(&area.id) {
             r.spawn((
                 button(fonts, "Edit", Variant::Secondary),
                 EditArea(area.id.clone()),
@@ -298,7 +301,7 @@ fn on_edit(
         return;
     };
     let areas = &model.snapshot.config.harness.audit_areas;
-    if let Some(area) = areas.iter().find(|a| a.id == *id && !a.builtin) {
+    if let Some(area) = areas.iter().find(|a| a.id == *id && !is_builtin(&a.id)) {
         *form = AreaForm {
             target: Some(FormTarget::Edit(id.clone())),
             name: area.name.clone(),
@@ -388,6 +391,14 @@ pub fn keep_form_text(
         } else if instructions.contains(commit.entity) {
             form.instruction = commit.value.clone();
         }
+    }
+}
+
+/// Closes the form when the Harness page is not the one showing, so a half-open form does not
+/// come back on a later visit.
+pub fn reset_form_off_page(nav: Res<Nav>, mut form: ResMut<AreaForm>) {
+    if nav.screen != Screen::Config(Section::Harness) && *form != AreaForm::default() {
+        *form = AreaForm::default();
     }
 }
 
@@ -674,5 +685,38 @@ mod tests {
             &mut app,
             "harness.audit_areas: duplicate id docs"
         ));
+    }
+
+    #[test]
+    fn a_built_in_id_is_built_in_whatever_its_flag_says() {
+        let mut app = harness_app();
+        let mut areas = default_areas();
+        areas[5].builtin = false;
+        testing::set_config_locally(&mut app, AREAS_KEY, &areas_value(&areas));
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<AreaSwitch>(&mut app), 6);
+        assert_eq!(testing::count::<EditArea>(&mut app), 0);
+        assert_eq!(testing::count::<DeleteArea>(&mut app), 0);
+        assert_eq!(without(&areas, "docs").len(), 6, "never dropped");
+        assert!(saved(&areas, &FormTarget::Edit("docs".into()), "Docs", "Docs.").is_err());
+    }
+
+    #[test]
+    fn leaving_the_harness_page_closes_the_form() {
+        let mut app = harness_app();
+        let add = testing::find::<AddAreaButton>(&mut app, |_| true);
+        testing::activate(&mut app, add);
+        testing::settle(&mut app);
+        assert!(app.world().resource::<AreaForm>().target.is_some());
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::General);
+        testing::settle(&mut app);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::Harness);
+        testing::settle(&mut app);
+        assert_eq!(*app.world().resource::<AreaForm>(), AreaForm::default());
+        assert_eq!(testing::count::<SaveArea>(&mut app), 0);
     }
 }

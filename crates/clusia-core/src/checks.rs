@@ -37,6 +37,11 @@ pub const BUILTIN_AREA_IDS: [&str; 6] = [
     "docs",
 ];
 
+/// Whether `id` is one of the built-in areas. Callers decide by this, not by `AuditArea::builtin`.
+pub fn is_builtin(id: &str) -> bool {
+    BUILTIN_AREA_IDS.contains(&id)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CheckKind {
@@ -150,7 +155,7 @@ pub fn validate_area(area: &AuditArea) -> Result<(), String> {
             "the id {SECURITY_AREA} is reserved for the security check"
         ));
     }
-    if area.builtin && !BUILTIN_AREA_IDS.contains(&area.id.as_str()) {
+    if area.builtin && !is_builtin(&area.id) {
         return Err(format!("{} is not a built-in area", area.id));
     }
     Ok(())
@@ -788,5 +793,11 @@ mod tests {
         f.start_line = Some(5);
         f.end_line = Some(9);
         assert_eq!((f.first_line(), f.last_line()), (Some(5), Some(9)));
+    }
+
+    #[test]
+    fn built_in_is_decided_by_the_id() {
+        assert!(is_builtin("docs") && is_builtin("correctness"));
+        assert!(!is_builtin("migrations") && !is_builtin("security"));
     }
 }

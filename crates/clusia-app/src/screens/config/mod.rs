@@ -123,6 +123,7 @@ impl Plugin for ConfigPlugin {
                 build_config,
                 commit_fields,
                 areas::keep_form_text,
+                areas::reset_form_off_page,
                 repos::commit_roots,
                 rebuild_config,
                 git::refresh_last_sync,
