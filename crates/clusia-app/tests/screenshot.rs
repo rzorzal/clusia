@@ -45,6 +45,8 @@ fn demo_screenshots() {
         "agent-chat",
         "config-harness",
         "permission",
+        "security",
+        "audits",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((
