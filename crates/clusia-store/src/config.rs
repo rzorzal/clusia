@@ -591,6 +591,34 @@ mod tests {
     }
 
     #[test]
+    fn permission_keys_are_read_and_set_by_name() {
+        let c = Config::default();
+        assert_eq!(get_value(&c, "harness.sandbox").unwrap(), "true");
+        assert_eq!(
+            get_value(&c, "harness.permission_timeout_secs").unwrap(),
+            "120"
+        );
+        let c = set_value(&c, "harness.sandbox", "false").unwrap();
+        assert!(!c.harness.sandbox);
+        let c = set_value(&c, "harness.permission_timeout_secs", "300").unwrap();
+        assert_eq!(c.harness.permission_timeout_secs, 300);
+        for (key, value) in [
+            ("harness.permission_timeout_secs", "29"),
+            ("harness.permission_timeout_secs", "601"),
+            ("harness.permission_timeout_secs", "soon"),
+            ("harness.sandbox", "maybe"),
+        ] {
+            assert!(
+                matches!(
+                    set_value(&c, key, value),
+                    Err(ConfigKeyError::Invalid { .. })
+                ),
+                "{key}={value}"
+            );
+        }
+    }
+
+    #[test]
     fn harness_values_are_validated() {
         let c = Config::default();
         for (key, value) in [

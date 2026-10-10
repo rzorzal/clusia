@@ -23,7 +23,8 @@ pub(crate) fn turn_of(entry: &AgentLogEntry) -> u64 {
         | AgentLogEntry::Denied { turn, .. }
         | AgentLogEntry::Suggestion { turn, .. }
         | AgentLogEntry::Done { turn, .. }
-        | AgentLogEntry::Error { turn, .. } => *turn,
+        | AgentLogEntry::Error { turn, .. }
+        | AgentLogEntry::Permission { turn, .. } => *turn,
     }
 }
 

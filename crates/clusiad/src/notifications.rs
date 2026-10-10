@@ -258,7 +258,7 @@ impl Engine {
                 subtitle: subtitle(&event),
                 body: event.body.clone(),
                 sound: decision.sound.map(|s| s.as_str().to_string()),
-                time_sensitive: !cfg.follow_focus,
+                time_sensitive: event.is_urgent() || !cfg.follow_focus,
                 open: event.open.clone(),
             }
         });

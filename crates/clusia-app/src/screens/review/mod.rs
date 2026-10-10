@@ -41,6 +41,7 @@ impl Plugin for ReviewPlugin {
                 finalize::FinalizePlugin,
                 leave::LeavePlugin,
                 agent::AgentPanel,
+                agent::PermissionPlugin,
                 crate::ui::composer::ComposerPlugin,
             ));
     }

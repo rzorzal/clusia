@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
+use clusia_core::printable::printable;
 use clusia_protocol::{HarnessKind, SessionStateKind};
 
 use super::model::{ChatLine, Chats, DEFAULT_WIDTH, PanelTab, display_text};
@@ -146,6 +147,20 @@ struct Hints {
     built: Option<HintsView>,
 }
 
+/// The footer's **Allowed for this review** list.
+#[derive(Component)]
+pub struct RulesPart {
+    pr: PrRef,
+    built: Option<Vec<String>>,
+}
+
+/// × on a rule's chip.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct RevokeButton {
+    pub pr: PrRef,
+    pub rule: String,
+}
+
 pub struct AgentPanel;
 
 impl Plugin for AgentPanel {
@@ -163,6 +178,7 @@ impl Plugin for AgentPanel {
                 rebuild_header,
                 rebuild_transcript,
                 rebuild_hints,
+                rebuild_rules,
                 send_on_enter,
                 placeholder_visibility,
             )
@@ -182,12 +198,13 @@ pub fn harness_ready(snap: &Snapshot) -> bool {
         })
 }
 
-/// The text the denied line shows.
+/// The text the denied line shows: a tool the user's own `deny` rules refuse.
 pub fn denied_text(tool: &str, detail: &str) -> String {
+    let (tool, detail) = (printable(tool), printable(detail));
     if tool == "Bash" {
-        format!("Wanted to run `{detail}` — needs permission, coming soon")
+        format!("Wanted to run `{detail}` — not allowed")
     } else {
-        format!("Wanted to use {tool} ({detail}) — needs permission, coming soon")
+        format!("Wanted to use {tool} ({detail}) — not allowed")
     }
 }
 
@@ -517,6 +534,18 @@ fn footer(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef) {
         });
         f.spawn((
             Node {
+                display: Display::None,
+                flex_direction: FlexDirection::Column,
+                row_gap: px(6),
+                ..default()
+            },
+            RulesPart {
+                pr: pr.clone(),
+                built: None,
+            },
+        ));
+        f.spawn((
+            Node {
                 column_gap: px(12),
                 justify_content: JustifyContent::SpaceBetween,
                 ..default()
@@ -755,6 +784,35 @@ fn chat_line(
             Swatch::OrangeSoft,
             Swatch::Orange,
         ),
+        ChatLine::Permission {
+            tool,
+            summary,
+            outcome,
+        } => {
+            let (mark, went_through, body) =
+                super::permission::permission_line(tool, summary, *outcome);
+            if went_through {
+                pill(
+                    p,
+                    fonts,
+                    mark,
+                    Swatch::Green,
+                    &body,
+                    Swatch::Chrome,
+                    Swatch::Muted,
+                );
+            } else {
+                pill(
+                    p,
+                    fonts,
+                    mark,
+                    Swatch::Orange,
+                    &body,
+                    Swatch::OrangeSoft,
+                    Swatch::Orange,
+                );
+            }
+        }
         ChatLine::Error(message) => {
             p.spawn(text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange)));
         }
@@ -854,13 +912,105 @@ fn rebuild_hints(
                 },
                 children![text(
                     &fonts,
-                    "Can read the worktree · can't run commands yet",
+                    "Can read the worktree · asks before running commands",
                     Type::META
                 )],
             ));
         });
         hints.built = Some(want);
     }
+}
+
+fn rebuild_rules(
+    mut commands: Commands,
+    chats: Res<Chats>,
+    fonts: Res<UiFonts>,
+    mut parts: Query<(Entity, &mut RulesPart, &mut Node)>,
+) {
+    for (entity, mut part, mut node) in &mut parts {
+        let Some(chat) = chats.0.get(&part.pr).filter(|c| c.tab == PanelTab::Agent) else {
+            continue;
+        };
+        if part.built.as_ref() == Some(&chat.rules) {
+            continue;
+        }
+        node.display = flex_if(!chat.rules.is_empty());
+        part.built = Some(chat.rules.clone());
+        commands.entity(entity).despawn_related::<Children>();
+        if chat.rules.is_empty() {
+            continue;
+        }
+        let pr = part.pr.clone();
+        commands.entity(entity).with_children(|c| {
+            c.spawn(text(&fonts, "Allowed for this review", Type::META));
+            c.spawn(Node {
+                flex_wrap: FlexWrap::Wrap,
+                column_gap: px(6),
+                row_gap: px(6),
+                ..default()
+            })
+            .with_children(|chips| {
+                for rule in &chat.rules {
+                    chips
+                        .spawn(panel(
+                            Node {
+                                column_gap: px(2),
+                                align_items: AlignItems::Center,
+                                padding: UiRect::new(px(10), px(4), px(3), px(3)),
+                                border_radius: BorderRadius::all(px(12)),
+                                ..default()
+                            },
+                            Swatch::Chrome,
+                        ))
+                        .with_children(|chip| {
+                            chip.spawn(text(
+                                &fonts,
+                                super::permission::rule_label(rule),
+                                Type::META,
+                            ));
+                            chip.spawn((
+                                Node {
+                                    padding: UiRect::axes(px(5), px(0)),
+                                    border_radius: BorderRadius::all(px(8)),
+                                    ..default()
+                                },
+                                (WidgetButton, Clickable),
+                                Hovered::default(),
+                                TabIndex(0),
+                                BackgroundColor::default(),
+                                Fill(Swatch::Clear),
+                                HoverFill(Swatch::Hover),
+                                RevokeButton {
+                                    pr: pr.clone(),
+                                    rule: rule.clone(),
+                                },
+                                observe(on_revoke),
+                                children![text(&fonts, "×", Type::META)],
+                            ));
+                        });
+                }
+            });
+        });
+    }
+}
+
+/// × takes the rule back: its chip goes at once, and the daemon's `RulesChanged` confirms.
+fn on_revoke(
+    activate: On<Activate>,
+    buttons: Query<&RevokeButton>,
+    mut chats: ResMut<Chats>,
+    mut asks: ResMut<Asks>,
+) {
+    let Ok(b) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Some(chat) = chats.0.get_mut(&b.pr) {
+        chat.rules.retain(|r| r != &b.rule);
+    }
+    asks.send(Ask::RevokeRule {
+        pr: b.pr.clone(),
+        rule: b.rule.clone(),
+    });
 }
 
 /// Puts the question an "Ask the agent about this line" started in the input, after what is
@@ -1309,7 +1459,7 @@ mod tests {
             "Is the lock needed?",
             "Read src/auth/store.rs",
             "The lock is needed.",
-            "Wanted to run `cargo test` — needs permission, coming soon",
+            "Wanted to run `cargo test` — not allowed",
             "Suggested comment",
             "refresh.rs:44",
             "Re-check",
@@ -1327,11 +1477,11 @@ mod tests {
     fn other_tools_are_named_in_their_denied_line() {
         assert_eq!(
             denied_text("Bash", "cargo test"),
-            "Wanted to run `cargo test` — needs permission, coming soon"
+            "Wanted to run `cargo test` — not allowed"
         );
         assert_eq!(
             denied_text("Edit", "src/lib.rs"),
-            "Wanted to use Edit (src/lib.rs) — needs permission, coming soon"
+            "Wanted to use Edit (src/lib.rs) — not allowed"
         );
     }
 
@@ -1519,7 +1669,7 @@ mod tests {
         ));
         assert!(testing::shows(
             &mut app,
-            "Can read the worktree · can't run commands yet"
+            "Can read the worktree · asks before running commands"
         ));
     }
 
@@ -1555,7 +1705,7 @@ mod tests {
 
     #[test]
     fn the_marks_the_chat_draws_exist_in_the_bundled_font() {
-        for mark in ['✓', '⊘', '↑', '·', '…', '—', '–'] {
+        for mark in ['✓', '⊘', '↑', '·', '…', '—', '–', '×', '“', '”'] {
             assert!(crate::fonts::covers(crate::fonts::INTER, mark), "{mark}");
         }
     }

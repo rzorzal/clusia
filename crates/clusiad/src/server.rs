@@ -215,6 +215,9 @@ impl Daemon {
             }
         }
         drop(self.listener);
+        // A request waiting for the reviewer holds its connection open: deny it first, or the
+        // wait below would run out its grace.
+        crate::permissions::cancel_all(&self.shared).await;
         if !self.shared.wait_idle(SHUTDOWN_GRACE).await {
             tracing::warn!("stopping with requests still running after {SHUTDOWN_GRACE:?}");
         }

@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use clusia_core::PrRef;
 use clusia_core::config::Harness;
 use clusia_harness::{
-    AgentEvent, ClaudeCode, ParseState, SessionArg, TurnSpec, extract_suggestions, parse_line,
-    parse_probe, probe_command,
+    AgentEvent, BridgeSpec, ClaudeCode, ParseState, SessionArg, TurnSpec, extract_suggestions,
+    parse_line, parse_probe, probe_command,
 };
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, ErrorCode, Event, Outcome, ProbeResult, ProtocolError, Reply,
@@ -118,7 +118,10 @@ impl Stop {
 }
 
 struct Active {
+    turn: u64,
     stop: Arc<Stop>,
+    /// Whether the program of this turn runs in the sandbox; set once its command is built.
+    sandbox: Option<bool>,
 }
 
 struct Queued {
@@ -262,7 +265,11 @@ impl Sessions {
                 (turn, None)
             } else {
                 let stop = Stop::new();
-                slot.running = Some(Active { stop: stop.clone() });
+                slot.running = Some(Active {
+                    turn,
+                    stop: stop.clone(),
+                    sandbox: None,
+                });
                 // Counted before the lock is released, so a shutdown that follows waits for it.
                 (turn, Some((stop, Live::new(shared))))
             }
@@ -345,6 +352,56 @@ impl Sessions {
         }
     }
 
+    /// The turn of `pr` that is running right now.
+    pub(crate) fn running_turn(&self, pr: &PrRef) -> Option<u64> {
+        let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        table.get(pr)?.running.as_ref().map(|active| active.turn)
+    }
+
+    /// Makes `turn` the running turn of `pr` without starting a process.
+    #[cfg(test)]
+    pub(crate) fn pretend_running(&self, pr: &PrRef, turn: u64) {
+        let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        table.entry(pr.clone()).or_default().running = Some(Active {
+            turn,
+            stop: Stop::new(),
+            sandbox: None,
+        });
+    }
+
+    /// Forgets the running turn of `pr`, as when its program ended.
+    #[cfg(test)]
+    pub(crate) fn pretend_stopped(&self, pr: &PrRef) {
+        let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(slot) = table.get_mut(pr) {
+            slot.running = None;
+        }
+    }
+
+    /// Records whether the program of `turn` runs in the sandbox, if `turn` still runs.
+    pub(crate) fn set_turn_sandbox(&self, pr: &PrRef, turn: u64, sandbox: bool) {
+        let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(active) = table
+            .get_mut(pr)
+            .and_then(|slot| slot.running.as_mut())
+            .filter(|active| active.turn == turn)
+        {
+            active.sandbox = Some(sandbox);
+        }
+    }
+
+    /// Whether the program of `turn` runs in the sandbox; `None` before its command is built
+    /// or once it no longer runs.
+    pub(crate) fn turn_sandbox(&self, pr: &PrRef, turn: u64) -> Option<bool> {
+        let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        table
+            .get(pr)?
+            .running
+            .as_ref()
+            .filter(|active| active.turn == turn)?
+            .sandbox
+    }
+
     /// Where the session of `pr` stands right now.
     #[cfg(test)]
     pub(crate) fn state(&self, pr: &PrRef) -> SessionStateKind {
@@ -400,7 +457,11 @@ impl Sessions {
         match slot.queued.take() {
             Some(queued) => {
                 let stop = Stop::new();
-                slot.running = Some(Active { stop: stop.clone() });
+                slot.running = Some(Active {
+                    turn: queued.turn,
+                    stop: stop.clone(),
+                    sandbox: None,
+                });
                 Some((queued.turn, queued.prompt, stop))
             }
             None => {
@@ -453,6 +514,8 @@ async fn drive(
                 AgentErrorKind::Crashed.default_message().to_string(),
             );
         }
+        // Whatever the turn was still asking, it asks no more.
+        crate::permissions::cancel_turn(&shared, &pr, turn).await;
         next = shared.sessions.next_after(&shared, &pr, turn);
     }
 }
@@ -757,7 +820,16 @@ impl Run<'_> {
                 }
             }
             AgentEvent::ToolUse(summary) => self.out.tool(summary),
-            AgentEvent::Denied { tool, detail } => self.out.denied(tool, detail),
+            AgentEvent::Denied { tool, detail } => {
+                // A request the reviewer (or the clock) denied is already in the chat.
+                if !self
+                    .shared
+                    .permissions
+                    .already_told(self.out.pr, self.out.turn, &tool)
+                {
+                    self.out.denied(tool, detail);
+                }
+            }
             AgentEvent::SessionId(id) => remember_session(self.shared, self.out.pr, &id).await,
             AgentEvent::Error { kind, message } => {
                 self.failed = true;
@@ -892,6 +964,30 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         }
     };
     let cwd = shared.paths.worktree_for(&pr);
+    let Some(bridge_program) = shared
+        .bridge_program
+        .clone()
+        .or_else(|| std::env::current_exe().ok())
+    else {
+        out.error(
+            AgentErrorKind::Crashed,
+            "Clúsia cannot find its own program to ask you for permission".to_string(),
+        );
+        return;
+    };
+    // Claude Code gives up on a tool call after `MCP_TOOL_TIMEOUT`; the question to the
+    // reviewer may take until our own deadline.
+    let mut base_env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
+    base_env.retain(|(key, _)| key != "MCP_TOOL_TIMEOUT");
+    base_env.push((
+        "MCP_TOOL_TIMEOUT".into(),
+        ((u64::from(harness.permission_timeout_secs) + 30) * 1000)
+            .to_string()
+            .into(),
+    ));
+    // Requests of this turn show, and are judged by, the sandbox its program runs with, even
+    // when the setting changes before the turn ends.
+    shared.sessions.set_turn_sandbox(&pr, turn, harness.sandbox);
     let spec = TurnSpec {
         program: program_path(&shared, &harness),
         prompt: prompt.text,
@@ -899,7 +995,17 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         session: shared.sessions.session_for(&shared, &pr),
         use_cli_permissions: harness.use_cli_permissions,
         extra_args,
-        base_env: std::env::vars_os().collect(),
+        base_env,
+        bridge: Some(BridgeSpec {
+            program: bridge_program,
+            socket: shared.paths.socket(),
+            pr: pr.to_string(),
+            turn,
+        }),
+        sandbox: harness.sandbox,
+        // No rule goes on the command line: every request comes to the daemon, which decides
+        // it with the review's rules.
+        rules: Vec::new(),
     };
     let mut command = Command::from(ClaudeCode::command(&spec));
     command
@@ -959,6 +1065,8 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
             _ = &mut deadline => break Ending::TimedOut,
         }
     };
+    // The turn is over for the agent: nobody is left to hear an answer.
+    crate::permissions::cancel_turn(&shared, &pr, turn).await;
     let tail = |task: tokio::task::JoinHandle<String>| async move {
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
@@ -1169,6 +1277,7 @@ mod tests {
             media_resolve: Vec::new(),
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
+            bridge_program: None,
         };
         Arc::new(Shared::new(paths, config, options))
     }

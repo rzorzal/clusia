@@ -19,7 +19,7 @@ use crate::review_state::{
     DiffMode, EditTarget, Editor, Modal, Phase, Ready, ReviewSection, ReviewTabs, Tab, TabUi,
 };
 use crate::screens::open_pr::Palette;
-use crate::screens::review::agent::{Chats, PanelTab};
+use crate::screens::review::agent::{Chats, PanelTab, PermissionQueue};
 use crate::ui::composer::popover::{PopoverKind, Popovers};
 use crate::ui::composer::{ComposerKey, ComposerMode, Slot};
 
@@ -132,7 +132,7 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
             );
             world.resource_mut::<Model>().probe = ProbeState::Done(fixture::demo_probe());
         }
-        Scene::AgentChat => {
+        Scene::AgentChat | Scene::Permission => {
             set_demo_config(world, &[("harness.program", "/opt/homebrew/bin/claude")])
         }
         _ => {}
@@ -197,7 +197,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::ConfigMedia
         | Scene::ConfigAbout
         | Scene::ConfigHarness => {}
-        Scene::AgentChat => ui.file = Some("src/auth/refresh.rs".into()),
+        Scene::AgentChat | Scene::Permission => ui.file = Some("src/auth/refresh.rs".into()),
         Scene::Composer | Scene::Emoji | Scene::Gif => {
             ui.editor = Some(composer_editor(ComposerMode::Write));
         }
@@ -263,7 +263,7 @@ pub fn stage(world: &mut World, scene: Scene) {
             nav.go(&WindowTarget::Home);
         }
     }
-    if scene == Scene::AgentChat {
+    if matches!(scene, Scene::AgentChat | Scene::Permission) {
         // As in the mockup, only the question turn: the log is not asked for again.
         let question = fixture::demo_agent_turns(now).remove(1);
         let mut chats = world.resource_mut::<Chats>();
@@ -272,6 +272,16 @@ pub fn stage(world: &mut World, scene: Scene) {
         chat.log_asked = true;
         chats.replay(&pr, &question);
         chats.entry(&pr).state = SessionStateKind::Running;
+    }
+    if scene == Scene::Permission {
+        // A frozen clock keeps the countdown at 1:52 for as long as the render takes.
+        *world.resource_mut::<Clock>() = Clock(Some(now));
+        // Asked 8 s ago of a 2-minute wait, so the bar is a little short of full, as the
+        // mockup's is.
+        let now_ms = now * 1000;
+        world
+            .resource_mut::<PermissionQueue>()
+            .push(fixture::demo_permission_request(now_ms), now_ms - 8_000);
     }
     if scene == Scene::Palette {
         *world.resource_mut::<Palette>() = Palette {
@@ -418,6 +428,13 @@ mod tests {
                     );
                     assert_eq!(chat.state, clusia_protocol::SessionStateKind::Running);
                 }
+                Scene::Permission => {
+                    assert_eq!(tab.ui.file.as_deref(), Some("src/auth/refresh.rs"));
+                    assert_eq!(
+                        testing::count::<crate::screens::review::agent::PermissionModal>(&mut app),
+                        1
+                    );
+                }
                 Scene::Composer | Scene::ComposerPreview | Scene::Emoji | Scene::Gif => {
                     let editor = tab.ui.editor.as_ref().expect("an open composer");
                     assert!(matches!(editor.target, EditTarget::Line { line: 44, .. }));
@@ -526,11 +543,59 @@ mod tests {
     }
 
     #[test]
+    fn the_permission_scene_shows_the_mockup_modal() {
+        let mut app = staged(Scene::Permission);
+        for needle in [
+            "Claude Code wants to run a command",
+            "“To check that two refreshes at once don't exchange the token twice.”",
+            "cargo test -p clusia-auth refresh_race -- --nocapture",
+            "no network · reads and writes only the worktree",
+            "Denied automatically in 1:52",
+            "Deny",
+            "Allow cargo test … for this review",
+            "Allow once",
+            "Is the new lock needed at all, or would re-checking the expiry be enough?",
+            "Claude Code · thinking…",
+            "session resumed · knows this review",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        assert!(
+            !testing::shows(&mut app, "Summary"),
+            "only the question turn, as in the mockup"
+        );
+        let clock = *app.world().resource::<crate::clock::Clock>();
+        assert_eq!(
+            clock,
+            crate::clock::Clock(Some(NOW)),
+            "the countdown must not drift in a render"
+        );
+        let queue = app.world().resource::<PermissionQueue>();
+        let pending = &queue.0[0];
+        let left = crate::screens::review::agent::permission::countdown_fraction(
+            pending.request.deadline,
+            pending.asked_ms,
+            NOW * 1000,
+        );
+        assert!(
+            (left - 112.0 / 120.0).abs() < 0.001,
+            "the bar shows time already passed, not a full bar: {left}"
+        );
+    }
+
+    #[test]
     fn the_harness_scene_shows_the_mockup_settings() {
         let config = demo_config(Scene::ConfigHarness);
         assert_eq!(config["harness"]["program"], "/opt/homebrew/bin/claude");
         assert_eq!(config["harness"]["extra_args"], "--model claude-opus-5-5");
+        assert_eq!(config["harness"]["sandbox"], true);
+        assert_eq!(config["harness"]["permission_timeout_secs"], 120);
         let mut app = staged_outside_review(Scene::ConfigHarness);
+        assert!(testing::shows(&mut app, "Deny unanswered requests after"));
+        assert!(testing::shows(
+            &mut app,
+            "Run commands in a sandbox: no network, writes only in the review worktree"
+        ));
         assert!(testing::shows(
             &mut app,
             "Claude Code 2.1.294 answered in 1.8 s"

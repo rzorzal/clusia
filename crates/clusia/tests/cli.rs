@@ -213,6 +213,17 @@ impl Home {
 
     /// Starts `clusia args` against `api` with piped stdio and returns it still running.
     fn spawn_github(&self, api: &str, token: Option<&str>, args: &[&str]) -> std::process::Child {
+        self.spawn_with_stdin(api, token, args, std::process::Stdio::piped())
+    }
+
+    /// Like `spawn_github`, with `stdin` as the process's standard input.
+    fn spawn_with_stdin(
+        &self,
+        api: &str,
+        token: Option<&str>,
+        args: &[&str],
+        stdin: std::process::Stdio,
+    ) -> std::process::Child {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clusia"));
         cmd.arg("--home")
             .arg(self.dir.path())
@@ -226,7 +237,7 @@ impl Home {
             .env_remove("CLUSIA_GITHUB_TOKEN")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::piped());
+            .stdin(stdin);
         if let Some(t) = token {
             cmd.env("CLUSIA_GITHUB_TOKEN", t);
         }
@@ -896,6 +907,508 @@ mod review_flow {
         assert_eq!(o.status.code(), Some(1));
         assert!(stderr(&o).contains("question"), "{}", stderr(&o));
         assert_eq!(h.clusia(&["daemon", "status"]).status.code(), Some(3));
+    }
+
+    /// The command the fake `claude` asks permission for, on turn 1 of a question.
+    fn asks_to_run_the_tests() -> Script {
+        Script::one(
+            Turn::answer("Done.")
+                .ask_permission("Bash", json!({"command": "cargo test -p clusia-core"})),
+        )
+    }
+
+    /// A pseudo-terminal: the master end the test types on, and the slave end the process
+    /// reads as its terminal.
+    fn pty() -> (std::fs::File, std::process::Stdio) {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: `openpty` fills the two descriptors; each is wrapped exactly once below.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "no pseudo-terminal");
+        // SAFETY: both descriptors are open and owned by nobody else.
+        let (master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        (
+            std::fs::File::from(master),
+            std::process::Stdio::from(slave),
+        )
+    }
+
+    /// Collects what `reader` produces, as it comes (a prompt has no line end to wait for).
+    fn collect(
+        reader: impl std::io::Read + Send + 'static,
+    ) -> std::sync::Arc<std::sync::Mutex<String>> {
+        collect_joinable(reader).0
+    }
+
+    /// Like `collect`, with the thread to join once the pipe is closed.
+    fn collect_joinable(
+        mut reader: impl std::io::Read + Send + 'static,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<String>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = seen.clone();
+        let reading = std::thread::spawn(move || {
+            let mut buffer = [0u8; 512];
+            while let Ok(n) = reader.read(&mut buffer) {
+                if n == 0 {
+                    return;
+                }
+                sink.lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&buffer[..n]));
+            }
+        });
+        (seen, reading)
+    }
+
+    /// A line typed at once after a question appears is ignored on purpose: wait it out, as a
+    /// reader who has read the question would.
+    fn let_the_question_settle() {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+
+    fn wait_until(seen: &std::sync::Mutex<String>, needle: &str) {
+        let start = std::time::Instant::now();
+        while !seen.lock().unwrap().contains(needle) {
+            assert!(
+                start.elapsed().as_secs() < 30,
+                "never saw {needle:?}; got {:?}",
+                seen.lock().unwrap()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Runs `clusia ask` on a terminal, types `typed` once the question is on the screen, and
+    /// returns (standard output, standard error) when it ends.
+    fn ask_on_a_terminal(w: &AgentWorld, typed: &str) -> (String, String) {
+        use std::io::Write;
+        let (mut master, slave) = pty();
+        let mut child = w.home.spawn_with_stdin(
+            &w.api,
+            Some("tok"),
+            &["ask", "acme/widgets#7", "run the tests"],
+            slave,
+        );
+        let (out, out_thread) = collect_joinable(child.stdout.take().unwrap());
+        let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
+        wait_until(&err, "/ [d]eny? ");
+        let_the_question_settle();
+        master.write_all(typed.as_bytes()).unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "{}", err.lock().unwrap());
+        out_thread.join().unwrap();
+        err_thread.join().unwrap();
+        let (out, err) = (out.lock().unwrap().clone(), err.lock().unwrap().clone());
+        (out, err)
+    }
+
+    #[test]
+    fn ask_on_a_terminal_asks_and_allow_once_runs_the_command() {
+        let w = AgentWorld::new(asks_to_run_the_tests());
+        let (out, err) = ask_on_a_terminal(&w, "o\n");
+        assert!(
+            err.contains(
+                "Claude Code wants to run: cargo test -p clusia-core  [o]nce / [r]eview (cargo test) / [d]eny? "
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains("✓ ran cargo test -p clusia-core (you allowed it)"),
+            "{err}"
+        );
+        assert!(out.contains("Done."), "{out}");
+        let answers = FakeClaude::permission_answers(&w.fake_dir());
+        assert_eq!(answers.len(), 1);
+        assert!(answers[0].allow);
+        let log = stdout(&w.run(&["agent", "log", "acme/widgets#7"]));
+        assert!(
+            log.contains("  ✓ ran cargo test -p clusia-core (you allowed it)"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn ask_on_a_terminal_review_saves_the_prefix_and_enter_alone_denies() {
+        let w = AgentWorld::new(asks_to_run_the_tests());
+        let (_, err) = ask_on_a_terminal(&w, "r\n");
+        assert!(
+            err.contains("✓ ran cargo test -p clusia-core (allowed for this review)"),
+            "{err}"
+        );
+        assert!(FakeClaude::permission_answers(&w.fake_dir())[0].allow);
+
+        let denying = AgentWorld::new(asks_to_run_the_tests());
+        let (out, err) = ask_on_a_terminal(&denying, "\n");
+        assert!(err.contains("⊘ Denied: cargo test -p clusia-core"), "{err}");
+        assert!(out.contains("Done."), "the agent goes on without it: {out}");
+        assert!(!FakeClaude::permission_answers(&denying.fake_dir())[0].allow);
+    }
+
+    /// What a fake daemon was told: the answers that reached it, as (request id, answer).
+    type Answers =
+        std::sync::Arc<std::sync::Mutex<Vec<(String, clusia_protocol::PermissionAnswerKind)>>>;
+
+    /// A daemon that asks permission once for `cargo test -p clusia-core` as soon as a question
+    /// arrives, then ends the turn when the answer comes. It stands where the real one would,
+    /// so the terminal side is tested on its own.
+    fn daemon_that_asks(rt: &tokio::runtime::Runtime, socket: &Path) -> Answers {
+        daemon_that_asks_after(rt, socket, None, None)
+    }
+
+    /// Like `daemon_that_asks`, but the request is only announced once `gate` is released.
+    /// `connected` fires when the question has been accepted: the client is connected and about
+    /// to read its terminal.
+    fn daemon_that_asks_after(
+        rt: &tokio::runtime::Runtime,
+        socket: &Path,
+        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+        connected: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Answers {
+        let (mut gate, mut connected) = (gate, connected);
+        use clusia_protocol::{
+            ClientMessage, Command as Request, Event, MessageReader, Outcome, PROTOCOL_VERSION,
+            PermissionAnswerKind, PermissionOutcome, Reply, ServerMessage, write_message,
+        };
+        let listener = {
+            let _guard = rt.enter();
+            tokio::net::UnixListener::bind(socket).unwrap()
+        };
+        let answers = Answers::default();
+        let told = answers.clone();
+        rt.spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (read, mut write) = stream.into_split();
+            let mut read = MessageReader::new(read);
+            let Ok(Some(ClientMessage::Hello { .. })) = read.next::<ClientMessage>().await else {
+                return;
+            };
+            let welcome = ServerMessage::Welcome {
+                protocol: PROTOCOL_VERSION,
+                daemon: "9.9.9".into(),
+            };
+            write_message(&mut write, &welcome).await.unwrap();
+            let pr: clusia_core::PrRef = "acme/widgets#7".parse().unwrap();
+            let event = |event| ServerMessage::Event {
+                topic: "agent".into(),
+                event,
+            };
+            while let Ok(Some(ClientMessage::Request { id, cmd })) =
+                read.next::<ClientMessage>().await
+            {
+                let is_send = matches!(cmd, Request::AgentSend { .. });
+                let (reply, then) = match cmd {
+                    Request::AgentSend { .. } => (
+                        Reply::AgentTurn { turn: 1 },
+                        vec![event(Event::PermissionRequested {
+                            id: "perm-1".into(),
+                            pr: pr.clone(),
+                            turn: 1,
+                            tool: "Bash".into(),
+                            summary: "cargo test -p clusia-core".into(),
+                            reason: None,
+                            prefix: Some("cargo test".into()),
+                            sandbox: true,
+                            deadline: 0,
+                            detail: None,
+                        })],
+                    ),
+                    Request::PermissionAnswer { id: asked, answer } => {
+                        told.lock().unwrap().push((asked.clone(), answer));
+                        let outcome = match answer {
+                            PermissionAnswerKind::Once => PermissionOutcome::Allowed,
+                            PermissionAnswerKind::Review => PermissionOutcome::AllowedForReview,
+                            PermissionAnswerKind::Deny => PermissionOutcome::Denied,
+                        };
+                        (
+                            Reply::Ack,
+                            vec![
+                                event(Event::PermissionResolved {
+                                    id: asked,
+                                    pr: pr.clone(),
+                                    tool: "Bash".into(),
+                                    summary: "cargo test -p clusia-core".into(),
+                                    outcome,
+                                }),
+                                event(Event::AgentChunk {
+                                    pr: pr.clone(),
+                                    turn: 1,
+                                    text: "Done.".into(),
+                                }),
+                                event(Event::AgentDone {
+                                    pr: pr.clone(),
+                                    turn: 1,
+                                    duration_ms: 1,
+                                }),
+                            ],
+                        )
+                    }
+                    _ => (Reply::Ack, Vec::new()),
+                };
+                let response = ServerMessage::Response {
+                    id,
+                    result: Outcome::Ok(reply),
+                };
+                write_message(&mut write, &response).await.unwrap();
+                if is_send && let Some(connected) = connected.take() {
+                    let _ = connected.send(());
+                }
+                if is_send && let Some(gate) = gate.take() {
+                    let _ = gate.await;
+                }
+                for message in then {
+                    write_message(&mut write, &message).await.unwrap();
+                }
+            }
+        });
+        answers
+    }
+
+    /// `clusia ask` on a terminal against `daemon_that_asks`, with `typed` typed at the prompt.
+    /// Returns (standard output, standard error, what the daemon was told).
+    fn ask_the_fake_daemon(
+        typed: &str,
+    ) -> (
+        String,
+        String,
+        Vec<(String, clusia_protocol::PermissionAnswerKind)>,
+    ) {
+        ask_the_fake_daemon_after(None, typed)
+    }
+
+    /// Like `ask_the_fake_daemon`, with `stray` typed while no question is open yet.
+    fn ask_the_fake_daemon_after(
+        stray: Option<&str>,
+        typed: &str,
+    ) -> (
+        String,
+        String,
+        Vec<(String, clusia_protocol::PermissionAnswerKind)>,
+    ) {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let (connected, is_connected) = tokio::sync::oneshot::channel();
+        let answers = daemon_that_asks_after(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            stray.map(|_| gate),
+            stray.map(|_| connected),
+        );
+        let (mut master, slave) = pty();
+        let mut child = fake_daemon_ask(dir.path(), slave);
+        let (out, out_thread) = collect_joinable(child.stdout.take().unwrap());
+        let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
+        if let Some(stray) = stray {
+            is_connected.blocking_recv().unwrap();
+            master.write_all(stray.as_bytes()).unwrap();
+            release.send(()).unwrap();
+        }
+        wait_until(&err, "/ [d]eny? ");
+        let_the_question_settle();
+        master.write_all(typed.as_bytes()).unwrap();
+        let status = child.wait().unwrap();
+        out_thread.join().unwrap();
+        err_thread.join().unwrap();
+        let (out, err) = (out.lock().unwrap().clone(), err.lock().unwrap().clone());
+        assert!(status.success(), "{err}");
+        let told = answers.lock().unwrap().clone();
+        (out, err, told)
+    }
+
+    fn fake_daemon_ask(home: &Path, stdin: std::process::Stdio) -> std::process::Child {
+        Command::new(env!("CARGO_BIN_EXE_clusia"))
+            .arg("--home")
+            .arg(home)
+            .args(["ask", "acme/widgets#7", "run the tests"])
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .stdin(stdin)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_line_typed_before_the_question_is_shown_never_answers_it() {
+        use clusia_protocol::PermissionAnswerKind::Deny;
+        let (_, err, told) = ask_the_fake_daemon_after(Some("o\n"), "\n");
+        assert_eq!(told, [("perm-1".to_string(), Deny)], "{err}");
+    }
+
+    #[test]
+    fn ctrl_c_at_the_prompt_detaches_and_answers_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let answers = daemon_that_asks(&rt, &clusia_core::Paths::new(dir.path()).socket());
+        let (_master, slave) = pty();
+        let mut child = fake_daemon_ask(dir.path(), slave);
+        let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
+        wait_until(&err, "/ [d]eny? ");
+        // SAFETY: the child is ours and still running (it waits at the prompt).
+        unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+        let status = child.wait().unwrap();
+        err_thread.join().unwrap();
+        assert_eq!(status.code(), Some(130), "{}", err.lock().unwrap());
+        assert!(
+            err.lock()
+                .unwrap()
+                .contains("Detached: the agent keeps working"),
+            "{}",
+            err.lock().unwrap()
+        );
+        assert!(answers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_terminal_sends_the_line_typed_at_the_prompt() {
+        use clusia_protocol::PermissionAnswerKind::{Deny, Once, Review};
+        for (typed, answer, line) in [
+            (
+                "o\n",
+                Once,
+                "✓ ran cargo test -p clusia-core (you allowed it)",
+            ),
+            (
+                "review\n",
+                Review,
+                "✓ ran cargo test -p clusia-core (allowed for this review)",
+            ),
+            ("\n", Deny, "⊘ Denied: cargo test -p clusia-core"),
+            ("sure\n", Deny, "⊘ Denied: cargo test -p clusia-core"),
+        ] {
+            let (out, err, told) = ask_the_fake_daemon(typed);
+            assert_eq!(told, [("perm-1".to_string(), answer)], "{typed:?}");
+            assert!(err.contains(line), "{typed:?}: {err}");
+            assert!(
+                err.contains("Claude Code wants to run: cargo test -p clusia-core  [o]nce / [r]eview (cargo test) / [d]eny? "),
+                "{err}"
+            );
+            assert!(out.contains("Done."), "{out}");
+        }
+    }
+
+    #[test]
+    fn ask_without_a_terminal_waits_for_the_window() {
+        use clusia_protocol::{Client, Command as Request, Event, PermissionAnswerKind, topics};
+        let w = AgentWorld::new(asks_to_run_the_tests());
+        let socket = clusia_core::Paths::new(w.home.dir.path()).socket();
+        // A window that is already listening, as a real one is.
+        let mut window = w._rt.block_on(async {
+            let mut client = Client::connect(&socket, "test-window").await.unwrap();
+            client
+                .request(Request::Subscribe {
+                    topics: vec![topics::AGENT.into()],
+                })
+                .await
+                .unwrap();
+            client
+        });
+        let mut asking = w.spawn(&["ask", "acme/widgets#7", "run the tests"]);
+        let err = collect(asking.stderr.take().unwrap());
+        wait_until(
+            &err,
+            "waiting for an answer in the window: Claude Code wants to run: cargo test -p clusia-core",
+        );
+        w._rt.block_on(async {
+            loop {
+                let (_, event) =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), window.next_event())
+                        .await
+                        .expect("the request is announced")
+                        .unwrap();
+                if let Event::PermissionRequested { id, .. } = event {
+                    window
+                        .request(Request::PermissionAnswer {
+                            id,
+                            answer: PermissionAnswerKind::Once,
+                        })
+                        .await
+                        .unwrap();
+                    return;
+                }
+            }
+        });
+        let done = asking.wait_with_output().unwrap();
+        assert!(done.status.success(), "{}", stderr(&done));
+        assert!(stdout(&done).contains("Done."), "{}", stdout(&done));
+        assert!(FakeClaude::permission_answers(&w.fake_dir())[0].allow);
+        assert!(
+            err.lock()
+                .unwrap()
+                .contains("✓ ran cargo test -p clusia-core (you allowed it)"),
+            "{}",
+            err.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_prompt_closes_when_the_request_is_answered_in_the_window() {
+        use clusia_protocol::{Client, Command as Request, Event, PermissionAnswerKind, topics};
+        let w = AgentWorld::new(asks_to_run_the_tests());
+        let socket = clusia_core::Paths::new(w.home.dir.path()).socket();
+        let mut window = w._rt.block_on(async {
+            let mut client = Client::connect(&socket, "test-window").await.unwrap();
+            client
+                .request(Request::Subscribe {
+                    topics: vec![topics::AGENT.into()],
+                })
+                .await
+                .unwrap();
+            client
+        });
+        let (_master, slave) = pty();
+        let mut child = w.home.spawn_with_stdin(
+            &w.api,
+            Some("tok"),
+            &["ask", "acme/widgets#7", "run the tests"],
+            slave,
+        );
+        let (out, out_thread) = collect_joinable(child.stdout.take().unwrap());
+        let (err, err_thread) = collect_joinable(child.stderr.take().unwrap());
+        wait_until(&err, "/ [d]eny? ");
+        w._rt.block_on(async {
+            loop {
+                let (_, event) =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), window.next_event())
+                        .await
+                        .expect("the request is announced")
+                        .unwrap();
+                if let Event::PermissionRequested { id, .. } = event {
+                    window
+                        .request(Request::PermissionAnswer {
+                            id,
+                            answer: PermissionAnswerKind::Once,
+                        })
+                        .await
+                        .unwrap();
+                    return;
+                }
+            }
+        });
+        assert!(child.wait().unwrap().success());
+        out_thread.join().unwrap();
+        err_thread.join().unwrap();
+        let (out, err) = (out.lock().unwrap().clone(), err.lock().unwrap().clone());
+        assert!(out.contains("Done."), "{out}");
+        assert!(
+            err.contains("/ [d]eny? \n✓ ran cargo test -p clusia-core (you allowed it)"),
+            "{err}"
+        );
     }
 }
 

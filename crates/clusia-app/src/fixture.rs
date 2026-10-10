@@ -9,8 +9,9 @@ use clusia_core::{
 };
 use clusia_protocol::{
     AgentLogEntry, AuthInfo, FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness,
-    HarnessKind, NewsItem, NewsKind, PermissionStatus, ProbeResult, RepoFolder, ReviewSummary,
-    ReviewView, Suggestion, SyncState, SyncStatus, TokenSource,
+    HarnessKind, NewsItem, NewsKind, PermissionOutcome, PermissionRequest, PermissionStatus,
+    ProbeResult, RepoFolder, ReviewSummary, ReviewView, Suggestion, SyncState, SyncStatus,
+    TokenSource,
 };
 
 use crate::snapshot::{GiphyKey, Snapshot};
@@ -460,6 +461,27 @@ pub fn demo_suggestion() -> Suggestion {
     }
 }
 
+/// What the demo agent asks to run (mockup `Permission.png`): 1:52 left when it is asked.
+pub fn demo_permission_request(now_ms: i64) -> PermissionRequest {
+    PermissionRequest {
+        id: "perm-7c1e5a90".into(),
+        pr: demo_pr(),
+        turn: 3,
+        tool: "Bash".into(),
+        summary: "cargo test -p clusia-auth refresh_race -- --nocapture".into(),
+        reason: Some("To check that two refreshes at once don't exchange the token twice.".into()),
+        prefix: Some("cargo test".into()),
+        sandbox: true,
+        deadline: now_ms + 112_000,
+        detail: None,
+    }
+}
+
+/// The rule "Allow for this review" grants in the demo.
+pub fn demo_permission_rules() -> Vec<String> {
+    vec!["Bash(cargo test:*)".into()]
+}
+
 /// Every suggestion the demo agent can make (`--demo` accepts them by id).
 pub fn demo_suggestions() -> Vec<Suggestion> {
     vec![demo_suggestion()]
@@ -486,16 +508,17 @@ pub fn demo_agent_turns(now: i64) -> Vec<Vec<AgentLogEntry>> {
             turn: 1,
             summary: "Read src/auth/refresh.rs".into(),
         },
-        AgentLogEntry::Denied {
+        AgentLogEntry::Permission {
             at: at(3_599),
             turn: 1,
             tool: "Bash".into(),
-            detail: "cargo test".into(),
+            summary: "cargo test".into(),
+            outcome: PermissionOutcome::Denied,
         },
         AgentLogEntry::Text {
             at: at(3_598),
             turn: 1,
-            text: "**Summary.** This pull request makes `TokenStore::refresh` safe to call from several tasks at once.\n\n- the token is refreshed one minute before it expires\n- a lock stops two callers from exchanging the same refresh token\n\nI could not run the tests: running commands needs permission, which arrives later.".into(),
+            text: "**Summary.** This pull request makes `TokenStore::refresh` safe to call from several tasks at once.\n\n- the token is refreshed one minute before it expires\n- a lock stops two callers from exchanging the same refresh token\n\nI could not run the tests: you denied the command.".into(),
         },
         AgentLogEntry::Done {
             at: at(3_596),
@@ -899,18 +922,38 @@ mod tests {
     use crate::testing::NOW;
 
     #[test]
+    fn the_demo_permission_request_is_the_mockups() {
+        let r = demo_permission_request(1_790_000_000_000);
+        assert_eq!(r.pr, demo_pr());
+        assert_eq!(r.tool, "Bash");
+        assert_eq!(
+            r.summary,
+            "cargo test -p clusia-auth refresh_race -- --nocapture"
+        );
+        assert_eq!(
+            r.reason.as_deref(),
+            Some("To check that two refreshes at once don't exchange the token twice.")
+        );
+        assert_eq!(r.prefix.as_deref(), Some("cargo test"));
+        assert!(r.sandbox);
+        assert_eq!(r.deadline, 1_790_000_112_000, "1:52 left when it is asked");
+        assert_eq!(r.detail, None, "a command has no diff");
+        assert_eq!(demo_permission_rules(), ["Bash(cargo test:*)"]);
+    }
+
+    #[test]
     fn the_demo_agent_log_has_the_mockup_chat() {
-        use clusia_protocol::AgentLogEntry;
+        use clusia_protocol::{AgentLogEntry, PermissionOutcome};
         let turns = demo_agent_turns(1_790_000_000);
         assert_eq!(turns.len(), 2);
         let all = demo_agent_log(1_790_000_000);
         assert_eq!(all.len(), turns.iter().map(Vec::len).sum::<usize>());
         let (first, second) = (&turns[0], &turns[1]);
-        assert!(
-            first
-                .iter()
-                .any(|e| matches!(e, AgentLogEntry::Denied { tool, .. } if tool == "Bash"))
-        );
+        assert!(first.iter().any(|e| matches!(
+            e,
+            AgentLogEntry::Permission { tool, summary, outcome: PermissionOutcome::Denied, .. }
+                if tool == "Bash" && summary == "cargo test"
+        )));
         assert!(
             first
                 .iter()

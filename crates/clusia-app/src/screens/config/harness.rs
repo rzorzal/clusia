@@ -42,11 +42,17 @@ pub struct HarnessView {
     pub on_open: OnOpen,
     pub timeout: String,
     pub use_cli_permissions: bool,
+    /// Commands run in the OS sandbox (no network, writes only in the worktree).
+    pub sandbox: bool,
+    /// Seconds a permission request waits before it is denied.
+    pub permission_timeout: String,
     pub program_error: Option<String>,
     pub args_error: Option<String>,
     pub on_open_error: Option<String>,
     pub timeout_error: Option<String>,
     pub permissions_error: Option<String>,
+    pub sandbox_error: Option<String>,
+    pub permission_timeout_error: Option<String>,
     pub probe: ProbeCard,
 }
 
@@ -72,6 +78,10 @@ pub fn view(
         on_open_error: refusal("harness.on_open"),
         timeout_error: refusal("harness.turn_timeout_secs"),
         permissions_error: refusal("harness.use_cli_permissions"),
+        sandbox: h.sandbox,
+        permission_timeout: h.permission_timeout_secs.to_string(),
+        sandbox_error: refusal("harness.sandbox"),
+        permission_timeout_error: refusal("harness.permission_timeout_secs"),
         probe: probe_card(probe),
     }
 }
@@ -243,6 +253,16 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
         "Seconds, 60 to 3600. A turn that takes longer is stopped",
         &v.timeout_error,
     );
+    field_row(
+        p,
+        fonts,
+        "Deny unanswered requests after",
+        "harness.permission_timeout_secs",
+        &v.permission_timeout,
+        120.0,
+        "Seconds, 30 to 600. No answer means deny, and you get a notification",
+        &v.permission_timeout_error,
+    );
     probe_row(p, fonts, &v.probe);
     super::heading(p, fonts, "What the agent may do without asking");
     p.spawn(Node {
@@ -289,8 +309,38 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
                 children![text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange))],
             ));
         }
+        c.spawn(Node {
+            column_gap: px(10),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|r| {
+            r.spawn((
+                checkbox(v.sandbox),
+                setter("harness.sandbox", (!v.sandbox).to_string()),
+            ));
+            r.spawn(text(
+                fonts,
+                "Run commands in a sandbox: no network, writes only in the review worktree",
+                Type::BODY,
+            ));
+        });
+        if !v.sandbox {
+            // Outside the sandbox a command also reaches clusiad's socket, which trusts any
+            // program of the user.
+            c.spawn(text(fonts, SANDBOX_OFF, Type::MUTED));
+        }
+        if let Some(message) = &v.sandbox_error {
+            c.spawn((
+                super::FieldError("harness.sandbox"),
+                children![text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange))],
+            ));
+        }
     });
 }
+
+/// What turning the sandbox off lets an allowed command do.
+const SANDBOX_OFF: &str = "With the sandbox off, an allowed command can reach the network, write outside the worktree and act through Clúsia as you: answer its own requests, change the draft or publish.";
 
 fn probe_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, state: &ProbeCard) {
     let (fill, stroke) = match state {
@@ -401,6 +451,8 @@ mod tests {
         assert_eq!(v.timeout, "600");
         assert!(v.use_cli_permissions);
         assert_eq!(v.probe, ProbeCard::Idle);
+        assert!(v.sandbox, "the sandbox is on by default");
+        assert_eq!(v.permission_timeout, "120");
 
         let mut snap = Snapshot::default();
         snap.config.harness.program = Some("/opt/homebrew/bin/claude".into());
@@ -408,6 +460,8 @@ mod tests {
         snap.config.harness.on_open = OnOpen::Wait;
         snap.config.harness.turn_timeout_secs = 900;
         snap.config.harness.use_cli_permissions = false;
+        snap.config.harness.sandbox = false;
+        snap.config.harness.permission_timeout_secs = 300;
         let v = view(&snap, &HashMap::new(), &ProbeState::Testing);
         assert_eq!(v.program, "/opt/homebrew/bin/claude");
         assert_eq!(v.extra_args, "--model claude-opus-5-5");
@@ -415,6 +469,8 @@ mod tests {
         assert_eq!(v.timeout, "900");
         assert!(!v.use_cli_permissions);
         assert_eq!(v.probe, ProbeCard::Testing);
+        assert!(!v.sandbox);
+        assert_eq!(v.permission_timeout, "300");
     }
 
     #[test]
@@ -429,6 +485,11 @@ mod tests {
                 "harness.turn_timeout_secs".to_string(),
                 "must be between 60 and 3600".to_string(),
             ),
+            (
+                "harness.permission_timeout_secs".to_string(),
+                "harness.permission_timeout_secs must be between 30 and 600, got 5".to_string(),
+            ),
+            ("harness.sandbox".to_string(), "not saved".to_string()),
         ]
         .into();
         let v = view(&Snapshot::default(), &rejected, &ProbeState::Idle);
@@ -439,6 +500,11 @@ mod tests {
             Some("must be between 60 and 3600")
         );
         assert_eq!(v.on_open_error, None);
+        assert_eq!(
+            v.permission_timeout_error.as_deref(),
+            Some("harness.permission_timeout_secs must be between 30 and 600, got 5")
+        );
+        assert_eq!(v.sandbox_error.as_deref(), Some("not saved"));
     }
 
     #[test]

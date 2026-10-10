@@ -41,13 +41,24 @@ async fn main() -> ExitCode {
                 if cli.json {
                     println!("{}", out.json);
                 } else {
-                    println!("{}", out.human);
+                    println!("{}", shown(&out.human));
                 }
             }
             ExitCode::SUCCESS
         }
         Err(e) => fail(cli.json, &e),
     }
+}
+
+/// An error as the terminal shows it: its message may carry the daemon's or the agent's text.
+fn error_line(e: &CliError) -> String {
+    shown(&format!("clusia: {e}"))
+}
+
+/// What the daemon sends (titles, messages, the agent's log) without anything that could
+/// repaint the terminal or disguise what is read.
+fn shown(text: &str) -> String {
+    agent::streamed(text)
 }
 
 fn fail(json: bool, e: &CliError) -> ExitCode {
@@ -57,7 +68,23 @@ fn fail(json: bool, e: &CliError) -> ExitCode {
             serde_json::json!({ "error": { "kind": e.kind(), "message": e.to_string() } })
         );
     } else {
-        eprintln!("clusia: {e}");
+        eprintln!("{}", error_line(e));
     }
     ExitCode::from(e.exit_code())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_error_from_the_daemon_cannot_repaint_the_terminal() {
+        let e = CliError::Other("no\u{1b}[2K\u{202e} such\nreview".into());
+        assert_eq!(error_line(&e), "clusia: no[2K such\nreview");
+    }
+
+    #[test]
+    fn output_from_the_daemon_cannot_repaint_the_terminal() {
+        assert_eq!(shown("a\u{1b}[2K\u{202e}b\n\tc"), "a[2Kb\n\tc");
+    }
 }

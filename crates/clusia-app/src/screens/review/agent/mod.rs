@@ -3,6 +3,7 @@
 
 pub mod model;
 pub mod panel;
+pub mod permission;
 pub mod suggestion;
 
 pub use model::{
@@ -13,3 +14,4 @@ pub use panel::{
     AgentPanel, AgentRegion, CHAT_INPUT, ChatInput, PanelColumn, PanelTabs, PanelToggle,
     harness_ready, on_panel_toggle, resize_edge, send_message,
 };
+pub use permission::{PermissionModal, PermissionPlugin, PermissionQueue};

@@ -519,6 +519,8 @@ pub struct Composer {
 
 pub const MIN_TURN_TIMEOUT_SECS: u32 = 60;
 pub const MAX_TURN_TIMEOUT_SECS: u32 = 3600;
+pub const MIN_PERMISSION_TIMEOUT_SECS: u32 = 30;
+pub const MAX_PERMISSION_TIMEOUT_SECS: u32 = 600;
 
 /// The agent behind the review chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,10 +537,15 @@ pub struct Harness {
     /// Also allow what the user's own Claude Code settings already allow.
     pub use_cli_permissions: bool,
     pub turn_timeout_secs: u32,
+    /// Run the agent's commands with no network and writes only in the review worktree.
+    pub sandbox: bool,
+    /// How long a permission request waits for an answer before it is denied.
+    pub permission_timeout_secs: u32,
 }
 
 impl Harness {
     pub const DEFAULT_TIMEOUT_SECS: u32 = 600;
+    pub const DEFAULT_PERMISSION_TIMEOUT_SECS: u32 = 120;
 
     /// `extra_args` split into words; an unbalanced quote is an error.
     pub fn extra_args_list(&self) -> Result<Vec<String>, String> {
@@ -555,6 +562,8 @@ impl Default for Harness {
             on_open: OnOpen::Summarize,
             use_cli_permissions: true,
             turn_timeout_secs: Self::DEFAULT_TIMEOUT_SECS,
+            sandbox: true,
+            permission_timeout_secs: Self::DEFAULT_PERMISSION_TIMEOUT_SECS,
         }
     }
 }
@@ -664,11 +673,14 @@ enum Takes {
 /// Flags that decide what the agent may do, which settings load, which session it joins, which
 /// prompt it follows and how it prints. Clúsia sets them itself, so the user's extra
 /// arguments never carry them.
-const RESERVED: [(&str, Takes); 23] = [
+const RESERVED: [(&str, Takes); 26] = [
     ("--dangerously-skip-permissions", Takes::Nothing),
     ("--allow-dangerously-skip-permissions", Takes::Nothing),
     ("--permission-mode", Takes::One),
     ("--permission-prompt-tool", Takes::One),
+    ("--permission-prompts", Takes::One),
+    ("--mcp-config", Takes::Many),
+    ("--strict-mcp-config", Takes::Nothing),
     ("--allowedTools", Takes::Many),
     ("--allowed-tools", Takes::Many),
     ("--tools", Takes::Many),
@@ -886,6 +898,12 @@ impl Config {
         if !(MIN_TURN_TIMEOUT_SECS..=MAX_TURN_TIMEOUT_SECS).contains(&timeout) {
             return Err(format!(
                 "harness.turn_timeout_secs must be between {MIN_TURN_TIMEOUT_SECS} and {MAX_TURN_TIMEOUT_SECS}, got {timeout}"
+            ));
+        }
+        let wait = self.harness.permission_timeout_secs;
+        if !(MIN_PERMISSION_TIMEOUT_SECS..=MAX_PERMISSION_TIMEOUT_SECS).contains(&wait) {
+            return Err(format!(
+                "harness.permission_timeout_secs must be between {MIN_PERMISSION_TIMEOUT_SECS} and {MAX_PERMISSION_TIMEOUT_SECS}, got {wait}"
             ));
         }
         let args = self
@@ -1244,6 +1262,37 @@ mod tests {
         assert!(h.use_cli_permissions);
         assert_eq!(h.turn_timeout_secs, 600);
         assert_eq!(Harness::DEFAULT_TIMEOUT_SECS, 600);
+        assert!(h.sandbox);
+        assert_eq!(h.permission_timeout_secs, 120);
+    }
+
+    #[test]
+    fn permission_settings_read_a_file_without_them() {
+        let c: Config = serde_json::from_str(r#"{"harness":{"on_open":"wait"}}"#).unwrap();
+        assert!(c.harness.sandbox);
+        assert_eq!(c.harness.permission_timeout_secs, 120);
+        let off: Config =
+            serde_json::from_str(r#"{"harness":{"sandbox":false,"permission_timeout_secs":45}}"#)
+                .unwrap();
+        assert!(!off.harness.sandbox);
+        assert_eq!(off.harness.permission_timeout_secs, 45);
+        assert_eq!(off.validate(), Ok(()));
+    }
+
+    #[test]
+    fn permission_timeout_is_bounded() {
+        let mut c = Config::default();
+        c.harness.permission_timeout_secs = 29;
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "harness.permission_timeout_secs must be between 30 and 600, got 29"
+        );
+        c.harness.permission_timeout_secs = 601;
+        assert!(c.validate().is_err());
+        for ok in [30, 120, 600] {
+            c.harness.permission_timeout_secs = ok;
+            assert_eq!(c.validate(), Ok(()), "{ok}");
+        }
     }
 
     #[test]
@@ -1329,6 +1378,11 @@ mod tests {
             "--print",
             "--output-format text",
             "--input-format stream-json",
+            "--permission-prompt-tool mcp__other__approve",
+            "--permission-prompts always",
+            "--mcp-config {}",
+            "--mcp-config=x.json",
+            "--strict-mcp-config",
         ] {
             c.harness.extra_args = bad.into();
             assert!(c.validate().unwrap_err().contains("must not set"), "{bad}");
@@ -1343,7 +1397,7 @@ mod tests {
     #[test]
     fn every_reserved_flag_is_refused_and_stripped() {
         let names: Vec<&str> = reserved_flags().collect();
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 26);
         for name in names {
             let args = vec![name.to_string(), "value".to_string()];
             assert_eq!(first_reserved_flag(&args), Some(name), "{name}");

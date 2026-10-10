@@ -32,6 +32,7 @@ pub enum Scene {
     ConfigAbout,
     AgentChat,
     ConfigHarness,
+    Permission,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -178,6 +179,7 @@ mod tests {
             ("config-about", Scene::ConfigAbout),
             ("agent-chat", Scene::AgentChat),
             ("config-harness", Scene::ConfigHarness),
+            ("permission", Scene::Permission),
         ] {
             assert_eq!(
                 parse(&["--demo", "--scene", name]).unwrap().scene,

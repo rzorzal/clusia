@@ -159,11 +159,14 @@ pub fn decide(
 ) -> Decision {
     let route = cfg.route(event.kind);
     let group = event.pr.clone().filter(|_| cfg.group_bursts).map(GroupKey);
-    let in_burst = group
-        .as_ref()
-        .and_then(|g| recent.last(g))
-        .is_some_and(|last| event.at.saturating_sub(last) < GROUP_WINDOW_SECS);
-    let macos = route.macos && !in_dnd(&cfg.dnd, now) && !in_burst;
+    // A permission request expires: it is told even in quiet hours and inside a burst.
+    let urgent = event.is_urgent();
+    let in_burst = !urgent
+        && group
+            .as_ref()
+            .and_then(|g| recent.last(g))
+            .is_some_and(|last| event.at.saturating_sub(last) < GROUP_WINDOW_SECS);
+    let macos = route.macos && (urgent || !in_dnd(&cfg.dnd, now)) && !in_burst;
     Decision {
         tray: route.tray,
         macos,
@@ -196,6 +199,12 @@ fn plural(n: u32, one: &str, many: &str) -> String {
 }
 
 impl NotifyEvent {
+    /// Whether the event may not wait: it bypasses quiet hours and is time-sensitive on
+    /// macOS, because what it asks for expires.
+    pub fn is_urgent(&self) -> bool {
+        self.kind == EventKind::AgentPermission
+    }
+
     fn about(
         kind: EventKind,
         pr: &PrRef,
@@ -337,6 +346,27 @@ impl NotifyEvent {
         )
     }
 
+    /// The agent waits for the reviewer's decision on `summary` (the command or the file),
+    /// which `verb` already says ("run", "edit", "write").
+    pub fn agent_permission(
+        pr: &PrRef,
+        pr_title: &str,
+        verb: &str,
+        summary: &str,
+        key: impl Into<String>,
+        at: i64,
+    ) -> Self {
+        Self::about(
+            EventKind::AgentPermission,
+            pr,
+            key,
+            at,
+            format!("Claude Code needs your permission on #{}", pr.number),
+            format!("It wants to {verb}: {summary} · {pr_title}"),
+            Self::review_of(pr, None),
+        )
+    }
+
     pub fn sync_problem(problem: SyncProblem, key: impl Into<String>, at: i64) -> Self {
         let (title, body) = match problem {
             SyncProblem::Unauthorized => (
@@ -445,6 +475,51 @@ mod tests {
         );
         let d = decide(&e, &Notifications::default(), NOON, &Recent::default());
         assert!(d.tray && d.macos && d.sound.is_none());
+    }
+
+    #[test]
+    fn a_permission_request_bypasses_quiet_hours_and_bursts() {
+        let e = NotifyEvent::agent_permission(
+            &pr(7),
+            "Add feature",
+            "run",
+            "cargo test -p clusia-core",
+            "k",
+            100,
+        );
+        assert_eq!(e.kind, EventKind::AgentPermission);
+        assert_eq!(e.title, "Claude Code needs your permission on #7");
+        assert_eq!(
+            e.body,
+            "It wants to run: cargo test -p clusia-core · Add feature"
+        );
+        assert_eq!(
+            e.open,
+            OpenTarget::Review {
+                pr: pr(7),
+                thread: None
+            }
+        );
+        assert!(e.is_urgent());
+        let cfg = Notifications {
+            dnd: Dnd {
+                enabled: true,
+                from: HourMinute::new(0, 0).unwrap(),
+                to: HourMinute::new(23, 59).unwrap(),
+                days: Weekday::ALL.into(),
+            },
+            ..Notifications::default()
+        };
+        let mut recent = Recent::default();
+        recent.record(&GroupKey(pr(7)), 90);
+        let d = decide(&e, &cfg, NOON, &recent);
+        assert!(d.tray && d.macos && d.sound.is_some(), "{d:?}");
+        let finished = NotifyEvent::agent_finished(&pr(7), "Add feature", "k2", 100);
+        assert!(!finished.is_urgent());
+        assert!(
+            !decide(&finished, &cfg, NOON, &recent).macos,
+            "everything else still keeps quiet"
+        );
     }
 
     #[test]

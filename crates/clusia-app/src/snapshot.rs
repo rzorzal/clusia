@@ -142,7 +142,10 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         | Event::AgentSuggestion { .. }
         | Event::AgentDone { .. }
         | Event::AgentError { .. }
-        | Event::SessionState { .. } => {}
+        | Event::SessionState { .. }
+        | Event::PermissionRequested { .. }
+        | Event::PermissionResolved { .. }
+        | Event::RulesChanged { .. } => {}
     }
     (r, None)
 }

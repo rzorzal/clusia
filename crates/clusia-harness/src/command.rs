@@ -18,6 +18,42 @@ Be concise.";
 /// What `--allowedTools` always lists: reading and searching, nothing that writes.
 const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "LS"];
 
+/// The MCP tool `claude` calls for a permission it was not granted.
+const PROMPT_TOOL: &str = "mcp__clusia__approve";
+
+/// Hooks off; with `sandbox`, also no network and writes only in the working folder. Commands
+/// the sandbox would allow still ask: `autoAllowBashIfSandboxed` stays off. Bash's own
+/// `dangerouslyDisableSandbox` would run a command outside it: `allowUnsandboxedCommands`
+/// turns that off.
+fn settings(sandbox: bool) -> &'static str {
+    if sandbox {
+        r#"{"disableAllHooks":true,"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":false,"allowUnsandboxedCommands":false}}"#
+    } else {
+        r#"{"disableAllHooks":true}"#
+    }
+}
+
+/// The `--mcp-config` JSON that starts the bridge: one server, named `clusia`.
+fn mcp_config(bridge: &BridgeSpec) -> String {
+    let text = |s: &str| serde_json::Value::String(s.to_string()).to_string();
+    let program = bridge.program.to_string_lossy();
+    let socket = bridge.socket.to_string_lossy();
+    let args = [
+        text("permission-bridge"),
+        text("--socket"),
+        text(&socket),
+        text("--pr"),
+        text(&bridge.pr),
+        text("--turn"),
+        text(&bridge.turn.to_string()),
+    ]
+    .join(",");
+    format!(
+        r#"{{"mcpServers":{{"clusia":{{"command":{},"args":[{args}]}}}}}}"#,
+        text(&program)
+    )
+}
+
 /// GitHub credentials an agent must never inherit; `CLUSIA_*` is dropped by prefix in `is_dropped`.
 const DROPPED_ENV: [&str; 3] = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"];
 
@@ -27,6 +63,18 @@ pub enum SessionArg {
     New(String),
     /// Any later turn: `--resume <uuid>`.
     Resume(String),
+}
+
+/// The permission bridge `claude` starts for the turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeSpec {
+    /// The `clusiad` that runs `permission-bridge`.
+    pub program: PathBuf,
+    /// The daemon's socket.
+    pub socket: PathBuf,
+    /// The review, as `owner/repo#n`.
+    pub pr: String,
+    pub turn: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +91,14 @@ pub struct TurnSpec {
     pub extra_args: Vec<String>,
     /// The environment to start from, usually the daemon's.
     pub base_env: Vec<(OsString, OsString)>,
+    /// Where `claude` sends what it is not allowed to do. Without it, such a request is refused.
+    pub bridge: Option<BridgeSpec>,
+    /// Run commands with no network and writes only in the worktree.
+    pub sandbox: bool,
+    /// What the reviewer allowed for this review (`Bash(cargo test:*)`). Never put on the command
+    /// line: `claude` would allow by its own prefix match and skip the daemon's checks, so every
+    /// such request goes through the bridge, where the daemon decides.
+    pub rules: Vec<String>,
 }
 
 pub struct ClaudeCode;
@@ -51,9 +107,10 @@ impl ClaudeCode {
     /// The process for one turn. Reading the answer from stdout and killing it are up to the
     /// caller; the child leads its own process group so a kill reaches its tools too.
     ///
-    /// Nothing here can widen what the agent may do: the permission mode is `dontAsk`, only
-    /// read tools are listed, the user's hooks are off, and the reserved flags are dropped
-    /// from the extra arguments.
+    /// Nothing here can widen what the agent may do: the permission mode is `default`, so
+    /// anything not listed goes to the bridge (or is refused without one), only read tools and
+    /// the reviewer's command rules are listed, the user's hooks are off, and the reserved
+    /// flags are dropped from the extra arguments.
     pub fn command(spec: &TurnSpec) -> Command {
         let mut cmd = Command::new(&spec.program);
         // A prompt that starts with a dash would be read as a flag.
@@ -67,15 +124,20 @@ impl ClaudeCode {
             .args(["--output-format", "stream-json"])
             .arg("--verbose")
             .arg("--include-partial-messages")
-            .args(["--permission-mode", "dontAsk"])
+            .args(["--permission-mode", "default"])
             .arg("--allowedTools")
-            .args(READ_ONLY_TOOLS)
-            .args(["--append-system-prompt", ROLE_PROMPT]);
+            .args(READ_ONLY_TOOLS);
+        if let Some(bridge) = &spec.bridge {
+            cmd.args(["--permission-prompt-tool", PROMPT_TOOL])
+                .args(["--mcp-config", &mcp_config(bridge)])
+                .arg("--strict-mcp-config");
+        }
+        cmd.args(["--append-system-prompt", ROLE_PROMPT]);
         match &spec.session {
             SessionArg::New(id) => cmd.args(["--session-id", id]),
             SessionArg::Resume(id) => cmd.args(["--resume", id]),
         };
-        cmd.args(["--settings", r#"{"disableAllHooks":true}"#]);
+        cmd.args(["--settings", settings(spec.sandbox)]);
         if !spec.use_cli_permissions {
             cmd.args(["--setting-sources", ""]);
         }
@@ -127,7 +189,29 @@ mod tests {
                 ("PATH".into(), "/usr/bin:/bin".into()),
                 ("HOME".into(), "/tmp/maria".into()),
             ],
+            bridge: None,
+            sandbox: false,
+            rules: Vec::new(),
         }
+    }
+
+    fn bridge() -> BridgeSpec {
+        BridgeSpec {
+            program: PathBuf::from("/Applications/Clusia.app/Contents/MacOS/clusiad"),
+            socket: PathBuf::from("/tmp/clusia/clusiad.sock"),
+            pr: "acme/widgets#7".into(),
+            turn: 3,
+        }
+    }
+
+    /// The words after `flag`, up to the next flag.
+    fn values_of(args: &[String], flag: &str) -> Vec<String> {
+        let at = args.iter().position(|a| a == flag).expect(flag);
+        args[at + 1..]
+            .iter()
+            .take_while(|a| !a.starts_with("--"))
+            .cloned()
+            .collect()
     }
 
     fn argv(cmd: &Command) -> Vec<String> {
@@ -161,7 +245,7 @@ mod tests {
                 "--verbose",
                 "--include-partial-messages",
                 "--permission-mode",
-                "dontAsk",
+                "default",
                 "--allowedTools",
                 "Read",
                 "Grep",
@@ -176,6 +260,131 @@ mod tests {
             ]
         );
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp/acme-widgets")));
+    }
+
+    #[test]
+    fn the_tool_timeout_of_the_daemon_reaches_claude() {
+        let mut s = spec();
+        s.base_env
+            .push(("MCP_TOOL_TIMEOUT".into(), "150000".into()));
+        let env = env_of(&ClaudeCode::command(&s));
+        assert!(env.contains(&("MCP_TOOL_TIMEOUT".to_string(), "150000".to_string())));
+    }
+
+    #[test]
+    fn a_turn_with_a_bridge_asks_the_reviewer() {
+        let mut s = spec();
+        s.bridge = Some(bridge());
+        let args = argv(&ClaudeCode::command(&s));
+        assert_eq!(
+            args[..21],
+            [
+                "-p",
+                "Is the expiry checked?",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--permission-mode",
+                "default",
+                "--allowedTools",
+                "Read",
+                "Grep",
+                "Glob",
+                "LS",
+                "--permission-prompt-tool",
+                "mcp__clusia__approve",
+                "--mcp-config",
+                r#"{"mcpServers":{"clusia":{"command":"/Applications/Clusia.app/Contents/MacOS/clusiad","args":["permission-bridge","--socket","/tmp/clusia/clusiad.sock","--pr","acme/widgets#7","--turn","3"]}}}"#,
+                "--strict-mcp-config",
+                "--append-system-prompt",
+                ROLE_PROMPT,
+                "--session-id",
+            ]
+        );
+        let config: serde_json::Value = serde_json::from_str(&args[16]).unwrap();
+        assert_eq!(
+            config["mcpServers"]["clusia"]["args"][2],
+            "/tmp/clusia/clusiad.sock"
+        );
+    }
+
+    #[test]
+    fn without_a_bridge_nothing_asks() {
+        let args = argv(&ClaudeCode::command(&spec()));
+        for flag in [
+            "--permission-prompt-tool",
+            "--mcp-config",
+            "--strict-mcp-config",
+        ] {
+            assert!(!args.contains(&flag.to_string()), "{flag}");
+        }
+    }
+
+    #[test]
+    fn paths_with_quotes_stay_valid_json() {
+        let mut b = bridge();
+        b.program = PathBuf::from("/tmp/a \"b\"/clusiad");
+        b.socket = PathBuf::from("/tmp/it's\\here.sock");
+        let mut s = spec();
+        s.bridge = Some(b.clone());
+        let args = argv(&ClaudeCode::command(&s));
+        let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let config: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(
+            config["mcpServers"]["clusia"]["command"],
+            "/tmp/a \"b\"/clusiad"
+        );
+        assert_eq!(
+            config["mcpServers"]["clusia"]["args"][2],
+            "/tmp/it's\\here.sock"
+        );
+    }
+
+    #[test]
+    fn the_sandbox_goes_into_the_settings() {
+        let settings = |sandbox: bool| {
+            let mut s = spec();
+            s.sandbox = sandbox;
+            let args = argv(&ClaudeCode::command(&s));
+            let at = args.iter().position(|a| a == "--settings").unwrap();
+            args[at + 1].clone()
+        };
+        assert_eq!(settings(false), r#"{"disableAllHooks":true}"#);
+        let on: serde_json::Value = serde_json::from_str(&settings(true)).unwrap();
+        assert_eq!(
+            on,
+            serde_json::json!({
+                "disableAllHooks": true,
+                "sandbox": {
+                    "enabled": true,
+                    "autoAllowBashIfSandboxed": false,
+                    "allowUnsandboxedCommands": false
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn review_rules_never_reach_the_command_line() {
+        let mut s = spec();
+        s.rules = [
+            "Bash(cargo test:*)",
+            "Bash(rm:*)",
+            "Bash(bash:*)",
+            "Bash(npm run:*)",
+            "Edit",
+            "Write",
+            "Bash",
+        ]
+        .map(String::from)
+        .to_vec();
+        let args = argv(&ClaudeCode::command(&s));
+        assert_eq!(
+            values_of(&args, "--allowedTools"),
+            ["Read", "Grep", "Glob", "LS"]
+        );
+        assert!(!args.iter().any(|a| a.starts_with("Bash")));
     }
 
     #[test]
@@ -223,9 +432,16 @@ mod tests {
     #[test]
     fn command_never_bypasses_permissions() {
         let count = |args: &[String], flag: &str| args.iter().filter(|a| *a == flag).count();
-        for use_cli_permissions in [true, false] {
+        for (use_cli_permissions, with_bridge) in
+            [(true, false), (false, false), (true, true), (false, true)]
+        {
             let mut base = spec();
             base.use_cli_permissions = use_cli_permissions;
+            if with_bridge {
+                base.bridge = Some(bridge());
+                base.sandbox = true;
+                base.rules = vec!["Bash(cargo test:*)".into()];
+            }
             let own = argv(&ClaudeCode::command(&base));
             for flag in reserved_flags() {
                 for extra in [
@@ -283,7 +499,11 @@ mod tests {
                 "values go with their flags"
             );
             let at = own.iter().position(|a| a == "--permission-mode").unwrap();
-            assert_eq!(own[at + 1], "dontAsk");
+            assert_eq!(own[at + 1], "default");
+            assert!(
+                !own.iter().any(|a| a == "dontAsk" || a == "acceptEdits"),
+                "the mode is never widened"
+            );
         }
     }
 

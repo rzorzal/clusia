@@ -81,6 +81,7 @@ impl Drop for Holder {
 fn hold_change(cmd: &Command) -> Option<(PrRef, bool)> {
     match cmd {
         Command::OpenReview { pr } => Some((pr.clone(), true)),
+        Command::HoldReview { pr, held } => Some((pr.clone(), *held)),
         Command::CloseReview { pr }
         | Command::DiscardReview { pr }
         | Command::Publish { pr, .. } => Some((pr.clone(), false)),
@@ -266,7 +267,21 @@ mod tests {
         );
         assert_eq!(
             hold_change(&Command::DiscardReview { pr: pr.clone() }),
-            Some((pr, false))
+            Some((pr.clone(), false))
+        );
+        assert_eq!(
+            hold_change(&Command::HoldReview {
+                pr: pr.clone(),
+                held: true
+            }),
+            Some((pr.clone(), true))
+        );
+        assert_eq!(
+            hold_change(&Command::HoldReview {
+                pr: pr.clone(),
+                held: false
+            }),
+            Some((pr.clone(), false))
         );
         assert_eq!(hold_change(&Command::GetConfig), None);
     }

@@ -1302,6 +1302,8 @@ mod tests {
             "What the agent may do without asking",
             "Read and search the review worktree",
             "Also allow what my Claude Code settings already allow",
+            "Deny unanswered requests after",
+            "Run commands in a sandbox: no network, writes only in the review worktree",
         ] {
             assert!(texts.iter().any(|t| t == needle), "{needle}\n{texts:?}");
         }
@@ -1317,10 +1319,15 @@ mod tests {
             "harness.program",
             "harness.extra_args",
             "harness.turn_timeout_secs",
+            "harness.permission_timeout_secs",
         ] {
             testing::find::<ConfigField>(&mut app, |f| f.0 == key);
         }
         assert_eq!(field_value(&mut app, "harness.turn_timeout_secs"), "600");
+        assert_eq!(
+            field_value(&mut app, "harness.permission_timeout_secs"),
+            "120"
+        );
     }
 
     #[test]
@@ -1338,6 +1345,15 @@ mod tests {
         testing::activate(&mut app, wait);
         let perms = testing::find::<SetValue>(&mut app, |s| s.key == "harness.use_cli_permissions");
         testing::activate(&mut app, perms);
+        let sandbox = testing::find::<SetValue>(&mut app, |s| s.key == "harness.sandbox");
+        testing::activate(&mut app, sandbox);
+        let timeout =
+            testing::find::<ConfigField>(&mut app, |f| f.0 == "harness.permission_timeout_secs");
+        app.world_mut().write_message(FieldCommitted {
+            entity: timeout,
+            value: "300".into(),
+        });
+        app.update();
         assert_eq!(
             testing::recorded(&mut app),
             [
@@ -1353,8 +1369,28 @@ mod tests {
                     key: "harness.use_cli_permissions".into(),
                     value: "false".into()
                 },
+                Ask::SetConfig {
+                    key: "harness.sandbox".into(),
+                    value: "false".into()
+                },
+                Ask::SetConfig {
+                    key: "harness.permission_timeout_secs".into(),
+                    value: "300".into()
+                },
             ]
         );
+    }
+
+    #[test]
+    fn with_the_sandbox_off_the_harness_page_says_what_a_command_can_do() {
+        const HINT: &str = "With the sandbox off, an allowed command can reach the network, write outside the worktree and act through Clúsia as you: answer its own requests, change the draft or publish.";
+        let mut app = config_app(Section::Harness);
+        assert!(!page_texts(&mut app).iter().any(|t| t == HINT));
+        let mut snap = app.world().resource::<Model>().snapshot.clone();
+        snap.config.harness.sandbox = false;
+        testing::tell(&mut app, Tell::Snapshot(Box::new(snap)));
+        testing::settle(&mut app);
+        assert!(page_texts(&mut app).iter().any(|t| t == HINT));
     }
 
     #[test]
