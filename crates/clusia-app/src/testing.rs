@@ -12,13 +12,15 @@ use clusia_core::{Density, Paths, PrRef};
 use clusia_protocol::WindowTarget;
 
 use crate::app::{AppPaths, StartTarget};
-use crate::bridge::{self, Ask, Asks, Connection, Model, Outbox, ShowRequested, Tell, Toasts};
+use crate::bridge::{
+    self, Ask, Asks, ChecksTell, Connection, Model, Outbox, ShowRequested, Tell, Toasts,
+};
 use crate::clock::Clock;
 use crate::fixture;
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, NavPlugin};
 use crate::platform_open::OpenUrls;
-use crate::review_state::{Phase, Ready, ReviewStatePlugin, ReviewTabs, Tab};
+use crate::review_state::{Phase, Ready, ReviewSection, ReviewStatePlugin, ReviewTabs, Tab};
 use crate::screens::config::ConfigPlugin;
 use crate::screens::first_run::FirstRunPlugin;
 use crate::screens::home::HomePlugin;
@@ -289,4 +291,32 @@ pub fn app_show_review(app: &mut App) {
         .write_message(ShowRequested(WindowTarget::Review { pr }));
     app.update();
     recorded(app);
+}
+
+/// Tells the demo's two check results for `pr` and settles.
+pub fn open_checks(app: &mut App, pr: &PrRef) {
+    let (results, states) = fixture::demo_checks(NOW);
+    tell(
+        app,
+        Tell::Checks(ChecksTell::Loaded {
+            pr: pr.clone(),
+            results,
+            states,
+            accepted: Vec::new(),
+            dismissed: Vec::new(),
+        }),
+    );
+    settle(app);
+}
+
+/// Selects `section` in the tab of `pr` and settles.
+pub fn set_section(app: &mut App, pr: &PrRef, section: ReviewSection) {
+    app.world_mut()
+        .resource_mut::<ReviewTabs>()
+        .0
+        .get_mut(pr)
+        .expect("an open tab")
+        .ui
+        .section = section;
+    settle(app);
 }

@@ -15,15 +15,16 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
+use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass};
 use clusia_core::draft::Origin;
 use clusia_core::{
     Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
 };
 use clusia_protocol::{
-    AgentErrorKind, AgentLogEntry, AnchorInput, Client, ClientError, Command, ErrorCode, Event,
-    GifPage, LoadStep, LoadStepKind, MediaFile, NewsItem, PermissionAnswerKind, PermissionOutcome,
-    ProbeResult, ProtocolError, PublishResult, Reply, ReviewView, Secret, SessionStateKind,
-    StepStatus, Suggestion, WindowTarget, topics,
+    AgentErrorKind, AgentLogEntry, AnchorInput, CheckState, CheckStatus, Client, ClientError,
+    Command, ErrorCode, Event, GifPage, LoadStep, LoadStepKind, MediaFile, NewsItem,
+    PermissionAnswerKind, PermissionOutcome, ProbeResult, ProtocolError, PublishResult, Reply,
+    ReviewView, Secret, SessionStateKind, StepStatus, Suggestion, WindowTarget, topics,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -33,6 +34,7 @@ use crate::clock::Clock;
 use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
 use crate::screens::review::agent::{Chats, PermissionQueue};
+use crate::screens::review::checks::{self, Checks, proposed_comment};
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::ui::media::MediaCache;
 
@@ -151,6 +153,28 @@ pub enum Ask {
         pr: PrRef,
         rule: String,
     },
+    /// Starts a check (or starts it again); the state comes back as `ChecksTell::State`.
+    RunCheck {
+        pr: PrRef,
+        kind: CheckKind,
+    },
+    StopCheck {
+        pr: PrRef,
+        kind: CheckKind,
+    },
+    /// Turns a finding into a draft item (`body`: the edited comment, else the finding's own).
+    AcceptFinding {
+        pr: PrRef,
+        id: String,
+        body: Option<String>,
+    },
+    DismissFinding {
+        pr: PrRef,
+        id: String,
+    },
+    /// Both checks' results and states, and which findings were accepted or dismissed:
+    /// `ChecksTell::Loaded`.
+    GetChecks(PrRef),
 }
 
 /// What the agent did, for the review's chat. Built from the daemon's agent events, or by the
@@ -355,6 +379,72 @@ impl PermissionTell {
     }
 }
 
+/// What the checks of a review did, from the daemon's events and from `GetChecks`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChecksTell {
+    Loaded {
+        pr: PrRef,
+        results: Vec<CheckResult>,
+        states: Vec<CheckStatus>,
+        accepted: Vec<String>,
+        dismissed: Vec<String>,
+    },
+    State {
+        pr: PrRef,
+        kind: CheckKind,
+        state: CheckState,
+    },
+    Finding {
+        pr: PrRef,
+        kind: CheckKind,
+        finding: Finding,
+    },
+    Pass {
+        pr: PrRef,
+        kind: CheckKind,
+        pass: Pass,
+    },
+    Done {
+        pr: PrRef,
+        kind: CheckKind,
+        result: CheckResult,
+    },
+    /// A finding was accepted into the draft (`accepted`) or dismissed.
+    Settled {
+        pr: PrRef,
+        id: String,
+        accepted: bool,
+    },
+    /// An accept or a dismiss that did not go through: the card is free again.
+    Refused { pr: PrRef, id: String },
+}
+
+impl ChecksTell {
+    pub fn pr(&self) -> &PrRef {
+        match self {
+            ChecksTell::Loaded { pr, .. }
+            | ChecksTell::State { pr, .. }
+            | ChecksTell::Finding { pr, .. }
+            | ChecksTell::Pass { pr, .. }
+            | ChecksTell::Done { pr, .. }
+            | ChecksTell::Settled { pr, .. }
+            | ChecksTell::Refused { pr, .. } => pr,
+        }
+    }
+
+    /// The tell for a check event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<ChecksTell> {
+        Some(match event.clone() {
+            Event::CheckState { pr, kind, state } => ChecksTell::State { pr, kind, state },
+            Event::CheckFinding { pr, kind, finding } => ChecksTell::Finding { pr, kind, finding },
+            Event::CheckPass { pr, kind, pass } => ChecksTell::Pass { pr, kind, pass },
+            Event::CheckDone { pr, kind, result } => ChecksTell::Done { pr, kind, result },
+            Event::FindingSettled { pr, id, accepted } => ChecksTell::Settled { pr, id, accepted },
+            _ => return None,
+        })
+    }
+}
+
 /// The harness test on Config › Harness.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ProbeState {
@@ -483,6 +573,8 @@ pub enum Tell {
     Agent(AgentTell),
     /// A permission request, its end, or the review's rules.
     Permission(PermissionTell),
+    /// What the review's security and audit checks did.
+    Checks(ChecksTell),
     /// The review's chat log, in answer to `Ask::AgentLog`.
     AgentLog {
         pr: PrRef,
@@ -654,6 +746,19 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
             ErrorCode::Offline,
             "Not connected to clusiad".into(),
         )))),
+        // A card waits for its accept or dismiss: free it, and say why nothing happened.
+        Ask::AcceptFinding { pr, id, .. } | Ask::DismissFinding { pr, id } => {
+            teller.send(Tell::Notice {
+                text: "Not connected to clusiad — not sent".into(),
+                warning: true,
+            });
+            teller.send(Tell::Checks(ChecksTell::Refused {
+                pr: pr.clone(),
+                id: id.clone(),
+            }));
+        }
+        // The checks are read again after a reconnect: no toast for a read.
+        Ask::GetChecks(_) => {}
         _ => return false,
     }
     true
@@ -809,6 +914,8 @@ async fn follow(
                 teller.send(Tell::Agent(tell));
             } else if let Some(tell) = PermissionTell::from_event(other) {
                 teller.send(Tell::Permission(tell));
+            } else if let Some(tell) = ChecksTell::from_event(other) {
+                teller.send(Tell::Checks(tell));
             }
         }
     }
@@ -1185,6 +1292,28 @@ async fn answer(
                 Err(e) => return Err(lost(e)),
             }
         }
+        Ask::RunCheck { pr, kind } => {
+            notify(client, teller, Command::RunCheck { pr, kind }, "").await?;
+        }
+        Ask::StopCheck { pr, kind } => {
+            notify(client, teller, Command::StopCheck { pr, kind }, "").await?;
+        }
+        Ask::GetChecks(pr) => send_checks(client, teller, pr).await?,
+        Ask::AcceptFinding { pr, id, body } => {
+            let cmd = Command::AcceptFinding {
+                pr: pr.clone(),
+                id: id.clone(),
+                body,
+            };
+            finding_write(client, teller, cmd, pr, id, true).await?;
+        }
+        Ask::DismissFinding { pr, id } => {
+            let cmd = Command::DismissFinding {
+                pr: pr.clone(),
+                id: id.clone(),
+            };
+            finding_write(client, teller, cmd, pr, id, false).await?;
+        }
     }
     Ok(())
 }
@@ -1325,6 +1454,55 @@ async fn suggestion_write(
         Err(e) => return Err(lost(e)),
     }
     Ok(false)
+}
+
+/// `GetChecks` → `ChecksTell::Loaded` (a refusal is only logged).
+async fn send_checks(client: &mut Client, teller: &Teller, pr: PrRef) -> Result<(), String> {
+    if let Some(Reply::Checks {
+        results,
+        states,
+        accepted,
+        dismissed,
+    }) = request(client, Command::GetChecks { pr: pr.clone() }).await?
+    {
+        teller.send(Tell::Checks(ChecksTell::Loaded {
+            pr,
+            results,
+            states,
+            accepted,
+            dismissed,
+        }));
+    }
+    Ok(())
+}
+
+/// `AcceptFinding` / `DismissFinding`: `Settled` when it went through, else a warning and
+/// `Refused`, so the card is free again. A finding the daemon no longer has (settled from
+/// another window or the CLI) reads the checks again, so the card shows what is true.
+async fn finding_write(
+    client: &mut Client,
+    teller: &Teller,
+    cmd: Command,
+    pr: PrRef,
+    id: String,
+    accepted: bool,
+) -> Result<(), String> {
+    match client.request(cmd).await {
+        Ok(_) => teller.send(Tell::Checks(ChecksTell::Settled { pr, id, accepted })),
+        Err(ClientError::Server(e)) => {
+            let gone = e.code == ErrorCode::NotFound;
+            teller.send(Tell::Notice {
+                text: e.message,
+                warning: true,
+            });
+            teller.send(Tell::Checks(ChecksTell::Refused { pr: pr.clone(), id }));
+            if gone {
+                send_checks(client, teller, pr).await?;
+            }
+        }
+        Err(e) => return Err(lost(e)),
+    }
+    Ok(())
 }
 
 /// Runs a long request on its own connection, so this one keeps reading events.
@@ -1648,6 +1826,7 @@ impl Plugin for BridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Model>()
             .init_resource::<Toasts>()
+            .init_resource::<Checks>()
             .add_message::<ShowRequested>()
             .add_message::<GifsArrived>()
             .add_systems(PreUpdate, pump);
@@ -1707,6 +1886,7 @@ pub(crate) fn pump(
     mut gifs: MessageWriter<GifsArrived>,
     mut chats: ResMut<Chats>,
     mut permissions: ResMut<PermissionQueue>,
+    mut checks: ResMut<Checks>,
     clock: Res<Clock>,
     time: Res<Time>,
 ) {
@@ -1758,6 +1938,10 @@ pub(crate) fn pump(
                 // The daemon denied what it held; a reconnect in this same batch must not
                 // meet requests that no longer exist.
                 permissions.0.clear();
+                // The answers still owed are lost: read the checks again on reconnect.
+                for model in checks.0.values_mut() {
+                    model.asked = false;
+                }
             }
             Tell::Quit => {
                 exit.write(AppExit::Success);
@@ -1778,6 +1962,10 @@ pub(crate) fn pump(
             }
             Tell::AgentLog { pr, entries } => chats.replay(&pr, &entries),
             Tell::Permission(tell) => permissions.apply(tell, &mut chats, clock.now_ms()),
+            Tell::Checks(tell) => {
+                checks::close_edited(&mut tabs, &tell);
+                checks.apply(&tell);
+            }
             Tell::Probe(result) => model.probe = ProbeState::Done(result),
             _ => {} // the other review tells were applied above
         }
@@ -1864,6 +2052,37 @@ pub(crate) fn demo_answers(
                 tells.extend(demo_accept(&tabs, &pr, &id, body, now));
             }
             Ask::DismissSuggestion { pr, id } => tells.push(Tell::Agent(AgentTell::Handled {
+                pr,
+                id,
+                accepted: false,
+            })),
+            // What the draft already holds from a check is accepted: a read after an accept (or a
+            // reconnect) must not give the card its buttons back.
+            Ask::GetChecks(pr) if pr == fixture::demo_pr() => {
+                if let Some(ready) = tabs.0.get(&pr).and_then(|t| t.ready()) {
+                    tells.push(fixture::demo_checks_tell(
+                        &pr,
+                        now,
+                        &ready.view.review.draft,
+                    ));
+                }
+            }
+            Ask::GetChecks(_) => {}
+            Ask::RunCheck { pr, kind } => {
+                let (results, _) = fixture::demo_checks(now);
+                if let Some(result) = results.into_iter().find(|r| r.kind == kind) {
+                    tells.push(Tell::Checks(ChecksTell::Done { pr, kind, result }));
+                }
+            }
+            Ask::StopCheck { pr, kind } => tells.push(Tell::Checks(ChecksTell::State {
+                pr,
+                kind,
+                state: CheckState::NotRun,
+            })),
+            Ask::AcceptFinding { pr, id, body } => {
+                tells.extend(demo_accept_finding(&tabs, &pr, &id, body, now));
+            }
+            Ask::DismissFinding { pr, id } => tells.push(Tell::Checks(ChecksTell::Settled {
                 pr,
                 id,
                 accepted: false,
@@ -2118,6 +2337,69 @@ fn demo_permission_answer(
         }),
     ]);
     tells
+}
+
+/// The demo's accept of a finding: a draft item with the finding's origin (a line comment, or
+/// a general note when the finding has no anchor), then `Settled`.
+fn demo_accept_finding(
+    tabs: &ReviewTabs,
+    pr: &PrRef,
+    id: &str,
+    body: Option<String>,
+    now: i64,
+) -> Vec<Tell> {
+    let warn = |text: String| {
+        vec![Tell::Notice {
+            text,
+            warning: true,
+        }]
+    };
+    let (results, _) = fixture::demo_checks(now);
+    let Some(finding) = results
+        .into_iter()
+        .flat_map(|r| r.findings)
+        .find(|f| f.id == id)
+    else {
+        return warn(format!("Demo mode has no finding {id}"));
+    };
+    let Some(ready) = tabs.0.get(pr).and_then(|t| t.ready()) else {
+        return warn("This review is not open".into());
+    };
+    let mut review = ready.view.review.clone();
+    let (kind, anchor) = match (finding.anchored, finding.line.or(finding.end_line)) {
+        (true, Some(line)) => (
+            DraftKind::LineComment,
+            Some(Anchor {
+                commit: review.head_sha.clone(),
+                path: finding.file.clone(),
+                line,
+                start_line: finding.start_line,
+                side: Side::Right,
+            }),
+        ),
+        _ => (DraftKind::General, None),
+    };
+    let origin = match finding.kind {
+        CheckKind::Security => Origin::Security,
+        CheckKind::Audit => Origin::Audit,
+    };
+    let text = body.unwrap_or_else(|| proposed_comment(&finding));
+    match review
+        .draft
+        .add_as(origin, kind, anchor, None, &text, now)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    {
+        Ok(()) => vec![
+            Tell::ReviewFile(Box::new(review)),
+            Tell::Checks(ChecksTell::Settled {
+                pr: pr.clone(),
+                id: id.to_string(),
+                accepted: true,
+            }),
+        ],
+        Err(message) => warn(message),
+    }
 }
 
 /// Accepting a demo suggestion adds its draft item the way the daemon does: a line comment
@@ -3073,5 +3355,209 @@ mod tests {
             ),
             "no review for acme/widgets#1; open it first"
         );
+    }
+
+    fn demo_finding_ids() -> Vec<String> {
+        fixture::demo_checks(1_790_000_000).0[0]
+            .findings
+            .iter()
+            .map(|f| f.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn check_events_become_checks_tells() {
+        use clusia_core::checks::CheckKind;
+        use clusia_protocol::CheckState;
+        let pr = fixture::demo_pr();
+        let (results, _) = fixture::demo_checks(1_790_000_000);
+        let finding = results[0].findings[0].clone();
+        let events = [
+            (
+                Event::CheckState {
+                    pr: pr.clone(),
+                    kind: CheckKind::Audit,
+                    state: CheckState::Waiting,
+                },
+                ChecksTell::State {
+                    pr: pr.clone(),
+                    kind: CheckKind::Audit,
+                    state: CheckState::Waiting,
+                },
+            ),
+            (
+                Event::CheckFinding {
+                    pr: pr.clone(),
+                    kind: CheckKind::Security,
+                    finding: finding.clone(),
+                },
+                ChecksTell::Finding {
+                    pr: pr.clone(),
+                    kind: CheckKind::Security,
+                    finding,
+                },
+            ),
+            (
+                Event::CheckDone {
+                    pr: pr.clone(),
+                    kind: CheckKind::Security,
+                    result: results[0].clone(),
+                },
+                ChecksTell::Done {
+                    pr: pr.clone(),
+                    kind: CheckKind::Security,
+                    result: results[0].clone(),
+                },
+            ),
+            (
+                Event::FindingSettled {
+                    pr: pr.clone(),
+                    id: "f1".into(),
+                    accepted: true,
+                },
+                ChecksTell::Settled {
+                    pr: pr.clone(),
+                    id: "f1".into(),
+                    accepted: true,
+                },
+            ),
+        ];
+        for (event, tell) in events {
+            let got = ChecksTell::from_event(&event);
+            assert_eq!(got.as_ref(), Some(&tell));
+            assert_eq!(got.unwrap().pr(), &pr);
+        }
+        assert_eq!(ChecksTell::from_event(&Event::Stopping), None);
+        assert!(
+            AgentTell::from_event(&Event::FindingSettled {
+                pr,
+                id: "f1".into(),
+                accepted: false
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn offline_check_writes_are_refused_not_dropped() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let pr = fixture::demo_pr();
+        assert!(offline(
+            &Ask::AcceptFinding {
+                pr: pr.clone(),
+                id: "f1".into(),
+                body: None
+            },
+            &teller
+        ));
+        let told: Vec<Tell> = rx.try_iter().collect();
+        assert!(told.iter().any(|t| matches!(
+            t,
+            Tell::Checks(ChecksTell::Refused { id, .. }) if id == "f1"
+        )));
+        assert!(
+            told.iter()
+                .any(|t| matches!(t, Tell::Notice { warning: true, .. }))
+        );
+        assert!(offline(&Ask::GetChecks(pr), &teller));
+        assert!(
+            rx.try_iter().next().is_none(),
+            "a read is not worth a toast"
+        );
+    }
+
+    #[test]
+    fn the_demo_answers_the_checks_asks() {
+        use clusia_core::checks::CheckKind;
+        let pr = fixture::demo_pr();
+        let tells = demo_agent_tells(vec![Ask::GetChecks(pr.clone())]);
+        let Some(Tell::Checks(ChecksTell::Loaded {
+            results,
+            states,
+            accepted,
+            dismissed,
+            ..
+        })) = tells.first()
+        else {
+            panic!("loaded: {tells:?}");
+        };
+        assert_eq!((results.len(), states.len()), (2, 2));
+        assert!(accepted.is_empty() && dismissed.is_empty());
+        assert!(demo_tells(vec![Ask::GetChecks("acme/widgets#9".parse().unwrap())]).is_empty());
+        assert!(
+            demo_tells(vec![Ask::GetChecks(pr.clone())]).is_empty(),
+            "no open review, nothing to mark as accepted"
+        );
+        let tells = demo_tells(vec![Ask::RunCheck {
+            pr: pr.clone(),
+            kind: CheckKind::Audit,
+        }]);
+        assert!(matches!(
+            tells.as_slice(),
+            [Tell::Checks(ChecksTell::Done {
+                kind: CheckKind::Audit,
+                ..
+            })]
+        ));
+        let tells = demo_tells(vec![Ask::StopCheck {
+            pr: pr.clone(),
+            kind: CheckKind::Security,
+        }]);
+        assert!(matches!(
+            tells.as_slice(),
+            [Tell::Checks(ChecksTell::State {
+                state: clusia_protocol::CheckState::NotRun,
+                ..
+            })]
+        ));
+        let id = demo_finding_ids()[0].clone();
+        let tells = demo_tells(vec![Ask::DismissFinding { pr, id: id.clone() }]);
+        assert!(matches!(
+            tells.as_slice(),
+            [Tell::Checks(ChecksTell::Settled { accepted: false, id: got, .. })] if *got == id
+        ));
+    }
+
+    #[test]
+    fn the_demo_accepts_a_finding_into_the_draft_with_its_origin() {
+        let pr = fixture::demo_pr();
+        let id = demo_finding_ids()[0].clone();
+        let tells = demo_agent_tells(vec![Ask::AcceptFinding {
+            pr: pr.clone(),
+            id: id.clone(),
+            body: Some("Please drop the body from the log.".into()),
+        }]);
+        let Some(Tell::ReviewFile(review)) = tells.first() else {
+            panic!("the draft changed: {tells:?}");
+        };
+        let item = review.draft.items.last().expect("an item");
+        assert_eq!(item.origin, Origin::Security);
+        assert!(item.accepted);
+        assert_eq!(item.body, "Please drop the body from the log.");
+        let anchor = item.anchor.as_ref().expect("anchored");
+        assert_eq!(
+            (anchor.path.as_str(), anchor.line),
+            ("src/client/http.rs", 17)
+        );
+        assert!(matches!(
+            tells.last(),
+            Some(Tell::Checks(ChecksTell::Settled { accepted: true, .. }))
+        ));
+        let audit_id = fixture::demo_checks(1_790_000_000).0[1].findings[0]
+            .id
+            .clone();
+        let tells = demo_agent_tells(vec![Ask::AcceptFinding {
+            pr,
+            id: audit_id,
+            body: None,
+        }]);
+        let Some(Tell::ReviewFile(review)) = tells.first() else {
+            panic!("the draft changed");
+        };
+        assert_eq!(review.draft.items.last().unwrap().origin, Origin::Audit);
     }
 }

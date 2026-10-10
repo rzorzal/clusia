@@ -213,7 +213,7 @@ fn on_place(activate: On<Activate>, places: Query<&SuggestionPlace>, mut tabs: R
 }
 
 /// The Diff on `file`; another file starts at its first lines, as from the file list.
-fn show_file(ui: &mut TabUi, file: &str) {
+pub(crate) fn show_file(ui: &mut TabUi, file: &str) {
     ui.section = ReviewSection::Diff;
     if ui.file.as_deref() != Some(file) {
         ui.file = Some(file.to_string());

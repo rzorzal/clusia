@@ -111,6 +111,9 @@ pub enum EditTarget {
         start: Option<u32>,
         line: u32,
     },
+    /// A waiting finding of a check, being edited before it joins the draft. It is drawn under
+    /// its card in Security or Audits, not in the diff.
+    Finding(String),
 }
 
 impl EditTarget {
@@ -305,6 +308,7 @@ impl Plugin for ReviewStatePlugin {
         app.init_resource::<ReviewTabs>()
             .init_resource::<Tickets>()
             .init_resource::<crate::screens::review::agent::Chats>()
+            .init_resource::<crate::screens::review::checks::Checks>()
             .add_message::<ReviewEvent>()
             .add_systems(Update, open_new_tabs.after(NavSystems));
     }

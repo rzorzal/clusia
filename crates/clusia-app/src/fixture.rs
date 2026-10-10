@@ -1,5 +1,6 @@
 //! Demo data for `--demo` and screenshots: only `rzorzal` repositories and generic people.
 
+use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass, Severity, finding_id};
 use clusia_core::media::MediaKind;
 use clusia_core::time::civil_from_days;
 use clusia_core::{
@@ -8,12 +9,13 @@ use clusia_core::{
     ReviewInfo, ReviewState, ReviewThread, Role, Side, ThreadPost,
 };
 use clusia_protocol::{
-    AgentLogEntry, AuthInfo, FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness,
-    HarnessKind, NewsItem, NewsKind, PermissionOutcome, PermissionRequest, PermissionStatus,
-    ProbeResult, RepoFolder, ReviewSummary, ReviewView, Suggestion, SyncState, SyncStatus,
-    TokenSource,
+    AgentLogEntry, AuthInfo, CheckState, CheckStatus, FileSummary, FirstRun, GifItem, GifPage,
+    GithubLogin, Harness, HarnessKind, NewsItem, NewsKind, PermissionOutcome, PermissionRequest,
+    PermissionStatus, ProbeResult, RepoFolder, ReviewSummary, ReviewView, Suggestion, SyncState,
+    SyncStatus, TokenSource,
 };
 
+use crate::bridge::{ChecksTell, Tell};
 use crate::snapshot::{GiphyKey, Snapshot};
 
 pub fn demo(now: i64) -> Snapshot {
@@ -567,6 +569,215 @@ pub fn demo_agent_log(now: i64) -> Vec<AgentLogEntry> {
     demo_agent_turns(now).concat()
 }
 
+/// The ids of the findings `draft` already holds: an item a check wrote (origin Security or
+/// Audit) on the finding's file and line.
+pub fn demo_accepted(results: &[CheckResult], draft: &Draft) -> Vec<String> {
+    results
+        .iter()
+        .flat_map(|r| &r.findings)
+        .filter(|f| {
+            draft.items.iter().any(|i| {
+                matches!(i.origin, Origin::Security | Origin::Audit)
+                    && i.anchor
+                        .as_ref()
+                        .is_some_and(|a| a.path == f.file && Some(a.line) == f.line)
+            })
+        })
+        .map(|f| f.id.clone())
+        .collect()
+}
+
+/// `demo_checks` as the tell a scene sends through the outbox. The findings `draft` already
+/// holds are accepted; nothing is dismissed.
+pub fn demo_checks_tell(pr: &PrRef, now: i64, draft: &Draft) -> Tell {
+    let (results, states) = demo_checks(now);
+    let accepted = demo_accepted(&results, draft);
+    Tell::Checks(ChecksTell::Loaded {
+        pr: pr.clone(),
+        results,
+        states,
+        accepted,
+        dismissed: Vec::new(),
+    })
+}
+
+/// The mockups' two results (`Security.png`, `Audits.png`): three security findings, and an
+/// audit with one finding in Correctness, Concurrency and Tests, the other areas ok. Every
+/// finding sits on a new-side line of the demo diff.
+pub fn demo_checks(now: i64) -> (Vec<CheckResult>, Vec<CheckStatus>) {
+    fn finding(
+        kind: CheckKind,
+        area: &str,
+        severity: Option<Severity>,
+        (file, line): (&str, u32),
+        (title, body, comment): (&str, &str, &str),
+        code: Option<&str>,
+    ) -> Finding {
+        Finding {
+            id: finding_id(area, file, Some(line), title),
+            kind,
+            area: area.into(),
+            severity,
+            title: title.into(),
+            file: file.into(),
+            line: Some(line),
+            start_line: None,
+            end_line: None,
+            body: body.into(),
+            comment: comment.into(),
+            code: code.map(Into::into),
+            anchored: true,
+        }
+    }
+    fn pass(area: &str, text: &str, place: &str) -> Pass {
+        Pass {
+            area: area.into(),
+            text: text.into(),
+            place: Some(place.into()),
+        }
+    }
+    let security = |severity, place, text, code| {
+        finding(
+            CheckKind::Security,
+            "security",
+            Some(severity),
+            place,
+            text,
+            code,
+        )
+    };
+    let audit = |area, place, text| finding(CheckKind::Audit, area, None, place, text, None);
+    let security_result = CheckResult {
+        kind: CheckKind::Security,
+        head: HEAD_SHA.into(),
+        files: 7,
+        findings: vec![
+            security(
+                Severity::High,
+                ("src/client/http.rs", 17),
+                (
+                    "Refresh token written to the debug log",
+                    "With RUST_LOG=debug, the client logs this request in full, and its body includes the refresh token. Anyone who can read the logs can sign in as the user.",
+                    "This logs the whole request body, refresh token included. Could we log the request without its body?",
+                ),
+                Some(
+                    "-            .execute(request.clone())\n+            .execute(request.redacted_for_logs())",
+                ),
+            ),
+            security(
+                Severity::Medium,
+                ("src/client/http.rs", 24),
+                (
+                    "No limit on refresh retries",
+                    "A token endpoint that keeps failing makes the client retry forever, which can lock the account by rate limit.",
+                    "Could we stop after a few refresh attempts and report the error?",
+                ),
+                None,
+            ),
+            security(
+                Severity::Low,
+                ("src/auth/store.rs", 88),
+                (
+                    "Token file created with default permissions",
+                    "The token file is created with the default umask (usually 0644), so other local users can read it. Create it with 0600.",
+                    "Could we create the token file with mode 0600 so other users cannot read it?",
+                ),
+                None,
+            ),
+        ],
+        passes: Vec::new(),
+        unreadable: 0,
+        areas: Vec::new(),
+        at: now - 120,
+    };
+    let audit_result = CheckResult {
+        kind: CheckKind::Audit,
+        head: HEAD_SHA.into(),
+        files: 7,
+        findings: vec![
+            audit(
+                "correctness",
+                ("src/auth/refresh.rs", 41),
+                (
+                    "The expiry is checked before the lock is taken",
+                    "The token is judged fresh before the refresh lock is held, so two tasks can both decide it is expired and both exchange it.",
+                    "Could we check the expiry again after taking the lock, so only one task exchanges the token?",
+                ),
+            ),
+            audit(
+                "concurrency",
+                ("src/auth/refresh.rs", 44),
+                (
+                    "The refresh lock is held across a network call",
+                    "Every request that needs a token waits on `refresh_lock` while one task talks to GitHub. With a slow endpoint, the whole client stalls for the length of the exchange.",
+                    "Could we re-check the expiry after taking the lock, and release it before calling `exchange`? Other tasks would then reuse the fresh token instead of queueing.",
+                ),
+            ),
+            audit(
+                "tests",
+                ("tests/refresh.rs", 28),
+                (
+                    "The retry after a revoked token has no test",
+                    "The new tests cover the early refresh and two refreshes at once, but not the second attempt after a 401.",
+                    "Could we add a test where the first request answers 401 and the retry succeeds?",
+                ),
+            ),
+        ],
+        passes: vec![
+            pass(
+                "concurrency",
+                "No shared state written outside the lock",
+                "checked 4 call sites",
+            ),
+            pass(
+                "concurrency",
+                "The new test covers two tasks refreshing at once",
+                "tests/refresh.rs:12",
+            ),
+            pass(
+                "error-handling",
+                "Every exchange error reaches the caller",
+                "checked 3 call sites",
+            ),
+            pass(
+                "performance",
+                "The cached token avoids a disk read per request",
+                "src/auth/store.rs:76",
+            ),
+            pass(
+                "docs",
+                "The changelog names the early refresh",
+                "CHANGELOG.md",
+            ),
+        ],
+        unreadable: 0,
+        areas: [
+            "correctness",
+            "concurrency",
+            "error-handling",
+            "performance",
+            "tests",
+            "docs",
+        ]
+        .map(String::from)
+        .to_vec(),
+        at: now - 120,
+    };
+    (
+        vec![security_result, audit_result],
+        vec![
+            CheckStatus {
+                kind: CheckKind::Security,
+                state: CheckState::Done,
+            },
+            CheckStatus {
+                kind: CheckKind::Audit,
+                state: CheckState::Done,
+            },
+        ],
+    )
+}
+
 /// The rows of `WhatsNew.png` ("Since you last looked, yesterday …").
 fn demo_news(now: i64) -> Vec<NewsItem> {
     let item = |kind, source: &str, who: Option<&str>, age: i64, summary: &str| NewsItem {
@@ -921,6 +1132,7 @@ fn heat(now: i64) -> Vec<DayCount> {
 mod tests {
     use super::*;
     use crate::testing::NOW;
+    use clusia_core::checks::anchor_in_diff;
 
     #[test]
     fn the_demo_permission_request_is_the_mockups() {
@@ -1232,5 +1444,115 @@ mod tests {
         assert_eq!(f.harnesses.len(), 2, "the daemon reports both kinds");
         assert_eq!(f.harnesses[0].kind, HarnessKind::ClaudeCode);
         assert!(f.harnesses[0].path.is_some() && f.harnesses[1].path.is_none());
+    }
+
+    #[test]
+    fn demo_checks_match_the_mockups() {
+        let (results, states) = demo_checks(NOW);
+        let security = results
+            .iter()
+            .find(|r| r.kind == CheckKind::Security)
+            .expect("a security result");
+        let titles: Vec<&str> = security.findings.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Refresh token written to the debug log",
+                "No limit on refresh retries",
+                "Token file created with default permissions",
+            ]
+        );
+        assert_eq!(security.files, 7);
+        let audit = results
+            .iter()
+            .find(|r| r.kind == CheckKind::Audit)
+            .expect("an audit result");
+        assert_eq!(
+            audit.areas,
+            [
+                "correctness",
+                "concurrency",
+                "error-handling",
+                "performance",
+                "tests",
+                "docs"
+            ]
+        );
+        let per_area = |area: &str| audit.findings.iter().filter(|f| f.area == area).count();
+        assert_eq!(
+            [
+                per_area("correctness"),
+                per_area("concurrency"),
+                per_area("error-handling"),
+                per_area("performance"),
+                per_area("tests"),
+                per_area("docs"),
+            ],
+            [1, 1, 0, 0, 1, 0]
+        );
+        assert_eq!(
+            audit
+                .passes
+                .iter()
+                .filter(|p| p.area == "concurrency")
+                .count(),
+            2
+        );
+        assert_eq!(states.len(), 2);
+        assert!(matches!(
+            demo_checks_tell(&demo_pr(), NOW, &demo_review(NOW).0.review.draft),
+            Tell::Checks(ChecksTell::Loaded { .. })
+        ));
+    }
+
+    #[test]
+    fn the_draft_marks_the_findings_it_holds_as_accepted() {
+        let (view, _) = demo_review(NOW);
+        let (results, _) = demo_checks(NOW);
+        let medium = results[0].findings[1].clone();
+        let mut draft = view.review.draft.clone();
+        assert!(demo_accepted(&results, &draft).is_empty());
+        draft
+            .add_as(
+                Origin::Security,
+                DraftKind::LineComment,
+                Some(Anchor {
+                    commit: HEAD_SHA.into(),
+                    path: medium.file.clone(),
+                    line: medium.line.unwrap(),
+                    start_line: None,
+                    side: Side::Right,
+                }),
+                None,
+                &medium.comment,
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(demo_accepted(&results, &draft), [medium.id.as_str()]);
+        let Tell::Checks(ChecksTell::Loaded { accepted, .. }) =
+            demo_checks_tell(&demo_pr(), NOW, &draft)
+        else {
+            panic!("a loaded tell");
+        };
+        assert_eq!(accepted, [medium.id]);
+    }
+
+    #[test]
+    fn demo_findings_sit_on_lines_of_the_demo_diff() {
+        let (view, _) = demo_review(NOW);
+        let (results, _) = demo_checks(NOW);
+        for f in results.iter().flat_map(|r| &r.findings) {
+            let line = f.line.expect("demo findings name one line");
+            assert!(f.anchored, "{} is anchored", f.title);
+            assert!(
+                anchor_in_diff(&view.diff, &f.file, line, line),
+                "{} points into the diff",
+                f.title
+            );
+            assert_eq!(
+                f.id,
+                clusia_core::checks::finding_id(&f.area, &f.file, Some(line), &f.title)
+            );
+        }
     }
 }
