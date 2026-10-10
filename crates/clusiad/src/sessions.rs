@@ -1,39 +1,32 @@
 //! Agent turns: one `claude -p` process per message, run one at a time for each review.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::process::{ExitStatus, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
-use clusia_core::config::Harness;
-use clusia_harness::{
-    AgentEvent, BridgeSpec, ClaudeCode, ParseState, SessionArg, TurnSpec, extract_suggestions,
-    parse_line, parse_probe, probe_command,
-};
+use clusia_harness::{AgentEvent, SessionArg, extract_suggestions, parse_probe, probe_command};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, ErrorCode, Event, Outcome, ProbeResult, ProtocolError, Reply,
-    SessionStateKind, Suggestion, topics,
+    SessionStateKind, Suggestion, TurnOrigin, topics,
 };
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::process::{Child, ChildStderr, Command};
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
+use tokio::process::Command;
+use tokio::sync::{Semaphore, watch};
 
 use crate::agent_log;
 use crate::agent_stream::StreamFilter;
 use crate::reviews;
 use crate::state::Shared;
 use crate::sync::now_unix;
+use crate::turns::{
+    self, Boxed, KILL_GRACE, SessionSource, Stop, TurnRun, TurnSink, Why, program_path,
+};
 
 /// Turns running at the same time across all reviews; the rest wait.
 pub(crate) const MAX_CONCURRENT_TURNS: usize = 3;
-/// How long a process gets to leave after SIGTERM before SIGKILL.
-pub(crate) const KILL_GRACE: Duration = Duration::from_secs(2);
 const PROBE_LIMIT: Duration = Duration::from_secs(10);
-/// How much of the program's standard error is kept for the error line.
-const STDERR_TAIL: usize = 2048;
 
 /// What a turn asks the agent. `shown` is false for the prompts the daemon writes itself,
 /// which the chat never displays as something the user said.
@@ -74,53 +67,18 @@ impl Refusal {
     }
 }
 
-/// Who asked for a running turn to end.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Why {
-    User,
-    Shutdown,
-    Ended,
-}
-
-impl Why {
-    /// What the chat says about a turn that was stopped for this reason.
-    fn message(self) -> &'static str {
-        match self {
-            Why::User => "Stopped by you",
-            Why::Shutdown => "The daemon stopped while this turn was running",
-            Why::Ended => "Stopped because the review ended",
-        }
-    }
-}
-
-/// Asks a turn to stop, and says why.
-struct Stop {
-    notify: Notify,
-    why: Mutex<Why>,
-}
-
-impl Stop {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            notify: Notify::new(),
-            why: Mutex::new(Why::User),
-        })
-    }
-
-    fn fire(&self, why: Why) {
-        *self.why.lock().unwrap_or_else(|p| p.into_inner()) = why;
-        self.notify.notify_one();
-    }
-
-    fn why(&self) -> Why {
-        *self.why.lock().unwrap_or_else(|p| p.into_inner())
-    }
-}
-
 struct Active {
     turn: u64,
     stop: Arc<Stop>,
     /// Whether the program of this turn runs in the sandbox; set once its command is built.
+    sandbox: Option<bool>,
+}
+
+/// A security check or audit whose program runs.
+struct RunningCheck {
+    turn: u64,
+    origin: TurnOrigin,
+    /// Whether its program runs in the sandbox; set once its command is built.
     sandbox: Option<bool>,
 }
 
@@ -137,6 +95,8 @@ struct Slot {
     queued: Option<Queued>,
     /// The id a first turn starts its session with, kept until the CLI confirms the session.
     fresh_session: Option<String>,
+    /// The checks running now, which are not the chat's turn but may ask for permission.
+    checks: Vec<RunningCheck>,
     /// The summary turn running or waiting, and the head it describes. The head is recorded
     /// only when that turn ends well, so until then this is what keeps a second open of the
     /// same head from asking again.
@@ -144,6 +104,12 @@ struct Slot {
 }
 
 impl Slot {
+    /// The next turn id of the review, above the highest one handed out or already logged.
+    fn take_turn(&mut self, floor: u64) -> u64 {
+        self.last_turn = self.last_turn.max(floor) + 1;
+        self.last_turn
+    }
+
     /// Turn `turn` ended or was dropped: if it was the summary, the head may be asked again.
     fn summary_over(&mut self, turn: u64) {
         if self.summarizing.as_ref().is_some_and(|(t, _)| *t == turn) {
@@ -252,8 +218,7 @@ impl Sessions {
             if slot.running.is_some() && slot.queued.is_some() {
                 return Err(Refusal::Busy);
             }
-            slot.last_turn = slot.last_turn.max(floor) + 1;
-            let turn = slot.last_turn;
+            let turn = slot.take_turn(floor);
             if let Some(head) = &prompt.summary_for {
                 slot.summarizing = Some((turn, head.clone()));
             }
@@ -352,10 +317,63 @@ impl Sessions {
         }
     }
 
-    /// The turn of `pr` that is running right now.
-    pub(crate) fn running_turn(&self, pr: &PrRef) -> Option<u64> {
+    /// A turn id for something that is not a chat message (a check), from the counter the chat
+    /// uses, so no two turns of a review share an id.
+    #[allow(dead_code)]
+    pub(crate) async fn next_turn(&self, shared: &Shared, pr: &PrRef) -> u64 {
+        let log = shared.paths.agent_log(pr);
+        let floor = tokio::task::spawn_blocking(move || agent_log::last_turn(&log))
+            .await
+            .unwrap_or(0);
+        let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        table.entry(pr.clone()).or_default().take_turn(floor)
+    }
+
+    /// Records that `turn`, a check, runs, so the permission bridge it started is heard.
+    pub(crate) fn register_check(&self, pr: &PrRef, turn: u64, origin: TurnOrigin) {
+        let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        table
+            .entry(pr.clone())
+            .or_default()
+            .checks
+            .push(RunningCheck {
+                turn,
+                origin,
+                sandbox: None,
+            });
+    }
+
+    /// The check `turn` no longer runs.
+    pub(crate) fn unregister_check(&self, pr: &PrRef, turn: u64) {
+        let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(slot) = table.get_mut(pr) {
+            slot.checks.retain(|check| check.turn != turn);
+        }
+    }
+
+    /// Who runs `turn` of `pr` if it runs now: the chat, or the check that registered it.
+    pub(crate) fn origin_of(&self, pr: &PrRef, turn: u64) -> Option<TurnOrigin> {
         let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
-        table.get(pr)?.running.as_ref().map(|active| active.turn)
+        let slot = table.get(pr)?;
+        if slot
+            .running
+            .as_ref()
+            .is_some_and(|active| active.turn == turn)
+        {
+            return Some(TurnOrigin::Chat);
+        }
+        slot.checks
+            .iter()
+            .find(|check| check.turn == turn)
+            .map(|check| check.origin)
+    }
+
+    /// Whether any turn of `pr`, the chat's or a check's, runs now.
+    pub(crate) fn any_running(&self, pr: &PrRef) -> bool {
+        let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        table
+            .get(pr)
+            .is_some_and(|slot| slot.running.is_some() || !slot.checks.is_empty())
     }
 
     /// Makes `turn` the running turn of `pr` without starting a process.
@@ -381,12 +399,13 @@ impl Sessions {
     /// Records whether the program of `turn` runs in the sandbox, if `turn` still runs.
     pub(crate) fn set_turn_sandbox(&self, pr: &PrRef, turn: u64, sandbox: bool) {
         let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(active) = table
-            .get_mut(pr)
-            .and_then(|slot| slot.running.as_mut())
-            .filter(|active| active.turn == turn)
-        {
+        let Some(slot) = table.get_mut(pr) else {
+            return;
+        };
+        if let Some(active) = slot.running.as_mut().filter(|active| active.turn == turn) {
             active.sandbox = Some(sandbox);
+        } else if let Some(check) = slot.checks.iter_mut().find(|check| check.turn == turn) {
+            check.sandbox = Some(sandbox);
         }
     }
 
@@ -394,12 +413,11 @@ impl Sessions {
     /// or once it no longer runs.
     pub(crate) fn turn_sandbox(&self, pr: &PrRef, turn: u64) -> Option<bool> {
         let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
-        table
-            .get(pr)?
-            .running
-            .as_ref()
-            .filter(|active| active.turn == turn)?
-            .sandbox
+        let slot = table.get(pr)?;
+        match slot.running.as_ref().filter(|active| active.turn == turn) {
+            Some(active) => active.sandbox,
+            None => slot.checks.iter().find(|check| check.turn == turn)?.sandbox,
+        }
     }
 
     /// Where the session of `pr` stands right now.
@@ -473,7 +491,7 @@ impl Sessions {
     }
 
     /// `--resume` for a session the CLI knows, `--session-id` with a fresh uuid otherwise.
-    fn session_for(&self, shared: &Shared, pr: &PrRef) -> SessionArg {
+    pub(crate) fn session_for(&self, shared: &Shared, pr: &PrRef) -> SessionArg {
         if let Ok(Some(review)) = reviews::load_stored(shared, pr)
             && let Some(id) = review.harness_session
         {
@@ -485,6 +503,21 @@ impl Sessions {
             .fresh_session
             .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
         SessionArg::New(id.clone())
+    }
+
+    /// A session a check runs in: a fork of the review's session, which keeps the chat's
+    /// history out of reach of the check and the check's out of the chat's, or a new session of
+    /// its own when the review has none yet. Neither is ever recorded as the review's session.
+    #[allow(dead_code)]
+    pub(crate) fn fork_session(&self, shared: &Shared, pr: &PrRef) -> SessionArg {
+        let id = uuid::Uuid::new_v4().to_string();
+        match reviews::load_stored(shared, pr) {
+            Ok(Some(review)) => match review.harness_session {
+                Some(parent) => SessionArg::Fork { parent, id },
+                None => SessionArg::New(id),
+            },
+            _ => SessionArg::New(id),
+        }
     }
 
     fn session_confirmed(&self, pr: &PrRef) {
@@ -645,149 +678,9 @@ impl<'a> Out<'a> {
     }
 }
 
-/// Where the `claude` command is: the program set in Config › Harness, else the daemon's own
-/// override, else `claude` on the daemon's `PATH` or in the usual install folders. A name that
-/// is nowhere is returned as is, so starting it fails with "not found".
-fn program_path(shared: &Shared, harness: &Harness) -> PathBuf {
-    let configured = harness
-        .program
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty());
-    let name = match (configured, &shared.claude_program) {
-        (Some(program), _) => program,
-        (None, Some(program)) => return program.clone(),
-        (None, None) => "claude",
-    };
-    if name.contains('/') {
-        return PathBuf::from(name);
-    }
-    let on_path = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .unwrap_or_default();
-    on_path
-        .iter()
-        .chain(&shared.harness_search_paths)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| PathBuf::from(name))
-}
-
-/// Reads what the program wrote to standard error, keeping only the end.
-async fn read_tail(stderr: Option<ChildStderr>) -> String {
-    let Some(mut stderr) = stderr else {
-        return String::new();
-    };
-    let mut tail = Vec::new();
-    let mut buffer = [0u8; 1024];
-    loop {
-        match stderr.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                tail.extend_from_slice(&buffer[..n]);
-                if tail.len() > STDERR_TAIL {
-                    let extra = tail.len() - STDERR_TAIL;
-                    tail.drain(..extra);
-                }
-            }
-        }
-    }
-    String::from_utf8_lossy(&tail).into_owned()
-}
-
-/// What a program that wrote no result line said on standard error, as an error kind.
-fn classify_stderr(text: &str) -> Option<AgentErrorKind> {
-    let text = text.to_lowercase();
-    if text.contains("not logged in") || text.contains("/login") || text.contains("invalid api key")
-    {
-        Some(AgentErrorKind::NotSignedIn)
-    } else if text.contains("usage limit") || text.contains("rate limit") {
-        Some(AgentErrorKind::UsageLimit)
-    } else {
-        None
-    }
-}
-
-fn signal_group(pid: Option<u32>, signal: i32) {
-    if let Some(pid) = pid {
-        // SAFETY: `killpg` only sends a signal. The group is the one the child leads
-        // (`process_group(0)` at spawn), so no other process is addressed.
-        unsafe {
-            libc::killpg(pid as i32, signal);
-        }
-    }
-}
-
-/// Whether the child has ended, without reaping it: until it is reaped its pid, and so the id
-/// of the group it leads, cannot be reused, so the group can still be signalled safely.
-fn has_exited(pid: u32) -> bool {
-    loop {
-        // SAFETY: `waitid` only writes into `info`, which is zeroed and owned here; `WNOWAIT`
-        // leaves the child waitable for `Child::wait`.
-        let (found, info) = unsafe {
-            let mut info: libc::siginfo_t = std::mem::zeroed();
-            let found = libc::waitid(
-                libc::P_PID,
-                pid as libc::id_t,
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            );
-            (found, info)
-        };
-        if found == 0 {
-            return info.si_signo == libc::SIGCHLD;
-        }
-        match std::io::Error::last_os_error().raw_os_error() {
-            // A signal arrived during the call: it says nothing about the child, so ask again.
-            Some(libc::EINTR) => continue,
-            // No such child: it is already reaped, so there is nothing left to wait for.
-            Some(libc::ECHILD) => return true,
-            _ => return false,
-        }
-    }
-}
-
-/// Waits up to `limit` for the child to end, leaving it unreaped; whether it ended.
-async fn exited_within(pid: u32, limit: Duration) -> bool {
-    let give_up = Instant::now() + limit;
-    loop {
-        if has_exited(pid) {
-            return true;
-        }
-        if Instant::now() >= give_up {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-/// SIGKILL to whatever is left of the child's group (tool processes it started that outlive
-/// it), then reaps the child. Only called while the child is not yet reaped.
-async fn sweep_and_reap(child: &mut Child, pid: Option<u32>) -> Option<ExitStatus> {
-    signal_group(pid, libc::SIGKILL);
-    child.wait().await.ok()
-}
-
-/// SIGTERM to the child's whole group, SIGKILL to the group once the child ended or after
-/// `KILL_GRACE`, then reaps the child. The child is reaped last, so its group id is never
-/// reused while it is signalled.
-async fn terminate(child: &mut Child) {
-    let pid = child.id();
-    signal_group(pid, libc::SIGTERM);
-    if let Some(pid) = pid {
-        exited_within(pid, KILL_GRACE).await;
-    }
-    sweep_and_reap(child, pid).await;
-}
-
-enum Ending {
-    Eof,
-    Stopped,
-    TimedOut,
-}
-
-/// The state of one turn while its output is read.
-struct Run<'a> {
+/// What the chat does with the events of one of its turns: tells the window, writes the log
+/// and records the session and the summary.
+struct ChatSink<'a> {
     shared: &'a Arc<Shared>,
     out: Out<'a>,
     filter: StreamFilter,
@@ -800,16 +693,7 @@ struct Run<'a> {
     stop: Arc<Stop>,
 }
 
-impl Run<'_> {
-    /// Lets out the text the suggestion filter still holds.
-    fn release(&mut self) {
-        let rest = self.filter.finish();
-        if !rest.is_empty() {
-            self.streamed = true;
-            self.out.chunk(rest);
-        }
-    }
-
+impl ChatSink<'_> {
     async fn handle(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::Text(text) => {
@@ -831,10 +715,7 @@ impl Run<'_> {
                 }
             }
             AgentEvent::SessionId(id) => remember_session(self.shared, self.out.pr, &id).await,
-            AgentEvent::Error { kind, message } => {
-                self.failed = true;
-                self.out.error(kind, message);
-            }
+            AgentEvent::Error { kind, message } => self.error(kind, message),
             AgentEvent::Final {
                 text,
                 duration_ms,
@@ -891,28 +772,45 @@ impl Run<'_> {
             }
         }
     }
+}
 
-    /// The program ended without a result line and without an error of its own.
-    fn ended(&mut self, status: Option<ExitStatus>, stderr: &str) {
-        self.release();
-        if self.saw_final || self.failed {
-            return;
-        }
-        let kind = classify_stderr(stderr).unwrap_or(AgentErrorKind::Crashed);
-        let said = stderr
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find(|line| !line.is_empty());
-        let mut message = kind.default_message().to_string();
-        match (said, status.and_then(|s| s.code())) {
-            (Some(said), _) => message = format!("{message}: {said}"),
-            (None, Some(0)) => message = "Claude Code ended without an answer".to_string(),
-            (None, Some(code)) => message = format!("{message} (exit code {code})"),
-            (None, None) => {}
-        }
+impl TurnSink for ChatSink<'_> {
+    fn waiting(&mut self) {
+        announce(self.shared, self.out.pr, SessionStateKind::Queued);
+    }
+
+    fn started(&mut self) {
+        announce(self.shared, self.out.pr, SessionStateKind::Running);
+    }
+
+    fn event<'a>(&'a mut self, event: AgentEvent) -> Boxed<'a> {
+        Box::pin(self.handle(event))
+    }
+
+    fn error(&mut self, kind: AgentErrorKind, message: String) {
         self.failed = true;
         self.out.error(kind, message);
+    }
+
+    /// Lets out the text the suggestion filter still holds.
+    fn release(&mut self) {
+        let rest = self.filter.finish();
+        if !rest.is_empty() {
+            self.streamed = true;
+            self.out.chunk(rest);
+        }
+    }
+
+    fn flush(&mut self) {
+        self.out.flush();
+    }
+
+    fn saw_final(&self) -> bool {
+        self.saw_final
+    }
+
+    fn failed(&self) -> bool {
+        self.failed
     }
 }
 
@@ -930,114 +828,11 @@ async fn remember_session(shared: &Shared, pr: &PrRef, id: &str) {
     shared.sessions.session_confirmed(pr);
 }
 
-/// Waits for one of the `MAX_CONCURRENT_TURNS` places; `None` when stopped while waiting.
-async fn wait_for_place(shared: &Shared, pr: &PrRef, stop: &Stop) -> Option<OwnedSemaphorePermit> {
-    let permits = shared.sessions.permits.clone();
-    if let Ok(permit) = permits.clone().try_acquire_owned() {
-        return Some(permit);
-    }
-    announce(shared, pr, SessionStateKind::Queued);
-    tokio::select! {
-        permit = permits.acquire_owned() => permit.ok(),
-        _ = stop.notify.notified() => None,
-    }
-}
-
+/// Runs one chat turn: the process part is `turns::run`, the chat's part is the sink.
 async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, stop: Arc<Stop>) {
-    let mut out = Out::new(&shared, &pr, turn);
-    let Some(_place) = wait_for_place(&shared, &pr, &stop).await else {
-        out.error(
-            AgentErrorKind::Interrupted,
-            stop.why().message().to_string(),
-        );
-        return;
-    };
-    let harness = shared.config.read().await.harness.clone();
-    let extra_args = match harness.extra_args_list() {
-        Ok(args) => args,
-        Err(message) => {
-            out.error(
-                AgentErrorKind::Crashed,
-                format!("Config › Harness: {message}"),
-            );
-            return;
-        }
-    };
-    let cwd = shared.paths.worktree_for(&pr);
-    let Some(bridge_program) = shared
-        .bridge_program
-        .clone()
-        .or_else(|| std::env::current_exe().ok())
-    else {
-        out.error(
-            AgentErrorKind::Crashed,
-            "Clúsia cannot find its own program to ask you for permission".to_string(),
-        );
-        return;
-    };
-    // Claude Code gives up on a tool call after `MCP_TOOL_TIMEOUT`; the question to the
-    // reviewer may take until our own deadline.
-    let mut base_env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
-    base_env.retain(|(key, _)| key != "MCP_TOOL_TIMEOUT");
-    base_env.push((
-        "MCP_TOOL_TIMEOUT".into(),
-        ((u64::from(harness.permission_timeout_secs) + 30) * 1000)
-            .to_string()
-            .into(),
-    ));
-    // Requests of this turn show, and are judged by, the sandbox its program runs with, even
-    // when the setting changes before the turn ends.
-    shared.sessions.set_turn_sandbox(&pr, turn, harness.sandbox);
-    let spec = TurnSpec {
-        program: program_path(&shared, &harness),
-        prompt: prompt.text,
-        cwd: cwd.clone(),
-        session: shared.sessions.session_for(&shared, &pr),
-        use_cli_permissions: harness.use_cli_permissions,
-        extra_args,
-        base_env,
-        bridge: Some(BridgeSpec {
-            program: bridge_program,
-            socket: shared.paths.socket(),
-            pr: pr.to_string(),
-            turn,
-        }),
-        sandbox: harness.sandbox,
-        // No rule goes on the command line: every request comes to the daemon, which decides
-        // it with the review's rules.
-        rules: Vec::new(),
-    };
-    let mut command = Command::from(ClaudeCode::command(&spec));
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let kind = AgentErrorKind::NotInstalled;
-            out.error(kind, kind.default_message().to_string());
-            return;
-        }
-        Err(e) => {
-            let kind = AgentErrorKind::Crashed;
-            out.error(kind, format!("{}: {e}", kind.default_message()));
-            return;
-        }
-    };
-    announce(&shared, &pr, SessionStateKind::Running);
-
-    let stdout = child.stdout.take().expect("stdout is piped");
-    let stderr = tokio::spawn(read_tail(child.stderr.take()));
-    let mut stdout = BufReader::new(stdout);
-    // Bytes, not text: a line that is not UTF-8 is converted lossily instead of ending the read.
-    let mut line = Vec::new();
-    let mut parse = ParseState::with_root(cwd);
-    let mut run = Run {
+    let mut sink = ChatSink {
         shared: &shared,
-        out,
+        out: Out::new(&shared, &pr, turn),
         filter: StreamFilter::default(),
         saw_final: false,
         failed: false,
@@ -1045,77 +840,18 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         summary_for: prompt.summary_for.clone(),
         stop: stop.clone(),
     };
-    let limit = Duration::from_secs(u64::from(harness.turn_timeout_secs));
-    let deadline = tokio::time::sleep(limit);
-    tokio::pin!(deadline);
-    let started = Instant::now();
-    let ending = loop {
-        tokio::select! {
-            read = stdout.read_until(b'\n', &mut line) => match read {
-                Ok(n) if n > 0 => {
-                    let text = String::from_utf8_lossy(&line);
-                    for event in parse_line(text.trim_end_matches(['\n', '\r']), &mut parse) {
-                        run.handle(event).await;
-                    }
-                    line.clear();
-                }
-                _ => break Ending::Eof,
-            },
-            _ = stop.notify.notified() => break Ending::Stopped,
-            _ = &mut deadline => break Ending::TimedOut,
-        }
+    let run = TurnRun {
+        pr: pr.clone(),
+        turn,
+        prompt: prompt.text,
+        fresh_prompt: None,
+        session: SessionSource::Chat,
+        origin: TurnOrigin::Chat,
+        places: shared.sessions.permits.clone(),
+        limit: None,
+        stop,
     };
-    // The turn is over for the agent: nobody is left to hear an answer.
-    crate::permissions::cancel_turn(&shared, &pr, turn).await;
-    let tail = |task: tokio::task::JoinHandle<String>| async move {
-        tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default()
-    };
-    match ending {
-        Ending::Eof => {
-            let pid = child.id();
-            let status = match pid {
-                Some(id) if !exited_within(id, KILL_GRACE).await => {
-                    terminate(&mut child).await;
-                    None
-                }
-                _ => sweep_and_reap(&mut child, pid).await,
-            };
-            run.ended(status, &tail(stderr).await);
-        }
-        // A turn that already ended (its result line came) keeps that ending: the process is
-        // stopped, but nothing more is said about the turn.
-        Ending::Stopped => {
-            terminate(&mut child).await;
-            run.release();
-            if !run.saw_final && !run.failed {
-                run.out.error(
-                    AgentErrorKind::Interrupted,
-                    stop.why().message().to_string(),
-                );
-            }
-        }
-        Ending::TimedOut if run.saw_final || run.failed => {
-            terminate(&mut child).await;
-            run.release();
-        }
-        Ending::TimedOut => {
-            terminate(&mut child).await;
-            run.release();
-            run.out.error(
-                AgentErrorKind::Interrupted,
-                format!(
-                    "The turn ran past its limit of {}s and was stopped",
-                    limit.as_secs()
-                ),
-            );
-        }
-    }
-    run.out.flush();
-    tracing::debug!(pr = %pr, turn, elapsed_ms = started.elapsed().as_millis() as u64, "agent turn ended");
+    turns::run(&shared, run, &mut sink).await;
 }
 
 /// Closes the turns a stopped daemon left without an ending, so a replayed chat never shows one
@@ -1273,6 +1009,7 @@ pub(crate) async fn probe(shared: &Shared) -> Outcome {
 mod tests {
     use std::path::Path;
 
+    use clusia_core::config::Harness;
     use clusia_core::{Config, Paths, Review};
     use clusia_harness::testkit::{FakeClaude, Script, Turn};
     use clusia_protocol::AgentLogEntry;
@@ -1280,6 +1017,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
+    use crate::turns::{TurnEnd, classify_stderr, has_exited};
 
     fn shared_for(paths: Paths, config: Config) -> Arc<Shared> {
         let options = crate::options::DaemonOptions {
@@ -2466,7 +2204,7 @@ mod tests {
             let shared = lab.shared.clone();
             let pr = pr.clone();
             async move {
-                let mut run = Run {
+                let mut run = ChatSink {
                     shared: &shared,
                     out: Out::new(&shared, &pr, 1),
                     filter: StreamFilter::default(),
@@ -2528,5 +2266,433 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(message.as_deref(), Some("Stopped because the review ended"));
+    }
+
+    /// Remembers what a run that is not the chat was told.
+    #[derive(Default)]
+    struct Recorder {
+        waited: bool,
+        started: bool,
+        errors: Vec<(AgentErrorKind, String)>,
+        session_ids: Vec<String>,
+        saw_final: bool,
+        failed: bool,
+    }
+
+    impl TurnSink for Recorder {
+        fn waiting(&mut self) {
+            self.waited = true;
+        }
+
+        fn started(&mut self) {
+            self.started = true;
+        }
+
+        fn event<'a>(&'a mut self, event: AgentEvent) -> Boxed<'a> {
+            Box::pin(async move {
+                match event {
+                    AgentEvent::SessionId(id) => self.session_ids.push(id),
+                    AgentEvent::Final { is_error, .. } => {
+                        self.saw_final = true;
+                        self.failed |= is_error;
+                    }
+                    AgentEvent::Error { .. } => self.failed = true,
+                    _ => {}
+                }
+            })
+        }
+
+        fn error(&mut self, kind: AgentErrorKind, message: String) {
+            self.failed = true;
+            self.errors.push((kind, message));
+        }
+
+        fn release(&mut self) {}
+
+        fn flush(&mut self) {}
+
+        fn saw_final(&self) -> bool {
+            self.saw_final
+        }
+
+        fn failed(&self) -> bool {
+            self.failed
+        }
+    }
+
+    fn check_run(
+        turn: u64,
+        session: SessionSource,
+        places: Arc<Semaphore>,
+        limit: Option<Duration>,
+    ) -> (TurnRun, Arc<Stop>) {
+        let stop = Stop::new();
+        let run = TurnRun {
+            pr: pr(7),
+            turn,
+            prompt: "Check this pull request.".into(),
+            fresh_prompt: Some("Read .clusia/review.md first. Check this pull request.".into()),
+            session,
+            origin: TurnOrigin::Security,
+            places,
+            limit,
+            stop: stop.clone(),
+        };
+        (run, stop)
+    }
+
+    /// Runs `run` in a task of its own and gives back how it ended and what its sink heard.
+    fn start(lab: &Lab, run: TurnRun) -> tokio::task::JoinHandle<(TurnEnd, Recorder)> {
+        let shared = lab.shared.clone();
+        tokio::spawn(async move {
+            let mut sink = Recorder::default();
+            let end = turns::run(&shared, run, &mut sink).await;
+            (end, sink)
+        })
+    }
+
+    fn store_session(lab: &Lab, pr: &PrRef, id: &str) {
+        let mut review = reviews::load_stored(&lab.shared, pr).unwrap().unwrap();
+        review.harness_session = Some(id.into());
+        save_review(&lab.shared.paths, &review).unwrap();
+    }
+
+    fn value_after<'a>(args: &'a [String], flag: &str) -> &'a str {
+        let at = args.iter().position(|a| a == flag).expect(flag);
+        &args[at + 1]
+    }
+
+    #[tokio::test]
+    async fn a_fork_run_forks_the_review_session() {
+        let lab = lab(Script::one(Turn::answer("Found no security problems.")));
+        let pr = pr(7);
+        store_session(&lab, &pr, "parent-session");
+        let (run, _stop) = check_run(5, SessionSource::Fork, Arc::new(Semaphore::new(2)), None);
+        let (end, sink) = start(&lab, run).await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert!(sink.started && !sink.waited);
+        let args = wait_calls(&lab, 1).await.remove(0).argv;
+        let at = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(
+            args[at..at + 3],
+            ["--resume", "parent-session", "--fork-session"]
+        );
+        let fork = value_after(&args, "--session-id");
+        assert_ne!(fork, "parent-session");
+        assert_eq!(fork.len(), 36, "a new uuid");
+        assert_eq!(value_after(&args, "-p"), "Check this pull request.");
+        assert_eq!(sink.session_ids, [fork.to_string()]);
+        let review = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+        assert_eq!(
+            review.harness_session.as_deref(),
+            Some("parent-session"),
+            "the chat's session is never replaced by a fork's"
+        );
+        assert_eq!(
+            FakeClaude::history(lab.fake.path(), fork),
+            ["Check this pull request."]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_without_a_review_session_starts_its_own() {
+        let lab = lab(Script::one(Turn::answer("ok")));
+        let pr = pr(7);
+        let (run, _stop) = check_run(5, SessionSource::Fork, Arc::new(Semaphore::new(2)), None);
+        let (end, _) = start(&lab, run).await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        let args = wait_calls(&lab, 1).await.remove(0).argv;
+        assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--fork-session".to_string()));
+        assert_eq!(value_after(&args, "--session-id").len(), 36);
+        assert_eq!(
+            value_after(&args, "-p"),
+            "Read .clusia/review.md first. Check this pull request.",
+            "a session of its own has not read the review yet"
+        );
+        let review = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+        assert_eq!(review.harness_session, None, "it never becomes the chat's");
+    }
+
+    #[tokio::test]
+    async fn a_given_session_is_used_as_it_is() {
+        let lab = lab(Script::one(Turn::answer("ok")));
+        let (run, _stop) = check_run(
+            5,
+            SessionSource::Given(SessionArg::Resume("elsewhere".into())),
+            Arc::new(Semaphore::new(2)),
+            None,
+        );
+        assert_eq!(start(&lab, run).await.unwrap().0, TurnEnd::Done);
+        let args = wait_calls(&lab, 1).await.remove(0).argv;
+        assert_eq!(value_after(&args, "--resume"), "elsewhere");
+    }
+
+    #[tokio::test]
+    async fn a_check_never_widens_what_the_chat_may_do() {
+        let lab = lab_with(Script::one(Turn::answer("ok")), |config| {
+            config.harness.sandbox = true;
+            config.harness.use_cli_permissions = false;
+            config.harness.extra_args = "--model opus".into();
+        });
+        let pr = pr(7);
+        store_session(&lab, &pr, "parent-session");
+        lab.send(&pr, "hello").await.unwrap();
+        wait_calls(&lab, 1).await;
+        let (run, _stop) = check_run(9, SessionSource::Fork, Arc::new(Semaphore::new(2)), None);
+        assert_eq!(start(&lab, run).await.unwrap().0, TurnEnd::Done);
+        let calls = wait_calls(&lab, 2).await;
+        let flags = |args: &[String]| -> Vec<String> {
+            args.iter()
+                .filter(|a| a.starts_with("--"))
+                .filter(|a| !["--resume", "--fork-session", "--session-id"].contains(&a.as_str()))
+                .cloned()
+                .collect()
+        };
+        let (chat, check) = (&calls[0].argv, &calls[1].argv);
+        assert_eq!(
+            flags(chat),
+            flags(check),
+            "the same flags, in the same order"
+        );
+        for flag in [
+            "--permission-mode",
+            "--permission-prompt-tool",
+            "--settings",
+            "--setting-sources",
+            "--append-system-prompt",
+            "--model",
+        ] {
+            assert_eq!(value_after(chat, flag), value_after(check, flag), "{flag}");
+        }
+        let allowed = |args: &[String]| {
+            args[args.iter().position(|a| a == "--allowedTools").unwrap() + 1..][..4].to_vec()
+        };
+        assert_eq!(allowed(chat), allowed(check));
+        assert_eq!(allowed(check), ["Read", "Grep", "Glob", "LS"]);
+        let bridge = |args: &[String]| -> serde_json::Value {
+            serde_json::from_str(value_after(args, "--mcp-config")).unwrap()
+        };
+        let (a, b) = (bridge(chat), bridge(check));
+        assert_eq!(
+            a["mcpServers"]["clusia"]["args"].as_array().unwrap()[..6],
+            b["mcpServers"]["clusia"]["args"].as_array().unwrap()[..6],
+            "the same bridge, for the same socket and review"
+        );
+        assert_eq!(
+            b["mcpServers"]["clusia"]["args"][6], "9",
+            "with the turn of the check"
+        );
+        assert_eq!(calls[0].cwd, calls[1].cwd);
+        assert_eq!(calls[0].env, calls[1].env, "the same environment");
+    }
+
+    #[tokio::test]
+    async fn a_check_is_known_to_the_daemon_only_while_it_runs() {
+        let lab = lab(Script::one(Turn::hanging()));
+        let pr = pr(7);
+        assert_eq!(lab.shared.sessions.origin_of(&pr, 5), None);
+        let (run, stop) = check_run(5, SessionSource::Fork, Arc::new(Semaphore::new(2)), None);
+        let task = start(&lab, run);
+        let call = wait_calls(&lab, 1).await.remove(0);
+        assert_eq!(
+            lab.shared.sessions.origin_of(&pr, 5),
+            Some(TurnOrigin::Security)
+        );
+        assert!(lab.shared.sessions.any_running(&pr));
+        assert_eq!(
+            lab.shared.sessions.origin_of(&pr, 6),
+            None,
+            "only the turn that runs may ask"
+        );
+        stop.fire(Why::User);
+        let (end, sink) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Stopped(Why::User));
+        assert_eq!(
+            sink.errors,
+            [(AgentErrorKind::Interrupted, "Stopped by you".to_string())]
+        );
+        assert_eq!(lab.shared.sessions.origin_of(&pr, 5), None);
+        assert!(!lab.shared.sessions.any_running(&pr));
+        assert!(gone_within(call.pid, Duration::from_secs(5)).await);
+    }
+
+    #[tokio::test]
+    async fn a_run_stopped_before_it_starts_starts_no_process() {
+        let lab = lab(Script::one(Turn::answer("ok")));
+        let (run, stop) = check_run(5, SessionSource::Fork, Arc::new(Semaphore::new(2)), None);
+        stop.fire(Why::Ended);
+        let (end, sink) = start(&lab, run).await.unwrap();
+        assert_eq!(end, TurnEnd::Stopped(Why::Ended));
+        assert!(!sink.started);
+        assert_eq!(
+            sink.errors,
+            [(
+                AgentErrorKind::Interrupted,
+                "Stopped because the review ended".to_string()
+            )]
+        );
+        assert!(
+            lab.calls().is_empty(),
+            "no process, not even one killed at once"
+        );
+        assert_eq!(lab.shared.sessions.origin_of(&pr(7), 5), None);
+    }
+
+    #[tokio::test]
+    async fn a_run_waits_for_a_place_of_its_own() {
+        let lab = lab(Script::one(Turn::answer("ok")));
+        let places = Arc::new(Semaphore::new(1));
+        let held = places.clone().acquire_owned().await.unwrap();
+        let (run, _stop) = check_run(5, SessionSource::Fork, places, None);
+        let task = start(&lab, run);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(lab.calls().is_empty(), "no process before a place is free");
+        assert_eq!(lab.shared.sessions.origin_of(&pr(7), 5), None);
+        drop(held);
+        let (end, sink) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert!(sink.waited && sink.started);
+    }
+
+    #[tokio::test]
+    async fn a_full_place_for_checks_does_not_hold_the_chat() {
+        let mut lab = lab(Script::one(Turn::answer("hi")));
+        let pr = pr(7);
+        let places = Arc::new(Semaphore::new(0));
+        let (run, stop) = check_run(5, SessionSource::Fork, places, None);
+        let task = start(&lab, run);
+        lab.send(&pr, "hello").await.unwrap();
+        until(&mut lab.events, ready(&pr)).await;
+        assert_eq!(lab.calls().len(), 1, "only the chat's process");
+        stop.fire(Why::User);
+        assert_eq!(task.await.unwrap().0, TurnEnd::Stopped(Why::User));
+    }
+
+    #[tokio::test]
+    async fn stopping_a_run_that_waits_starts_no_process() {
+        let lab = lab(Script::one(Turn::answer("ok")));
+        let places = Arc::new(Semaphore::new(1));
+        let _held = places.clone().acquire_owned().await.unwrap();
+        let (run, stop) = check_run(5, SessionSource::Fork, places, None);
+        let task = start(&lab, run);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.fire(Why::Ended);
+        let (end, sink) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Stopped(Why::Ended));
+        assert!(sink.waited && !sink.started);
+        assert_eq!(
+            sink.errors,
+            [(
+                AgentErrorKind::Interrupted,
+                "Stopped because the review ended".to_string()
+            )]
+        );
+        assert!(lab.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_past_its_limit_is_stopped() {
+        let lab = lab(Script::one(Turn::hanging()));
+        let (run, _stop) = check_run(
+            5,
+            SessionSource::Fork,
+            Arc::new(Semaphore::new(2)),
+            Some(Duration::from_secs(1)),
+        );
+        let task = start(&lab, run);
+        let call = wait_calls(&lab, 1).await.remove(0);
+        let (end, sink) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::TimedOut);
+        assert_eq!(
+            sink.errors,
+            [(
+                AgentErrorKind::Interrupted,
+                "The turn ran past its limit of 1s and was stopped".to_string()
+            )]
+        );
+        assert!(gone_within(call.pid, Duration::from_secs(5)).await);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_fails_to_start_says_so() {
+        let lab = lab_with(Script::one(Turn::answer("x")), |config| {
+            config.harness.program = Some("/nonexistent/claude".into());
+        });
+        let (run, _stop) = check_run(5, SessionSource::Fork, Arc::new(Semaphore::new(2)), None);
+        let (end, sink) = start(&lab, run).await.unwrap();
+        assert_eq!(end, TurnEnd::Failed);
+        assert_eq!(sink.errors.len(), 1);
+        assert_eq!(sink.errors[0].0, AgentErrorKind::NotInstalled);
+        assert_eq!(lab.shared.sessions.origin_of(&pr(7), 5), None);
+    }
+
+    #[tokio::test]
+    async fn a_program_that_ends_without_an_answer_fails_the_run() {
+        let lab = lab(Script::one(
+            Turn::lines(&[]).exit(1).stderr("Error: Not logged in\n"),
+        ));
+        let (run, _stop) = check_run(5, SessionSource::Fork, Arc::new(Semaphore::new(2)), None);
+        let (end, sink) = start(&lab, run).await.unwrap();
+        assert_eq!(end, TurnEnd::Failed);
+        assert_eq!(sink.errors[0].0, AgentErrorKind::NotSignedIn);
+    }
+
+    #[tokio::test]
+    async fn the_chat_and_the_checks_share_one_turn_counter() {
+        let mut lab = lab(Script::one(Turn::answer("hi")));
+        let pr = pr(7);
+        assert_eq!(lab.shared.sessions.next_turn(&lab.shared, &pr).await, 1);
+        let chat = lab.send(&pr, "hello").await.unwrap();
+        assert_eq!(chat, 2);
+        until(&mut lab.events, ready(&pr)).await;
+        assert_eq!(lab.shared.sessions.next_turn(&lab.shared, &pr).await, 3);
+        assert_eq!(lab.send(&pr, "again").await.unwrap(), 4);
+        until(&mut lab.events, ready(&pr)).await;
+        let other = self::pr(8);
+        lab.add_review(&other);
+        assert_eq!(
+            lab.shared.sessions.next_turn(&lab.shared, &other).await,
+            1,
+            "each review counts for itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_counter_continues_from_the_log() {
+        let lab = lab(Script::one(Turn::answer("hi")));
+        let pr = pr(7);
+        agent_log::append(
+            &lab.shared.paths.agent_log(&pr),
+            &AgentLogEntry::Check {
+                at: 1,
+                turn: 10,
+                kind: clusia_core::CheckKind::Audit,
+                state: "done".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(lab.shared.sessions.next_turn(&lab.shared, &pr).await, 11);
+        assert_eq!(lab.send(&pr, "hello").await.unwrap(), 12);
+    }
+
+    #[tokio::test]
+    async fn the_chat_answers_while_a_check_runs() {
+        let mut lab = lab(Script::turns(vec![Turn::hanging(), Turn::answer("hi")]));
+        let pr = pr(7);
+        let (run, stop) = check_run(5, SessionSource::Fork, Arc::new(Semaphore::new(2)), None);
+        let task = start(&lab, run);
+        wait_calls(&lab, 1).await;
+        lab.send(&pr, "hello").await.unwrap();
+        let events = until(&mut lab.events, ready(&pr)).await;
+        assert!(texts(&events).contains("hi"));
+        assert_eq!(lab.shared.sessions.state(&pr), SessionStateKind::Ready);
+        assert_eq!(
+            lab.shared.sessions.origin_of(&pr, 5),
+            Some(TurnOrigin::Security),
+            "the check still runs"
+        );
+        stop.fire(Why::User);
+        task.await.unwrap();
     }
 }

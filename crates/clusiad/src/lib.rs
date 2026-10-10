@@ -28,6 +28,7 @@ mod spawner;
 mod state;
 mod sync;
 mod tray;
+mod turns;
 mod worktrees;
 
 pub use bridge::run_permission_bridge;

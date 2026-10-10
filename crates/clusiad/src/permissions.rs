@@ -4,7 +4,7 @@
 //! the deadline. Only an answer allows: no answer, a stop, the end of the turn or of the
 //! review, and a shutdown all deny.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -103,9 +103,10 @@ struct Pending {
 pub(crate) struct Permissions {
     pending: Mutex<HashMap<String, Pending>>,
     next_seq: AtomicU64,
-    /// The last turn of each review that ended: it asks no more, even while its program
-    /// is still being stopped.
-    closed: Mutex<HashMap<PrRef, u64>>,
+    /// The turns of each review that ended: they ask no more, even while their programs are
+    /// still being stopped. A set, not the last turn: a check and the chat run at once, and the
+    /// end of one must not close the other.
+    closed: Mutex<HashMap<PrRef, HashSet<u64>>>,
     /// Denials already in the chat, by review, turn and tool: the program reports the same
     /// denial again in its result at the end of the turn, which must not be told twice.
     told: Mutex<HashMap<(PrRef, u64, String), usize>>,
@@ -157,9 +158,12 @@ impl Permissions {
     }
 
     fn close_turn(&self, pr: &PrRef, turn: u64) {
-        let mut closed = self.closed.lock().unwrap_or_else(|p| p.into_inner());
-        let last = closed.entry(pr.clone()).or_insert(turn);
-        *last = (*last).max(turn);
+        self.closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(pr.clone())
+            .or_default()
+            .insert(turn);
     }
 
     fn is_closed(&self, pr: &PrRef, turn: u64) -> bool {
@@ -167,13 +171,13 @@ impl Permissions {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(pr)
-            .is_some_and(|last| turn <= *last)
+            .is_some_and(|turns| turns.contains(&turn))
     }
 
     /// The review ended: its last turn is no longer kept. Only once no turn of it runs, since
     /// a stopped program may still ask until it is gone.
     pub(crate) fn forget_review(&self, shared: &Shared, pr: &PrRef) {
-        if shared.sessions.running_turn(pr).is_none() {
+        if !shared.sessions.any_running(pr) {
             self.closed
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -239,16 +243,16 @@ fn log(
     }
 }
 
-/// Whether `turn` of `pr` may still ask: it is the running turn, it has not ended, and the
-/// daemon is not stopping.
-fn may_ask(shared: &Shared, pr: &PrRef, turn: u64) -> Result<(), String> {
+/// Whether `turn` of `pr` may still ask: it is the running chat turn or a running check of the
+/// review, it has not ended, and the daemon is not stopping. Says who runs it.
+fn may_ask(shared: &Shared, pr: &PrRef, turn: u64) -> Result<TurnOrigin, String> {
     if *shared.shutdown.borrow() {
         return Err("clusiad is stopping".to_string());
     }
-    if shared.sessions.running_turn(pr) != Some(turn) || shared.permissions.is_closed(pr, turn) {
-        return Err(format!("turn {turn} of {pr} is not running"));
+    match shared.sessions.origin_of(pr, turn) {
+        Some(origin) if !shared.permissions.is_closed(pr, turn) => Ok(origin),
+        _ => Err(format!("turn {turn} of {pr} is not running")),
     }
-    Ok(())
 }
 
 /// A decision that needs no reviewer: logged and told like any other, under an id of its own.
@@ -351,7 +355,7 @@ pub(crate) async fn ask(
         tool,
         input,
     } = request;
-    may_ask(shared, &pr, turn)?;
+    let origin = may_ask(shared, &pr, turn)?;
     let worktree = shared.paths.worktree_for(&pr);
     let summary = summary_for(&tool, &input);
     let (timeout, configured_sandbox) = {
@@ -382,7 +386,7 @@ pub(crate) async fn ask(
             &tool,
             &summary,
             PermissionOutcome::Denied,
-            TurnOrigin::Chat,
+            origin,
         );
         return Ok(PermissionDecision::denied(UNSANDBOXED));
     }
@@ -397,7 +401,7 @@ pub(crate) async fn ask(
             &tool,
             &summary,
             PermissionOutcome::Denied,
-            TurnOrigin::Chat,
+            origin,
         );
         return Ok(PermissionDecision::denied(OUTSIDE));
     }
@@ -411,7 +415,7 @@ pub(crate) async fn ask(
             &tool,
             &summary,
             PermissionOutcome::AllowedForReview,
-            TurnOrigin::Chat,
+            origin,
         );
         return Ok(PermissionDecision::allowed());
     }
@@ -441,7 +445,7 @@ pub(crate) async fn ask(
         sandbox,
         deadline: now_ms() + (timeout * 1000) as i64,
         detail: detail_for(&tool, &input),
-        origin: TurnOrigin::Chat,
+        origin,
     };
     let outcome = register(shared, request, rule)?;
     // A bridge that goes away does not end this: the connection detaches its handler, so the
@@ -1110,6 +1114,244 @@ mod tests {
             won == PermissionOutcome::Allowed
         );
         assert_eq!(outcomes(&lab.log()), [won]);
+    }
+
+    fn origin_of_request(event: &Event) -> TurnOrigin {
+        match event {
+            Event::PermissionRequested { origin, .. } => *origin,
+            other => panic!("not a request: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_requests_follow_the_chat_rules() {
+        let mut lab = lab();
+        lab.shared
+            .sessions
+            .register_check(&pr(7), 2, TurnOrigin::Security);
+
+        // The chat and the check each say who asked.
+        let chat = lab.ask("Bash", bash("make"));
+        let (chat_id, requested) = lab.requested().await;
+        assert_eq!(origin_of_request(&requested), TurnOrigin::Chat);
+        answer(&lab.shared, &chat_id, PermissionAnswerKind::Deny).await;
+        chat.await.unwrap().unwrap();
+
+        let check = lab.ask_turn(2, "Bash", bash("cargo test -p clusia-core"));
+        let (check_id, requested) = lab.requested().await;
+        assert_eq!(origin_of_request(&requested), TurnOrigin::Security);
+        let Event::PermissionRequested { turn, sandbox, .. } = requested else {
+            unreachable!()
+        };
+        assert_eq!(turn, 2);
+        assert!(sandbox, "judged by the sandbox of the check's own program");
+        answer(&lab.shared, &check_id, PermissionAnswerKind::Review).await;
+        assert!(check.await.unwrap().unwrap().allow);
+
+        // What the reviewer allowed for the review covers the chat and the check alike.
+        for turn in [1, 2] {
+            let decision = ask(
+                &lab.shared,
+                PermissionAsk {
+                    pr: pr(7),
+                    turn,
+                    tool: "Bash".into(),
+                    input: bash("cargo test --all"),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(decision.allow, "turn {turn}");
+        }
+        assert_eq!(
+            lab.shared.permissions.waiting(),
+            0,
+            "nobody was asked again"
+        );
+
+        // A command outside the rules still goes to the reviewer, for the check too.
+        let rm = lab.ask_turn(2, "Bash", bash("rm -rf target"));
+        let (rm_id, _) = lab.requested().await;
+        answer(&lab.shared, &rm_id, PermissionAnswerKind::Deny).await;
+        assert!(!rm.await.unwrap().unwrap().allow);
+    }
+
+    #[tokio::test]
+    async fn a_check_is_judged_by_the_sandbox_of_its_own_program() {
+        let mut lab = lab();
+        lab.shared
+            .sessions
+            .register_check(&pr(7), 2, TurnOrigin::Security);
+        lab.shared.sessions.set_turn_sandbox(&pr(7), 2, true);
+        // The setting changed after the check started: its own program still runs sandboxed.
+        lab.shared.config.write().await.harness.sandbox = false;
+        let outside = json!({"command": "make", "dangerouslyDisableSandbox": true});
+        let check = ask(
+            &lab.shared,
+            PermissionAsk {
+                pr: pr(7),
+                turn: 2,
+                tool: "Bash".into(),
+                input: outside.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(check, PermissionDecision::denied(UNSANDBOXED));
+        while let Ok((_, event)) = lab.events.try_recv() {
+            assert!(
+                !matches!(event, Event::PermissionRequested { .. }),
+                "nobody is asked to step over the sandbox"
+            );
+        }
+        // The chat turn has no sandbox of its own recorded: the setting (now off) decides.
+        let chat = lab.ask("Bash", outside);
+        let (id, requested) = lab.requested().await;
+        assert_eq!(origin_of_request(&requested), TurnOrigin::Chat);
+        answer(&lab.shared, &id, PermissionAnswerKind::Deny).await;
+        chat.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_line_of_a_request_decided_at_once_says_who_asked() {
+        let mut lab = lab();
+        lab.shared
+            .sessions
+            .register_check(&pr(7), 2, TurnOrigin::Audit);
+        let outside = ask(
+            &lab.shared,
+            PermissionAsk {
+                pr: pr(7),
+                turn: 2,
+                tool: "Write".into(),
+                input: json!({"file_path": "/etc/passwd", "content": "x"}),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!outside.allow);
+        let resolved = loop {
+            let (_, event) = lab.events.recv().await.unwrap();
+            if let Event::PermissionResolved { origin, .. } = event {
+                break origin;
+            }
+        };
+        assert_eq!(resolved, TurnOrigin::Audit);
+        let chat = ask(
+            &lab.shared,
+            PermissionAsk {
+                pr: pr(7),
+                turn: 1,
+                tool: "Write".into(),
+                input: json!({"file_path": "/etc/passwd", "content": "x"}),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!chat.allow);
+        let resolved = loop {
+            let (_, event) = lab.events.recv().await.unwrap();
+            if let Event::PermissionResolved { origin, .. } = event {
+                break origin;
+            }
+        };
+        assert_eq!(resolved, TurnOrigin::Chat);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_check_request_says_who_asked() {
+        let mut lab = lab();
+        lab.shared
+            .sessions
+            .register_check(&pr(7), 2, TurnOrigin::Security);
+        let asked = lab.ask_turn(2, "Bash", bash("make"));
+        let (id, _) = lab.requested().await;
+        cancel_turn(&lab.shared, &pr(7), 2).await;
+        asked.await.unwrap().unwrap();
+        let seen = lab.until_resolved(&id).await;
+        let Some((_, Event::PermissionResolved { origin, .. })) = seen.last() else {
+            panic!("a resolution");
+        };
+        assert_eq!(*origin, TurnOrigin::Security);
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_does_not_run_may_not_ask() {
+        let lab = lab();
+        let refused = |turn: u64| {
+            let shared = lab.shared.clone();
+            async move {
+                ask(
+                    &shared,
+                    PermissionAsk {
+                        pr: pr(7),
+                        turn,
+                        tool: "Bash".into(),
+                        input: bash("make"),
+                    },
+                )
+                .await
+                .unwrap_err()
+            }
+        };
+        assert_eq!(refused(9).await, "turn 9 of acme/widgets#7 is not running");
+        lab.shared
+            .sessions
+            .register_check(&pr(7), 2, TurnOrigin::Audit);
+        lab.shared.sessions.unregister_check(&pr(7), 2);
+        assert_eq!(
+            refused(2).await,
+            "turn 2 of acme/widgets#7 is not running",
+            "a check that ended asks no more"
+        );
+        // Another review's check is not this review's.
+        lab.shared
+            .sessions
+            .register_check(&pr(8), 3, TurnOrigin::Audit);
+        assert_eq!(refused(3).await, "turn 3 of acme/widgets#7 is not running");
+    }
+
+    #[tokio::test]
+    async fn the_end_of_the_chat_turn_leaves_a_running_check_asking() {
+        let mut lab = lab();
+        lab.shared
+            .sessions
+            .register_check(&pr(7), 2, TurnOrigin::Security);
+        cancel_turn(&lab.shared, &pr(7), 1).await;
+        let asked = lab.ask_turn(2, "Bash", bash("make"));
+        let (id, requested) = lab.requested().await;
+        assert_eq!(origin_of_request(&requested), TurnOrigin::Security);
+        // The chat turn is closed: its late request is refused and never announced.
+        let late = lab.ask_turn(1, "Bash", bash("make test"));
+        assert!(late.await.unwrap().is_err());
+        // The check's end cancels what it still waits for, and nothing else.
+        cancel_turn(&lab.shared, &pr(7), 2).await;
+        assert_eq!(
+            asked.await.unwrap().unwrap(),
+            PermissionDecision::denied(CANCELLED)
+        );
+        assert!(refused_as_not_found(
+            answer(&lab.shared, &id, PermissionAnswerKind::Once).await
+        ));
+        assert_eq!(lab.shared.permissions.waiting(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_check_turn_keeps_the_review_in_the_permission_state() {
+        let lab = lab();
+        lab.shared
+            .sessions
+            .register_check(&pr(7), 2, TurnOrigin::Audit);
+        lab.shared.sessions.pretend_stopped(&pr(7));
+        cancel_turn(&lab.shared, &pr(7), 1).await;
+        lab.shared.permissions.forget_review(&lab.shared, &pr(7));
+        assert!(
+            lab.shared.permissions.is_closed(&pr(7), 1),
+            "a check still runs: the closed turns are kept"
+        );
+        lab.shared.sessions.unregister_check(&pr(7), 2);
+        lab.shared.permissions.forget_review(&lab.shared, &pr(7));
+        assert!(!lab.shared.permissions.is_closed(&pr(7), 1));
     }
 
     #[tokio::test]
