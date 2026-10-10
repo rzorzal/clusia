@@ -5,6 +5,11 @@
 //! `calls/<n>/`, then replays the [`Turn`] of that call (the n-th call plays the n-th turn, and
 //! the last turn repeats). `--version` is answered without being recorded.
 //!
+//! The fake keeps what each session was asked: every run appends its `-p` prompt to the file of
+//! its session (the id after `--session-id`, else the one after `--resume`). A run with
+//! `--fork-session` first copies the history of the session it resumes, so the fork starts with
+//! its parent's prompts and the parent never gets the fork's. [`FakeClaude::history`] reads it.
+//!
 //! A turn can ask permissions: when the run has `--mcp-config`, the fake starts the MCP server
 //! named there, calls its `approve` tool once per ask and records every answer under
 //! `calls/<n>/answers`. Asks that were not allowed are listed in the result line's
@@ -87,6 +92,19 @@ impl Turn {
         }
     }
 
+    /// A normal turn whose answer is `prose` followed by `blocks`, each set apart by a blank
+    /// line. Build the blocks with [`finding_block`] and [`pass_block`].
+    pub fn answer_blocks(prose: &str, blocks: &[String]) -> Self {
+        let mut text = prose.trim_end().to_string();
+        for block in blocks {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(block);
+        }
+        Self::answer(&text)
+    }
+
     /// Starts the session and then never ends: the process sleeps until it is killed.
     pub fn hanging() -> Self {
         let init = serde_json::json!({
@@ -140,6 +158,16 @@ impl Turn {
         self.asks.push((tool.to_string(), input));
         self
     }
+}
+
+/// A fenced `clusia-finding` block holding `json`.
+pub fn finding_block(json: serde_json::Value) -> String {
+    format!("```clusia-finding\n{json}\n```")
+}
+
+/// A fenced `clusia-pass` block holding `json`.
+pub fn pass_block(json: serde_json::Value) -> String {
+    format!("```clusia-pass\n{json}\n```")
 }
 
 /// The turns the fake plays, one per call.
@@ -258,6 +286,21 @@ impl FakeClaude {
             .into_iter()
             .filter_map(|n| read_call(&dir.join("calls").join(n.to_string())))
             .collect()
+    }
+
+    /// The prompts session `session` was asked, oldest first. A fork's list starts with its
+    /// parent's. A session that never ran has none.
+    pub fn history(dir: &Path, session: &str) -> Vec<String> {
+        let Ok(bytes) = fs::read(dir.join("sessions").join(session)) else {
+            return Vec::new();
+        };
+        let mut prompts: Vec<String> = bytes
+            .split(|b| *b == 0)
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect();
+        // Every prompt ends with a NUL, so the split leaves one empty piece at the end.
+        prompts.pop();
+        prompts
     }
 
     /// What the bridge answered, in run order and then ask order.
@@ -399,11 +442,24 @@ k=$n
 sid=""
 prev=""
 cfg=""
+prompt=""
+parent=""
+fork=""
 for a in "$@"; do
   if [ "$prev" = "--session-id" ] || [ "$prev" = "--resume" ]; then sid=$a; fi
+  if [ "$prev" = "--resume" ]; then parent=$a; fi
   if [ "$prev" = "--mcp-config" ]; then cfg=$a; fi
+  if [ "$prev" = "-p" ]; then prompt=$a; fi
+  if [ "$a" = "--fork-session" ]; then fork=1; fi
   prev=$a
 done
+if [ -n "$sid" ]; then
+  mkdir -p "$dir/sessions"
+  if [ -n "$fork" ] && [ -n "$parent" ] && [ -f "$dir/sessions/$parent" ]; then
+    cp "$dir/sessions/$parent" "$dir/sessions/$sid"
+  fi
+  printf '%s\0' "$prompt" >> "$dir/sessions/$sid"
+fi
 . "$dir/turn-$k.conf"
 [ -n "$ignore_term" ] && trap '' TERM
 [ -s "$dir/turn-$k.stderr" ] && cat "$dir/turn-$k.stderr" >&2
@@ -529,6 +585,110 @@ mod tests {
                 .all(|l| l.contains("\"session_id\":\"sess-9\""))
         );
         assert!(lines[2].contains("\"result\":\"hi\""));
+    }
+
+    #[test]
+    fn a_fork_gets_a_new_session_that_starts_with_its_parents_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = FakeClaude::install(dir.path(), Script::one(Turn::answer("ok")));
+        run(
+            &program,
+            &["-p", "first", "--session-id", "parent-1"],
+            dir.path(),
+        );
+        run(
+            &program,
+            &["-p", "second", "--resume", "parent-1"],
+            dir.path(),
+        );
+        let out = run(
+            &program,
+            &[
+                "-p",
+                "check it",
+                "--resume",
+                "parent-1",
+                "--fork-session",
+                "--session-id",
+                "fork-1",
+            ],
+            dir.path(),
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            text.lines()
+                .all(|l| l.contains("\"session_id\":\"fork-1\"")),
+            "the fork answers under its own id: {text}"
+        );
+        run(
+            &program,
+            &["-p", "third", "--resume", "parent-1"],
+            dir.path(),
+        );
+        assert_eq!(
+            FakeClaude::history(dir.path(), "fork-1"),
+            ["first", "second", "check it"]
+        );
+        assert_eq!(
+            FakeClaude::history(dir.path(), "parent-1"),
+            ["first", "second", "third"],
+            "the parent never sees what the fork was asked"
+        );
+        assert!(FakeClaude::history(dir.path(), "never-ran").is_empty());
+    }
+
+    #[test]
+    fn a_fork_of_a_session_that_never_ran_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = FakeClaude::install(dir.path(), Script::one(Turn::answer("ok")));
+        run(
+            &program,
+            &[
+                "-p",
+                "x\ny",
+                "--resume",
+                "ghost",
+                "--fork-session",
+                "--session-id",
+                "f2",
+            ],
+            dir.path(),
+        );
+        assert_eq!(FakeClaude::history(dir.path(), "f2"), ["x\ny"]);
+    }
+
+    #[test]
+    fn blocks_follow_the_prose_in_the_answer() {
+        let finding = finding_block(serde_json::json!({"area": "security", "title": "t"}));
+        let pass = pass_block(serde_json::json!({"area": "tests", "text": "ok"}));
+        assert_eq!(
+            finding,
+            "```clusia-finding\n{\"area\":\"security\",\"title\":\"t\"}\n```"
+        );
+        assert_eq!(
+            pass,
+            "```clusia-pass\n{\"area\":\"tests\",\"text\":\"ok\"}\n```"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let program = FakeClaude::install(
+            dir.path(),
+            Script::one(Turn::answer_blocks(
+                "Done.",
+                &[finding.clone(), pass.clone()],
+            )),
+        );
+        let out = run(&program, &["-p", "x", "--session-id", "s"], dir.path());
+        let last = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        let result: serde_json::Value = serde_json::from_str(&last).unwrap();
+        assert_eq!(result["result"], format!("Done.\n\n{finding}\n\n{pass}"));
+        let bare = Turn::answer_blocks("", std::slice::from_ref(&pass));
+        assert_eq!(bare.lines.len(), 3);
+        assert!(bare.lines[2].contains("clusia-pass"));
     }
 
     #[test]
