@@ -412,7 +412,7 @@ fn too_long_home_fails_before_running() {
 
 mod review_flow {
     use super::*;
-    use clusia_harness::testkit::{FakeClaude, Script, Turn};
+    use clusia_harness::testkit::{FakeClaude, Script, Turn, finding_block, pass_block};
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
@@ -900,6 +900,173 @@ mod review_flow {
         assert_eq!(asked.status.code(), Some(130), "{said}");
         assert!(said.contains("nothing was asked"), "{said}");
         assert!(FakeClaude::calls(&w.fake_dir()).is_empty());
+    }
+
+    /// What the fake `claude` answers to a check: two Security findings (the second with a
+    /// control character in its title), one Audit finding and one pass. Each run keeps the blocks
+    /// of its own kind and counts the others as unreadable.
+    fn check_answer() -> Turn {
+        Turn::answer_blocks(
+            "Found.",
+            &[
+                finding_block(json!({
+                    "area": "security", "severity": "high", "title": "Token in the log",
+                    "file": "feature.txt", "line": 2, "body": "b"
+                })),
+                finding_block(json!({
+                    "area": "security", "severity": "low", "title": "Bad\u{1b}[2K title",
+                    "file": "feature.txt", "line": 3, "body": "b"
+                })),
+                finding_block(json!({
+                    "area": "correctness", "title": "Off by one",
+                    "file": "feature.txt", "line": 3, "body": "b"
+                })),
+                pass_block(json!({
+                    "area": "concurrency", "text": "No shared state",
+                    "where": "checked 2 call sites"
+                })),
+            ],
+        )
+    }
+
+    fn has_line(text: &str, line: &str) -> bool {
+        text.lines().any(|l| l == line)
+    }
+
+    #[test]
+    fn findings_are_printed_filtered() {
+        let w = AgentWorld::new(Script::one(check_answer()));
+        let o = w.run(&["check", "acme/widgets#7"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = stdout(&o);
+        assert!(has_line(&out, "Security"), "{out}");
+        assert!(
+            has_line(&out, "HIGH  feature.txt:2  Token in the log"),
+            "{out}"
+        );
+        assert!(
+            has_line(&out, "LOW  feature.txt:3  Bad\\u{1b}[2K title"),
+            "a control character is shown as an escape: {out}"
+        );
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(has_line(&out, "Audit · Correctness"), "{out}");
+        assert!(has_line(&out, "feature.txt:3  Off by one"), "{out}");
+        assert!(has_line(&out, "Audit · Concurrency"), "{out}");
+        assert!(has_line(&out, "No findings in this area."), "{out}");
+        assert!(
+            has_line(&out, "ok  No shared state  (checked 2 call sites)"),
+            "{out}"
+        );
+        assert_eq!(
+            out.lines().filter(|l| *l == "Not checked").count(),
+            4,
+            "an area the agent wrote nothing about is never ok: {out}"
+        );
+        let progress = stderr(&o);
+        assert!(progress.contains("Security: done"), "{progress}");
+        assert!(progress.contains("Audit: done"), "{progress}");
+
+        let calls = FakeClaude::calls(&w.fake_dir());
+        assert_eq!(calls.len(), 2, "one process for each kind");
+        assert!(
+            calls
+                .iter()
+                .all(|c| c.argv.iter().any(|a| a == "--session-id")),
+            "a review with no chat has no session to fork"
+        );
+    }
+
+    #[test]
+    fn check_with_a_flag_runs_only_that_kind() {
+        let w = AgentWorld::new(Script::one(check_answer()));
+        let o = w.run(&["check", "acme/widgets#7", "--security"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = stdout(&o);
+        assert!(
+            has_line(&out, "HIGH  feature.txt:2  Token in the log"),
+            "{out}"
+        );
+        assert!(!out.contains("Audit"), "{out}");
+        assert_eq!(FakeClaude::calls(&w.fake_dir()).len(), 1);
+    }
+
+    #[test]
+    fn check_json_prints_the_results_once() {
+        let w = AgentWorld::new(Script::one(check_answer()));
+        let o = w.run(&["--json", "check", "acme/widgets#7", "--audit"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let value: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("one JSON value");
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["kind"], "audit");
+        assert_eq!(results[0]["findings"][0]["title"], "Off by one");
+        assert_eq!(value["dismissed"], json!([]));
+        assert_eq!(value["accepted"], json!([]));
+        assert!(
+            stderr(&o).is_empty(),
+            "no progress with --json: {}",
+            stderr(&o)
+        );
+    }
+
+    #[test]
+    fn a_failed_check_exits_1_and_says_so() {
+        let w = AgentWorld::new(Script::one(Turn::lines(&[]).exit(1)));
+        let o = w.run(&["check", "acme/widgets#7", "--security"]);
+        assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+        assert!(
+            stderr(&o).contains("Security check failed"),
+            "{}",
+            stderr(&o)
+        );
+    }
+
+    #[test]
+    fn check_refuses_both_flags_and_a_bad_pull_request_before_the_daemon() {
+        let h = Home::new();
+        let both = h.clusia(&["check", "acme/widgets#7", "--security", "--audit"]);
+        assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
+        let bad = h.clusia(&["check", "nocolon"]);
+        assert_eq!(bad.status.code(), Some(1), "{}", stderr(&bad));
+        assert_eq!(
+            h.clusia(&["daemon", "status"]).status.code(),
+            Some(3),
+            "no daemon was started"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_on_check_stops_the_checks_it_started() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        let checking = w.spawn(&["check", "acme/widgets#7", "--security"]);
+        let start = std::time::Instant::now();
+        let call = loop {
+            if let Some(call) = FakeClaude::calls(&w.fake_dir()).into_iter().next() {
+                break call;
+            }
+            assert!(
+                start.elapsed().as_secs() < 30,
+                "the fake claude never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        // SAFETY: signals a child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(checking.id() as i32, libc::SIGINT) }, 0);
+        let checked = checking.wait_with_output().unwrap();
+        assert_eq!(checked.status.code(), Some(130), "{}", stderr(&checked));
+        assert!(
+            stderr(&checked).contains("Stopped the checks"),
+            "{}",
+            stderr(&checked)
+        );
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while FakeClaude::is_running(call.pid) {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "the check's process outlived the command"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     #[test]
