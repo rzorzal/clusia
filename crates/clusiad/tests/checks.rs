@@ -1242,3 +1242,28 @@ async fn a_shutdown_leaves_no_check_process() {
         assert!(gone(call.pid).await, "pid {} outlived the daemon", call.pid);
     }
 }
+
+#[tokio::test]
+async fn a_summary_dropped_from_the_queue_releases_the_checks_that_waited_for_it() {
+    let w = world().await;
+    let dir = use_fake(&w, Script::turns(vec![Turn::hanging(), Turn::hanging()])).await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(send("a question that runs long")).await.unwrap();
+    calls(&dir, 1).await;
+
+    // The reopen on a new head asks for a summary, which queues behind the question.
+    common::agent::set_config(&w, "harness.on_open", "summarize").await;
+    checks_on_open(&w, true, false).await;
+    advance(&w).await;
+    open(&mut c).await;
+    assert_eq!(
+        checks_of(&mut c).await.state(CheckKind::Security),
+        CheckState::Waiting,
+        "the check waits for the summary"
+    );
+
+    c.request(Command::AgentCancel { pr: pr7() }).await.unwrap();
+    until(&mut watcher, state_is(CheckKind::Security, is_running)).await;
+}

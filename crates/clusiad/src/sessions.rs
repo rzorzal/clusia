@@ -255,9 +255,14 @@ impl Sessions {
         Ok(turn)
     }
 
-    /// Stops the running turn of `pr` and drops the one waiting behind it.
-    pub(crate) fn cancel(&self, shared: &Shared, pr: &PrRef) {
-        self.stop_with(shared, pr, Why::User);
+    /// Stops the running turn of `pr` and drops the one waiting behind it. When the dropped
+    /// turn was the summary, the checks that waited for it go ahead, as they do when a summary
+    /// ends: it will never run.
+    pub(crate) fn cancel(&self, shared: &Arc<Shared>, pr: &PrRef) {
+        if self.stop_with(shared, pr, Why::User) {
+            let (shared, pr) = (shared.clone(), pr.clone());
+            tokio::spawn(async move { crate::checks::on_summary_over(&shared, &pr).await });
+        }
     }
 
     /// Like [`Sessions::cancel`], for a review that ended: the chat says so, and a turn that
@@ -266,19 +271,26 @@ impl Sessions {
         self.stop_with(shared, pr, Why::Ended);
     }
 
-    fn stop_with(&self, shared: &Shared, pr: &PrRef, why: Why) {
-        let (stop, dropped) = {
+    /// Stops the running turn and drops the queued one; whether the dropped turn was a summary.
+    fn stop_with(&self, shared: &Shared, pr: &PrRef, why: Why) -> bool {
+        let (stop, dropped, dropped_summary) = {
             let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
             let Some(slot) = table.get_mut(pr) else {
-                return;
+                return false;
             };
             let queued = slot.queued.take();
+            let was_summary = queued.as_ref().is_some_and(|queued| {
+                slot.summarizing
+                    .as_ref()
+                    .is_some_and(|(turn, _)| *turn == queued.turn)
+            });
             if let Some(queued) = &queued {
                 slot.summary_over(queued.turn);
             }
             (
                 slot.running.as_ref().map(|active| active.stop.clone()),
                 queued,
+                was_summary,
             )
         };
         if let Some(queued) = dropped {
@@ -290,6 +302,7 @@ impl Sessions {
         if let Some(stop) = stop {
             stop.fire(why);
         }
+        dropped_summary
     }
 
     /// Ends the session of `pr`: its turn is stopped, its queue dropped and its slot forgotten.
@@ -367,12 +380,13 @@ impl Sessions {
             .map(|check| check.origin)
     }
 
-    /// Whether any turn of `pr`, the chat's or a check's, runs now.
+    /// Whether a summary turn of `pr` runs or waits.
     pub(crate) fn summarizing(&self, pr: &PrRef) -> bool {
         let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
         table.get(pr).is_some_and(|slot| slot.summarizing.is_some())
     }
 
+    /// Whether any turn of `pr`, the chat's or a check's, runs now.
     pub(crate) fn any_running(&self, pr: &PrRef) -> bool {
         let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
         table

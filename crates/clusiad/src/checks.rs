@@ -530,14 +530,13 @@ fn place_of(finding: &Finding) -> String {
 async fn complete(shared: &Arc<Shared>, pr: &PrRef, kind: CheckKind, job: &Job, sink: CheckSink) {
     let text = sink.answer.unwrap_or(sink.streamed);
     let (_prose, mut findings, passes, unreadable) = extract_check_blocks(&text, kind, &job.areas);
-    let known = load_agent_state(&shared.paths, pr).unwrap_or_default();
     let mut seen = HashSet::new();
-    findings.retain(|f| !known.dismissed_findings.contains(&f.id) && seen.insert(f.id.clone()));
+    findings.retain(|f| seen.insert(f.id.clone()));
     for finding in &mut findings {
         finding.anchored = lines_of(finding)
             .is_some_and(|(start, end)| anchor_in_diff(&job.files, &finding.file, start, end));
     }
-    let result = CheckResult {
+    let mut result = CheckResult {
         kind,
         head: job.head.clone(),
         files: u32::try_from(job.files.len()).unwrap_or(u32::MAX),
@@ -550,9 +549,14 @@ async fn complete(shared: &Arc<Shared>, pr: &PrRef, kind: CheckKind, job: &Job, 
         },
         at: now_unix(),
     };
-    // Under the review lock: a review that ended while the run finished has no result to keep.
+    // Under the review lock: a review that ended while the run finished has no result to keep,
+    // and a finding dismissed while the run finished must not come back.
     let kept = {
         let _guard = reviews::lock(shared, pr).await;
+        let known = load_agent_state(&shared.paths, pr).unwrap_or_default();
+        result
+            .findings
+            .retain(|f| !known.dismissed_findings.contains(&f.id));
         let alive =
             job.stop.why() != Why::Ended && matches!(reviews::load_stored(shared, pr), Ok(Some(_)));
         if alive {
@@ -797,9 +801,20 @@ pub(crate) async fn on_open(
         }
     }
     if summarized {
-        shared
-            .checks
-            .with(pr, |entry| entry.awaiting = kinds.clone());
+        // A kind with a run that waits or runs keeps its own state; it does not wait for the
+        // summary. One already waiting for it keeps waiting.
+        kinds.retain(|kind| {
+            shared
+                .checks
+                .with(pr, |entry| entry.run_of(*kind).is_none())
+        });
+        shared.checks.with(pr, |entry| {
+            for kind in &kinds {
+                if !entry.awaiting.contains(kind) {
+                    entry.awaiting.push(*kind);
+                }
+            }
+        });
         for kind in kinds {
             tell_state(shared, pr, kind, CheckState::Waiting);
         }
