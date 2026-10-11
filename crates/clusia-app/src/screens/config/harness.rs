@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, observe};
-use clusia_core::config::OnOpen;
+use clusia_core::checks::AuditArea;
+use clusia_core::config::{Harness, OnOpen};
 use clusia_protocol::ProbeResult;
 
-use super::{ConfigField, field_row, option_card, page_header, row, segment_row, setter};
-use crate::bridge::{Ask, Asks, Model, ProbeState};
+use super::{ConfigField, areas, field_row, option_card, page_header, row, setter};
+use crate::bridge::{Ask, Asks, Model, ProbeState, set_config};
 use crate::fonts::UiFonts;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
@@ -54,6 +55,97 @@ pub struct HarnessView {
     pub sandbox_error: Option<String>,
     pub permission_timeout_error: Option<String>,
     pub probe: ProbeCard,
+    pub open: OpenChecks,
+    pub check_timeout: String,
+    pub check_timeout_error: Option<String>,
+    pub areas: Vec<AuditArea>,
+    pub areas_error: Option<String>,
+    /// The add/edit form, when it is open.
+    pub form: Option<areas::AreaForm>,
+}
+
+/// What the three *When I open a review* checkboxes show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenChecks {
+    pub summarize: bool,
+    pub security: bool,
+    pub audit: bool,
+}
+
+pub fn open_checks(h: &Harness) -> OpenChecks {
+    OpenChecks {
+        summarize: h.on_open == OnOpen::Summarize,
+        security: h.check_security,
+        audit: h.audit,
+    }
+}
+
+/// The note under the checks.
+pub const COST_NOTE: &str = "Each check is one Claude Code turn on your account.";
+
+/// A *When I open a review* checkbox: the key it flips.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct OpenToggle(pub &'static str);
+
+/// Flips a *When I open a review* setting from its value now, not from the value the page
+/// was drawn with, so a change made since then is not written back.
+fn on_open_toggle(
+    activate: On<Activate>,
+    toggles: Query<&OpenToggle>,
+    mut model: ResMut<Model>,
+    mut asks: ResMut<Asks>,
+) {
+    let Ok(OpenToggle(key)) = toggles.get(activate.entity) else {
+        return;
+    };
+    let h = &model.snapshot.config.harness;
+    let value = match *key {
+        "harness.on_open" if h.on_open == OnOpen::Summarize => "wait".to_string(),
+        "harness.on_open" => "summarize".to_string(),
+        "harness.check_security" => (!h.check_security).to_string(),
+        "harness.audit" => (!h.audit).to_string(),
+        _ => return,
+    };
+    set_config(&mut asks, &mut model, key, value);
+}
+
+/// The three checkboxes of *When I open a review*, in a column. Config and the first run
+/// show the same ones.
+pub fn open_checkboxes(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &OpenChecks) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: px(8),
+        ..default()
+    })
+    .with_children(|c| {
+        let choices = [
+            ("Summarize it", "harness.on_open", v.summarize),
+            ("Check security", "harness.check_security", v.security),
+            ("Audit the change", "harness.audit", v.audit),
+        ];
+        for (label, key, on) in choices {
+            c.spawn(Node {
+                column_gap: px(10),
+                align_items: AlignItems::Center,
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn((checkbox(on), OpenToggle(key), observe(on_open_toggle)));
+                r.spawn(text(fonts, label, Type::BODY));
+            });
+        }
+    });
+}
+
+impl HarnessView {
+    /// The same view with the add/edit form, which lives in a resource of its own.
+    pub fn with_form(mut self, form: &areas::AreaForm) -> Self {
+        self.form = form.target.is_some().then(|| form.clone());
+        if let Some(writing) = &form.writing {
+            self.areas = writing.clone();
+        }
+        self
+    }
 }
 
 /// The **Test** / **Test again** button.
@@ -83,6 +175,12 @@ pub fn view(
         sandbox_error: refusal("harness.sandbox"),
         permission_timeout_error: refusal("harness.permission_timeout_secs"),
         probe: probe_card(probe),
+        open: open_checks(h),
+        check_timeout: h.check_timeout_secs.to_string(),
+        check_timeout_error: refusal("harness.check_timeout_secs"),
+        areas: h.audit_areas.clone(),
+        areas_error: refusal(areas::AREAS_KEY),
+        form: None,
     }
 }
 
@@ -222,20 +320,13 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
         "Passed to every session",
         v.args_error.as_deref().map(|m| ("harness.extra_args", m)),
     );
-    segment_row(
+    row(
         p,
         fonts,
         "When I open a review",
-        "harness.on_open",
-        &[
-            ("Summarize it", "summarize"),
-            ("Wait for my first question", "wait"),
-        ],
-        match v.on_open {
-            OnOpen::Summarize => "summarize",
-            OnOpen::Wait => "wait",
-        },
-        "The summary uses your Claude Code usage",
+        |r| open_checkboxes(r, fonts, &v.open),
+        COST_NOTE,
+        None,
     );
     if let Some(message) = &v.on_open_error {
         p.spawn((
@@ -252,6 +343,16 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
         120.0,
         "Seconds, 60 to 3600. A turn that takes longer is stopped",
         &v.timeout_error,
+    );
+    field_row(
+        p,
+        fonts,
+        "Check timeout",
+        "harness.check_timeout_secs",
+        &v.check_timeout,
+        120.0,
+        "Seconds, 60 to 1800. A check that takes longer is stopped",
+        &v.check_timeout_error,
     );
     field_row(
         p,
@@ -337,6 +438,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
             ));
         }
     });
+    areas::build(p, fonts, &v.areas, &v.areas_error, &v.form);
 }
 
 /// What turning the sandbox off lets an allowed command do.
@@ -545,5 +647,155 @@ mod tests {
             seconds: "1.8".into(),
         };
         assert_eq!(program_hint(&v), "Found at /usr/local/bin/claude");
+    }
+
+    fn harness_app() -> App {
+        let mut app = crate::testing::app(crate::fixture::demo(crate::testing::NOW));
+        app.world_mut()
+            .resource_mut::<crate::nav::Nav>()
+            .go(&clusia_protocol::WindowTarget::Config);
+        app.world_mut()
+            .resource_mut::<crate::nav::Nav>()
+            .open_section(crate::nav::Section::Harness);
+        crate::testing::settle(&mut app);
+        app
+    }
+
+    #[test]
+    fn the_view_reads_the_review_checks() {
+        let v = view(&Snapshot::default(), &HashMap::new(), &ProbeState::Idle);
+        assert_eq!(
+            v.open,
+            OpenChecks {
+                summarize: true,
+                security: true,
+                audit: true
+            }
+        );
+        assert_eq!(v.check_timeout, "600");
+        assert_eq!(v.areas.len(), 6);
+        assert_eq!((v.areas_error, v.form), (None, None));
+
+        let mut snap = Snapshot::default();
+        snap.config.harness.on_open = OnOpen::Wait;
+        snap.config.harness.check_security = false;
+        snap.config.harness.audit = false;
+        snap.config.harness.check_timeout_secs = 900;
+        let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
+        assert_eq!(
+            v.open,
+            OpenChecks {
+                summarize: false,
+                security: false,
+                audit: false
+            }
+        );
+        assert_eq!(v.check_timeout, "900");
+    }
+
+    #[test]
+    fn the_timeout_refusal_belongs_to_its_row() {
+        let rejected: HashMap<String, String> = [(
+            "harness.check_timeout_secs".to_string(),
+            "harness.check_timeout_secs must be between 60 and 1800, got 5".to_string(),
+        )]
+        .into();
+        let v = view(&Snapshot::default(), &rejected, &ProbeState::Idle);
+        assert!(
+            v.check_timeout_error
+                .unwrap()
+                .contains("between 60 and 1800")
+        );
+    }
+
+    #[test]
+    fn the_three_checkboxes_write_their_keys() {
+        let mut app = harness_app();
+        for needle in [
+            "When I open a review",
+            "Summarize it",
+            "Check security",
+            "Audit the change",
+            COST_NOTE,
+            "Check timeout",
+        ] {
+            assert!(crate::testing::shows(&mut app, needle), "{needle}");
+        }
+        assert!(!crate::testing::shows(
+            &mut app,
+            "Wait for my first question"
+        ));
+        for (key, value) in [
+            ("harness.on_open", "wait"),
+            ("harness.check_security", "false"),
+            ("harness.audit", "false"),
+        ] {
+            let e = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == key);
+            crate::testing::activate(&mut app, e);
+            assert_eq!(
+                crate::testing::recorded(&mut app),
+                [Ask::SetConfig {
+                    key: key.into(),
+                    value: value.into()
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn a_checkbox_that_is_off_turns_the_key_back_on() {
+        let mut app = harness_app();
+        crate::testing::set_config_locally(&mut app, "harness.audit", "false");
+        crate::testing::set_config_locally(&mut app, "harness.on_open", "wait");
+        crate::testing::settle(&mut app);
+        let audit = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.audit");
+        crate::testing::activate(&mut app, audit);
+        let summarize = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.on_open");
+        crate::testing::activate(&mut app, summarize);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [
+                Ask::SetConfig {
+                    key: "harness.audit".into(),
+                    value: "true".into()
+                },
+                Ask::SetConfig {
+                    key: "harness.on_open".into(),
+                    value: "summarize".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_checkbox_reads_the_setting_when_it_is_clicked() {
+        let mut app = harness_app();
+        let security =
+            crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.check_security");
+        // Changed elsewhere after the page was drawn, before it is drawn again.
+        app.world_mut()
+            .resource_mut::<crate::bridge::Model>()
+            .snapshot
+            .config
+            .harness
+            .check_security = false;
+        crate::testing::activate(&mut app, security);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.check_security".into(),
+                value: "true".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_check_timeout_is_a_field() {
+        use crate::screens::config::ConfigField;
+        use crate::ui::kit::Field;
+        let mut app = harness_app();
+        let e =
+            crate::testing::find::<ConfigField>(&mut app, |f| f.0 == "harness.check_timeout_secs");
+        assert_eq!(app.world().get::<Field>(e).unwrap().committed, "600");
     }
 }

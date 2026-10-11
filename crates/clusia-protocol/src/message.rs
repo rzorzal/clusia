@@ -2,9 +2,9 @@
 
 pub use clusia_core::OpenTarget;
 use clusia_core::{
-    ActivitySummary, ChecksSummary, Config, DraftItem, DraftKind, EventKind, FileDiff, MediaKind,
-    PrConversation, PrDetail, PrFilter, PrRef, PrSummary, Review, ReviewState, Role, Side,
-    ThreadRef, Verdict,
+    ActivitySummary, CheckKind, CheckResult, ChecksSummary, Config, DraftItem, DraftKind,
+    EventKind, FileDiff, Finding, MediaKind, Pass, PrConversation, PrDetail, PrFilter, PrRef,
+    PrSummary, Review, ReviewState, Role, Side, ThreadRef, Verdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -264,6 +264,32 @@ pub enum Command {
         pr: PrRef,
         held: bool,
     },
+    /// Run the security check or the audit of this review now, or again.
+    RunCheck {
+        pr: PrRef,
+        kind: CheckKind,
+    },
+    /// Stop that check if it runs or waits.
+    StopCheck {
+        pr: PrRef,
+        kind: CheckKind,
+    },
+    /// The results and the state of both checks of this review.
+    GetChecks {
+        pr: PrRef,
+    },
+    /// Turn a finding into a draft item, with `body` instead of the proposed comment when set.
+    AcceptFinding {
+        pr: PrRef,
+        id: String,
+        #[serde(default)]
+        body: Option<String>,
+    },
+    /// Never show this finding again for this review.
+    DismissFinding {
+        pr: PrRef,
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -318,6 +344,14 @@ pub enum Reply {
     Rules(Vec<String>),
     /// The waiting requests of `GetPermissions`, oldest first.
     Permissions(Vec<PermissionRequest>),
+    /// What `GetChecks` knows. The results are whole: the finding ids in `dismissed` are still
+    /// in them, and `accepted` says which already joined the draft.
+    Checks {
+        results: Vec<CheckResult>,
+        states: Vec<CheckStatus>,
+        accepted: Vec<String>,
+        dismissed: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,6 +625,9 @@ pub enum Event {
         /// An excerpt of what the tool would do (for an edit, the old and the new text), at
         /// most 2000 characters.
         detail: Option<String>,
+        /// Who asked: the chat, or one of the checks.
+        #[serde(default, skip_serializing_if = "TurnOrigin::is_chat")]
+        origin: TurnOrigin,
     },
     /// A request ended, whoever or whatever ended it, or a rule or the worktree check decided
     /// it without asking (topic `agent`).
@@ -601,11 +638,44 @@ pub enum Event {
         /// The command or the path, as in `PermissionRequested`.
         summary: String,
         outcome: PermissionOutcome,
+        /// Who asked, as in `PermissionRequested`.
+        #[serde(default, skip_serializing_if = "TurnOrigin::is_chat")]
+        origin: TurnOrigin,
     },
     /// The review's rules changed (topic `agent`).
     RulesChanged {
         pr: PrRef,
         rules: Vec<String>,
+    },
+    /// A check changed state (topic `agent`).
+    CheckState {
+        pr: PrRef,
+        kind: CheckKind,
+        state: CheckState,
+    },
+    /// A running check found a problem (topic `agent`).
+    CheckFinding {
+        pr: PrRef,
+        kind: CheckKind,
+        finding: Finding,
+    },
+    /// A running check reported something that is fine (topic `agent`).
+    CheckPass {
+        pr: PrRef,
+        kind: CheckKind,
+        pass: Pass,
+    },
+    /// A check finished; `result` is what it keeps (topic `agent`).
+    CheckDone {
+        pr: PrRef,
+        kind: CheckKind,
+        result: CheckResult,
+    },
+    /// A finding was accepted into the draft or dismissed, from any window (topic `agent`).
+    FindingSettled {
+        pr: PrRef,
+        id: String,
+        accepted: bool,
     },
 }
 
@@ -925,6 +995,14 @@ pub enum AgentLogEntry {
         summary: String,
         outcome: PermissionOutcome,
     },
+    /// A check changed state: `waiting`, `running`, `done`, `failed` or `stopped`. Not part of
+    /// the chat: `GetAgentLog` leaves these out.
+    Check {
+        at: i64,
+        turn: u64,
+        kind: CheckKind,
+        state: String,
+    },
 }
 
 /// A permission request waiting for the reviewer: the fields of `Event::PermissionRequested`.
@@ -941,6 +1019,59 @@ pub struct PermissionRequest {
     /// Unix milliseconds.
     pub deadline: i64,
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "TurnOrigin::is_chat")]
+    pub origin: TurnOrigin,
+}
+
+/// Who runs a turn of the agent: the review chat, or one of the two checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOrigin {
+    #[default]
+    Chat,
+    Security,
+    Audit,
+}
+
+impl TurnOrigin {
+    pub fn is_chat(&self) -> bool {
+        *self == TurnOrigin::Chat
+    }
+}
+
+impl From<CheckKind> for TurnOrigin {
+    fn from(kind: CheckKind) -> Self {
+        match kind {
+            CheckKind::Security => TurnOrigin::Security,
+            CheckKind::Audit => TurnOrigin::Audit,
+        }
+    }
+}
+
+/// Where one check of a review stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    /// It has not run for this review, or it was stopped.
+    NotRun,
+    /// It waits for one of the places of the daemon.
+    Waiting,
+    /// It runs; `activity` is the last thing the agent did, such as `Reading src/a.rs`.
+    Running {
+        activity: Option<String>,
+    },
+    Done,
+    Failed {
+        message: String,
+    },
+    /// Its result is for an older commit than the review's head.
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckStatus {
+    pub kind: CheckKind,
+    pub state: CheckState,
 }
 
 /// What the reviewer chose.
@@ -2608,6 +2739,7 @@ mod tests {
                 sandbox: false,
                 deadline: 5,
                 detail: Some("a\n→\nb".into()),
+                origin: TurnOrigin::Chat,
             }])),
             r#"{"type":"response","id":4,"result":{"ok":{"permissions":[{"id":"perm-1","pr":"acme/widgets#7","turn":3,"tool":"Edit","summary":"src/lib.rs","reason":null,"prefix":"Edit","sandbox":false,"deadline":5,"detail":"a\n→\nb"}]}}}"#
         );
@@ -2633,6 +2765,7 @@ mod tests {
                 sandbox: true,
                 deadline: 1_760_000_120_000,
                 detail: None,
+                origin: TurnOrigin::Chat,
             }),
             r#"{"type":"event","topic":"agent","event":{"permission_requested":{"id":"perm-1","pr":"acme/widgets#7","turn":3,"tool":"Bash","summary":"cargo test -p clusia-core","reason":"To check the expiry test.","prefix":"cargo test","sandbox":true,"deadline":1760000120000,"detail":null}}}"#
         );
@@ -2643,6 +2776,7 @@ mod tests {
                 tool: "Bash".into(),
                 summary: "cargo test".into(),
                 outcome: PermissionOutcome::AllowedForReview,
+                origin: TurnOrigin::Chat,
             }),
             r#"{"type":"event","topic":"agent","event":{"permission_resolved":{"id":"perm-1","pr":"acme/widgets#7","tool":"Bash","summary":"cargo test","outcome":"allowed_for_review"}}}"#
         );
@@ -2653,6 +2787,266 @@ mod tests {
             }),
             r#"{"type":"event","topic":"agent","event":{"rules_changed":{"pr":"acme/widgets#7","rules":["Bash(cargo test:*)"]}}}"#
         );
+    }
+
+    fn finding() -> Finding {
+        Finding {
+            id: "0123456789abcdef".into(),
+            kind: CheckKind::Security,
+            area: "security".into(),
+            severity: Some(clusia_core::Severity::High),
+            title: "Token written to the log".into(),
+            file: "src/auth/store.rs".into(),
+            line: Some(52),
+            start_line: None,
+            end_line: None,
+            body: "The token is logged.".into(),
+            comment: "Do not log the token.".into(),
+            code: None,
+            anchored: true,
+        }
+    }
+
+    fn check_result() -> CheckResult {
+        CheckResult {
+            kind: CheckKind::Security,
+            head: "a".repeat(40),
+            files: 7,
+            findings: vec![finding()],
+            passes: vec![Pass {
+                area: "security".into(),
+                text: "Inputs are escaped.".into(),
+                place: Some("src/a.rs".into()),
+            }],
+            unreadable: 0,
+            areas: Vec::new(),
+            at: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn check_commands_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        assert_eq!(
+            request(Command::RunCheck {
+                pr: acme(),
+                kind: CheckKind::Security,
+            }),
+            r#"{"type":"request","id":5,"cmd":{"run_check":{"pr":"acme/widgets#7","kind":"security"}}}"#
+        );
+        assert_eq!(
+            request(Command::StopCheck {
+                pr: acme(),
+                kind: CheckKind::Audit,
+            }),
+            r#"{"type":"request","id":5,"cmd":{"stop_check":{"pr":"acme/widgets#7","kind":"audit"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetChecks { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"get_checks":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::AcceptFinding {
+                pr: acme(),
+                id: "0123456789abcdef".into(),
+                body: Some("Edited.".into()),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"accept_finding":{"pr":"acme/widgets#7","id":"0123456789abcdef","body":"Edited."}}}"#
+        );
+        assert_eq!(
+            request(Command::DismissFinding {
+                pr: acme(),
+                id: "0123456789abcdef".into(),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"dismiss_finding":{"pr":"acme/widgets#7","id":"0123456789abcdef"}}}"#
+        );
+        let bare: ClientMessage = serde_json::from_str(
+            r#"{"type":"request","id":5,"cmd":{"accept_finding":{"pr":"acme/widgets#7","id":"x"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            bare,
+            ClientMessage::Request {
+                id: 5,
+                cmd: Command::AcceptFinding {
+                    pr: acme(),
+                    id: "x".into(),
+                    body: None
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn check_replies_and_events_wire_format() {
+        let reply = |reply| {
+            wire(&ServerMessage::Response {
+                id: 5,
+                result: Outcome::Ok(reply),
+            })
+        };
+        assert_eq!(
+            reply(Reply::Checks {
+                results: Vec::new(),
+                states: vec![
+                    CheckStatus {
+                        kind: CheckKind::Security,
+                        state: CheckState::Running {
+                            activity: Some("Reading src/a.rs".into()),
+                        },
+                    },
+                    CheckStatus {
+                        kind: CheckKind::Audit,
+                        state: CheckState::Failed {
+                            message: "ran past its limit".into(),
+                        },
+                    },
+                ],
+                accepted: vec!["a1".into()],
+                dismissed: Vec::new(),
+            }),
+            r#"{"type":"response","id":5,"result":{"ok":{"checks":{"results":[],"states":[{"kind":"security","state":{"running":{"activity":"Reading src/a.rs"}}},{"kind":"audit","state":{"failed":{"message":"ran past its limit"}}}],"accepted":["a1"],"dismissed":[]}}}}"#
+        );
+        for (state, text) in [
+            (CheckState::NotRun, r#""not_run""#),
+            (CheckState::Waiting, r#""waiting""#),
+            (CheckState::Done, r#""done""#),
+            (CheckState::Stale, r#""stale""#),
+        ] {
+            assert_eq!(wire(&state), text);
+        }
+        let event = |event| {
+            wire(&ServerMessage::Event {
+                topic: topics::AGENT.into(),
+                event,
+            })
+        };
+        assert_eq!(
+            event(Event::CheckState {
+                pr: acme(),
+                kind: CheckKind::Audit,
+                state: CheckState::Waiting,
+            }),
+            r#"{"type":"event","topic":"agent","event":{"check_state":{"pr":"acme/widgets#7","kind":"audit","state":"waiting"}}}"#
+        );
+        assert_eq!(
+            event(Event::FindingSettled {
+                pr: acme(),
+                id: "a1".into(),
+                accepted: true,
+            }),
+            r#"{"type":"event","topic":"agent","event":{"finding_settled":{"pr":"acme/widgets#7","id":"a1","accepted":true}}}"#
+        );
+        assert_eq!(
+            event(Event::CheckPass {
+                pr: acme(),
+                kind: CheckKind::Audit,
+                pass: Pass {
+                    area: "tests".into(),
+                    text: "Covered.".into(),
+                    place: None,
+                },
+            }),
+            r#"{"type":"event","topic":"agent","event":{"check_pass":{"pr":"acme/widgets#7","kind":"audit","pass":{"area":"tests","text":"Covered.","where":null}}}}"#
+        );
+    }
+
+    #[test]
+    fn check_events_with_findings_round_trip() {
+        round_trip(Event::CheckFinding {
+            pr: acme(),
+            kind: CheckKind::Security,
+            finding: finding(),
+        });
+        round_trip(Event::CheckDone {
+            pr: acme(),
+            kind: CheckKind::Security,
+            result: check_result(),
+        });
+        round_trip(Reply::Checks {
+            results: vec![check_result()],
+            states: Vec::new(),
+            accepted: Vec::new(),
+            dismissed: vec!["0123456789abcdef".into()],
+        });
+    }
+
+    #[test]
+    fn a_permission_request_names_who_asked() {
+        let request = |origin| Event::PermissionRequested {
+            id: "perm-1".into(),
+            pr: acme(),
+            turn: 4,
+            tool: "Bash".into(),
+            summary: "cargo test".into(),
+            reason: None,
+            prefix: None,
+            sandbox: true,
+            deadline: 5,
+            detail: None,
+            origin,
+        };
+        let chat = serde_json::to_string(&request(TurnOrigin::Chat)).unwrap();
+        assert!(
+            !chat.contains("origin"),
+            "a chat request reads as before: {chat}"
+        );
+        let security = serde_json::to_string(&request(TurnOrigin::Security)).unwrap();
+        assert!(security.ends_with(r#""origin":"security"}}"#), "{security}");
+        for origin in [TurnOrigin::Chat, TurnOrigin::Security, TurnOrigin::Audit] {
+            round_trip(request(origin));
+        }
+        assert_eq!(TurnOrigin::default(), TurnOrigin::Chat);
+        assert_eq!(TurnOrigin::from(CheckKind::Audit), TurnOrigin::Audit);
+    }
+
+    #[test]
+    fn a_resolved_request_names_who_asked_unless_it_was_the_chat() {
+        let resolved = |origin| Event::PermissionResolved {
+            id: "perm-1".into(),
+            pr: acme(),
+            tool: "Bash".into(),
+            summary: "cargo test".into(),
+            outcome: PermissionOutcome::Cancelled,
+            origin,
+        };
+        let chat = serde_json::to_string(&resolved(TurnOrigin::Chat)).unwrap();
+        assert!(!chat.contains("origin"), "{chat}");
+        let audit = serde_json::to_string(&resolved(TurnOrigin::Audit)).unwrap();
+        assert!(audit.ends_with(r#""origin":"audit"}}"#), "{audit}");
+        for origin in [TurnOrigin::Chat, TurnOrigin::Security, TurnOrigin::Audit] {
+            round_trip(resolved(origin));
+        }
+        let old: Event = serde_json::from_str(
+            r#"{"permission_resolved":{"id":"p","pr":"acme/widgets#7","tool":"Bash","summary":"ls","outcome":"allowed"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old,
+            Event::PermissionResolved {
+                id: "p".into(),
+                pr: acme(),
+                tool: "Bash".into(),
+                summary: "ls".into(),
+                outcome: PermissionOutcome::Allowed,
+                origin: TurnOrigin::Chat,
+            }
+        );
+    }
+
+    #[test]
+    fn a_check_log_line_wire_format() {
+        let entry = AgentLogEntry::Check {
+            at: 10,
+            turn: 5,
+            kind: CheckKind::Security,
+            state: "running".into(),
+        };
+        assert_eq!(
+            wire(&entry),
+            r#"{"type":"check","at":10,"turn":5,"kind":"security","state":"running"}"#
+        );
+        round_trip(entry);
     }
 
     #[test]
@@ -2726,6 +3120,7 @@ mod tests {
                 sandbox: false,
                 deadline: 5,
                 detail: Some("x".into()),
+                origin: TurnOrigin::Chat,
             },
             Event::PermissionResolved {
                 id: "p".into(),
@@ -2733,6 +3128,7 @@ mod tests {
                 tool: "Edit".into(),
                 summary: "src/lib.rs".into(),
                 outcome: PermissionOutcome::Cancelled,
+                origin: TurnOrigin::Chat,
             },
             Event::RulesChanged {
                 pr: acme(),

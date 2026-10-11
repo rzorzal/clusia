@@ -1,4 +1,5 @@
 mod agent;
+mod check;
 mod cli;
 mod install;
 mod review;

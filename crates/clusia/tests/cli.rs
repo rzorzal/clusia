@@ -412,7 +412,7 @@ fn too_long_home_fails_before_running() {
 
 mod review_flow {
     use super::*;
-    use clusia_harness::testkit::{FakeClaude, Script, Turn};
+    use clusia_harness::testkit::{FakeClaude, Script, Turn, finding_block, pass_block};
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
@@ -748,6 +748,8 @@ mod review_flow {
             for (key, value) in [
                 ("repositories.roots", format!("[\"{}\"]", roots.display())),
                 ("harness.on_open", "wait".to_string()),
+                ("harness.check_security", "false".to_string()),
+                ("harness.audit", "false".to_string()),
                 ("harness.program", fake.display().to_string()),
             ] {
                 let o = world.run(&["config", "set", key, &value]);
@@ -898,6 +900,173 @@ mod review_flow {
         assert_eq!(asked.status.code(), Some(130), "{said}");
         assert!(said.contains("nothing was asked"), "{said}");
         assert!(FakeClaude::calls(&w.fake_dir()).is_empty());
+    }
+
+    /// What the fake `claude` answers to a check: two Security findings (the second with a
+    /// control character in its title), one Audit finding and one pass. Each run keeps the blocks
+    /// of its own kind and counts the others as unreadable.
+    fn check_answer() -> Turn {
+        Turn::answer_blocks(
+            "Found.",
+            &[
+                finding_block(json!({
+                    "area": "security", "severity": "high", "title": "Token in the log",
+                    "file": "feature.txt", "line": 2, "body": "b"
+                })),
+                finding_block(json!({
+                    "area": "security", "severity": "low", "title": "Bad\u{1b}[2K title",
+                    "file": "feature.txt", "line": 3, "body": "b"
+                })),
+                finding_block(json!({
+                    "area": "correctness", "title": "Off by one",
+                    "file": "feature.txt", "line": 3, "body": "b"
+                })),
+                pass_block(json!({
+                    "area": "concurrency", "text": "No shared state",
+                    "where": "checked 2 call sites"
+                })),
+            ],
+        )
+    }
+
+    fn has_line(text: &str, line: &str) -> bool {
+        text.lines().any(|l| l == line)
+    }
+
+    #[test]
+    fn findings_are_printed_filtered() {
+        let w = AgentWorld::new(Script::one(check_answer()));
+        let o = w.run(&["check", "acme/widgets#7"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = stdout(&o);
+        assert!(has_line(&out, "Security"), "{out}");
+        assert!(
+            has_line(&out, "HIGH  feature.txt:2  Token in the log"),
+            "{out}"
+        );
+        assert!(
+            has_line(&out, "LOW  feature.txt:3  Bad\\u{1b}[2K title"),
+            "a control character is shown as an escape: {out}"
+        );
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(has_line(&out, "Audit · Correctness"), "{out}");
+        assert!(has_line(&out, "feature.txt:3  Off by one"), "{out}");
+        assert!(has_line(&out, "Audit · Concurrency"), "{out}");
+        assert!(has_line(&out, "No findings in this area."), "{out}");
+        assert!(
+            has_line(&out, "ok  No shared state  (checked 2 call sites)"),
+            "{out}"
+        );
+        assert_eq!(
+            out.lines().filter(|l| *l == "Not checked").count(),
+            4,
+            "an area the agent wrote nothing about is never ok: {out}"
+        );
+        let progress = stderr(&o);
+        assert!(progress.contains("Security: done"), "{progress}");
+        assert!(progress.contains("Audit: done"), "{progress}");
+
+        let calls = FakeClaude::calls(&w.fake_dir());
+        assert_eq!(calls.len(), 2, "one process for each kind");
+        assert!(
+            calls
+                .iter()
+                .all(|c| c.argv.iter().any(|a| a == "--session-id")),
+            "a review with no chat has no session to fork"
+        );
+    }
+
+    #[test]
+    fn check_with_a_flag_runs_only_that_kind() {
+        let w = AgentWorld::new(Script::one(check_answer()));
+        let o = w.run(&["check", "acme/widgets#7", "--security"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = stdout(&o);
+        assert!(
+            has_line(&out, "HIGH  feature.txt:2  Token in the log"),
+            "{out}"
+        );
+        assert!(!out.contains("Audit"), "{out}");
+        assert_eq!(FakeClaude::calls(&w.fake_dir()).len(), 1);
+    }
+
+    #[test]
+    fn check_json_prints_the_results_once() {
+        let w = AgentWorld::new(Script::one(check_answer()));
+        let o = w.run(&["--json", "check", "acme/widgets#7", "--audit"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let value: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("one JSON value");
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["kind"], "audit");
+        assert_eq!(results[0]["findings"][0]["title"], "Off by one");
+        assert_eq!(value["dismissed"], json!([]));
+        assert_eq!(value["accepted"], json!([]));
+        assert!(
+            stderr(&o).is_empty(),
+            "no progress with --json: {}",
+            stderr(&o)
+        );
+    }
+
+    #[test]
+    fn a_failed_check_exits_1_and_says_so() {
+        let w = AgentWorld::new(Script::one(Turn::lines(&[]).exit(1)));
+        let o = w.run(&["check", "acme/widgets#7", "--security"]);
+        assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+        assert!(
+            stderr(&o).contains("Security check failed"),
+            "{}",
+            stderr(&o)
+        );
+    }
+
+    #[test]
+    fn check_refuses_both_flags_and_a_bad_pull_request_before_the_daemon() {
+        let h = Home::new();
+        let both = h.clusia(&["check", "acme/widgets#7", "--security", "--audit"]);
+        assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
+        let bad = h.clusia(&["check", "nocolon"]);
+        assert_eq!(bad.status.code(), Some(1), "{}", stderr(&bad));
+        assert_eq!(
+            h.clusia(&["daemon", "status"]).status.code(),
+            Some(3),
+            "no daemon was started"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_on_check_stops_the_checks_it_started() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        let checking = w.spawn(&["check", "acme/widgets#7", "--security"]);
+        let start = std::time::Instant::now();
+        let call = loop {
+            if let Some(call) = FakeClaude::calls(&w.fake_dir()).into_iter().next() {
+                break call;
+            }
+            assert!(
+                start.elapsed().as_secs() < 30,
+                "the fake claude never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        // SAFETY: signals a child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(checking.id() as i32, libc::SIGINT) }, 0);
+        let checked = checking.wait_with_output().unwrap();
+        assert_eq!(checked.status.code(), Some(130), "{}", stderr(&checked));
+        assert!(
+            stderr(&checked).contains("Stopped the checks"),
+            "{}",
+            stderr(&checked)
+        );
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while FakeClaude::is_running(call.pid) {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "the check's process outlived the command"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     #[test]
@@ -1124,6 +1293,7 @@ mod review_flow {
                             sandbox: true,
                             deadline: 0,
                             detail: None,
+                            origin: clusia_protocol::TurnOrigin::Chat,
                         })],
                     ),
                     Request::PermissionAnswer { id: asked, answer } => {
@@ -1137,6 +1307,7 @@ mod review_flow {
                             Reply::Ack,
                             vec![
                                 event(Event::PermissionResolved {
+                                    origin: clusia_protocol::TurnOrigin::Chat,
                                     id: asked,
                                     pr: pr.clone(),
                                     tool: "Bash".into(),
@@ -1514,4 +1685,273 @@ fn uninstall_removes_the_bundle_the_agent_and_the_link_in_the_given_folders() {
     assert!(!agent.exists());
     assert!(bin.join("clusia").symlink_metadata().is_err());
     assert!(bin.join("other").exists(), "nothing else is touched");
+}
+
+/// `clusia check` against a daemon whose every answer the test writes.
+mod check_against_a_scripted_daemon {
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use clusia_core::checks::{CheckKind, CheckResult, Finding};
+    use clusia_protocol::{
+        CheckState, CheckStatus, ClientMessage, Command as Request, Event, MessageReader, Outcome,
+        PROTOCOL_VERSION, Reply, ServerMessage, write_message,
+    };
+    use tokio::sync::mpsc::UnboundedSender;
+
+    type Say = UnboundedSender<ServerMessage>;
+
+    fn pr() -> clusia_core::PrRef {
+        "acme/widgets#7".parse().unwrap()
+    }
+
+    fn state(kind: CheckKind, state: CheckState) -> ServerMessage {
+        ServerMessage::Event {
+            topic: "agent".into(),
+            event: Event::CheckState {
+                pr: pr(),
+                kind,
+                state,
+            },
+        }
+    }
+
+    fn result(title: &str, at: i64) -> CheckResult {
+        CheckResult {
+            kind: CheckKind::Security,
+            head: "h".into(),
+            files: 1,
+            findings: vec![Finding {
+                id: format!("id-{title}"),
+                kind: CheckKind::Security,
+                area: "security".into(),
+                severity: Some(clusia_core::checks::Severity::High),
+                title: title.into(),
+                file: "feature.txt".into(),
+                line: Some(2),
+                start_line: None,
+                end_line: None,
+                body: "b".into(),
+                comment: "c".into(),
+                code: None,
+                anchored: true,
+            }],
+            passes: Vec::new(),
+            unreadable: 0,
+            areas: Vec::new(),
+            at,
+        }
+    }
+
+    fn checks(results: Vec<CheckResult>, now: CheckState) -> Option<Reply> {
+        Some(Reply::Checks {
+            results,
+            states: vec![CheckStatus {
+                kind: CheckKind::Security,
+                state: now,
+            }],
+            accepted: Vec::new(),
+            dismissed: Vec::new(),
+        })
+    }
+
+    /// Serves one client on `socket`: each request gets what `answer` returns, or no answer at
+    /// all for `None`. `answer` may send events, now or later, through the `Say` it is given.
+    fn daemon(
+        rt: &tokio::runtime::Runtime,
+        socket: &Path,
+        mut answer: impl FnMut(&Request, &Say) -> Option<Reply> + Send + 'static,
+    ) {
+        let listener = {
+            let _guard = rt.enter();
+            tokio::net::UnixListener::bind(socket).unwrap()
+        };
+        rt.spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (read, mut write) = stream.into_split();
+            let mut read = MessageReader::new(read);
+            let Ok(Some(ClientMessage::Hello { .. })) = read.next::<ClientMessage>().await else {
+                return;
+            };
+            let (say, mut said) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
+            tokio::spawn(async move {
+                while let Some(message) = said.recv().await {
+                    if write_message(&mut write, &message).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            let _ = say.send(ServerMessage::Welcome {
+                protocol: PROTOCOL_VERSION,
+                daemon: "9.9.9".into(),
+            });
+            while let Ok(Some(ClientMessage::Request { id, cmd })) =
+                read.next::<ClientMessage>().await
+            {
+                if let Some(reply) = answer(&cmd, &say) {
+                    let _ = say.send(ServerMessage::Response {
+                        id,
+                        result: Outcome::Ok(reply),
+                    });
+                }
+            }
+        });
+    }
+
+    fn check(home: &Path) -> std::process::Child {
+        std::process::Command::new(env!("CARGO_BIN_EXE_clusia"))
+            .arg("--home")
+            .arg(home)
+            .args(["check", "acme/widgets#7", "--security"])
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    /// Waits up to `limit` for `child`; kills it and returns `None` when it is still running.
+    fn ended_within(child: &mut std::process::Child, limit: Duration) -> Option<i32> {
+        let give_up = Instant::now() + limit;
+        while Instant::now() < give_up {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status.code();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        None
+    }
+
+    fn stderr_of(child: &mut std::process::Child) -> String {
+        use std::io::Read;
+        let mut text = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        text
+    }
+
+    fn stdout_of(child: &mut std::process::Child) -> String {
+        use std::io::Read;
+        let mut text = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        text
+    }
+
+    #[test]
+    fn check_reports_the_run_it_started_not_an_older_ending() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        daemon(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, say| match cmd {
+                Request::GetChecks { .. } if done.load(Ordering::SeqCst) => {
+                    checks(vec![result("New finding", 1)], CheckState::Done)
+                }
+                Request::GetChecks { .. } => {
+                    checks(vec![result("Old finding", 1)], CheckState::Done)
+                }
+                Request::RunCheck { kind, .. } => {
+                    // What the open told about the old result arrives before the new run.
+                    let _ = say.send(state(*kind, CheckState::Stale));
+                    let (say, done, kind) = (say.clone(), done.clone(), *kind);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let _ = say.send(state(kind, CheckState::Waiting));
+                        let _ = say.send(state(kind, CheckState::Running { activity: None }));
+                        done.store(true, Ordering::SeqCst);
+                        let _ = say.send(state(kind, CheckState::Done));
+                    });
+                    Some(Reply::Ack)
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = check(dir.path());
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{err}");
+        assert!(out.contains("New finding"), "{out}");
+        assert!(!out.contains("Old finding"), "{out}");
+    }
+
+    /// A daemon that runs the Security check and never answers its Stop.
+    fn deaf_to_stop(rt: &tokio::runtime::Runtime, home: &Path) -> std::sync::mpsc::Receiver<()> {
+        let (running, is_running) = std::sync::mpsc::channel();
+        daemon(
+            rt,
+            &clusia_core::Paths::new(home).socket(),
+            move |cmd, say| match cmd {
+                Request::GetChecks { .. } => checks(Vec::new(), CheckState::NotRun),
+                Request::RunCheck { kind, .. } => {
+                    let _ = say.send(state(*kind, CheckState::Waiting));
+                    let _ = say.send(state(*kind, CheckState::Running { activity: None }));
+                    let _ = running.send(());
+                    Some(Reply::Ack)
+                }
+                Request::StopCheck { .. } => None,
+                _ => Some(Reply::Ack),
+            },
+        );
+        is_running
+    }
+
+    fn interrupt(child: &std::process::Child) {
+        // SAFETY: signals a child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    }
+
+    #[test]
+    fn a_second_ctrl_c_ends_check_while_the_daemon_does_not_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let running = deaf_to_stop(&rt, dir.path());
+        let mut child = check(dir.path());
+        running.recv_timeout(Duration::from_secs(30)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        interrupt(&child);
+        std::thread::sleep(Duration::from_millis(500));
+        interrupt(&child);
+        let code = ended_within(&mut child, Duration::from_secs(3));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(130), "{err}");
+        assert!(
+            err.contains(
+                "The daemon did not answer; the checks may still run (Stop in the window)."
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_stop_the_daemon_does_not_answer_gives_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let running = deaf_to_stop(&rt, dir.path());
+        let mut child = check(dir.path());
+        running.recv_timeout(Duration::from_secs(30)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        interrupt(&child);
+        let code = ended_within(&mut child, Duration::from_secs(12));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(130), "{err}");
+        assert!(err.contains("The daemon did not answer"), "{err}");
+    }
 }

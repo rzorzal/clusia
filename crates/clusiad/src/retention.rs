@@ -60,6 +60,7 @@ pub(crate) async fn sweep(shared: &Shared) -> usize {
     let cutoff = now_unix() - days * 86_400;
     let removed = sweep_worktrees(shared, cutoff).await;
     sweep_caches(shared, cutoff).await;
+    sweep_checks(shared, cutoff).await;
     removed
 }
 
@@ -85,6 +86,30 @@ async fn sweep_caches(shared: &Shared, cutoff: i64) {
         }
         if !shared.paths.review_file(&pr).exists() {
             crate::reviews::drop_cache(shared, &pr);
+        }
+    }
+}
+
+/// Removes the stored check results of pull requests with no review file that are older than
+/// `cutoff`; the same rule as the cached copies.
+async fn sweep_checks(shared: &Shared, cutoff: i64) {
+    let Ok(mut entries) = tokio::fs::read_dir(shared.paths.checks_dir()).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pr) = name.strip_suffix(".json").and_then(PrRef::from_file_key) else {
+            continue;
+        };
+        if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
+            continue;
+        }
+        let _guard = lock(shared, &pr).await;
+        if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
+            continue;
+        }
+        if !shared.paths.review_file(&pr).exists() {
+            crate::checks::drop_results(shared, &pr);
         }
     }
 }
@@ -338,6 +363,31 @@ mod tests {
         };
         tokio::join!(sweep_caches(&shared, cutoff), open);
         assert!(cache.exists());
+    }
+
+    fn checks_for(shared: &Shared, n: u64, days_old: u64) -> PathBuf {
+        let pr: PrRef = format!("acme/widgets#{n}").parse().unwrap();
+        let file = shared.paths.checks_file(&pr);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"[]").unwrap();
+        age(&file, days_old);
+        file
+    }
+
+    #[tokio::test]
+    async fn sweep_drops_old_check_results_that_have_no_review_and_keeps_the_rest() {
+        let (_dir, shared) = shared();
+        let old = checks_for(&shared, 1, 100);
+        let fresh = checks_for(&shared, 2, 1);
+        old_review(&shared, 3, ReviewState::Saved);
+        let kept = checks_for(&shared, 3, 100);
+        let touched = checks_for(&shared, 4, 100);
+        shared.touch(&"acme/widgets#4".parse().unwrap());
+        sweep(&shared).await;
+        assert!(!old.exists(), "no review, older than the retention");
+        assert!(fresh.exists(), "recent");
+        assert!(kept.exists(), "its review still exists");
+        assert!(touched.exists(), "open this session");
     }
 
     fn media_file(dir: &std::path::Path, name: &str, bytes: usize, days_old: u64) -> PathBuf {

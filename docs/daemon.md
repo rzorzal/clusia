@@ -26,6 +26,8 @@ does not hide a Homebrew install. The agent's turns start the program of `harnes
 
 The agent's turns run in `--permission-mode default` and ask `clusiad permission-bridge`, a small stdio server that `claude` itself starts (from `--mcp-config`, with `--strict-mcp-config`, so your own MCP servers are not loaded in those turns). The bridge forwards each request over the daemon's socket and only the daemon decides: no answer, an error or a bridge that cannot reach it means deny. With `harness.sandbox` on (default), the turn also gets `--settings` with the sandbox enabled (no network, writes only in the worktree). `harness.permission_timeout_secs` (default 120, 30 to 600) is how long a request waits.
 
+The security check and the audit are two more turns of the same kind. Each one is a `claude -p` with `--resume <review session> --fork-session --session-id <new id>` (or just `--session-id <new id>` when the review has no session yet), so it inherits what the chat read and the chat's session is never replaced by the fork's. A check has the chat's command line and permissions (the sandbox, the permission bridge, hooks off, no token, `cwd` = the worktree); only the prompt differs, and a custom audit area's instruction only ever reaches the prompt. A turn id comes from the review's own counter, shared by chat turns and checks, and `PermissionAsk` is accepted from the running chat turn or a running check of that review. At most 2 checks run at once (a separate limit from the chat's 3 turns), each for at most `harness.check_timeout_secs` (default 600, 60 to 1800).
+
 | Variable | Meaning |
 |---|---|
 | `CLUSIA_HOME` | the data folder (default `~/Library/Application Support/Clusia`) |
@@ -50,6 +52,7 @@ The agent's turns run in `--permission-mode default` and ask `clusiad permission
 | `~/Library/Logs/Clusia/daemon.start.log` | what each start printed before the log opened; appended to, emptied once past 256 KiB |
 | `<data>/agent/<owner>~<repo>~<n>.jsonl` | the agent's chat log of a review (every event; 0600; at most 2 MB, then the oldest half is dropped) |
 | `<data>/agent/<owner>~<repo>~<n>.state.json` | the suggestions you accepted or dismissed, the head the last summary saw and the review's permission rules (`Bash(cargo test:*)`, `Edit`), which end with the session |
+| `<data>/checks/<owner>~<repo>~<n>.json` | the results of the security check and the audit of a review: the head they checked, the findings with their proposed comments, the passes and the number of blocks that could not be read. Deleted when the review is published or discarded, and swept like the review cache. The finding ids you accepted or dismissed live in the review's `.state.json` |
 | `<worktree>/.clusia/review.md` | what the agent reads first: the pull request, the draft, the summary (excluded from git through the worktree's `info/exclude`). Never written through a symlink: when the pull request makes `.clusia` anything but a folder, the notes are not written |
 | `~/Library/Logs/Clusia/daemon.launchd.log` | what a daemon launchd started printed (the login agent's output); not rotated |
 

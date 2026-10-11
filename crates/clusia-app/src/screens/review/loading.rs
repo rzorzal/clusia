@@ -6,6 +6,7 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
 use bevy::ui_widgets::observe;
 use clusia_core::PrRef;
+use clusia_core::printable::printable;
 use clusia_protocol::{LoadStep, LoadStepKind, StepStatus};
 
 use crate::bridge::Model;
@@ -130,7 +131,13 @@ fn row(pr: &PrRef, kind: LoadStepKind, last: Option<&LoadStep>) -> StepRow {
         (LoadStepKind::Agent, None | Some(StepStatus::Running)) => {
             ("Your agent joins when a harness is set up".into(), false)
         }
-        (LoadStepKind::Agent, Some(StepStatus::Done)) => ("Connected".into(), false),
+        (LoadStepKind::Agent, Some(StepStatus::Done)) => (
+            message
+                .map(|m| printable(&m))
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| "Connected".into()),
+            false,
+        ),
     };
     StepRow {
         name: name(kind),
@@ -922,5 +929,42 @@ mod tests {
             Phase::Loading { .. }
         ));
         assert_eq!(leaves(&mut app), [LeafState::Waiting; 4]);
+    }
+
+    #[test]
+    fn the_agent_row_says_what_the_agent_will_do() {
+        let step = |status, message: Option<&str>| LoadStep {
+            pr: pr(),
+            step: LoadStepKind::Agent,
+            status,
+            message: message.map(String::from),
+        };
+        let detail = |s: &LoadStep| row(&pr(), LoadStepKind::Agent, Some(s)).detail;
+        assert_eq!(
+            detail(&step(
+                StepStatus::Done,
+                Some("Summarizing · Checking security · Auditing (6 areas)")
+            )),
+            "Summarizing · Checking security · Auditing (6 areas)"
+        );
+        assert_eq!(
+            detail(&step(StepStatus::Done, Some("Summarizing"))),
+            "Summarizing",
+            "summary only"
+        );
+        assert_eq!(detail(&step(StepStatus::Done, None)), "Connected");
+        assert_eq!(detail(&step(StepStatus::Done, Some("  "))), "Connected");
+        assert!(
+            !detail(&step(StepStatus::Done, Some("Checking\u{1b}[2J security"))).contains('\u{1b}'),
+            "the daemon's text is shown as escapes, never as controls"
+        );
+        assert_eq!(
+            detail(&step(
+                StepStatus::Skipped,
+                Some("Waiting for your first question")
+            )),
+            "Skipped: no harness set up",
+            "the other notes are unchanged"
+        );
     }
 }

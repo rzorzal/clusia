@@ -65,6 +65,17 @@ pub enum Command {
     /// The review's agent: show its chat log or stop its turn.
     #[command(subcommand)]
     Agent(AgentCommand),
+    /// Run the security and audit checks of a review and print what they found.
+    Check {
+        /// `owner/repo#number` or a pull request URL.
+        pr: String,
+        /// Only the security check.
+        #[arg(long, conflicts_with = "audit")]
+        security: bool,
+        /// Only the audit.
+        #[arg(long)]
+        audit: bool,
+    },
     /// Put Clúsia.app, the login agent and the `clusia` command in place.
     Install(InstallArgs),
     /// Remove Clúsia.app, the login agent and the `clusia` link; your data stays.

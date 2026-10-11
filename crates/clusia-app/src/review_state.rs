@@ -111,6 +111,9 @@ pub enum EditTarget {
         start: Option<u32>,
         line: u32,
     },
+    /// A waiting finding of a check, being edited before it joins the draft. It is drawn under
+    /// its card in Security or Audits, not in the diff.
+    Finding(String),
 }
 
 impl EditTarget {
@@ -171,6 +174,8 @@ pub struct TabUi {
     pub opening: bool,
     /// Why the last refresh of a tab that already shows a copy failed.
     pub open_error: Option<String>,
+    /// The area selected in Audits (its id); `None`: the first area with findings, else the first.
+    pub audit_area: Option<String>,
 }
 
 impl Default for TabUi {
@@ -187,6 +192,7 @@ impl Default for TabUi {
             expanded: BTreeSet::new(),
             opening: false,
             open_error: None,
+            audit_area: None,
         }
     }
 }
@@ -305,6 +311,7 @@ impl Plugin for ReviewStatePlugin {
         app.init_resource::<ReviewTabs>()
             .init_resource::<Tickets>()
             .init_resource::<crate::screens::review::agent::Chats>()
+            .init_resource::<crate::screens::review::checks::Checks>()
             .add_message::<ReviewEvent>()
             .add_systems(Update, open_new_tabs.after(NavSystems));
     }

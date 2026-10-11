@@ -63,6 +63,10 @@ pub enum SessionArg {
     New(String),
     /// Any later turn: `--resume <uuid>`.
     Resume(String),
+    /// A turn on a copy of session `parent`, which keeps its own history: `--resume <parent>
+    /// --fork-session --session-id <id>`. The copy starts with what `parent` holds, and `parent`
+    /// never sees what the copy does.
+    Fork { parent: String, id: String },
 }
 
 /// The permission bridge `claude` starts for the turn.
@@ -136,6 +140,10 @@ impl ClaudeCode {
         match &spec.session {
             SessionArg::New(id) => cmd.args(["--session-id", id]),
             SessionArg::Resume(id) => cmd.args(["--resume", id]),
+            SessionArg::Fork { parent, id } => cmd
+                .args(["--resume", parent])
+                .arg("--fork-session")
+                .args(["--session-id", id]),
         };
         cmd.args(["--settings", settings(spec.sandbox)]);
         if !spec.use_cli_permissions {
@@ -385,6 +393,122 @@ mod tests {
             ["Read", "Grep", "Glob", "LS"]
         );
         assert!(!args.iter().any(|a| a.starts_with("Bash")));
+    }
+
+    #[test]
+    fn a_fork_resumes_its_parent_into_a_new_session() {
+        let mut s = spec();
+        s.session = SessionArg::Fork {
+            parent: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d".into(),
+            id: "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f".into(),
+        };
+        let args = argv(&ClaudeCode::command(&s));
+        let at = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(
+            args[at..at + 5],
+            [
+                "--resume",
+                "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+                "--fork-session",
+                "--session-id",
+                "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f",
+            ]
+        );
+        assert_eq!(args.iter().filter(|a| *a == "--resume").count(), 1);
+        assert_eq!(args.iter().filter(|a| *a == "--session-id").count(), 1);
+    }
+
+    /// The command line with the session flags and the prompt taken out.
+    fn without_session_and_prompt(args: &[String]) -> Vec<String> {
+        let mut rest = args.to_vec();
+        rest.drain(0..2);
+        let from = rest
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .unwrap()
+            + 2;
+        let to = rest.iter().position(|a| a == "--settings").unwrap();
+        rest.drain(from..to);
+        rest
+    }
+
+    #[test]
+    fn a_fork_has_the_chats_command_line_except_the_session_and_the_prompt() {
+        let mut bridged = spec();
+        bridged.bridge = Some(bridge());
+        bridged.sandbox = true;
+        bridged.use_cli_permissions = false;
+        bridged.extra_args = vec!["--model".into(), "opus".into()];
+        let mut chat = bridged.clone();
+        chat.session = SessionArg::Resume("0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d".into());
+        let mut fork = bridged.clone();
+        fork.prompt = "Check this pull request for security problems.".into();
+        fork.session = SessionArg::Fork {
+            parent: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d".into(),
+            id: "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f".into(),
+        };
+        let (chat_args, fork_args) = (
+            argv(&ClaudeCode::command(&chat)),
+            argv(&ClaudeCode::command(&fork)),
+        );
+        assert_eq!(
+            without_session_and_prompt(&chat_args),
+            without_session_and_prompt(&fork_args)
+        );
+        for args in [&chat_args, &fork_args] {
+            assert_eq!(
+                values_of(args, "--allowedTools"),
+                ["Read", "Grep", "Glob", "LS"]
+            );
+            assert!(args.contains(&"--permission-prompt-tool".to_string()));
+            assert!(args.contains(&"--strict-mcp-config".to_string()));
+            assert!(args.iter().any(|a| a.contains(r#""disableAllHooks":true"#)));
+        }
+    }
+
+    #[test]
+    fn session_flags_in_the_extra_arguments_never_reach_a_fork() {
+        let mut s = spec();
+        s.session = SessionArg::Fork {
+            parent: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d".into(),
+            id: "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f".into(),
+        };
+        s.extra_args = [
+            "--resume",
+            "x",
+            "--session-id",
+            "y",
+            "--fork-session",
+            "--fork-session=1",
+            "--model",
+            "opus",
+        ]
+        .map(String::from)
+        .to_vec();
+        let args = argv(&ClaudeCode::command(&s));
+        for flag in ["--resume", "--session-id", "--fork-session"] {
+            assert_eq!(
+                args.iter().filter(|a| *a == flag).count(),
+                1,
+                "{flag} once: {args:?}"
+            );
+        }
+        assert!(!args.iter().any(|a| a == "x" || a == "y"), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a.starts_with("--fork-session=")),
+            "{args:?}"
+        );
+        let at = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(
+            args[at..at + 4],
+            [
+                "--resume",
+                "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+                "--fork-session",
+                "--session-id"
+            ]
+        );
+        assert_eq!(args[args.len() - 2..], ["--model", "opus"]);
     }
 
     #[test]

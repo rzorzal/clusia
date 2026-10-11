@@ -40,6 +40,25 @@ pub async fn fake_program(w: &World, script: Script) -> PathBuf {
     dir
 }
 
+/// Sets one config value.
+pub async fn set_config(w: &World, key: &str, value: &str) {
+    w.daemon
+        .client()
+        .await
+        .request(Command::SetConfigValue {
+            key: key.into(),
+            value: value.into(),
+        })
+        .await
+        .unwrap();
+}
+
+/// Turns the checks that run when a review opens on or off (`world` starts with both off).
+pub async fn checks_on_open(w: &World, security: bool, audit: bool) {
+    set_config(w, "harness.check_security", &security.to_string()).await;
+    set_config(w, "harness.audit", &audit.to_string()).await;
+}
+
 /// A client subscribed to the agent topic.
 pub async fn watching(w: &World) -> Client {
     let mut c = w.daemon.client().await;

@@ -145,7 +145,12 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         | Event::SessionState { .. }
         | Event::PermissionRequested { .. }
         | Event::PermissionResolved { .. }
-        | Event::RulesChanged { .. } => {}
+        | Event::RulesChanged { .. }
+        | Event::CheckState { .. }
+        | Event::CheckFinding { .. }
+        | Event::CheckPass { .. }
+        | Event::CheckDone { .. }
+        | Event::FindingSettled { .. } => {}
     }
     (r, None)
 }

@@ -533,6 +533,7 @@ pub(crate) async fn publish(
         finish_published(shared, &mut review, pr, client, None);
     }
     crate::agent::forget(shared, pr);
+    crate::agent::forget_checks(shared, pr);
     cleanup_checkout(shared, pr).await;
     shared.files_cache.lock().await.remove(pr);
     announce(shared, &review);

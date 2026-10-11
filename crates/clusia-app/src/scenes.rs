@@ -3,21 +3,23 @@
 
 use bevy::prelude::*;
 use bevy::ui_widgets::ScrollArea;
+use clusia_core::checks::{AuditArea, default_areas};
 use clusia_core::draft::{DraftKind, ThreadRef};
-use clusia_core::{Side, Verdict};
+use clusia_core::{Anchor, Origin, Side, Verdict};
 use clusia_protocol::{
     AuthInfo, LoadStep, LoadStepKind, SessionStateKind, StepStatus, SyncState, SyncStatus,
     WindowTarget,
 };
 
 use crate::args::Scene;
-use crate::bridge::{Model, ProbeState};
+use crate::bridge::{Model, Outbox, ProbeState};
 use crate::clock::Clock;
 use crate::fixture;
 use crate::nav::{Nav, Section};
 use crate::review_state::{
     DiffMode, EditTarget, Editor, Modal, Phase, Ready, ReviewSection, ReviewTabs, Tab, TabUi,
 };
+use crate::screens::config::areas::areas_value;
 use crate::screens::open_pr::Palette;
 use crate::screens::review::agent::{Chats, PanelTab, PermissionQueue};
 use crate::ui::composer::popover::{PopoverKind, Popovers};
@@ -66,7 +68,16 @@ fn steps(pr: &clusia_core::PrRef) -> Vec<LoadStep> {
             StepStatus::Done,
             Some("~/Library/Application Support/Clusia/worktrees/rzorzal~clusia~123"),
         ),
-        step(LoadStepKind::Pr, StepStatus::Running, None),
+        step(
+            LoadStepKind::Pr,
+            StepStatus::Done,
+            Some("7 files, 5 comments and the checks"),
+        ),
+        step(
+            LoadStepKind::Agent,
+            StepStatus::Done,
+            Some("Summarizing · Checking security · Auditing (6 areas)"),
+        ),
     ]
 }
 
@@ -115,6 +126,41 @@ fn set_demo_config(world: &mut World, settings: &[(&str, &str)]) {
     }
 }
 
+/// The six built-in audit areas and one custom area, as the value of `harness.audit_areas`.
+fn demo_areas() -> String {
+    let mut areas = default_areas();
+    areas.push(AuditArea {
+        id: "migrations".into(),
+        name: "Migrations".into(),
+        instruction: "Check that every migration can be undone and that none locks a large table."
+            .into(),
+        enabled: true,
+        builtin: false,
+    });
+    areas_value(&areas)
+}
+
+/// The finding the Security mockup already has in the draft: the demo's MEDIUM finding, as
+/// accepting it would add it.
+fn accept_demo_finding(ready: &mut Ready, now: i64) {
+    let finding = fixture::demo_checks(now).0[0].findings[1].clone();
+    let anchor = Anchor {
+        commit: ready.view.review.head_sha.clone(),
+        path: finding.file.clone(),
+        line: finding.line.expect("the demo finding has a line"),
+        start_line: None,
+        side: Side::Right,
+    };
+    let _ = ready.view.review.draft.add_as(
+        Origin::Security,
+        DraftKind::LineComment,
+        Some(anchor),
+        None,
+        &finding.comment,
+        now,
+    );
+}
+
 /// Signs the demo out and gives the first-run screen its answers.
 fn stage_snapshot(world: &mut World, scene: Scene) {
     match scene {
@@ -123,16 +169,18 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
             set_demo_config(world, &NOTIFICATION_SETTINGS);
         }
         Scene::ConfigHarness => {
+            let areas = demo_areas();
             set_demo_config(
                 world,
                 &[
                     ("harness.program", "/opt/homebrew/bin/claude"),
                     ("harness.extra_args", "--model claude-opus-5-5"),
+                    ("harness.audit_areas", &areas),
                 ],
             );
             world.resource_mut::<Model>().probe = ProbeState::Done(fixture::demo_probe());
         }
-        Scene::AgentChat | Scene::Permission => {
+        Scene::AgentChat | Scene::Permission | Scene::Security | Scene::Audits => {
             set_demo_config(world, &[("harness.program", "/opt/homebrew/bin/claude")])
         }
         _ => {}
@@ -198,6 +246,15 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::ConfigAbout
         | Scene::ConfigHarness => {}
         Scene::AgentChat | Scene::Permission => ui.file = Some("src/auth/refresh.rs".into()),
+        Scene::Security => {
+            ui.section = ReviewSection::Security;
+            accept_demo_finding(&mut ready, now);
+        }
+        Scene::Audits => {
+            ui.section = ReviewSection::Audits;
+            ui.audit_area = Some("concurrency".into());
+            accept_demo_finding(&mut ready, now);
+        }
         Scene::Composer | Scene::Emoji | Scene::Gif => {
             ui.editor = Some(composer_editor(ComposerMode::Write));
         }
@@ -236,6 +293,8 @@ pub fn stage(world: &mut World, scene: Scene) {
         Scene::WhatsNew => ui.modal = Some(Modal::WhatsNew),
         Scene::Leave => ui.modal = Some(Modal::Leave { window: false }),
     }
+    let checks_tell = matches!(scene, Scene::Security | Scene::Audits)
+        .then(|| fixture::demo_checks_tell(&pr, now, &ready.view.review.draft));
     let phase = match scene {
         Scene::Loading => Phase::Loading { steps: steps(&pr) },
         Scene::Failed => Phase::Failed {
@@ -264,6 +323,11 @@ pub fn stage(world: &mut World, scene: Scene) {
         chat.log_asked = true;
         chats.replay(&pr, &question);
         chats.entry(&pr).state = SessionStateKind::Running;
+    }
+    if let Some(tell) = checks_tell {
+        world.resource_mut::<Chats>().entry(&pr).state = SessionStateKind::Running;
+        // The same way a daemon's answer arrives: `pump` fills the checks of the review.
+        let _ = world.resource::<Outbox>().0.send(tell);
     }
     if scene == Scene::Permission {
         // A frozen clock keeps the countdown at 1:52 for as long as the render takes.
@@ -427,6 +491,11 @@ mod tests {
                         1
                     );
                 }
+                Scene::Security => assert_eq!(tab.ui.section, ReviewSection::Security),
+                Scene::Audits => {
+                    assert_eq!(tab.ui.section, ReviewSection::Audits);
+                    assert_eq!(tab.ui.audit_area.as_deref(), Some("concurrency"));
+                }
                 Scene::Composer | Scene::ComposerPreview | Scene::Emoji | Scene::Gif => {
                     let editor = tab.ui.editor.as_ref().expect("an open composer");
                     assert!(matches!(editor.target, EditTarget::Line { line: 44, .. }));
@@ -436,7 +505,16 @@ mod tests {
                     let Phase::Loading { steps } = &tab.phase else {
                         panic!("loading")
                     };
-                    assert_eq!(steps.len(), 3);
+                    assert_eq!(steps.len(), 4);
+                    let agent = steps.last().unwrap();
+                    assert_eq!(
+                        (agent.step, agent.status),
+                        (LoadStepKind::Agent, StepStatus::Done)
+                    );
+                    assert_eq!(
+                        agent.message.as_deref(),
+                        Some("Summarizing · Checking security · Auditing (6 areas)")
+                    );
                 }
                 Scene::Failed => {
                     let Phase::Failed { step, message } = &tab.phase else {
@@ -590,6 +668,121 @@ mod tests {
             "Found at /opt/homebrew/bin/claude"
         ));
         assert!(testing::shows(&mut app, "Test again"));
+        let areas = config["harness"]["audit_areas"].as_array().unwrap();
+        assert_eq!(areas.len(), 7, "the six built-in areas and a custom one");
+        assert_eq!(areas[6]["id"], "migrations");
+        assert_eq!(areas[6]["builtin"], false);
+        for needle in [
+            "When I open a review",
+            "Check security",
+            "Audit areas",
+            "Docs and changelog",
+            "Migrations",
+            "+ Add area",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+    }
+
+    #[test]
+    fn the_security_scene_shows_the_mockup_findings() {
+        let mut app = staged(Scene::Security);
+        for needle in [
+            "2 security findings",
+            "Claude Code checked the 7 changed files 2 minutes ago. Accepted findings become draft comments.",
+            "1 high",
+            "1 low",
+            "Proposed comment",
+            "Show in diff",
+            "Refresh token written to the debug log",
+            "No limit on refresh retries",
+            "Token file created with default permissions",
+            "In your draft",
+            "Check again",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        let draft = testing::ready(&app, &fixture::demo_pr()).view.review.draft;
+        assert_eq!(
+            draft.items.len(),
+            4,
+            "the demo draft plus the accepted finding"
+        );
+        assert!(
+            !testing::shows(&mut app, "1 medium"),
+            "an accepted finding is not counted as open"
+        );
+        let last = draft.items.last().unwrap();
+        assert_eq!(last.origin, clusia_core::Origin::Security);
+        assert_eq!(
+            last.anchor.as_ref().map(|a| (a.path.as_str(), a.line)),
+            Some(("src/client/http.rs", 24))
+        );
+        let chats = app
+            .world()
+            .resource::<crate::screens::review::agent::Chats>();
+        assert_eq!(
+            chats.0[&fixture::demo_pr()].state,
+            clusia_protocol::SessionStateKind::Running
+        );
+    }
+
+    #[test]
+    fn the_audits_scene_shows_the_mockup_area() {
+        let mut app = staged(Scene::Audits);
+        for needle in [
+            "Correctness",
+            "Concurrency",
+            "Error handling",
+            "Performance",
+            "Tests",
+            "Docs and changelog",
+            "The refresh lock is held across a network call",
+            "Proposed comment",
+            "Accept into draft",
+            "Edit first",
+            "Dismiss",
+            "No shared state written outside the lock",
+            "The new test covers two tasks refreshing at once",
+            "Ask the agent about this",
+            "Needs your OK",
+            "Run by Claude Code with your audit areas. Findings the agent proposes wait for your OK before they join the draft.",
+            "3 waiting for your OK",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        assert!(
+            testing::shown_text(&mut app)
+                .iter()
+                .any(|t| t.to_uppercase().contains("AUDIT · 6 AREAS")),
+            "the list says how many areas it audits"
+        );
+    }
+
+    #[test]
+    fn the_loading_scene_names_the_agent_work() {
+        let mut app = staged(Scene::Loading);
+        assert!(testing::shows(
+            &mut app,
+            "Summarizing · Checking security · Auditing (6 areas)"
+        ));
+    }
+
+    #[test]
+    fn the_first_run_scene_shows_step_three() {
+        let mut app = staged_outside_review(Scene::FirstRun);
+        for needle in [
+            "Connect your AI harness",
+            "Found · /opt/homebrew/bin/claude",
+            "Coming soon",
+            "When I open a review",
+            "Check security",
+            "Audit the change",
+            "Skip for now",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        assert!(!testing::shows(&mut app, "Connecting a harness arrives"));
     }
 
     #[test]

@@ -8,6 +8,7 @@ use crate::nav::NavSystems;
 use crate::review_state::open_new_tabs;
 
 pub mod agent;
+pub mod checks;
 pub mod comments;
 pub mod diff;
 pub mod editor;
@@ -42,6 +43,7 @@ impl Plugin for ReviewPlugin {
                 leave::LeavePlugin,
                 agent::AgentPanel,
                 agent::PermissionPlugin,
+                checks::ChecksPlugin,
                 crate::ui::composer::ComposerPlugin,
             ));
     }

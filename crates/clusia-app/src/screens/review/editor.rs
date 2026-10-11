@@ -126,7 +126,7 @@ pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor
                 ));
                 let label = match editor.target {
                     EditTarget::Item(_) => "Save",
-                    EditTarget::Suggestion { .. } => "Accept into draft",
+                    EditTarget::Suggestion { .. } | EditTarget::Finding(_) => "Accept into draft",
                     _ => "Add to draft",
                 };
                 if editor.ticket.is_some() {
@@ -221,6 +221,15 @@ pub fn submit_editor(
             // stays (with its text) until then, and its button is not left on "Saving…".
             editor.ticket = None;
             Ask::AcceptSuggestion {
+                pr,
+                id: id.clone(),
+                body: Some(body),
+            }
+        }
+        EditTarget::Finding(id) => {
+            // Answered by `Settled`, like a suggestion: the editor keeps its text until then.
+            editor.ticket = None;
+            Ask::AcceptFinding {
                 pr,
                 id: id.clone(),
                 body: Some(body),
@@ -903,5 +912,41 @@ mod tests {
             testing::settle(&mut app);
             assert_eq!(testing::count::<AskAgentButton>(&mut app), 0);
         }
+    }
+
+    #[test]
+    fn a_finding_editor_accepts_with_its_text() {
+        let mut tab = Tab::loading(crate::review_state::DiffMode::Unified);
+        tab.ui.editor = Some(Editor {
+            target: EditTarget::Finding("f1".into()),
+            text: String::new(),
+            error: None,
+            ticket: None,
+            mode: crate::ui::composer::ComposerMode::Write,
+        });
+        let pr = fixture::demo_pr();
+        let mut tickets = Tickets::default();
+        let mut asks = Asks::default();
+        assert!(submit_editor(
+            &mut tab,
+            &pr,
+            "  Please log less.  ",
+            true,
+            &mut tickets,
+            &mut asks
+        ));
+        assert_eq!(
+            asks.recorded,
+            [Ask::AcceptFinding {
+                pr,
+                id: "f1".into(),
+                body: Some("Please log less.".into()),
+            }]
+        );
+        assert_eq!(
+            tab.ui.editor.unwrap().ticket,
+            None,
+            "the daemon answers with a settle"
+        );
     }
 }

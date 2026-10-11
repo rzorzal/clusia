@@ -246,8 +246,12 @@ impl Turn {
         let ours = match event {
             Event::PermissionRequested { pr, turn, .. } => *pr == self.pr && *turn == self.turn,
             // What a rule or the worktree decides at once has no request of ours to match: it
-            // belongs to this turn once the review's turn is the one that runs.
-            Event::PermissionResolved { pr, .. } => *pr == self.pr && self.running,
+            // belongs to this turn once the review's turn is the one that runs. A check's requests
+            // are not part of this chat: they are answered in the window or with `clusia check`,
+            // and never named here.
+            Event::PermissionResolved { pr, origin, .. } => {
+                *pr == self.pr && self.running && origin.is_chat()
+            }
             Event::AgentChunk { pr, turn, .. }
             | Event::AgentToolUse { pr, turn, .. }
             | Event::AgentDenied { pr, turn, .. }
@@ -385,11 +389,34 @@ pub(crate) fn suggestion_line(s: &Suggestion) -> String {
     format!("{place}  {}", printable(&body))
 }
 
-/// The chat as lines: consecutive text entries of one turn are one answer.
+fn turn_of(entry: &AgentLogEntry) -> u64 {
+    match entry {
+        AgentLogEntry::User { turn, .. }
+        | AgentLogEntry::Text { turn, .. }
+        | AgentLogEntry::ToolUse { turn, .. }
+        | AgentLogEntry::Denied { turn, .. }
+        | AgentLogEntry::Suggestion { turn, .. }
+        | AgentLogEntry::Done { turn, .. }
+        | AgentLogEntry::Error { turn, .. }
+        | AgentLogEntry::Permission { turn, .. }
+        | AgentLogEntry::Check { turn, .. } => *turn,
+    }
+}
+
+/// The chat as lines: consecutive text entries of one turn are one answer. A turn of a check
+/// (one with a `Check` entry) is not part of the chat: none of its entries is shown.
 pub(crate) fn log_lines(entries: &[AgentLogEntry]) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut joining: Option<u64> = None;
+    let checks: std::collections::HashSet<u64> = entries
+        .iter()
+        .filter(|entry| matches!(entry, AgentLogEntry::Check { .. }))
+        .map(turn_of)
+        .collect();
     for entry in entries {
+        if checks.contains(&turn_of(entry)) {
+            continue;
+        }
         if let AgentLogEntry::Text { turn, text, .. } = entry {
             match (joining, lines.last_mut()) {
                 (Some(open), Some(last)) if open == *turn => last.push_str(&streamed(text)),
@@ -424,7 +451,9 @@ pub(crate) fn log_lines(entries: &[AgentLogEntry]) -> Vec<String> {
                 outcome,
                 ..
             } => permission_line(tool, summary, *outcome),
-            AgentLogEntry::Text { .. } => unreachable!("handled above"),
+            AgentLogEntry::Text { .. } | AgentLogEntry::Check { .. } => {
+                unreachable!("handled above")
+            }
         });
     }
     lines
@@ -1003,6 +1032,7 @@ mod tests {
             sandbox: true,
             deadline: 0,
             detail: None,
+            origin: clusia_protocol::TurnOrigin::Chat,
         }
     }
 
@@ -1017,7 +1047,84 @@ mod tests {
             tool: tool.into(),
             summary: summary.into(),
             outcome,
+            origin: clusia_protocol::TurnOrigin::Chat,
         }
+    }
+
+    #[test]
+    fn the_log_leaves_out_every_entry_of_a_check_turn() {
+        let entries = [
+            AgentLogEntry::User {
+                at: 1,
+                turn: 1,
+                text: "hi".into(),
+            },
+            AgentLogEntry::Check {
+                at: 2,
+                turn: 2,
+                kind: clusia_core::CheckKind::Audit,
+                state: "running".into(),
+            },
+            AgentLogEntry::ToolUse {
+                at: 3,
+                turn: 2,
+                summary: "Read src/a.rs".into(),
+            },
+            AgentLogEntry::Permission {
+                at: 4,
+                turn: 2,
+                tool: "Bash".into(),
+                summary: "cargo test".into(),
+                outcome: PermissionOutcome::Cancelled,
+            },
+            AgentLogEntry::Check {
+                at: 5,
+                turn: 2,
+                kind: clusia_core::CheckKind::Audit,
+                state: "stopped".into(),
+            },
+        ];
+        assert_eq!(log_lines(&entries), ["you: hi"]);
+    }
+
+    #[test]
+    fn what_a_check_asked_is_not_said_in_the_chat() {
+        let (mut turn, mut out, mut err) = run(false);
+        turn.feed(
+            &requested("p1", 2, "Bash", "make", Some("make")),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        err.clear();
+        let Event::PermissionResolved {
+            id,
+            pr,
+            tool,
+            summary,
+            outcome,
+            ..
+        } = resolved("c1", PermissionOutcome::Cancelled)
+        else {
+            unreachable!()
+        };
+        let by_check = Event::PermissionResolved {
+            id,
+            pr,
+            tool,
+            summary,
+            outcome,
+            origin: clusia_protocol::TurnOrigin::Security,
+        };
+        turn.feed(&by_check, &mut out, &mut err).unwrap();
+        assert_eq!(said(&err), "", "a check's line stays out of the chat");
+        turn.feed(
+            &resolved("c2", PermissionOutcome::Cancelled),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_ne!(said(&err), "", "the chat's own line is still told");
     }
 
     fn said(bytes: &[u8]) -> String {

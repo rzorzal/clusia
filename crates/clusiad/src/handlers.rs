@@ -13,6 +13,7 @@ use clusia_store::{ConfigKeyError, get_value, save_config, set_value};
 
 use crate::activity;
 use crate::agent;
+use crate::checks;
 use crate::first_run;
 use crate::giphy;
 use crate::media;
@@ -182,6 +183,13 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::GetPermissions { pr } => permissions::waiting_for(shared, &pr),
         // The connection records the hold once this succeeds.
         Command::HoldReview { .. } => Outcome::Ok(Reply::Ack),
+        Command::RunCheck { pr, kind } => checks::run(shared, &pr, kind).await,
+        Command::StopCheck { pr, kind } => checks::stop(shared, &pr, kind),
+        Command::GetChecks { pr } => checks::get(shared, &pr),
+        Command::AcceptFinding { pr, id, body } => {
+            checks::accept(shared, client, &pr, &id, body).await
+        }
+        Command::DismissFinding { pr, id } => checks::dismiss(shared, &pr, &id).await,
     }
 }
 

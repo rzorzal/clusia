@@ -9,7 +9,7 @@ use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
-use clusia_core::{DraftItem, DraftKind, ItemStatus, PrRef};
+use clusia_core::{DraftItem, DraftKind, ItemStatus, Origin, PrRef};
 use clusia_protocol::{ReviewView, SessionStateKind};
 
 use crate::bridge::{Ask, Asks, Connection, Model, Toasts};
@@ -76,6 +76,8 @@ pub struct DraftCard {
     /// `refresh.rs:44`, `General note`, `Reply to @mona · refresh.rs:41`, `Resolve thread by @ana`
     pub title: String,
     pub badge: Option<(String, Tone)>,
+    /// `from Security` / `from Audit`: the check that proposed the item.
+    pub origin: Option<String>,
     /// The body's Markdown source (empty for a resolve); the card shows its first words.
     pub body: String,
     pub obsolete: bool,
@@ -230,7 +232,13 @@ struct RightView {
 }
 
 fn is_placeholder(section: ReviewSection) -> bool {
-    !matches!(section, ReviewSection::Diff | ReviewSection::Comments)
+    !matches!(
+        section,
+        ReviewSection::Diff
+            | ReviewSection::Comments
+            | ReviewSection::Security
+            | ReviewSection::Audits
+    )
 }
 
 /// What a placeholder section says: (heading, text).
@@ -240,19 +248,12 @@ pub fn placeholder_text(section: ReviewSection) -> (&'static str, &'static str) 
             "Diagrams",
             "Arrives with SP3 (#8): class, sequence and data-flow diagrams of this change.",
         ),
-        ReviewSection::Security => (
-            "Security",
-            "Arrives with the harness (SP2, #7): your agent checks this change for security issues.",
-        ),
-        ReviewSection::Audits => (
-            "Audits",
-            "Arrives with the harness (SP2, #7): audits your agent runs on this change.",
-        ),
+        ReviewSection::Audits => ("", ""),
         ReviewSection::Tests => (
             "Tests",
             "Arrives with SP4 (#9): run and read the tests this change touches.",
         ),
-        ReviewSection::Diff | ReviewSection::Comments => ("", ""),
+        ReviewSection::Diff | ReviewSection::Comments | ReviewSection::Security => ("", ""),
     }
 }
 
@@ -370,6 +371,11 @@ pub fn draft_card(item: &DraftItem) -> DraftCard {
         id: item.id.clone(),
         title,
         badge,
+        origin: match item.origin {
+            Origin::Security => Some("from Security".to_string()),
+            Origin::Audit => Some("from Audit".to_string()),
+            _ => None,
+        },
         body: if item.kind == DraftKind::Resolve {
             String::new()
         } else {
@@ -674,15 +680,18 @@ fn rebuild_top(
     model: Res<Model>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
+    checks: Res<crate::screens::review::checks::Checks>,
     mut tops: Query<(Entity, &mut ShellTop)>,
 ) {
     for (entity, mut top) in &mut tops {
         let Some((v, cached)) = current_view(&tabs, &model, &top.pr, clock.now()) else {
             continue;
         };
+        let mut sections = v.sections;
+        crate::screens::review::checks::badge_sections(&mut sections, checks.0.get(&top.pr));
         let want = TopView {
             header: v.header,
-            sections: v.sections,
+            sections,
             retry: v.read_only.is_some() && cached && model.connection == Connection::Live,
             read_only: v.read_only,
             closed: v.closed,
@@ -1117,6 +1126,9 @@ fn draft_card_node(
                 if let Some((label, tone)) = &card.badge {
                     place.spawn(badge(fonts, label, *tone));
                 }
+                if let Some(origin) = &card.origin {
+                    place.spawn(badge(fonts, origin, Tone::Neutral));
+                }
             });
             if !read_only {
                 // A button inside the card's button: its click stops here. A compact × so the
@@ -1151,6 +1163,7 @@ fn rebuild_status(
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
     chats: Res<Chats>,
+    checks: Res<crate::screens::review::checks::Checks>,
     mut bars: Query<(Entity, &mut StatusBar)>,
 ) {
     for (entity, mut bar) in &mut bars {
@@ -1162,6 +1175,10 @@ fn rebuild_status(
         status.agent = agent;
         status.agent_live = agent_live;
         status.panel_open = chats.0.get(&bar.pr).is_none_or(|c| c.open);
+        let waiting = checks.0.get(&bar.pr).map_or(0, |m| m.waiting_ok());
+        if waiting > 0 {
+            status.draft = format!("{} · {waiting} waiting for your OK", status.draft);
+        }
         if bar.built.as_ref() == Some(&status) {
             continue;
         }
@@ -1617,24 +1634,24 @@ mod tests {
             0,
             "Diff is not a placeholder"
         );
-        let security =
-            testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Security);
-        testing::activate(&mut app, security);
+        let diagrams =
+            testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Diagrams);
+        testing::activate(&mut app, diagrams);
         testing::settle(&mut app);
         assert_eq!(
             app.world().resource::<ReviewTabs>().0[&pr].ui.section,
-            ReviewSection::Security
+            ReviewSection::Diagrams
         );
         let shown = testing::find::<Placeholder>(&mut app, |_| true);
         assert_eq!(
             app.world().get::<Placeholder>(shown),
-            Some(&Placeholder(ReviewSection::Security))
+            Some(&Placeholder(ReviewSection::Diagrams))
         );
         let has = |app: &mut App, needle: &str| {
             let mut q = app.world_mut().query::<&Text>();
             q.iter(app.world()).any(|t| t.0.contains(needle))
         };
-        assert!(has(&mut app, "Arrives with the harness (SP2, #7)"));
+        assert!(has(&mut app, "Arrives with SP3 (#8)"));
         let diff = testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Diff);
         testing::activate(&mut app, diff);
         testing::settle(&mut app);
@@ -2030,5 +2047,43 @@ mod tests {
         assert!(long.ends_with('…') && long.chars().count() <= 81, "{long}");
         assert!(!testing::shows(&mut app, "**"));
         assert_eq!(testing::count::<crate::ui::markdown::MdLink>(&mut app), 0);
+    }
+
+    #[test]
+    fn a_draft_card_names_the_check_that_proposed_it() {
+        let mut security = item(DraftKind::General, None, None);
+        security.origin = Origin::Security;
+        let mut audit = item(DraftKind::General, None, None);
+        audit.origin = Origin::Audit;
+        assert_eq!(
+            draft_card(&security).origin.as_deref(),
+            Some("from Security")
+        );
+        assert_eq!(draft_card(&audit).origin.as_deref(), Some("from Audit"));
+        assert_eq!(
+            draft_card(&item(DraftKind::General, None, None)).origin,
+            None
+        );
+    }
+
+    #[test]
+    fn a_security_draft_card_shows_its_chip() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        let mut review = testing::ready(&app, &pr).view.review;
+        review
+            .draft
+            .add_as(
+                Origin::Security,
+                DraftKind::General,
+                None,
+                None,
+                "No limit on refresh retries.",
+                NOW,
+            )
+            .unwrap();
+        testing::tell(&mut app, crate::bridge::Tell::ReviewFile(Box::new(review)));
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "from Security"));
     }
 }

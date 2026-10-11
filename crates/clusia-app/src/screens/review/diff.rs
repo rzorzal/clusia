@@ -2268,6 +2268,7 @@ mod tests {
             .clone();
         testing::tell(&mut app, Tell::Snapshot(Box::new(snapshot)));
         testing::settle(&mut app);
+        testing::recorded(&mut app);
         let submit = testing::find::<EditorSubmit>(&mut app, |_| true);
         testing::activate(&mut app, submit);
         let asks = testing::recorded(&mut app);

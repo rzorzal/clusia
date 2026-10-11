@@ -20,6 +20,10 @@ pub struct AgentState {
     /// What the human allowed for this review: `Bash(<prefix>:*)` or a bare file tool name.
     /// They end with the session.
     pub rules: BTreeSet<String>,
+    /// Finding ids the human dismissed; they are never shown again for this review.
+    pub dismissed_findings: BTreeSet<String>,
+    /// Finding ids the human accepted into the draft.
+    pub accepted_findings: BTreeSet<String>,
 }
 
 impl AgentState {
@@ -36,6 +40,21 @@ impl AgentState {
     /// Records an acceptance; `false` when it was already recorded.
     pub fn accept(&mut self, id: &str) -> bool {
         self.accepted.insert(id.to_string())
+    }
+
+    /// Whether the finding was already answered, either way.
+    pub fn is_finding_settled(&self, id: &str) -> bool {
+        self.dismissed_findings.contains(id) || self.accepted_findings.contains(id)
+    }
+
+    /// Records a dismissed finding; `false` when it was already recorded.
+    pub fn dismiss_finding(&mut self, id: &str) -> bool {
+        self.dismissed_findings.insert(id.to_string())
+    }
+
+    /// Records an accepted finding; `false` when it was already recorded.
+    pub fn accept_finding(&mut self, id: &str) -> bool {
+        self.accepted_findings.insert(id.to_string())
     }
 }
 
@@ -274,7 +293,7 @@ mod tests {
         assert_eq!(with_rules.rules.len(), 2);
         assert_eq!(
             serde_json::to_string(&AgentState::default()).unwrap(),
-            r#"{"dismissed":[],"accepted":[],"last_summary_head":null,"rules":[]}"#
+            r#"{"dismissed":[],"accepted":[],"last_summary_head":null,"rules":[],"dismissed_findings":[],"accepted_findings":[]}"#
         );
     }
 
@@ -429,5 +448,21 @@ mod tests {
              - General note: No place\n\
              - Resolve the thread by @ana (src/http.rs:12)\n"
         );
+    }
+
+    #[test]
+    fn findings_are_settled_apart_from_suggestions() {
+        let mut state = AgentState::default();
+        assert!(!state.is_finding_settled("f1"));
+        assert!(state.dismiss_finding("f1"));
+        assert!(!state.dismiss_finding("f1"), "recorded once");
+        assert!(state.accept_finding("f2"));
+        assert!(state.is_finding_settled("f1") && state.is_finding_settled("f2"));
+        assert!(!state.is_settled("f1"), "suggestions keep their own sets");
+        let back: AgentState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(back, state);
+        let old: AgentState = serde_json::from_str(r#"{"dismissed":["sug-1"]}"#).unwrap();
+        assert!(old.dismissed_findings.is_empty() && old.accepted_findings.is_empty());
     }
 }

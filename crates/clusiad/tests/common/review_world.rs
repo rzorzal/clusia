@@ -60,6 +60,17 @@ async fn world_with(background_sync: bool) -> World {
         })
         .await
         .unwrap();
+    for key in ["harness.check_security", "harness.audit"] {
+        daemon
+            .client()
+            .await
+            .request(Command::SetConfigValue {
+                key: key.into(),
+                value: "false".into(),
+            })
+            .await
+            .unwrap();
+    }
     World {
         tmp,
         server,

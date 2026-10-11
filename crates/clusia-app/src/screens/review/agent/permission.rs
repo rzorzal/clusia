@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, observe};
 use clusia_core::PrRef;
 use clusia_core::printable::{printable, printable_lines};
-use clusia_protocol::{PermissionAnswerKind, PermissionOutcome};
+use clusia_protocol::{PermissionAnswerKind, PermissionOutcome, TurnOrigin};
 
 use super::model::Chats;
 use crate::bridge::{Ask, Asks, Connection, Model, PermissionRequest, PermissionTell};
@@ -106,12 +106,17 @@ impl PermissionQueue {
                 tool,
                 summary,
                 outcome,
+                origin,
             } => {
                 // A request that was answered here is gone from the queue; one that was decided
                 // at once (a rule covered it, or it was outside the worktree) never was in it.
                 // The line comes from the event either way.
                 self.resolve(&id);
-                chats.permission(&pr, &tool, &summary, outcome);
+                // A check's requests are the check's, queued here or not: the chat's transcript
+                // says only how the chat's own requests ended.
+                if origin == TurnOrigin::Chat {
+                    chats.permission(&pr, &tool, &summary, outcome);
+                }
             }
             PermissionTell::Rules { pr, rules } => chats.set_rules(&pr, rules),
             // The daemon's list is the truth for its review, in its order: a request it no longer
@@ -184,11 +189,22 @@ pub struct ModalView {
 }
 
 pub fn title_for(tool: &str) -> String {
+    title_for_origin(tool, TurnOrigin::Chat)
+}
+
+/// The modal's title: who wants to do what. A check names itself, so the reviewer knows the
+/// request is not the chat's.
+pub fn title_for_origin(tool: &str, origin: TurnOrigin) -> String {
+    let who = match origin {
+        TurnOrigin::Chat => "Claude Code",
+        TurnOrigin::Security => "Security check",
+        TurnOrigin::Audit => "Audit check",
+    };
     match tool {
-        "Bash" => "Claude Code wants to run a command".into(),
-        "Edit" | "MultiEdit" | "NotebookEdit" => "Claude Code wants to edit a file".into(),
-        "Write" => "Claude Code wants to write a file".into(),
-        other => format!("Claude Code wants to use {}", printable(other)),
+        "Bash" => format!("{who} wants to run a command"),
+        "Edit" | "MultiEdit" | "NotebookEdit" => format!("{who} wants to edit a file"),
+        "Write" => format!("{who} wants to write a file"),
+        other => format!("{who} wants to use {}", printable(other)),
     }
 }
 
@@ -289,7 +305,7 @@ pub fn answer_counts(now_secs: f64, shown_at: f64) -> bool {
 pub fn modal_view(pending: &Pending, worktree: Option<&str>, more: usize) -> ModalView {
     let r = &pending.request;
     ModalView {
-        title: title_for(&r.tool),
+        title: title_for_origin(&r.tool, r.origin),
         reason: r
             .reason
             .as_deref()
@@ -720,6 +736,7 @@ mod tests {
             sandbox: true,
             deadline: NOW * 1000 + 112_000,
             detail: None,
+            origin: clusia_protocol::TurnOrigin::Chat,
         }
     }
 
@@ -760,6 +777,22 @@ mod tests {
                 tool: tool.into(),
                 summary: summary.into(),
                 outcome,
+                origin: clusia_protocol::TurnOrigin::Chat,
+            }),
+        );
+        testing::settle(app);
+    }
+
+    fn resolve_from(app: &mut App, id: &str, origin: TurnOrigin) {
+        testing::tell(
+            app,
+            Tell::Permission(PermissionTell::Resolved {
+                id: id.into(),
+                pr: pr(),
+                tool: "Bash".into(),
+                summary: COMMAND.into(),
+                outcome: PermissionOutcome::Allowed,
+                origin,
             }),
         );
         testing::settle(app);
@@ -1662,5 +1695,70 @@ mod tests {
             "Enter does not open a pull request from under the modal"
         );
         assert_eq!(testing::count::<PermissionModal>(&mut app), 1);
+    }
+
+    #[test]
+    fn titles_name_who_asked() {
+        assert_eq!(
+            title_for_origin("Bash", TurnOrigin::Chat),
+            "Claude Code wants to run a command"
+        );
+        assert_eq!(
+            title_for_origin("Bash", TurnOrigin::Security),
+            "Security check wants to run a command"
+        );
+        assert_eq!(
+            title_for_origin("Edit", TurnOrigin::Audit),
+            "Audit check wants to edit a file"
+        );
+        assert_eq!(
+            title_for_origin("Write", TurnOrigin::Audit),
+            "Audit check wants to write a file"
+        );
+        assert_eq!(
+            title_for_origin("WebFetch", TurnOrigin::Security),
+            "Security check wants to use WebFetch"
+        );
+        assert_eq!(
+            title_for("Bash"),
+            title_for_origin("Bash", TurnOrigin::Chat)
+        );
+    }
+
+    #[test]
+    fn a_check_request_opens_a_modal_that_names_the_check() {
+        let mut app = open();
+        let mut r = bash("perm-sec");
+        r.origin = TurnOrigin::Security;
+        ask(&mut app, r);
+        assert!(testing::shows(
+            &mut app,
+            "Security check wants to run a command"
+        ));
+        assert!(!testing::shows(
+            &mut app,
+            "Claude Code wants to run a command"
+        ));
+    }
+
+    #[test]
+    fn a_check_request_leaves_no_line_in_the_chat() {
+        let mut app = open();
+        let before = app.world().resource::<Chats>().0[&pr()].lines.len();
+        let mut r = bash("perm-aud");
+        r.origin = TurnOrigin::Audit;
+        ask(&mut app, r);
+        resolve_from(&mut app, "perm-aud", TurnOrigin::Audit);
+        assert_eq!(app.world().resource::<Chats>().0[&pr()].lines.len(), before);
+        // A request a rule covered was never queued here; its end is still the check's.
+        resolve_from(&mut app, "perm-rule", TurnOrigin::Security);
+        assert_eq!(app.world().resource::<Chats>().0[&pr()].lines.len(), before);
+        ask(&mut app, bash("perm-chat"));
+        resolve(&mut app, "perm-chat", PermissionOutcome::Allowed);
+        assert_eq!(
+            app.world().resource::<Chats>().0[&pr()].lines.len(),
+            before + 1,
+            "the chat's own requests still say how they ended"
+        );
     }
 }
