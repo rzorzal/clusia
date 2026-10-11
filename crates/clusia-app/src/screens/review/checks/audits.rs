@@ -61,6 +61,8 @@ pub struct FindingView {
     pub show: Option<String>,
     pub accepted: bool,
     pub busy: bool,
+    /// What waits is a dismiss.
+    pub dismissing: bool,
     pub general: bool,
     /// The result is of an older head: only **Dismiss** and **Show in diff** are offered.
     pub stale: bool,
@@ -120,8 +122,10 @@ fn empty_view(notice: Option<Notice>) -> AuditsView {
 }
 
 /// What the Audits tab shows. `areas` are the configured audit areas (they name the ids the run
-/// reports), `files` the pull request's changed paths, `selected` the chosen area's id and
-/// `editing` the id of the finding whose editor is open.
+/// reports), `files` the pull request's changed paths, `selected` the chosen area's id,
+/// `editing` the id of the finding whose editor is open and `offline` says the tab is a cached
+/// copy.
+#[allow(clippy::too_many_arguments)] // each is one fact the view is drawn from
 pub fn audits_view(
     model: Option<&ChecksModel>,
     areas: &[AuditArea],
@@ -130,12 +134,17 @@ pub fn audits_view(
     now: i64,
     selected: Option<&str>,
     editing: Option<&str>,
+    offline: bool,
 ) -> AuditsView {
     let default = ChecksModel::default();
     let m = model.unwrap_or(&default);
     let k = m.kind(CheckKind::Audit);
     // Nothing to run: the daemon refuses an audit with every area off.
-    if k.result.is_none() && k.state == CheckState::NotRun && !areas.iter().any(|a| a.enabled) {
+    if m.loaded
+        && k.result.is_none()
+        && k.state == CheckState::NotRun
+        && !areas.iter().any(|a| a.enabled)
+    {
         return empty_view(Some(Notice {
             title: "Audit".into(),
             line: "No audit areas are switched on. Switch one on in Config › Harness.".into(),
@@ -143,7 +152,7 @@ pub fn audits_view(
             setup: true,
         }));
     }
-    if let Some(notice) = notice_of(CheckKind::Audit, k, harness) {
+    if let Some(notice) = notice_of(CheckKind::Audit, k, harness, m.loaded, offline) {
         return empty_view(Some(notice));
     }
     let Some(result) = &k.result else {
@@ -202,7 +211,8 @@ pub fn audits_view(
                 comment: printable_lines(&proposed_comment(f)),
                 show: files.contains(&f.file.as_str()).then(|| f.file.clone()),
                 accepted: m.accepted.contains(&f.id),
-                busy: m.pending.contains(&f.id),
+                busy: m.pending.contains_key(&f.id),
+                dismissing: m.pending.get(&f.id) == Some(&false),
                 general: !f.anchored,
                 stale,
                 editing: editing == Some(f.id.as_str()),
@@ -269,6 +279,14 @@ pub struct AskAreaButton {
     pub name: String,
 }
 
+/// The scrolling list of areas on the left.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct AreaList(pub PrRef);
+
+/// The scrolling detail of the selected area on the right.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct AuditDetail(pub PrRef);
+
 /// The tab's content inside `SectionBody`, rebuilt when its view or its editor's state changes.
 #[derive(Component, Debug)]
 pub struct AuditsRoot {
@@ -287,6 +305,8 @@ pub(super) fn fill_audits(
     fonts: Res<UiFonts>,
     bodies: Query<(Entity, &SectionBody, Option<&Children>)>,
     mut roots: Query<(Entity, &mut AuditsRoot)>,
+    lists: Query<(&AreaList, &ScrollPosition)>,
+    details: Query<(&AuditDetail, &ScrollPosition)>,
 ) {
     for (entity, body, children) in &bodies {
         let Some(tab) = tabs.0.get(&body.pr) else {
@@ -311,6 +331,7 @@ pub(super) fn fill_audits(
                 EditTarget::Finding(id) => Some(id.as_str()),
                 _ => None,
             }),
+            ready.cached_at.is_some(),
         );
         let key = (
             view,
@@ -328,9 +349,22 @@ pub(super) fn fill_audits(
         match existing {
             Some((_, root)) if root.built.as_ref() == Some(&key) => {}
             Some((root_entity, mut root)) => {
+                // The panes are spawned again: they keep where the user had scrolled them.
+                let scrolled = Scrolled {
+                    list: lists
+                        .iter()
+                        .find(|(list, _)| list.0 == pr)
+                        .map(|(_, at)| at.clone())
+                        .unwrap_or_default(),
+                    detail: details
+                        .iter()
+                        .find(|(detail, _)| detail.0 == pr)
+                        .map(|(_, at)| at.clone())
+                        .unwrap_or_default(),
+                };
                 commands.entity(root_entity).despawn_related::<Children>();
                 commands.entity(root_entity).with_children(|p| {
-                    draw(p, &fonts, &pr, &key.0, editor.as_ref());
+                    draw(p, &fonts, &pr, &key.0, editor.as_ref(), scrolled);
                 });
                 root.built = Some(key);
             }
@@ -349,11 +383,20 @@ pub(super) fn fill_audits(
                             built: Some(key.clone()),
                         },
                     ))
-                    .with_children(|c| draw(c, &fonts, &pr, &key.0, editor.as_ref()));
+                    .with_children(|c| {
+                        draw(c, &fonts, &pr, &key.0, editor.as_ref(), Scrolled::default());
+                    });
                 });
             }
         }
     }
+}
+
+/// Where the two panes were scrolled before a rebuild.
+#[derive(Debug, Clone, Default)]
+struct Scrolled {
+    list: ScrollPosition,
+    detail: ScrollPosition,
 }
 
 fn draw(
@@ -362,6 +405,7 @@ fn draw(
     pr: &PrRef,
     v: &AuditsView,
     editor: Option<&Editor>,
+    scrolled: Scrolled,
 ) {
     if let Some(n) = &v.notice {
         notice_pane(p, fonts, pr, n);
@@ -371,6 +415,7 @@ fn draw(
         Node {
             width: px(280),
             flex_shrink: 0.0,
+            min_height: px(0),
             flex_direction: FlexDirection::Column,
             row_gap: px(4),
             padding: UiRect::axes(px(12), px(16)),
@@ -396,12 +441,23 @@ fn draw(
                 check_button(h, fonts, pr, CheckKind::Audit, action);
             }
         });
-        for row in &v.rows {
-            area_row(left, fonts, pr, row);
-        }
-        left.spawn(Node {
-            flex_grow: 1.0,
-            ..default()
+        left.spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
+                flex_grow: 1.0,
+                min_height: px(0),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollArea,
+            scrolled.list,
+            AreaList(pr.clone()),
+        ))
+        .with_children(|list| {
+            for row in &v.rows {
+                area_row(list, fonts, pr, row);
+            }
         });
         left.spawn(text(
             fonts,
@@ -421,7 +477,8 @@ fn draw(
             ..default()
         },
         ScrollArea,
-        ScrollPosition::default(),
+        scrolled.detail,
+        AuditDetail(pr.clone()),
     ))
     .with_children(|right| {
         if let Some(d) = &v.detail {
@@ -642,7 +699,12 @@ fn finding_card(
             if f.accepted {
                 // Nothing to decide: it is in the draft.
             } else if f.busy {
-                row.spawn(disabled_button(fonts, "Adding…"));
+                let label = if f.dismissing {
+                    "Dismissing…"
+                } else {
+                    "Adding…"
+                };
+                row.spawn(disabled_button(fonts, label));
             } else if f.stale {
                 dismiss_button(row, fonts, pr, &f.id, Variant::Ghost);
             } else {
@@ -723,6 +785,14 @@ mod tests {
 
     const FILES: [&str; 3] = ["src/auth/refresh.rs", "tests/refresh.rs", "src/config.rs"];
 
+    /// A model the daemon answered, with nothing in it.
+    fn read() -> ChecksModel {
+        ChecksModel {
+            loaded: true,
+            ..ChecksModel::default()
+        }
+    }
+
     fn model() -> ChecksModel {
         let (results, states) = fixture::demo_checks(NOW);
         let mut m = ChecksModel::default();
@@ -737,7 +807,16 @@ mod tests {
     }
 
     fn view(m: &ChecksModel, selected: Option<&str>) -> AuditsView {
-        audits_view(Some(m), &default_areas(), true, &FILES, NOW, selected, None)
+        audits_view(
+            Some(m),
+            &default_areas(),
+            true,
+            &FILES,
+            NOW,
+            selected,
+            None,
+            false,
+        )
     }
 
     fn rows(v: &AuditsView) -> Vec<(&str, &RowStatus)> {
@@ -906,14 +985,23 @@ mod tests {
         for a in &mut areas {
             a.enabled = false;
         }
-        let v = audits_view(None, &areas, true, &FILES, NOW, None, None);
+        let v = audits_view(Some(&read()), &areas, true, &FILES, NOW, None, None, false);
         let n = v.notice.expect("a notice");
         assert_eq!(
             n.line,
             "No audit areas are switched on. Switch one on in Config › Harness."
         );
         assert!(n.setup && n.action.is_none());
-        let v = audits_view(None, &default_areas(), true, &FILES, NOW, None, None);
+        let v = audits_view(
+            Some(&read()),
+            &default_areas(),
+            true,
+            &FILES,
+            NOW,
+            None,
+            None,
+            false,
+        );
         assert_eq!(v.notice.unwrap().action, Some(CheckAction::Run));
     }
 
@@ -926,9 +1014,12 @@ mod tests {
         let d = view(&m, Some("concurrency")).detail.unwrap();
         assert!(d.findings[0].accepted && d.findings[0].general);
         m.accepted.clear();
-        m.pending.insert(id);
+        m.pending.insert(id.clone(), true);
         let d = view(&m, Some("concurrency")).detail.unwrap();
-        assert!(d.findings[0].busy);
+        assert!(d.findings[0].busy && !d.findings[0].dismissing);
+        m.pending.insert(id, false);
+        let d = view(&m, Some("concurrency")).detail.unwrap();
+        assert!(d.findings[0].busy && d.findings[0].dismissing);
     }
 
     #[test]
@@ -936,7 +1027,7 @@ mod tests {
         let mut areas: Vec<AuditArea> = default_areas();
         areas.retain(|a| a.id != "docs");
         areas[0].name = "Is it right?".into();
-        let v = audits_view(Some(&model()), &areas, true, &FILES, NOW, None, None);
+        let v = audits_view(Some(&model()), &areas, true, &FILES, NOW, None, None, false);
         assert_eq!(v.rows[0].name, "Is it right?");
         assert_eq!(v.rows[5].name, "docs");
     }
@@ -974,6 +1065,7 @@ mod tests {
             NOW,
             Some("correctness"),
             None,
+            false,
         );
         let d = v.detail.unwrap();
         let f = &d.findings[0];
@@ -988,17 +1080,44 @@ mod tests {
 
     #[test]
     fn states_without_a_result_show_the_notice_and_no_list() {
-        let v = audits_view(None, &default_areas(), false, &FILES, NOW, None, None);
+        let v = audits_view(
+            Some(&read()),
+            &default_areas(),
+            false,
+            &FILES,
+            NOW,
+            None,
+            None,
+            false,
+        );
         let n = v.notice.expect("a notice");
         assert_eq!(n.line, "Set up a harness in Config › Harness");
         assert!(v.rows.is_empty() && v.detail.is_none());
-        let v = audits_view(None, &default_areas(), true, &FILES, NOW, None, None);
+        let v = audits_view(
+            Some(&read()),
+            &default_areas(),
+            true,
+            &FILES,
+            NOW,
+            None,
+            None,
+            false,
+        );
         assert_eq!(v.notice.unwrap().action, Some(CheckAction::Run));
-        let mut m = ChecksModel::default();
+        let mut m = read();
         m.audit.state = CheckState::Running {
             activity: Some("Reading tests/refresh.rs…".into()),
         };
-        let v = audits_view(Some(&m), &default_areas(), true, &FILES, NOW, None, None);
+        let v = audits_view(
+            Some(&m),
+            &default_areas(),
+            true,
+            &FILES,
+            NOW,
+            None,
+            None,
+            false,
+        );
         assert_eq!(v.notice.unwrap().line, "Reading tests/refresh.rs…");
     }
 
@@ -1024,6 +1143,77 @@ mod tests {
             .unwrap()
             .id
             .clone()
+    }
+
+    fn scroll_of<T: Component>(app: &mut App) -> f32 {
+        let mut q = app.world_mut().query_filtered::<&ScrollPosition, With<T>>();
+        let positions: Vec<f32> = q.iter(app.world()).map(|p| p.y).collect();
+        assert_eq!(positions.len(), 1, "one pane");
+        positions[0]
+    }
+
+    fn scroll_to<T: Component>(app: &mut App, y: f32) {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut ScrollPosition, With<T>>();
+        for mut p in q.iter_mut(app.world_mut()) {
+            p.y = y;
+        }
+    }
+
+    #[test]
+    fn a_rebuild_keeps_where_both_panes_were_scrolled() {
+        let mut app = testing::app(fixture::demo(NOW));
+        open_audits(&mut app);
+        scroll_to::<AuditDetail>(&mut app, 240.0);
+        scroll_to::<AreaList>(&mut app, 90.0);
+        let id = concurrency_id();
+        let edit = testing::find::<FindingEdit>(&mut app, |b| b.id == id);
+        testing::activate(&mut app, edit);
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::count::<EditorSubmit>(&mut app),
+            1,
+            "rebuilt with the editor"
+        );
+        assert_eq!(scroll_of::<AuditDetail>(&mut app), 240.0);
+        assert_eq!(scroll_of::<AreaList>(&mut app), 90.0);
+    }
+
+    #[test]
+    fn ten_areas_scroll_in_their_list_above_the_footer() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_audits(&mut app);
+        let ids: Vec<String> = (1..=10).map(|n| format!("area-{n}")).collect();
+        app.world_mut()
+            .resource_mut::<Checks>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .audit
+            .result
+            .as_mut()
+            .unwrap()
+            .areas = ids;
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<AreaButton>(&mut app), 10);
+        let mut lists = app
+            .world_mut()
+            .query_filtered::<(&Node, &ChildOf), (With<AreaList>, With<ScrollArea>)>();
+        let (list, parent) = lists.single(app.world()).expect("one scrolling area list");
+        assert_eq!(list.overflow.y, OverflowAxis::Scroll);
+        assert_eq!(list.min_height, px(0));
+        assert!(list.flex_grow > 0.0);
+        let column = app.world().get::<Node>(parent.parent()).unwrap();
+        assert_eq!(
+            column.min_height,
+            px(0),
+            "the column may shrink to the pane"
+        );
+        assert!(testing::shows(
+            &mut app,
+            "Run by Claude Code with your audit areas. Findings the agent proposes wait for your OK before they join the draft."
+        ));
     }
 
     #[test]

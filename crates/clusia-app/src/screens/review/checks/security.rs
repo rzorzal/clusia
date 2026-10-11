@@ -42,6 +42,8 @@ pub struct CardView {
     pub accepted: bool,
     /// An accept or dismiss waits for the daemon.
     pub busy: bool,
+    /// What waits is a dismiss.
+    pub dismissing: bool,
     /// No place in the diff: it joins the draft as a general comment.
     pub general: bool,
     /// The result is of an older head: only **Dismiss** and **Show in diff** are offered.
@@ -79,18 +81,19 @@ fn severity_of(f: &Finding) -> (&'static str, Tone) {
 }
 
 /// What the Security tab shows. `files` are the pull request's changed paths; `editing` is the
-/// id of the finding whose editor is open.
+/// id of the finding whose editor is open; `offline` says the tab is a cached copy.
 pub fn security_view(
     model: Option<&ChecksModel>,
     harness: bool,
     files: &[&str],
     now: i64,
     editing: Option<&str>,
+    offline: bool,
 ) -> SecurityView {
     let default = ChecksModel::default();
     let m = model.unwrap_or(&default);
     let k = m.kind(CheckKind::Security);
-    if let Some(n) = notice_of(CheckKind::Security, k, harness) {
+    if let Some(n) = notice_of(CheckKind::Security, k, harness, m.loaded, offline) {
         return SecurityView {
             title: n.title,
             line: n.line,
@@ -120,10 +123,22 @@ pub fn security_view(
         } else {
             format!("Checked an older commit, {age} ago. Check again to add these to your draft.")
         }
-    } else if shown.is_empty() {
+    } else if result.findings.is_empty() && result.unreadable == 0 {
+        // A claim about what the agent found, so only for a result with nothing in it.
         format!(
             "Claude Code found no security issues in {}.",
             plural(result.files as usize, "file")
+        )
+    } else if result.findings.is_empty() {
+        format!(
+            "Claude Code checked {}; {} could not be read.",
+            plural(result.files as usize, "file"),
+            plural(result.unreadable as usize, "result")
+        )
+    } else if shown.is_empty() {
+        format!(
+            "Claude Code checked the {} {age} ago. No findings wait for your OK.",
+            plural(result.files as usize, "changed file")
         )
     } else {
         format!(
@@ -131,7 +146,7 @@ pub fn security_view(
             plural(result.files as usize, "changed file")
         )
     };
-    if result.unreadable > 0 {
+    if result.unreadable > 0 && !result.findings.is_empty() {
         line.push_str(&format!(
             " {} could not be read.",
             plural(result.unreadable as usize, "result")
@@ -170,7 +185,8 @@ pub fn security_view(
                 comment: printable_lines(&proposed_comment(f)),
                 show: files.contains(&f.file.as_str()).then(|| f.file.clone()),
                 accepted: m.accepted.contains(&f.id),
-                busy: m.pending.contains(&f.id),
+                busy: m.pending.contains_key(&f.id),
+                dismissing: m.pending.get(&f.id) == Some(&false),
                 general: !f.anchored,
                 stale,
                 editing: editing == Some(f.id.as_str()),
@@ -179,7 +195,8 @@ pub fn security_view(
         .collect();
     SecurityView {
         title: match (open.len(), shown.len()) {
-            (0, 0) => "No security findings".to_string(),
+            (0, 0) if result.findings.is_empty() => "No security findings".to_string(),
+            (0, 0) => "No open security findings".to_string(),
             (0, _) => "All security findings are in your draft".to_string(),
             (n, _) => plural(n, "security finding"),
         },
@@ -231,6 +248,7 @@ pub(super) fn fill_security(
                 crate::review_state::EditTarget::Finding(id) => Some(id.as_str()),
                 _ => None,
             }),
+            ready.cached_at.is_some(),
         );
         let key = (
             view,
@@ -404,7 +422,12 @@ fn finding_card(
             if c.accepted {
                 row.spawn(badge(fonts, "✓ In your draft", Tone::Green));
             } else if c.busy {
-                row.spawn(crate::ui::kit::disabled_button(fonts, "Adding…"));
+                let label = if c.dismissing {
+                    "Dismissing…"
+                } else {
+                    "Adding…"
+                };
+                row.spawn(crate::ui::kit::disabled_button(fonts, label));
             } else if c.stale {
                 dismiss_button(row, fonts, pr, &c.id, Variant::Secondary);
             } else {
@@ -446,7 +469,7 @@ mod tests {
 
     #[test]
     fn the_mockup_view() {
-        let v = security_view(Some(&model()), true, &FILES, NOW, None);
+        let v = security_view(Some(&model()), true, &FILES, NOW, None, false);
         assert_eq!(v.title, "3 security findings");
         assert_eq!(
             v.line,
@@ -482,7 +505,7 @@ mod tests {
 
     #[test]
     fn a_file_outside_the_pull_request_has_no_show_in_diff() {
-        let v = security_view(Some(&model()), true, &["src/config.rs"], NOW, None);
+        let v = security_view(Some(&model()), true, &["src/config.rs"], NOW, None, false);
         assert!(v.cards.iter().all(|c| c.show.is_none()));
     }
 
@@ -497,7 +520,7 @@ mod tests {
         for id in &ids[1..] {
             m.dismissed.insert(id.clone());
         }
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert_eq!(v.title, "1 security finding");
         assert_eq!(v.chips, [("1 high".to_string(), Tone::Orange)]);
     }
@@ -508,8 +531,8 @@ mod tests {
         let id = m.findings(CheckKind::Security)[1].id.clone();
         m.accepted.insert(id.clone());
         m.pending
-            .insert(m.findings(CheckKind::Security)[0].id.clone());
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+            .insert(m.findings(CheckKind::Security)[0].id.clone(), true);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert!(v.cards[1].accepted);
         assert!(v.cards[0].busy);
     }
@@ -518,7 +541,7 @@ mod tests {
     fn an_unanchored_finding_joins_as_a_general_comment() {
         let mut m = model();
         m.security.result.as_mut().unwrap().findings[0].anchored = false;
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert!(v.cards[0].general);
         assert!(
             v.cards[0].comment.starts_with("src/client/http.rs:17: "),
@@ -535,7 +558,7 @@ mod tests {
             .map(|f| f.id.clone())
             .collect();
         m.accepted.insert(ids[1].clone());
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert_eq!(v.title, "2 security findings");
         assert_eq!(
             v.chips,
@@ -547,7 +570,7 @@ mod tests {
         assert_eq!(v.cards.len(), 3);
         assert!(v.cards[1].accepted);
         m.accepted.extend(ids);
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert_eq!(v.title, "All security findings are in your draft");
         assert!(v.chips.is_empty());
     }
@@ -560,7 +583,7 @@ mod tests {
         f.line = None;
         f.start_line = Some(5);
         f.end_line = Some(7);
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert!(
             v.cards[0].comment.starts_with("src/client/http.rs:5-7: "),
             "{}",
@@ -569,7 +592,7 @@ mod tests {
         let f = &mut m.security.result.as_mut().unwrap().findings[0];
         f.start_line = Some(5);
         f.end_line = Some(5);
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert!(v.cards[0].comment.starts_with("src/client/http.rs:5-5: "));
     }
 
@@ -577,7 +600,7 @@ mod tests {
     fn a_stale_result_marks_every_card_stale() {
         let mut m = model();
         m.security.state = CheckState::Stale;
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert!(v.cards.iter().all(|c| c.stale));
     }
 
@@ -585,12 +608,12 @@ mod tests {
     fn a_clean_stale_or_unreadable_result_is_worded_for_what_it_is() {
         let mut m = model();
         m.security.result.as_mut().unwrap().findings.clear();
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert_eq!(v.title, "No security findings");
         assert_eq!(v.line, "Claude Code found no security issues in 7 files.");
         assert!(v.cards.is_empty() && v.chips.is_empty());
         m.security.state = CheckState::Stale;
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert_eq!(
             v.line,
             "Checked an older commit, 2 minutes ago. Check again to look at the latest one.",
@@ -598,14 +621,14 @@ mod tests {
         );
         assert_eq!(v.action, Some(CheckAction::CheckAgain));
         m.security.result = model().security.result;
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert_eq!(
             v.line,
             "Checked an older commit, 2 minutes ago. Check again to add these to your draft."
         );
         m.security.state = CheckState::Done;
         m.security.result.as_mut().unwrap().unreadable = 1;
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         assert!(
             v.line.ends_with("1 result could not be read."),
             "{}",
@@ -621,7 +644,7 @@ mod tests {
         f.body = "line one\nline\u{202e}two".into();
         f.code = Some("+ ok\u{7}".into());
         f.comment = "Please\u{1b}[0m fix".into();
-        let v = security_view(Some(&m), true, &FILES, NOW, None);
+        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
         let c = &v.cards[0];
         for text in [&c.title, &c.body, &c.comment, c.code.as_ref().unwrap()] {
             assert!(
@@ -634,10 +657,14 @@ mod tests {
 
     #[test]
     fn states_without_a_result_show_the_notice() {
-        let v = security_view(None, false, &FILES, NOW, None);
+        let read = ChecksModel {
+            loaded: true,
+            ..ChecksModel::default()
+        };
+        let v = security_view(Some(&read), false, &FILES, NOW, None, false);
         assert_eq!(v.line, "Set up a harness in Config › Harness");
         assert!(v.setup && v.cards.is_empty() && v.action.is_none());
-        let v = security_view(None, true, &FILES, NOW, None);
+        let v = security_view(Some(&read), true, &FILES, NOW, None, false);
         assert_eq!(v.action, Some(CheckAction::Run));
         assert_eq!(v.title, "Security check");
     }

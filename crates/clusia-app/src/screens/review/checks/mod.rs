@@ -5,7 +5,7 @@
 //! A finding is the agent's proposal, so everything the window shows of it is made printable
 //! and drawn as plain text. Nothing here sends a finding to the draft without a click.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
@@ -57,8 +57,8 @@ pub struct ChecksModel {
     pub accepted: BTreeSet<String>,
     /// Finding ids the user dismissed: never shown again.
     pub dismissed: BTreeSet<String>,
-    /// Ids whose accept or dismiss waits for the daemon.
-    pub pending: BTreeSet<String>,
+    /// Ids whose accept (`true`) or dismiss (`false`) waits for the daemon.
+    pub pending: BTreeMap<String, bool>,
     /// `GetChecks` was asked for.
     pub asked: bool,
     /// The daemon's answer arrived.
@@ -126,7 +126,11 @@ impl ChecksModel {
                 }
                 k.state = state.clone();
                 // A stop or a failure may have left the daemon's old result in place: read it.
-                if matches!(state, CheckState::NotRun | CheckState::Failed { .. }) {
+                // So may a stop of a run that only waited, which ends Done or Stale with no
+                // result told after it.
+                let unread =
+                    matches!(state, CheckState::Done | CheckState::Stale) && k.result.is_none();
+                if unread || matches!(state, CheckState::NotRun | CheckState::Failed { .. }) {
                     self.asked = false;
                 }
             }
@@ -204,6 +208,18 @@ impl ChecksModel {
         (n > 0).then(|| n.to_string())
     }
 
+    /// Whether finding `id` is drawn with its buttons, so its editor can be finished: listed by
+    /// a kind whose run is done (not running, not stale) and not in the draft yet.
+    pub fn editable(&self, id: &str) -> bool {
+        !self.accepted.contains(id)
+            && [CheckKind::Security, CheckKind::Audit]
+                .into_iter()
+                .any(|kind| {
+                    self.kind(kind).state == CheckState::Done
+                        && self.findings(kind).iter().any(|f| f.id == id)
+                })
+    }
+
     /// Audit findings the user has not accepted or dismissed yet.
     pub fn waiting_ok(&self) -> usize {
         self.open(CheckKind::Audit).len()
@@ -248,6 +264,61 @@ pub(crate) fn close_edited(tabs: &mut ReviewTabs, tell: &ChecksTell) {
         )
     {
         tab.ui.editor = None;
+    }
+}
+
+/// What a closed finding editor says: its text was not added.
+pub const EDIT_DROPPED: &str = "The finding changed; your edit was not added.";
+
+/// Closes every finding editor whose card is no longer drawn with its buttons (a new run, a
+/// stale result, a finding dismissed or accepted elsewhere, or a new id for it), and says so.
+/// Such an editor could be neither finished nor cancelled, and an unsent editor holds the tab
+/// and the window open. A tab that edits nothing is not touched, so nothing redraws.
+pub(crate) fn reconcile_editors(
+    tabs: &mut ReviewTabs,
+    checks: &Checks,
+    toasts: &mut Toasts,
+    now: f64,
+) {
+    let orphaned: Vec<PrRef> = tabs
+        .0
+        .iter()
+        .filter(|(pr, tab)| {
+            matches!(
+                tab.ui.editor.as_ref().map(|e| &e.target),
+                Some(EditTarget::Finding(id))
+                    if !checks.0.get(*pr).is_some_and(|m| m.editable(id))
+            )
+        })
+        .map(|(pr, _)| pr.clone())
+        .collect();
+    for pr in orphaned {
+        if let Some(tab) = tabs.0.get_mut(&pr) {
+            tab.ui.editor = None;
+        }
+        toasts.0.push(crate::bridge::Toast {
+            text: EDIT_DROPPED.to_string(),
+            warning: true,
+            until: now + crate::bridge::TOAST_SECS,
+        });
+    }
+}
+
+/// `reconcile_editors` after `load_checks`, which forgets the checks of closed tabs.
+fn reconcile_finding_editors(
+    mut tabs: ResMut<ReviewTabs>,
+    checks: Res<Checks>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+) {
+    let stale = tabs.0.iter().any(|(pr, tab)| {
+        matches!(
+            tab.ui.editor.as_ref().map(|e| &e.target),
+            Some(EditTarget::Finding(id)) if !checks.0.get(pr).is_some_and(|m| m.editable(id))
+        )
+    });
+    if stale {
+        reconcile_editors(&mut tabs, &checks, &mut toasts, time.elapsed_secs_f64());
     }
 }
 
@@ -314,9 +385,17 @@ pub struct Notice {
     pub setup: bool,
 }
 
-/// The tab's state when there is nothing to list: no harness, not run, waiting, running or
-/// failed. `None` when the kind has a result (a run in progress or a failure comes first).
-pub fn notice_of(kind: CheckKind, k: &KindModel, harness: bool) -> Option<Notice> {
+/// The tab's state when there is nothing to list: the checks not read yet (or not readable
+/// offline), no harness, not run, waiting, running or failed. `None` when the kind has a result
+/// (a run in progress or a failure comes first). Until the daemon answers nothing is offered: a
+/// Run clicked then would throw away a result the tab has not shown yet.
+pub fn notice_of(
+    kind: CheckKind,
+    k: &KindModel,
+    harness: bool,
+    loaded: bool,
+    offline: bool,
+) -> Option<Notice> {
     let (name, working, failed, not_run) = match kind {
         CheckKind::Security => (
             "Security check",
@@ -339,6 +418,14 @@ pub fn notice_of(kind: CheckKind, k: &KindModel, harness: bool) -> Option<Notice
             setup,
         })
     };
+    if !loaded {
+        let line = if offline {
+            "Checks are not available offline."
+        } else {
+            "Loading checks…"
+        };
+        return notice(name, line.into(), None, false);
+    }
     match &k.state {
         CheckState::Waiting => notice(working, "Waiting for another check".into(), None, false),
         CheckState::Running { activity } => {
@@ -544,7 +631,7 @@ fn on_accept(
         .entry(b.pr.clone())
         .or_default()
         .pending
-        .insert(b.id.clone());
+        .insert(b.id.clone(), true);
     asks.send(Ask::AcceptFinding {
         pr: b.pr.clone(),
         id: b.id.clone(),
@@ -573,7 +660,7 @@ fn on_dismiss(
         .entry(b.pr.clone())
         .or_default()
         .pending
-        .insert(b.id.clone());
+        .insert(b.id.clone(), false);
     asks.send(Ask::DismissFinding {
         pr: b.pr.clone(),
         id: b.id.clone(),
@@ -638,7 +725,12 @@ impl Plugin for ChecksPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (load_checks, security::fill_security, audits::fill_audits)
+            (
+                load_checks,
+                reconcile_finding_editors,
+                security::fill_security,
+                audits::fill_audits,
+            )
                 .chain()
                 .after(ReviewSystems),
         );
@@ -831,8 +923,8 @@ mod tests {
     fn settled_and_refused_move_the_id_sets() {
         let ids = security_ids();
         let mut m = loaded();
-        m.pending.insert(ids[0].clone());
-        m.pending.insert(ids[1].clone());
+        m.pending.insert(ids[0].clone(), true);
+        m.pending.insert(ids[1].clone(), true);
         m.apply(&ChecksTell::Settled {
             pr: pr(),
             id: ids[0].clone(),
@@ -914,10 +1006,10 @@ mod tests {
     #[test]
     fn notices_cover_every_state_without_a_result() {
         let mut k = KindModel::default();
-        let n = notice_of(CheckKind::Security, &k, false).unwrap();
+        let n = notice_of(CheckKind::Security, &k, false, true, false).unwrap();
         assert_eq!(n.line, "Set up a harness in Config › Harness");
         assert!(n.setup && n.action.is_none());
-        let n = notice_of(CheckKind::Security, &k, true).unwrap();
+        let n = notice_of(CheckKind::Security, &k, true, true, false).unwrap();
         assert_eq!(n.action, Some(CheckAction::Run));
         assert_eq!(
             CheckAction::Run.label(CheckKind::Security),
@@ -926,21 +1018,23 @@ mod tests {
         assert_eq!(CheckAction::Run.label(CheckKind::Audit), "Run audit");
         k.state = CheckState::Waiting;
         assert_eq!(
-            notice_of(CheckKind::Audit, &k, true).unwrap().line,
+            notice_of(CheckKind::Audit, &k, true, true, false)
+                .unwrap()
+                .line,
             "Waiting for another check"
         );
         k.state = CheckState::Running {
             activity: Some("Reading src/auth/store.rs…".into()),
         };
         k.found = 2;
-        let n = notice_of(CheckKind::Security, &k, true).unwrap();
+        let n = notice_of(CheckKind::Security, &k, true, true, false).unwrap();
         assert_eq!(n.line, "Reading src/auth/store.rs… · 2 found so far");
         assert_eq!(n.action, Some(CheckAction::Stop));
         k.state = CheckState::Running {
             activity: Some("Run\u{1b}[31m this".into()),
         };
         assert!(
-            !notice_of(CheckKind::Security, &k, true)
+            !notice_of(CheckKind::Security, &k, true, true, false)
                 .unwrap()
                 .line
                 .contains('\u{1b}'),
@@ -949,12 +1043,12 @@ mod tests {
         k.state = CheckState::Failed {
             message: "The check took too long".into(),
         };
-        let n = notice_of(CheckKind::Security, &k, true).unwrap();
+        let n = notice_of(CheckKind::Security, &k, true, true, false).unwrap();
         assert_eq!(n.line, "The check took too long");
         assert_eq!(n.action, Some(CheckAction::TryAgain));
         k.state = CheckState::Done;
         k.result = fixture::demo_checks(NOW).0.into_iter().next();
-        assert_eq!(notice_of(CheckKind::Security, &k, true), None);
+        assert_eq!(notice_of(CheckKind::Security, &k, true, true, false), None);
     }
 
     fn open_security(app: &mut App) -> PrRef {
@@ -1350,6 +1444,234 @@ mod tests {
         );
         testing::settle(&mut app);
         assert!(testing::shows(&mut app, "●"));
+    }
+
+    fn toasts(app: &App) -> Vec<String> {
+        app.world()
+            .resource::<crate::bridge::Toasts>()
+            .0
+            .iter()
+            .map(|t| t.text.clone())
+            .collect()
+    }
+
+    /// Opens the editor of the first Security finding with **Edit first**.
+    fn edit_first(app: &mut App, pr: &PrRef) -> String {
+        let id = security_ids()[0].clone();
+        let edit = testing::find::<FindingEdit>(app, |b| b.id == id);
+        testing::activate(app, edit);
+        testing::settle(app);
+        assert!(testing::tab(app, pr).ui.editor.is_some(), "an editor");
+        id
+    }
+
+    #[test]
+    fn a_new_run_closes_the_finding_editor_and_the_tab_can_close() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_security(&mut app);
+        edit_first(&mut app, &pr);
+        testing::tell(
+            &mut app,
+            Tell::Checks(ChecksTell::State {
+                pr: pr.clone(),
+                kind: CheckKind::Security,
+                state: CheckState::Waiting,
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ui.editor.is_none());
+        assert!(
+            toasts(&app)
+                .iter()
+                .any(|t| t == "The finding changed; your edit was not added."),
+            "{:?}",
+            toasts(&app)
+        );
+        let close = testing::find::<crate::nav::CloseTab>(&mut app, |c| c.0 == pr);
+        testing::activate(&mut app, close);
+        testing::settle(&mut app);
+        assert!(
+            !toasts(&app)
+                .iter()
+                .any(|t| t.starts_with("Finish or cancel")),
+            "nothing holds the tab: {:?}",
+            toasts(&app)
+        );
+    }
+
+    #[test]
+    fn a_stale_result_closes_the_finding_editor_and_offers_no_accept() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_security(&mut app);
+        edit_first(&mut app, &pr);
+        testing::tell(
+            &mut app,
+            Tell::Checks(ChecksTell::State {
+                pr: pr.clone(),
+                kind: CheckKind::Security,
+                state: CheckState::Stale,
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ui.editor.is_none());
+        assert_eq!(testing::count::<EditorSubmit>(&mut app), 0);
+        assert_eq!(testing::count::<FindingAccept>(&mut app), 0);
+    }
+
+    #[test]
+    fn a_finding_dismissed_elsewhere_closes_its_editor() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_security(&mut app);
+        let id = edit_first(&mut app, &pr);
+        let (results, states) = fixture::demo_checks(NOW);
+        testing::tell(
+            &mut app,
+            Tell::Checks(ChecksTell::Loaded {
+                pr: pr.clone(),
+                results,
+                states,
+                accepted: Vec::new(),
+                dismissed: vec![id],
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ui.editor.is_none());
+    }
+
+    #[test]
+    fn an_editor_on_a_finding_still_listed_stays() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_security(&mut app);
+        edit_first(&mut app, &pr);
+        testing::tell(
+            &mut app,
+            Tell::Checks(ChecksTell::State {
+                pr: pr.clone(),
+                kind: CheckKind::Audit,
+                state: CheckState::Running { activity: None },
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_some(),
+            "the other kind ran"
+        );
+        assert!(toasts(&app).is_empty(), "{:?}", toasts(&app));
+    }
+
+    #[test]
+    fn every_finding_dismissed_is_not_a_clean_result() {
+        let ids = security_ids();
+        let mut m = loaded();
+        for id in &ids {
+            m.apply(&ChecksTell::Settled {
+                pr: pr(),
+                id: id.clone(),
+                accepted: false,
+            });
+        }
+        let v = security::security_view(Some(&m), true, &[], NOW, None, false);
+        assert!(!v.line.contains("found no security issues"), "{}", v.line);
+        assert_eq!(
+            v.line,
+            "Claude Code checked the 7 changed files 2 minutes ago. No findings wait for your OK."
+        );
+        assert_eq!(v.title, "No open security findings");
+    }
+
+    #[test]
+    fn only_unreadable_results_is_not_a_clean_result() {
+        let mut m = loaded();
+        let result = m.security.result.as_mut().unwrap();
+        result.findings.clear();
+        result.unreadable = 3;
+        let v = security::security_view(Some(&m), true, &[], NOW, None, false);
+        assert!(!v.line.contains("found no security issues"), "{}", v.line);
+        assert_eq!(
+            v.line,
+            "Claude Code checked 7 files; 3 results could not be read."
+        );
+    }
+
+    #[test]
+    fn a_dismiss_in_flight_says_dismissing() {
+        let mut app = testing::app(fixture::demo(NOW));
+        open_security(&mut app);
+        let id = security_ids()[2].clone();
+        let dismiss = testing::find::<FindingDismiss>(&mut app, |b| b.id == id);
+        testing::activate(&mut app, dismiss);
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Dismissing…"));
+        assert!(!testing::shows(&mut app, "Adding…"));
+    }
+
+    #[test]
+    fn before_the_checks_arrive_the_tabs_say_so_and_offer_nothing() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        for section in [ReviewSection::Security, ReviewSection::Audits] {
+            testing::set_section(&mut app, &pr, section);
+            assert!(testing::shows(&mut app, "Loading checks…"), "{section:?}");
+            assert!(!testing::shows(&mut app, "has not"), "{section:?}");
+            assert_eq!(testing::count::<CheckButton>(&mut app), 0, "{section:?}");
+        }
+    }
+
+    #[test]
+    fn a_cached_copy_says_the_checks_are_not_available_offline() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        app.world_mut().resource_mut::<Checks>().0.clear();
+        if let Some(ready) = app
+            .world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .and_then(crate::review_state::Tab::ready_mut)
+        {
+            ready.cached_at = Some(NOW - 3600);
+        }
+        for section in [ReviewSection::Security, ReviewSection::Audits] {
+            testing::set_section(&mut app, &pr, section);
+            assert!(
+                testing::shows(&mut app, "Checks are not available offline."),
+                "{section:?}"
+            );
+            assert_eq!(testing::count::<CheckButton>(&mut app), 0, "{section:?}");
+        }
+    }
+
+    #[test]
+    fn a_stop_while_waiting_reads_the_checks_again() {
+        let mut m = loaded();
+        for state in [CheckState::Done, CheckState::Stale] {
+            m.apply(&ChecksTell::State {
+                pr: pr(),
+                kind: CheckKind::Security,
+                state: CheckState::Waiting,
+            });
+            assert!(m.security.result.is_none());
+            m.asked = true;
+            m.apply(&ChecksTell::State {
+                pr: pr(),
+                kind: CheckKind::Security,
+                state,
+            });
+            assert!(!m.asked, "the result the waiting run cleared is read again");
+        }
+        // A Done that comes with its result does not ask again.
+        m.apply(&ChecksTell::Done {
+            pr: pr(),
+            kind: CheckKind::Security,
+            result: fixture::demo_checks(NOW).0.remove(0),
+        });
+        m.asked = true;
+        m.apply(&ChecksTell::State {
+            pr: pr(),
+            kind: CheckKind::Security,
+            state: CheckState::Done,
+        });
+        assert!(m.asked);
     }
 
     #[test]

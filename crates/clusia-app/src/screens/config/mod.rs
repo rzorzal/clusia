@@ -123,6 +123,7 @@ impl Plugin for ConfigPlugin {
                 build_config,
                 commit_fields,
                 areas::keep_form_text,
+                areas::settle_area_write,
                 areas::reset_form_off_page,
                 repos::commit_roots,
                 rebuild_config,
@@ -1347,9 +1348,7 @@ mod tests {
             value: " --model claude-opus-5-5 ".into(),
         });
         app.update();
-        let wait = testing::find::<SetValue>(&mut app, |s| {
-            s.key == "harness.on_open" && s.value == "wait"
-        });
+        let wait = testing::find::<harness::OpenToggle>(&mut app, |t| t.0 == "harness.on_open");
         testing::activate(&mut app, wait);
         let perms = testing::find::<SetValue>(&mut app, |s| s.key == "harness.use_cli_permissions");
         testing::activate(&mut app, perms);

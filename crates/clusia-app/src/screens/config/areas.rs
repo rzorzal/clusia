@@ -10,12 +10,14 @@ use clusia_core::checks::{
     AREA_INSTRUCTION_MAX, AREA_NAME_MAX, AuditArea, is_builtin, slug_id, validate_area,
 };
 
-use super::{FieldError, row, setter};
+use super::{FieldError, row};
 use crate::bridge::{Asks, Model, set_config};
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, Screen, Section};
 use crate::theme::Swatch;
-use crate::ui::kit::{FieldCommitted, Type, Variant, button, card, checkbox, text, text_field};
+use crate::ui::kit::{
+    FieldCommitted, Type, Variant, button, card, checkbox, disabled_button, text, text_field,
+};
 
 /// The config key that holds the list.
 pub const AREAS_KEY: &str = "harness.audit_areas";
@@ -33,12 +35,42 @@ pub enum FormTarget {
 
 /// The add/edit form: closed while `target` is `None`. `name` and `instruction` fill the
 /// fields when it opens or after a refused save; `error` is the reason for that refusal.
+///
+/// `writing` is the list last sent and not yet back from the daemon (in live mode a write
+/// comes back only after a round trip). The switches are drawn from it, and every change
+/// builds on it, so two quick changes never undo each other. `saving` keeps the form open
+/// until its list is back, so a refused write loses nothing that was typed.
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
 pub struct AreaForm {
     pub target: Option<FormTarget>,
     pub name: String,
     pub instruction: String,
     pub error: Option<String>,
+    pub saving: bool,
+    pub writing: Option<Vec<AuditArea>>,
+}
+
+impl AreaForm {
+    /// The list a change builds on: the one being written, else the daemon's.
+    fn base(&self, model: &Model) -> Vec<AuditArea> {
+        self.writing
+            .clone()
+            .unwrap_or_else(|| model.snapshot.config.harness.audit_areas.clone())
+    }
+
+    /// Sends `next` and remembers it until the daemon answers.
+    fn write(&mut self, asks: &mut Asks, model: &mut Model, next: Vec<AuditArea>) {
+        set_config(asks, model, AREAS_KEY, areas_value(&next));
+        self.writing = Some(next);
+    }
+
+    /// A closed form that keeps the write in flight.
+    fn closed(&self) -> AreaForm {
+        AreaForm {
+            writing: self.writing.clone(),
+            ..default()
+        }
+    }
 }
 
 /// The checkbox that switches an area (by id) on or off.
@@ -156,7 +188,7 @@ pub fn build(
     })
     .with_children(|c| {
         for area in areas {
-            area_row(c, fonts, area, areas);
+            area_row(c, fonts, area);
         }
     });
     if let Some(message) = error {
@@ -177,7 +209,7 @@ pub fn build(
     }
 }
 
-fn area_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, area: &AuditArea, all: &[AuditArea]) {
+fn area_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, area: &AuditArea) {
     p.spawn(Node {
         column_gap: px(10),
         align_items: AlignItems::Center,
@@ -186,8 +218,8 @@ fn area_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, area: &AuditArea, all
     .with_children(|r| {
         r.spawn((
             checkbox(area.enabled),
-            setter(AREAS_KEY, areas_value(&toggled(all, &area.id))),
             AreaSwitch(area.id.clone()),
+            observe(on_switch),
         ));
         r.spawn(Node {
             flex_grow: 1.0,
@@ -270,11 +302,15 @@ fn form_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, f: &AreaForm) {
             ..default()
         })
         .with_children(|b| {
-            b.spawn((
-                button(fonts, "Save area", Variant::Primary),
-                SaveArea,
-                observe(on_save),
-            ));
+            if f.saving {
+                b.spawn((disabled_button(fonts, "Saving…"), SaveArea));
+            } else {
+                b.spawn((
+                    button(fonts, "Save area", Variant::Primary),
+                    SaveArea,
+                    observe(on_save),
+                ));
+            }
             b.spawn((
                 button(fonts, "Cancel", Variant::Secondary),
                 CancelArea,
@@ -287,8 +323,23 @@ fn form_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, f: &AreaForm) {
 fn on_add(_activate: On<Activate>, mut form: ResMut<AreaForm>) {
     *form = AreaForm {
         target: Some(FormTarget::New),
-        ..default()
+        ..form.closed()
     };
+}
+
+/// Flips one area's switch, on the list as it is being written.
+fn on_switch(
+    activate: On<Activate>,
+    switches: Query<&AreaSwitch>,
+    mut form: ResMut<AreaForm>,
+    mut model: ResMut<Model>,
+    mut asks: ResMut<Asks>,
+) {
+    let Ok(AreaSwitch(id)) = switches.get(activate.entity) else {
+        return;
+    };
+    let next = toggled(&form.base(&model), id);
+    form.write(&mut asks, &mut model, next);
 }
 
 fn on_edit(
@@ -300,13 +351,13 @@ fn on_edit(
     let Ok(EditArea(id)) = targets.get(activate.entity) else {
         return;
     };
-    let areas = &model.snapshot.config.harness.audit_areas;
+    let areas = form.base(&model);
     if let Some(area) = areas.iter().find(|a| a.id == *id && !is_builtin(&a.id)) {
         *form = AreaForm {
             target: Some(FormTarget::Edit(id.clone())),
             name: area.name.clone(),
             instruction: area.instruction.clone(),
-            error: None,
+            ..form.closed()
         };
     }
 }
@@ -321,18 +372,15 @@ fn on_delete(
     let Ok(DeleteArea(id)) = targets.get(activate.entity) else {
         return;
     };
-    let value = {
-        let areas = &model.snapshot.config.harness.audit_areas;
-        let next = without(areas, id);
-        if next.len() == areas.len() {
-            return;
-        }
-        areas_value(&next)
-    };
-    if form.target == Some(FormTarget::Edit(id.clone())) {
-        *form = AreaForm::default();
+    let areas = form.base(&model);
+    let next = without(&areas, id);
+    if next.len() == areas.len() {
+        return;
     }
-    set_config(&mut asks, &mut model, AREAS_KEY, value);
+    if form.target == Some(FormTarget::Edit(id.clone())) {
+        *form = form.closed();
+    }
+    form.write(&mut asks, &mut model, next);
 }
 
 fn on_save(
@@ -349,29 +397,41 @@ fn on_save(
     // The fields are read as they stand: a click on **Save area** may come before the field
     // has reported its text.
     let (name, instruction) = (first_text(&names), first_text(&instructions));
-    match saved(
-        &model.snapshot.config.harness.audit_areas,
-        &target,
-        &name,
-        &instruction,
-    ) {
-        Ok(next) => {
-            *form = AreaForm::default();
-            set_config(&mut asks, &mut model, AREAS_KEY, areas_value(&next));
-        }
-        Err(message) => {
-            *form = AreaForm {
-                target: Some(target),
-                name: name.trim().to_string(),
-                instruction: instruction.trim().to_string(),
-                error: Some(message),
-            };
-        }
+    let saving = saved(&form.base(&model), &target, &name, &instruction);
+    *form = AreaForm {
+        target: Some(target),
+        name: name.trim().to_string(),
+        instruction: instruction.trim().to_string(),
+        error: saving.as_ref().err().cloned(),
+        saving: saving.is_ok(),
+        ..form.closed()
+    };
+    if let Ok(next) = saving {
+        form.write(&mut asks, &mut model, next);
     }
 }
 
 fn on_cancel(_activate: On<Activate>, mut form: ResMut<AreaForm>) {
-    *form = AreaForm::default();
+    *form = form.closed();
+}
+
+/// Ends the write in flight: once the daemon's list is the one sent, the write is done and a
+/// saving form closes; once the daemon refused it, the switches show the daemon's list again
+/// and the form stays open with what was typed (the refusal shows under the list).
+pub fn settle_area_write(model: Res<Model>, mut form: ResMut<AreaForm>) {
+    let Some(writing) = &form.writing else {
+        return;
+    };
+    if model.snapshot.config.harness.audit_areas == *writing {
+        if form.saving {
+            *form = AreaForm::default();
+        } else {
+            form.writing = None;
+        }
+    } else if model.rejected.contains_key(AREAS_KEY) {
+        form.writing = None;
+        form.saving = false;
+    }
 }
 
 /// Keeps what was typed when the page is rebuilt for another reason (a probe result, a change
@@ -397,8 +457,8 @@ pub fn keep_form_text(
 /// Closes the form when the Harness page is not the one showing, so a half-open form does not
 /// come back on a later visit.
 pub fn reset_form_off_page(nav: Res<Nav>, mut form: ResMut<AreaForm>) {
-    if nav.screen != Screen::Config(Section::Harness) && *form != AreaForm::default() {
-        *form = AreaForm::default();
+    if nav.screen != Screen::Config(Section::Harness) && *form != form.closed() {
+        *form = form.closed();
     }
 }
 
@@ -596,9 +656,6 @@ mod tests {
             ("migrations", "Migrations")
         );
         assert!(added.enabled && !added.builtin);
-        assert_eq!(*app.world().resource::<AreaForm>(), AreaForm::default());
-        testing::settle(&mut app);
-        assert_eq!(testing::count::<SaveArea>(&mut app), 0, "the form closed");
     }
 
     #[test]
@@ -699,6 +756,116 @@ mod tests {
         assert_eq!(testing::count::<DeleteArea>(&mut app), 0);
         assert_eq!(without(&areas, "docs").len(), 6, "never dropped");
         assert!(saved(&areas, &FormTarget::Edit("docs".into()), "Docs", "Docs.").is_err());
+    }
+
+    fn click_switch(app: &mut App, id: &str) -> Vec<AuditArea> {
+        let switch = testing::find::<AreaSwitch>(app, |s| s.0 == id);
+        testing::activate(app, switch);
+        testing::settle(app);
+        written_areas(&testing::recorded(app))
+    }
+
+    fn enabled(areas: &[AuditArea], id: &str) -> bool {
+        areas.iter().find(|a| a.id == id).unwrap().enabled
+    }
+
+    #[test]
+    fn two_switches_before_the_daemon_answers_keep_both_changes() {
+        let mut app = harness_app();
+        let first = click_switch(&mut app, "performance");
+        assert!(!enabled(&first, "performance"));
+        let second = click_switch(&mut app, "docs");
+        assert!(
+            !enabled(&second, "performance") && !enabled(&second, "docs"),
+            "the second write builds on the first"
+        );
+    }
+
+    #[test]
+    fn a_switch_clicked_twice_flips_twice_and_shows_the_change_at_once() {
+        let mut app = harness_app();
+        let first = click_switch(&mut app, "performance");
+        assert!(!enabled(&first, "performance"));
+        assert_eq!(
+            app.world().resource::<AreaForm>().writing.as_ref(),
+            Some(&first),
+            "the switches are drawn from the list being written"
+        );
+        let second = click_switch(&mut app, "performance");
+        assert!(enabled(&second, "performance"));
+        // The daemon's answer ends the write.
+        testing::set_config_locally(&mut app, AREAS_KEY, &areas_value(&second));
+        testing::settle(&mut app);
+        assert_eq!(app.world().resource::<AreaForm>().writing, None);
+    }
+
+    #[test]
+    fn a_delete_during_a_switch_keeps_the_switch() {
+        let mut app = harness_app();
+        with_custom(&mut app);
+        click_switch(&mut app, "performance");
+        let delete = testing::find::<DeleteArea>(&mut app, |d| d.0 == "migrations");
+        testing::activate(&mut app, delete);
+        let left = written_areas(&testing::recorded(&mut app));
+        assert!(!enabled(&left, "performance"));
+        assert!(left.iter().all(|a| a.id != "migrations"));
+    }
+
+    #[test]
+    fn a_saved_form_closes_when_the_list_arrives() {
+        let mut app = harness_app();
+        let add = testing::find::<AddAreaButton>(&mut app, |_| true);
+        testing::activate(&mut app, add);
+        testing::settle(&mut app);
+        type_form(
+            &mut app,
+            "Migrations",
+            "Check every migration can be undone.",
+        );
+        let save = testing::find::<SaveArea>(&mut app, |_| true);
+        testing::activate(&mut app, save);
+        let written = written_areas(&testing::recorded(&mut app));
+        testing::settle(&mut app);
+        assert!(app.world().resource::<AreaForm>().saving);
+        assert_eq!(
+            testing::count::<SaveArea>(&mut app),
+            1,
+            "open until it is saved"
+        );
+        testing::set_config_locally(&mut app, AREAS_KEY, &areas_value(&written));
+        testing::settle(&mut app);
+        assert_eq!(*app.world().resource::<AreaForm>(), AreaForm::default());
+        assert_eq!(testing::count::<SaveArea>(&mut app), 0, "the form closed");
+    }
+
+    #[test]
+    fn a_save_the_daemon_refuses_keeps_the_typed_text() {
+        let mut app = harness_app();
+        let add = testing::find::<AddAreaButton>(&mut app, |_| true);
+        testing::activate(&mut app, add);
+        testing::settle(&mut app);
+        type_form(
+            &mut app,
+            "Migrations",
+            "Check every migration can be undone.",
+        );
+        let save = testing::find::<SaveArea>(&mut app, |_| true);
+        testing::activate(&mut app, save);
+        testing::recorded(&mut app);
+        app.world_mut()
+            .resource_mut::<Model>()
+            .rejected
+            .insert(AREAS_KEY.into(), "the daemon is offline".into());
+        testing::settle(&mut app);
+        let form = app.world().resource::<AreaForm>().clone();
+        assert_eq!(form.target, Some(FormTarget::New));
+        assert!(!form.saving && form.writing.is_none());
+        let name = testing::find::<AreaNameField>(&mut app, |_| true);
+        assert_eq!(
+            app.world().get::<Field>(name).unwrap().committed,
+            "Migrations"
+        );
+        assert!(testing::shows(&mut app, "the daemon is offline"));
     }
 
     #[test]

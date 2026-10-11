@@ -1964,6 +1964,7 @@ pub(crate) fn pump(
             Tell::Checks(tell) => {
                 checks::close_edited(&mut tabs, &tell);
                 checks.apply(&tell);
+                checks::reconcile_editors(&mut tabs, &checks, &mut toasts, time.elapsed_secs_f64());
             }
             Tell::Probe(result) => model.probe = ProbeState::Done(result),
             _ => {} // the other review tells were applied above
@@ -2066,7 +2067,14 @@ pub(crate) fn demo_answers(
                     ));
                 }
             }
-            Ask::GetChecks(_) => {}
+            // Any other review has no checks: its tabs say not checked instead of loading.
+            Ask::GetChecks(pr) => tells.push(Tell::Checks(ChecksTell::Loaded {
+                pr,
+                results: Vec::new(),
+                states: Vec::new(),
+                accepted: Vec::new(),
+                dismissed: Vec::new(),
+            })),
             Ask::RunCheck { pr, kind } => {
                 let (results, _) = fixture::demo_checks(now);
                 if let Some(result) = results.into_iter().find(|r| r.kind == kind) {
@@ -2389,7 +2397,9 @@ fn demo_accept_finding(
         CheckKind::Security => Origin::Security,
         CheckKind::Audit => Origin::Audit,
     };
-    let text = body.unwrap_or_else(|| proposed_comment(&finding));
+    // What the card shows is what is added.
+    let text = body
+        .unwrap_or_else(|| clusia_core::printable::printable_lines(&proposed_comment(&finding)));
     match review
         .draft
         .add_as(origin, kind, anchor, None, &text, now)
@@ -3494,7 +3504,13 @@ mod tests {
         };
         assert_eq!((results.len(), states.len()), (2, 2));
         assert!(accepted.is_empty() && dismissed.is_empty());
-        assert!(demo_tells(vec![Ask::GetChecks("acme/widgets#9".parse().unwrap())]).is_empty());
+        assert!(
+            matches!(
+                demo_tells(vec![Ask::GetChecks("acme/widgets#9".parse().unwrap())]).as_slice(),
+                [Tell::Checks(ChecksTell::Loaded { results, .. })] if results.is_empty()
+            ),
+            "another review has no checks, and says so instead of loading"
+        );
         assert!(
             demo_tells(vec![Ask::GetChecks(pr.clone())]).is_empty(),
             "no open review, nothing to mark as accepted"

@@ -11,7 +11,7 @@ use clusia_core::config::{Harness, OnOpen};
 use clusia_protocol::ProbeResult;
 
 use super::{ConfigField, areas, field_row, option_card, page_header, row, setter};
-use crate::bridge::{Ask, Asks, Model, ProbeState};
+use crate::bridge::{Ask, Asks, Model, ProbeState, set_config};
 use crate::fonts::UiFonts;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
@@ -83,6 +83,32 @@ pub fn open_checks(h: &Harness) -> OpenChecks {
 /// The note under the checks.
 pub const COST_NOTE: &str = "Each check is one Claude Code turn on your account.";
 
+/// A *When I open a review* checkbox: the key it flips.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct OpenToggle(pub &'static str);
+
+/// Flips a *When I open a review* setting from its value now, not from the value the page
+/// was drawn with, so a change made since then is not written back.
+fn on_open_toggle(
+    activate: On<Activate>,
+    toggles: Query<&OpenToggle>,
+    mut model: ResMut<Model>,
+    mut asks: ResMut<Asks>,
+) {
+    let Ok(OpenToggle(key)) = toggles.get(activate.entity) else {
+        return;
+    };
+    let h = &model.snapshot.config.harness;
+    let value = match *key {
+        "harness.on_open" if h.on_open == OnOpen::Summarize => "wait".to_string(),
+        "harness.on_open" => "summarize".to_string(),
+        "harness.check_security" => (!h.check_security).to_string(),
+        "harness.audit" => (!h.audit).to_string(),
+        _ => return,
+    };
+    set_config(&mut asks, &mut model, key, value);
+}
+
 /// The three checkboxes of *When I open a review*, in a column. Config and the first run
 /// show the same ones.
 pub fn open_checkboxes(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &OpenChecks) {
@@ -92,35 +118,19 @@ pub fn open_checkboxes(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &OpenCh
         ..default()
     })
     .with_children(|c| {
-        let on_open = if v.summarize { "wait" } else { "summarize" };
         let choices = [
-            (
-                "Summarize it",
-                "harness.on_open",
-                on_open.to_string(),
-                v.summarize,
-            ),
-            (
-                "Check security",
-                "harness.check_security",
-                (!v.security).to_string(),
-                v.security,
-            ),
-            (
-                "Audit the change",
-                "harness.audit",
-                (!v.audit).to_string(),
-                v.audit,
-            ),
+            ("Summarize it", "harness.on_open", v.summarize),
+            ("Check security", "harness.check_security", v.security),
+            ("Audit the change", "harness.audit", v.audit),
         ];
-        for (label, key, value, on) in choices {
+        for (label, key, on) in choices {
             c.spawn(Node {
                 column_gap: px(10),
                 align_items: AlignItems::Center,
                 ..default()
             })
             .with_children(|r| {
-                r.spawn((checkbox(on), setter(key, value)));
+                r.spawn((checkbox(on), OpenToggle(key), observe(on_open_toggle)));
                 r.spawn(text(fonts, label, Type::BODY));
             });
         }
@@ -131,6 +141,9 @@ impl HarnessView {
     /// The same view with the add/edit form, which lives in a resource of its own.
     pub fn with_form(mut self, form: &areas::AreaForm) -> Self {
         self.form = form.target.is_some().then(|| form.clone());
+        if let Some(writing) = &form.writing {
+            self.areas = writing.clone();
+        }
         self
     }
 }
@@ -697,7 +710,6 @@ mod tests {
 
     #[test]
     fn the_three_checkboxes_write_their_keys() {
-        use crate::screens::config::SetValue;
         let mut app = harness_app();
         for needle in [
             "When I open a review",
@@ -718,7 +730,7 @@ mod tests {
             ("harness.check_security", "false"),
             ("harness.audit", "false"),
         ] {
-            let e = crate::testing::find::<SetValue>(&mut app, |s| s.key == key);
+            let e = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == key);
             crate::testing::activate(&mut app, e);
             assert_eq!(
                 crate::testing::recorded(&mut app),
@@ -732,14 +744,13 @@ mod tests {
 
     #[test]
     fn a_checkbox_that_is_off_turns_the_key_back_on() {
-        use crate::screens::config::SetValue;
         let mut app = harness_app();
         crate::testing::set_config_locally(&mut app, "harness.audit", "false");
         crate::testing::set_config_locally(&mut app, "harness.on_open", "wait");
         crate::testing::settle(&mut app);
-        let audit = crate::testing::find::<SetValue>(&mut app, |s| s.key == "harness.audit");
+        let audit = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.audit");
         crate::testing::activate(&mut app, audit);
-        let summarize = crate::testing::find::<SetValue>(&mut app, |s| s.key == "harness.on_open");
+        let summarize = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.on_open");
         crate::testing::activate(&mut app, summarize);
         assert_eq!(
             crate::testing::recorded(&mut app),
@@ -753,6 +764,28 @@ mod tests {
                     value: "summarize".into()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_checkbox_reads_the_setting_when_it_is_clicked() {
+        let mut app = harness_app();
+        let security =
+            crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.check_security");
+        // Changed elsewhere after the page was drawn, before it is drawn again.
+        app.world_mut()
+            .resource_mut::<crate::bridge::Model>()
+            .snapshot
+            .config
+            .harness
+            .check_security = false;
+        crate::testing::activate(&mut app, security);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.check_security".into(),
+                value: "true".into()
+            }]
         );
     }
 

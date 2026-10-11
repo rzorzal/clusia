@@ -1358,7 +1358,7 @@ mod tests {
 
     #[test]
     fn step_three_has_the_checks_and_no_placeholder() {
-        use crate::screens::config::SetValue;
+        use crate::screens::config::harness::OpenToggle;
         let mut app = step_three_app();
         for needle in [
             "When I open a review",
@@ -1371,7 +1371,7 @@ mod tests {
             assert!(testing::shows(&mut app, needle), "{needle}");
         }
         assert!(!testing::shows(&mut app, "Connecting a harness arrives"));
-        let security = testing::find::<SetValue>(&mut app, |s| s.key == "harness.check_security");
+        let security = testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.check_security");
         testing::activate(&mut app, security);
         assert_eq!(
             testing::recorded(&mut app),
