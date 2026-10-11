@@ -52,7 +52,9 @@ pub(crate) fn append(path: &Path, entry: &AgentLogEntry) -> io::Result<()> {
 }
 
 /// Drops the oldest half of the file, cutting at a line boundary. When the newest entry alone
-/// is longer than half the file, everything before it goes and it stays.
+/// is longer than half the file, everything before it goes and it stays. A check turn cut in
+/// two keeps its first `Check` line, moved to the top, so the rest of that turn still reads as
+/// a check's and never as the chat's.
 fn trim(path: &Path) -> io::Result<()> {
     let bytes = fs::read(path)?;
     let middle = bytes.len() / 2;
@@ -71,8 +73,32 @@ fn trim(path: &Path) -> io::Result<()> {
         .write(true)
         .mode(0o600)
         .open(&temporary)?;
+    file.write_all(&check_lines_cut_off(&bytes[..start], &bytes[start..]))?;
     file.write_all(&bytes[start..])?;
     fs::rename(&temporary, path)
+}
+
+/// The first `Check` line in `dropped` of each turn that still has entries in `kept`.
+fn check_lines_cut_off(dropped: &[u8], kept: &[u8]) -> Vec<u8> {
+    let parse = |line: &[u8]| serde_json::from_slice::<AgentLogEntry>(line).ok();
+    let kept_turns: std::collections::HashSet<u64> = kept
+        .split(|b| *b == b'\n')
+        .filter_map(parse)
+        .map(|entry| turn_of(&entry))
+        .collect();
+    let mut moved = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for line in dropped.split(|b| *b == b'\n') {
+        let Some(entry @ AgentLogEntry::Check { .. }) = parse(line) else {
+            continue;
+        };
+        let turn = turn_of(&entry);
+        if kept_turns.contains(&turn) && moved.insert(turn) {
+            out.extend_from_slice(line);
+            out.push(b'\n');
+        }
+    }
+    out
 }
 
 /// Every entry, oldest first. A missing file is an empty log; a line that does not parse
@@ -248,6 +274,45 @@ mod tests {
         append(&path, &text(17, &big)).unwrap();
         let entries = read(&path);
         assert_eq!(entries.last(), Some(&text(17, &big)), "the newest stays");
+        assert!(fs::metadata(&path).unwrap().len() <= MAX_BYTES);
+    }
+
+    #[test]
+    fn a_check_turn_cut_by_the_trim_keeps_its_check_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let chunk = "x".repeat(64 * 1024);
+        append(
+            &path,
+            &AgentLogEntry::Check {
+                at: 1,
+                turn: 1,
+                kind: clusia_core::CheckKind::Security,
+                state: "running".into(),
+            },
+        )
+        .unwrap();
+        for _ in 0..40 {
+            append(
+                &path,
+                &AgentLogEntry::Permission {
+                    at: 1,
+                    turn: 1,
+                    tool: "Bash".into(),
+                    summary: chunk.clone(),
+                    outcome: clusia_protocol::PermissionOutcome::Allowed,
+                },
+            )
+            .unwrap();
+        }
+        let entries = read(&path);
+        assert!(entries.len() < 41, "the log was trimmed");
+        assert!(
+            matches!(entries[0], AgentLogEntry::Check { turn: 1, .. }),
+            "the check line moves to the top: {:?}",
+            entries.first().map(turn_of)
+        );
+        assert_eq!(check_turns(&entries), [1].into_iter().collect());
         assert!(fs::metadata(&path).unwrap().len() <= MAX_BYTES);
     }
 

@@ -380,6 +380,14 @@ impl Sessions {
             .map(|check| check.origin)
     }
 
+    /// The turn `turn` of `pr` ended: if it was the summary, the head may be asked again.
+    fn summary_ended(&self, pr: &PrRef, turn: u64) {
+        let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(slot) = table.get_mut(pr) {
+            slot.summary_over(turn);
+        }
+    }
+
     /// Whether a summary turn of `pr` runs or waits.
     pub(crate) fn summarizing(&self, pr: &PrRef) -> bool {
         let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
@@ -870,6 +878,9 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         stop,
     };
     let end = turns::run(&shared, run, &mut sink).await;
+    // Before the checks start: a reopen from then on must not wait for this summary, since
+    // nobody would release what waits for it.
+    shared.sessions.summary_ended(&pr, turn);
     if is_summary && !matches!(end, TurnEnd::Stopped(Why::Ended | Why::Shutdown)) {
         crate::checks::on_summary_over(&shared, &pr).await;
     }
@@ -2034,6 +2045,48 @@ mod tests {
             Path::new("no-such-claude-anywhere"),
             "a name that is nowhere stays a bare name"
         );
+    }
+
+    #[tokio::test]
+    async fn a_summary_is_over_before_the_checks_that_waited_for_it_start() {
+        let mut lab = lab_with(
+            Script::one(Turn::answer("The summary.").delay_ms(300)),
+            |c| {
+                c.harness.check_security = false;
+                c.harness.audit = false;
+            },
+        );
+        let pr = pr(7);
+        let prompt = Prompt {
+            text: "Summarize".into(),
+            shown: false,
+            summary_for: Some("abc123".into()),
+        };
+        Sessions::submit(&lab.shared, &pr, prompt).await.unwrap();
+        // The session is remembered before the text streams. After the end the turn records
+        // the summary's head under the review lock and the checks then wait for that lock; a
+        // second hold queued behind the first (the lock is fair) keeps the checks waiting,
+        // which is the gap a reopen can fall into.
+        until(&mut lab.events, |e| matches!(e, Event::AgentChunk { .. })).await;
+        let first = reviews::lock(&lab.shared, &pr).await;
+        until(&mut lab.events, |e| matches!(e, Event::AgentDone { .. })).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let second = {
+            let (shared, pr) = (lab.shared.clone(), pr.clone());
+            tokio::spawn(async move { reviews::lock(&shared, &pr).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(first);
+        let guard = second.await.unwrap();
+        let over = tokio::time::timeout(Duration::from_secs(3), async {
+            while lab.shared.sessions.summarizing(&pr) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        drop(guard);
+        assert!(over.is_ok(), "a reopen now must not wait for the summary");
+        until(&mut lab.events, ready(&pr)).await;
     }
 
     #[tokio::test]

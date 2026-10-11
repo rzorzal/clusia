@@ -174,7 +174,7 @@ impl Permissions {
             .is_some_and(|turns| turns.contains(&turn))
     }
 
-    /// The review ended: its last turn is no longer kept. Only once no turn of it runs, since
+    /// The review ended: its closed turns are no longer kept. Only once no turn of it runs, since
     /// a stopped program may still ask until it is gone.
     pub(crate) fn forget_review(&self, shared: &Shared, pr: &PrRef) {
         if !shared.sessions.any_running(pr) {

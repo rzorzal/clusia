@@ -11,7 +11,7 @@ use clusia_core::checks::{
     AuditArea, CheckKind, CheckResult, Finding, PromptContext, anchor_in_diff, audit_prompt,
     security_prompt,
 };
-use clusia_core::{AgentState, DraftKind, FileDiff, Origin, PrRef, Side};
+use clusia_core::{AgentState, DraftKind, FileDiff, Origin, PrRef, ReviewState, Side};
 use clusia_harness::{AgentEvent, extract_check_blocks};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, AnchorInput, CheckState, CheckStatus, ErrorCode, Event, Outcome,
@@ -288,7 +288,11 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, kind: CheckKind) -> Result<(), 
         return Err(reviews::invalid_state("clusiad is stopping"));
     }
     let review = match reviews::load_stored(shared, pr) {
-        Ok(Some(review)) if shared.paths.worktree_for(pr).is_dir() => review,
+        Ok(Some(review))
+            if review.state == ReviewState::Active && shared.paths.worktree_for(pr).is_dir() =>
+        {
+            review
+        }
         Ok(_) => {
             return Err(reviews::invalid_state(format!(
                 "no review for {pr}; open it first"
@@ -523,6 +527,11 @@ fn place_of(finding: &Finding) -> String {
         (None, Some(start), Some(end)) => format!("{}:{start}-{end}", finding.file),
         _ => finding.file.clone(),
     }
+}
+
+/// The comment of a finding with no anchor, naming its place.
+fn general_text(finding: &Finding) -> String {
+    clusia_core::printable::printable_lines(&format!("{}: {}", place_of(finding), finding.comment))
 }
 
 /// Turns the answer of a run that ended well into a result: the blocks it holds, minus the
@@ -834,12 +843,18 @@ pub(crate) async fn on_open(
 /// lock, which `reviews::open` holds while `on_open` sets it, so a summary that ends right away
 /// waits for the open to finish and cannot be missed.
 pub(crate) async fn on_summary_over(shared: &Arc<Shared>, pr: &PrRef) {
-    let kinds = {
+    let mut kinds = {
         let _guard = reviews::lock(shared, pr).await;
         shared
             .checks
             .with(pr, |entry| std::mem::take(&mut entry.awaiting))
     };
+    // A kind switched off in Config while it waited does not start.
+    let harness = shared.config.read().await.harness.clone();
+    kinds.retain(|kind| match kind {
+        CheckKind::Security => harness.check_security,
+        CheckKind::Audit => harness.audit && harness.audit_areas.iter().any(|a| a.enabled),
+    });
     for kind in kinds {
         if start(shared, pr, kind).await.is_err() {
             tracing::warn!(pr = %pr, "could not start a check after the summary");
@@ -938,11 +953,7 @@ pub(crate) async fn accept(
     let (kind, anchor, text) = match anchor_of(&finding).filter(|_| finding.anchored) {
         Some(anchor) => (DraftKind::LineComment, Some(anchor), text),
         None if edited => (DraftKind::General, None, text),
-        None => (
-            DraftKind::General,
-            None,
-            format!("{}: {text}", place_of(&finding)),
-        ),
+        None => (DraftKind::General, None, general_text(&finding)),
     };
     let origin = match finding.kind {
         CheckKind::Security => Origin::Security,
@@ -1198,6 +1209,75 @@ mod tests {
             shared.sessions.next_turn(&shared, &pr(waiting)).await > turn,
             "a turn id handed to a check is not handed out again"
         );
+    }
+
+    #[tokio::test]
+    async fn a_closed_review_cannot_be_checked() {
+        let (_home, fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        let mut review = reviews::load_stored(&shared, &pr(1)).unwrap().unwrap();
+        review.state = ReviewState::Saved;
+        save_review(&shared.paths, &review).unwrap();
+        let Outcome::Err(refusal) = run(&shared, &pr(1), CheckKind::Security).await else {
+            panic!("refused");
+        };
+        assert_eq!(refusal.code, ErrorCode::InvalidState);
+        assert!(refusal.message.contains("open it first"));
+        assert!(FakeClaude::calls(fake.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_kind_switched_off_while_it_waited_for_the_summary_does_not_start() {
+        let (_home, fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        shared.checks.with(&pr(1), |entry| {
+            entry.awaiting = vec![CheckKind::Security, CheckKind::Audit];
+        });
+        shared.config.write().await.harness.check_security = false;
+        on_summary_over(&shared, &pr(1)).await;
+        assert_eq!(calls(&fake, 1).await.len(), 1, "the audit still runs");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(FakeClaude::calls(fake.path()).len(), 1, "security does not");
+        assert!(!running(&shared, 1));
+        shutdown(&shared).await;
+    }
+
+    #[tokio::test]
+    async fn an_audit_whose_areas_went_off_while_it_waited_does_not_start() {
+        let (_home, fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        shared.checks.with(&pr(1), |entry| {
+            entry.awaiting = vec![CheckKind::Audit];
+        });
+        for area in &mut shared.config.write().await.harness.audit_areas {
+            area.enabled = false;
+        }
+        on_summary_over(&shared, &pr(1)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(FakeClaude::calls(fake.path()).is_empty());
+        shutdown(&shared).await;
+    }
+
+    #[test]
+    fn the_general_text_of_an_unanchored_finding_is_printable() {
+        let finding = Finding {
+            id: "x".into(),
+            kind: CheckKind::Security,
+            area: "security".into(),
+            severity: None,
+            title: "t".into(),
+            file: "a\u{202e}.rs\u{1b}[2J".into(),
+            line: Some(3),
+            start_line: None,
+            end_line: None,
+            body: "b".into(),
+            comment: "Fix\u{1b}[31m it\nsecond".into(),
+            code: None,
+            anchored: false,
+        };
+        let text = general_text(&finding);
+        assert!(
+            !text.contains('\u{202e}') && !text.contains('\u{1b}'),
+            "{text:?}"
+        );
+        assert_eq!(text, "a\\u{202e}.rs\\u{1b}[2J:3: Fix\\u{1b}[31m it\nsecond");
     }
 
     #[tokio::test]
