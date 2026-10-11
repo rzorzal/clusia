@@ -171,3 +171,60 @@ fn the_custom_area_is_named_after_the_run_so_it_can_be_found_and_removed() {
     assert!(source.contains("clusia-check-$RUN"));
     assert!(source.contains("remove clusia-check-$RUN if it is still there"));
 }
+
+#[test]
+fn ctrl_c_ends_the_script_instead_of_going_on_to_the_next_step() {
+    let source = source();
+    assert!(
+        source.contains("trap 'exit 130' INT TERM HUP"),
+        "a Ctrl-C passed on by a command must end the script"
+    );
+    let home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(script())
+        .args(["--pr", "rzorzal/clusia#123"])
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = String::new();
+    let mut stdout = child.stdout.take().unwrap();
+    // The question is on the screen once "Continue?" was printed: the script waits in `read`.
+    let mut byte = [0u8; 1];
+    while !said.ends_with("Continue? [y/N] ") {
+        use std::io::Read;
+        assert_eq!(stdout.read(&mut byte).unwrap(), 1, "{said}");
+        said.push(byte[0] as char);
+    }
+    // SAFETY: signals a child this test spawned and still owns.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let status = child.wait().unwrap();
+    drop(child.stdin.take());
+    assert_eq!(status.code(), Some(130), "{status:?}");
+}
+
+#[test]
+fn the_chat_answer_wait_is_bounded_and_matches_the_answer_alone() {
+    let source = source();
+    let step = source
+        .split("step_open() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("the open step");
+    assert!(
+        step.contains(
+            r#"600 grep -Eqx '[[:space:]]*42[.]?[[:space:]]*' "$ERR.out" || { stop_ask; clusia agent stop "$PR" >/dev/null 2>&1; }"#
+        ),
+        "{step}"
+    );
+    assert!(!step.contains(r#"grep -q "42""#), "{step}");
+    let stop = step.find("stop_ask;").unwrap();
+    let wait = step.find("wait_ask").unwrap();
+    assert!(
+        stop < wait,
+        "a chat that never answers is stopped before the wait"
+    );
+}

@@ -52,6 +52,9 @@ stop_ask() {
   if [ -n "$ASK_PID" ]; then kill "$ASK_PID" 2>/dev/null; fi
 }
 trap 'stop_ask; close_window; restore_settings; rm -f "$ERR" "$ERR.out"' EXIT
+# clusia exits 130 on a Ctrl-C by status, not by the signal, so bash would go on to the next
+# step; the script ends instead (the EXIT trap still cleans up).
+trap 'exit 130' INT TERM HUP
 
 STEPS=(
   "preflight: claude and clusia are installed, the daemon answers and the three review checks are on"
@@ -186,7 +189,7 @@ step_open() {
   echo "  Look at the window: after the summary, the Security and Audits tabs should show a"
   echo "  running mark. While they run, the script asks the chat a question."
   ask_agent_detached "What is 6 times 7? Answer with only the number."
-  wait_for "the chat answered while the checks run (it said 42)" 600 grep -q "42" "$ERR.out"
+  wait_for "the chat answered while the checks run (it said 42)" 600 grep -Eqx '[[:space:]]*42[.]?[[:space:]]*' "$ERR.out" || { stop_ask; clusia agent stop "$PR" >/dev/null 2>&1; }
   wait_ask
   ask "Did the Security and Audits tabs show a running mark while the chat answered?"
   echo "  Wait until both tabs stop running (a count, a check mark or a result)."

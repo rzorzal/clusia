@@ -3,12 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 use clusia_core::checks::{AreaStatus, CheckKind, CheckResult, Finding, Severity, area_status};
 use clusia_core::{Paths, PrRef};
 use clusia_protocol::{CheckState, Client, Command as Request, Event, Reply, TurnOrigin, topics};
 use serde_json::json;
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::agent::printable;
 use crate::review::parse_pr;
@@ -83,19 +84,30 @@ fn unreadable_line(count: u32) -> Option<String> {
     }
 }
 
-/// The findings of `area` that are still open, the most severe first.
-fn open_findings<'a>(
-    result: &'a CheckResult,
+/// The findings of `area` that were not dismissed, the most severe first; one already in the
+/// draft says so.
+fn area_findings(
+    result: &CheckResult,
     area: &str,
-    hidden: &BTreeSet<String>,
-) -> Vec<&'a Finding> {
+    accepted: &BTreeSet<String>,
+    dismissed: &BTreeSet<String>,
+) -> Vec<String> {
     let mut found: Vec<&Finding> = result
         .findings
         .iter()
-        .filter(|f| f.area == area && !hidden.contains(&f.id))
+        .filter(|f| f.area == area && !dismissed.contains(&f.id))
         .collect();
     found.sort_by_key(|f| f.severity);
     found
+        .into_iter()
+        .map(|f| {
+            if accepted.contains(&f.id) {
+                format!("{}  (in your draft)", finding_line(f))
+            } else {
+                finding_line(f)
+            }
+        })
+        .collect()
 }
 
 fn passes_of<'a>(result: &'a CheckResult, area: &str) -> impl Iterator<Item = String> + 'a {
@@ -107,40 +119,49 @@ fn passes_of<'a>(result: &'a CheckResult, area: &str) -> impl Iterator<Item = St
         .map(|p| pass_line(&p.text, p.place.as_deref()))
 }
 
-/// What one kind's result says. The findings in `hidden` (accepted or dismissed) are left out:
-/// the findings grouped by area, the passes, and what could not be read. A clean security
-/// result says what the agent did, never that the change is safe.
+fn files_of(count: u32) -> String {
+    let unit = if count == 1 { "file" } else { "files" };
+    format!("{count} {unit}")
+}
+
+/// What one kind's result says: the findings grouped by area (an accepted one marked as in the
+/// draft, a dismissed one left out and counted at the end), the passes, and what could not be
+/// read. The clean sentence is a claim about what the agent found, so it is said only when the
+/// result itself has no finding and no unreadable block; it never says the change is safe.
 pub(crate) fn report_lines(
     result: &CheckResult,
-    hidden: &BTreeSet<String>,
+    accepted: &BTreeSet<String>,
+    dismissed: &BTreeSet<String>,
     area_names: &BTreeMap<String, String>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    let mut unreadable_said = false;
     match result.kind {
         CheckKind::Security => {
             lines.push("Security".to_string());
-            let open = open_findings(result, "security", hidden);
-            if open.is_empty() {
-                let unit = if result.files == 1 { "file" } else { "files" };
+            if result.findings.is_empty() && result.unreadable == 0 {
                 lines.push(format!(
-                    "Claude Code found no security issues in {} {unit}.",
-                    result.files
+                    "Claude Code found no security issues in {}.",
+                    files_of(result.files)
                 ));
+            } else if result.findings.is_empty() {
+                lines.push(format!(
+                    "Claude Code checked {}; {}.",
+                    files_of(result.files),
+                    unreadable_line(result.unreadable).unwrap_or_default()
+                ));
+                unreadable_said = true;
             }
-            lines.extend(open.into_iter().map(finding_line));
+            lines.extend(area_findings(result, "security", accepted, dismissed));
             lines.extend(passes_of(result, "security"));
         }
         CheckKind::Audit => {
             for area in &result.areas {
                 let shown = area_names.get(area).unwrap_or(area);
                 lines.push(format!("Audit · {}", line_of(shown)));
-                match area_status(result, area, hidden) {
+                match area_status(result, area, dismissed) {
                     AreaStatus::Findings(_) => {
-                        lines.extend(
-                            open_findings(result, area, hidden)
-                                .into_iter()
-                                .map(finding_line),
-                        );
+                        lines.extend(area_findings(result, area, accepted, dismissed));
                     }
                     AreaStatus::Ok => lines.push("No findings in this area.".to_string()),
                     AreaStatus::NotChecked => lines.push("Not checked".to_string()),
@@ -149,7 +170,17 @@ pub(crate) fn report_lines(
             }
         }
     }
-    lines.extend(unreadable_line(result.unreadable));
+    if !unreadable_said {
+        lines.extend(unreadable_line(result.unreadable));
+    }
+    let gone = result
+        .findings
+        .iter()
+        .filter(|f| dismissed.contains(&f.id))
+        .count();
+    if gone > 0 {
+        lines.push(format!("{gone} dismissed"));
+    }
     lines
 }
 
@@ -157,23 +188,75 @@ fn io_error(e: io::Error) -> CliError {
     CliError::Other(e.to_string())
 }
 
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
-}
+/// How long the command waits for the daemon once the checks are over or stopped.
+const ANSWER_WAIT: Duration = Duration::from_secs(5);
 
-/// Asks the daemon to stop what this command started.
-async fn stop_started(client: &mut Client, pr: &PrRef, started: &[CheckKind]) {
-    for &kind in started {
-        let _ = client
+/// Asks the daemon to stop the runs this command follows; whether every stop went through.
+async fn stop_started(client: &mut Client, pr: &PrRef, going: &[CheckKind]) -> bool {
+    let mut through = true;
+    for &kind in going {
+        through &= client
             .request(Request::StopCheck {
                 pr: pr.clone(),
                 kind,
             })
-            .await;
+            .await
+            .is_ok();
     }
+    through
+}
+
+/// `stop_started`, given up on at a second Ctrl-C or after `ANSWER_WAIT`, so a daemon that does
+/// not answer cannot hold the terminal.
+async fn stop_or_give_up(
+    client: &mut Client,
+    pr: &PrRef,
+    going: &[CheckKind],
+    interrupt: &mut Signal,
+) -> bool {
+    tokio::select! {
+        through = stop_started(client, pr, going) => through,
+        _ = interrupt.recv() => false,
+        _ = tokio::time::sleep(ANSWER_WAIT) => false,
+    }
+}
+
+/// What `asked` gives, or `None` when the daemon takes longer than `ANSWER_WAIT`. A Ctrl-C ends
+/// the command.
+async fn answered<T>(asked: impl Future<Output = T>, interrupt: &mut Signal) -> Option<T> {
+    tokio::select! {
+        answer = asked => Some(answer),
+        _ = interrupt.recv() => {
+            eprintln!("Interrupted.");
+            std::process::exit(130);
+        }
+        _ = tokio::time::sleep(ANSWER_WAIT) => None,
+    }
+}
+
+/// The check a permission request comes from; `None` for the chat's.
+fn kind_of(origin: TurnOrigin) -> Option<CheckKind> {
+    match origin {
+        TurnOrigin::Chat => None,
+        TurnOrigin::Security => Some(CheckKind::Security),
+        TurnOrigin::Audit => Some(CheckKind::Audit),
+    }
+}
+
+/// The note for a permission request of a check this command follows; `None` for any other.
+fn permission_note(
+    origin: TurnOrigin,
+    going: &[CheckKind],
+    tool: &str,
+    summary: &str,
+) -> Option<String> {
+    let kind = kind_of(origin).filter(|kind| going.contains(kind))?;
+    Some(format!(
+        "{}: waiting for an answer in the window: Claude Code wants to use {}: {}",
+        kind.label(),
+        line_of(tool),
+        line_of(summary)
+    ))
 }
 
 pub(crate) async fn check(
@@ -207,8 +290,11 @@ pub(crate) async fn check(
         }
     }
 
-    let began = now();
-    let Reply::Checks { states, .. } = client
+    let Reply::Checks {
+        states,
+        results: before,
+        ..
+    } = client
         .request(Request::GetChecks { pr: pr.clone() })
         .await?
     else {
@@ -247,12 +333,20 @@ pub(crate) async fn check(
     let mut failures: Vec<String> = Vec::new();
     let mut asked: BTreeSet<String> = BTreeSet::new();
     let mut finished: Vec<CheckKind> = Vec::new();
+    // A kind this command started ends only after its run has been seen waiting or running:
+    // an ending told before that (a Stale from the open, a queued Done) is an older run's.
+    let mut begun: Vec<CheckKind> = Vec::new();
     while !going.is_empty() {
         let (_, event) = tokio::select! {
             event = client.next_event() => event?,
             _ = interrupt.recv() => {
-                stop_started(&mut client, &pr, &going).await;
-                eprintln!("Stopped the checks.");
+                if stop_or_give_up(&mut client, &pr, &going, &mut interrupt).await {
+                    eprintln!("Stopped the checks.");
+                } else {
+                    eprintln!(
+                        "The daemon did not answer; the checks may still run (Stop in the window)."
+                    );
+                }
                 std::process::exit(130);
             }
         };
@@ -262,6 +356,13 @@ pub(crate) async fn check(
                 kind,
                 state,
             } if of == pr && going.contains(&kind) => {
+                let ending = !matches!(state, CheckState::Waiting | CheckState::Running { .. });
+                if !ending && !begun.contains(&kind) {
+                    begun.push(kind);
+                }
+                if ending && started.contains(&kind) && !begun.contains(&kind) {
+                    continue;
+                }
                 if !json && let Some(line) = progress_line(kind, &state) {
                     eprintln!("{line}");
                 }
@@ -292,38 +393,34 @@ pub(crate) async fn check(
                 summary,
                 origin,
                 ..
-            } if of == pr && !origin.is_chat() => {
-                if asked.insert(id) && !json {
-                    let who = match origin {
-                        TurnOrigin::Audit => CheckKind::Audit.label(),
-                        _ => CheckKind::Security.label(),
-                    };
-                    eprintln!(
-                        "{who}: waiting for an answer in the window: Claude Code wants to use {}: {}",
-                        line_of(&tool),
-                        line_of(&summary)
-                    );
+            } if of == pr => {
+                if let Some(note) = permission_note(origin, &going, &tool, &summary)
+                    && asked.insert(id)
+                    && !json
+                {
+                    eprintln!("{note}");
                 }
             }
             _ => {}
         }
     }
 
+    let no_answer = || CliError::Other("the daemon did not answer GetChecks".into());
+    let asked = client.request(Request::GetChecks { pr: pr.clone() });
     let Reply::Checks {
         results,
         dismissed,
         accepted,
         ..
-    } = client
-        .request(Request::GetChecks { pr: pr.clone() })
-        .await?
+    } = answered(asked, &mut interrupt)
+        .await
+        .ok_or_else(no_answer)??
     else {
-        return Err(CliError::Other(
-            "the daemon did not answer GetChecks".into(),
-        ));
+        return Err(no_answer());
     };
-    let area_names: BTreeMap<String, String> = match client.request(Request::GetConfig).await {
-        Ok(Reply::Config(config)) => config
+    let config = answered(client.request(Request::GetConfig), &mut interrupt).await;
+    let area_names: BTreeMap<String, String> = match config {
+        Some(Ok(Reply::Config(config))) => config
             .harness
             .audit_areas
             .iter()
@@ -331,18 +428,27 @@ pub(crate) async fn check(
             .collect(),
         _ => BTreeMap::new(),
     };
-    // A finding that is in the draft or was dismissed is not open: the report leaves it out.
-    let hidden: BTreeSet<String> = dismissed.iter().chain(&accepted).cloned().collect();
+    let accepted_ids: BTreeSet<String> = accepted.iter().cloned().collect();
+    let dismissed_ids: BTreeSet<String> = dismissed.iter().cloned().collect();
     let mut sections: Vec<Vec<String>> = Vec::new();
     let mut shown: Vec<&CheckResult> = Vec::new();
     for &kind in &wanted {
         if !finished.contains(&kind) {
             continue;
         }
-        // A result older than this command is what an earlier run left: this run was stopped.
-        match results.iter().find(|r| r.kind == kind && r.at >= began) {
+        // The result that was there before this command is what an earlier run left: this run
+        // was stopped.
+        match results
+            .iter()
+            .find(|r| r.kind == kind && !before.contains(r))
+        {
             Some(result) => {
-                sections.push(report_lines(result, &hidden, &area_names));
+                sections.push(report_lines(
+                    result,
+                    &accepted_ids,
+                    &dismissed_ids,
+                    &area_names,
+                ));
                 shown.push(result);
             }
             None => failures.push(format!("{} check was stopped", kind.label())),
@@ -427,6 +533,26 @@ mod tests {
 
     fn none() -> BTreeSet<String> {
         BTreeSet::new()
+    }
+
+    #[test]
+    fn a_permission_note_names_only_a_check_this_command_follows() {
+        let audit_only = [CheckKind::Audit];
+        assert_eq!(
+            permission_note(TurnOrigin::Security, &audit_only, "Bash", "make"),
+            None,
+            "a Security request is not news under --audit"
+        );
+        assert_eq!(
+            permission_note(TurnOrigin::Chat, &audit_only, "Bash", "make"),
+            None
+        );
+        assert_eq!(
+            permission_note(TurnOrigin::Audit, &audit_only, "Bash", "make\u{1b}[2K").as_deref(),
+            Some(
+                "Audit: waiting for an answer in the window: Claude Code wants to use Bash: make\\u{1b}[2K"
+            )
+        );
     }
 
     #[test]
@@ -518,7 +644,7 @@ mod tests {
     fn a_clean_security_result_says_what_the_agent_found_never_that_it_is_safe() {
         let clean = result(CheckKind::Security, Vec::new(), Vec::new());
         assert_eq!(
-            report_lines(&clean, &none(), &BTreeMap::new()),
+            report_lines(&clean, &none(), &none(), &BTreeMap::new()),
             [
                 "Security",
                 "Claude Code found no security issues in 7 files."
@@ -527,7 +653,7 @@ mod tests {
         let mut one = result(CheckKind::Security, Vec::new(), Vec::new());
         one.files = 1;
         assert_eq!(
-            report_lines(&one, &none(), &BTreeMap::new())[1],
+            report_lines(&one, &none(), &none(), &BTreeMap::new())[1],
             "Claude Code found no security issues in 1 file."
         );
     }
@@ -568,36 +694,123 @@ mod tests {
         r.unreadable = 2;
         let dismissed: BTreeSet<String> = ["id-security-Dismissed".to_string()].into();
         assert_eq!(
-            report_lines(&r, &dismissed, &BTreeMap::new()),
+            report_lines(&r, &none(), &dismissed, &BTreeMap::new()),
             [
                 "Security",
                 "HIGH  client/http.rs:2  Token in the log",
                 "LOW  client/http.rs:9  Loose parse",
                 "ok  No secrets in the diff  (checked 1 file)",
                 "2 results could not be read",
+                "1 dismissed",
             ]
         );
         r.unreadable = 1;
         assert_eq!(
-            report_lines(&r, &none(), &BTreeMap::new()).last().unwrap(),
+            report_lines(&r, &none(), &none(), &BTreeMap::new())
+                .last()
+                .unwrap(),
             "1 result could not be read"
         );
     }
 
-    #[test]
-    fn a_finding_already_in_the_draft_is_left_out() {
-        let r = result(
+    const CLEAN: &str = "Claude Code found no security issues in 7 files.";
+
+    fn two_security_findings() -> CheckResult {
+        result(
             CheckKind::Security,
             vec![
                 finding("security", Some(Severity::High), "Accepted", Some(2), None),
                 finding("security", Some(Severity::Low), "Open", Some(9), None),
             ],
             Vec::new(),
-        );
-        let hidden: BTreeSet<String> = ["id-security-Accepted".to_string()].into();
+        )
+    }
+
+    fn ids(ids: &[&str]) -> BTreeSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn a_finding_already_in_the_draft_says_so() {
+        let accepted = ids(&["id-security-Accepted"]);
         assert_eq!(
-            report_lines(&r, &hidden, &BTreeMap::new()),
-            ["Security", "LOW  client/http.rs:9  Open"]
+            report_lines(
+                &two_security_findings(),
+                &accepted,
+                &none(),
+                &BTreeMap::new()
+            ),
+            [
+                "Security",
+                "HIGH  client/http.rs:2  Accepted  (in your draft)",
+                "LOW  client/http.rs:9  Open",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_finding_accepted_is_not_a_clean_result() {
+        let accepted = ids(&["id-security-Accepted", "id-security-Open"]);
+        let lines = report_lines(
+            &two_security_findings(),
+            &accepted,
+            &none(),
+            &BTreeMap::new(),
+        );
+        assert!(!lines.iter().any(|l| l == CLEAN), "{lines:?}");
+        assert_eq!(
+            lines,
+            [
+                "Security",
+                "HIGH  client/http.rs:2  Accepted  (in your draft)",
+                "LOW  client/http.rs:9  Open  (in your draft)",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_finding_dismissed_is_not_a_clean_result() {
+        let dismissed = ids(&["id-security-Accepted", "id-security-Open"]);
+        let lines = report_lines(
+            &two_security_findings(),
+            &none(),
+            &dismissed,
+            &BTreeMap::new(),
+        );
+        assert!(!lines.iter().any(|l| l == CLEAN), "{lines:?}");
+        assert_eq!(lines, ["Security", "2 dismissed"]);
+    }
+
+    #[test]
+    fn only_unreadable_blocks_is_not_a_clean_result() {
+        let mut r = result(CheckKind::Security, Vec::new(), Vec::new());
+        r.unreadable = 3;
+        let lines = report_lines(&r, &none(), &none(), &BTreeMap::new());
+        assert!(!lines.iter().any(|l| l == CLEAN), "{lines:?}");
+        assert_eq!(
+            lines,
+            [
+                "Security",
+                "Claude Code checked 7 files; 3 results could not be read."
+            ]
+        );
+    }
+
+    #[test]
+    fn an_audit_finding_in_the_draft_keeps_its_area_from_reading_clean() {
+        let mut r = result(
+            CheckKind::Audit,
+            vec![finding("correctness", None, "Off by one", Some(3), None)],
+            Vec::new(),
+        );
+        r.areas = vec!["correctness".into()];
+        let accepted = ids(&["id-correctness-Off by one"]);
+        assert_eq!(
+            report_lines(&r, &accepted, &none(), &BTreeMap::new()),
+            [
+                "Audit · correctness",
+                "client/http.rs:3  Off by one  (in your draft)"
+            ]
         );
     }
 
@@ -612,7 +825,7 @@ mod tests {
         let names: BTreeMap<String, String> =
             [("correctness".to_string(), "Correctness".to_string())].into();
         assert_eq!(
-            report_lines(&r, &none(), &names),
+            report_lines(&r, &none(), &none(), &names),
             [
                 "Audit · Correctness",
                 "client/http.rs:3  Off by one",
@@ -624,11 +837,12 @@ mod tests {
             ]
         );
         let dismissed: BTreeSet<String> = ["id-correctness-Off by one".to_string()].into();
-        let after = report_lines(&r, &dismissed, &names);
+        let after = report_lines(&r, &none(), &dismissed, &names);
         assert_eq!(
             after[..2],
             ["Audit · Correctness", "No findings in this area."],
             "the agent did look at the area; only its finding is gone"
         );
+        assert_eq!(after.last().unwrap(), "1 dismissed");
     }
 }

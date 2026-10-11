@@ -467,12 +467,47 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_flag_in_the_extra_arguments_is_dropped() {
+    fn session_flags_in_the_extra_arguments_never_reach_a_fork() {
         let mut s = spec();
-        s.session = SessionArg::New("0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d".into());
-        s.extra_args = vec!["--fork-session".into(), "--model".into(), "opus".into()];
+        s.session = SessionArg::Fork {
+            parent: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d".into(),
+            id: "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f".into(),
+        };
+        s.extra_args = [
+            "--resume",
+            "x",
+            "--session-id",
+            "y",
+            "--fork-session",
+            "--fork-session=1",
+            "--model",
+            "opus",
+        ]
+        .map(String::from)
+        .to_vec();
         let args = argv(&ClaudeCode::command(&s));
-        assert!(!args.contains(&"--fork-session".to_string()));
+        for flag in ["--resume", "--session-id", "--fork-session"] {
+            assert_eq!(
+                args.iter().filter(|a| *a == flag).count(),
+                1,
+                "{flag} once: {args:?}"
+            );
+        }
+        assert!(!args.iter().any(|a| a == "x" || a == "y"), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a.starts_with("--fork-session=")),
+            "{args:?}"
+        );
+        let at = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(
+            args[at..at + 4],
+            [
+                "--resume",
+                "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+                "--fork-session",
+                "--session-id"
+            ]
+        );
         assert_eq!(args[args.len() - 2..], ["--model", "opus"]);
     }
 

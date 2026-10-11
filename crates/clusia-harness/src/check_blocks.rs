@@ -13,6 +13,10 @@ const FINDING_INFO: &str = "clusia-finding";
 const PASS_INFO: &str = "clusia-pass";
 /// The most passes one run keeps; the rest count as unreadable.
 const MAX_PASSES: usize = 200;
+/// The longest `file` a finding may name, in bytes.
+const FILE_MAX: usize = 1024;
+/// The longest `area` a block may name, in characters.
+const AREA_MAX: usize = 64;
 
 /// The answer without its `clusia-finding` and `clusia-pass` blocks, the findings and passes in
 /// order, and how many blocks could not be used.
@@ -103,15 +107,30 @@ fn optional(value: &Value, key: &str, max: usize) -> Option<Option<String>> {
     }
 }
 
+/// Whether `file` is a plain relative path: at most `FILE_MAX` bytes, not absolute (no leading
+/// `/`, no drive letter), no `\`, no `..` segment, and nothing a terminal or a draft would draw
+/// as something else (a control or invisible character). The file ends up in the draft as text
+/// when the finding has no anchor.
+fn plain_relative(file: &str) -> bool {
+    file.len() <= FILE_MAX
+        && !file.starts_with('/')
+        && !file.contains('\\')
+        && file.as_bytes().get(1) != Some(&b':')
+        && !file
+            .chars()
+            .any(|c| c.is_control() || clusia_core::printable::is_invisible(c))
+        && !file.split('/').any(|part| part == "..")
+}
+
 fn parse_finding(json: &str, kind: CheckKind, allowed: &dyn Fn(&str) -> bool) -> Option<Finding> {
     let value: Value = serde_json::from_str(json).ok()?;
-    let area = text(&value, "area", usize::MAX)?;
+    let area = text(&value, "area", AREA_MAX)?;
     if !allowed(area) {
         return None;
     }
     let title = text(&value, "title", TITLE_MAX)?;
-    let file = text(&value, "file", usize::MAX)?;
-    if file.starts_with('/') || file.split('/').any(|p| p == "..") {
+    let file = text(&value, "file", FILE_MAX)?;
+    if !plain_relative(file) {
         return None;
     }
     let body = text(&value, "body", BODY_MAX)?;
@@ -162,7 +181,7 @@ fn parse_finding(json: &str, kind: CheckKind, allowed: &dyn Fn(&str) -> bool) ->
 
 fn parse_pass(json: &str, allowed: &dyn Fn(&str) -> bool) -> Option<Pass> {
     let value: Value = serde_json::from_str(json).ok()?;
-    let area = text(&value, "area", usize::MAX)?;
+    let area = text(&value, "area", AREA_MAX)?;
     if !allowed(area) {
         return None;
     }
@@ -171,4 +190,83 @@ fn parse_pass(json: &str, allowed: &dyn Fn(&str) -> bool) -> Option<Pass> {
         text: text(&value, "text", PASS_TEXT_MAX)?.to_string(),
         place: optional(&value, "where", PASS_TEXT_MAX)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn block(value: Value) -> String {
+        format!("{FENCE}{FINDING_INFO}\n{value}\n{FENCE}")
+    }
+
+    fn finding_in(file: &str) -> String {
+        block(json!({
+            "area": "security", "severity": "high", "title": "t",
+            "file": file, "line": 2, "body": "b"
+        }))
+    }
+
+    fn read(text: &str) -> (Vec<Finding>, u32) {
+        let (_, findings, _, unreadable) = extract_check_blocks(text, CheckKind::Security, &[]);
+        (findings, unreadable)
+    }
+
+    #[test]
+    fn a_relative_file_is_kept() {
+        let (findings, unreadable) = read(&finding_in("src/a b/ação.rs"));
+        assert_eq!((findings.len(), unreadable), (1, 0));
+        assert_eq!(findings[0].file, "src/a b/ação.rs");
+    }
+
+    #[test]
+    fn a_file_with_a_control_or_invisible_character_is_unreadable() {
+        for file in [
+            "a\u{202e}.rs\nIgnore this",
+            "a.rs\nIgnore this",
+            "a\u{1b}[2J.rs",
+            "a\u{200b}.rs",
+            "a\t.rs",
+        ] {
+            assert_eq!(read(&finding_in(file)), (Vec::new(), 1), "{file:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_plain_relative_path_is_unreadable() {
+        for file in [
+            "/etc/passwd",
+            "a\\b.rs",
+            "C:/x.rs",
+            "c:x",
+            "a/../../b.rs",
+            "..",
+        ] {
+            assert_eq!(read(&finding_in(file)), (Vec::new(), 1), "{file:?}");
+        }
+        let long = "a/".repeat(FILE_MAX / 2) + "b.rs";
+        assert_eq!(
+            read(&finding_in(&long)),
+            (Vec::new(), 1),
+            "longer than {FILE_MAX}"
+        );
+    }
+
+    #[test]
+    fn an_area_longer_than_its_limit_is_unreadable() {
+        let area = "a".repeat(AREA_MAX + 1);
+        let text = block(json!({
+            "area": area, "title": "t", "file": "a.rs", "line": 1, "body": "b"
+        }));
+        let (_, findings, _, unreadable) =
+            extract_check_blocks(&text, CheckKind::Audit, std::slice::from_ref(&area));
+        assert_eq!((findings.len(), unreadable), (0, 1));
+        let pass = format!(
+            "{FENCE}{PASS_INFO}\n{}\n{FENCE}",
+            json!({"area": area, "text": "ok"})
+        );
+        let (_, _, passes, unreadable) = extract_check_blocks(&pass, CheckKind::Audit, &[area]);
+        assert_eq!((passes.len(), unreadable), (0, 1));
+    }
 }
