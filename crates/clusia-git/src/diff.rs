@@ -58,6 +58,53 @@ pub async fn diff_between(repo: &Path, old: &str, new: &str) -> Result<String, G
     .await
 }
 
+/// The line that ends a diff `diff_for_prompt` cut.
+pub const DIFF_CUT_NOTE: &str = "[diff truncated — read the files in the worktree]";
+
+/// The diff from `old` to `new` with 3 lines of context and rename detection, for a prompt: cut
+/// at the last whole line within `cap` bytes, with `DIFF_CUT_NOTE` as its last line when cut.
+pub async fn diff_for_prompt(
+    repo: &Path,
+    old: &str,
+    new: &str,
+    cap: usize,
+) -> Result<String, GitError> {
+    require_object_id(old)?;
+    require_object_id(new)?;
+    let diff = git(
+        repo,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "-U3",
+            "-M",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            old,
+            new,
+            "--",
+        ],
+    )
+    .await?;
+    Ok(cut_diff(diff, cap))
+}
+
+fn cut_diff(diff: String, cap: usize) -> String {
+    if diff.len() <= cap {
+        return diff;
+    }
+    let mut end = cap;
+    while !diff.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = diff[..end].rfind('\n').unwrap_or(end);
+    format!("{}\n{DIFF_CUT_NOTE}", &diff[..end])
+}
+
 pub fn reviewed_ref(number: u64) -> String {
     format!("refs/clusia/reviewed/pr-{number}")
 }
@@ -191,6 +238,66 @@ mod tests {
             diff.contains("rename from old.txt") && diff.contains("rename to new.txt"),
             "{diff}"
         );
+    }
+
+    #[tokio::test]
+    async fn diff_for_prompt_has_three_lines_of_context_and_renames() {
+        let (_t, repo, first, second) = repo_with_two_commits();
+        let diff = diff_for_prompt(&repo, &first, &second, 100_000)
+            .await
+            .unwrap();
+        assert!(diff.contains("@@ -1,3 +1,4 @@"), "{diff}");
+        assert!(diff.contains("+0\n 1\n 2\n 3"), "{diff}");
+        assert!(
+            diff.contains("rename from old.txt") && diff.contains("rename to new.txt"),
+            "{diff}"
+        );
+        assert!(!diff.contains(DIFF_CUT_NOTE));
+    }
+
+    #[tokio::test]
+    async fn diff_for_prompt_ignores_user_prefix_config() {
+        let (_t, repo, first, second) = repo_with_two_commits();
+        sh(&repo, &["config", "diff.noprefix", "true"]);
+        let diff = diff_for_prompt(&repo, &first, &second, 100_000)
+            .await
+            .unwrap();
+        assert!(diff.contains("diff --git a/a.txt b/a.txt"), "{diff}");
+    }
+
+    #[tokio::test]
+    async fn diff_for_prompt_stops_at_a_whole_line_and_says_so() {
+        let (_t, repo, first, second) = repo_with_two_commits();
+        let whole = diff_for_prompt(&repo, &first, &second, 100_000)
+            .await
+            .unwrap();
+        let cut = diff_for_prompt(&repo, &first, &second, 60).await.unwrap();
+        assert!(cut.ends_with(&format!("\n{DIFF_CUT_NOTE}")), "{cut}");
+        let body = cut.strip_suffix(&format!("\n{DIFF_CUT_NOTE}")).unwrap();
+        assert!(body.len() <= 60 && whole.starts_with(body), "{cut}");
+        assert!(whole[body.len()..].starts_with('\n'), "a whole line");
+        let exact = diff_for_prompt(&repo, &first, &second, whole.len())
+            .await
+            .unwrap();
+        assert_eq!(exact, whole, "a diff that fits is not cut");
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_character() {
+        let diff = "ação ação ação".to_string();
+        let cut = cut_diff(diff, 2);
+        assert_eq!(cut, format!("a\n{DIFF_CUT_NOTE}"));
+    }
+
+    #[tokio::test]
+    async fn diff_for_prompt_validates_its_ids() {
+        let (_t, repo, first, _second) = repo_with_two_commits();
+        assert!(
+            diff_for_prompt(&repo, "--output=/tmp/x", &first, 10)
+                .await
+                .is_err()
+        );
+        assert!(diff_for_prompt(&repo, &first, "HEAD", 10).await.is_err());
     }
 
     #[tokio::test]

@@ -25,7 +25,8 @@ pub(crate) fn turn_of(entry: &AgentLogEntry) -> u64 {
         | AgentLogEntry::Done { turn, .. }
         | AgentLogEntry::Error { turn, .. }
         | AgentLogEntry::Permission { turn, .. }
-        | AgentLogEntry::Check { turn, .. } => *turn,
+        | AgentLogEntry::Check { turn, .. }
+        | AgentLogEntry::Revalidation { turn, .. } => *turn,
     }
 }
 
@@ -52,9 +53,9 @@ pub(crate) fn append(path: &Path, entry: &AgentLogEntry) -> io::Result<()> {
 }
 
 /// Drops the oldest half of the file, cutting at a line boundary. When the newest entry alone
-/// is longer than half the file, everything before it goes and it stays. A check turn cut in
-/// two keeps its first `Check` line, moved to the top, so the rest of that turn still reads as
-/// a check's and never as the chat's.
+/// is longer than half the file, everything before it goes and it stays. A check or revalidation
+/// turn cut in two keeps its first `Check` or `Revalidation` line, moved to the top, so the rest
+/// of that turn still reads as a run's and never as the chat's.
 fn trim(path: &Path) -> io::Result<()> {
     let bytes = fs::read(path)?;
     let middle = bytes.len() / 2;
@@ -78,7 +79,7 @@ fn trim(path: &Path) -> io::Result<()> {
     fs::rename(&temporary, path)
 }
 
-/// The first `Check` line in `dropped` of each turn that still has entries in `kept`.
+/// The first `Check` or `Revalidation` line in `dropped` of each turn that still has entries in `kept`.
 fn check_lines_cut_off(dropped: &[u8], kept: &[u8]) -> Vec<u8> {
     let parse = |line: &[u8]| serde_json::from_slice::<AgentLogEntry>(line).ok();
     let kept_turns: std::collections::HashSet<u64> = kept
@@ -89,7 +90,7 @@ fn check_lines_cut_off(dropped: &[u8], kept: &[u8]) -> Vec<u8> {
     let mut moved = std::collections::HashSet::new();
     let mut out = Vec::new();
     for line in dropped.split(|b| *b == b'\n') {
-        let Some(entry @ AgentLogEntry::Check { .. }) = parse(line) else {
+        let Some(entry) = parse(line).filter(is_run_entry) else {
             continue;
         };
         let turn = turn_of(&entry);
@@ -99,6 +100,13 @@ fn check_lines_cut_off(dropped: &[u8], kept: &[u8]) -> Vec<u8> {
         }
     }
     out
+}
+
+fn is_run_entry(entry: &AgentLogEntry) -> bool {
+    matches!(
+        entry,
+        AgentLogEntry::Check { .. } | AgentLogEntry::Revalidation { .. }
+    )
 }
 
 /// Every entry, oldest first. A missing file is an empty log; a line that does not parse
@@ -117,18 +125,19 @@ pub(crate) fn last_turn(path: &Path) -> u64 {
     read(path).iter().map(turn_of).max().unwrap_or(0)
 }
 
-/// The turns that belong to a check, not to the chat: those with a `Check` entry. Every entry
-/// of such a turn (its tools, its permission lines, its end) stays out of the chat.
+/// The turns that belong to a check or a revalidation, not to the chat: those with a `Check` or
+/// `Revalidation` entry. Every entry of such a turn (its tools, its permission lines, its end) stays out of the chat.
 pub(crate) fn check_turns(entries: &[AgentLogEntry]) -> std::collections::HashSet<u64> {
     entries
         .iter()
-        .filter(|entry| matches!(entry, AgentLogEntry::Check { .. }))
+        .filter(|entry| is_run_entry(entry))
         .map(turn_of)
         .collect()
 }
 
 /// The turns that started but have no ending, oldest first: a chat turn ends with `Done` or
-/// `Error`, a check's with a `Check` entry that is `done`, `failed` or `stopped`.
+/// `Error`, a check's or a revalidation's with a `Check` or `Revalidation` entry that is `done`, `failed` or
+/// `stopped`.
 pub(crate) fn unfinished_turns(entries: &[AgentLogEntry]) -> Vec<u64> {
     let mut started = Vec::new();
     let mut ended = std::collections::HashSet::new();
@@ -139,7 +148,7 @@ pub(crate) fn unfinished_turns(entries: &[AgentLogEntry]) -> Vec<u64> {
         }
         let over = match entry {
             AgentLogEntry::Done { .. } | AgentLogEntry::Error { .. } => true,
-            AgentLogEntry::Check { state, .. } => {
+            AgentLogEntry::Check { state, .. } | AgentLogEntry::Revalidation { state, .. } => {
                 matches!(state.as_str(), "done" | "failed" | "stopped")
             }
             _ => false,
@@ -338,6 +347,25 @@ mod tests {
         ];
         assert_eq!(check_turns(&entries), [2].into_iter().collect());
         assert!(check_turns(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_revalidation_turn_is_not_the_chat_and_ends_like_a_check() {
+        let run = |turn: u64, state: &str| AgentLogEntry::Revalidation {
+            at: 1,
+            turn,
+            state: state.into(),
+        };
+        let entries = [
+            text(1, "chat"),
+            run(2, "running"),
+            run(2, "done"),
+            run(3, "waiting"),
+            run(3, "running"),
+        ];
+        assert_eq!(check_turns(&entries), [2, 3].into_iter().collect());
+        assert_eq!(unfinished_turns(&entries), [1, 3]);
+        assert_eq!(turn_of(&entries[1]), 2);
     }
 
     #[test]

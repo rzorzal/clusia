@@ -192,13 +192,14 @@ pub fn title_for(tool: &str) -> String {
     title_for_origin(tool, TurnOrigin::Chat)
 }
 
-/// The modal's title: who wants to do what. A check names itself, so the reviewer knows the
+/// The modal's title: who wants to do what. A check or the revalidation names itself, so the reviewer knows the
 /// request is not the chat's.
 pub fn title_for_origin(tool: &str, origin: TurnOrigin) -> String {
     let who = match origin {
         TurnOrigin::Chat => "Claude Code",
         TurnOrigin::Security => "Security check",
         TurnOrigin::Audit => "Audit check",
+        TurnOrigin::Revalidation => "Revalidation",
     };
     match tool {
         "Bash" => format!("{who} wants to run a command"),
@@ -1718,6 +1719,10 @@ mod tests {
         assert_eq!(
             title_for_origin("WebFetch", TurnOrigin::Security),
             "Security check wants to use WebFetch"
+        );
+        assert_eq!(
+            title_for_origin("Bash", TurnOrigin::Revalidation),
+            "Revalidation wants to run a command"
         );
         assert_eq!(
             title_for("Bash"),

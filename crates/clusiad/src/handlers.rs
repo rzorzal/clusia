@@ -190,6 +190,14 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
             checks::accept(shared, client, &pr, &id, body).await
         }
         Command::DismissFinding { pr, id } => checks::dismiss(shared, &pr, &id).await,
+        Command::Revalidate { .. }
+        | Command::StopRevalidation { .. }
+        | Command::GetRevalidation { .. }
+        | Command::DecideProposal { .. }
+        | Command::AcceptAllProposals { .. }
+        | Command::ReanchorDraftItem { .. } => {
+            crate::reviews::invalid_state("revalidation is not available yet")
+        }
     }
 }
 

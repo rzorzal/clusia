@@ -6,6 +6,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::checks::{AuditArea, BUILTIN_AREA_IDS, default_areas, validate_area};
+use crate::revalidation::{QUIET_DEFAULT_SECS, QUIET_RANGE};
 
 pub const MIN_POLL_SECS: u64 = 15;
 pub const MAX_POLL_SECS: u64 = 3600;
@@ -553,6 +554,10 @@ pub struct Harness {
     pub audit_areas: Vec<AuditArea>,
     /// How long one security check or audit may run before it is stopped.
     pub check_timeout_secs: u32,
+    /// Ask the agent to re-read the draft when a saved review's pull request gets new commits.
+    pub revalidate: bool,
+    /// How long no push may arrive before the draft is revalidated.
+    pub revalidate_quiet_secs: u32,
 }
 
 impl Harness {
@@ -580,6 +585,8 @@ impl Default for Harness {
             audit: true,
             audit_areas: default_areas(),
             check_timeout_secs: DEFAULT_CHECK_TIMEOUT_SECS,
+            revalidate: true,
+            revalidate_quiet_secs: QUIET_DEFAULT_SECS,
         }
     }
 }
@@ -928,6 +935,14 @@ impl Config {
                 "harness.check_timeout_secs must be between {} and {}, got {limit}",
                 CHECK_TIMEOUT_RANGE.start(),
                 CHECK_TIMEOUT_RANGE.end()
+            ));
+        }
+        let quiet = self.harness.revalidate_quiet_secs;
+        if !QUIET_RANGE.contains(&quiet) {
+            return Err(format!(
+                "harness.revalidate_quiet_secs must be between {} and {}, got {quiet}",
+                QUIET_RANGE.start(),
+                QUIET_RANGE.end()
             ));
         }
         let mut seen = BTreeSet::new();
@@ -1327,6 +1342,40 @@ mod tests {
         assert_eq!(off.harness.check_timeout_secs, 90);
         assert_eq!(off.harness.audit_areas, default_areas());
         assert_eq!(off.validate(), Ok(()));
+    }
+
+    #[test]
+    fn revalidation_defaults_are_on_with_five_minutes() {
+        let h = Config::default().harness;
+        assert!(h.revalidate);
+        assert_eq!(h.revalidate_quiet_secs, 300);
+        assert_eq!(QUIET_DEFAULT_SECS, 300);
+        assert_eq!(QUIET_RANGE, 60..=3600);
+        let old: Config = serde_json::from_str(r#"{"harness":{"on_open":"wait"}}"#).unwrap();
+        assert!(old.harness.revalidate);
+        assert_eq!(old.harness.revalidate_quiet_secs, 300);
+        let off: Config =
+            serde_json::from_str(r#"{"harness":{"revalidate":false,"revalidate_quiet_secs":90}}"#)
+                .unwrap();
+        assert!(!off.harness.revalidate);
+        assert_eq!(off.harness.revalidate_quiet_secs, 90);
+        assert_eq!(off.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_quiet_period_is_bounded() {
+        let mut c = Config::default();
+        for bad in [0, 59, 3601] {
+            c.harness.revalidate_quiet_secs = bad;
+            assert_eq!(
+                c.validate().unwrap_err(),
+                format!("harness.revalidate_quiet_secs must be between 60 and 3600, got {bad}")
+            );
+        }
+        for ok in [60, 300, 3600] {
+            c.harness.revalidate_quiet_secs = ok;
+            assert_eq!(c.validate(), Ok(()));
+        }
     }
 
     #[test]

@@ -212,6 +212,37 @@ impl Draft {
         Ok(())
     }
 
+    /// Points a line comment at `anchor`, or turns it into a general comment with `None`; the
+    /// status becomes `Ok` either way. A general comment, reply or resolve takes no anchor, but
+    /// `None` still clears its obsolete mark.
+    pub fn reanchor(&mut self, id: &str, anchor: Option<Anchor>) -> Result<(), DraftError> {
+        let item = self
+            .items
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| DraftError::NoSuchItem(id.to_string()))?;
+        match anchor {
+            Some(a) => {
+                if item.kind != DraftKind::LineComment {
+                    return Err(DraftError::UnexpectedAnchor);
+                }
+                let start = a.start_line.unwrap_or(a.line);
+                if a.line == 0 || start == 0 || start > a.line {
+                    return Err(DraftError::InvalidRange { start, end: a.line });
+                }
+                item.anchor = Some(a);
+            }
+            None => {
+                if item.kind == DraftKind::LineComment {
+                    item.kind = DraftKind::General;
+                    item.anchor = None;
+                }
+            }
+        }
+        item.status = ItemStatus::Ok;
+        Ok(())
+    }
+
     pub fn remove(&mut self, id: &str) -> Result<DraftItem, DraftError> {
         let index = self
             .items
@@ -526,6 +557,81 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Origin>(r#""human""#).unwrap(),
             Origin::Human
+        );
+    }
+
+    #[test]
+    fn reanchor_points_a_line_comment_elsewhere_and_clears_its_status() {
+        let mut d = Draft::default();
+        d.add(DraftKind::LineComment, Some(anchor(3, None)), None, "x", 1)
+            .unwrap();
+        d.items[0].status = ItemStatus::Obsolete {
+            reason: "the commented lines changed".into(),
+        };
+        let mut target = anchor(9, Some(7));
+        target.path = "src/b.rs".into();
+        d.reanchor("i1", Some(target.clone())).unwrap();
+        assert_eq!(d.items[0].anchor, Some(target));
+        assert_eq!(d.items[0].kind, DraftKind::LineComment);
+        assert_eq!(d.items[0].status, ItemStatus::Ok);
+        assert_eq!(d.publishable().count(), 1);
+    }
+
+    #[test]
+    fn reanchor_without_an_anchor_makes_a_general_comment() {
+        let mut d = Draft::default();
+        d.add(DraftKind::LineComment, Some(anchor(3, None)), None, "x", 1)
+            .unwrap();
+        d.items[0].status = ItemStatus::Obsolete {
+            reason: "gone".into(),
+        };
+        d.reanchor("i1", None).unwrap();
+        let item = &d.items[0];
+        assert_eq!(
+            (item.kind, item.anchor.as_ref(), item.body.as_str()),
+            (DraftKind::General, None, "x")
+        );
+        assert_eq!(item.status, ItemStatus::Ok);
+    }
+
+    #[test]
+    fn reanchor_without_an_anchor_restores_any_other_item() {
+        let mut d = Draft::default();
+        d.add(DraftKind::General, None, None, "note", 1).unwrap();
+        d.items[0].status = ItemStatus::Obsolete {
+            reason: "gone".into(),
+        };
+        d.reanchor("i1", None).unwrap();
+        assert_eq!(d.items[0].kind, DraftKind::General);
+        assert_eq!(d.items[0].status, ItemStatus::Ok);
+    }
+
+    #[test]
+    fn reanchor_validates() {
+        let mut d = Draft::default();
+        d.add(DraftKind::General, None, None, "note", 1).unwrap();
+        d.add(DraftKind::LineComment, Some(anchor(3, None)), None, "x", 2)
+            .unwrap();
+        assert_eq!(
+            d.reanchor("i1", Some(anchor(3, None))),
+            Err(DraftError::UnexpectedAnchor)
+        );
+        assert_eq!(
+            d.reanchor("i2", Some(anchor(3, Some(5)))),
+            Err(DraftError::InvalidRange { start: 5, end: 3 })
+        );
+        assert_eq!(
+            d.reanchor("i2", Some(anchor(0, None))),
+            Err(DraftError::InvalidRange { start: 0, end: 0 })
+        );
+        assert_eq!(
+            d.reanchor("i9", None),
+            Err(DraftError::NoSuchItem("i9".into()))
+        );
+        assert_eq!(
+            d.items[1].anchor,
+            Some(anchor(3, None)),
+            "a refusal changes nothing"
         );
     }
 }

@@ -1,6 +1,7 @@
 //! Every message that crosses the socket.
 
 pub use clusia_core::OpenTarget;
+use clusia_core::revalidation::Revalidation;
 use clusia_core::{
     ActivitySummary, CheckKind, CheckResult, ChecksSummary, Config, DraftItem, DraftKind,
     EventKind, FileDiff, Finding, MediaKind, Pass, PrConversation, PrDetail, PrFilter, PrRef,
@@ -290,6 +291,36 @@ pub enum Command {
         pr: PrRef,
         id: String,
     },
+    /// Revalidate the draft of this review now: it also opens a round when the head moved and
+    /// none exists.
+    Revalidate {
+        pr: PrRef,
+    },
+    /// Stop the revalidation if it runs or waits.
+    StopRevalidation {
+        pr: PrRef,
+    },
+    /// The revalidation round of this review, if it has one.
+    GetRevalidation {
+        pr: PrRef,
+    },
+    /// Accept or reject what the revalidation proposed for one draft item.
+    DecideProposal {
+        pr: PrRef,
+        item: String,
+        accept: bool,
+    },
+    /// Accept every proposal that still waits and still matches its item.
+    AcceptAllProposals {
+        pr: PrRef,
+    },
+    /// Point a draft item at another line, or turn a line comment into a general one (`None`).
+    ReanchorDraftItem {
+        pr: PrRef,
+        id: String,
+        #[serde(default)]
+        anchor: Option<AnchorInput>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -352,6 +383,8 @@ pub enum Reply {
         accepted: Vec<String>,
         dismissed: Vec<String>,
     },
+    /// What `GetRevalidation` knows.
+    Revalidation(Option<Revalidation>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -677,6 +710,12 @@ pub enum Event {
         id: String,
         accepted: bool,
     },
+    /// The revalidation round of a review changed: its state, its proposals or a decision
+    /// (topic `reviews`).
+    RevalidationChanged {
+        pr: PrRef,
+        revalidation: Option<Revalidation>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -770,6 +809,8 @@ pub enum NewsKind {
     Checks,
     Local,
     Moved,
+    /// The agent re-read the draft after new commits.
+    Revalidated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1003,6 +1044,13 @@ pub enum AgentLogEntry {
         kind: CheckKind,
         state: String,
     },
+    /// A revalidation changed state: `waiting`, `running`, `done`, `failed` or `stopped`. Not
+    /// part of the chat: `GetAgentLog` leaves these out.
+    Revalidation {
+        at: i64,
+        turn: u64,
+        state: String,
+    },
 }
 
 /// A permission request waiting for the reviewer: the fields of `Event::PermissionRequested`.
@@ -1023,7 +1071,7 @@ pub struct PermissionRequest {
     pub origin: TurnOrigin,
 }
 
-/// Who runs a turn of the agent: the review chat, or one of the two checks.
+/// Who runs a turn of the agent: the review chat, one of the two checks, or the revalidation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOrigin {
@@ -1031,6 +1079,7 @@ pub enum TurnOrigin {
     Chat,
     Security,
     Audit,
+    Revalidation,
 }
 
 impl TurnOrigin {
@@ -3153,5 +3202,155 @@ mod tests {
                 result: Outcome::Ok(reply),
             });
         }
+    }
+
+    fn round() -> Revalidation {
+        use clusia_core::revalidation::{CommitLine, Decision, Proposal, RoundState, Verdict};
+        Revalidation {
+            from_head: "h1".into(),
+            to_head: "h2".into(),
+            commits: vec![CommitLine {
+                sha: "abc1234".into(),
+                title: "Handle expiry".into(),
+            }],
+            before: std::collections::BTreeMap::new(),
+            sp1_moved: 1,
+            sp1_obsolete: 0,
+            state: RoundState::Running {
+                activity: Some("Reading src/a.rs".into()),
+            },
+            proposals: vec![Proposal {
+                item: "i1".into(),
+                before: None,
+                verdict: Verdict::Obsolete {
+                    reason: "gone".into(),
+                },
+                decision: Decision::Pending,
+                fingerprint: "0123456789abcdef".into(),
+            }],
+            unreadable: 0,
+            asked: 1,
+            finished_at: None,
+            notified: false,
+        }
+    }
+
+    #[test]
+    fn revalidation_commands_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        assert_eq!(
+            request(Command::Revalidate { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"revalidate":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::StopRevalidation { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"stop_revalidation":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetRevalidation { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"get_revalidation":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::DecideProposal {
+                pr: acme(),
+                item: "i1".into(),
+                accept: true,
+            }),
+            r#"{"type":"request","id":5,"cmd":{"decide_proposal":{"pr":"acme/widgets#7","item":"i1","accept":true}}}"#
+        );
+        assert_eq!(
+            request(Command::AcceptAllProposals { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"accept_all_proposals":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::ReanchorDraftItem {
+                pr: acme(),
+                id: "i1".into(),
+                anchor: Some(AnchorInput {
+                    path: "src/a.rs".into(),
+                    line: 44,
+                    start_line: None,
+                    side: Side::Right,
+                }),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"reanchor_draft_item":{"pr":"acme/widgets#7","id":"i1","anchor":{"path":"src/a.rs","line":44,"start_line":null,"side":"right"}}}}"#
+        );
+        let general: ClientMessage = serde_json::from_str(
+            r#"{"type":"request","id":5,"cmd":{"reanchor_draft_item":{"pr":"acme/widgets#7","id":"i1"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            general,
+            ClientMessage::Request {
+                id: 5,
+                cmd: Command::ReanchorDraftItem {
+                    pr: acme(),
+                    id: "i1".into(),
+                    anchor: None,
+                }
+            },
+            "no anchor turns the comment into a general one"
+        );
+    }
+
+    #[test]
+    fn revalidation_replies_events_and_origins_wire_format() {
+        round_trip(Reply::Revalidation(None));
+        round_trip(Reply::Revalidation(Some(round())));
+        assert_eq!(
+            wire(&ServerMessage::Response {
+                id: 5,
+                result: Outcome::Ok(Reply::Revalidation(None)),
+            }),
+            r#"{"type":"response","id":5,"result":{"ok":{"revalidation":null}}}"#
+        );
+        let changed = Event::RevalidationChanged {
+            pr: acme(),
+            revalidation: Some(round()),
+        };
+        round_trip(changed.clone());
+        let text = wire(&ServerMessage::Event {
+            topic: topics::REVIEWS.into(),
+            event: changed,
+        });
+        assert!(
+            text.starts_with(r#"{"type":"event","topic":"reviews","event":{"revalidation_changed":{"pr":"acme/widgets#7","revalidation":{"from_head":"h1""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""state":{"state":"running","activity":"Reading src/a.rs"}"#),
+            "{text}"
+        );
+        round_trip(Event::RevalidationChanged {
+            pr: acme(),
+            revalidation: None,
+        });
+        assert_eq!(wire(&TurnOrigin::Revalidation), r#""revalidation""#);
+        let request = Event::PermissionRequested {
+            id: "perm-1".into(),
+            pr: acme(),
+            turn: 4,
+            tool: "Bash".into(),
+            summary: "cargo test".into(),
+            reason: None,
+            prefix: None,
+            sandbox: true,
+            deadline: 5,
+            detail: None,
+            origin: TurnOrigin::Revalidation,
+        };
+        assert!(wire(&request).ends_with(r#""origin":"revalidation"}}"#));
+        round_trip(request);
+        assert_eq!(wire(&NewsKind::Revalidated), r#""revalidated""#);
+        let entry = AgentLogEntry::Revalidation {
+            at: 9,
+            turn: 3,
+            state: "running".into(),
+        };
+        assert_eq!(
+            wire(&entry),
+            r#"{"type":"revalidation","at":9,"turn":3,"state":"running"}"#
+        );
+        round_trip(entry);
     }
 }

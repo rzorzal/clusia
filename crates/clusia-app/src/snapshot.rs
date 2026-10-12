@@ -128,7 +128,7 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
             r.reviews = true;
             r.activity = state == ReviewState::Published;
         }
-        Event::ReviewOutdated { .. } => r.reviews = true,
+        Event::ReviewOutdated { .. } | Event::RevalidationChanged { .. } => r.reviews = true,
         Event::WindowRequested { target } => return (r, Some(target)),
         // `Stopping` is handled by the bridge before `apply` (it closes the window).
         Event::LoadStep(_)
@@ -198,6 +198,25 @@ mod tests {
             state,
             ..SyncStatus::default()
         }
+    }
+
+    #[test]
+    fn a_revalidation_change_refreshes_the_review_lists() {
+        let mut s = Snapshot::default();
+        let (r, _) = apply(
+            &mut s,
+            Event::RevalidationChanged {
+                pr: "rzorzal/clusia#123".parse().unwrap(),
+                revalidation: None,
+            },
+        );
+        assert_eq!(
+            r,
+            Refresh {
+                reviews: true,
+                ..Refresh::default()
+            }
+        );
     }
 
     #[test]

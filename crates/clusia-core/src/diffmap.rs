@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::draft::{Draft, ItemStatus, Side};
+use crate::draft::{Anchor, Draft, ItemStatus, Side};
+use crate::prdata::FileDiff;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hunk {
@@ -290,10 +291,33 @@ pub fn can_comment(patch: &str, side: Side, line: u32) -> bool {
     }
 }
 
+/// Whether every line of `anchor` can carry a review comment in `files` (GitHub's patches).
+pub fn fits_diff(files: &[FileDiff], anchor: &Anchor) -> bool {
+    let Some(patch) = files
+        .iter()
+        .find(|f| f.path == anchor.path)
+        .and_then(|f| f.patch.as_deref())
+    else {
+        return false;
+    };
+    let (left, right) = commentable_lines(patch);
+    let lines: &BTreeSet<u32> = match anchor.side {
+        Side::Left => &left,
+        Side::Right => &right,
+    };
+    let start = anchor.start_line.unwrap_or(anchor.line);
+    if start > anchor.line {
+        return false;
+    }
+    // A range longer than the commentable lines cannot fit; this also bounds the loop.
+    let span = u64::from(anchor.line - start) + 1;
+    span <= lines.len() as u64 && (start..=anchor.line).all(|l| lines.contains(&l))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::draft::{Anchor, DraftKind};
+    use crate::draft::DraftKind;
 
     const DIFF: &str = "\
 diff --git a/src/a.rs b/src/a.rs
@@ -542,5 +566,42 @@ index 777..888 100644
         assert!(can_comment(patch, Side::Right, 12));
         assert!(can_comment(patch, Side::Left, 11));
         assert!(!can_comment(patch, Side::Right, 40));
+    }
+
+    fn file_with(patch: Option<&str>) -> FileDiff {
+        FileDiff {
+            path: "src/a.rs".into(),
+            previous_path: None,
+            status: "modified".into(),
+            additions: 1,
+            deletions: 1,
+            patch: patch.map(String::from),
+        }
+    }
+
+    fn at(line: u32, start: Option<u32>, side: Side) -> Anchor {
+        Anchor {
+            path: "src/a.rs".into(),
+            line,
+            start_line: start,
+            side,
+            commit: "h".into(),
+        }
+    }
+
+    #[test]
+    fn an_anchor_fits_when_every_line_can_carry_a_comment() {
+        let files = [file_with(Some("@@ -1,3 +1,3 @@\n a\n-b\n+c\n d\n"))];
+        assert!(fits_diff(&files, &at(2, None, Side::Right)));
+        assert!(fits_diff(&files, &at(3, Some(1), Side::Right)));
+        assert!(fits_diff(&files, &at(2, None, Side::Left)));
+        assert!(!fits_diff(&files, &at(4, None, Side::Right)));
+        assert!(!fits_diff(&files, &at(5, Some(2), Side::Right)));
+        assert!(!fits_diff(&files, &at(2, Some(3), Side::Right)));
+        let mut other = at(2, None, Side::Right);
+        other.path = "src/b.rs".into();
+        assert!(!fits_diff(&files, &other));
+        assert!(!fits_diff(&[file_with(None)], &at(2, None, Side::Right)));
+        assert!(!fits_diff(&files, &at(u32::MAX, Some(1), Side::Right)));
     }
 }

@@ -364,14 +364,16 @@ impl ChatModel {
                 }),
                 AgentLogEntry::Done { .. }
                 | AgentLogEntry::Text { .. }
-                | AgentLogEntry::Check { .. } => {}
+                | AgentLogEntry::Check { .. }
+                | AgentLogEntry::Revalidation { .. } => {}
             }
         }
         let unfinished = match entries.last() {
             None
             | Some(AgentLogEntry::Done { .. })
             | Some(AgentLogEntry::Error { .. })
-            | Some(AgentLogEntry::Check { .. }) => None,
+            | Some(AgentLogEntry::Check { .. })
+            | Some(AgentLogEntry::Revalidation { .. }) => None,
             Some(
                 AgentLogEntry::User { turn, .. }
                 | AgentLogEntry::Text { turn, .. }
