@@ -42,7 +42,10 @@ pub struct FinalizeItem {
     pub body: String,
     /// Resolves have no text.
     pub editable: bool,
+    /// Obsolete and still a problem: it blocks Publish.
     pub obsolete: bool,
+    /// Obsolete, but removed in the revalidation: kept in the draft, shown as settled.
+    pub removed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,7 +144,9 @@ pub fn finalize_view(ready: &Ready, form: &FinalizeForm) -> FinalizeView {
                 label,
                 body: i.body.clone(),
                 editable: i.kind != DraftKind::Resolve,
-                obsolete: matches!(i.status, ItemStatus::Obsolete { .. }),
+                obsolete: matches!(i.status, ItemStatus::Obsolete { .. })
+                    && !view.review.removed.contains(&i.id),
+                removed: view.review.removed.contains(&i.id),
             }
         })
         .collect();
@@ -458,6 +463,8 @@ fn card_content(
                 }
                 if item.obsolete {
                     row.spawn(badge(fonts, "obsolete", Tone::Orange));
+                } else if item.removed {
+                    row.spawn(text(fonts, "Removed in the revalidation", Type::MUTED));
                 }
                 if !v.cached {
                     row.spawn((
@@ -1090,6 +1097,26 @@ mod tests {
         };
         let v = finalize_view(&r, &chosen);
         assert_eq!((v.warning, v.blocked), (None, None));
+    }
+
+    #[test]
+    fn a_comment_removed_in_the_revalidation_reads_as_settled() {
+        let mut r = ready();
+        r.view.review.removed.insert("i3".into());
+        let chosen = FinalizeForm::default();
+        let v = finalize_view(&r, &chosen);
+        let item = v.items.iter().find(|i| i.id == "i3").expect("the item");
+        assert_eq!((item.obsolete, item.removed), (false, true));
+        let mut app = finalize_app(false);
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let ready = tabs.0.get_mut(&pr).and_then(|t| t.ready_mut()).unwrap();
+            ready.view.review.removed.insert("i3".into());
+        }
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Removed in the revalidation"));
+        assert!(!testing::shows(&mut app, "no longer fits the diff"));
     }
 
     #[test]

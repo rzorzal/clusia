@@ -1285,7 +1285,9 @@ fn end_reanchor(
         let gone = tab
             .ready()
             .is_some_and(|r| !r.view.review.draft.items.iter().any(|i| i.id == item));
-        let escaped = esc && shown.as_ref() == Some(pr) && tab.ui.modal.is_none();
+        // An open comment editor takes the Esc first: one press closes one thing.
+        let escaped =
+            esc && shown.as_ref() == Some(pr) && tab.ui.modal.is_none() && tab.ui.editor.is_none();
         if gone || escaped {
             tab.ui.reanchor = None;
         }
@@ -2500,6 +2502,26 @@ mod tests {
         testing::activate(&mut app, cancel);
         assert_eq!(testing::tab(&app, &pr).ui.reanchor, None);
         assert!(testing::recorded(&mut app).is_empty());
+    }
+
+    #[test]
+    fn escape_with_a_comment_editor_open_keeps_the_mode() {
+        let (mut app, pr) = reanchoring("i3");
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .editor = Some(crate::review_state::Editor {
+            target: crate::review_state::EditTarget::General,
+            text: String::new(),
+            error: None,
+            ticket: None,
+            mode: crate::ui::composer::ComposerMode::Write,
+        });
+        press(&mut app, KeyCode::Escape);
+        assert_eq!(testing::tab(&app, &pr).ui.reanchor.as_deref(), Some("i3"));
     }
 
     #[test]
