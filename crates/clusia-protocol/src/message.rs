@@ -291,8 +291,8 @@ pub enum Command {
         pr: PrRef,
         id: String,
     },
-    /// Revalidate the draft of this review now: it also opens a round when the head moved and
-    /// none exists.
+    /// Revalidate the draft of this review now. A review with no round has no new commits to
+    /// check, so it answers `InvalidState`.
     Revalidate {
         pr: PrRef,
     },

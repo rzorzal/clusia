@@ -182,11 +182,13 @@ pub fn open_round(
     let state = RoundState::Scheduled {
         at: now + i64::from(quiet_secs),
     };
-    let under_way = |r: &Revalidation| {
+    // Kept and not-checked rows can never be decided, so only `pending` keeps a finished round
+    // alive.
+    let under_way = review.revalidation.as_ref().is_some_and(|r| {
         !matches!(r.state, RoundState::Done | RoundState::Failed { .. })
-            || r.proposals.iter().any(|p| p.decision == Decision::Pending)
-    };
-    match review.revalidation.as_mut().filter(|r| under_way(r)) {
+            || pending(r, &review.draft) > 0
+    });
+    match review.revalidation.as_mut().filter(|_| under_way) {
         Some(round) => {
             for (id, anchor) in before {
                 round.before.entry(id).or_insert(anchor);
@@ -221,7 +223,9 @@ pub fn open_round(
 
 /// Whether two anchors name the same lines; the commit they refer to does not matter.
 fn same_place(a: &Anchor, b: &Anchor) -> bool {
-    (&a.path, a.line, a.start_line, a.side) == (&b.path, b.line, b.start_line, b.side)
+    // A range that starts on its own last line is a single line.
+    let start = |a: &Anchor| a.start_line.filter(|s| *s != a.line);
+    (&a.path, a.line, start(a), a.side) == (&b.path, b.line, start(b), b.side)
 }
 
 pub fn row_kind(p: &Proposal, item: &DraftItem) -> RowKind {
@@ -243,19 +247,24 @@ pub fn row_kind(p: &Proposal, item: &DraftItem) -> RowKind {
 /// How many proposals still wait for a click: undecided, with something to decide, on an item
 /// that is still in the draft and still reads as it did when the proposal was made. A proposal
 /// whose item changed since can no longer be decided, so it does not count.
+/// Whether a click can settle this proposal for this item: the row has something to decide, and
+/// a move needs both the anchor the item had and the one it has.
+fn decidable(p: &Proposal, item: &DraftItem) -> bool {
+    match row_kind(p, item) {
+        RowKind::Kept | RowKind::NotChecked => false,
+        RowKind::Moved => p.before.is_some() && item.anchor.is_some(),
+        RowKind::Obsolete | RowKind::NewWording => true,
+    }
+}
+
 pub fn pending(r: &Revalidation, draft: &Draft) -> usize {
     r.proposals
         .iter()
         .filter(|p| p.decision == Decision::Pending)
-        .filter_map(|p| {
-            let item = draft.get(&p.item)?;
-            (fingerprint(item) == p.fingerprint).then(|| row_kind(p, item))
-        })
-        .filter(|kind| {
-            matches!(
-                kind,
-                RowKind::Moved | RowKind::Obsolete | RowKind::NewWording
-            )
+        .filter(|p| {
+            draft
+                .get(&p.item)
+                .is_some_and(|item| fingerprint(item) == p.fingerprint && decidable(p, item))
         })
         .count()
 }
@@ -291,6 +300,9 @@ pub fn decide(
     let current = review.draft.get(item).ok_or(DecideError::Changed)?.clone();
     if fingerprint(&current) != proposal.fingerprint {
         return Err(DecideError::Changed);
+    }
+    if !decidable(&proposal, &current) {
+        return Err(DecideError::NothingToDecide);
     }
     let mut next = current.clone();
     // Some(true): the reviewer removed the comment; Some(false): it is back in the draft.
@@ -346,6 +358,8 @@ pub fn decide(
         RowKind::NewWording => {
             if accept && let Verdict::Reword { text, .. } = &proposal.verdict {
                 next.body = text.clone();
+                // Still obsolete after new wording: the comment keeps blocking a publish.
+                removal = Some(false);
             }
         }
     }
@@ -755,6 +769,73 @@ mod tests {
             None,
         );
         assert_eq!(row_kind(&reword, &item), RowKind::NewWording);
+    }
+
+    #[test]
+    fn a_kept_row_left_pending_does_not_keep_a_finished_round_alive() {
+        let mut r = with(Verdict::Kept, None);
+        assert_eq!(
+            r.revalidation.as_ref().unwrap().proposals[0].decision,
+            Decision::Pending
+        );
+        open_round(
+            &mut r,
+            BTreeMap::new(),
+            "h2",
+            "h3",
+            Relocation::default(),
+            9,
+            60,
+        );
+        let round = r.revalidation.as_ref().unwrap();
+        assert_eq!(round.from_head, "h2");
+        assert!(round.proposals.is_empty());
+    }
+
+    #[test]
+    fn a_move_on_a_comment_with_no_anchor_is_not_pending_and_cannot_be_decided() {
+        let mut r = with(
+            Verdict::Moved {
+                anchor: anchor("src/a.rs", 3, "h2"),
+                reason: "r".into(),
+            },
+            None,
+        );
+        r.draft.reanchor("i1", None).unwrap();
+        r.revalidation.as_mut().unwrap().proposals[0].fingerprint = fingerprint(&r.draft.items[0]);
+        let draft = r.draft.clone();
+        assert_eq!(pending(r.revalidation.as_ref().unwrap(), &draft), 0);
+        assert_eq!(
+            decide(&mut r, "i1", true, &files()),
+            Err(DecideError::NothingToDecide)
+        );
+        assert_eq!(accept_all(&mut r, &files()), 0);
+    }
+
+    #[test]
+    fn new_wording_on_a_removed_obsolete_comment_unmarks_the_removal() {
+        let mut r = with(
+            Verdict::Reword {
+                text: "Why 60 seconds?".into(),
+                reason: None,
+            },
+            None,
+        );
+        r.draft.items[0].status = ItemStatus::Obsolete { reason: "x".into() };
+        r.removed.insert("i1".into());
+        r.revalidation.as_mut().unwrap().proposals[0].fingerprint = fingerprint(&r.draft.items[0]);
+        decide(&mut r, "i1", true, &files()).unwrap();
+        assert!(r.removed.is_empty());
+    }
+
+    #[test]
+    fn a_range_that_starts_on_its_last_line_is_the_same_place() {
+        let single = anchor("src/a.rs", 2, "h1");
+        let mut ranged = anchor("src/a.rs", 2, "h2");
+        ranged.start_line = Some(2);
+        assert!(same_place(&single, &ranged));
+        ranged.start_line = Some(1);
+        assert!(!same_place(&single, &ranged));
     }
 
     #[test]
