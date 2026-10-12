@@ -14,7 +14,7 @@ const PASS_INFO: &str = "clusia-pass";
 /// The most passes one run keeps; the rest count as unreadable.
 const MAX_PASSES: usize = 200;
 /// The longest `file` a finding may name, in bytes.
-const FILE_MAX: usize = 1024;
+pub(crate) const FILE_MAX: usize = 1024;
 /// The longest `area` a block may name, in characters.
 const AREA_MAX: usize = 64;
 
@@ -90,14 +90,14 @@ pub fn extract_check_blocks(
 }
 
 /// A required string: present, a string, not blank once trimmed and at most `max` characters.
-fn text<'a>(value: &'a Value, key: &str, max: usize) -> Option<&'a str> {
+pub(crate) fn text<'a>(value: &'a Value, key: &str, max: usize) -> Option<&'a str> {
     let s = value.get(key)?.as_str()?.trim();
     (!s.is_empty() && s.chars().count() <= max).then_some(s)
 }
 
 /// An optional string: absent or null is `None`; anything else must be a string of at most
 /// `max` characters.
-fn optional(value: &Value, key: &str, max: usize) -> Option<Option<String>> {
+pub(crate) fn optional(value: &Value, key: &str, max: usize) -> Option<Option<String>> {
     match value.get(key) {
         None | Some(Value::Null) => Some(None),
         Some(Value::String(s)) if s.trim().chars().count() <= max => {
@@ -111,7 +111,7 @@ fn optional(value: &Value, key: &str, max: usize) -> Option<Option<String>> {
 /// `/`, no drive letter), no `\`, no `..` segment, and nothing a terminal or a draft would draw
 /// as something else (a control or invisible character). The file ends up in the draft as text
 /// when the finding has no anchor.
-fn plain_relative(file: &str) -> bool {
+pub(crate) fn plain_relative(file: &str) -> bool {
     file.len() <= FILE_MAX
         && !file.starts_with('/')
         && !file.contains('\\')

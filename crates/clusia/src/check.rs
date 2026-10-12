@@ -26,7 +26,7 @@ pub(crate) fn kinds(security: bool, audit: bool) -> Vec<CheckKind> {
 
 /// The text on one line: line breaks and runs of spaces become one space, and every other
 /// control or invisible character is shown as an escape, so nothing repaints the terminal.
-fn line_of(text: &str) -> String {
+pub(crate) fn line_of(text: &str) -> String {
     printable(&text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
@@ -234,10 +234,10 @@ async fn answered<T>(asked: impl Future<Output = T>, interrupt: &mut Signal) -> 
     }
 }
 
-/// The check a permission request comes from; `None` for the chat's.
+/// The check a permission request comes from; `None` for the chat's and the revalidation's.
 fn kind_of(origin: TurnOrigin) -> Option<CheckKind> {
     match origin {
-        TurnOrigin::Chat => None,
+        TurnOrigin::Chat | TurnOrigin::Revalidation => None,
         TurnOrigin::Security => Some(CheckKind::Security),
         TurnOrigin::Audit => Some(CheckKind::Audit),
     }
@@ -546,6 +546,16 @@ mod tests {
         assert_eq!(
             permission_note(TurnOrigin::Chat, &audit_only, "Bash", "make"),
             None
+        );
+        assert_eq!(
+            permission_note(
+                TurnOrigin::Revalidation,
+                &[CheckKind::Security, CheckKind::Audit],
+                "Bash",
+                "make"
+            ),
+            None,
+            "a revalidation request is not a check's"
         );
         assert_eq!(
             permission_note(TurnOrigin::Audit, &audit_only, "Bash", "make\u{1b}[2K").as_deref(),

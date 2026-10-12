@@ -88,6 +88,7 @@ pub fn news_row(item: &NewsItem) -> NewsRow {
         NewsKind::Checks => ("•", Tone::Neutral, None),
         NewsKind::Local => ("+", Tone::Neutral, Some(ReviewSection::Diff)),
         NewsKind::Moved => ("↻", Tone::Orange, Some(ReviewSection::Diff)),
+        NewsKind::Revalidated => ("↻", Tone::Green, None),
     };
     let (who, source) = match item.source.strip_prefix("You via ") {
         Some(client) => ("You".to_string(), client_name(client)),
@@ -433,6 +434,20 @@ mod tests {
     }
 
     #[test]
+    fn a_revalidated_row_has_its_own_icon() {
+        let row = news_row(&item(
+            NewsKind::Revalidated,
+            "Claude Code",
+            None,
+            "Draft revalidated: 1 moved, 1 obsolete, 1 new wording",
+        ));
+        assert_eq!(row.icon, "↻");
+        assert_eq!(row.what, "Draft revalidated");
+        assert_eq!(row.detail, "1 moved, 1 obsolete, 1 new wording");
+        assert_eq!(row.source, "Claude Code");
+    }
+
+    #[test]
     fn rows_read_like_the_mockup() {
         let rows: Vec<NewsRow> = [
             item(NewsKind::Commits, "GitHub", Some("octo"), "2 new commits"),
@@ -580,7 +595,12 @@ mod tests {
         testing::settle(&mut app);
         let asks: Vec<Ask> = testing::recorded(&mut app)
             .into_iter()
-            .filter(|a| !matches!(a, Ask::AgentLog { .. } | Ask::GetChecks(_)))
+            .filter(|a| {
+                !matches!(
+                    a,
+                    Ask::AgentLog { .. } | Ask::GetChecks(_) | Ask::GetRevalidation(_)
+                )
+            })
             .collect();
         assert_eq!(asks, [Ask::MarkSeen(pr.clone())]);
         assert_eq!(modal(&app, &pr), None);

@@ -192,13 +192,14 @@ pub fn title_for(tool: &str) -> String {
     title_for_origin(tool, TurnOrigin::Chat)
 }
 
-/// The modal's title: who wants to do what. A check names itself, so the reviewer knows the
+/// The modal's title: who wants to do what. A check or the revalidation names itself, so the reviewer knows the
 /// request is not the chat's.
 pub fn title_for_origin(tool: &str, origin: TurnOrigin) -> String {
     let who = match origin {
         TurnOrigin::Chat => "Claude Code",
         TurnOrigin::Security => "Security check",
         TurnOrigin::Audit => "Audit check",
+        TurnOrigin::Revalidation => "Revalidation",
     };
     match tool {
         "Bash" => format!("{who} wants to run a command"),
@@ -1720,6 +1721,10 @@ mod tests {
             "Security check wants to use WebFetch"
         );
         assert_eq!(
+            title_for_origin("Bash", TurnOrigin::Revalidation),
+            "Revalidation wants to run a command"
+        );
+        assert_eq!(
             title_for("Bash"),
             title_for_origin("Bash", TurnOrigin::Chat)
         );
@@ -1739,6 +1744,33 @@ mod tests {
             &mut app,
             "Claude Code wants to run a command"
         ));
+    }
+
+    #[test]
+    fn a_revalidation_request_opens_a_modal_that_names_the_revalidation() {
+        let mut app = open();
+        let mut r = bash("perm-rev");
+        r.origin = TurnOrigin::Revalidation;
+        ask(&mut app, r);
+        assert!(testing::shows(
+            &mut app,
+            "Revalidation wants to run a command"
+        ));
+        assert!(!testing::shows(
+            &mut app,
+            "Claude Code wants to run a command"
+        ));
+    }
+
+    #[test]
+    fn a_revalidation_request_leaves_no_line_in_the_chat() {
+        let mut app = open();
+        let before = app.world().resource::<Chats>().0[&pr()].lines.len();
+        let mut r = bash("perm-rev");
+        r.origin = TurnOrigin::Revalidation;
+        ask(&mut app, r);
+        resolve_from(&mut app, "perm-rev", TurnOrigin::Revalidation);
+        assert_eq!(app.world().resource::<Chats>().0[&pr()].lines.len(), before);
     }
 
     #[test]

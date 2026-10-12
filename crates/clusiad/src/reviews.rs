@@ -213,13 +213,28 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     if review.state == clusia_core::ReviewState::Publishing {
         let _ = review.apply(ReviewEvent::PublishFailed, now);
     }
+    let mut round_at = None;
     if review.head_sha != detail.head_sha || review.base_sha != detail.base_sha {
         let head_changed = review.head_sha != detail.head_sha;
+        let old_head = review.head_sha.clone();
+        let before = crate::revalidate::snapshot(&review);
         let report =
             relocate::relocate_review(&mut review, &detail, &repo, Some(files.as_slice())).await;
         // A base that only moved ahead changes nothing for the draft: take it silently.
         if head_changed || report.moved + report.obsolete > 0 {
             let _ = review.apply(ReviewEvent::NewHead, now);
+        }
+        // A window waits for nothing: the round starts now.
+        if head_changed {
+            round_at = crate::revalidate::open_for_new_head(
+                shared,
+                &mut review,
+                before,
+                &old_head,
+                report,
+                true,
+            )
+            .await;
         }
         if report.moved + report.obsolete > 0 {
             let note = format!("{} moved, {} obsolete", report.moved, report.obsolete);
@@ -265,7 +280,14 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     // Read under the review lock `open` holds: a summary that is running now ends after the checks
     // have been told to wait for it.
     let summarizing = shared.sessions.summarizing(pr);
-    let plan = crate::checks::on_open(shared, pr, &review.head_sha, summarizing).await;
+    let mut plan = crate::checks::on_open(shared, pr, &review.head_sha, summarizing).await;
+    if let Some(at) = round_at {
+        crate::revalidate::reschedule(shared, pr, at);
+        plan.revalidating = true;
+    } else {
+        plan.revalidating = crate::revalidate::run_on_open(shared, &review).await;
+    }
+    crate::revalidate::tell(shared, &review);
     let (status, note) = match crate::checks::note(summarizing, &plan) {
         Some(note) => (StepStatus::Done, note),
         None => (status, note),
@@ -589,7 +611,7 @@ pub(crate) fn load_existing(shared: &Shared, pr: &PrRef) -> Result<Review, Outco
     load_stored(shared, pr)?.ok_or_else(|| no_review(pr))
 }
 
-fn bad_request(message: impl Into<String>) -> Outcome {
+pub(crate) fn bad_request(message: impl Into<String>) -> Outcome {
     Outcome::Err(ProtocolError::new(ErrorCode::BadRequest, message))
 }
 
@@ -597,7 +619,7 @@ fn no_review(pr: &PrRef) -> Outcome {
     invalid_state(format!("no review for {pr}; open it first"))
 }
 
-fn editable(review: &Review) -> bool {
+pub(crate) fn editable(review: &Review) -> bool {
     matches!(
         review.state,
         ReviewState::Active | ReviewState::Saved | ReviewState::Outdated | ReviewState::Revalidated
@@ -640,7 +662,7 @@ pub(crate) async fn files_for(
 }
 
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
-async fn resolve_anchor(
+pub(crate) async fn resolve_anchor(
     shared: &Shared,
     review: &Review,
     input: AnchorInput,
@@ -820,6 +842,7 @@ pub(crate) async fn remove_item(shared: &Shared, pr: &PrRef, id: &str) -> Outcom
     if let Err(e) = review.draft.remove(id) {
         return bad_request(e.to_string());
     }
+    review.removed.remove(id);
     review.updated_at = now_unix();
     if let Err(out) = save(shared, &review) {
         return out;

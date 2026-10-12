@@ -11,6 +11,7 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
+use clusia_core::revalidation::{blocking_obsolete, pending};
 use clusia_core::{DraftKind, ItemStatus, PrRef, Verdict};
 use clusia_protocol::{ErrorCode, WindowTarget};
 
@@ -21,6 +22,7 @@ use crate::review_state::{FinalizeForm, Modal, Phase, Ready, ReviewEvent, Review
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::editor::{not_sent, read_only_reason};
 use crate::screens::review::leave::close_tab;
+use crate::screens::review::revalidation::{Revalidations, pending_of};
 use crate::screens::review::shell::ModalFor;
 use crate::theme::Swatch;
 use crate::ui::composer::{
@@ -40,7 +42,10 @@ pub struct FinalizeItem {
     pub body: String,
     /// Resolves have no text.
     pub editable: bool,
+    /// Obsolete and still a problem: it blocks Publish.
     pub obsolete: bool,
+    /// Obsolete, but removed in the revalidation: kept in the draft, shown as settled.
+    pub removed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +64,8 @@ pub struct FinalizeView {
     pub note: &'static str,
     pub items: Vec<FinalizeItem>,
     pub warning: Option<String>,
+    /// Suggestions of the revalidation that nobody decided: Publish sends the draft as it is.
+    pub suggestions: usize,
     pub verdicts: Vec<VerdictCard>,
     /// Why Publish is disabled (`None`: it is enabled).
     pub blocked: Option<&'static str>,
@@ -66,6 +73,16 @@ pub struct FinalizeView {
     pub busy: bool,
     /// The cached copy: nothing is sent from it, so Discard is off too.
     pub cached: bool,
+}
+
+/// `2 suggestions not reviewed: your draft is published as it is.`
+pub fn suggestions_note(waiting: usize) -> String {
+    let what = if waiting == 1 {
+        "1 suggestion".to_string()
+    } else {
+        format!("{waiting} suggestions")
+    };
+    format!("{what} not reviewed: your draft is published as it is.")
 }
 
 pub fn verdict_text(v: Verdict) -> (&'static str, &'static str) {
@@ -127,11 +144,15 @@ pub fn finalize_view(ready: &Ready, form: &FinalizeForm) -> FinalizeView {
                 label,
                 body: i.body.clone(),
                 editable: i.kind != DraftKind::Resolve,
-                obsolete: matches!(i.status, ItemStatus::Obsolete { .. }),
+                obsolete: matches!(i.status, ItemStatus::Obsolete { .. })
+                    && !view.review.removed.contains(&i.id),
+                removed: view.review.removed.contains(&i.id),
             }
         })
         .collect();
-    let obsolete = items.iter().filter(|i| i.obsolete).count();
+    // An obsolete comment the reviewer already removed in the revalidation is left out of the
+    // publish and blocks nothing.
+    let obsolete = blocking_obsolete(&view.review);
     let warning = match obsolete {
         0 => None,
         1 => Some(
@@ -187,6 +208,11 @@ pub fn finalize_view(ready: &Ready, form: &FinalizeForm) -> FinalizeView {
         note: "Everything below goes to GitHub as one review. You can still edit any comment.",
         items,
         warning,
+        suggestions: view
+            .review
+            .revalidation
+            .as_ref()
+            .map_or(0, |r| pending(r, &view.review.draft)),
         verdicts,
         blocked,
         error: form.error.clone(),
@@ -306,11 +332,16 @@ fn rebuild_modal(
     model: Res<Model>,
     edits: Res<FinalizeEdits>,
     extra: Res<ExtraModes>,
+    revalidations: Res<Revalidations>,
     fonts: Res<UiFonts>,
     mut parts: Query<(Entity, &mut FinalizePart)>,
 ) {
     for (entity, mut part) in &mut parts {
-        if part.built.is_some() && !tabs.is_changed() && !model.is_changed() {
+        if part.built.is_some()
+            && !tabs.is_changed()
+            && !model.is_changed()
+            && !revalidations.is_changed()
+        {
             continue;
         }
         let Some(tab) = tabs.0.get(&part.pr) else {
@@ -320,6 +351,8 @@ fn rebuild_modal(
             continue;
         };
         let mut v = finalize_view(ready, &tab.ui.finalize);
+        // The round the window holds may be newer than the one in the review file.
+        v.suggestions = pending_of(tab, revalidations.0.get(&part.pr));
         if v.blocked.is_none() && model.connection != Connection::Live {
             v.blocked = Some("Not connected to clusiad");
         }
@@ -430,6 +463,8 @@ fn card_content(
                 }
                 if item.obsolete {
                     row.spawn(badge(fonts, "obsolete", Tone::Orange));
+                } else if item.removed {
+                    row.spawn(text(fonts, "Removed in the revalidation", Type::MUTED));
                 }
                 if !v.cached {
                     row.spawn((
@@ -458,6 +493,19 @@ fn card_content(
                     format!("⚠ {warning}"),
                     Type::BODY.ink(Swatch::Orange),
                 ));
+            });
+        }
+        if v.suggestions > 0 {
+            c.spawn(panel(
+                Node {
+                    padding: UiRect::axes(px(12), px(8)),
+                    border_radius: BorderRadius::all(px(6)),
+                    ..default()
+                },
+                Swatch::Chrome,
+            ))
+            .with_children(|w| {
+                w.spawn(text(fonts, suggestions_note(v.suggestions), Type::BODY));
             });
         }
         c.spawn(text(fonts, "Summary", Type::STRONG));
@@ -927,6 +975,7 @@ mod tests {
     use crate::ui::composer::testkit::with_fonts;
     use crate::ui::text_area::Grow;
     use clusia_core::Role;
+    use clusia_core::revalidation::{Decision, RoundState};
     use clusia_protocol::PublishResult;
 
     fn ready() -> Ready {
@@ -1006,6 +1055,116 @@ mod tests {
             v.blocked,
             Some("Fix the comments that no longer fit the diff first")
         );
+    }
+
+    #[test]
+    fn suggestions_nobody_decided_are_counted_and_block_nothing() {
+        let mut r = ready();
+        let round = testing::demo_round(&mut r.view.review, RoundState::Done);
+        r.view.review.revalidation = Some(round);
+        let chosen = FinalizeForm {
+            verdict: Some(Verdict::Comment),
+            ..FinalizeForm::default()
+        };
+        // The moved comment, the obsolete one and the new wording wait.
+        let v = finalize_view(&r, &chosen);
+        assert_eq!(v.suggestions, 3);
+        assert_eq!(
+            suggestions_note(v.suggestions),
+            "3 suggestions not reviewed: your draft is published as it is."
+        );
+        assert_eq!(
+            suggestions_note(1),
+            "1 suggestion not reviewed: your draft is published as it is."
+        );
+        assert_eq!(
+            v.blocked,
+            Some("Fix the comments that no longer fit the diff first"),
+            "the demo's obsolete comment still blocks"
+        );
+    }
+
+    #[test]
+    fn an_obsolete_comment_removed_in_the_revalidation_blocks_nothing() {
+        let mut r = ready();
+        let round = testing::demo_round(&mut r.view.review, RoundState::Done);
+        r.view.review.revalidation = Some(round);
+        // *Remove comment* marks the item removed; the daemon keeps it obsolete in the draft.
+        r.view.review.removed.insert("i3".into());
+        let chosen = FinalizeForm {
+            verdict: Some(Verdict::Comment),
+            ..FinalizeForm::default()
+        };
+        let v = finalize_view(&r, &chosen);
+        assert_eq!((v.warning, v.blocked), (None, None));
+    }
+
+    #[test]
+    fn a_comment_removed_in_the_revalidation_reads_as_settled() {
+        let mut r = ready();
+        r.view.review.removed.insert("i3".into());
+        let chosen = FinalizeForm::default();
+        let v = finalize_view(&r, &chosen);
+        let item = v.items.iter().find(|i| i.id == "i3").expect("the item");
+        assert_eq!((item.obsolete, item.removed), (false, true));
+        let mut app = finalize_app(false);
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let ready = tabs.0.get_mut(&pr).and_then(|t| t.ready_mut()).unwrap();
+            ready.view.review.removed.insert("i3".into());
+        }
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Removed in the revalidation"));
+        assert!(!testing::shows(&mut app, "no longer fits the diff"));
+    }
+
+    #[test]
+    fn an_accepted_proposal_alone_does_not_unblock_an_obsolete_comment() {
+        let mut r = ready();
+        let mut round = testing::demo_round(&mut r.view.review, RoundState::Done);
+        // The user took new wording for the obsolete comment: it is not a removal.
+        let wording = round
+            .proposals
+            .iter_mut()
+            .find(|p| p.item == "i3")
+            .expect("the obsolete proposal");
+        wording.decision = Decision::Accepted;
+        r.view.review.revalidation = Some(round);
+        let chosen = FinalizeForm {
+            verdict: Some(Verdict::Comment),
+            ..FinalizeForm::default()
+        };
+        let v = finalize_view(&r, &chosen);
+        assert!(v.warning.is_some());
+        assert_eq!(
+            v.blocked,
+            Some("Fix the comments that no longer fit the diff first")
+        );
+    }
+
+    #[test]
+    fn the_modal_says_how_many_suggestions_wait() {
+        let mut app = finalize_app(false);
+        let pr = fixture::demo_pr();
+        assert!(!testing::shows(&mut app, "not reviewed"));
+        let round = {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let ready = tabs.0.get_mut(&pr).and_then(|t| t.ready_mut()).unwrap();
+            testing::demo_round(&mut ready.view.review, RoundState::Done)
+        };
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::Revalidation(crate::bridge::RevalidationTell::Round {
+                pr,
+                round: Some(round),
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(testing::shows(
+            &mut app,
+            "3 suggestions not reviewed: your draft is published as it is."
+        ));
     }
 
     #[test]

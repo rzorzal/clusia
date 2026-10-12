@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clusia_core::time::parse_rfc3339;
 use clusia_core::{
@@ -155,6 +156,14 @@ pub(crate) fn news_items(input: &NewsInput) -> Vec<NewsItem> {
                 summary: "Item added".into(),
                 url: None,
             }),
+            ActivityKind::ReviewRevalidated => items.push(NewsItem {
+                kind: NewsKind::Revalidated,
+                source: "Claude Code".into(),
+                who: None,
+                at: a.ts,
+                summary: format!("Draft revalidated: {}", a.note.as_deref().unwrap_or("")),
+                url: None,
+            }),
             ActivityKind::ReviewOutdated => items.push(NewsItem {
                 kind: NewsKind::Moved,
                 source: "Clúsia".into(),
@@ -285,7 +294,7 @@ async fn note_pr_ended(shared: &Shared, pr: &PrRef, state: PrState) {
 }
 
 /// Relocates saved reviews whose pull request moved (spec §6.6); deterministic, no agent involved.
-pub(crate) async fn check_saved_reviews(shared: &Shared) {
+pub(crate) async fn check_saved_reviews(shared: &Arc<Shared>) {
     // The sync status says whether GitHub is reachable; polling every PR while offline only logs noise.
     if shared.sync.read().await.state != SyncState::Online {
         return;
@@ -368,6 +377,7 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
         };
         let head_changed = review.head_sha != detail.head_sha;
         let old_head = review.head_sha.clone();
+        let before = crate::revalidate::snapshot(&review);
         let report = relocate::relocate_review(
             &mut review,
             &detail,
@@ -386,6 +396,21 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             tracing::warn!(error = %e, pr = %pr, "cannot mark a saved review outdated");
             continue;
         }
+        // A new head starts, or extends, a round of revalidation; the notification then waits for
+        // the round's end.
+        let round_at = if head_changed {
+            crate::revalidate::open_for_new_head(
+                shared,
+                &mut review,
+                before,
+                &old_head,
+                report,
+                false,
+            )
+            .await
+        } else {
+            None
+        };
         if save(shared, &review).is_err() {
             tracing::warn!(pr = %pr, "cannot save a re-anchored review");
             continue;
@@ -411,8 +436,13 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             },
         );
         announce(shared, &review);
-        // A base that moved alone may obsolete comments, but brings no commits to re-read.
         if head_changed {
+            crate::revalidate::tell(shared, &review);
+        }
+        if let Some(at) = round_at {
+            crate::revalidate::reschedule(shared, &pr, at);
+        } else if head_changed {
+            // A base that moved alone may obsolete comments, but brings no commits to re-read.
             crate::notifications::review_outdated(shared, &review, &old_head).await;
         }
     }
@@ -551,6 +581,29 @@ mod tests {
         assert_eq!(items[3].source, "You via clusia");
         assert_eq!(items[5].source, "GitHub Actions");
         assert_eq!(items[1].url.as_deref(), Some("c3"));
+    }
+
+    #[test]
+    fn a_revalidated_draft_is_a_row_from_claude_code() {
+        let mut i = input();
+        i.local = vec![Activity {
+            ts: SINCE + 3800,
+            kind: ActivityKind::ReviewRevalidated,
+            pr: "acme/widgets#7".parse().unwrap(),
+            client: String::new(),
+            url: None,
+            note: Some("1 moved, 1 obsolete, 1 new wording".into()),
+        }];
+        let row = news_items(&i)
+            .into_iter()
+            .find(|row| row.kind == NewsKind::Revalidated)
+            .expect("a revalidated row");
+        assert_eq!(row.source, "Claude Code");
+        assert_eq!(
+            row.summary,
+            "Draft revalidated: 1 moved, 1 obsolete, 1 new wording"
+        );
+        assert_eq!((row.who, row.at), (None, SINCE + 3800));
     }
 
     #[test]

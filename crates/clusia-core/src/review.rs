@@ -1,7 +1,10 @@
 //! A review in progress and its lifecycle (spec §6).
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
+use crate::revalidation::Revalidation;
 use crate::{Draft, PrRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +112,13 @@ pub struct Review {
     /// in the background.
     #[serde(default, skip_serializing_if = "PrState::is_open")]
     pub pr_state: PrState,
+    /// What the agent proposed for the draft after the pull request got new commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revalidation: Option<Revalidation>,
+    /// The draft items the reviewer removed through a revalidation. They stay in the draft as
+    /// obsolete and do not stop a publish; re-anchoring or deleting an item takes it off.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub removed: BTreeSet<String>,
 }
 
 impl Review {
@@ -126,6 +136,8 @@ impl Review {
             last_checks: None,
             harness_session: None,
             pr_state: PrState::Open,
+            revalidation: None,
+            removed: BTreeSet::new(),
         }
     }
 

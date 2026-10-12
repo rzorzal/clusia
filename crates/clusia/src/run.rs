@@ -12,7 +12,7 @@ use serde_json::json;
 use crate::cli::{
     AgentCommand, AuthCommand, Command, ConfigCommand, DaemonCommand, InstallArgs, UninstallArgs,
 };
-use crate::{agent, check, install, review, spawn};
+use crate::{agent, check, install, revalidate, review, spawn};
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
 pub struct Output {
@@ -94,6 +94,9 @@ pub async fn run(
             security,
             audit,
         } => check::check(paths, home, &pr, security, audit, json).await,
+        Command::Revalidate { pr, again } => {
+            revalidate::revalidate(paths, home, &pr, again, json).await
+        }
         Command::Agent(AgentCommand::Log { pr }) => agent::log(paths, home, &pr).await,
         Command::Agent(AgentCommand::Stop { pr }) => agent::stop(paths, home, &pr).await,
         Command::Install(args) => install_command(paths, home, &args),

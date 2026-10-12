@@ -18,6 +18,7 @@ pub mod pr;
 pub mod prdata;
 pub mod printable;
 pub mod publish;
+pub mod revalidation;
 pub mod review;
 pub mod time;
 
@@ -32,7 +33,8 @@ pub use config::{
     Media, Notifications, Route, SoundId, Weekday,
 };
 pub use diffmap::{
-    DiffMap, FileChange, Hunk, LineMap, Relocation, can_comment, commentable_lines, relocate,
+    DiffMap, FileChange, Hunk, LineMap, Relocation, can_comment, commentable_lines, fits_diff,
+    relocate,
 };
 pub use draft::{
     Anchor, Draft, DraftError, DraftItem, DraftKind, ItemStatus, Origin, Side, ThreadRef,
@@ -49,5 +51,10 @@ pub use prdata::{
 pub use publish::{
     DEFAULT_BODY, PublishError, PublishPlan, ReplyPayload, ReviewComment, ReviewPayload,
     plan_publish,
+};
+pub use revalidation::{
+    AskedItem, CommitLine, DecideError, Decision, MAX_BLOCKS, Proposal, QUIET_DEFAULT_SECS,
+    QUIET_RANGE, Revalidation, RevalidationContext, RoundState, RowKind, accept_all, decide,
+    fingerprint, open_round, revalidation_prompt, row_kind,
 };
 pub use review::{InvalidTransition, PrState, Review, ReviewEvent, ReviewState, Role, Verdict};

@@ -165,6 +165,11 @@ pub fn finding_block(json: serde_json::Value) -> String {
     format!("```clusia-finding\n{json}\n```")
 }
 
+/// A fenced `clusia-revalidation` block holding `json`.
+pub fn revalidation_block(json: serde_json::Value) -> String {
+    format!("```clusia-revalidation\n{json}\n```")
+}
+
 /// A fenced `clusia-pass` block holding `json`.
 pub fn pass_block(json: serde_json::Value) -> String {
     format!("```clusia-pass\n{json}\n```")
@@ -689,6 +694,14 @@ mod tests {
         let bare = Turn::answer_blocks("", std::slice::from_ref(&pass));
         assert_eq!(bare.lines.len(), 3);
         assert!(bare.lines[2].contains("clusia-pass"));
+    }
+
+    #[test]
+    fn a_revalidation_block_is_fenced_like_the_others() {
+        assert_eq!(
+            revalidation_block(serde_json::json!({"item": "i1", "verdict": "kept"})),
+            "```clusia-revalidation\n{\"item\":\"i1\",\"verdict\":\"kept\"}\n```"
+        );
     }
 
     #[test]

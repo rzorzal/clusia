@@ -15,6 +15,7 @@ pub mod editor;
 pub mod finalize;
 pub mod leave;
 pub mod loading;
+pub mod revalidation;
 pub mod shell;
 pub mod whats_new;
 
@@ -44,6 +45,7 @@ impl Plugin for ReviewPlugin {
                 agent::AgentPanel,
                 agent::PermissionPlugin,
                 checks::ChecksPlugin,
+                revalidation::RevalidationPlugin,
                 crate::ui::composer::ComposerPlugin,
             ));
     }

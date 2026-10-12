@@ -5,19 +5,20 @@ use bevy::prelude::*;
 use bevy::ui_widgets::ScrollArea;
 use clusia_core::checks::{AuditArea, default_areas};
 use clusia_core::draft::{DraftKind, ThreadRef};
-use clusia_core::{Anchor, Origin, Side, Verdict};
+use clusia_core::{Anchor, Origin, ReviewState, Side, Verdict};
 use clusia_protocol::{
     AuthInfo, LoadStep, LoadStepKind, SessionStateKind, StepStatus, SyncState, SyncStatus,
     WindowTarget,
 };
 
 use crate::args::Scene;
-use crate::bridge::{Model, Outbox, ProbeState};
+use crate::bridge::{Model, Outbox, ProbeState, RevalidationTell, Tell};
 use crate::clock::Clock;
 use crate::fixture;
 use crate::nav::{Nav, Section};
 use crate::review_state::{
-    DiffMode, EditTarget, Editor, Modal, Phase, Ready, ReviewSection, ReviewTabs, Tab, TabUi,
+    DiffMode, EditTarget, Editor, Modal, Phase, Ready, RevalView, ReviewSection, ReviewTabs, Tab,
+    TabUi,
 };
 use crate::screens::config::areas::areas_value;
 use crate::screens::open_pr::Palette;
@@ -180,7 +181,12 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
             );
             world.resource_mut::<Model>().probe = ProbeState::Done(fixture::demo_probe());
         }
-        Scene::AgentChat | Scene::Permission | Scene::Security | Scene::Audits => {
+        Scene::AgentChat
+        | Scene::Permission
+        | Scene::Security
+        | Scene::Audits
+        | Scene::Revalidated
+        | Scene::RevalidatedBanner => {
             set_demo_config(world, &[("harness.program", "/opt/homebrew/bin/claude")])
         }
         _ => {}
@@ -235,6 +241,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         // with news); the other scenes clear the news.
         ready.news.clear();
     }
+    let mut round = None;
     let mut ui = TabUi::default();
     match scene {
         Scene::Diff | Scene::Loading | Scene::Failed | Scene::Palette => {}
@@ -254,6 +261,17 @@ pub fn stage(world: &mut World, scene: Scene) {
             ui.section = ReviewSection::Audits;
             ui.audit_area = Some("concurrency".into());
             accept_demo_finding(&mut ready, now);
+        }
+        Scene::Revalidated | Scene::RevalidatedBanner => {
+            let (draft, proposals) = fixture::demo_revalidation(now);
+            ready.view.review.draft = draft;
+            ready.view.review.state = ReviewState::Revalidated;
+            // The daemon's answer to `GetRevalidation` reads the review, so both agree.
+            ready.view.review.revalidation = Some(proposals.clone());
+            round = Some(proposals);
+            if scene == Scene::RevalidatedBanner {
+                ui.revalidation = RevalView::Closed;
+            }
         }
         Scene::Composer | Scene::Emoji | Scene::Gif => {
             ui.editor = Some(composer_editor(ComposerMode::Write));
@@ -329,6 +347,16 @@ pub fn stage(world: &mut World, scene: Scene) {
         // The same way a daemon's answer arrives: `pump` fills the checks of the review.
         let _ = world.resource::<Outbox>().0.send(tell);
     }
+    if let Some(round) = round {
+        // The same way a daemon's answer arrives: `pump` fills the model of the review.
+        let _ = world
+            .resource::<Outbox>()
+            .0
+            .send(Tell::Revalidation(RevalidationTell::Round {
+                pr: pr.clone(),
+                round: Some(round),
+            }));
+    }
     if scene == Scene::Permission {
         // A frozen clock keeps the countdown at 1:52 for as long as the render takes.
         *world.resource_mut::<Clock>() = Clock(Some(now));
@@ -383,11 +411,15 @@ mod tests {
 
     use super::*;
     use crate::nav::{FirstRunScreen, Screen};
+    use crate::review_state::RevalView;
     use crate::screens::open_pr::PaletteRoot;
     use crate::screens::review::comments::CommentsRegion;
     use crate::screens::review::diff::DiffRegion;
     use crate::screens::review::finalize::FinalizeModal;
     use crate::screens::review::leave::LeaveModal;
+    use crate::screens::review::revalidation::{
+        RevalidationBanner, RevalidationRoot, RevalidationRow,
+    };
     use crate::screens::review::shell::ModalFor;
     use crate::testing::{self, NOW};
     use clap::ValueEnum;
@@ -495,6 +527,15 @@ mod tests {
                 Scene::Audits => {
                     assert_eq!(tab.ui.section, ReviewSection::Audits);
                     assert_eq!(tab.ui.audit_area.as_deref(), Some("concurrency"));
+                }
+                Scene::Revalidated => {
+                    assert_eq!(tab.ui.revalidation, RevalView::Auto);
+                    assert_eq!(testing::count::<RevalidationRoot>(&mut app), 1);
+                }
+                Scene::RevalidatedBanner => {
+                    assert_eq!(tab.ui.revalidation, RevalView::Closed);
+                    assert_eq!(testing::count::<RevalidationBanner>(&mut app), 1);
+                    assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
                 }
                 Scene::Composer | Scene::ComposerPreview | Scene::Emoji | Scene::Gif => {
                     let editor = tab.ui.editor.as_ref().expect("an open composer");
@@ -647,6 +688,81 @@ mod tests {
     }
 
     #[test]
+    fn the_revalidated_scene_shows_every_row_kind() {
+        let mut app = staged(Scene::Revalidated);
+        for needle in [
+            "2 new commits since you saved this review. Claude Code checked your 5 comments against them.",
+            "1 kept · 1 moved · 1 obsolete · 1 new wording suggested",
+            "See the new commits",
+            "Accept all",
+            "Kept",
+            "Moved",
+            "Obsolete",
+            "New wording",
+            "Not checked",
+            "store.rs:81 → 88",
+            "save() moved down 7 lines when the temp-file helper was added; the comment follows the same code.",
+            "The retry loop was removed in \"refactor: one retry path\".",
+            "c41d2e7",
+            "refactor: one retry path",
+            "a98f03b",
+            "fix: write the token through a temp file",
+            "Suggested: ",
+            "The new test covers two refreshes at once; a refresh racing invalidate() is still missing.",
+            "Put it back",
+            "Keep the move",
+            "Keep and re-anchor",
+            "Remove comment",
+            "Keep mine",
+            "Use new wording",
+            "Claude Code did not return a result for this comment",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        assert_eq!(testing::count::<RevalidationRow>(&mut app), 5);
+        assert!(
+            !testing::shows(&mut app, "verified") && !testing::shows(&mut app, "guaranteed"),
+            "the screen says checked, never verified"
+        );
+    }
+
+    #[test]
+    fn the_revalidated_scene_changes_nothing_in_the_draft() {
+        let app = staged(Scene::Revalidated);
+        let (want, _) = fixture::demo_revalidation(NOW);
+        let draft = testing::ready(&app, &fixture::demo_pr()).view.review.draft;
+        assert_eq!(draft, want, "a round only proposes");
+        assert!(
+            testing::ready(&app, &fixture::demo_pr())
+                .view
+                .review
+                .revalidation
+                .is_some(),
+            "the review carries the round the screen shows"
+        );
+        assert_eq!(
+            testing::ready(&app, &fixture::demo_pr()).view.review.state,
+            clusia_core::ReviewState::Revalidated
+        );
+    }
+
+    #[test]
+    fn the_banner_scene_shows_the_diff_under_a_compact_banner() {
+        let mut app = staged(Scene::RevalidatedBanner);
+        // The strip is a text and a **Review them** button, so each is a node of its own.
+        assert!(testing::shows(
+            &mut app,
+            "3 suggestions from the revalidation ·"
+        ));
+        assert!(testing::shows(&mut app, "Review them"));
+        assert_eq!(testing::count::<RevalidationRoot>(&mut app), 0);
+        assert!(
+            !testing::shows(&mut app, "Put it back"),
+            "the rows are on the other screen"
+        );
+    }
+
+    #[test]
     fn the_harness_scene_shows_the_mockup_settings() {
         let config = demo_config(Scene::ConfigHarness);
         assert_eq!(config["harness"]["program"], "/opt/homebrew/bin/claude");
@@ -679,6 +795,15 @@ mod tests {
             "Docs and changelog",
             "Migrations",
             "+ Add area",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        assert_eq!(config["harness"]["revalidate"], true);
+        assert_eq!(config["harness"]["revalidate_quiet_secs"], 300);
+        for needle in [
+            "When new commits arrive on a saved review",
+            "Revalidate my draft",
+            "Wait for pushes to settle",
         ] {
             assert!(testing::shows(&mut app, needle), "{needle}");
         }

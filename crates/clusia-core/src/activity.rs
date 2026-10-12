@@ -13,6 +13,7 @@ pub enum ActivityKind {
     ReviewPublished,
     ReviewDiscarded,
     ReviewOutdated,
+    ReviewRevalidated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

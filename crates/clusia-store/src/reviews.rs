@@ -10,6 +10,7 @@ use crate::atomic::{quarantine, write_atomic};
 use crate::now_unix;
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // a loaded review is moved out whole, never copied around
 pub enum ReviewLoad {
     Missing,
     Found(Review),

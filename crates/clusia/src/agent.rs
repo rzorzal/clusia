@@ -399,18 +399,25 @@ fn turn_of(entry: &AgentLogEntry) -> u64 {
         | AgentLogEntry::Done { turn, .. }
         | AgentLogEntry::Error { turn, .. }
         | AgentLogEntry::Permission { turn, .. }
-        | AgentLogEntry::Check { turn, .. } => *turn,
+        | AgentLogEntry::Check { turn, .. }
+        | AgentLogEntry::Revalidation { turn, .. } => *turn,
     }
 }
 
-/// The chat as lines: consecutive text entries of one turn are one answer. A turn of a check
-/// (one with a `Check` entry) is not part of the chat: none of its entries is shown.
+/// The chat as lines: consecutive text entries of one turn are one answer. A turn of a check or
+/// a revalidation (one with a `Check` or `Revalidation` entry) is not part of the chat: none of
+/// its entries is shown.
 pub(crate) fn log_lines(entries: &[AgentLogEntry]) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut joining: Option<u64> = None;
     let checks: std::collections::HashSet<u64> = entries
         .iter()
-        .filter(|entry| matches!(entry, AgentLogEntry::Check { .. }))
+        .filter(|entry| {
+            matches!(
+                entry,
+                AgentLogEntry::Check { .. } | AgentLogEntry::Revalidation { .. }
+            )
+        })
         .map(turn_of)
         .collect();
     for entry in entries {
@@ -451,7 +458,9 @@ pub(crate) fn log_lines(entries: &[AgentLogEntry]) -> Vec<String> {
                 outcome,
                 ..
             } => permission_line(tool, summary, *outcome),
-            AgentLogEntry::Text { .. } | AgentLogEntry::Check { .. } => {
+            AgentLogEntry::Text { .. }
+            | AgentLogEntry::Check { .. }
+            | AgentLogEntry::Revalidation { .. } => {
                 unreachable!("handled above")
             }
         });
@@ -1082,6 +1091,33 @@ mod tests {
                 turn: 2,
                 kind: clusia_core::CheckKind::Audit,
                 state: "stopped".into(),
+            },
+        ];
+        assert_eq!(log_lines(&entries), ["you: hi"]);
+    }
+
+    #[test]
+    fn the_log_leaves_out_every_entry_of_a_revalidation_turn() {
+        let entries = [
+            AgentLogEntry::User {
+                at: 1,
+                turn: 1,
+                text: "hi".into(),
+            },
+            AgentLogEntry::Revalidation {
+                at: 2,
+                turn: 2,
+                state: "running".into(),
+            },
+            AgentLogEntry::ToolUse {
+                at: 3,
+                turn: 2,
+                summary: "Read src/a.rs".into(),
+            },
+            AgentLogEntry::Revalidation {
+                at: 5,
+                turn: 2,
+                state: "done".into(),
             },
         ];
         assert_eq!(log_lines(&entries), ["you: hi"]);

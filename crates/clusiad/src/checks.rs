@@ -190,12 +190,19 @@ struct Job {
     stop: Arc<Stop>,
 }
 
+/// The places the checks and the revalidation runs share.
+pub(crate) fn places(shared: &Shared) -> Arc<Semaphore> {
+    shared.checks.places.clone()
+}
+
 /// What `on_open` decided to run, for the Agent row of the loading screen.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Plan {
     pub security: bool,
     /// How many areas the audit reads, when it runs.
     pub audit_areas: Option<usize>,
+    /// A round of revalidation of the draft starts as the review opens.
+    pub revalidating: bool,
 }
 
 /// The Agent row's note: what the agent does as the review opens, only the parts that run.
@@ -210,6 +217,9 @@ pub(crate) fn note(summarizing: bool, plan: &Plan) -> Option<String> {
     if let Some(n) = plan.audit_areas {
         let unit = if n == 1 { "area" } else { "areas" };
         parts.push(format!("Auditing ({n} {unit})"));
+    }
+    if plan.revalidating {
+        parts.push("Revalidating your draft".into());
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
@@ -1077,6 +1087,7 @@ mod tests {
         let plan = |security, audit_areas| Plan {
             security,
             audit_areas,
+            revalidating: false,
         };
         assert_eq!(
             note(true, &plan(true, Some(6))).as_deref(),
@@ -1095,6 +1106,18 @@ mod tests {
             Some("Summarizing")
         );
         assert_eq!(note(false, &plan(false, None)), None);
+        let revalidating = Plan {
+            revalidating: true,
+            ..plan(false, None)
+        };
+        assert_eq!(
+            note(false, &revalidating).as_deref(),
+            Some("Revalidating your draft")
+        );
+        assert_eq!(
+            note(true, &revalidating).as_deref(),
+            Some("Summarizing · Revalidating your draft")
+        );
     }
 
     #[tokio::test]

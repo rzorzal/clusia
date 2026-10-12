@@ -290,6 +290,35 @@ mod tests {
     }
 
     #[test]
+    fn the_revalidation_settings_round_trip_through_the_file() {
+        let (_d, p) = paths();
+        let mut c = Config::default();
+        c.harness.revalidate = false;
+        c.harness.revalidate_quiet_secs = 600;
+        save_config(&p, &c).unwrap();
+        let text = fs::read_to_string(p.config_file()).unwrap();
+        assert!(text.contains("revalidate = false"), "{text}");
+        assert!(text.contains("revalidate_quiet_secs = 600"), "{text}");
+        assert_eq!(load_config(&p).unwrap(), Loaded::Read(c));
+    }
+
+    #[test]
+    fn the_revalidation_keys_are_read_and_set_by_name() {
+        let c = Config::default();
+        assert_eq!(get_value(&c, "harness.revalidate").unwrap(), "true");
+        assert_eq!(
+            get_value(&c, "harness.revalidate_quiet_secs").unwrap(),
+            "300"
+        );
+        let c = set_value(&c, "harness.revalidate", "false").unwrap();
+        assert!(!c.harness.revalidate);
+        let c = set_value(&c, "harness.revalidate_quiet_secs", "120").unwrap();
+        assert_eq!(c.harness.revalidate_quiet_secs, 120);
+        assert!(set_value(&c, "harness.revalidate_quiet_secs", "59").is_err());
+        assert!(set_value(&c, "harness.revalidate_quiet_secs", "3601").is_err());
+    }
+
+    #[test]
     fn the_check_keys_are_read_and_set_by_name() {
         let c = Config::default();
         assert_eq!(get_value(&c, "harness.check_security").unwrap(), "true");

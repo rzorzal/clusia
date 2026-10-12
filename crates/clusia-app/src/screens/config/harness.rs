@@ -58,6 +58,13 @@ pub struct HarnessView {
     pub open: OpenChecks,
     pub check_timeout: String,
     pub check_timeout_error: Option<String>,
+    /// *Revalidate my draft*: check a saved review's comments when its pull request gets new
+    /// commits.
+    pub revalidate: bool,
+    pub revalidate_error: Option<String>,
+    /// Seconds without a new commit before the check starts.
+    pub quiet: String,
+    pub quiet_error: Option<String>,
     pub areas: Vec<AuditArea>,
     pub areas_error: Option<String>,
     /// The add/edit form, when it is open.
@@ -83,7 +90,10 @@ pub fn open_checks(h: &Harness) -> OpenChecks {
 /// The note under the checks.
 pub const COST_NOTE: &str = "Each check is one Claude Code turn on your account.";
 
-/// A *When I open a review* checkbox: the key it flips.
+/// The note under *Revalidate my draft*.
+pub const REVALIDATE_NOTE: &str = "Claude Code reads each draft comment against the new commits and proposes keeping, moving, removing or rewording it. Nothing changes until you accept it. It is one Claude Code turn per round, on your account.";
+
+/// A *When I open a review* checkbox (and *Revalidate my draft*): the key it flips.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct OpenToggle(pub &'static str);
 
@@ -104,6 +114,7 @@ fn on_open_toggle(
         "harness.on_open" => "summarize".to_string(),
         "harness.check_security" => (!h.check_security).to_string(),
         "harness.audit" => (!h.audit).to_string(),
+        "harness.revalidate" => (!h.revalidate).to_string(),
         _ => return,
     };
     set_config(&mut asks, &mut model, key, value);
@@ -178,6 +189,10 @@ pub fn view(
         open: open_checks(h),
         check_timeout: h.check_timeout_secs.to_string(),
         check_timeout_error: refusal("harness.check_timeout_secs"),
+        revalidate: h.revalidate,
+        revalidate_error: refusal("harness.revalidate"),
+        quiet: h.revalidate_quiet_secs.to_string(),
+        quiet_error: refusal("harness.revalidate_quiet_secs"),
         areas: h.audit_areas.clone(),
         areas_error: refusal(areas::AREAS_KEY),
         form: None,
@@ -365,6 +380,44 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
         &v.permission_timeout_error,
     );
     probe_row(p, fonts, &v.probe);
+    super::heading(p, fonts, "When new commits arrive on a saved review");
+    p.spawn(Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: px(6),
+        ..default()
+    })
+    .with_children(|c| {
+        c.spawn(Node {
+            column_gap: px(10),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|r| {
+            r.spawn((
+                checkbox(v.revalidate),
+                OpenToggle("harness.revalidate"),
+                observe(on_open_toggle),
+            ));
+            r.spawn(text(fonts, "Revalidate my draft", Type::BODY));
+        });
+        c.spawn(text(fonts, REVALIDATE_NOTE, Type::META));
+        if let Some(message) = &v.revalidate_error {
+            c.spawn((
+                super::FieldError("harness.revalidate"),
+                children![text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange))],
+            ));
+        }
+    });
+    field_row(
+        p,
+        fonts,
+        "Wait for pushes to settle",
+        "harness.revalidate_quiet_secs",
+        &v.quiet,
+        120.0,
+        "Seconds, 60 to 3600. The check starts once no new commit has arrived for this long",
+        &v.quiet_error,
+    );
     super::heading(p, fonts, "What the agent may do without asking");
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
@@ -787,6 +840,55 @@ mod tests {
                 value: "true".into()
             }]
         );
+    }
+
+    #[test]
+    fn the_view_reads_the_revalidation_settings() {
+        let v = view(&Snapshot::default(), &HashMap::new(), &ProbeState::Idle);
+        assert_eq!((v.revalidate, v.quiet.as_str()), (true, "300"));
+        let mut snap = Snapshot::default();
+        snap.config.harness.revalidate = false;
+        snap.config.harness.revalidate_quiet_secs = 600;
+        let rejected: HashMap<String, String> = [(
+            "harness.revalidate_quiet_secs".to_string(),
+            "harness.revalidate_quiet_secs must be between 60 and 3600, got 5".to_string(),
+        )]
+        .into();
+        let v = view(&snap, &rejected, &ProbeState::Idle);
+        assert_eq!((v.revalidate, v.quiet.as_str()), (false, "600"));
+        assert_eq!(
+            v.quiet_error.as_deref(),
+            Some("harness.revalidate_quiet_secs must be between 60 and 3600, got 5")
+        );
+        assert_eq!(v.revalidate_error, None);
+    }
+
+    #[test]
+    fn the_group_for_saved_reviews_writes_its_keys() {
+        use crate::screens::config::ConfigField;
+        use crate::ui::kit::Field;
+        let mut app = harness_app();
+        for needle in [
+            "When new commits arrive on a saved review",
+            "Revalidate my draft",
+            "Wait for pushes to settle",
+            REVALIDATE_NOTE,
+        ] {
+            assert!(crate::testing::shows(&mut app, needle), "{needle}");
+        }
+        let toggle = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.revalidate");
+        crate::testing::activate(&mut app, toggle);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.revalidate".into(),
+                value: "false".into()
+            }]
+        );
+        let field = crate::testing::find::<ConfigField>(&mut app, |f| {
+            f.0 == "harness.revalidate_quiet_secs"
+        });
+        assert_eq!(app.world().get::<Field>(field).unwrap().committed, "300");
     }
 
     #[test]

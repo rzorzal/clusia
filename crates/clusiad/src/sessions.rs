@@ -903,11 +903,19 @@ pub(crate) fn close_unfinished(shared: &Shared) {
                 AgentLogEntry::Check { turn: t, kind, .. } if *t == turn => Some(*kind),
                 _ => None,
             });
+            let revalidation = entries.iter().any(
+                |entry| matches!(entry, AgentLogEntry::Revalidation { turn: t, .. } if *t == turn),
+            );
             let entry = match check {
                 Some(kind) => AgentLogEntry::Check {
                     at: now_unix(),
                     turn,
                     kind,
+                    state: "stopped".into(),
+                },
+                None if revalidation => AgentLogEntry::Revalidation {
+                    at: now_unix(),
+                    turn,
                     state: "stopped".into(),
                 },
                 None => AgentLogEntry::Error {
@@ -1622,6 +1630,31 @@ mod tests {
                 .all(|(_, message)| message.starts_with("The daemon stopped")),
             "{interrupted:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_revalidation_a_stopped_daemon_left_unfinished_is_closed_as_stopped() {
+        let home = tempfile::tempdir().unwrap();
+        let shared = shared_for(Paths::new(home.path()), Config::default());
+        let pr = pr(7);
+        let path = shared.paths.agent_log(&pr);
+        let run = |state: &str| AgentLogEntry::Revalidation {
+            at: 1,
+            turn: 3,
+            state: state.into(),
+        };
+        agent_log::append(&path, &run("waiting")).unwrap();
+        agent_log::append(&path, &run("running")).unwrap();
+
+        close_unfinished(&shared);
+
+        assert!(matches!(
+            agent_log::read(&path).last(),
+            Some(AgentLogEntry::Revalidation { turn: 3, state, .. }) if state == "stopped"
+        ));
+        let count = agent_log::read(&path).len();
+        close_unfinished(&shared);
+        assert_eq!(agent_log::read(&path).len(), count, "closed only once");
     }
 
     #[tokio::test]

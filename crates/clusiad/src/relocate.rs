@@ -1,11 +1,10 @@
 //! Re-anchoring a stored draft when the pull request moved (spec §6.6); deterministic, no agent involved.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 
 use clusia_core::{
-    Anchor, DiffMap, FileDiff, ItemStatus, PrDetail, PrRef, Relocation, Review, Side,
-    commentable_lines, relocate,
+    Anchor, DiffMap, FileDiff, ItemStatus, PrDetail, PrRef, Relocation, Review, Side, relocate,
 };
 use clusia_git::{base_pin_ref, diff_between, fetch_branch, merge_base, pin_commit};
 
@@ -103,28 +102,7 @@ pub(crate) async fn relocate_review(
     report
 }
 
-/// Whether every line of `anchor` can carry a review comment in `files` (GitHub's patches).
-pub(crate) fn fits_diff(files: &[FileDiff], anchor: &Anchor) -> bool {
-    let Some(patch) = files
-        .iter()
-        .find(|f| f.path == anchor.path)
-        .and_then(|f| f.patch.as_deref())
-    else {
-        return false;
-    };
-    let (left, right) = commentable_lines(patch);
-    let lines: &BTreeSet<u32> = match anchor.side {
-        Side::Left => &left,
-        Side::Right => &right,
-    };
-    let start = anchor.start_line.unwrap_or(anchor.line);
-    if start > anchor.line {
-        return false;
-    }
-    // A range longer than the commentable lines cannot fit; this also bounds the loop.
-    let span = u64::from(anchor.line - start) + 1;
-    span <= lines.len() as u64 && (start..=anchor.line).all(|l| lines.contains(&l))
-}
+pub(crate) use clusia_core::fits_diff;
 
 /// Marks live anchored items outside the diff obsolete; returns their ids.
 fn obsolete_outside_diff(review: &mut Review, files: &[FileDiff]) -> Vec<String> {

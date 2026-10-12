@@ -79,6 +79,18 @@ pub enum CommentsFilter {
     All,
 }
 
+/// Whether the revalidation screen replaces the review's tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RevalView {
+    /// It shows while a suggestion waits or a round is on its way, and not otherwise.
+    #[default]
+    Auto,
+    /// *Back to review*: the tabs, until a new round opens.
+    Closed,
+    /// *Review them*: the screen, whatever waits.
+    Open,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Modal {
     WhatsNew,
@@ -176,6 +188,9 @@ pub struct TabUi {
     pub open_error: Option<String>,
     /// The area selected in Audits (its id); `None`: the first area with findings, else the first.
     pub audit_area: Option<String>,
+    pub revalidation: RevalView,
+    /// The draft item the Diff asks a new place for (*Keep and re-anchor*).
+    pub reanchor: Option<String>,
 }
 
 impl Default for TabUi {
@@ -193,6 +208,8 @@ impl Default for TabUi {
             opening: false,
             open_error: None,
             audit_area: None,
+            revalidation: RevalView::Auto,
+            reanchor: None,
         }
     }
 }
@@ -312,6 +329,7 @@ impl Plugin for ReviewStatePlugin {
             .init_resource::<Tickets>()
             .init_resource::<crate::screens::review::agent::Chats>()
             .init_resource::<crate::screens::review::checks::Checks>()
+            .init_resource::<crate::screens::review::revalidation::Revalidations>()
             .add_message::<ReviewEvent>()
             .add_systems(Update, open_new_tabs.after(NavSystems));
     }

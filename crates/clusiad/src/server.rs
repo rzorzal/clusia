@@ -150,6 +150,7 @@ impl Daemon {
             tokio::spawn(sync::run_loop(self.shared.clone()));
         }
         tokio::spawn(crate::notifications::run_checks(self.shared.clone()));
+        crate::revalidate::resume_all(&self.shared).await;
         let tray = self.shared.tray_program.clone().map(|program| {
             tokio::spawn(crate::tray::supervise(
                 program,
@@ -223,6 +224,7 @@ impl Daemon {
         }
         tokio::join!(
             crate::checks::shutdown(&self.shared),
+            crate::revalidate::shutdown(&self.shared),
             self.shared.sessions.shutdown(&self.shared)
         );
         if let Some(tray) = tray {
