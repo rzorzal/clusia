@@ -1347,3 +1347,131 @@ mod tests {
         assert!(revalidation_prompt(&cut).contains(note));
     }
 }
+
+/// How many obsolete items keep the draft from being published: the ones the user has not taken
+/// out of it with *Remove comment* or *Accept all* (`Review::removed`). A removed comment stays in
+/// the draft, marked obsolete, and `Draft::publishable` leaves it out of the review.
+pub fn blocking_obsolete(review: &Review) -> usize {
+    review
+        .draft
+        .items
+        .iter()
+        .filter(|item| matches!(item.status, ItemStatus::Obsolete { .. }))
+        .filter(|item| !review.removed.contains(&item.id))
+        .count()
+}
+
+#[cfg(test)]
+mod blocking_tests {
+    use super::*;
+    use crate::draft::{DraftItem, DraftKind, Origin};
+
+    fn obsolete(id: &str) -> DraftItem {
+        DraftItem {
+            id: id.into(),
+            kind: DraftKind::General,
+            origin: Origin::Human,
+            anchor: None,
+            body: "b".into(),
+            status: ItemStatus::Obsolete {
+                reason: "gone".into(),
+            },
+            accepted: true,
+            created_at: 0,
+            thread: None,
+        }
+    }
+
+    fn review_with(items: Vec<DraftItem>) -> Review {
+        let mut review = Review::new(
+            "acme/widgets#7".parse().unwrap(),
+            "t".into(),
+            "b".into(),
+            "h".into(),
+            0,
+        );
+        review.draft.items = items;
+        review
+    }
+
+    #[test]
+    fn only_a_comment_the_user_removed_stops_blocking() {
+        let mut review = review_with(vec![obsolete("a"), obsolete("b"), obsolete("c")]);
+        review.removed.insert("a".into());
+        assert_eq!(blocking_obsolete(&review), 2, "b and c still block");
+    }
+
+    #[test]
+    fn a_draft_with_nothing_removed_blocks_on_every_obsolete_item() {
+        let review = review_with(vec![obsolete("a")]);
+        assert_eq!(blocking_obsolete(&review), 1);
+    }
+
+    #[test]
+    fn an_item_that_is_not_obsolete_never_blocks() {
+        let mut ok = obsolete("a");
+        ok.status = ItemStatus::Ok;
+        let mut review = review_with(vec![ok]);
+        review.removed.insert("a".into());
+        assert_eq!(blocking_obsolete(&review), 0);
+    }
+
+    fn proposal(item: &DraftItem, verdict: Verdict) -> Proposal {
+        Proposal {
+            item: item.id.clone(),
+            before: None,
+            verdict,
+            decision: Decision::Pending,
+            fingerprint: fingerprint(item),
+        }
+    }
+
+    fn with_round(item: DraftItem, verdict: Verdict) -> Review {
+        let mut review = review_with(vec![item.clone()]);
+        review.revalidation = Some(Revalidation {
+            from_head: "h0".into(),
+            to_head: "h".into(),
+            commits: Vec::new(),
+            before: BTreeMap::new(),
+            sp1_moved: 0,
+            sp1_obsolete: 1,
+            state: RoundState::Done,
+            proposals: vec![proposal(&item, verdict)],
+            unreadable: 0,
+            asked: 1,
+            finished_at: Some(1),
+            notified: false,
+        });
+        review
+    }
+
+    #[test]
+    fn accepting_new_wording_on_an_obsolete_comment_still_blocks() {
+        let mut review = with_round(
+            obsolete("a"),
+            Verdict::Reword {
+                text: "Better.".into(),
+                reason: None,
+            },
+        );
+        decide(&mut review, "a", true, &[]).unwrap();
+        assert_eq!(review.draft.get("a").unwrap().body, "Better.");
+        assert_eq!(blocking_obsolete(&review), 1, "the user did not remove it");
+    }
+
+    #[test]
+    fn a_removal_survives_the_next_round() {
+        let mut review = with_round(
+            obsolete("a"),
+            Verdict::Obsolete {
+                reason: "The line was deleted.".into(),
+            },
+        );
+        decide(&mut review, "a", true, &[]).unwrap();
+        assert_eq!(blocking_obsolete(&review), 0);
+        assert!(review.removed.contains("a"));
+        // The proposals of a rerun are new ones; what the user removed stays removed.
+        review.revalidation = None;
+        assert_eq!(blocking_obsolete(&review), 0);
+    }
+}

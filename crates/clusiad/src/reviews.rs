@@ -611,7 +611,7 @@ pub(crate) fn load_existing(shared: &Shared, pr: &PrRef) -> Result<Review, Outco
     load_stored(shared, pr)?.ok_or_else(|| no_review(pr))
 }
 
-fn bad_request(message: impl Into<String>) -> Outcome {
+pub(crate) fn bad_request(message: impl Into<String>) -> Outcome {
     Outcome::Err(ProtocolError::new(ErrorCode::BadRequest, message))
 }
 
@@ -619,7 +619,7 @@ fn no_review(pr: &PrRef) -> Outcome {
     invalid_state(format!("no review for {pr}; open it first"))
 }
 
-fn editable(review: &Review) -> bool {
+pub(crate) fn editable(review: &Review) -> bool {
     matches!(
         review.state,
         ReviewState::Active | ReviewState::Saved | ReviewState::Outdated | ReviewState::Revalidated
@@ -662,7 +662,7 @@ pub(crate) async fn files_for(
 }
 
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
-async fn resolve_anchor(
+pub(crate) async fn resolve_anchor(
     shared: &Shared,
     review: &Review,
     input: AnchorInput,
@@ -842,6 +842,7 @@ pub(crate) async fn remove_item(shared: &Shared, pr: &PrRef, id: &str) -> Outcom
     if let Err(e) = review.draft.remove(id) {
         return bad_request(e.to_string());
     }
+    review.removed.remove(id);
     review.updated_at = now_unix();
     if let Err(out) = save(shared, &review) {
         return out;

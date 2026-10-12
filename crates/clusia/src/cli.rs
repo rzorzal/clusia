@@ -76,6 +76,16 @@ pub enum Command {
         #[arg(long)]
         audit: bool,
     },
+    /// Have Claude Code re-read the draft of a saved review against the new commits of its pull
+    /// request, now, and print what it found for each comment.
+    Revalidate {
+        /// `owner/repo#number` or a pull request URL.
+        pr: String,
+        /// Run it again when the review already has a finished round; without it that round is
+        /// printed as it is.
+        #[arg(long)]
+        again: bool,
+    },
     /// Put Clúsia.app, the login agent and the `clusia` command in place.
     Install(InstallArgs),
     /// Remove Clúsia.app, the login agent and the `clusia` link; your data stays.

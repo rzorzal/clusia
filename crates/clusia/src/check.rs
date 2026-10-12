@@ -26,7 +26,7 @@ pub(crate) fn kinds(security: bool, audit: bool) -> Vec<CheckKind> {
 
 /// The text on one line: line breaks and runs of spaces become one space, and every other
 /// control or invisible character is shown as an escape, so nothing repaints the terminal.
-fn line_of(text: &str) -> String {
+pub(crate) fn line_of(text: &str) -> String {
     printable(&text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 

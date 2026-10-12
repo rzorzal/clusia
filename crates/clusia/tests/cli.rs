@@ -412,7 +412,9 @@ fn too_long_home_fails_before_running() {
 
 mod review_flow {
     use super::*;
-    use clusia_harness::testkit::{FakeClaude, Script, Turn, finding_block, pass_block};
+    use clusia_harness::testkit::{
+        FakeClaude, Script, Turn, finding_block, pass_block, revalidation_block,
+    };
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
@@ -771,6 +773,31 @@ mod review_flow {
             self.tmp.path().join("fake")
         }
 
+        /// Pushes a commit that puts a line on top of `feature.txt` and serves it, with that
+        /// commit as the pull request's only one.
+        fn push(&self) {
+            let head = advance(self.tmp.path(), "zero\none\ntwo\nthree\n");
+            let seed = self.tmp.path().join("seed");
+            let base = git(&seed, &["rev-parse", "main"]);
+            let origin = self.tmp.path().join("origin.git");
+            self._rt.block_on(async {
+                self._server.reset().await;
+                mount(&self._server, &head, &base, origin.to_str().unwrap()).await;
+                Mock::given(method("GET"))
+                    .and(path("/repos/acme/widgets/pulls/7/commits"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                        "sha": head, "author": { "login": "maria" },
+                        "commit": {
+                            "message": "Move things\n\nlong text",
+                            "author": { "name": "Maria", "date": "2026-10-02T12:00:00Z" }
+                        }
+                    }])))
+                    .with_priority(1)
+                    .mount(&self._server)
+                    .await;
+            });
+        }
+
         /// Every GitHub read now takes `secs` and then fails.
         fn slow_github(&self, secs: u64) {
             self._rt.block_on(
@@ -973,6 +1000,130 @@ mod review_flow {
                 .iter()
                 .all(|c| c.argv.iter().any(|a| a == "--session-id")),
             "a review with no chat has no session to fork"
+        );
+    }
+
+    /// The id a `review comment` or `review note` prints: `<id> added`.
+    fn added_id(o: &Output) -> String {
+        stdout(o).split_whitespace().next().unwrap().to_string()
+    }
+
+    #[test]
+    fn revalidate_prints_one_line_for_each_comment_filtered() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        let pr = "acme/widgets#7";
+        assert!(w.run(&["open", pr]).status.success());
+        let a = added_id(&w.run(&["review", "comment", pr, "feature.txt:2", "Rename this."]));
+        let b = added_id(&w.run(&["review", "comment", pr, "feature.txt:3", "Drop this."]));
+        let n = added_id(&w.run(&["review", "note", pr, "Looks good."]));
+        assert!(w.run(&["review", "close", pr]).status.success());
+        let answer = Turn::answer_blocks(
+            "Checked.",
+            &[
+                revalidation_block(json!({
+                    "item": a, "verdict": "moved", "path": "feature.txt", "line": 1,
+                    "reason": "Follows\u{1b}[2K the code."
+                })),
+                revalidation_block(json!({
+                    "item": b, "verdict": "obsolete", "reason": "The line was deleted."
+                })),
+                revalidation_block(json!({
+                    "item": n, "verdict": "reword", "text": "Looks good;\none nit."
+                })),
+                "```clusia-revalidation\nnot json\n```".to_string(),
+            ],
+        );
+        FakeClaude::install(&w.fake_dir(), Script::turns(vec![answer.clone(), answer]));
+        w.push();
+
+        let o = w.run(&["revalidate", pr]);
+
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = stdout(&o);
+        assert_eq!(
+            out.lines().collect::<Vec<_>>(),
+            [
+                "Claude Code checked your 3 comments against 1 new commit.",
+                "MOVED  feature.txt:1  Follows\\u{1b}[2K the code.",
+                "OBSOLETE  feature.txt:4  The line was deleted.",
+                "REWORD  general  Looks good; one nit.",
+                "1 result could not be read",
+            ]
+        );
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(stderr(&o).contains("Revalidation: done"), "{}", stderr(&o));
+        let calls = FakeClaude::calls(&w.fake_dir());
+        assert_eq!(calls.len(), 1, "one process for the round");
+        // The draft was not touched by what the agent said.
+        let status = stdout(&w.run(&["review", "status", pr]));
+        assert!(status.contains("Rename this."), "{status}");
+        assert!(status.contains("[moved from feature.txt:2]"), "{status}");
+        assert!(!status.contains("feature.txt:1 "), "{status}");
+        // The command opened a saved review, so it leaves it saved: the daemon keeps following
+        // its pull request in the background.
+        assert!(status.contains("· saved"), "{status}");
+
+        // A finished round is printed as it is; --again runs it once more.
+        let again = w.run(&["revalidate", pr]);
+        assert!(again.status.success(), "{}", stderr(&again));
+        assert_eq!(stdout(&again), out, "the stored round, as it was");
+        assert_eq!(FakeClaude::calls(&w.fake_dir()).len(), 1, "nothing ran");
+        let rerun = w.run(&["revalidate", "--again", pr]);
+        assert!(rerun.status.success(), "{}", stderr(&rerun));
+        assert_eq!(FakeClaude::calls(&w.fake_dir()).len(), 2, "it ran again");
+        assert_eq!(stdout(&rerun), out);
+    }
+
+    #[test]
+    fn revalidate_json_prints_the_round_once_and_a_review_without_new_commits_exits_1() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        let pr = "acme/widgets#7";
+        assert!(w.run(&["open", pr]).status.success());
+        let a = added_id(&w.run(&["review", "comment", pr, "feature.txt:2", "Rename this."]));
+        assert!(w.run(&["review", "close", pr]).status.success());
+
+        let none = w.run(&["revalidate", pr]);
+        assert_eq!(none.status.code(), Some(1), "{}", stderr(&none));
+        assert!(
+            stderr(&none).contains("no new commits"),
+            "{}",
+            stderr(&none)
+        );
+
+        FakeClaude::install(
+            &w.fake_dir(),
+            Script::one(Turn::answer_blocks(
+                "Checked.",
+                &[revalidation_block(json!({"item": a, "verdict": "kept"}))],
+            )),
+        );
+        w.push();
+        let o = w.run(&["--json", "revalidate", pr]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let value: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("one JSON value");
+        assert_eq!(value["revalidation"]["state"]["state"], "done");
+        assert_eq!(
+            value["revalidation"]["proposals"][0]["verdict"]["verdict"],
+            "kept"
+        );
+        assert!(
+            stderr(&o).is_empty(),
+            "no progress with --json: {}",
+            stderr(&o)
+        );
+    }
+
+    #[test]
+    fn revalidate_needs_a_pull_request_and_refuses_a_bad_one_before_the_daemon() {
+        let h = Home::new();
+        let missing = h.clusia(&["revalidate"]);
+        assert_eq!(missing.status.code(), Some(2), "{}", stderr(&missing));
+        let bad = h.clusia(&["revalidate", "nocolon"]);
+        assert_eq!(bad.status.code(), Some(1), "{}", stderr(&bad));
+        assert_eq!(
+            h.clusia(&["daemon", "status"]).status.code(),
+            Some(3),
+            "no daemon was started"
         );
     }
 

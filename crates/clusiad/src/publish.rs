@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use clusia_core::time::parse_rfc3339;
 use clusia_core::{
-    ActivityKind, ItemStatus, PrRef, ReplyPayload, Review, ReviewEvent, ReviewInfo, ReviewPayload,
-    ReviewState, Role, Verdict, plan_publish,
+    ActivityKind, PrRef, ReplyPayload, Review, ReviewEvent, ReviewInfo, ReviewPayload, ReviewState,
+    Role, Verdict, plan_publish,
 };
 use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, PublishResult, Reply};
@@ -365,12 +365,9 @@ pub(crate) async fn publish(
             "the pull request changed since you saved this review; open it again to check the moved comments",
         );
     }
-    let obsolete = review
-        .draft
-        .items
-        .iter()
-        .filter(|i| matches!(i.status, ItemStatus::Obsolete { .. }))
-        .count();
+    // An obsolete comment the user took out of the draft (Remove comment) stays in the file but
+    // is not published, so it does not stop the publish.
+    let obsolete = clusia_core::revalidation::blocking_obsolete(&review);
     if obsolete > 0 {
         return Outcome::Err(ProtocolError::new(
             ErrorCode::BadRequest,

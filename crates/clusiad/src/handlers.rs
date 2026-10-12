@@ -20,6 +20,7 @@ use crate::media;
 use crate::news;
 use crate::notifications;
 use crate::permissions;
+use crate::proposals;
 use crate::publish;
 use crate::reviews;
 use crate::sessions;
@@ -195,11 +196,13 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
             crate::revalidate::stop(shared, &pr).await;
             Outcome::Ok(Reply::Ack)
         }
-        Command::GetRevalidation { .. }
-        | Command::DecideProposal { .. }
-        | Command::AcceptAllProposals { .. }
-        | Command::ReanchorDraftItem { .. } => {
-            crate::reviews::invalid_state("revalidation is not available yet")
+        Command::GetRevalidation { pr } => proposals::get(shared, &pr),
+        Command::DecideProposal { pr, item, accept } => {
+            proposals::decide_proposal(shared, &pr, &item, accept).await
+        }
+        Command::AcceptAllProposals { pr } => proposals::accept_all_proposals(shared, &pr).await,
+        Command::ReanchorDraftItem { pr, id, anchor } => {
+            proposals::reanchor(shared, &pr, &id, anchor).await
         }
     }
 }

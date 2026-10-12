@@ -19,6 +19,7 @@ mod news;
 mod notifications;
 mod options;
 mod permissions;
+mod proposals;
 mod publish;
 mod relocate;
 mod retention;

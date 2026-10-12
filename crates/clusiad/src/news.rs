@@ -156,6 +156,14 @@ pub(crate) fn news_items(input: &NewsInput) -> Vec<NewsItem> {
                 summary: "Item added".into(),
                 url: None,
             }),
+            ActivityKind::ReviewRevalidated => items.push(NewsItem {
+                kind: NewsKind::Revalidated,
+                source: "Claude Code".into(),
+                who: None,
+                at: a.ts,
+                summary: format!("Draft revalidated: {}", a.note.as_deref().unwrap_or("")),
+                url: None,
+            }),
             ActivityKind::ReviewOutdated => items.push(NewsItem {
                 kind: NewsKind::Moved,
                 source: "Clúsia".into(),
@@ -571,6 +579,29 @@ mod tests {
         assert_eq!(items[3].source, "You via clusia");
         assert_eq!(items[5].source, "GitHub Actions");
         assert_eq!(items[1].url.as_deref(), Some("c3"));
+    }
+
+    #[test]
+    fn a_revalidated_draft_is_a_row_from_claude_code() {
+        let mut i = input();
+        i.local = vec![Activity {
+            ts: SINCE + 3800,
+            kind: ActivityKind::ReviewRevalidated,
+            pr: "acme/widgets#7".parse().unwrap(),
+            client: String::new(),
+            url: None,
+            note: Some("1 moved, 1 obsolete, 1 new wording".into()),
+        }];
+        let row = news_items(&i)
+            .into_iter()
+            .find(|row| row.kind == NewsKind::Revalidated)
+            .expect("a revalidated row");
+        assert_eq!(row.source, "Claude Code");
+        assert_eq!(
+            row.summary,
+            "Draft revalidated: 1 moved, 1 obsolete, 1 new wording"
+        );
+        assert_eq!((row.who, row.at), (None, SINCE + 3800));
     }
 
     #[test]

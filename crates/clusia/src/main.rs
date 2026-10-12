@@ -2,6 +2,7 @@ mod agent;
 mod check;
 mod cli;
 mod install;
+mod revalidate;
 mod review;
 mod run;
 mod spawn;
