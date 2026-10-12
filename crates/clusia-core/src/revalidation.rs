@@ -244,9 +244,6 @@ pub fn row_kind(p: &Proposal, item: &DraftItem) -> RowKind {
     }
 }
 
-/// How many proposals still wait for a click: undecided, with something to decide, on an item
-/// that is still in the draft and still reads as it did when the proposal was made. A proposal
-/// whose item changed since can no longer be decided, so it does not count.
 /// Whether a click can settle this proposal for this item: the row has something to decide, and
 /// a move needs both the anchor the item had and the one it has.
 fn decidable(p: &Proposal, item: &DraftItem) -> bool {
@@ -257,6 +254,9 @@ fn decidable(p: &Proposal, item: &DraftItem) -> bool {
     }
 }
 
+/// How many proposals still wait for a click: undecided, with something to decide, on an item
+/// that is still in the draft and still reads as it did when the proposal was made. A proposal
+/// whose item changed since can no longer be decided, so it does not count.
 pub fn pending(r: &Revalidation, draft: &Draft) -> usize {
     r.proposals
         .iter()

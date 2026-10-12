@@ -25,10 +25,10 @@ pub struct RawVerdict {
 /// ```` ``` ````. A block that never closes stays in the text and is not counted. A closed block
 /// that is not JSON, names an item that was not asked, lacks a required field, or names a path
 /// that is absolute or climbs with `..` is counted and left out; so is every block past
-/// `MAX_BLOCKS`. The length caps apply to what the agent wrote, before the escapes below, so a
-/// stored `text` or `reason` can run past them. A later valid block for an item replaces an earlier one. The `text` and the
+/// `MAX_BLOCKS`. A later valid block for an item replaces an earlier one. The `text` and the
 /// `reason` come back with the characters that draw nothing or reorder what is drawn shown as
-/// escapes.
+/// escapes; the length caps apply to what the agent wrote, before those escapes, so a stored
+/// `text` or `reason` can run past them.
 pub fn extract_revalidation_blocks(text: &str, asked: &[String]) -> (String, Vec<RawVerdict>, u32) {
     let lines: Vec<&str> = text.lines().collect();
     let mut kept: Vec<&str> = Vec::new();
