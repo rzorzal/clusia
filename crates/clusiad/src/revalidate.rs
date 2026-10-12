@@ -1084,35 +1084,32 @@ pub(crate) async fn run_now(shared: &Arc<Shared>, pr: &PrRef) -> clusia_protocol
     }
 }
 
+/// Cancels the timer and the request to start over, and stops the live run. False when no run
+/// is left to settle the round: there is none, or its stop already fired for another reason (a
+/// newer head), so the caller settles the stored round itself.
+fn stop_run(entry: &mut Entry) -> bool {
+    entry.cancel_timer();
+    entry.rerun = false;
+    match &entry.run {
+        Some(run) if !run.stop.fired() => {
+            run.stop.fire(Why::User);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// `StopRevalidation`: the run ends, or a round that waits for its quiet period is cancelled;
 /// either way the round reads `Failed { "Stopped" }`, which offers Try again.
 pub(crate) async fn stop(shared: &Arc<Shared>, pr: &PrRef) {
-    let ran = shared.revalidations.with(pr, |entry| {
-        entry.cancel_timer();
-        match &entry.run {
-            Some(run) => {
-                run.stop.fire(Why::User);
-                true
-            }
-            None => false,
-        }
-    });
+    let ran = shared.revalidations.with(pr, stop_run);
     if ran {
         return;
     }
     let _guard = reviews::lock(shared, pr).await;
     // A start that held the lock until now may have placed a run: it is stopped, and settles
     // the round itself.
-    let placed = shared.revalidations.with(pr, |entry| {
-        entry.cancel_timer();
-        match &entry.run {
-            Some(run) => {
-                run.stop.fire(Why::User);
-                true
-            }
-            None => false,
-        }
-    });
+    let placed = shared.revalidations.with(pr, stop_run);
     if placed {
         return;
     }
@@ -1383,6 +1380,55 @@ mod tests {
         stopping.await.unwrap();
         assert!(run.fired());
         assert_eq!(run.why(), Why::User);
+    }
+
+    #[tokio::test]
+    async fn stop_during_the_wind_down_of_a_superseded_run_settles_the_round() {
+        let (_home, shared) = lab();
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let mut stored = review(vec![item(
+            "a",
+            DraftKind::LineComment,
+            true,
+            Some(anchor(4)),
+        )]);
+        let before = snapshot(&stored);
+        open_round(
+            &mut stored,
+            before,
+            "h0",
+            "h1",
+            Relocation::default(),
+            0,
+            300,
+        );
+        reviews::save(&shared, &stored).unwrap();
+        let run = Stop::new();
+        run.fire(Why::Superseded);
+        shared.revalidations.with(&pr, |entry| {
+            entry.rerun = true;
+            entry.run = Some(Run {
+                turn: 1,
+                stop: run.clone(),
+                activity: None,
+                told: None,
+            });
+        });
+
+        stop(&shared, &pr).await;
+
+        assert_eq!(run.why(), Why::Superseded, "the run's own ending is kept");
+        shared.revalidations.with(&pr, |entry| {
+            assert!(!entry.rerun, "no start over against the user's Stop");
+            entry.run = None;
+        });
+        let stored = reviews::load_stored(&shared, &pr).unwrap().unwrap();
+        assert_eq!(
+            stored.revalidation.unwrap().state,
+            RoundState::Failed {
+                message: STOPPED.into()
+            }
+        );
     }
 
     #[tokio::test]
