@@ -182,3 +182,75 @@ fn the_quiet_period_is_the_shortest_the_setting_allows() {
     let source = source();
     assert!(source.contains("config set harness.revalidate_quiet_secs 60"));
 }
+
+#[test]
+fn the_save_step_sees_four_comments_the_fake_clusia_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // `clusia` answers every command; `status` lists four comments of the owner's.
+    let fake = "#!/bin/sh\n\
+        case \"$*\" in\n\
+        \"--json review status\"*) for i in 1 2 3 4; do echo '{\"origin\": \"human\"}'; done ;;\n\
+        \"config get\"*) echo 5 ;;\n\
+        revalidate*) echo 'KEPT  src/a.rs:1  fine' ;;\n\
+        esac\n\
+        exit 0\n";
+    for name in ["clusia", "claude"] {
+        let path = bin.join(name);
+        std::fs::write(&path, fake).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut child = Command::new(script())
+        .args(["--yes", "--pr", "rzorzal/clusia#123"])
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("SP2_CHECK_WAIT", "3")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&b"y\n".repeat(40))
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("PASS  four comments of yours are in the draft"),
+        "{said}"
+    );
+    assert!(said.contains("PASS  clusia revalidate finished"), "{said}");
+}
+
+#[test]
+fn a_no_before_the_settings_change_leaves_them_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let log = dir.path().join("calls");
+    let fake = format!("#!/bin/sh\necho \"$*\" >> {}\nexit 0\n", log.display());
+    for name in ["clusia", "claude"] {
+        let path = bin.join(name);
+        std::fs::write(&path, &fake).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut child = Command::new(script())
+        .args(["--yes", "--pr", "rzorzal/clusia#123"])
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"n\n").unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(1));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(!calls.contains("config set"), "{calls}");
+}

@@ -828,7 +828,7 @@ pub fn demo_revalidation(now: i64) -> (Draft, Revalidation) {
         .iter()
         .map(|item| (item.id.clone(), item.anchor.clone()))
         .collect();
-    // SP1 moved i2 from line 81 before the agent looked.
+    // The deterministic relocation already moved i2 from line 81 before the agent looked.
     before.insert("i2".into(), Some(anchor("src/auth/store.rs", 81)));
     let proposal = |id: &str, verdict: Verdict| {
         let item = draft

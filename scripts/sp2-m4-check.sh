@@ -7,8 +7,9 @@
 #
 #   scripts/sp2-m4-check.sh --pr rzorzal/clusia#123     run the check (asks first)
 #   scripts/sp2-m4-check.sh --list                      print the steps and exit
-#   add --yes to skip the question below; every step still asks you on the terminal, and
-#   without one each of those questions is answered no
+#   add --yes to skip the first question below; the script still asks on the terminal before it
+#   changes your settings and before it runs Claude Code from the terminal, and every step's
+#   own question is still yours to answer (a question without an answer counts as no)
 #
 # Needs Clusia installed (clusia on the PATH, signed in to GitHub), Claude Code installed and
 # signed in, and a branch of the pull request you can push to. The window is started for you; look
@@ -40,9 +41,12 @@ restore_settings() {
   [ -n "$OLD_ON_OPEN" ] && clusia config set harness.on_open "$OLD_ON_OPEN" >/dev/null 2>&1
   [ -n "$OLD_SECURITY" ] && clusia config set harness.check_security "$OLD_SECURITY" >/dev/null 2>&1
   [ -n "$OLD_AUDIT" ] && clusia config set harness.audit "$OLD_AUDIT" >/dev/null 2>&1
-  if [ -z "$OLD_REVALIDATE" ] || [ -z "$OLD_QUIET" ] || [ -z "$OLD_ON_OPEN" ] || [ -z "$OLD_SECURITY" ] || [ -z "$OLD_AUDIT" ]; then
-    echo "Some old values could not be read. Check Config › Harness: Revalidate my draft, Wait for pushes to settle and the three When I open a review boxes." >&2
-  fi
+  [ -n "$OLD_REVALIDATE" ] || echo "Could not read the old harness.revalidate; check Config › Harness: Revalidate my draft." >&2
+  [ -n "$OLD_QUIET" ] || echo "Could not read the old harness.revalidate_quiet_secs; check Config › Harness: Wait for pushes to settle." >&2
+  [ -n "$OLD_ON_OPEN" ] || echo "Could not read the old harness.on_open; check Config › Harness: When I open a review." >&2
+  [ -n "$OLD_SECURITY" ] || echo "Could not read the old harness.check_security; check Config › Harness: Check security." >&2
+  [ -n "$OLD_AUDIT" ] || echo "Could not read the old harness.audit; check Config › Harness: Audit." >&2
+  return 0
 }
 close_window() {
   if [ -n "$APP_PID" ]; then kill "$APP_PID" 2>/dev/null; fi
@@ -118,6 +122,8 @@ confirm() {
 
 # Draft items you wrote, as the terminal prints them in JSON.
 human_items() { clusia --json review status "$PR" 2>/dev/null | grep -Eio '"origin": ?"human"' | wc -l | tr -d ' '; }
+# A function, so each poll of wait_for counts again.
+four_comments() { [ "$(human_items)" -ge 4 ]; }
 
 app_binary() {
   local dir
@@ -161,6 +167,10 @@ step_preflight() {
   echo "  turns the three 'When I open a review' boxes off, so the only Claude Code turn it spends"
   echo "  is the revalidation. Your values (revalidate '$OLD_REVALIDATE', wait '$OLD_QUIET' s, on open"
   echo "  '$OLD_ON_OPEN', security '$OLD_SECURITY', audit '$OLD_AUDIT') are put back when it ends."
+  yes_or_no "Change those five settings now (they are put back when the check ends)?" || {
+    echo "Nothing was changed."
+    exit 1
+  }
   CHANGED=1
   clusia config set harness.revalidate true >/dev/null 2>&1
   clusia config set harness.revalidate_quiet_secs 60 >/dev/null 2>&1
@@ -180,7 +190,7 @@ step_save() {
   echo "    b. on code you will push other lines above (it will move down),"
   echo "    c. on code you will delete,"
   echo "    d. on code whose meaning you will change."
-  wait_for "four comments of yours are in the draft" 900 test "$(human_items)" -ge 4
+  wait_for "four comments of yours are in the draft" 900 four_comments
   echo "  Now close the review's tab and choose Keep for later. The window can stay open."
   ask "Is the review saved, with its four comments still in the draft?"
 }
@@ -217,6 +227,10 @@ step_cli() {
   say "6. clusia revalidate"
   echo "  This runs the revalidation again at the terminal (--again) and prints a line for each"
   echo "  comment. A rerun replaces the proposals, so it comes before you decide anything."
+  yes_or_no "Run clusia revalidate --again now? It spends one Claude Code turn." || {
+    echo "  Skipped: clusia revalidate was not run."
+    return 0
+  }
   clusia revalidate "$PR" --again </dev/null >"$ERR.out" 2>"$ERR"
   status=$?
   cat "$ERR.out"
