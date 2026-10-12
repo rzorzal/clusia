@@ -23,10 +23,11 @@ use crate::review_state::{
 use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::agent::{
-    AgentRegion, Chats, DEFAULT_WIDTH, PanelColumn, PanelTabs, PanelToggle, on_panel_toggle,
-    resize_edge,
+    AgentRegion, Chats, DEFAULT_WIDTH, PanelColumn, PanelTabs, PanelToggle, harness_ready,
+    on_panel_toggle, resize_edge,
 };
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason, sync_editor_text};
+use crate::screens::review::revalidation::{Revalidations, revalidation_root, screen_wanted};
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
@@ -133,6 +134,8 @@ pub struct Placeholder(pub ReviewSection);
 pub enum Mounted {
     Opening,
     Shell,
+    /// The revalidation screen, in place of the shell.
+    Revalidation,
 }
 
 /// The region shown while the tab is loading or failed to load (filled by `loading`).
@@ -265,7 +268,7 @@ fn plural(n: usize, one: &str) -> String {
     }
 }
 
-fn file_name(path: &str) -> &str {
+pub(crate) fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
@@ -494,15 +497,24 @@ impl Plugin for ShellPlugin {
 fn mount(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
+    model: Res<Model>,
+    revalidations: Res<Revalidations>,
     fonts: Res<UiFonts>,
     screens: Query<(Entity, &ReviewScreen, Option<&Mounted>)>,
 ) {
     for (entity, ReviewScreen(pr), mounted) in &screens {
         let Some(tab) = tabs.0.get(pr) else { continue };
-        let want = if matches!(tab.phase, Phase::Ready(_)) {
-            Mounted::Shell
-        } else {
+        let want = if !matches!(tab.phase, Phase::Ready(_)) {
             Mounted::Opening
+        } else if screen_wanted(
+            tab,
+            revalidations.0.get(pr),
+            mounted == Some(&Mounted::Revalidation),
+            harness_ready(&model.snapshot),
+        ) {
+            Mounted::Revalidation
+        } else {
+            Mounted::Shell
         };
         if mounted == Some(&want) {
             continue;
@@ -513,6 +525,9 @@ fn mount(
             .insert(want);
         commands.entity(entity).with_children(|p| match want {
             Mounted::Shell => shell_frame(p, pr),
+            Mounted::Revalidation => {
+                p.spawn(revalidation_root(pr));
+            }
             Mounted::Opening => {
                 p.spawn((
                     Node {

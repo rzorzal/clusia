@@ -8,12 +8,18 @@ use bevy::prelude::*;
 use bevy::text::{EditableText, FontCx, LayoutCx, TextEdit};
 use bevy::ui_widgets::Activate;
 use bevy::window::{RequestRedraw, WindowThemeChanged};
-use clusia_core::{Density, Paths, PrRef};
+use clusia_core::revalidation::{
+    CommitLine, Decision, Proposal, Revalidation, RoundState, Verdict, fingerprint,
+};
+use clusia_core::{
+    Anchor, Density, DraftItem, DraftKind, ItemStatus, Origin, Paths, PrRef, Review, Side,
+};
 use clusia_protocol::WindowTarget;
 
 use crate::app::{AppPaths, StartTarget};
 use crate::bridge::{
-    self, Ask, Asks, ChecksTell, Connection, Model, Outbox, ShowRequested, Tell, Toasts,
+    self, Ask, Asks, ChecksTell, Connection, Model, Outbox, RevalidationTell, ShowRequested, Tell,
+    Toasts,
 };
 use crate::clock::Clock;
 use crate::fixture;
@@ -319,4 +325,131 @@ pub fn set_section(app: &mut App, pr: &PrRef, section: ReviewSection) {
         .ui
         .section = section;
     settle(app);
+}
+
+fn right(path: &str, line: u32, commit: &str) -> Anchor {
+    Anchor {
+        path: path.into(),
+        line,
+        start_line: None,
+        side: Side::Right,
+        commit: commit.into(),
+    }
+}
+
+/// A round over the demo draft, which gains `i4` and `i5`: `i1` kept, `i2` moved (the agent
+/// proposes line 92; `before` is line 81), `i3` obsolete, `i4` with new wording and `i5` with
+/// no result. The comments of `review` are left as they are but for the two new ones.
+pub fn demo_round(review: &mut Review, state: RoundState) -> Revalidation {
+    let head = review.head_sha.clone();
+    review.draft.next_id = review.draft.next_id.max(5);
+    for (id, line) in [("i4", 64), ("i5", 46)] {
+        review.draft.items.push(DraftItem {
+            id: id.into(),
+            kind: DraftKind::LineComment,
+            origin: Origin::Human,
+            anchor: Some(right("src/auth/refresh.rs", line, &head)),
+            thread: None,
+            body: format!("Comment {id}."),
+            status: ItemStatus::Ok,
+            accepted: true,
+            created_at: NOW,
+        });
+    }
+    let item = |id: &str| {
+        review
+            .draft
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .expect("a demo item")
+    };
+    let proposal = |id: &str, before: Anchor, verdict: Verdict| Proposal {
+        item: id.into(),
+        before: Some(before),
+        verdict,
+        decision: Decision::Pending,
+        fingerprint: fingerprint(item(id)),
+    };
+    let proposals = vec![
+        proposal("i1", right("src/auth/refresh.rs", 44, &head), Verdict::Kept),
+        proposal(
+            "i2",
+            right("src/auth/store.rs", 81, &head),
+            Verdict::Moved {
+                anchor: right("src/auth/store.rs", 92, &head),
+                reason: "The function gained four lines above this one.".into(),
+            },
+        ),
+        proposal(
+            "i3",
+            right("src/client/http.rs", 20, &head),
+            Verdict::Obsolete {
+                reason: "The retry loop was removed.".into(),
+            },
+        ),
+        proposal(
+            "i4",
+            right("src/auth/refresh.rs", 64, &head),
+            Verdict::Reword {
+                text: "The new test covers two writers; a reader is still missing.".into(),
+                reason: None,
+            },
+        ),
+        proposal(
+            "i5",
+            right("src/auth/refresh.rs", 46, &head),
+            Verdict::NotChecked,
+        ),
+    ];
+    Revalidation {
+        from_head: "1111111".into(),
+        to_head: head,
+        commits: vec![
+            CommitLine {
+                sha: "a1b2c3d".into(),
+                title: "refactor: one retry path".into(),
+            },
+            CommitLine {
+                sha: "e4f5a6b".into(),
+                title: "fix: refresh early".into(),
+            },
+        ],
+        before: proposals
+            .iter()
+            .map(|p| (p.item.clone(), p.before.clone()))
+            .collect(),
+        sp1_moved: 1,
+        sp1_obsolete: 1,
+        state,
+        proposals,
+        unreadable: 0,
+        asked: 5,
+        finished_at: Some(NOW),
+        notified: false,
+    }
+}
+
+/// Opens the demo review with `demo_round` in `state` told by the daemon, and settles.
+pub fn open_round(app: &mut App, state: RoundState) -> PrRef {
+    let pr = open_ready(app, false);
+    let round = {
+        let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+        let ready = tabs
+            .0
+            .get_mut(&pr)
+            .and_then(Tab::ready_mut)
+            .expect("a ready tab");
+        demo_round(&mut ready.view.review, state)
+    };
+    tell(
+        app,
+        Tell::Revalidation(RevalidationTell::Round {
+            pr: pr.clone(),
+            round: Some(round),
+        }),
+    );
+    settle(app);
+    recorded(app);
+    pr
 }

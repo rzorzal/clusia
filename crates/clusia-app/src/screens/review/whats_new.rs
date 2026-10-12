@@ -595,7 +595,12 @@ mod tests {
         testing::settle(&mut app);
         let asks: Vec<Ask> = testing::recorded(&mut app)
             .into_iter()
-            .filter(|a| !matches!(a, Ask::AgentLog { .. } | Ask::GetChecks(_)))
+            .filter(|a| {
+                !matches!(
+                    a,
+                    Ask::AgentLog { .. } | Ask::GetChecks(_) | Ask::GetRevalidation(_)
+                )
+            })
             .collect();
         assert_eq!(asks, [Ask::MarkSeen(pr.clone())]);
         assert_eq!(modal(&app, &pr), None);

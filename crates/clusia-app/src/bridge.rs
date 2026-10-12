@@ -17,6 +17,7 @@ use bevy::window::RequestRedraw;
 use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
 use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass};
 use clusia_core::draft::Origin;
+use clusia_core::revalidation::{self, Revalidation};
 use clusia_core::{
     Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
 };
@@ -35,6 +36,7 @@ use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
 use crate::screens::review::agent::{Chats, PermissionQueue};
 use crate::screens::review::checks::{self, Checks, proposed_comment};
+use crate::screens::review::revalidation::Revalidations;
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::ui::media::MediaCache;
 
@@ -175,6 +177,20 @@ pub enum Ask {
     /// Both checks' results and states, and which findings were accepted or dismissed:
     /// `ChecksTell::Loaded`.
     GetChecks(PrRef),
+    /// Runs the revalidation of the review's draft now (a round starts when the head moved and
+    /// none exists); the state comes back as `RevalidationTell::Round`.
+    Revalidate(PrRef),
+    StopRevalidation(PrRef),
+    /// The round of the review: `RevalidationTell::Round`.
+    GetRevalidation(PrRef),
+    /// Accepts or rejects the agent's proposal for one draft item. The refreshed review comes
+    /// back as `Tell::ReviewFile`, then `RevalidationTell::Settled` or `Refused`.
+    DecideProposal {
+        pr: PrRef,
+        item: String,
+        accept: bool,
+    },
+    AcceptAllProposals(PrRef),
 }
 
 /// What the agent did, for the review's chat. Built from the daemon's agent events, or by the
@@ -445,6 +461,42 @@ impl ChecksTell {
     }
 }
 
+/// What the revalidation of a review did, from the daemon's events and from
+/// `GetRevalidation`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RevalidationTell {
+    /// The round as the daemon holds it now (`None`: there is none).
+    Round {
+        pr: PrRef,
+        round: Option<Revalidation>,
+    },
+    /// A decision went through (`item: None`: *Accept all*): its buttons are free again.
+    Settled { pr: PrRef, item: Option<String> },
+    /// A decision that did not go through: the buttons are free again.
+    Refused { pr: PrRef, item: Option<String> },
+}
+
+impl RevalidationTell {
+    pub fn pr(&self) -> &PrRef {
+        match self {
+            RevalidationTell::Round { pr, .. }
+            | RevalidationTell::Settled { pr, .. }
+            | RevalidationTell::Refused { pr, .. } => pr,
+        }
+    }
+
+    /// The tell for a round event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<RevalidationTell> {
+        match event.clone() {
+            Event::RevalidationChanged { pr, revalidation } => Some(RevalidationTell::Round {
+                pr,
+                round: revalidation,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// The harness test on Config › Harness.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ProbeState {
@@ -575,6 +627,8 @@ pub enum Tell {
     Permission(PermissionTell),
     /// What the review's security and audit checks did.
     Checks(ChecksTell),
+    /// What the revalidation of the review's draft did.
+    Revalidation(RevalidationTell),
     /// The review's chat log, in answer to `Ask::AgentLog`.
     AgentLog {
         pr: PrRef,
@@ -758,7 +812,28 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
             }));
         }
         // The checks are read again after a reconnect: no toast for a read.
-        Ask::GetChecks(_) => {}
+        Ask::GetChecks(_) | Ask::GetRevalidation(_) => {}
+        // The row waits for its decision: free it, and say why nothing happened.
+        Ask::DecideProposal { pr, item, .. } => {
+            teller.send(Tell::Notice {
+                text: "Not connected to clusiad — not sent".into(),
+                warning: true,
+            });
+            teller.send(Tell::Revalidation(RevalidationTell::Refused {
+                pr: pr.clone(),
+                item: Some(item.clone()),
+            }));
+        }
+        Ask::AcceptAllProposals(pr) => {
+            teller.send(Tell::Notice {
+                text: "Not connected to clusiad — not sent".into(),
+                warning: true,
+            });
+            teller.send(Tell::Revalidation(RevalidationTell::Refused {
+                pr: pr.clone(),
+                item: None,
+            }));
+        }
         _ => return false,
     }
     true
@@ -916,6 +991,8 @@ async fn follow(
                 teller.send(Tell::Permission(tell));
             } else if let Some(tell) = ChecksTell::from_event(other) {
                 teller.send(Tell::Checks(tell));
+            } else if let Some(tell) = RevalidationTell::from_event(other) {
+                teller.send(Tell::Revalidation(tell));
             }
         }
     }
@@ -1299,6 +1376,23 @@ async fn answer(
             notify(client, teller, Command::StopCheck { pr, kind }, "").await?;
         }
         Ask::GetChecks(pr) => send_checks(client, teller, pr).await?,
+        Ask::Revalidate(pr) => notify(client, teller, Command::Revalidate { pr }, "").await?,
+        Ask::StopRevalidation(pr) => {
+            notify(client, teller, Command::StopRevalidation { pr }, "").await?;
+        }
+        Ask::GetRevalidation(pr) => send_revalidation(client, teller, pr).await?,
+        Ask::DecideProposal { pr, item, accept } => {
+            let cmd = Command::DecideProposal {
+                pr: pr.clone(),
+                item: item.clone(),
+                accept,
+            };
+            decision_write(client, teller, cmd, pr, Some(item)).await?;
+        }
+        Ask::AcceptAllProposals(pr) => {
+            let cmd = Command::AcceptAllProposals { pr: pr.clone() };
+            decision_write(client, teller, cmd, pr, None).await?;
+        }
         Ask::AcceptFinding { pr, id, body } => {
             let cmd = Command::AcceptFinding {
                 pr: pr.clone(),
@@ -1472,6 +1566,52 @@ async fn send_checks(client: &mut Client, teller: &Teller, pr: PrRef) -> Result<
             accepted,
             dismissed,
         }));
+    }
+    Ok(())
+}
+
+/// `GetRevalidation` → `RevalidationTell::Round` (a refusal is only logged).
+async fn send_revalidation(client: &mut Client, teller: &Teller, pr: PrRef) -> Result<(), String> {
+    if let Some(Reply::Revalidation(round)) =
+        request(client, Command::GetRevalidation { pr: pr.clone() }).await?
+    {
+        teller.send(Tell::Revalidation(RevalidationTell::Round { pr, round }));
+    }
+    Ok(())
+}
+
+/// `DecideProposal` / `AcceptAllProposals`: the refreshed review and `Settled` when it went
+/// through, else a warning and `Refused`, so the row is free again. A proposal the daemon no
+/// longer has (decided from another window, or dropped by a new head) reads the round again.
+async fn decision_write(
+    client: &mut Client,
+    teller: &Teller,
+    cmd: Command,
+    pr: PrRef,
+    item: Option<String>,
+) -> Result<(), String> {
+    match client.request(cmd).await {
+        Ok(Reply::ReviewFile(review)) => {
+            teller.send(Tell::ReviewFile(review));
+            teller.send(Tell::Revalidation(RevalidationTell::Settled { pr, item }));
+        }
+        Ok(_) => teller.send(Tell::Revalidation(RevalidationTell::Settled { pr, item })),
+        Err(ClientError::Server(e)) => {
+            let reread = matches!(e.code, ErrorCode::NotFound | ErrorCode::Conflict);
+            teller.send(Tell::Notice {
+                text: e.message,
+                warning: true,
+            });
+            teller.send(Tell::Revalidation(RevalidationTell::Refused {
+                pr: pr.clone(),
+                item,
+            }));
+            if reread {
+                refetch(client, &pr, teller).await?;
+                send_revalidation(client, teller, pr).await?;
+            }
+        }
+        Err(e) => return Err(lost(e)),
     }
     Ok(())
 }
@@ -1886,6 +2026,7 @@ pub(crate) fn pump(
     mut chats: ResMut<Chats>,
     mut permissions: ResMut<PermissionQueue>,
     mut checks: ResMut<Checks>,
+    mut revalidations: ResMut<Revalidations>,
     clock: Res<Clock>,
     time: Res<Time>,
 ) {
@@ -1941,6 +2082,12 @@ pub(crate) fn pump(
                 for model in checks.0.values_mut() {
                     model.asked = false;
                 }
+                // So are the rounds, and a decision in flight is never answered.
+                for model in revalidations.0.values_mut() {
+                    model.asked = false;
+                    model.pending.clear();
+                    model.all_pending = false;
+                }
             }
             Tell::Quit => {
                 exit.write(AppExit::Success);
@@ -1966,6 +2113,22 @@ pub(crate) fn pump(
                 checks.apply(&tell);
                 checks::reconcile_editors(&mut tabs, &checks, &mut toasts, time.elapsed_secs_f64());
             }
+            Tell::Revalidation(tell) => {
+                // A round that starts again shows its screen again, even after *Back to review*.
+                if let RevalidationTell::Round {
+                    pr,
+                    round: Some(new),
+                } = &tell
+                    && crate::screens::review::revalidation::reopens(
+                        revalidations.0.get(pr).and_then(|m| m.round.as_ref()),
+                        new,
+                    )
+                    && let Some(tab) = tabs.0.get_mut(pr)
+                {
+                    tab.ui.revalidation = crate::review_state::RevalView::Auto;
+                }
+                revalidations.apply(&tell);
+            }
             Tell::Probe(result) => model.probe = ProbeState::Done(result),
             _ => {} // the other review tells were applied above
         }
@@ -1980,6 +2143,7 @@ pub(crate) fn demo_answers(
     mut model: ResMut<Model>,
     mut toasts: ResMut<Toasts>,
     tabs: Res<ReviewTabs>,
+    revalidations: Res<Revalidations>,
     outbox: Res<Outbox>,
     queue: Res<PermissionQueue>,
     clock: Res<Clock>,
@@ -2094,6 +2258,22 @@ pub(crate) fn demo_answers(
                 id,
                 accepted: false,
             })),
+            // The demo's rounds come from scenes and tests; any other review has none.
+            Ask::GetRevalidation(pr) => tells.push(Tell::Revalidation(RevalidationTell::Round {
+                round: tabs
+                    .0
+                    .get(&pr)
+                    .and_then(|t| t.ready())
+                    .and_then(|r| r.view.review.revalidation.clone()),
+                pr,
+            })),
+            Ask::Revalidate(_) | Ask::StopRevalidation(_) => {}
+            Ask::DecideProposal { pr, item, accept } => {
+                tells.extend(demo_decide(&tabs, &revalidations, &pr, Some(&item), accept));
+            }
+            Ask::AcceptAllProposals(pr) => {
+                tells.extend(demo_decide(&tabs, &revalidations, &pr, None, true));
+            }
             Ask::Probe => tells.push(Tell::Probe(fixture::demo_probe())),
             Ask::AddItem {
                 pr,
@@ -2477,6 +2657,59 @@ fn demo_accept(
 }
 
 /// A draft write on the demo review: `ReviewFile` + `Saved`, or `Refused` with the message.
+/// Demo mode: decides one proposal (or all of them, `item: None`) with the daemon's own rules,
+/// on a copy of the review the tab holds.
+fn demo_decide(
+    tabs: &ReviewTabs,
+    revalidations: &Revalidations,
+    pr: &PrRef,
+    item: Option<&str>,
+    accept: bool,
+) -> Vec<Tell> {
+    let refuse = |text: String| {
+        vec![
+            Tell::Notice {
+                text,
+                warning: true,
+            },
+            Tell::Revalidation(RevalidationTell::Refused {
+                pr: pr.clone(),
+                item: item.map(String::from),
+            }),
+        ]
+    };
+    let Some(ready) = tabs.0.get(pr).and_then(|t| t.ready()) else {
+        return refuse("This review is not open".into());
+    };
+    let mut review = ready.view.review.clone();
+    // The round the screen shows is the one that is decided.
+    if let Some(round) = revalidations.0.get(pr).and_then(|m| m.round.clone()) {
+        review.revalidation = Some(round);
+    }
+    let done = match item {
+        Some(id) => revalidation::decide(&mut review, id, accept, &ready.view.diff)
+            .map_err(|e| e.to_string()),
+        None => {
+            revalidation::accept_all(&mut review, &ready.view.diff);
+            Ok(())
+        }
+    };
+    match done {
+        Ok(()) => vec![
+            Tell::Revalidation(RevalidationTell::Round {
+                pr: pr.clone(),
+                round: review.revalidation.clone(),
+            }),
+            Tell::ReviewFile(Box::new(review)),
+            Tell::Revalidation(RevalidationTell::Settled {
+                pr: pr.clone(),
+                item: item.map(String::from),
+            }),
+        ],
+        Err(message) => refuse(message),
+    }
+}
+
 fn demo_edit(
     tabs: &ReviewTabs,
     pr: &PrRef,
@@ -2656,6 +2889,7 @@ mod tests {
             .insert_resource(Model::default())
             .insert_resource(Toasts::default())
             .insert_resource(ReviewTabs::default())
+            .init_resource::<Revalidations>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -2698,6 +2932,7 @@ mod tests {
             .insert_resource(Model::default())
             .insert_resource(Toasts::default())
             .insert_resource(tabs)
+            .init_resource::<Revalidations>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(demo_queue())
             .insert_resource(outbox)
@@ -3039,6 +3274,7 @@ mod tests {
             .insert_resource(Model::default())
             .insert_resource(Toasts::default())
             .insert_resource(ReviewTabs::default())
+            .init_resource::<Revalidations>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -3196,6 +3432,7 @@ mod tests {
                 .insert_resource(ReviewTabs::default())
                 .init_resource::<Chats>()
                 .init_resource::<Checks>()
+                .init_resource::<Revalidations>()
                 .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
                     mode: Mode::Demo { theme: forced },
@@ -3452,6 +3689,63 @@ mod tests {
                 accepted: false
             })
             .is_none()
+        );
+    }
+
+    #[test]
+    fn a_round_event_becomes_a_round_tell() {
+        let pr = fixture::demo_pr();
+        let event = Event::RevalidationChanged {
+            pr: pr.clone(),
+            revalidation: None,
+        };
+        let got = RevalidationTell::from_event(&event).expect("a round tell");
+        assert_eq!(
+            got,
+            RevalidationTell::Round {
+                pr: pr.clone(),
+                round: None,
+            }
+        );
+        assert_eq!(got.pr(), &pr);
+        assert_eq!(RevalidationTell::from_event(&Event::Stopping), None);
+        assert!(ChecksTell::from_event(&event).is_none());
+        assert!(AgentTell::from_event(&event).is_none());
+    }
+
+    #[test]
+    fn offline_decisions_are_refused_not_dropped() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let pr = fixture::demo_pr();
+        assert!(offline(
+            &Ask::DecideProposal {
+                pr: pr.clone(),
+                item: "i2".into(),
+                accept: true
+            },
+            &teller
+        ));
+        assert!(offline(&Ask::AcceptAllProposals(pr.clone()), &teller));
+        assert!(offline(&Ask::GetRevalidation(pr.clone()), &teller));
+        let told: Vec<Tell> = rx.try_iter().collect();
+        assert!(told.iter().any(|t| matches!(
+            t,
+            Tell::Revalidation(RevalidationTell::Refused { item: Some(i), .. }) if i == "i2"
+        )));
+        assert!(told.iter().any(|t| matches!(
+            t,
+            Tell::Revalidation(RevalidationTell::Refused { item: None, .. })
+        )));
+        assert_eq!(
+            told.iter()
+                .filter(|t| matches!(t, Tell::Notice { warning: true, .. }))
+                .count(),
+            2,
+            "a read says nothing"
         );
     }
 
