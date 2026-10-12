@@ -52,13 +52,16 @@ struct Entry {
     generation: u64,
     timer: Option<JoinHandle<()>>,
     run: Option<Run>,
+    /// A start found the run still there (it may be winding down after a newer head stopped it):
+    /// when the run is over and the round waits for its quiet period, it is scheduled at once.
+    rerun: bool,
 }
 
 impl Entry {
-    /// Nothing is left to remember: no run, and no timer (a nonzero generation is a timer that
-    /// has not fired yet).
+    /// Nothing is left to remember: no run, no request to start over and no timer (a nonzero
+    /// generation is a timer that has not fired yet).
     fn empty(&self) -> bool {
-        self.run.is_none() && self.generation == 0
+        self.run.is_none() && self.generation == 0 && !self.rerun
     }
 
     /// Cancels the timer; one that already woke finds its generation gone and does nothing.
@@ -317,7 +320,7 @@ pub(crate) async fn run_on_open(shared: &Arc<Shared>, review: &Review) -> bool {
     // Not `schedule`: the quiet period is over because the user is looking.
     let (shared, pr) = (shared.clone(), review.pr.clone());
     tokio::spawn(async move {
-        if let Err(out) = start(&shared, &pr, Trigger::Now).await {
+        if let Err(out) = start(&shared, &pr, Trigger::Open).await {
             tracing::debug!(pr = %pr, ?out, "the revalidation did not start");
         }
     });
@@ -373,10 +376,10 @@ pub(crate) fn schedule(shared: &Arc<Shared>, pr: &PrRef, at: i64) {
         }
     });
     shared.revalidations.with(pr, |entry| {
-        if entry.generation == generation && !task.is_finished() {
+        // A timer that lost its generation does nothing when it wakes, so it is left alone: an
+        // abort could cancel the start it is already making.
+        if entry.generation == generation {
             entry.timer = Some(task);
-        } else {
-            task.abort();
         }
     });
 }
@@ -445,8 +448,11 @@ pub(crate) async fn resume_all(shared: &Arc<Shared>) {
 enum Trigger {
     /// The quiet period ended: the round starts only if it is still due.
     Timer,
-    /// The user or a window asked for it now.
+    /// The user asked for it now.
     Now,
+    /// A window opened the review: the round starts now, unless it ended meanwhile (the user may
+    /// have stopped it).
+    Open,
 }
 
 /// What a run needs once it has been accepted.
@@ -500,6 +506,20 @@ pub(crate) async fn files_at(
     reviews::files_for(shared, pr, head).await.ok()
 }
 
+/// The diff the prompt carries, or a line that sends the agent to the files.
+async fn diff_of(shared: &Shared, pr: &PrRef, from_head: &str, to_head: &str) -> String {
+    const UNAVAILABLE: &str = "[diff unavailable — read the files in the worktree]";
+    match repo_of_worktree(&shared.paths.worktree_for(pr)).await {
+        Ok(repo) => diff_for_prompt(&repo, from_head, to_head, DIFF_CAP)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, pr = %pr, "cannot diff the new commits");
+                UNAVAILABLE.to_string()
+            }),
+        Err(_) => UNAVAILABLE.to_string(),
+    }
+}
+
 fn invalid(message: impl Into<String>) -> clusia_protocol::Outcome {
     reviews::invalid_state(message)
 }
@@ -517,18 +537,22 @@ async fn start(
     }
     let harness = shared.config.read().await.harness.clone();
     // The commits come from GitHub, so they are read before the review lock is taken.
-    let from_head = reviews::load_stored(shared, pr)?
+    let heads = reviews::load_stored(shared, pr)?
         .and_then(|review| review.revalidation)
-        .map(|round| round.from_head);
-    let commits = match from_head {
-        Some(from) => commit_lines(shared, pr, &from).await,
-        None => Vec::new(),
+        .map(|round| (round.from_head, round.to_head));
+    let (commits, mut diff) = match &heads {
+        Some((from, to)) => (
+            commit_lines(shared, pr, from).await,
+            Some(diff_of(shared, pr, from, to).await),
+        ),
+        None => (Vec::new(), None),
     };
     let _guard = reviews::lock(shared, pr).await;
     let mut review = match reviews::load_stored(shared, pr)? {
-        Some(review) if !review.state.is_terminal() && review.state != ReviewState::Publishing => {
-            review
+        Some(review) if review.state == ReviewState::Publishing => {
+            return Err(invalid("A publish was under way"));
         }
+        Some(review) if !review.state.is_terminal() => review,
         _ => return Err(invalid(format!("no review for {pr}; open it first"))),
     };
     let Some(round) = review.revalidation.as_ref() else {
@@ -556,6 +580,14 @@ async fn start(
             "the worktree of {pr} is gone; open the review again"
         )));
     }
+    if trigger == Trigger::Open
+        && !matches!(
+            round.state,
+            RoundState::Scheduled { .. } | RoundState::Waiting | RoundState::Running { .. }
+        )
+    {
+        return Ok(());
+    }
     let asked = asked_items(&review, round);
     let fingerprints: HashMap<String, String> = review
         .draft
@@ -564,14 +596,10 @@ async fn start(
         .map(|item| (item.id.clone(), fingerprint(item)))
         .collect();
     let (from_head, to_head) = (round.from_head.clone(), round.to_head.clone());
-    let diff = match repo_of_worktree(&worktree).await {
-        Ok(repo) => diff_for_prompt(&repo, &from_head, &to_head, DIFF_CAP)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, pr = %pr, "cannot diff the new commits");
-                "[diff unavailable — read the files in the worktree]".to_string()
-            }),
-        Err(_) => "[diff unavailable — read the files in the worktree]".to_string(),
+    // The round may have moved to a newer head while the commits and the diff were read.
+    let diff = match diff.take() {
+        Some(diff) if heads.as_ref() == Some(&(from_head.clone(), to_head.clone())) => diff,
+        _ => diff_of(shared, pr, &from_head, &to_head).await,
     };
     let commits = if commits.is_empty() {
         round.commits.clone()
@@ -594,9 +622,10 @@ async fn start(
             return Err(invalid("clusiad is stopping"));
         }
         if entry.run.is_some() {
+            entry.rerun = true;
             return Ok(None);
         }
-        if trigger == Trigger::Now {
+        if trigger != Trigger::Timer {
             entry.cancel_timer();
         }
         entry.run = Some(Run {
@@ -646,6 +675,7 @@ async fn drive(_live: Live, shared: Arc<Shared>, pr: PrRef, job: Job) {
     if task.await.is_err() {
         tracing::error!(pr = %pr, turn, "a revalidation failed inside the daemon");
         shared.revalidations.end_run(&pr, turn);
+        note_log(&shared, &pr, turn, "failed");
         settle(
             &shared,
             &pr,
@@ -653,6 +683,28 @@ async fn drive(_live: Live, shared: Arc<Shared>, pr: PrRef, job: Job) {
             Ending::Failed("The revalidation stopped unexpectedly".to_string()),
         )
         .await;
+    }
+    rerun_if_due(&shared, &pr).await;
+}
+
+/// A start found this run still there. Now that it is over, a round that still waits for its
+/// quiet period starts at once.
+async fn rerun_if_due(shared: &Arc<Shared>, pr: &PrRef) {
+    let wanted = shared
+        .revalidations
+        .with(pr, |entry| std::mem::take(&mut entry.rerun));
+    if !wanted {
+        return;
+    }
+    let _guard = reviews::lock(shared, pr).await;
+    let Ok(Some(review)) = reviews::load_stored(shared, pr) else {
+        return;
+    };
+    if review
+        .revalidation
+        .is_some_and(|r| matches!(r.state, RoundState::Scheduled { .. }))
+    {
+        schedule(shared, pr, now_unix());
     }
 }
 
@@ -1049,6 +1101,21 @@ pub(crate) async fn stop(shared: &Arc<Shared>, pr: &PrRef) {
         return;
     }
     let _guard = reviews::lock(shared, pr).await;
+    // A start that held the lock until now may have placed a run: it is stopped, and settles
+    // the round itself.
+    let placed = shared.revalidations.with(pr, |entry| {
+        entry.cancel_timer();
+        match &entry.run {
+            Some(run) => {
+                run.stop.fire(Why::User);
+                true
+            }
+            None => false,
+        }
+    });
+    if placed {
+        return;
+    }
     let Ok(Some(mut review)) = reviews::load_stored(shared, pr) else {
         return;
     };
@@ -1083,6 +1150,7 @@ pub(crate) async fn stop_all(shared: &Shared, pr: &PrRef, why: Why) {
 pub(crate) fn forget(shared: &Shared, pr: &PrRef) {
     shared.revalidations.with(pr, |entry| {
         entry.cancel_timer();
+        entry.rerun = false;
         if let Some(run) = &entry.run {
             run.stop.fire(Why::Ended);
         }
@@ -1290,6 +1358,31 @@ mod tests {
             !has_timer(&shared, &pr),
             "a publish that went through ends it"
         );
+    }
+
+    #[tokio::test]
+    async fn stop_reaches_a_run_a_start_placed_while_it_waited_for_the_lock() {
+        let (_home, shared) = lab();
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let guard = reviews::lock(&shared, &pr).await;
+        let stopping = tokio::spawn({
+            let (shared, pr) = (shared.clone(), pr.clone());
+            async move { stop(&shared, &pr).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let run = Stop::new();
+        shared.revalidations.with(&pr, |entry| {
+            entry.run = Some(Run {
+                turn: 1,
+                stop: run.clone(),
+                activity: None,
+                told: None,
+            });
+        });
+        drop(guard);
+        stopping.await.unwrap();
+        assert!(run.fired());
+        assert_eq!(run.why(), Why::User);
     }
 
     #[tokio::test]

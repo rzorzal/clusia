@@ -89,6 +89,13 @@ pub async fn push(w: &World, c: &mut Client, extra: &str) -> String {
 /// Pushes a commit that makes the file `content`, serves it with `patch` as GitHub's patch of the
 /// file (the one that adds all of `content` when `None`), and lets the daemon poll once.
 pub async fn push_content(w: &World, c: &mut Client, content: &str, patch: Option<&str>) -> String {
+    let head = serve_head(w, content, patch).await;
+    c.request(Command::SyncNow).await.unwrap();
+    head
+}
+
+/// Pushes a commit that makes the file `content` and serves it, without letting the daemon poll.
+pub async fn serve_head(w: &World, content: &str, patch: Option<&str>) -> String {
     let head = advance_pr(w.tmp.path(), 7, FILE, content);
     w.server.reset().await;
     let mut mock = PrMock::new(&head, &w.base, &w.origin).adding_feature(content);
@@ -99,7 +106,6 @@ pub async fn push_content(w: &World, c: &mut Client, content: &str, patch: Optio
     }
     mount_pr(&w.server, &mock).await;
     mount_search(w).await;
-    c.request(Command::SyncNow).await.unwrap();
     head
 }
 

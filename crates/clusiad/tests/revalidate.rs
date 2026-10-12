@@ -680,3 +680,76 @@ async fn a_timer_that_cannot_start_fails_the_round_and_sends_the_old_notificatio
     assert_eq!(notices(&mut c).await, ["#7 is out of date"]);
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn a_window_opening_a_new_head_while_a_run_winds_down_still_runs_the_round() {
+    let w = world().await;
+    let (mut c, ids) = saved(&w).await;
+    use_script(
+        &w,
+        Script::turns(vec![Turn::hanging().ignore_term(), answer(&ids)]),
+    )
+    .await;
+    push(&w, &mut c, "zero\n").await;
+    let mut watcher = reviews_watcher(&w).await;
+    c.request(Command::Revalidate { pr: pr7() }).await.unwrap();
+    common::agent::until(&mut watcher, round_is(is_running)).await;
+
+    // The program ignores the first request to end, so the run winds down for a while.
+    // The daemon has not polled the newer head: the window finds it while the run still lives.
+    let head = serve_head(&w, "zero\nzero\none\ntwo\nthree\n", None).await;
+    open(&mut c).await;
+    common::agent::until(&mut watcher, round_is(is_done)).await;
+
+    let round = review_of(&mut c).await.revalidation.unwrap();
+    assert_eq!(round.to_head, head);
+    assert_eq!(round.state, RoundState::Done);
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn stopping_a_round_the_window_is_starting_keeps_it_stopped() {
+    let w = world().await;
+    let (mut c, _ids) = saved(&w).await;
+    let dir = use_script(&w, Script::one(Turn::hanging())).await;
+    push(&w, &mut c, "zero\n").await;
+    // The start reads the commits before it places the run: slow them down.
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(
+            "/repos/acme/widgets/pulls/7/commits",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!([]))
+                .set_delay(Duration::from_millis(800)),
+        )
+        .with_priority(1)
+        .mount(&w.server)
+        .await;
+    let mut watcher = reviews_watcher(&w).await;
+
+    open(&mut c).await;
+    c.request(Command::StopRevalidation { pr: pr7() })
+        .await
+        .unwrap();
+    common::agent::until(&mut watcher, round_is(is_failed)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let round = review_of(&mut c).await.revalidation.unwrap();
+    assert_eq!(
+        round.state,
+        RoundState::Failed {
+            message: "Stopped".into()
+        }
+    );
+    // Opening the review starts the summary too: only a revalidation prompt would be wrong.
+    let revalidations = FakeClaude::calls(&dir)
+        .into_iter()
+        .filter(|call| {
+            common::agent::value_of(&call.argv, "-p")
+                .is_some_and(|prompt| prompt.contains("clusia-revalidation"))
+        })
+        .count();
+    assert_eq!(revalidations, 0, "the stopped round did not run");
+    w.daemon.stop().await;
+}
