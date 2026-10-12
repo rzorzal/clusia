@@ -58,6 +58,10 @@ impl RevalidationModel {
                 self.round = round.clone();
                 self.loaded = true;
                 self.asked = true;
+                // A re-anchor waits only for a decision still in flight; the round may arrive
+                // before that decision's own answer, so what is in flight is checked first.
+                let in_flight = self.pending.clone();
+                self.reanchor.retain(|item| in_flight.contains(item));
                 // A decision the round already shows is no longer in flight.
                 let waiting: BTreeSet<String> = round
                     .iter()
@@ -1867,6 +1871,25 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_round_forgets_a_re_anchor_nobody_waits_for() {
+        let (app, _) = done_app();
+        let round = round_of_app(&app);
+        let told = RevalidationTell::Round {
+            pr: pr(),
+            round: Some(round),
+        };
+        let mut m = RevalidationModel::default();
+        m.reanchor.insert("i3".into());
+        m.apply(&told);
+        assert!(m.reanchor.is_empty(), "a stale mark is dropped");
+        // A decision in flight keeps its mark although the round already shows it.
+        m.pending.insert("i3".into());
+        m.reanchor.insert("i3".into());
+        m.apply(&told);
+        assert!(m.reanchor.contains("i3"));
     }
 
     #[test]

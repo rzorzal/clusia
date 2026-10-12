@@ -2090,6 +2090,7 @@ pub(crate) fn pump(
                 for model in revalidations.0.values_mut() {
                     model.asked = false;
                     model.pending.clear();
+                    model.reanchor.clear();
                     model.all_pending = false;
                 }
             }
