@@ -1,7 +1,12 @@
 //! Demo data for `--demo` and screenshots: only `rzorzal` repositories and generic people.
 
+use std::collections::BTreeMap;
+
 use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass, Severity, finding_id};
 use clusia_core::media::MediaKind;
+use clusia_core::revalidation::{
+    CommitLine, Decision, Proposal, Revalidation, RoundState, Verdict, fingerprint,
+};
 use clusia_core::time::civil_from_days;
 use clusia_core::{
     ActivitySummary, Anchor, ChecksSummary, Config, DayCount, Draft, DraftItem, DraftKind,
@@ -779,6 +784,116 @@ pub fn demo_checks(now: i64) -> (Vec<CheckResult>, Vec<CheckStatus>) {
 }
 
 /// The rows of `WhatsNew.png` ("Since you last looked, yesterday …").
+/// The draft of the revalidation scenes and the finished round over it: the demo draft grown to
+/// five items, and one proposal for each kind of row (kept, moved, obsolete, new wording and
+/// not checked). The round only proposes; the draft is exactly what the demo draft says.
+pub fn demo_revalidation(now: i64) -> (Draft, Revalidation) {
+    let anchor = |path: &str, line: u32| Anchor {
+        path: path.into(),
+        line,
+        start_line: None,
+        side: Side::Right,
+        commit: HEAD_SHA.into(),
+    };
+    let mut draft = demo_draft(now);
+    for (id, path, line, body) in [
+        (
+            "i4",
+            "tests/refresh.rs",
+            18,
+            "Missing a test for concurrent refreshes.",
+        ),
+        (
+            "i5",
+            "src/auth/store.rs",
+            96,
+            "Name the temp file after the process id so two reviews never share one.",
+        ),
+    ] {
+        draft.items.push(DraftItem {
+            id: id.into(),
+            kind: DraftKind::LineComment,
+            origin: Origin::Human,
+            anchor: Some(anchor(path, line)),
+            body: body.into(),
+            status: ItemStatus::Ok,
+            accepted: true,
+            created_at: now - 3000,
+            thread: None,
+        });
+    }
+    draft.next_id = 5;
+    let mut before: BTreeMap<String, Option<Anchor>> = draft
+        .items
+        .iter()
+        .map(|item| (item.id.clone(), item.anchor.clone()))
+        .collect();
+    // SP1 moved i2 from line 81 before the agent looked.
+    before.insert("i2".into(), Some(anchor("src/auth/store.rs", 81)));
+    let proposal = |id: &str, verdict: Verdict| {
+        let item = draft
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .expect("the demo draft has this item");
+        Proposal {
+            item: id.into(),
+            before: before[id].clone(),
+            verdict,
+            decision: Decision::Pending,
+            fingerprint: fingerprint(item),
+        }
+    };
+    let proposals = vec![
+        proposal("i1", Verdict::Kept),
+        proposal(
+            "i2",
+            Verdict::Moved {
+                anchor: anchor("src/auth/store.rs", 88),
+                reason: "save() moved down 7 lines when the temp-file helper was added; the comment follows the same code.".into(),
+            },
+        ),
+        proposal(
+            "i3",
+            Verdict::Obsolete {
+                reason: "The retry loop was removed in \"refactor: one retry path\".".into(),
+            },
+        ),
+        proposal(
+            "i4",
+            Verdict::Reword {
+                text: "The new test covers two refreshes at once; a refresh racing invalidate() is still missing.".into(),
+                reason: None,
+            },
+        ),
+        proposal("i5", Verdict::NotChecked),
+    ];
+    let round = Revalidation {
+        from_head: "7d3c5a1e9b2f4a6c8e0d1f3b5a7c9e2d4f6a8b0c".into(),
+        to_head: HEAD_SHA.into(),
+        commits: vec![
+            CommitLine {
+                sha: "c41d2e7".into(),
+                title: "refactor: one retry path".into(),
+            },
+            CommitLine {
+                sha: "a98f03b".into(),
+                title: "fix: write the token through a temp file".into(),
+            },
+        ],
+        before,
+        sp1_moved: 1,
+        sp1_obsolete: 1,
+        state: RoundState::Done,
+        proposals,
+        unreadable: 0,
+        asked: 5,
+        finished_at: Some(now - 120),
+        notified: false,
+    };
+    (draft, round)
+}
+
 fn demo_news(now: i64) -> Vec<NewsItem> {
     let item = |kind, source: &str, who: Option<&str>, age: i64, summary: &str| NewsItem {
         kind,
@@ -1554,5 +1669,93 @@ mod tests {
                 clusia_core::checks::finding_id(&f.area, &f.file, Some(line), &f.title)
             );
         }
+    }
+
+    #[test]
+    fn the_demo_round_has_one_proposal_per_row_kind() {
+        use clusia_core::revalidation::{Decision, RoundState, RowKind, pending, row_kind};
+        let (draft, round) = demo_revalidation(NOW);
+        let ids: Vec<&str> = draft.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["i1", "i2", "i3", "i4", "i5"]);
+        assert_eq!(draft.next_id, 5);
+        assert_eq!(round.state, RoundState::Done);
+        assert_eq!((round.asked, round.unreadable), (5, 0));
+        assert_eq!((round.sp1_moved, round.sp1_obsolete), (1, 1));
+        assert_eq!(round.commits.len(), 2);
+        assert_eq!(round.to_head, HEAD_SHA);
+        assert_ne!(round.from_head, round.to_head);
+        let kinds: Vec<RowKind> = round
+            .proposals
+            .iter()
+            .map(|p| {
+                let item = draft.items.iter().find(|i| i.id == p.item).unwrap();
+                row_kind(p, item)
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                RowKind::Kept,
+                RowKind::Moved,
+                RowKind::Obsolete,
+                RowKind::NewWording,
+                RowKind::NotChecked,
+            ]
+        );
+        assert!(
+            round
+                .proposals
+                .iter()
+                .all(|p| p.decision == Decision::Pending)
+        );
+        assert_eq!(pending(&round, &draft), 3);
+        for p in &round.proposals {
+            let item = draft.items.iter().find(|i| i.id == p.item).unwrap();
+            assert_eq!(p.fingerprint, clusia_core::revalidation::fingerprint(item));
+            assert_eq!(p.before, round.before[&p.item], "{}", p.item);
+        }
+    }
+
+    #[test]
+    fn the_demo_round_changes_nothing_in_the_draft_and_sits_on_the_diff() {
+        let (view, _) = demo_review(NOW);
+        let (draft, round) = demo_revalidation(NOW);
+        assert_eq!(
+            draft.items[..3],
+            view.review.draft.items[..],
+            "the first three items are the demo draft's"
+        );
+        for item in &draft.items {
+            if let (Some(a), true) = (&item.anchor, item.status == ItemStatus::Ok) {
+                assert!(
+                    anchor_in_diff(&view.diff, &a.path, a.line, a.line),
+                    "{} points into the diff",
+                    item.id
+                );
+            }
+        }
+        // Put it back needs the old line to be commentable at the new head.
+        let back = round.before["i2"].as_ref().expect("i2 had an anchor");
+        assert_eq!((back.path.as_str(), back.line), ("src/auth/store.rs", 81));
+        assert!(anchor_in_diff(&view.diff, &back.path, back.line, back.line));
+        let moved = round
+            .proposals
+            .iter()
+            .find(|p| p.item == "i2")
+            .expect("i2 has a proposal");
+        let clusia_core::revalidation::Verdict::Moved { anchor, reason } = &moved.verdict else {
+            panic!("i2 is the moved row")
+        };
+        assert_eq!(
+            (anchor.path.as_str(), anchor.line),
+            ("src/auth/store.rs", 88)
+        );
+        assert!(anchor_in_diff(
+            &view.diff,
+            &anchor.path,
+            anchor.line,
+            anchor.line
+        ));
+        assert!(!reason.is_empty());
     }
 }

@@ -35,6 +35,8 @@ pub enum Scene {
     Permission,
     Security,
     Audits,
+    Revalidated,
+    RevalidatedBanner,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -184,6 +186,8 @@ mod tests {
             ("permission", Scene::Permission),
             ("security", Scene::Security),
             ("audits", Scene::Audits),
+            ("revalidated", Scene::Revalidated),
+            ("revalidated-banner", Scene::RevalidatedBanner),
         ] {
             assert_eq!(
                 parse(&["--demo", "--scene", name]).unwrap().scene,

@@ -47,6 +47,8 @@ fn demo_screenshots() {
         "permission",
         "security",
         "audits",
+        "revalidated",
+        "revalidated-banner",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((
