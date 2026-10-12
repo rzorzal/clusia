@@ -19,6 +19,7 @@ use clusia_core::PrRef;
 use clusia_core::commentable_lines;
 use clusia_core::draft::{DraftKind, ItemStatus, Side, ThreadRef};
 use clusia_highlight::{Span, highlight};
+use clusia_protocol::AnchorInput;
 use clusia_view::diff::{
     Row, RowKind, anchor_of, intraline, line_on, parse_patch, row_of, side_text, split_rows,
 };
@@ -30,6 +31,7 @@ use crate::review_state::{
 };
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
+use crate::screens::review::revalidation::{Revalidations, reanchor_click};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
 use crate::ui::code::{CodeSpan, code_line, spans_for};
@@ -1448,10 +1450,34 @@ fn on_line(
     buttons: Query<&LineButton>,
     keys: Res<ButtonInput<KeyCode>>,
     mut tabs: ResMut<ReviewTabs>,
+    model: Res<Model>,
+    mut rounds: ResMut<Revalidations>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
 ) {
     let Ok(b) = buttons.get(activate.entity) else {
         return;
     };
+    // While a comment waits for its new place, a click on a line is that place.
+    let place = AnchorInput {
+        path: b.path.clone(),
+        line: b.line,
+        start_line: None,
+        side: b.side,
+    };
+    if reanchor_click(
+        &tabs,
+        &model,
+        &mut rounds,
+        &mut toasts,
+        &time,
+        &mut asks,
+        &b.pr,
+        place,
+    ) {
+        return;
+    }
     let Some(ui) = ui_of(&mut tabs, &b.pr) else {
         return;
     };

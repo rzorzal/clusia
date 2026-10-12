@@ -15,7 +15,8 @@ use clusia_core::revalidation::{
     DecideError, Decision, Revalidation, RoundState, RowKind, Verdict, decidable, decide,
     fingerprint, pending, row_kind,
 };
-use clusia_core::{Anchor, FileDiff, ItemStatus, PrRef, Review};
+use clusia_core::{Anchor, DraftItem, FileDiff, ItemStatus, PrRef, Review};
+use clusia_protocol::AnchorInput;
 
 use crate::bridge::{Ask, Asks, Connection, Model, RevalidationTell, Toasts};
 use crate::fonts::UiFonts;
@@ -29,6 +30,7 @@ use crate::theme::Swatch;
 use crate::ui::kit::{
     Stroke, Tone, Type, Variant, badge, button, card, disabled_button, panel, text,
 };
+use crate::ui::modal::escape_pressed;
 
 /// One review's round as the window knows it.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -46,6 +48,9 @@ pub struct RevalidationModel {
     /// Items whose *Keep and re-anchor* waits for the daemon: the Diff opens on its re-anchor
     /// mode once the decision is settled, not before.
     pub reanchor: BTreeSet<String>,
+    /// Items whose new place waits for the daemon. Kept apart from `pending`: a round told
+    /// meanwhile trims `pending` to the undecided proposals, and this mark must outlive it.
+    pub reanchoring: BTreeSet<String>,
 }
 
 impl RevalidationModel {
@@ -81,9 +86,14 @@ impl RevalidationModel {
                 Some(item) => {
                     self.pending.remove(item);
                     self.reanchor.remove(item);
+                    // A refused re-anchor is a refusal too: the Diff takes another click.
+                    self.reanchoring.remove(item);
                 }
                 None => self.all_pending = false,
             },
+            RevalidationTell::Reanchored { item, .. } => {
+                self.reanchoring.remove(item);
+            }
         }
     }
 }
@@ -685,7 +695,7 @@ impl Plugin for RevalidationPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (load_revalidations, fill_revalidation)
+            (load_revalidations, fill_revalidation, end_reanchor)
                 .chain()
                 .after(ReviewSystems),
         );
@@ -1047,6 +1057,238 @@ fn on_proposal(
             .or_default()
             .reanchor
             .insert(item.clone());
+    }
+}
+
+/// The compact line on the normal tabs while suggestions wait.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct RevalidationBanner(pub PrRef);
+
+/// **Review them**: brings the revalidation screen back.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct ReviewThem(pub PrRef);
+
+/// What the banner says before its button: `2 suggestions from the revalidation ·`.
+pub fn banner_text(waiting: usize) -> String {
+    format!("{} from the revalidation ·", plural(waiting, "suggestion"))
+}
+
+pub fn banner_strip(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, waiting: usize) {
+    p.spawn((
+        panel(
+            Node {
+                padding: UiRect::axes(px(20), px(6)),
+                column_gap: px(8),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            Swatch::GreenSoft,
+        ),
+        RevalidationBanner(pr.clone()),
+    ))
+    .with_children(|s| {
+        s.spawn(text(fonts, "↻", Type::STRONG.ink(Swatch::Green)));
+        s.spawn(text(fonts, banner_text(waiting), Type::BODY));
+        s.spawn((
+            button(fonts, "Review them", Variant::Ghost),
+            ReviewThem(pr.clone()),
+            observe(on_review_them),
+        ));
+    });
+}
+
+/// The strip while the Diff waits for a click on the new place of a comment.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct ReanchorStrip(pub PrRef);
+
+/// **Make it a general comment**.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct ReanchorGeneral {
+    pub pr: PrRef,
+    pub item: String,
+}
+
+/// **Cancel** (the same as Esc).
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct ReanchorCancel(pub PrRef);
+
+/// The comment the strip names: its place and the start of its text.
+pub fn reanchor_preview(item: &DraftItem) -> String {
+    let body = printable_lines(item.body.trim()).replace('\n', " ");
+    let mut short: String = body.chars().take(80).collect();
+    if body.chars().count() > 80 {
+        short.push('…');
+    }
+    format!("{} · {short}", draft_card(item).title)
+}
+
+pub fn reanchor_strip(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    item: &str,
+    preview: &str,
+) {
+    p.spawn((
+        panel(
+            Node {
+                padding: UiRect::axes(px(20), px(8)),
+                column_gap: px(12),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            Swatch::OrangeSoft,
+        ),
+        ReanchorStrip(pr.clone()),
+    ))
+    .with_children(|s| {
+        s.spawn(Node {
+            flex_grow: 1.0,
+            flex_basis: px(0),
+            min_width: px(0),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(2),
+            ..default()
+        })
+        .with_children(|t| {
+            t.spawn(text(
+                fonts,
+                "Click a line to anchor this comment",
+                Type::STRONG.ink(Swatch::Orange),
+            ));
+            t.spawn(text(fonts, preview.to_string(), Type::META));
+        });
+        s.spawn((
+            button(fonts, "Make it a general comment", Variant::Secondary),
+            ReanchorGeneral {
+                pr: pr.clone(),
+                item: item.to_string(),
+            },
+            observe(on_general),
+        ));
+        s.spawn((
+            button(fonts, "Cancel", Variant::Ghost),
+            ReanchorCancel(pr.clone()),
+            observe(on_cancel),
+        ));
+    });
+}
+
+fn on_review_them(
+    activate: On<Activate>,
+    buttons: Query<&ReviewThem>,
+    mut tabs: ResMut<ReviewTabs>,
+) {
+    let Ok(ReviewThem(pr)) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Some(tab) = tabs.0.get_mut(pr) {
+        tab.ui.revalidation = RevalView::Open;
+    }
+}
+
+fn on_cancel(
+    activate: On<Activate>,
+    buttons: Query<&ReanchorCancel>,
+    mut tabs: ResMut<ReviewTabs>,
+) {
+    let Ok(ReanchorCancel(pr)) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Some(tab) = tabs.0.get_mut(pr) {
+        tab.ui.reanchor = None;
+    }
+}
+
+fn on_general(
+    activate: On<Activate>,
+    buttons: Query<&ReanchorGeneral>,
+    tabs: Res<ReviewTabs>,
+    model: Res<Model>,
+    mut rounds: ResMut<Revalidations>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
+) {
+    let Ok(ReanchorGeneral { pr, item }) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Some(reason) = read_only_reason(&tabs, &model, pr) {
+        return not_sent(&mut toasts, &time, reason);
+    }
+    if rounds
+        .0
+        .entry(pr.clone())
+        .or_default()
+        .reanchoring
+        .insert(item.clone())
+    {
+        asks.send(Ask::ReanchorDraftItem {
+            pr: pr.clone(),
+            id: item.clone(),
+            anchor: None,
+        });
+    }
+}
+
+/// A click on a line while the Diff waits for the new place of `item`: asks the daemon to move
+/// it there. Returns `false` when the tab is not in that mode, so the click means what it
+/// always meant.
+pub(crate) fn reanchor_click(
+    tabs: &ReviewTabs,
+    model: &Model,
+    rounds: &mut Revalidations,
+    toasts: &mut Toasts,
+    time: &Time,
+    asks: &mut Asks,
+    pr: &PrRef,
+    place: AnchorInput,
+) -> bool {
+    let Some(item) = tabs.0.get(pr).and_then(|t| t.ui.reanchor.clone()) else {
+        return false;
+    };
+    if let Some(reason) = read_only_reason(tabs, model, pr) {
+        not_sent(toasts, time, reason);
+        return true;
+    }
+    if rounds
+        .0
+        .entry(pr.clone())
+        .or_default()
+        .reanchoring
+        .insert(item.clone())
+    {
+        asks.send(Ask::ReanchorDraftItem {
+            pr: pr.clone(),
+            id: item,
+            anchor: Some(place),
+        });
+    }
+    true
+}
+
+/// Esc ends the re-anchor mode, and so does the comment going away.
+fn end_reanchor(
+    keys: Res<ButtonInput<KeyCode>>,
+    nav: Res<crate::nav::Nav>,
+    mut tabs: ResMut<ReviewTabs>,
+) {
+    let esc = escape_pressed(&keys);
+    let shown = match &nav.screen {
+        crate::nav::Screen::Review(pr) => Some(pr.clone()),
+        _ => None,
+    };
+    for (pr, tab) in tabs.0.iter_mut() {
+        let Some(item) = tab.ui.reanchor.clone() else {
+            continue;
+        };
+        let gone = tab
+            .ready()
+            .is_some_and(|r| !r.view.review.draft.items.iter().any(|i| i.id == item));
+        let escaped = esc && shown.as_ref() == Some(pr) && tab.ui.modal.is_none();
+        if gone || escaped {
+            tab.ui.reanchor = None;
+        }
     }
 }
 
@@ -1911,5 +2153,465 @@ mod tests {
             item: None,
         });
         assert!(!m.all_pending);
+    }
+
+    fn press(app: &mut App, key: KeyCode) {
+        app.world_mut()
+            .resource_mut::<bevy::input::ButtonInput<KeyCode>>()
+            .press(key);
+        app.update();
+        let mut keys = app
+            .world_mut()
+            .resource_mut::<bevy::input::ButtonInput<KeyCode>>();
+        keys.release(key);
+        keys.reset_all();
+    }
+
+    fn reanchoring(item: &str) -> (App, PrRef) {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let ui = &mut tabs.0.get_mut(&pr).unwrap().ui;
+            ui.reanchor = Some(item.into());
+            ui.section = ReviewSection::Diff;
+            ui.file = Some("src/client/http.rs".into());
+        }
+        testing::settle(&mut app);
+        (app, pr)
+    }
+
+    fn line_button(app: &mut App) -> Entity {
+        testing::find::<crate::screens::review::diff::LineButton>(app, |b| {
+            b.path == "src/client/http.rs"
+        })
+    }
+
+    #[test]
+    fn suggestions_that_wait_show_a_compact_banner_on_the_tabs() {
+        let (mut app, pr) = done_app();
+        top(&mut app, TopAction::Back);
+        assert_eq!(testing::count::<RevalidationBanner>(&mut app), 1);
+        assert!(testing::shows(
+            &mut app,
+            "3 suggestions from the revalidation ·"
+        ));
+        let review_them = testing::find::<ReviewThem>(&mut app, |_| true);
+        testing::activate(&mut app, review_them);
+        assert_eq!(testing::tab(&app, &pr).ui.revalidation, RevalView::Open);
+        assert_eq!(testing::count::<RevalidationRow>(&mut app), 5);
+    }
+
+    #[test]
+    fn the_banner_counts_what_is_left_and_goes_when_nothing_is() {
+        let (mut app, pr) = done_app();
+        top(&mut app, TopAction::Back);
+        let mut round = round_of_app(&app);
+        round.proposals[1].decision = Decision::Accepted;
+        testing::tell(
+            &mut app,
+            Tell::Revalidation(RevalidationTell::Round {
+                pr: pr.clone(),
+                round: Some(round.clone()),
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(testing::shows(
+            &mut app,
+            "2 suggestions from the revalidation ·"
+        ));
+        for p in round.proposals.iter_mut() {
+            p.decision = Decision::Rejected;
+        }
+        testing::tell(
+            &mut app,
+            Tell::Revalidation(RevalidationTell::Round {
+                pr,
+                round: Some(round),
+            }),
+        );
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<RevalidationBanner>(&mut app), 0);
+    }
+
+    #[test]
+    fn a_review_with_no_round_has_no_banner() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        assert_eq!(testing::count::<RevalidationBanner>(&mut app), 0);
+        assert_eq!(testing::count::<ReanchorStrip>(&mut app), 0);
+    }
+
+    #[test]
+    fn an_obsolete_draft_card_offers_restore() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        assert_eq!(
+            testing::count::<crate::screens::review::shell::DraftCardRestore>(&mut app),
+            1,
+            "only the demo's obsolete comment"
+        );
+        let restore =
+            testing::find::<crate::screens::review::shell::DraftCardRestore>(&mut app, |r| {
+                r.id == "i3"
+            });
+        testing::activate(&mut app, restore);
+        let tab = testing::tab(&app, &pr);
+        assert_eq!(tab.ui.reanchor.as_deref(), Some("i3"));
+        assert_eq!(tab.ui.section, ReviewSection::Diff);
+        assert_eq!(tab.ui.file.as_deref(), Some("src/client/http.rs"));
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "nothing is sent yet"
+        );
+        assert!(testing::shows(
+            &mut app,
+            "Click a line to anchor this comment"
+        ));
+    }
+
+    fn with_general_comment_obsolete(app: &mut App, pr: &PrRef) {
+        let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+        let ready = tabs.0.get_mut(pr).and_then(Tab::ready_mut).unwrap();
+        let review = &mut ready.view.review;
+        let id = review
+            .draft
+            .add(
+                clusia_core::DraftKind::General,
+                None,
+                None,
+                "A general note.",
+                NOW,
+            )
+            .expect("adds")
+            .id
+            .clone();
+        review
+            .draft
+            .items
+            .iter_mut()
+            .find(|i| i.id == id)
+            .unwrap()
+            .status = ItemStatus::Obsolete {
+            reason: "removed in the revalidation".into(),
+        };
+    }
+
+    #[test]
+    fn restoring_an_obsolete_general_comment_clears_its_mark() {
+        let mut app = testing::app(fixture::demo(NOW));
+        app.add_systems(Update, crate::bridge::demo_answers);
+        let pr = testing::open_ready(&mut app, false);
+        with_general_comment_obsolete(&mut app, &pr);
+        testing::settle(&mut app);
+        let id = testing::ready(&app, &pr)
+            .view
+            .review
+            .draft
+            .items
+            .iter()
+            .find(|i| i.kind == clusia_core::DraftKind::General)
+            .unwrap()
+            .id
+            .clone();
+        let restore =
+            testing::find::<crate::screens::review::shell::DraftCardRestore>(&mut app, |r| {
+                r.id == id
+            });
+        assert_eq!(
+            app.world()
+                .get::<crate::screens::review::shell::DraftCardRestore>(restore)
+                .unwrap()
+                .path,
+            None,
+            "a general comment has no place to ask for"
+        );
+        testing::activate(&mut app, restore);
+        testing::settle(&mut app);
+        let ready = testing::ready(&app, &pr);
+        let item = ready
+            .view
+            .review
+            .draft
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .unwrap();
+        assert_eq!(item.status, ItemStatus::Ok);
+        assert_eq!(item.kind, clusia_core::DraftKind::General);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.reanchor,
+            None,
+            "no Diff mode for it"
+        );
+    }
+
+    #[test]
+    fn restoring_a_general_comment_sends_one_ask_while_it_waits() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        with_general_comment_obsolete(&mut app, &pr);
+        testing::settle(&mut app);
+        let restore =
+            testing::find::<crate::screens::review::shell::DraftCardRestore>(&mut app, |r| {
+                r.path.is_none()
+            });
+        testing::activate(&mut app, restore);
+        let asks = testing::recorded(&mut app);
+        assert!(matches!(
+            asks.as_slice(),
+            [Ask::ReanchorDraftItem { anchor: None, .. }]
+        ));
+        testing::activate(&mut app, restore);
+        assert!(testing::recorded(&mut app).is_empty());
+    }
+
+    #[test]
+    fn a_round_told_meanwhile_does_not_free_a_waiting_re_anchor() {
+        let (mut app, pr) = reanchoring("i3");
+        let line = line_button(&mut app);
+        testing::activate(&mut app, line);
+        assert_eq!(testing::recorded(&mut app).len(), 1);
+        // The daemon's round event for the same change comes before the reply.
+        testing::tell(
+            &mut app,
+            Tell::Revalidation(RevalidationTell::Round {
+                pr: pr.clone(),
+                round: None,
+            }),
+        );
+        testing::activate(&mut app, line);
+        assert!(testing::recorded(&mut app).is_empty(), "still waiting");
+        testing::tell(
+            &mut app,
+            Tell::Revalidation(RevalidationTell::Refused {
+                pr,
+                item: Some("i3".into()),
+            }),
+        );
+        testing::activate(&mut app, line);
+        assert_eq!(testing::recorded(&mut app).len(), 1, "refused: a new try");
+    }
+
+    #[test]
+    fn a_cached_copy_has_no_restore() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            tabs.0
+                .get_mut(&pr)
+                .and_then(Tab::ready_mut)
+                .unwrap()
+                .cached_at = Some(NOW - 60);
+        }
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::count::<crate::screens::review::shell::DraftCardRestore>(&mut app),
+            0
+        );
+    }
+
+    #[test]
+    fn the_strip_names_the_comment() {
+        let (mut app, _) = reanchoring("i3");
+        assert_eq!(testing::count::<ReanchorStrip>(&mut app), 1);
+        assert!(testing::shows(
+            &mut app,
+            "Click a line to anchor this comment"
+        ));
+        assert!(testing::shows(
+            &mut app,
+            "http.rs:20 · This retry loop is gone in the new version."
+        ));
+        assert!(testing::shows(&mut app, "Make it a general comment"));
+    }
+
+    #[test]
+    fn a_click_on_a_line_moves_the_comment_there() {
+        let (mut app, pr) = reanchoring("i3");
+        let line = line_button(&mut app);
+        let (path, row_line, side) = {
+            let b = app
+                .world()
+                .get::<crate::screens::review::diff::LineButton>(line)
+                .unwrap();
+            (b.path.clone(), b.line, b.side)
+        };
+        testing::activate(&mut app, line);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::ReanchorDraftItem {
+                pr: pr.clone(),
+                id: "i3".into(),
+                anchor: Some(AnchorInput {
+                    path,
+                    line: row_line,
+                    start_line: None,
+                    side,
+                }),
+            }]
+        );
+        assert_eq!(
+            testing::tab(&app, &pr).ui.editor,
+            None,
+            "the click is not a new comment"
+        );
+        // A second click while it waits is ignored.
+        testing::activate(&mut app, line);
+        assert!(testing::recorded(&mut app).is_empty());
+        // The daemon answers: the mode ends.
+        testing::tell(
+            &mut app,
+            Tell::Revalidation(RevalidationTell::Reanchored {
+                pr: pr.clone(),
+                item: "i3".into(),
+            }),
+        );
+        assert_eq!(testing::tab(&app, &pr).ui.reanchor, None);
+        assert_eq!(testing::count::<ReanchorStrip>(&mut app), 0);
+    }
+
+    #[test]
+    fn a_refused_place_keeps_the_mode_and_can_be_tried_again() {
+        let (mut app, pr) = reanchoring("i3");
+        let line = line_button(&mut app);
+        testing::activate(&mut app, line);
+        testing::recorded(&mut app);
+        testing::tell(
+            &mut app,
+            Tell::Revalidation(RevalidationTell::Refused {
+                pr: pr.clone(),
+                item: Some("i3".into()),
+            }),
+        );
+        assert_eq!(testing::tab(&app, &pr).ui.reanchor.as_deref(), Some("i3"));
+        testing::activate(&mut app, line);
+        assert_eq!(testing::recorded(&mut app).len(), 1);
+    }
+
+    #[test]
+    fn escape_and_cancel_end_the_mode_without_sending() {
+        let (mut app, pr) = reanchoring("i3");
+        press(&mut app, KeyCode::Escape);
+        assert_eq!(testing::tab(&app, &pr).ui.reanchor, None);
+        let (mut app, pr) = reanchoring("i3");
+        let cancel = testing::find::<ReanchorCancel>(&mut app, |_| true);
+        testing::activate(&mut app, cancel);
+        assert_eq!(testing::tab(&app, &pr).ui.reanchor, None);
+        assert!(testing::recorded(&mut app).is_empty());
+    }
+
+    #[test]
+    fn make_it_a_general_comment_sends_no_place() {
+        let (mut app, pr) = reanchoring("i3");
+        let general = testing::find::<ReanchorGeneral>(&mut app, |_| true);
+        testing::activate(&mut app, general);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::ReanchorDraftItem {
+                pr,
+                id: "i3".into(),
+                anchor: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_cached_copy_does_not_re_anchor() {
+        let (mut app, pr) = reanchoring("i3");
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            tabs.0
+                .get_mut(&pr)
+                .and_then(Tab::ready_mut)
+                .unwrap()
+                .cached_at = Some(NOW - 60);
+        }
+        testing::settle(&mut app);
+        let line = line_button(&mut app);
+        testing::activate(&mut app, line);
+        assert!(testing::recorded(&mut app).is_empty());
+        assert!(!app.world().resource::<Toasts>().0.is_empty());
+        assert_eq!(testing::tab(&app, &pr).ui.reanchor.as_deref(), Some("i3"));
+    }
+
+    #[test]
+    fn a_comment_that_leaves_the_draft_ends_the_mode() {
+        let (mut app, pr) = reanchoring("i3");
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let ready = tabs.0.get_mut(&pr).and_then(Tab::ready_mut).unwrap();
+            ready.view.review.draft.items.retain(|i| i.id != "i3");
+        }
+        testing::settle(&mut app);
+        assert_eq!(testing::tab(&app, &pr).ui.reanchor, None);
+        assert_eq!(testing::count::<ReanchorStrip>(&mut app), 0);
+    }
+
+    #[test]
+    fn in_demo_mode_a_click_re_anchors_the_comment() {
+        let mut app = testing::app(fixture::demo(NOW));
+        app.add_systems(Update, crate::bridge::demo_answers);
+        let pr = testing::open_ready(&mut app, false);
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let ui = &mut tabs.0.get_mut(&pr).unwrap().ui;
+            ui.reanchor = Some("i3".into());
+            ui.section = ReviewSection::Diff;
+            ui.file = Some("src/client/http.rs".into());
+        }
+        testing::settle(&mut app);
+        let line = line_button(&mut app);
+        let target = app
+            .world()
+            .get::<crate::screens::review::diff::LineButton>(line)
+            .unwrap()
+            .line;
+        testing::activate(&mut app, line);
+        testing::settle(&mut app);
+        let ready = testing::ready(&app, &pr);
+        let item = ready
+            .view
+            .review
+            .draft
+            .items
+            .iter()
+            .find(|i| i.id == "i3")
+            .unwrap();
+        assert_eq!(item.anchor.as_ref().map(|a| a.line), Some(target));
+        assert_eq!(item.status, ItemStatus::Ok);
+        assert_eq!(testing::tab(&app, &pr).ui.reanchor, None);
+    }
+
+    #[test]
+    fn in_demo_mode_a_general_comment_loses_its_anchor() {
+        let mut app = testing::app(fixture::demo(NOW));
+        app.add_systems(Update, crate::bridge::demo_answers);
+        let pr = testing::open_ready(&mut app, false);
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .reanchor = Some("i3".into());
+        testing::settle(&mut app);
+        let general = testing::find::<ReanchorGeneral>(&mut app, |_| true);
+        testing::activate(&mut app, general);
+        testing::settle(&mut app);
+        let ready = testing::ready(&app, &pr);
+        let item = ready
+            .view
+            .review
+            .draft
+            .items
+            .iter()
+            .find(|i| i.id == "i3")
+            .unwrap();
+        assert_eq!(
+            (item.kind, item.anchor.clone(), item.status.clone()),
+            (clusia_core::DraftKind::General, None, ItemStatus::Ok)
+        );
     }
 }

@@ -27,7 +27,10 @@ use crate::screens::review::agent::{
     on_panel_toggle, resize_edge,
 };
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason, sync_editor_text};
-use crate::screens::review::revalidation::{Revalidations, revalidation_root, screen_wanted};
+use crate::screens::review::revalidation::{
+    Revalidations, banner_strip, pending_of, reanchor_preview, reanchor_strip, revalidation_root,
+    screen_wanted,
+};
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
@@ -190,6 +193,15 @@ pub struct DraftCardRemove {
     pub id: String,
 }
 
+/// **Restore** on an obsolete comment. A line comment (`path`) asks the Diff for its new place;
+/// any other comment has no place to ask for and gets its obsolete mark cleared at once.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct DraftCardRestore {
+    pub pr: PrRef,
+    pub id: String,
+    pub path: Option<String>,
+}
+
 /// A draft card's location and badge: they shrink and are cut so the remove × stays in the card.
 #[derive(Component, Debug)]
 pub struct DraftCardPlace;
@@ -223,6 +235,10 @@ struct TopView {
     read_only: Option<String>,
     retry: bool,
     closed: Option<String>,
+    /// Suggestions of the revalidation that wait for a click.
+    suggestions: usize,
+    /// The comment the Diff asks a place for: (id, its place and start).
+    reanchor: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,6 +712,7 @@ fn rebuild_top(
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
     checks: Res<crate::screens::review::checks::Checks>,
+    revalidations: Res<Revalidations>,
     mut tops: Query<(Entity, &mut ShellTop)>,
 ) {
     for (entity, mut top) in &mut tops {
@@ -704,12 +721,26 @@ fn rebuild_top(
         };
         let mut sections = v.sections;
         crate::screens::review::checks::badge_sections(&mut sections, checks.0.get(&top.pr));
+        let tab = &tabs.0[&top.pr];
+        let reanchor = tab.ui.reanchor.as_ref().and_then(|id| {
+            let item = tab
+                .ready()?
+                .view
+                .review
+                .draft
+                .items
+                .iter()
+                .find(|i| i.id == *id)?;
+            Some((id.clone(), reanchor_preview(item)))
+        });
         let want = TopView {
             header: v.header,
             sections,
             retry: v.read_only.is_some() && cached && model.connection == Connection::Live,
             read_only: v.read_only,
             closed: v.closed,
+            suggestions: pending_of(tab, revalidations.0.get(&top.pr)),
+            reanchor,
         };
         if top.built.as_ref() == Some(&want) {
             continue;
@@ -846,6 +877,12 @@ fn top_region(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &Top
         p.spawn(strip(Swatch::OrangeSoft)).with_children(|s| {
             s.spawn(text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange)));
         });
+    }
+    if v.suggestions > 0 {
+        banner_strip(p, fonts, pr, v.suggestions);
+    }
+    if let Some((id, preview)) = &v.reanchor {
+        reanchor_strip(p, fonts, pr, id, preview);
     }
     section_tabs(p, fonts, pr, &v.sections, true);
 }
@@ -1145,6 +1182,25 @@ fn draft_card_node(
                     place.spawn(badge(fonts, origin, Tone::Neutral));
                 }
             });
+            if !read_only && card.obsolete {
+                h.spawn((
+                    button(fonts, "Restore", Variant::Secondary),
+                    DraftCardRestore {
+                        pr: pr.clone(),
+                        id: card.id.clone(),
+                        path: match &card.target {
+                            CardTarget::Diff(path) => Some(path.clone()),
+                            _ => None,
+                        },
+                    },
+                    observe(on_card_restore),
+                ))
+                .entry::<Node>()
+                .and_modify(|mut node| {
+                    node.height = px(24);
+                    node.align_self = AlignSelf::Center;
+                });
+            }
             if !read_only {
                 // A button inside the card's button: its click stops here. A compact × so the
                 // location and the whole badge fit at the panel width.
@@ -1379,6 +1435,42 @@ fn on_card(activate: On<Activate>, cards: Query<&DraftCardButton>, mut tabs: Res
         }
         CardTarget::Comments => tab.ui.section = ReviewSection::Comments,
         CardTarget::Stay => {}
+    }
+}
+
+fn on_card_restore(
+    activate: On<Activate>,
+    buttons: Query<&DraftCardRestore>,
+    mut tabs: ResMut<ReviewTabs>,
+    model: Res<Model>,
+    mut rounds: ResMut<Revalidations>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
+) {
+    let Ok(b) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Some(reason) = read_only_reason(&tabs, &model, &b.pr) {
+        return not_sent(&mut toasts, &time, reason);
+    }
+    match &b.path {
+        Some(path) => {
+            if let Some(tab) = tabs.0.get_mut(&b.pr) {
+                tab.ui.reanchor = Some(b.id.clone());
+                crate::screens::review::agent::suggestion::show_file(&mut tab.ui, path);
+            }
+        }
+        None => {
+            let waiting = rounds.0.entry(b.pr.clone()).or_default();
+            if waiting.reanchoring.insert(b.id.clone()) {
+                asks.send(Ask::ReanchorDraftItem {
+                    pr: b.pr.clone(),
+                    id: b.id.clone(),
+                    anchor: None,
+                });
+            }
+        }
     }
 }
 

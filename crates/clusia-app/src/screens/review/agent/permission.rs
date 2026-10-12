@@ -1747,6 +1747,33 @@ mod tests {
     }
 
     #[test]
+    fn a_revalidation_request_opens_a_modal_that_names_the_revalidation() {
+        let mut app = open();
+        let mut r = bash("perm-rev");
+        r.origin = TurnOrigin::Revalidation;
+        ask(&mut app, r);
+        assert!(testing::shows(
+            &mut app,
+            "Revalidation wants to run a command"
+        ));
+        assert!(!testing::shows(
+            &mut app,
+            "Claude Code wants to run a command"
+        ));
+    }
+
+    #[test]
+    fn a_revalidation_request_leaves_no_line_in_the_chat() {
+        let mut app = open();
+        let before = app.world().resource::<Chats>().0[&pr()].lines.len();
+        let mut r = bash("perm-rev");
+        r.origin = TurnOrigin::Revalidation;
+        ask(&mut app, r);
+        resolve_from(&mut app, "perm-rev", TurnOrigin::Revalidation);
+        assert_eq!(app.world().resource::<Chats>().0[&pr()].lines.len(), before);
+    }
+
+    #[test]
     fn a_check_request_leaves_no_line_in_the_chat() {
         let mut app = open();
         let before = app.world().resource::<Chats>().0[&pr()].lines.len();

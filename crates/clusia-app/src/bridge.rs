@@ -191,6 +191,13 @@ pub enum Ask {
         accept: bool,
     },
     AcceptAllProposals(PrRef),
+    /// Points a draft item at another line (`anchor: None`: makes it a general comment). A
+    /// refusal comes back as a warning and `RevalidationTell::Refused`; success as `Reanchored`.
+    ReanchorDraftItem {
+        pr: PrRef,
+        id: String,
+        anchor: Option<AnchorInput>,
+    },
 }
 
 /// What the agent did, for the review's chat. Built from the daemon's agent events, or by the
@@ -474,6 +481,8 @@ pub enum RevalidationTell {
     Settled { pr: PrRef, item: Option<String> },
     /// A decision that did not go through: the buttons are free again.
     Refused { pr: PrRef, item: Option<String> },
+    /// A draft item has its new place (the refreshed review arrives as `Tell::ReviewFile`).
+    Reanchored { pr: PrRef, item: String },
 }
 
 impl RevalidationTell {
@@ -481,7 +490,8 @@ impl RevalidationTell {
         match self {
             RevalidationTell::Round { pr, .. }
             | RevalidationTell::Settled { pr, .. }
-            | RevalidationTell::Refused { pr, .. } => pr,
+            | RevalidationTell::Refused { pr, .. }
+            | RevalidationTell::Reanchored { pr, .. } => pr,
         }
     }
 
@@ -822,6 +832,16 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
             teller.send(Tell::Revalidation(RevalidationTell::Refused {
                 pr: pr.clone(),
                 item: Some(item.clone()),
+            }));
+        }
+        Ask::ReanchorDraftItem { pr, id, .. } => {
+            teller.send(Tell::Notice {
+                text: "Not connected to clusiad — not sent".into(),
+                warning: true,
+            });
+            teller.send(Tell::Revalidation(RevalidationTell::Refused {
+                pr: pr.clone(),
+                item: Some(id.clone()),
             }));
         }
         Ask::AcceptAllProposals(pr) => {
@@ -1396,6 +1416,30 @@ async fn answer(
         Ask::AcceptAllProposals(pr) => {
             let cmd = Command::AcceptAllProposals { pr: pr.clone() };
             decision_write(client, teller, cmd, pr, None).await?;
+        }
+        Ask::ReanchorDraftItem { pr, id, anchor } => {
+            let cmd = Command::ReanchorDraftItem {
+                pr: pr.clone(),
+                id: id.clone(),
+                anchor,
+            };
+            match client.request(cmd).await {
+                Ok(_) => teller.send(Tell::Revalidation(RevalidationTell::Reanchored {
+                    pr,
+                    item: id,
+                })),
+                Err(ClientError::Server(e)) => {
+                    teller.send(Tell::Notice {
+                        text: e.message,
+                        warning: true,
+                    });
+                    teller.send(Tell::Revalidation(RevalidationTell::Refused {
+                        pr,
+                        item: Some(id),
+                    }));
+                }
+                Err(e) => return Err(lost(e)),
+            }
         }
         Ask::AcceptFinding { pr, id, body } => {
             let cmd = Command::AcceptFinding {
@@ -2091,6 +2135,7 @@ pub(crate) fn pump(
                     model.asked = false;
                     model.pending.clear();
                     model.reanchor.clear();
+                    model.reanchoring.clear();
                     model.all_pending = false;
                 }
             }
@@ -2141,6 +2186,13 @@ pub(crate) fn pump(
                     && let Some(tab) = tabs.0.get_mut(pr)
                 {
                     crate::screens::review::revalidation::enter_reanchor(tab, item);
+                }
+                // The item has its new place: the Diff stops asking for one.
+                if let RevalidationTell::Reanchored { pr, item } = &tell
+                    && let Some(tab) = tabs.0.get_mut(pr)
+                    && tab.ui.reanchor.as_deref() == Some(item)
+                {
+                    tab.ui.reanchor = None;
                 }
                 revalidations.apply(&tell);
             }
@@ -2288,6 +2340,9 @@ pub(crate) fn demo_answers(
             }
             Ask::AcceptAllProposals(pr) => {
                 tells.extend(demo_decide(&tabs, &revalidations, &pr, None, true));
+            }
+            Ask::ReanchorDraftItem { pr, id, anchor } => {
+                tells.extend(demo_reanchor(&tabs, &pr, &id, anchor));
             }
             Ask::Probe => tells.push(Tell::Probe(fixture::demo_probe())),
             Ask::AddItem {
@@ -2722,6 +2777,55 @@ fn demo_decide(
             }),
         ],
         Err(message) => refuse(message),
+    }
+}
+
+/// Demo mode: points a draft item elsewhere with the daemon's own rule, on a copy of the review.
+fn demo_reanchor(
+    tabs: &ReviewTabs,
+    pr: &PrRef,
+    id: &str,
+    anchor: Option<AnchorInput>,
+) -> Vec<Tell> {
+    let refuse = |text: String| {
+        vec![
+            Tell::Notice {
+                text,
+                warning: true,
+            },
+            Tell::Revalidation(RevalidationTell::Refused {
+                pr: pr.clone(),
+                item: Some(id.to_string()),
+            }),
+        ]
+    };
+    let Some(ready) = tabs.0.get(pr).and_then(|t| t.ready()) else {
+        return refuse("This review is not open".into());
+    };
+    let mut review = ready.view.review.clone();
+    let anchor = anchor.map(|a| Anchor {
+        commit: match a.side {
+            Side::Right => review.head_sha.clone(),
+            Side::Left => review.base_sha.clone(),
+        },
+        path: a.path,
+        line: a.line,
+        start_line: a.start_line,
+        side: a.side,
+    });
+    match review.draft.reanchor(id, anchor) {
+        Ok(()) => {
+            // A comment that has a place again is no longer a removal.
+            review.removed.remove(id);
+            vec![
+                Tell::ReviewFile(Box::new(review)),
+                Tell::Revalidation(RevalidationTell::Reanchored {
+                    pr: pr.clone(),
+                    item: id.to_string(),
+                }),
+            ]
+        }
+        Err(e) => refuse(e.to_string()),
     }
 }
 

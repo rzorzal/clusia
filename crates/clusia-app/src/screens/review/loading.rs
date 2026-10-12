@@ -952,6 +952,11 @@ mod tests {
             "Summarizing",
             "summary only"
         );
+        assert_eq!(
+            detail(&step(StepStatus::Done, Some("Revalidating your draft"))),
+            "Revalidating your draft",
+            "a review that opens with new commits says the draft is being checked"
+        );
         assert_eq!(detail(&step(StepStatus::Done, None)), "Connected");
         assert_eq!(detail(&step(StepStatus::Done, Some("  "))), "Connected");
         assert!(

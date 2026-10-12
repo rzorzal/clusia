@@ -88,7 +88,7 @@ pub fn news_row(item: &NewsItem) -> NewsRow {
         NewsKind::Checks => ("•", Tone::Neutral, None),
         NewsKind::Local => ("+", Tone::Neutral, Some(ReviewSection::Diff)),
         NewsKind::Moved => ("↻", Tone::Orange, Some(ReviewSection::Diff)),
-        NewsKind::Revalidated => ("⟳", Tone::Green, None),
+        NewsKind::Revalidated => ("↻", Tone::Green, None),
     };
     let (who, source) = match item.source.strip_prefix("You via ") {
         Some(client) => ("You".to_string(), client_name(client)),
@@ -441,7 +441,7 @@ mod tests {
             None,
             "Draft revalidated: 1 moved, 1 obsolete, 1 new wording",
         ));
-        assert_eq!(row.icon, "⟳");
+        assert_eq!(row.icon, "↻");
         assert_eq!(row.what, "Draft revalidated");
         assert_eq!(row.detail, "1 moved, 1 obsolete, 1 new wording");
         assert_eq!(row.source, "Claude Code");
