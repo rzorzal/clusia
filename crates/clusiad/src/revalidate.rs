@@ -288,6 +288,8 @@ pub(crate) async fn open_for_new_head(
         || !available(shared, &harness)
         || !review.draft.items.iter().any(askable)
     {
+        // The old proposals were made against an older head; `removed` stays, it is durable.
+        review.revalidation = None;
         return None;
     }
     let quiet = if immediate {

@@ -474,7 +474,7 @@ fn counts_line(rows: &[RowView], unreadable: u32) -> String {
     )
 }
 
-/// What SP1's relocation did without the agent: `Your draft followed the code: 1 moved, …`.
+/// What the deterministic relocation did without the agent: `Your draft followed the code: 1 moved, …`.
 fn sp1_summary(round: &Revalidation) -> String {
     let mut parts = Vec::new();
     if round.sp1_moved > 0 {

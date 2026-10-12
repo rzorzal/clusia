@@ -162,6 +162,34 @@ async fn a_new_head_drops_old_proposals_and_keeps_where_the_round_began() {
 }
 
 #[tokio::test]
+async fn a_new_head_with_revalidation_off_drops_the_old_proposals() {
+    let w = world().await;
+    let (mut c, ids) = saved(&w).await;
+    use_script(&w, Script::one(answer(&ids))).await;
+    push(&w, &mut c, "zero\n").await;
+    let mut watcher = reviews_watcher(&w).await;
+    c.request(Command::Revalidate { pr: pr7() }).await.unwrap();
+    common::agent::until(&mut watcher, round_is(is_done)).await;
+    assert!(
+        !review_of(&mut c)
+            .await
+            .revalidation
+            .unwrap()
+            .proposals
+            .is_empty()
+    );
+    set_config(&w, "harness.revalidate", "false").await;
+
+    push(&w, &mut c, "zero\nzero\n").await;
+
+    assert!(
+        review_of(&mut c).await.revalidation.is_none(),
+        "proposals made against an older head cannot be decided"
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_push_in_the_quiet_period_restarts_it() {
     let w = world().await;
     let (mut c, ids) = saved(&w).await;

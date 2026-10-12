@@ -112,7 +112,7 @@ async fn keeping_a_move_moves_the_comment_and_tells_the_windows() {
             from_path: FILE.into(),
             from_line: 2
         },
-        "moved from where it was before the round, not from where SP1 put it"
+        "moved from where it was before the round, not from where the relocation put it"
     );
     assert_eq!(decision(&review, &ids.a), Decision::Accepted);
     assert_eq!(

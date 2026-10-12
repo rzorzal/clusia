@@ -269,6 +269,11 @@ async fn follow(
                     _ => {}
                 }
             }
+            ref gone if review_gone(gone, pr, begun) => {
+                return Err(CliError::Other(
+                    "The review was published or discarded; nothing was revalidated".into(),
+                ));
+            }
             Event::PermissionRequested {
                 pr: of,
                 id,
@@ -291,12 +296,31 @@ async fn follow(
     finish(client, pr, finished).await
 }
 
+/// The review's round was removed while this run was followed: the review was published or
+/// discarded, so no `Done` or `Failed` will come.
+fn review_gone(event: &Event, pr: &PrRef, begun: bool) -> bool {
+    begun && matches!(event, Event::RevalidationChanged { pr: of, revalidation: None } if of == pr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clusia_core::revalidation::{CommitLine, Decision, Proposal};
     use clusia_core::{DraftKind, Origin, Side};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn a_removed_round_ends_a_followed_run() {
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let other: PrRef = "acme/widgets#8".parse().unwrap();
+        let gone = |of: &PrRef| Event::RevalidationChanged {
+            pr: of.clone(),
+            revalidation: None,
+        };
+        assert!(review_gone(&gone(&pr), &pr, true));
+        assert!(!review_gone(&gone(&pr), &pr, false), "an older run's end");
+        assert!(!review_gone(&gone(&other), &pr, true));
+    }
 
     fn anchor(line: u32) -> Anchor {
         Anchor {

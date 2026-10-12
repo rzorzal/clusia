@@ -436,8 +436,10 @@ pub(crate) async fn check_saved_reviews(shared: &Arc<Shared>) {
             },
         );
         announce(shared, &review);
-        if let Some(at) = round_at {
+        if head_changed {
             crate::revalidate::tell(shared, &review);
+        }
+        if let Some(at) = round_at {
             crate::revalidate::reschedule(shared, &pr, at);
         } else if head_changed {
             // A base that moved alone may obsolete comments, but brings no commits to re-read.
