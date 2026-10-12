@@ -12,8 +12,8 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::revalidation::{
-    DecideError, Decision, Revalidation, RoundState, RowKind, Verdict, decide, fingerprint,
-    pending, row_kind,
+    DecideError, Decision, Revalidation, RoundState, RowKind, Verdict, decidable, decide,
+    fingerprint, pending, row_kind,
 };
 use clusia_core::{Anchor, FileDiff, ItemStatus, PrRef, Review};
 
@@ -43,9 +43,15 @@ pub struct RevalidationModel {
     pub pending: BTreeSet<String>,
     /// *Accept all* waits for the daemon.
     pub all_pending: bool,
+    /// Items whose *Keep and re-anchor* waits for the daemon: the Diff opens on its re-anchor
+    /// mode once the decision is settled, not before.
+    pub reanchor: BTreeSet<String>,
 }
 
 impl RevalidationModel {
+    /// A `Settled` or `Refused` answer does not touch `round`: the daemon sends the new round
+    /// (`Round`) before it settles a decision, and until one arrives `round_of` keeps showing
+    /// what it showed.
     pub fn apply(&mut self, tell: &RevalidationTell) {
         match tell {
             RevalidationTell::Round { round, .. } => {
@@ -61,14 +67,19 @@ impl RevalidationModel {
                     .collect();
                 self.pending.retain(|item| waiting.contains(item));
             }
-            RevalidationTell::Settled { item, .. } | RevalidationTell::Refused { item, .. } => {
-                match item {
-                    Some(item) => {
-                        self.pending.remove(item);
-                    }
-                    None => self.all_pending = false,
+            RevalidationTell::Settled { item, .. } => match item {
+                Some(item) => {
+                    self.pending.remove(item);
                 }
-            }
+                None => self.all_pending = false,
+            },
+            RevalidationTell::Refused { item, .. } => match item {
+                Some(item) => {
+                    self.pending.remove(item);
+                    self.reanchor.remove(item);
+                }
+                None => self.all_pending = false,
+            },
         }
     }
 }
@@ -80,6 +91,31 @@ pub struct Revalidations(pub HashMap<PrRef, RevalidationModel>);
 impl Revalidations {
     pub fn apply(&mut self, tell: &RevalidationTell) {
         self.0.entry(tell.pr().clone()).or_default().apply(tell);
+    }
+
+    /// Whether `item`'s *Keep and re-anchor* was waiting; it no longer is.
+    pub fn take_reanchor(&mut self, pr: &PrRef, item: &str) -> bool {
+        self.0.get_mut(pr).is_some_and(|m| m.reanchor.remove(item))
+    }
+}
+
+/// Leaves the screen for the Diff on `item`'s file, where its new place is asked for.
+pub fn enter_reanchor(tab: &mut Tab, item: &str) {
+    let Some(ready) = tab.ready() else { return };
+    let path = ready
+        .view
+        .review
+        .draft
+        .items
+        .iter()
+        .find(|i| i.id == item)
+        .and_then(|i| i.anchor.as_ref())
+        .map(|a| a.path.clone());
+    tab.ui.reanchor = Some(item.to_string());
+    tab.ui.revalidation = RevalView::Closed;
+    match path {
+        Some(path) => show_file(&mut tab.ui, &path),
+        None => tab.ui.section = crate::review_state::ReviewSection::Diff,
     }
 }
 
@@ -302,10 +338,8 @@ pub fn row_views(
         };
         let kind = row_kind(p, item);
         let (label, tone) = label_of(kind);
-        let decidable = matches!(
-            kind,
-            RowKind::Moved | RowKind::Obsolete | RowKind::NewWording
-        );
+        // The daemon's own rule: a move with no anchor to move from or to has nothing to click.
+        let has_buttons = decidable(p, item);
         let undecided = p.decision == Decision::Pending;
         let mut place = draft_card(item).title;
         let mut note = None;
@@ -343,7 +377,7 @@ pub fn row_views(
         }
         let mut actions = Vec::new();
         let mut outcome = None;
-        if decidable && undecided {
+        if has_buttons && undecided {
             let obsolete_item = matches!(item.status, ItemStatus::Obsolete { .. });
             let (reject, accept): (&'static str, &'static str) = match kind {
                 RowKind::Moved => ("Put it back", "Keep the move"),
@@ -377,7 +411,7 @@ pub fn row_views(
                 accept: true,
                 enabled: on,
             });
-        } else if decidable {
+        } else if has_buttons {
             outcome = Some(decided_text(kind, p.decision == Decision::Accepted).to_string());
         }
         rows.push(RowView {
@@ -540,7 +574,12 @@ fn banner_view(
                 .commits
                 .iter()
                 .take(COMMITS_SHOWN)
-                .map(|c| (c.sha.chars().take(7).collect(), printable(&c.title)))
+                .map(|c| {
+                    (
+                        printable(&c.sha).chars().take(7).collect(),
+                        printable(&c.title),
+                    )
+                })
                 .collect();
             done.more = commits.saturating_sub(COMMITS_SHOWN);
             done
@@ -933,7 +972,7 @@ fn on_top(
     };
     let guarded = matches!(
         action,
-        TopAction::AcceptAll | TopAction::RevalidateNow | TopAction::TryAgain
+        TopAction::AcceptAll | TopAction::Stop | TopAction::RevalidateNow | TopAction::TryAgain
     );
     if guarded && let Some(reason) = read_only_reason(&tabs, &model, pr) {
         return not_sent(&mut toasts, &time, reason);
@@ -965,7 +1004,7 @@ fn on_top(
 fn on_proposal(
     activate: On<Activate>,
     buttons: Query<&ProposalButton>,
-    mut tabs: ResMut<ReviewTabs>,
+    tabs: Res<ReviewTabs>,
     model: Res<Model>,
     mut rounds: ResMut<Revalidations>,
     mut toasts: ResMut<Toasts>,
@@ -987,28 +1026,23 @@ fn on_proposal(
         item: item.clone(),
         accept: *accept,
     });
-    // Refusing an obsolete item asks the Diff for its new place.
-    let Some(tab) = tabs.0.get_mut(pr) else {
-        return;
-    };
-    let Some(ready) = tab.ready() else { return };
-    let obsolete = ready
-        .view
-        .review
-        .draft
-        .items
-        .iter()
-        .find(|i| i.id == *item)
-        .filter(|i| matches!(i.status, ItemStatus::Obsolete { .. }));
-    if let (false, Some(found)) = (*accept, obsolete) {
-        let path = found.anchor.as_ref().map(|a| a.path.clone());
-        tab.ui.reanchor = Some(item.clone());
-        tab.ui.revalidation = RevalView::Closed;
-        if let Some(path) = path {
-            show_file(&mut tab.ui, &path);
-        } else {
-            tab.ui.section = crate::review_state::ReviewSection::Diff;
-        }
+    // Refusing an obsolete item asks the Diff for its new place, once the daemon settles it.
+    let obsolete = tabs.0.get(pr).and_then(|t| t.ready()).is_some_and(|ready| {
+        ready
+            .view
+            .review
+            .draft
+            .items
+            .iter()
+            .any(|i| i.id == *item && matches!(i.status, ItemStatus::Obsolete { .. }))
+    });
+    if !*accept && obsolete {
+        rounds
+            .0
+            .entry(pr.clone())
+            .or_default()
+            .reanchor
+            .insert(item.clone());
     }
 }
 
@@ -1267,11 +1301,87 @@ mod tests {
                 accept: false,
             }]
         );
+        // The screen stays until the daemon takes the decision.
+        let tab = testing::tab(&app, &pr);
+        assert_eq!(
+            (tab.ui.reanchor, tab.ui.revalidation),
+            (None, RevalView::Auto)
+        );
+        testing::tell(
+            &mut app,
+            Tell::Revalidation(RevalidationTell::Settled {
+                pr: pr.clone(),
+                item: Some("i3".into()),
+            }),
+        );
+        testing::settle(&mut app);
         let tab = testing::tab(&app, &pr);
         assert_eq!(tab.ui.reanchor.as_deref(), Some("i3"));
         assert_eq!(tab.ui.revalidation, RevalView::Closed);
         assert_eq!(tab.ui.section, ReviewSection::Diff);
         assert_eq!(tab.ui.file.as_deref(), Some("src/client/http.rs"));
+    }
+
+    #[test]
+    fn a_refused_re_anchor_keeps_the_screen() {
+        let (mut app, pr) = done_app();
+        click(&mut app, "i3", false);
+        testing::recorded(&mut app);
+        testing::tell(
+            &mut app,
+            Tell::Revalidation(RevalidationTell::Refused {
+                pr: pr.clone(),
+                item: Some("i3".into()),
+            }),
+        );
+        // A later answer for the same item must not open the Diff.
+        testing::tell(
+            &mut app,
+            Tell::Revalidation(RevalidationTell::Settled {
+                pr: pr.clone(),
+                item: Some("i3".into()),
+            }),
+        );
+        testing::settle(&mut app);
+        let tab = testing::tab(&app, &pr);
+        assert_eq!(
+            (tab.ui.reanchor, tab.ui.revalidation),
+            (None, RevalView::Auto)
+        );
+        assert_eq!(testing::count::<RevalidationRow>(&mut app), 5);
+    }
+
+    #[test]
+    fn a_move_with_nothing_to_move_from_has_no_buttons() {
+        let (app, pr) = done_app();
+        let ready = testing::ready(&app, &pr);
+        let mut round = round_of_app(&app);
+        round.proposals[1].before = None;
+        let rows = row_views(
+            &round,
+            &ready.view.review,
+            &ready.view.diff,
+            &BTreeSet::new(),
+        );
+        assert!(rows[1].actions.is_empty());
+        assert_eq!(pending(&round, &ready.view.review.draft), 2);
+    }
+
+    #[test]
+    fn stop_is_refused_on_a_cached_copy() {
+        let (mut app, pr) = state_app(RoundState::Running { activity: None });
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            tabs.0
+                .get_mut(&pr)
+                .and_then(Tab::ready_mut)
+                .unwrap()
+                .cached_at = Some(NOW - 60);
+        }
+        testing::settle(&mut app);
+        top(&mut app, TopAction::Stop);
+        assert!(testing::recorded(&mut app).is_empty());
+        assert!(!app.world().resource::<Toasts>().0.is_empty());
     }
 
     #[test]
@@ -1574,9 +1684,11 @@ mod tests {
 
     #[test]
     fn in_demo_mode_nothing_changes_until_a_click() {
-        let (app, pr) = demo_decisions_app();
-        let before = testing::ready(&app, &pr).view.review.draft;
-        assert_eq!(testing::ready(&app, &pr).view.review.draft, before);
+        let (mut app, pr) = demo_decisions_app();
+        testing::settle(&mut app);
+        assert_eq!(body_of(&app, &pr, "i4"), "Comment i4.");
+        assert!(rows_of(&app).iter().all(|r| r.outcome.is_none()));
+        assert!(testing::recorded(&mut app).is_empty());
     }
 
     #[test]

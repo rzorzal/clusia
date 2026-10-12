@@ -246,7 +246,7 @@ pub fn row_kind(p: &Proposal, item: &DraftItem) -> RowKind {
 
 /// Whether a click can settle this proposal for this item: the row has something to decide, and
 /// a move needs both the anchor the item had and the one it has.
-fn decidable(p: &Proposal, item: &DraftItem) -> bool {
+pub fn decidable(p: &Proposal, item: &DraftItem) -> bool {
     match row_kind(p, item) {
         RowKind::Kept | RowKind::NotChecked => false,
         RowKind::Moved => p.before.is_some() && item.anchor.is_some(),

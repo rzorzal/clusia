@@ -834,6 +834,10 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
                 item: None,
             }));
         }
+        Ask::Revalidate(_) | Ask::StopRevalidation(_) => teller.send(Tell::Notice {
+            text: "Not connected to clusiad — not sent".into(),
+            warning: true,
+        }),
         _ => return false,
     }
     true
@@ -2126,6 +2130,16 @@ pub(crate) fn pump(
                     && let Some(tab) = tabs.0.get_mut(pr)
                 {
                     tab.ui.revalidation = crate::review_state::RevalView::Auto;
+                }
+                // *Keep and re-anchor* leaves for the Diff only once the daemon took the decision.
+                if let RevalidationTell::Settled {
+                    pr,
+                    item: Some(item),
+                } = &tell
+                    && revalidations.take_reanchor(pr, item)
+                    && let Some(tab) = tabs.0.get_mut(pr)
+                {
+                    crate::screens::review::revalidation::enter_reanchor(tab, item);
                 }
                 revalidations.apply(&tell);
             }
@@ -3731,6 +3745,8 @@ mod tests {
         ));
         assert!(offline(&Ask::AcceptAllProposals(pr.clone()), &teller));
         assert!(offline(&Ask::GetRevalidation(pr.clone()), &teller));
+        assert!(offline(&Ask::StopRevalidation(pr.clone()), &teller));
+        assert!(offline(&Ask::Revalidate(pr.clone()), &teller));
         let told: Vec<Tell> = rx.try_iter().collect();
         assert!(told.iter().any(|t| matches!(
             t,
@@ -3744,7 +3760,7 @@ mod tests {
             told.iter()
                 .filter(|t| matches!(t, Tell::Notice { warning: true, .. }))
                 .count(),
-            2,
+            4,
             "a read says nothing"
         );
     }
