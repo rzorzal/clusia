@@ -339,6 +339,7 @@ pub(crate) async fn notify_finished(shared: &Shared, pr: &PrRef, turn: u64) {
 /// may be waiting for that lock and would not see the stop while it is held.
 pub(crate) async fn stop(shared: &Shared, pr: &PrRef) {
     crate::checks::stop_all(shared, pr, crate::turns::Why::Ended).await;
+    crate::revalidate::stop_all(shared, pr, crate::turns::Why::Ended).await;
     shared.sessions.end(shared, pr).await;
     shared.permissions.forget_review(shared, pr);
 }
@@ -351,6 +352,7 @@ pub(crate) fn forget_checks(shared: &Shared, pr: &PrRef) {
         state.accepted_findings.clear();
     });
     crate::checks::forget(shared, pr);
+    crate::revalidate::forget(shared, pr);
 }
 
 /// The review is gone: what was still waiting is dismissed and the summary forgotten, so a later

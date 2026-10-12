@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod git_fixture;
 pub mod github_mock;
+pub mod revalidation;
 pub mod review_world;
 
 use std::path::PathBuf;

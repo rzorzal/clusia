@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clusia_core::time::parse_rfc3339;
 use clusia_core::{
@@ -285,7 +286,7 @@ async fn note_pr_ended(shared: &Shared, pr: &PrRef, state: PrState) {
 }
 
 /// Relocates saved reviews whose pull request moved (spec §6.6); deterministic, no agent involved.
-pub(crate) async fn check_saved_reviews(shared: &Shared) {
+pub(crate) async fn check_saved_reviews(shared: &Arc<Shared>) {
     // The sync status says whether GitHub is reachable; polling every PR while offline only logs noise.
     if shared.sync.read().await.state != SyncState::Online {
         return;
@@ -368,6 +369,7 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
         };
         let head_changed = review.head_sha != detail.head_sha;
         let old_head = review.head_sha.clone();
+        let before = crate::revalidate::snapshot(&review);
         let report = relocate::relocate_review(
             &mut review,
             &detail,
@@ -386,6 +388,21 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             tracing::warn!(error = %e, pr = %pr, "cannot mark a saved review outdated");
             continue;
         }
+        // A new head starts, or extends, a round of revalidation; the notification then waits for
+        // the round's end.
+        let round_at = if head_changed {
+            crate::revalidate::open_for_new_head(
+                shared,
+                &mut review,
+                before,
+                &old_head,
+                report,
+                false,
+            )
+            .await
+        } else {
+            None
+        };
         if save(shared, &review).is_err() {
             tracing::warn!(pr = %pr, "cannot save a re-anchored review");
             continue;
@@ -411,8 +428,11 @@ pub(crate) async fn check_saved_reviews(shared: &Shared) {
             },
         );
         announce(shared, &review);
-        // A base that moved alone may obsolete comments, but brings no commits to re-read.
-        if head_changed {
+        if let Some(at) = round_at {
+            crate::revalidate::tell(shared, &review);
+            crate::revalidate::reschedule(shared, &pr, at);
+        } else if head_changed {
+            // A base that moved alone may obsolete comments, but brings no commits to re-read.
             crate::notifications::review_outdated(shared, &review, &old_head).await;
         }
     }

@@ -33,6 +33,8 @@ pub(crate) enum Why {
     User,
     Shutdown,
     Ended,
+    /// The pull request got a new head, so what the turn reads is out of date.
+    Superseded,
 }
 
 impl Why {
@@ -42,6 +44,7 @@ impl Why {
             Why::User => "Stopped by you",
             Why::Shutdown => "The daemon stopped while this turn was running",
             Why::Ended => "Stopped because the review ended",
+            Why::Superseded => "Stopped because the pull request got new commits",
         }
     }
 }

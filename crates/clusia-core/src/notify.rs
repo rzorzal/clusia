@@ -274,6 +274,20 @@ impl NotifyEvent {
         )
     }
 
+    /// A saved review's draft was re-read against new commits; `summary` says what changed.
+    pub fn review_revalidated(pr: &PrRef, summary: &str, key: impl Into<String>, at: i64) -> Self {
+        Self::about(
+            EventKind::CommitsAfterReview,
+            pr,
+            key,
+            at,
+            format!("Review #{} revalidated: {summary}", pr.number),
+            "Claude Code checked your draft against the new commits. Nothing changes until you accept it."
+                .to_string(),
+            Self::review_of(pr, None),
+        )
+    }
+
     pub fn reply_to_you(
         pr: &PrRef,
         pr_title: &str,

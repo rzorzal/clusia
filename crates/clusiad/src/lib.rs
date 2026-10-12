@@ -22,6 +22,7 @@ mod permissions;
 mod publish;
 mod relocate;
 mod retention;
+mod revalidate;
 mod reviews;
 mod server;
 mod sessions;

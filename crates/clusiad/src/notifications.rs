@@ -656,6 +656,18 @@ pub(crate) async fn review_outdated(shared: &Shared, review: &Review, old_head: 
     .await;
 }
 
+/// A saved review's draft was re-read against the commits its pull request got; `summary` says
+/// what the agent proposes.
+pub(crate) async fn review_revalidated(shared: &Shared, review: &Review, summary: &str) {
+    let event = NotifyEvent::review_revalidated(
+        &review.pr,
+        summary,
+        format!("revalidated:{}:{}", review.pr, review.head_sha),
+        now_unix(),
+    );
+    deliver(shared, vec![event]).await;
+}
+
 /// Called with every sync status the daemon computes.
 pub(crate) async fn sync_observed(shared: &Shared, previous: SyncState, state: SyncState) {
     let now = now_unix();
