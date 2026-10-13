@@ -977,11 +977,15 @@ impl From<HarnessKind> for clusia_core::config::HarnessKind {
     }
 }
 
-impl From<clusia_core::config::HarnessKind> for HarnessKind {
-    fn from(kind: clusia_core::config::HarnessKind) -> Self {
+/// A custom command is never scanned for, so it has no scan kind.
+impl TryFrom<clusia_core::config::HarnessKind> for HarnessKind {
+    type Error = ();
+
+    fn try_from(kind: clusia_core::config::HarnessKind) -> Result<Self, ()> {
         match kind {
-            clusia_core::config::HarnessKind::ClaudeCode => Self::ClaudeCode,
-            clusia_core::config::HarnessKind::Codex => Self::Codex,
+            clusia_core::config::HarnessKind::ClaudeCode => Ok(Self::ClaudeCode),
+            clusia_core::config::HarnessKind::Codex => Ok(Self::Codex),
+            clusia_core::config::HarnessKind::Custom => Err(()),
         }
     }
 }
@@ -3428,8 +3432,9 @@ mod tests {
             (HarnessKind::Codex, Config::Codex),
         ] {
             assert_eq!(Config::from(wire_kind), config);
-            assert_eq!(HarnessKind::from(config), wire_kind);
+            assert_eq!(HarnessKind::try_from(config), Ok(wire_kind));
         }
+        assert_eq!(HarnessKind::try_from(Config::Custom), Err(()));
         assert_eq!(wire(&HarnessKind::Codex), r#""codex""#);
     }
 }

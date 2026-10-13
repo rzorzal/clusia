@@ -124,6 +124,7 @@ fn kind_value(kind: HarnessKind) -> &'static str {
     match kind {
         HarnessKind::ClaudeCode => "claude-code",
         HarnessKind::Codex => "codex",
+        HarnessKind::Custom => "custom",
     }
 }
 

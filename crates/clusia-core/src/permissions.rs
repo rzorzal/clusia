@@ -80,11 +80,13 @@ pub fn rule_for_tool(tool: &str) -> String {
     tool.to_string()
 }
 
-/// What the request shows the reviewer: the command, the path, or the tool name.
+/// What the request shows the reviewer: the command, the path, the detail of an `Other`
+/// request a custom command made, or the tool name.
 pub fn summary_for(tool: &str, input: &Value) -> String {
     let text = |key: &str| input.get(key).and_then(Value::as_str);
     match tool {
         "Bash" => text("command").unwrap_or(tool),
+        "Other" => text("detail").unwrap_or(tool),
         t if FILE_TOOLS.contains(&t) => text(path_key(t)).unwrap_or(tool),
         _ => tool,
     }
@@ -731,6 +733,11 @@ mod tests {
         assert_eq!(summary_for("Write", &both), "a.rs");
         assert_eq!(summary_for("Bash", &json!({})), "Bash");
         assert_eq!(summary_for("WebFetch", &json!({ "url": "u" })), "WebFetch");
+        assert_eq!(
+            summary_for("Other", &json!({ "detail": "Delete the cache" })),
+            "Delete the cache"
+        );
+        assert_eq!(summary_for("Other", &json!({})), "Other");
     }
 
     #[test]

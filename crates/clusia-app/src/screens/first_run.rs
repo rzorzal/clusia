@@ -194,6 +194,7 @@ fn harness_view(
     let value = match config_kind {
         ConfigKind::ClaudeCode => "claude-code",
         ConfigKind::Codex => "codex",
+        ConfigKind::Custom => "custom",
     };
     match found {
         Some(h) => HarnessView {
@@ -918,6 +919,7 @@ fn on_continue(
         let value = match kind {
             ConfigKind::ClaudeCode => "claude-code",
             ConfigKind::Codex => "codex",
+            ConfigKind::Custom => "custom",
         };
         crate::screens::config::harness::write_kind(&mut asks, &mut model, value);
     }

@@ -210,7 +210,7 @@ pub(crate) async fn update_state(
 /// the user chose to ask first. Returns how the "agent" load step went.
 pub(crate) async fn on_open(shared: &Arc<Shared>, pr: &PrRef, head: &str) -> (StepStatus, String) {
     let skipped = |why: String| (StepStatus::Skipped, why);
-    let name = crate::sessions::current_agent(shared).await.name();
+    let name = crate::sessions::current_name(shared).await;
     let wait = matches!(shared.config.read().await.harness.on_open, OnOpen::Wait);
     if wait {
         return skipped("Waiting for your first question".to_string());
@@ -331,7 +331,7 @@ pub(crate) async fn notify_finished(shared: &Shared, pr: &PrRef, turn: u64) {
     let at = now_unix();
     let event = NotifyEvent::agent_finished(
         pr,
-        harness,
+        &harness,
         &title,
         format!("agent_finished:{pr}:{turn}:{at}"),
         at,

@@ -112,6 +112,12 @@ pub struct Review {
     /// The harness that made `harness_session`; a session without one is Claude Code's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_kind: Option<HarnessKind>,
+    /// The program that made `harness_session` when it is a custom command, as configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_program: Option<String>,
+    /// What the pages called the harness that made `harness_session`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_name: Option<String>,
     /// Whether the pull request is still open; a closed or merged one is not checked again
     /// in the background.
     #[serde(default, skip_serializing_if = "PrState::is_open")]
@@ -127,10 +133,39 @@ pub struct Review {
 
 impl Review {
     /// The stored session when `kind` made it; a session of another harness is not `kind`'s to
-    /// resume.
-    pub fn session_of(&self, kind: HarnessKind) -> Option<&str> {
+    /// resume. A custom command's session also needs the same `program`.
+    pub fn session_of(&self, kind: HarnessKind, program: Option<&str>) -> Option<&str> {
         let made_by = self.harness_session_kind.unwrap_or(HarnessKind::ClaudeCode);
-        self.harness_session.as_deref().filter(|_| made_by == kind)
+        let same_program =
+            kind != HarnessKind::Custom || self.harness_session_program.as_deref() == program;
+        self.harness_session
+            .as_deref()
+            .filter(|_| made_by == kind && same_program)
+    }
+
+    /// Stores `id` as the chat's session, made by `kind`. The program is kept only for a custom
+    /// command.
+    pub fn remember_session(
+        &mut self,
+        id: &str,
+        kind: HarnessKind,
+        program: Option<&str>,
+        name: &str,
+    ) {
+        self.harness_session = Some(id.to_string());
+        self.harness_session_kind = Some(kind);
+        self.harness_session_program = program
+            .filter(|_| kind == HarnessKind::Custom)
+            .map(str::to_owned);
+        self.harness_session_name = Some(name.to_owned());
+    }
+
+    /// Drops the chat's session, so the next turn starts a new one.
+    pub fn forget_session(&mut self) {
+        self.harness_session = None;
+        self.harness_session_kind = None;
+        self.harness_session_program = None;
+        self.harness_session_name = None;
     }
 
     pub fn new(pr: PrRef, title: String, base_sha: String, head_sha: String, now: i64) -> Self {
@@ -147,6 +182,8 @@ impl Review {
             last_checks: None,
             harness_session: None,
             harness_session_kind: None,
+            harness_session_program: None,
+            harness_session_name: None,
             pr_state: PrState::Open,
             revalidation: None,
             removed: BTreeSet::new(),
@@ -297,17 +334,55 @@ mod tests {
     fn a_session_belongs_to_the_harness_that_made_it() {
         let pr: PrRef = "acme/widgets#7".parse().unwrap();
         let mut review = Review::new(pr, "t".into(), "b".into(), "h".into(), 1);
-        assert_eq!(review.session_of(HarnessKind::ClaudeCode), None);
+        assert_eq!(review.session_of(HarnessKind::ClaudeCode, None), None);
         review.harness_session = Some("uuid".into());
         assert_eq!(
-            review.session_of(HarnessKind::ClaudeCode),
+            review.session_of(HarnessKind::ClaudeCode, None),
             Some("uuid"),
             "no kind recorded: Claude Code's"
         );
-        assert_eq!(review.session_of(HarnessKind::Codex), None);
+        assert_eq!(review.session_of(HarnessKind::Codex, None), None);
         review.harness_session_kind = Some(HarnessKind::Codex);
-        assert_eq!(review.session_of(HarnessKind::Codex), Some("uuid"));
-        assert_eq!(review.session_of(HarnessKind::ClaudeCode), None);
+        assert_eq!(review.session_of(HarnessKind::Codex, None), Some("uuid"));
+        assert_eq!(review.session_of(HarnessKind::ClaudeCode, None), None);
+    }
+
+    #[test]
+    fn a_custom_session_belongs_to_its_program() {
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let mut review = Review::new(pr, "t".into(), "b".into(), "h".into(), 1);
+        review.remember_session("abc", HarnessKind::Custom, Some("/bin/echo-a"), "Echo");
+        assert_eq!(
+            review.session_of(HarnessKind::Custom, Some("/bin/echo-a")),
+            Some("abc")
+        );
+        assert_eq!(
+            review.session_of(HarnessKind::Custom, Some("/bin/echo-b")),
+            None
+        );
+        assert_eq!(review.session_of(HarnessKind::Custom, None), None);
+        assert_eq!(review.harness_session_name.as_deref(), Some("Echo"));
+        review.remember_session("thr", HarnessKind::Codex, Some("/bin/ignored"), "Codex");
+        assert_eq!(review.harness_session_program, None);
+        assert_eq!(
+            review.session_of(HarnessKind::Codex, Some("/x")),
+            Some("thr")
+        );
+    }
+
+    #[test]
+    fn forgetting_the_session_clears_every_field() {
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let mut review = Review::new(pr, "t".into(), "b".into(), "h".into(), 1);
+        review.remember_session("abc", HarnessKind::Custom, Some("/bin/echo-a"), "Echo");
+        review.forget_session();
+        assert_eq!(review.harness_session, None);
+        assert_eq!(review.harness_session_kind, None);
+        assert_eq!(review.harness_session_program, None);
+        assert_eq!(review.harness_session_name, None);
+        let text = serde_json::to_string(&review).unwrap();
+        assert!(!text.contains("harness_session_program"), "{text}");
+        assert!(!text.contains("harness_session_name"), "{text}");
     }
 
     #[test]

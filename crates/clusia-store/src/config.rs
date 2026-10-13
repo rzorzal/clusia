@@ -212,9 +212,11 @@ pub fn set_value(cfg: &Config, key: &str, raw: &str) -> Result<Config, ConfigKey
     let mut updated: Config = toml::Value::Table(table)
         .try_into()
         .map_err(|e: toml::de::Error| invalid(e.to_string()))?;
-    // One program path cannot serve two harnesses: a new kind starts from its own default.
+    // One program path and one name cannot serve two harnesses: a new kind starts from its own
+    // default.
     if key == "harness.kind" && updated.harness.kind != cfg.harness.kind {
         updated.harness.program = None;
+        updated.harness.custom_name = String::new();
     }
     updated.validate().map_err(invalid)?;
     Ok(updated)
@@ -763,6 +765,27 @@ mod tests {
         let with_flag = set_value(&c, "harness.extra_args", "--sandbox read-only").unwrap();
         assert!(matches!(
             set_value(&with_flag, "harness.kind", "codex"),
+            Err(ConfigKeyError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn a_new_harness_kind_clears_the_custom_name_and_custom_to_custom_keeps_it() {
+        let c = set_value(&Config::default(), "harness.kind", "custom").unwrap();
+        assert_eq!(c.harness.kind, clusia_core::config::HarnessKind::Custom);
+        assert_eq!(get_value(&c, "harness.custom_name").unwrap(), "");
+        let c = set_value(&c, "harness.program", "/opt/bin/echo.py").unwrap();
+        let c = set_value(&c, "harness.custom_name", "Echo").unwrap();
+        assert_eq!(c.harness.custom_name, "Echo");
+        let same = set_value(&c, "harness.kind", "custom").unwrap();
+        assert_eq!(same.harness.program.as_deref(), Some("/opt/bin/echo.py"));
+        assert_eq!(same.harness.custom_name, "Echo");
+        let codex = set_value(&c, "harness.kind", "codex").unwrap();
+        assert_eq!(codex.harness.program, None);
+        assert_eq!(codex.harness.custom_name, "");
+        let long = "x".repeat(41);
+        assert!(matches!(
+            set_value(&c, "harness.custom_name", &long),
             Err(ConfigKeyError::Invalid { .. })
         ));
     }
