@@ -221,19 +221,24 @@ impl Sessions {
     }
 
     /// The review opens: it runs on the config's harness, unless a turn of an earlier open still
-    /// runs, which keeps the one it started with. A close waiting for that turn is cancelled.
-    pub(crate) fn repin(&self, pr: &PrRef, harness: &Harness) {
+    /// runs, which keeps the one it started with. A close waiting for that turn is cancelled. A
+    /// Codex server of an earlier open ends when the review moves to another kind.
+    pub(crate) async fn repin(&self, shared: &Shared, pr: &PrRef, harness: &Harness) {
         self.closed
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(pr);
         if self.any_running(pr) {
             self.pin(pr, harness);
-        } else {
-            self.pinned
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(pr.clone(), Pinned::of(harness));
+            return;
+        }
+        let replaced = self
+            .pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(pr.clone(), Pinned::of(harness));
+        if replaced.is_some_and(|old| old.kind == HarnessKind::Codex && harness.kind != old.kind) {
+            crate::codex::close(shared, pr).await;
         }
     }
 
@@ -2262,6 +2267,32 @@ mod tests {
             Some("Install Codex or set its path")
         );
         assert_eq!(found.harness, "Codex");
+    }
+
+    #[test]
+    fn a_version_run_gets_no_github_token_for_either_agent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("agent");
+        std::fs::write(&program, "#!/bin/sh\nexec /usr/bin/env\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env: Vec<(OsString, OsString)> = [
+            ("GH_TOKEN", "t1"),
+            ("GITHUB_TOKEN", "t2"),
+            ("CLUSIA_HOME", "/x"),
+            ("KEEP", "x"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        for agent in [Agent::ClaudeCode, Agent::Codex] {
+            let out = version_command(agent, &program, &env).output().unwrap();
+            let seen = String::from_utf8_lossy(&out.stdout);
+            assert!(seen.contains("KEEP=x"), "{agent:?}: {seen}");
+            for dropped in ["GH_TOKEN=", "GITHUB_TOKEN=", "CLUSIA_"] {
+                assert!(!seen.contains(dropped), "{agent:?}: {seen}");
+            }
+        }
     }
 
     #[tokio::test]

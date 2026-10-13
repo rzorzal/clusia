@@ -113,7 +113,7 @@ pub(crate) struct Turn {
     /// When the question now on the screen was printed.
     prompted_at: Option<std::time::Instant>,
     /// The display name of the agent that asks.
-    harness: &'static str,
+    harness: HarnessKind,
 }
 
 impl Turn {
@@ -132,13 +132,13 @@ impl Turn {
             running: false,
             prompt_open: false,
             prompted_at: None,
-            harness: HarnessKind::default().name(),
+            harness: HarnessKind::default(),
         }
     }
 
     /// Names the agent in what is printed.
-    pub(crate) fn harness(mut self, name: &'static str) -> Self {
-        self.harness = name;
+    pub(crate) fn harness(mut self, kind: HarnessKind) -> Self {
+        self.harness = kind;
         self
     }
 
@@ -167,7 +167,7 @@ impl Turn {
     /// Prints the question of the first waiting request.
     fn show_prompt(&mut self, err: &mut dyn Write) -> io::Result<()> {
         if let Some(front) = self.waiting.first() {
-            write!(err, "{}", front.prompt(self.harness))?;
+            write!(err, "{}", front.prompt(self.harness.name()))?;
             err.flush()?;
             self.prompt_open = true;
             self.prompted_at = Some(std::time::Instant::now());
@@ -295,7 +295,10 @@ impl Turn {
                 });
                 if !self.json {
                     if !self.interactive {
-                        let said = self.waiting.last().map(|w| w.elsewhere(self.harness));
+                        let said = self
+                            .waiting
+                            .last()
+                            .map(|w| w.elsewhere(self.harness.name()));
                         writeln!(err, "{}", said.unwrap_or_default())?;
                     } else if self.waiting.len() == 1 {
                         self.show_prompt(err)?;
@@ -380,20 +383,11 @@ impl Turn {
     }
 }
 
-fn failure_message(kind: AgentErrorKind, message: &str, harness: &str) -> String {
+fn failure_message(kind: AgentErrorKind, message: &str, harness: HarnessKind) -> String {
     if message.trim().is_empty() {
-        kind.message_for(harness, sign_in_hint(harness))
+        kind.message_for(harness.name(), harness.sign_in_hint())
     } else {
         printable(message)
-    }
-}
-
-/// What to do when `harness` is not signed in.
-fn sign_in_hint(harness: &str) -> &'static str {
-    if harness == HarnessKind::Codex.name() {
-        HarnessKind::Codex.sign_in_hint()
-    } else {
-        HarnessKind::ClaudeCode.sign_in_hint()
     }
 }
 
@@ -426,7 +420,7 @@ fn turn_of(entry: &AgentLogEntry) -> u64 {
 /// The chat as lines: consecutive text entries of one turn are one answer. A turn of a check or
 /// a revalidation (one with a `Check` or `Revalidation` entry) is not part of the chat: none of
 /// its entries is shown.
-pub(crate) fn log_lines(entries: &[AgentLogEntry], harness: &str) -> Vec<String> {
+pub(crate) fn log_lines(entries: &[AgentLogEntry], harness: HarnessKind) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut joining: Option<u64> = None;
     let checks: std::collections::HashSet<u64> = entries
@@ -635,7 +629,7 @@ pub(crate) async fn ask(
         Err(e) => return Err(e.into()),
     };
     let interactive = io::stdin().is_terminal() && !json;
-    let harness = crate::harness::name_of(&mut client).await;
+    let harness = crate::harness::kind_of(&mut client, &pr).await;
     let mut run = Turn::new(pr, turn, json)
         .harness(harness)
         .interactive(interactive);
@@ -682,7 +676,7 @@ pub(crate) async fn ask(
 pub(crate) async fn log(paths: &Paths, home: Option<&Path>, pr: &str) -> Result<Output, CliError> {
     let pr = parse_pr(pr)?;
     let mut client = connect(paths, home).await?;
-    let harness = crate::harness::name_of(&mut client).await;
+    let harness = crate::harness::kind_of(&mut client, &pr).await;
     match client
         .request(Request::GetAgentLog { pr: pr.clone() })
         .await?
@@ -923,7 +917,7 @@ mod tests {
                     summary: summary.into(),
                     outcome,
                 }],
-                "Claude Code",
+                HarnessKind::ClaudeCode,
             )
             .remove(0)
         };
@@ -1029,7 +1023,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            log_lines(&entries, "Claude Code"),
+            log_lines(&entries, HarnessKind::ClaudeCode),
             [
                 "you: Is the lock needed?",
                 "  ✓ Read src/auth/store.rs",
@@ -1119,7 +1113,7 @@ mod tests {
                 state: "stopped".into(),
             },
         ];
-        assert_eq!(log_lines(&entries, "Claude Code"), ["you: hi"]);
+        assert_eq!(log_lines(&entries, HarnessKind::ClaudeCode), ["you: hi"]);
     }
 
     #[test]
@@ -1146,7 +1140,7 @@ mod tests {
                 state: "done".into(),
             },
         ];
-        assert_eq!(log_lines(&entries, "Claude Code"), ["you: hi"]);
+        assert_eq!(log_lines(&entries, HarnessKind::ClaudeCode), ["you: hi"]);
     }
 
     #[test]
@@ -1252,31 +1246,31 @@ mod tests {
     #[test]
     fn the_questions_and_failures_name_the_harness_in_use() {
         let (turn, mut out, mut err) = run(false);
-        let mut turn = turn.harness("Codex").interactive(true);
+        let mut turn = turn.harness(HarnessKind::Codex).interactive(true);
         let ask = requested("p1", 2, "Bash", "make", None);
         turn.feed(&ask, &mut out, &mut err).unwrap();
         assert_eq!(said(&err), "Codex wants to run: make  [o]nce / [d]eny? ");
         let (turn, mut out, mut err) = run(false);
-        let mut turn = turn.harness("Codex");
+        let mut turn = turn.harness(HarnessKind::Codex);
         turn.feed(&ask, &mut out, &mut err).unwrap();
         assert_eq!(
             said(&err),
             "waiting for an answer in the window: Codex wants to run: make\n"
         );
         assert_eq!(
-            failure_message(AgentErrorKind::Crashed, "", "Codex"),
+            failure_message(AgentErrorKind::Crashed, "", HarnessKind::Codex),
             "Codex stopped unexpectedly"
         );
         assert_eq!(
-            failure_message(AgentErrorKind::NotSignedIn, "", "Codex"),
+            failure_message(AgentErrorKind::NotSignedIn, "", HarnessKind::Codex),
             "Run `codex login` once in a terminal"
         );
         assert_eq!(
-            failure_message(AgentErrorKind::NotSignedIn, "", "Claude Code"),
+            failure_message(AgentErrorKind::NotSignedIn, "", HarnessKind::ClaudeCode),
             "Run `claude` once in a terminal"
         );
         assert_eq!(
-            failure_message(AgentErrorKind::Crashed, "boom", "Codex"),
+            failure_message(AgentErrorKind::Crashed, "boom", HarnessKind::Codex),
             "boom"
         );
     }
@@ -1622,7 +1616,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            log_lines(&entries, "Claude Code"),
+            log_lines(&entries, HarnessKind::ClaudeCode),
             [
                 format!("you: {SHOWN}"),
                 format!("  ✓ {SHOWN}"),

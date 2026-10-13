@@ -500,11 +500,6 @@ impl Server {
             .map(str::to_string)
     }
 
-    fn stderr_text(&self) -> String {
-        let tail = self.stderr.lock().unwrap_or_else(|p| p.into_inner());
-        String::from_utf8_lossy(&tail).into_owned()
-    }
-
     /// Ends the process the polite way: its input closes, which makes it leave; whatever is
     /// left of its group after `CLOSE_GRACE` is killed, and the process is reaped.
     async fn stop(&self) {
@@ -816,9 +811,10 @@ fn stopped_early(stop: &Stop, sink: &mut dyn TurnSink) -> TurnEnd {
 
 /// What an error that ended the process says: its kind and the line the chat shows.
 fn crash_error(server: &Server) -> (AgentErrorKind, String) {
-    let kind = codex::classify_codex(&server.stderr_text());
+    let said = server.last_stderr_line();
+    let kind = codex::classify_codex(said.as_deref().unwrap_or_default());
     let message = Agent::Codex.message_for(kind);
-    match server.last_stderr_line() {
+    match said {
         Some(said) => (kind, format!("{message}: {said}")),
         None => (kind, message),
     }
@@ -1748,12 +1744,15 @@ mod tests {
         claude.kind = HarnessKind::ClaudeCode;
         lab.shared.sessions.pin(&pr(7), &codex);
 
-        lab.shared.sessions.repin(&pr(7), &claude);
+        lab.shared
+            .sessions
+            .repin(&lab.shared, &pr(7), &claude)
+            .await;
         let pinned = lab.shared.sessions.pinned(&pr(7)).unwrap();
         assert_eq!(pinned.kind, HarnessKind::ClaudeCode);
 
         lab.shared.sessions.pretend_running(&pr(7), 3);
-        lab.shared.sessions.repin(&pr(7), &codex);
+        lab.shared.sessions.repin(&lab.shared, &pr(7), &codex).await;
         let pinned = lab.shared.sessions.pinned(&pr(7)).unwrap();
         assert_eq!(
             pinned.kind,
@@ -1761,6 +1760,26 @@ mod tests {
             "a running turn keeps it"
         );
         lab.shared.sessions.pretend_stopped(&pr(7));
+    }
+
+    #[tokio::test]
+    async fn opening_on_another_kind_ends_the_codex_process() {
+        let lab = lab(CodexScript::one(Scripted::answer("ok")));
+        let codex = lab.shared.config.read().await.harness.clone();
+        let mut claude = codex.clone();
+        claude.kind = HarnessKind::ClaudeCode;
+        lab.run(new_thread()).await;
+        let pid = lab.calls()[0].pid;
+        lab.shared.sessions.pin(&pr(7), &codex);
+
+        lab.shared.sessions.repin(&lab.shared, &pr(7), &codex).await;
+        assert!(FakeCodex::is_running(pid), "the same kind keeps it");
+
+        lab.shared
+            .sessions
+            .repin(&lab.shared, &pr(7), &claude)
+            .await;
+        assert!(gone(pid).await, "the process outlived the switch");
     }
 
     #[tokio::test]

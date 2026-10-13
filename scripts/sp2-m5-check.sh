@@ -367,16 +367,16 @@ step_isolation() {
 
 step_approve() {
   say "6. A command asks you"
-  clusia ask "$PR" "Create an empty file named check-deny.txt in the worktree with \`touch check-deny.txt\` and tell me what happened." </dev/null >"$WORK/deny.out" 2>"$WORK/deny.err" &
+  clusia ask "$PR" "Run \`curl -sI https://example.com\` and tell me what happened." </dev/null >"$WORK/deny.out" 2>"$WORK/deny.err" &
   echo "  The window shows 'Codex wants to run a command'. Choose Deny once, and watch the chat go on."
   echo "  (If no request appears, Codex did not need to ask: answer n and note it.)"
   ask "Did Deny stop the command, with the chat saying it was denied?"
-  clusia ask "$PR" "Now create the file check-allow.txt in the worktree with \`touch check-allow.txt\`." </dev/null >"$WORK/allow.out" 2>"$WORK/allow.err" &
+  clusia ask "$PR" "Now run \`curl -sI https://example.com\` again and tell me the first line it prints." </dev/null >"$WORK/allow.out" 2>"$WORK/allow.err" &
   echo "  Choose Allow once this time."
-  ask "Did the command run and the chat show that the file was created?"
-  clusia ask "$PR" "Create the file check-timeout.txt in the worktree with \`touch check-timeout.txt\`." </dev/null >"$WORK/timeout.out" 2>"$WORK/timeout.err" &
+  ask "Did the command run and the chat show what it printed?"
+  clusia ask "$PR" "Run \`curl -sI https://example.org\` and tell me what happened." </dev/null >"$WORK/timeout.out" 2>"$WORK/timeout.err" &
   echo "  This time do not answer. The request is denied when the time in Config › Harness passes."
-  ask "Was the request denied by itself, with a notification and a line in the chat?"
+  ask "Was the request denied by itself after the time in Config › Harness, with a "denied" line in the chat and the modal gone?"
 }
 
 step_checks() {

@@ -148,7 +148,12 @@ async fn finish(client: &mut Client, pr: &PrRef, round: Revalidation) -> Result<
         return Err(no_answer("GetReview"));
     };
     Ok(Output {
-        human: report_lines(&round, &review, crate::harness::name_of(client).await).join("\n"),
+        human: report_lines(
+            &round,
+            &review,
+            crate::harness::kind_of(client, pr).await.name(),
+        )
+        .join("\n"),
         json: json!({ "revalidation": round }),
     })
 }
@@ -220,7 +225,7 @@ async fn follow(
             .request(Request::Revalidate { pr: pr.clone() })
             .await?;
     }
-    let harness = crate::harness::name_of(client).await;
+    let harness = crate::harness::kind_of(client, pr).await.name();
     let mut asked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let finished = loop {
         let (_, event) = tokio::select! {

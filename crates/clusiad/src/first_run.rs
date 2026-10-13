@@ -2,12 +2,14 @@
 //! the configured folders, and which agent command-line tools are installed. Nothing here
 //! changes anything.
 
+use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use clusia_git::expand_root;
+use clusia_harness::Agent;
 use clusia_protocol::{FirstRun, GithubLogin, Harness, HarnessKind, RepoFolder};
 use serde_json::Value;
 
@@ -42,13 +44,14 @@ pub(crate) async fn status(shared: &Shared) -> FirstRun {
     })
     .await
     .unwrap_or_default();
+    let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let mut harnesses = Vec::new();
     for (kind, name) in HARNESSES {
         let own = match kind {
             HarnessKind::ClaudeCode => shared.claude_program.as_deref(),
             HarnessKind::Codex => shared.codex_program.as_deref(),
         };
-        harnesses.push(harness(kind, name, own, &shared.harness_search_paths).await);
+        harnesses.push(harness(kind, name, own, &shared.harness_search_paths, &env).await);
     }
     FirstRun {
         github,
@@ -158,8 +161,15 @@ pub(crate) fn is_executable(path: &Path) -> bool {
 
 /// The program the daemon was told to use (`own`: `CLUSIA_CLAUDE_BIN`, `CLUSIA_CODEX_BIN`), or
 /// else the first `name` in `dirs`, that runs and reports a version. A stale link or a script
-/// that fails does not count.
-async fn harness(kind: HarnessKind, name: &str, own: Option<&Path>, dirs: &[PathBuf]) -> Harness {
+/// that fails does not count. `--version` runs with the environment rules of `kind`'s own
+/// turns, so the GitHub tokens never reach it.
+async fn harness(
+    kind: HarnessKind,
+    name: &str,
+    own: Option<&Path>,
+    dirs: &[PathBuf],
+    env: &[(OsString, OsString)],
+) -> Harness {
     let candidates: Vec<PathBuf> = match own {
         Some(program) => vec![program.to_path_buf()],
         None => dirs.iter().map(|dir| dir.join(name)).collect(),
@@ -168,7 +178,7 @@ async fn harness(kind: HarnessKind, name: &str, own: Option<&Path>, dirs: &[Path
         if !is_executable(&path) {
             continue;
         }
-        if let Some(version) = version_of(&path).await {
+        if let Some(version) = version_of(kind, &path, env).await {
             return Harness {
                 kind,
                 path: Some(path.display().to_string()),
@@ -185,9 +195,15 @@ async fn harness(kind: HarnessKind, name: &str, own: Option<&Path>, dirs: &[Path
 
 /// The first word that starts with a digit in the first line of `--version`
 /// (`2.1.291 (Claude Code)` → `2.1.291`), else the whole line.
-async fn version_of(program: &Path) -> Option<String> {
-    let run = tokio::process::Command::new(program)
-        .arg("--version")
+async fn version_of(
+    kind: HarnessKind,
+    program: &Path,
+    env: &[(OsString, OsString)],
+) -> Option<String> {
+    let mut command = std::process::Command::new(program);
+    command.arg("--version");
+    Agent::from(clusia_core::config::HarnessKind::from(kind)).set_env(&mut command, env);
+    let run = tokio::process::Command::from(command)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -252,5 +268,44 @@ mod tests {
         let login = github_login(&gh, "github.com", Duration::from_millis(200)).await;
         assert_eq!(login, GithubLogin::Unknown);
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// What a `--version` run of `kind` sees of an environment holding the tokens.
+    async fn env_seen_by_version(kind: HarnessKind) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("agent");
+        let dump = dir.path().join("env.txt");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n/usr/bin/env > '{}'\necho 9.9.9\n",
+                dump.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env: Vec<(OsString, OsString)> = [
+            ("GH_TOKEN", "t1"),
+            ("GITHUB_TOKEN", "t2"),
+            ("CLUSIA_HOME", "/x"),
+            ("KEEP", "x"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        let found = harness(kind, "agent", Some(&program), &[], &env).await;
+        assert_eq!(found.version.as_deref(), Some("9.9.9"));
+        std::fs::read_to_string(dump).unwrap()
+    }
+
+    #[tokio::test]
+    async fn first_run_gives_no_agent_the_github_tokens() {
+        for kind in [HarnessKind::ClaudeCode, HarnessKind::Codex] {
+            let seen = env_seen_by_version(kind).await;
+            assert!(seen.contains("KEEP=x"), "{kind:?}: {seen}");
+            for dropped in ["GH_TOKEN=", "GITHUB_TOKEN=", "CLUSIA_"] {
+                assert!(!seen.contains(dropped), "{kind:?}: {seen}");
+            }
+        }
     }
 }

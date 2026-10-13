@@ -257,7 +257,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         return out;
     }
     let harness = shared.config.read().await.harness.clone();
-    shared.sessions.repin(pr, &harness);
+    shared.sessions.repin(shared, pr, &harness).await;
     if let Err(e) = pin_commit(&repo, &reviewed_ref(pr.number), &review.head_sha).await {
         tracing::warn!(error = %e, pr = %pr, "cannot pin the reviewed commit");
     }

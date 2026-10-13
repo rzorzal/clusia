@@ -304,7 +304,7 @@ pub(crate) async fn check(
             "the daemon did not answer GetChecks".into(),
         ));
     };
-    let harness = crate::harness::name_of(&mut client).await;
+    let harness = crate::harness::kind_of(&mut client, &pr).await.name();
     let mut going: Vec<CheckKind> = Vec::new();
     let mut started: Vec<CheckKind> = Vec::new();
     for &kind in &wanted {
