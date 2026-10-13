@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
-use clusia_core::config::Harness;
+use clusia_core::config::{Harness, HarnessKind};
 use clusia_harness::{
-    AgentEvent, BridgeSpec, ClaudeCode, ParseState, SessionArg, TurnSpec, parse_line,
+    Agent, AgentEvent, BridgeSpec, ClaudeCode, ParseState, SessionArg, TurnSpec, parse_line,
 };
 use clusia_protocol::{AgentErrorKind, TurnOrigin};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -86,19 +86,25 @@ impl Stop {
     }
 }
 
-/// Where the `claude` command is: the program set in Config › Harness, else the daemon's own
-/// override, else `claude` on the daemon's `PATH` or in the usual install folders. A name that
-/// is nowhere is returned as is, so starting it fails with "not found".
+/// Where the agent's command is: the program set in Config › Harness, else the daemon's own
+/// override for the harness's kind, else the kind's command (`claude` or `codex`) on the
+/// daemon's `PATH` or in the usual install folders. A name that is nowhere is returned as is,
+/// so starting it fails with "not found".
 pub(crate) fn program_path(shared: &Shared, harness: &Harness) -> PathBuf {
+    let agent = Agent::from(harness.kind);
     let configured = harness
         .program
         .as_deref()
         .map(str::trim)
         .filter(|p| !p.is_empty());
-    let name = match (configured, &shared.claude_program) {
+    let own = match agent {
+        Agent::ClaudeCode => &shared.claude_program,
+        Agent::Codex => &shared.codex_program,
+    };
+    let name = match (configured, own) {
         (Some(program), _) => program,
         (None, Some(program)) => return program.clone(),
-        (None, None) => "claude",
+        (None, None) => agent.program(),
     };
     if name.contains('/') {
         return PathBuf::from(name);
@@ -149,7 +155,7 @@ pub(crate) fn classify_stderr(text: &str) -> Option<AgentErrorKind> {
     }
 }
 
-fn signal_group(pid: Option<u32>, signal: i32) {
+pub(crate) fn signal_group(pid: Option<u32>, signal: i32) {
     if let Some(pid) = pid {
         // SAFETY: `killpg` only sends a signal. The group is the one the child leads
         // (`process_group(0)` at spawn), so no other process is addressed.
@@ -189,7 +195,7 @@ pub(crate) fn has_exited(pid: u32) -> bool {
 }
 
 /// Waits up to `limit` for the child to end, leaving it unreaped; whether it ended.
-async fn exited_within(pid: u32, limit: Duration) -> bool {
+pub(crate) async fn exited_within(pid: u32, limit: Duration) -> bool {
     let give_up = Instant::now() + limit;
     loop {
         if has_exited(pid) {
@@ -204,7 +210,7 @@ async fn exited_within(pid: u32, limit: Duration) -> bool {
 
 /// SIGKILL to whatever is left of the child's group (tool processes it started that outlive
 /// it), then reaps the child. Only called while the child is not yet reaped.
-async fn sweep_and_reap(child: &mut Child, pid: Option<u32>) -> Option<ExitStatus> {
+pub(crate) async fn sweep_and_reap(child: &mut Child, pid: Option<u32>) -> Option<ExitStatus> {
     signal_group(pid, libc::SIGKILL);
     child.wait().await.ok()
 }
@@ -212,7 +218,7 @@ async fn sweep_and_reap(child: &mut Child, pid: Option<u32>) -> Option<ExitStatu
 /// SIGTERM to the child's whole group, SIGKILL to the group once the child ended or after
 /// `KILL_GRACE`, then reaps the child. The child is reaped last, so its group id is never
 /// reused while it is signalled.
-async fn terminate(child: &mut Child) {
+pub(crate) async fn terminate(child: &mut Child) {
     let pid = child.id();
     signal_group(pid, libc::SIGTERM);
     if let Some(pid) = pid {
@@ -378,7 +384,21 @@ async fn execute(
     stop: &Arc<Stop>,
     sink: &mut dyn TurnSink,
 ) -> TurnEnd {
-    let harness = shared.config.read().await.harness.clone();
+    let harness = harness_for(shared, pr).await;
+    if harness.kind == HarnessKind::Codex {
+        return execute_codex(
+            shared,
+            pr,
+            turn,
+            prompt,
+            fresh_prompt,
+            session,
+            limit,
+            stop,
+            sink,
+        )
+        .await;
+    }
     let extra_args = match harness.extra_args_list() {
         Ok(args) => args,
         Err(message) => {
@@ -389,6 +409,7 @@ async fn execute(
             return TurnEnd::Failed;
         }
     };
+    let agent = Agent::from(harness.kind);
     let cwd = shared.paths.worktree_for(pr);
     let Some(bridge_program) = shared
         .bridge_program
@@ -414,18 +435,8 @@ async fn execute(
     // Requests of this turn show, and are judged by, the sandbox its program runs with, even
     // when the setting changes before the turn ends.
     shared.sessions.set_turn_sandbox(pr, turn, harness.sandbox);
-    let (session, prompt) = match session {
-        SessionSource::Chat => (shared.sessions.session_for(shared, pr), prompt),
-        SessionSource::Fork => {
-            let session = shared.sessions.fork_session(shared, pr);
-            let prompt = match (&session, fresh_prompt) {
-                (SessionArg::New(_), Some(fresh)) => fresh,
-                _ => prompt,
-            };
-            (session, prompt)
-        }
-        SessionSource::Given(session) => (session, prompt),
-    };
+    let (session, prompt) =
+        resolve_session(shared, pr, session, prompt, fresh_prompt, harness.kind);
     let spec = TurnSpec {
         program: program_path(shared, &harness),
         prompt,
@@ -456,12 +467,12 @@ async fn execute(
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let kind = AgentErrorKind::NotInstalled;
-            sink.error(kind, kind.default_message().to_string());
+            sink.error(kind, agent.message_for(kind));
             return TurnEnd::Failed;
         }
         Err(e) => {
             let kind = AgentErrorKind::Crashed;
-            sink.error(kind, format!("{}: {e}", kind.default_message()));
+            sink.error(kind, format!("{}: {e}", agent.message_for(kind)));
             return TurnEnd::Failed;
         }
     };
@@ -515,7 +526,7 @@ async fn execute(
                 }
                 _ => sweep_and_reap(&mut child, pid).await,
             };
-            ended(sink, status, &tail(stderr).await);
+            ended(agent, sink, status, &tail(stderr).await);
         }
         Ending::Stopped => {
             terminate(&mut child).await;
@@ -553,9 +564,79 @@ async fn execute(
     }
 }
 
+/// The harness a turn of `pr` runs with: the config's, except that the agent, the program and
+/// the extra arguments are the ones the review pinned when it opened, so a change in Config ›
+/// Harness applies to reviews opened afterwards. A review with nothing pinned (a saved one that
+/// is not open) follows the config. The pinned program and arguments count only once the config
+/// names another agent: while it names the same one, an edit of its program or arguments reaches
+/// the next turn as it always did.
+pub(crate) async fn harness_for(shared: &Shared, pr: &PrRef) -> Harness {
+    let mut harness = shared.config.read().await.harness.clone();
+    if let Some(pinned) = shared.sessions.pinned(pr)
+        && pinned.kind != harness.kind
+    {
+        harness.kind = pinned.kind;
+        harness.program = pinned.program;
+        harness.extra_args = pinned.extra_args;
+    }
+    harness
+}
+
+/// The session `source` names, and the prompt to put to it: a fork of a review that has no
+/// session of this kind to copy starts a session of its own, which has not read the review yet.
+pub(crate) fn resolve_session(
+    shared: &Shared,
+    pr: &PrRef,
+    source: SessionSource,
+    prompt: String,
+    fresh_prompt: Option<String>,
+    kind: HarnessKind,
+) -> (SessionArg, String) {
+    match source {
+        SessionSource::Chat => (shared.sessions.session_for(shared, pr, kind), prompt),
+        SessionSource::Fork => {
+            let session = shared.sessions.fork_session(shared, pr, kind);
+            let prompt = match (&session, fresh_prompt) {
+                (SessionArg::New(_), Some(fresh)) => fresh,
+                _ => prompt,
+            };
+            (session, prompt)
+        }
+        SessionSource::Given(session) => (session, prompt),
+    }
+}
+
+/// Runs one turn on `codex app-server`.
+#[allow(clippy::too_many_arguments)]
+async fn execute_codex(
+    shared: &Arc<Shared>,
+    pr: &PrRef,
+    turn: u64,
+    prompt: String,
+    fresh_prompt: Option<String>,
+    session: SessionSource,
+    limit: Option<Duration>,
+    stop: &Arc<Stop>,
+    sink: &mut dyn TurnSink,
+) -> TurnEnd {
+    // Codex runs in its read-only sandbox, and asks only about what must leave it: accepting a
+    // command runs it with the network and writes outside the worktree, so the request is shown
+    // and judged as an unsandboxed one.
+    shared.sessions.set_turn_sandbox(pr, turn, false);
+    let (session, prompt) = resolve_session(
+        shared,
+        pr,
+        session,
+        prompt,
+        fresh_prompt,
+        HarnessKind::Codex,
+    );
+    crate::codex::run_turn(shared, pr, turn, session, prompt, limit, stop, sink).await
+}
+
 /// The program ended without a result line and without an error of its own: says what its
 /// exit and its standard error tell.
-fn ended(sink: &mut dyn TurnSink, status: Option<ExitStatus>, stderr: &str) {
+fn ended(agent: Agent, sink: &mut dyn TurnSink, status: Option<ExitStatus>, stderr: &str) {
     sink.release();
     if sink.saw_final() || sink.failed() {
         return;
@@ -566,10 +647,10 @@ fn ended(sink: &mut dyn TurnSink, status: Option<ExitStatus>, stderr: &str) {
         .rev()
         .map(str::trim)
         .find(|line| !line.is_empty());
-    let mut message = kind.default_message().to_string();
+    let mut message = agent.message_for(kind);
     match (said, status.and_then(|s| s.code())) {
         (Some(said), _) => message = format!("{message}: {said}"),
-        (None, Some(0)) => message = "Claude Code ended without an answer".to_string(),
+        (None, Some(0)) => message = format!("{} ended without an answer", agent.name()),
         (None, Some(code)) => message = format!("{message} (exit code {code})"),
         (None, None) => {}
     }

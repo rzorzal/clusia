@@ -953,23 +953,36 @@ pub enum AgentErrorKind {
 }
 
 impl AgentErrorKind {
-    /// The chat line for this failure when the program said nothing more specific.
-    pub fn default_message(self) -> &'static str {
+    /// The chat line for this failure when the program said nothing more specific. `name` is
+    /// the harness's display name and `sign_in_hint` what to do when it is not signed in.
+    pub fn message_for(self, name: &str, sign_in_hint: &str) -> String {
         match self {
-            Self::NotInstalled => "Install Claude Code or set its path",
-            Self::NotSignedIn => "Run `claude` once in a terminal",
-            Self::UsageLimit => "Claude Code reached its usage limit",
-            Self::Crashed => "Claude Code stopped unexpectedly",
-            Self::Interrupted => "The turn was interrupted",
-            Self::Unparsed => "Claude Code answered in a format Clúsia does not know",
-            Self::Busy => "The agent is busy: wait for the current turn",
+            Self::NotInstalled => format!("Install {name} or set its path"),
+            Self::NotSignedIn => sign_in_hint.to_string(),
+            Self::UsageLimit => format!("{name} reached its usage limit"),
+            Self::Crashed => format!("{name} stopped unexpectedly"),
+            Self::Interrupted => "The turn was interrupted".to_string(),
+            Self::Unparsed => format!("{name} answered in a format Clúsia does not know"),
+            Self::Busy => "The agent is busy: wait for the current turn".to_string(),
         }
     }
 }
 
-impl std::fmt::Display for AgentErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.default_message())
+impl From<HarnessKind> for clusia_core::config::HarnessKind {
+    fn from(kind: HarnessKind) -> Self {
+        match kind {
+            HarnessKind::ClaudeCode => Self::ClaudeCode,
+            HarnessKind::Codex => Self::Codex,
+        }
+    }
+}
+
+impl From<clusia_core::config::HarnessKind> for HarnessKind {
+    fn from(kind: clusia_core::config::HarnessKind) -> Self {
+        match kind {
+            clusia_core::config::HarnessKind::ClaudeCode => Self::ClaudeCode,
+            clusia_core::config::HarnessKind::Codex => Self::Codex,
+        }
     }
 }
 
@@ -1158,6 +1171,15 @@ pub struct ProbeResult {
     pub elapsed_ms: u64,
     /// Why it failed, when `ok` is false.
     pub error: Option<String>,
+    /// The display name of the harness that was probed ("Claude Code", "Codex").
+    #[serde(default)]
+    pub harness: String,
+    /// Whether the harness has a login; `None` when the probe does not check (Claude Code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    /// What the login check said, such as "Logged in using ChatGPT", with any API key masked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2488,7 +2510,7 @@ mod tests {
                 id: 4,
                 result: Outcome::Err(ProtocolError::new(
                     ErrorCode::Busy,
-                    AgentErrorKind::Busy.default_message()
+                    AgentErrorKind::Busy.message_for("Claude Code", "")
                 )),
             }),
             r#"{"type":"response","id":4,"result":{"err":{"code":"busy","message":"The agent is busy: wait for the current turn"}}}"#
@@ -2603,9 +2625,33 @@ mod tests {
                 version: Some("2.1.294 (Claude Code)".into()),
                 program: "claude".into(),
                 elapsed_ms: 410,
-                error: None
+                error: None,
+                harness: "Claude Code".into(),
+                signed_in: None,
+                account: None,
             })),
-            r#"{"type":"response","id":5,"result":{"ok":{"probe":{"ok":true,"version":"2.1.294 (Claude Code)","program":"claude","elapsed_ms":410,"error":null}}}}"#
+            r#"{"type":"response","id":5,"result":{"ok":{"probe":{"ok":true,"version":"2.1.294 (Claude Code)","program":"claude","elapsed_ms":410,"error":null,"harness":"Claude Code"}}}}"#
+        );
+        assert_eq!(
+            ok(Reply::Probe(ProbeResult {
+                ok: true,
+                version: Some("0.162.1".into()),
+                program: "codex".into(),
+                elapsed_ms: 400,
+                error: None,
+                harness: "Codex".into(),
+                signed_in: Some(true),
+                account: Some("Logged in using ChatGPT".into()),
+            })),
+            r#"{"type":"response","id":5,"result":{"ok":{"probe":{"ok":true,"version":"0.162.1","program":"codex","elapsed_ms":400,"error":null,"harness":"Codex","signed_in":true,"account":"Logged in using ChatGPT"}}}}"#
+        );
+        let old: ProbeResult = serde_json::from_str(
+            r#"{"ok":true,"version":"2.1.294","program":"claude","elapsed_ms":1,"error":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (old.harness.as_str(), old.signed_in, old.account),
+            ("", None, None)
         );
     }
 
@@ -2622,12 +2668,29 @@ mod tests {
         ];
         for (kind, name) in kinds {
             assert_eq!(wire(&kind), format!("\"{name}\""));
-            assert_eq!(kind.to_string(), kind.default_message());
-            assert!(!kind.default_message().is_empty());
+            assert!(!kind.message_for("Claude Code", "hint").is_empty());
         }
+        let said = |kind: AgentErrorKind, name: &str| kind.message_for(name, "Run `x` once");
         assert_eq!(
-            AgentErrorKind::NotInstalled.default_message(),
+            said(AgentErrorKind::NotInstalled, "Claude Code"),
             "Install Claude Code or set its path"
+        );
+        assert_eq!(
+            said(AgentErrorKind::NotInstalled, "Codex"),
+            "Install Codex or set its path"
+        );
+        assert_eq!(said(AgentErrorKind::NotSignedIn, "Codex"), "Run `x` once");
+        assert_eq!(
+            said(AgentErrorKind::UsageLimit, "Codex"),
+            "Codex reached its usage limit"
+        );
+        assert_eq!(
+            said(AgentErrorKind::Crashed, "Codex"),
+            "Codex stopped unexpectedly"
+        );
+        assert_eq!(
+            said(AgentErrorKind::Unparsed, "Codex"),
+            "Codex answered in a format Clúsia does not know"
         );
         for (state, name) in [
             (SessionStateKind::None, "none"),
@@ -2702,6 +2765,9 @@ mod tests {
                 program: "claude".into(),
                 elapsed_ms: 3,
                 error: Some("not found".into()),
+                harness: "Claude Code".into(),
+                signed_in: None,
+                account: None,
             }),
         ] {
             round_trip(ServerMessage::Response {
@@ -3352,5 +3418,18 @@ mod tests {
             r#"{"type":"revalidation","at":9,"turn":3,"state":"running"}"#
         );
         round_trip(entry);
+    }
+
+    #[test]
+    fn the_two_harness_kinds_convert_both_ways() {
+        use clusia_core::config::HarnessKind as Config;
+        for (wire_kind, config) in [
+            (HarnessKind::ClaudeCode, Config::ClaudeCode),
+            (HarnessKind::Codex, Config::Codex),
+        ] {
+            assert_eq!(Config::from(wire_kind), config);
+            assert_eq!(HarnessKind::from(config), wire_kind);
+        }
+        assert_eq!(wire(&HarnessKind::Codex), r#""codex""#);
     }
 }

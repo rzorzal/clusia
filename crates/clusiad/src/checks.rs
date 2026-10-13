@@ -1,4 +1,4 @@
-//! Security and audit checks: each one is a Claude Code turn forked from the review's session,
+//! Security and audit checks: each one is an agent turn forked from the review's session,
 //! run beside the chat. A review has at most one run of each kind, and at most `CHECK_PLACES`
 //! runs go at once across all reviews.
 
@@ -12,7 +12,7 @@ use clusia_core::checks::{
     security_prompt,
 };
 use clusia_core::{AgentState, DraftKind, FileDiff, Origin, PrRef, ReviewState, Side};
-use clusia_harness::{AgentEvent, extract_check_blocks};
+use clusia_harness::{Agent, AgentEvent, extract_check_blocks};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, AnchorInput, CheckState, CheckStatus, ErrorCode, Event, Outcome,
     ProtocolError, Reply, topics,
@@ -395,10 +395,12 @@ async fn drive(_live: Live, shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job
             "The check stopped unexpectedly".to_string(),
         );
     }
+    shared.sessions.release_closed(&shared, &pr).await;
 }
 
 async fn execute(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job: Job) {
-    let mut sink = CheckSink::new(shared.clone(), pr.clone(), kind, job.turn);
+    let agent = crate::sessions::agent_for(&shared, &pr).await;
+    let mut sink = CheckSink::new(shared.clone(), pr.clone(), kind, job.turn, agent);
     let run = TurnRun {
         pr: pr.clone(),
         turn: job.turn,
@@ -416,7 +418,7 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job: Job) {
         TurnEnd::Failed => {
             let message = sink
                 .message
-                .unwrap_or_else(|| "Claude Code could not finish the check".to_string());
+                .unwrap_or_else(|| format!("{} could not finish the check", agent.name()));
             fail(&shared, &pr, kind, job.turn, message);
         }
         TurnEnd::TimedOut => fail(
@@ -446,11 +448,13 @@ struct CheckSink {
     saw_final: bool,
     failed: bool,
     message: Option<String>,
+    agent: Agent,
 }
 
 impl CheckSink {
-    fn new(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, turn: u64) -> Self {
+    fn new(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, turn: u64, agent: Agent) -> Self {
         Self {
+            agent,
             shared,
             pr,
             kind,
@@ -487,7 +491,7 @@ impl CheckSink {
                 if !is_error {
                     self.answer = Some(text);
                 } else if text.trim().is_empty() {
-                    self.fail_with("Claude Code could not finish the check".to_string());
+                    self.fail_with(format!("{} could not finish the check", self.agent.name()));
                 } else {
                     self.fail_with(text.trim().to_string());
                 }
@@ -1043,6 +1047,7 @@ mod tests {
         tweak(&mut config);
         let options = crate::options::DaemonOptions {
             claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
             github_api: Some("http://127.0.0.1:9".into()),
             github_token: None,
             gh_program: "/nonexistent/gh".into(),

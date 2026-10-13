@@ -1,5 +1,5 @@
 //! Revalidation of a saved review's draft: when the pull request gets new commits and stays quiet
-//! for a while, one forked Claude Code turn re-reads every comment against them. What it says is
+//! for a while, one forked agent turn re-reads every comment against them. What it says is
 //! stored as proposals; the draft changes only when the user decides one.
 
 use std::collections::{BTreeMap, HashMap};
@@ -17,7 +17,7 @@ use clusia_core::{
     ReviewState, Side,
 };
 use clusia_git::{diff_for_prompt, repo_of_worktree};
-use clusia_harness::{AgentEvent, RawVerdict, extract_revalidation_blocks};
+use clusia_harness::{Agent, AgentEvent, RawVerdict, extract_revalidation_blocks};
 use clusia_protocol::{AgentErrorKind, AgentLogEntry, Event, TurnOrigin, topics};
 use clusia_store::{list_reviews, load_review_cache};
 use tokio::sync::watch;
@@ -225,7 +225,7 @@ fn asked_items(review: &Review, round: &Revalidation) -> Vec<AskedItem> {
         .collect()
 }
 
-/// Whether this daemon can run Claude Code: the program is a file we can find.
+/// Whether this daemon can run the agent: the program is a file we can find.
 fn available(shared: &Shared, harness: &Harness) -> bool {
     turns::program_path(shared, harness).is_file()
 }
@@ -270,7 +270,7 @@ fn note_log(shared: &Shared, pr: &PrRef, turn: u64, state: &str) {
 
 /// Opens, or extends, the round of a review that was just moved to a new head, and returns the
 /// time the quiet period ends. `None` when nothing is to be revalidated: the switch is off, no
-/// Claude Code is configured or the draft has nothing to re-read. `immediate` is a review that
+/// agent is installed or the draft has nothing to re-read. `immediate` is a review that
 /// is being opened in a window: it does not wait.
 ///
 /// Call it after the relocation, with the anchors taken by [`snapshot`] before it, then save the
@@ -716,7 +716,8 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Job) {
         complete(&shared, &pr, &job, String::new()).await;
         return;
     }
-    let mut sink = RunSink::new(shared.clone(), pr.clone(), job.turn);
+    let agent = crate::sessions::agent_for(&shared, &pr).await;
+    let mut sink = RunSink::new(shared.clone(), pr.clone(), job.turn, agent);
     let run = TurnRun {
         pr: pr.clone(),
         turn: job.turn,
@@ -728,7 +729,13 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Job) {
         limit: Some(job.limit),
         stop: job.stop.clone(),
     };
-    match turns::run(&shared, run, &mut sink).await {
+    let end = turns::run(&shared, run, &mut sink).await;
+    // A round of a review that is not open leaves no Codex process behind.
+    if shared.sessions.pinned(&pr).is_none() && !shared.sessions.any_running(&pr) {
+        crate::codex::close(&shared, &pr).await;
+    }
+    shared.sessions.release_closed(&shared, &pr).await;
+    match end {
         TurnEnd::Done => {
             let text = sink.answer.unwrap_or(sink.streamed);
             complete(&shared, &pr, &job, text).await;
@@ -736,7 +743,7 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Job) {
         TurnEnd::Failed => {
             let message = sink
                 .message
-                .unwrap_or_else(|| "Claude Code could not finish the revalidation".to_string());
+                .unwrap_or_else(|| format!("{} could not finish the revalidation", agent.name()));
             finish(&shared, &pr, &job, Ending::Failed(message)).await;
         }
         TurnEnd::TimedOut => {
@@ -771,11 +778,13 @@ struct RunSink {
     saw_final: bool,
     failed: bool,
     message: Option<String>,
+    agent: Agent,
 }
 
 impl RunSink {
-    fn new(shared: Arc<Shared>, pr: PrRef, turn: u64) -> Self {
+    fn new(shared: Arc<Shared>, pr: PrRef, turn: u64, agent: Agent) -> Self {
         Self {
+            agent,
             shared,
             pr,
             turn,
@@ -823,7 +832,10 @@ impl RunSink {
                 if !is_error {
                     self.answer = Some(text);
                 } else if text.trim().is_empty() {
-                    self.fail_with("Claude Code could not finish the revalidation".to_string());
+                    self.fail_with(format!(
+                        "{} could not finish the revalidation",
+                        self.agent.name()
+                    ));
                 } else {
                     self.fail_with(text.trim().to_string());
                 }
@@ -1311,6 +1323,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let options = crate::options::DaemonOptions {
             claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
             github_api: Some("http://127.0.0.1:9".into()),
             github_token: None,
             gh_program: "/nonexistent/gh".into(),

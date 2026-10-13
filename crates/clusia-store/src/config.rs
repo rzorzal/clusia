@@ -209,9 +209,13 @@ pub fn set_value(cfg: &Config, key: &str, raw: &str) -> Result<Config, ConfigKey
     let value = parse_like(existing, raw);
     parent.insert(leaf.to_string(), value);
 
-    let updated: Config = toml::Value::Table(table)
+    let mut updated: Config = toml::Value::Table(table)
         .try_into()
         .map_err(|e: toml::de::Error| invalid(e.to_string()))?;
+    // One program path cannot serve two harnesses: a new kind starts from its own default.
+    if key == "harness.kind" && updated.harness.kind != cfg.harness.kind {
+        updated.harness.program = None;
+    }
     updated.validate().map_err(invalid)?;
     Ok(updated)
 }
@@ -725,7 +729,7 @@ mod tests {
             ("harness.turn_timeout_secs", "3601"),
             ("harness.turn_timeout_secs", "soon"),
             ("harness.on_open", "sometimes"),
-            ("harness.kind", "codex"),
+            ("harness.kind", "gemini"),
             ("harness.extra_args", "--x 'open"),
             ("harness.extra_args", "--dangerously-skip-permissions"),
             ("harness.use_cli_permissions", "maybe"),
@@ -742,6 +746,53 @@ mod tests {
             set_value(&c, "harness.nope", "1"),
             Err(ConfigKeyError::Unknown(_))
         ));
+    }
+
+    #[test]
+    fn the_harness_kind_can_be_codex() {
+        let c = Config::default();
+        let set = set_value(&c, "harness.kind", "codex").unwrap();
+        assert_eq!(set.harness.kind, clusia_core::config::HarnessKind::Codex);
+        assert_eq!(get_value(&set, "harness.kind").unwrap(), "codex");
+        let back = set_value(&set, "harness.kind", "claude-code").unwrap();
+        assert_eq!(
+            back.harness.kind,
+            clusia_core::config::HarnessKind::ClaudeCode
+        );
+        // Extra arguments are checked against the harness in use.
+        let with_flag = set_value(&c, "harness.extra_args", "--sandbox read-only").unwrap();
+        assert!(matches!(
+            set_value(&with_flag, "harness.kind", "codex"),
+            Err(ConfigKeyError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn a_new_harness_kind_clears_the_program_of_the_old_one() {
+        let c = set_value(
+            &Config::default(),
+            "harness.program",
+            "/opt/homebrew/bin/claude",
+        )
+        .unwrap();
+        assert_eq!(
+            c.harness.program.as_deref(),
+            Some("/opt/homebrew/bin/claude")
+        );
+        let codex = set_value(&c, "harness.kind", "codex").unwrap();
+        assert_eq!(codex.harness.program, None, "{codex:?}");
+        let mine = set_value(&codex, "harness.program", "/opt/bin/codex").unwrap();
+        let same = set_value(&mine, "harness.kind", "codex").unwrap();
+        assert_eq!(
+            same.harness.program.as_deref(),
+            Some("/opt/bin/codex"),
+            "the same kind keeps its program"
+        );
+        let back = set_value(&mine, "harness.kind", "claude-code").unwrap();
+        assert_eq!(back.harness.program, None);
+        // Other keys leave it alone.
+        let other = set_value(&mine, "harness.on_open", "wait").unwrap();
+        assert_eq!(other.harness.program.as_deref(), Some("/opt/bin/codex"));
     }
 
     #[test]

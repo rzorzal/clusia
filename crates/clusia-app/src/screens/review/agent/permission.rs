@@ -188,15 +188,15 @@ pub struct ModalView {
     pub more: usize,
 }
 
-pub fn title_for(tool: &str) -> String {
-    title_for_origin(tool, TurnOrigin::Chat)
+pub fn title_for(tool: &str, agent: &str) -> String {
+    title_for_origin(tool, TurnOrigin::Chat, agent)
 }
 
 /// The modal's title: who wants to do what. A check or the revalidation names itself, so the reviewer knows the
 /// request is not the chat's.
-pub fn title_for_origin(tool: &str, origin: TurnOrigin) -> String {
+pub fn title_for_origin(tool: &str, origin: TurnOrigin, agent: &str) -> String {
     let who = match origin {
-        TurnOrigin::Chat => "Claude Code",
+        TurnOrigin::Chat => agent,
         TurnOrigin::Security => "Security check",
         TurnOrigin::Audit => "Audit check",
         TurnOrigin::Revalidation => "Revalidation",
@@ -303,10 +303,15 @@ pub fn answer_counts(now_secs: f64, shown_at: f64) -> bool {
     now_secs - shown_at >= ANSWER_QUIET_SECS
 }
 
-pub fn modal_view(pending: &Pending, worktree: Option<&str>, more: usize) -> ModalView {
+pub fn modal_view(
+    pending: &Pending,
+    worktree: Option<&str>,
+    more: usize,
+    agent: &str,
+) -> ModalView {
     let r = &pending.request;
     ModalView {
-        title: title_for_origin(&r.tool, r.origin),
+        title: title_for_origin(&r.tool, r.origin, agent),
         reason: r
             .reason
             .as_deref()
@@ -417,6 +422,7 @@ fn rebuild_body(
     mut commands: Commands,
     queue: Res<PermissionQueue>,
     tabs: Res<ReviewTabs>,
+    model: Res<Model>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
     mut bodies: Query<(Entity, &mut PermissionBody)>,
@@ -431,7 +437,11 @@ fn rebuild_body(
             .get(pr)
             .and_then(|t| t.ready())
             .and_then(|r| r.view.worktree.as_deref());
-        let view = modal_view(pending, worktree, queue.others(pr));
+        let agent = tabs.0.get(pr).map_or_else(
+            || crate::agent_name::active(&model.snapshot),
+            |t| crate::agent_name::of_tab(&model.snapshot, t),
+        );
+        let view = modal_view(pending, worktree, queue.others(pr), agent);
         let key = (view, pending.answered);
         if body.built.as_ref() == Some(&key) {
             continue;
@@ -832,21 +842,51 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn the_modal_names_the_agent_that_asks() {
+        assert_eq!(title_for("Bash", "Codex"), "Codex wants to run a command");
+        assert_eq!(title_for("Edit", "Codex"), "Codex wants to edit a file");
+        assert_eq!(
+            title_for_origin("Bash", TurnOrigin::Chat, "Codex"),
+            "Codex wants to run a command"
+        );
+        assert_eq!(
+            title_for_origin("Bash", TurnOrigin::Security, "Codex"),
+            "Security check wants to run a command",
+            "a check names itself, not the agent"
+        );
+    }
+
     fn answer_button(app: &mut App, answer: PermissionAnswerKind) -> Entity {
         testing::find::<AnswerButton>(app, |b| b.answer == answer)
     }
 
     #[test]
     fn titles_follow_the_tool() {
-        assert_eq!(title_for("Bash"), "Claude Code wants to run a command");
-        assert_eq!(title_for("Edit"), "Claude Code wants to edit a file");
-        assert_eq!(title_for("MultiEdit"), "Claude Code wants to edit a file");
         assert_eq!(
-            title_for("NotebookEdit"),
+            title_for("Bash", "Claude Code"),
+            "Claude Code wants to run a command"
+        );
+        assert_eq!(
+            title_for("Edit", "Claude Code"),
             "Claude Code wants to edit a file"
         );
-        assert_eq!(title_for("Write"), "Claude Code wants to write a file");
-        assert_eq!(title_for("WebFetch"), "Claude Code wants to use WebFetch");
+        assert_eq!(
+            title_for("MultiEdit", "Claude Code"),
+            "Claude Code wants to edit a file"
+        );
+        assert_eq!(
+            title_for("NotebookEdit", "Claude Code"),
+            "Claude Code wants to edit a file"
+        );
+        assert_eq!(
+            title_for("Write", "Claude Code"),
+            "Claude Code wants to write a file"
+        );
+        assert_eq!(
+            title_for("WebFetch", "Claude Code"),
+            "Claude Code wants to use WebFetch"
+        );
     }
 
     #[test]
@@ -1701,32 +1741,32 @@ mod tests {
     #[test]
     fn titles_name_who_asked() {
         assert_eq!(
-            title_for_origin("Bash", TurnOrigin::Chat),
+            title_for_origin("Bash", TurnOrigin::Chat, "Claude Code"),
             "Claude Code wants to run a command"
         );
         assert_eq!(
-            title_for_origin("Bash", TurnOrigin::Security),
+            title_for_origin("Bash", TurnOrigin::Security, "Claude Code"),
             "Security check wants to run a command"
         );
         assert_eq!(
-            title_for_origin("Edit", TurnOrigin::Audit),
+            title_for_origin("Edit", TurnOrigin::Audit, "Claude Code"),
             "Audit check wants to edit a file"
         );
         assert_eq!(
-            title_for_origin("Write", TurnOrigin::Audit),
+            title_for_origin("Write", TurnOrigin::Audit, "Claude Code"),
             "Audit check wants to write a file"
         );
         assert_eq!(
-            title_for_origin("WebFetch", TurnOrigin::Security),
+            title_for_origin("WebFetch", TurnOrigin::Security, "Claude Code"),
             "Security check wants to use WebFetch"
         );
         assert_eq!(
-            title_for_origin("Bash", TurnOrigin::Revalidation),
+            title_for_origin("Bash", TurnOrigin::Revalidation, "Claude Code"),
             "Revalidation wants to run a command"
         );
         assert_eq!(
-            title_for("Bash"),
-            title_for_origin("Bash", TurnOrigin::Chat)
+            title_for("Bash", "Claude Code"),
+            title_for_origin("Bash", TurnOrigin::Chat, "Claude Code")
         );
     }
 

@@ -503,7 +503,52 @@ pub fn demo_probe() -> ProbeResult {
         program: "/opt/homebrew/bin/claude".into(),
         elapsed_ms: 1800,
         error: None,
+        harness: "Claude Code".into(),
+        signed_in: None,
+        account: None,
     }
+}
+
+/// The settings that make the demo use Codex.
+pub const CODEX_DEMO_SETTINGS: [(&str, &str); 2] = [
+    ("harness.kind", "codex"),
+    ("harness.program", "/opt/homebrew/bin/codex"),
+];
+
+/// The demo with Codex chosen as the agent.
+pub fn demo_codex(now: i64) -> Snapshot {
+    let mut snap = demo(now);
+    for (key, value) in CODEX_DEMO_SETTINGS {
+        crate::snapshot::apply_config_locally(&mut snap.config, key, value)
+            .expect("the demo setting is valid");
+    }
+    snap
+}
+
+/// A good Codex test: it answered in 0.4 s and is signed in with ChatGPT.
+pub fn demo_codex_probe() -> ProbeResult {
+    ProbeResult {
+        ok: true,
+        version: Some("0.162.1".into()),
+        program: "/opt/homebrew/bin/codex".into(),
+        elapsed_ms: 400,
+        error: None,
+        harness: "Codex".into(),
+        signed_in: Some(true),
+        account: Some("Logged in using ChatGPT".into()),
+    }
+}
+
+/// The first-run scan when both harnesses are installed.
+pub fn demo_first_run_both() -> FirstRun {
+    let mut first_run = demo_first_run();
+    for h in &mut first_run.harnesses {
+        if h.kind == HarnessKind::Codex {
+            h.path = Some("/opt/homebrew/bin/codex".into());
+            h.version = Some("0.162.1".into());
+        }
+    }
+    first_run
 }
 
 /// The demo review's chat, one inner list per turn: the summary the agent wrote when the
@@ -1248,6 +1293,39 @@ mod tests {
     use super::*;
     use crate::testing::NOW;
     use clusia_core::checks::anchor_in_diff;
+
+    #[test]
+    fn the_codex_demo_is_the_demo_with_codex_chosen() {
+        use clusia_core::config::HarnessKind as Kind;
+        let snap = demo_codex(1_700_000_000);
+        assert_eq!(snap.config.harness.kind, Kind::Codex);
+        assert_eq!(
+            snap.config.harness.program.as_deref(),
+            Some("/opt/homebrew/bin/codex")
+        );
+        assert_eq!(
+            demo(1_700_000_000).config.harness.kind,
+            Kind::ClaudeCode,
+            "the plain demo stays on Claude Code"
+        );
+    }
+
+    #[test]
+    fn the_codex_probe_names_codex_and_its_login() {
+        let p = demo_codex_probe();
+        assert!(p.ok);
+        assert_eq!(p.harness, "Codex");
+        assert_eq!(p.version.as_deref(), Some("0.162.1"));
+        assert_eq!(p.account.as_deref(), Some("Logged in using ChatGPT"));
+        assert_eq!(p.signed_in, Some(true));
+    }
+
+    #[test]
+    fn first_run_can_find_both_harnesses() {
+        let f = demo_first_run_both();
+        assert!(f.harnesses.iter().all(|h| h.path.is_some()));
+        assert_eq!(f.folders, demo_first_run().folders);
+    }
 
     #[test]
     fn the_demo_permission_request_is_the_mockups() {

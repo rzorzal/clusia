@@ -65,6 +65,8 @@ pub(crate) struct Shared {
     pub harness_search_paths: Vec<PathBuf>,
     /// The `claude` program of `DaemonOptions` (see `sessions::program_path`).
     pub claude_program: Option<PathBuf>,
+    /// The `codex` program of `DaemonOptions` (see `turns::program_path`).
+    pub codex_program: Option<PathBuf>,
     /// The `clusiad` that runs as the permission bridge; this executable when `None`.
     pub bridge_program: Option<PathBuf>,
     /// The permission requests waiting for the reviewer.
@@ -74,6 +76,8 @@ pub(crate) struct Shared {
     /// The running security and audit checks of every review. Not `checks_wake`, which wakes
     /// the task that looks at the continuous-integration checks of your pull requests.
     pub checks: Checks,
+    /// The `codex app-server` processes, one per open review.
+    pub codex: crate::codex::Servers,
     /// The timers and runs that revalidate the drafts of saved reviews.
     pub revalidations: Revalidations,
     /// Which reviews a connected client has open, so the daemon knows when no window shows one.
@@ -154,10 +158,12 @@ impl Shared {
                 .unwrap_or_else(|| "https://api.giphy.com".to_string()),
             harness_search_paths: options.harness_search_paths,
             claude_program: options.claude_program,
+            codex_program: options.codex_program,
             bridge_program: options.bridge_program,
             permissions: Permissions::default(),
             sessions: Sessions::default(),
             checks: Checks::default(),
+            codex: crate::codex::Servers::default(),
             revalidations: Revalidations::default(),
             holds: Holds::default(),
             window_listeners: AtomicUsize::new(0),

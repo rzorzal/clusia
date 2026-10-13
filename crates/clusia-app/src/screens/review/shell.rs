@@ -101,12 +101,12 @@ pub struct StatusView {
 }
 
 /// The status bar's agent text, and whether its dot is lit.
-pub fn agent_status(state: SessionStateKind) -> (String, bool) {
+pub fn agent_status(state: SessionStateKind, name: &str) -> (String, bool) {
     match state {
-        SessionStateKind::None => ("Claude Code · no session yet".into(), false),
-        SessionStateKind::Ready => ("Claude Code · ready".into(), true),
-        SessionStateKind::Running => ("Claude Code · thinking…".into(), true),
-        SessionStateKind::Queued => ("Claude Code · waiting for its turn".into(), true),
+        SessionStateKind::None => (format!("{name} · no session yet"), false),
+        SessionStateKind::Ready => (format!("{name} · ready"), true),
+        SessionStateKind::Running => (format!("{name} · thinking…"), true),
+        SessionStateKind::Queued => (format!("{name} · waiting for its turn"), true),
     }
 }
 
@@ -472,7 +472,7 @@ pub fn shell_view(
         sections,
         draft: items.iter().map(draft_card).collect(),
         status: StatusView {
-            agent: agent_status(SessionStateKind::None).0,
+            agent: agent_status(SessionStateKind::None, crate::agent_name::of_tab(snap, tab)).0,
             agent_live: false,
             draft: if items.is_empty() {
                 "Draft empty".into()
@@ -526,7 +526,10 @@ fn mount(
             tab,
             revalidations.0.get(pr),
             mounted == Some(&Mounted::Revalidation),
-            harness_ready(&model.snapshot),
+            harness_ready(
+                &model.snapshot,
+                crate::agent_name::kind_of_tab(&model.snapshot, tab),
+            ),
         ) {
             Mounted::Revalidation
         } else {
@@ -1241,7 +1244,11 @@ fn rebuild_status(
         let Some((v, _)) = current_view(&tabs, &model, &bar.pr, clock.now()) else {
             continue;
         };
-        let (agent, agent_live) = agent_status(chats.state(&bar.pr));
+        let name = tabs.0.get(&bar.pr).map_or_else(
+            || crate::agent_name::active(&model.snapshot),
+            |t| crate::agent_name::of_tab(&model.snapshot, t),
+        );
+        let (agent, agent_live) = agent_status(chats.state(&bar.pr), name);
         let mut status = v.status.clone();
         status.agent = agent;
         status.agent_live = agent_live;
@@ -1525,6 +1532,31 @@ mod tests {
             })),
             ui: Default::default(),
         }
+    }
+
+    #[test]
+    fn the_status_pill_names_the_agent() {
+        for (state, text, live) in [
+            (SessionStateKind::None, "Codex · no session yet", false),
+            (SessionStateKind::Ready, "Codex · ready", true),
+            (SessionStateKind::Running, "Codex · thinking…", true),
+            (
+                SessionStateKind::Queued,
+                "Codex · waiting for its turn",
+                true,
+            ),
+        ] {
+            assert_eq!(agent_status(state, "Codex"), (text.to_string(), live));
+        }
+    }
+
+    #[test]
+    fn a_codex_config_shows_in_the_shell_view() {
+        let tab = ready_tab();
+        let mut snap = fixture::demo(NOW);
+        snap.config.harness.kind = clusia_core::config::HarnessKind::Codex;
+        let v = shell_view(&tab, &snap, &Connection::Live, NOW).expect("ready");
+        assert_eq!(v.status.agent, "Codex · no session yet");
     }
 
     fn view_of(tab: &Tab, connection: &Connection) -> ShellView {

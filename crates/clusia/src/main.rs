@@ -1,6 +1,7 @@
 mod agent;
 mod check;
 mod cli;
+mod harness;
 mod install;
 mod revalidate;
 mod review;

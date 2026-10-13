@@ -65,9 +65,9 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 /// The report of a finished round: what it covered, then `KEPT|MOVED|OBSOLETE|REWORD|NOT CHECKED
 /// file:line  text` for each comment, then how many answers could not be read. It says what Claude
 /// Code returned; it never says the draft is right.
-pub(crate) fn report_lines(round: &Revalidation, review: &Review) -> Vec<String> {
+pub(crate) fn report_lines(round: &Revalidation, review: &Review, harness: &str) -> Vec<String> {
     let mut lines = vec![format!(
-        "Claude Code checked your {} against {}.",
+        "{harness} checked your {} against {}.",
         plural(round.asked as usize, "comment", "comments"),
         plural(round.commits.len(), "new commit", "new commits"),
     )];
@@ -148,7 +148,12 @@ async fn finish(client: &mut Client, pr: &PrRef, round: Revalidation) -> Result<
         return Err(no_answer("GetReview"));
     };
     Ok(Output {
-        human: report_lines(&round, &review).join("\n"),
+        human: report_lines(
+            &round,
+            &review,
+            crate::harness::kind_of(client, pr).await.name(),
+        )
+        .join("\n"),
         json: json!({ "revalidation": round }),
     })
 }
@@ -220,6 +225,7 @@ async fn follow(
             .request(Request::Revalidate { pr: pr.clone() })
             .await?;
     }
+    let harness = crate::harness::kind_of(client, pr).await.name();
     let mut asked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let finished = loop {
         let (_, event) = tokio::select! {
@@ -284,7 +290,7 @@ async fn follow(
             } if of == *pr => {
                 if asked.insert(id) && !json {
                     eprintln!(
-                        "Revalidation: waiting for an answer in the window: Claude Code wants to use {}: {}",
+                        "Revalidation: waiting for an answer in the window: {harness} wants to use {}: {}",
                         line_of(&tool),
                         line_of(&summary)
                     );
@@ -432,7 +438,7 @@ mod tests {
     fn cli_prints_filtered_verdicts() {
         let (round, review) = fixture();
         assert_eq!(
-            report_lines(&round, &review),
+            report_lines(&round, &review, "Claude Code"),
             [
                 "Claude Code checked your 5 comments against 2 new commits.",
                 "KEPT  src/cache.rs:10  Keep me.",
@@ -446,6 +452,13 @@ mod tests {
     }
 
     #[test]
+    fn the_report_names_the_harness_in_use() {
+        let (round, review) = fixture();
+        let lines = report_lines(&round, &review, "Codex");
+        assert!(lines[0].starts_with("Codex checked your "), "{}", lines[0]);
+    }
+
+    #[test]
     fn a_comment_sp1_moved_and_the_agent_kept_reads_moved() {
         let (mut round, mut review) = fixture();
         review.draft.items[0].anchor = Some(anchor(12));
@@ -453,7 +466,7 @@ mod tests {
         round.unreadable = 0;
         round.asked = 1;
         round.commits.truncate(1);
-        let lines = report_lines(&round, &review);
+        let lines = report_lines(&round, &review, "Claude Code");
         assert_eq!(
             lines[0],
             "Claude Code checked your 1 comment against 1 new commit."
@@ -467,7 +480,7 @@ mod tests {
         let (round, mut review) = fixture();
         review.draft.items.retain(|i| i.id != "k");
         assert!(
-            !report_lines(&round, &review)
+            !report_lines(&round, &review, "Claude Code")
                 .iter()
                 .any(|l| l.starts_with("KEPT"))
         );

@@ -1,13 +1,16 @@
 //! Agent turns: one `claude -p` process per message, run one at a time for each review.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
-use clusia_harness::{AgentEvent, SessionArg, extract_suggestions, parse_probe, probe_command};
+use clusia_core::config::{Harness, HarnessKind};
+use clusia_harness::{Agent, AgentEvent, SessionArg, extract_suggestions, version_at_least};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, ErrorCode, Event, Outcome, ProbeResult, ProtocolError, Reply,
     SessionStateKind, Suggestion, TurnOrigin, topics,
@@ -50,17 +53,18 @@ pub(crate) enum Refusal {
 }
 
 impl Refusal {
-    pub(crate) fn into_outcome(self) -> Outcome {
+    /// `harness` is the display name of the agent the refusal talks about.
+    pub(crate) fn into_outcome(self, harness: &str) -> Outcome {
         let (code, message) = match self {
             Refusal::Busy => (
                 ErrorCode::Busy,
-                AgentErrorKind::Busy.default_message().into(),
+                AgentErrorKind::Busy.message_for(harness, ""),
             ),
             Refusal::NoReview(message) => (ErrorCode::InvalidState, message),
             Refusal::Stopping => (ErrorCode::InvalidState, "clusiad is stopping".to_string()),
             Refusal::Summarizing => (
                 ErrorCode::Busy,
-                "Claude Code is already reading this version".to_string(),
+                format!("{harness} is already reading this version"),
             ),
         };
         Outcome::Err(ProtocolError::new(code, message))
@@ -72,6 +76,25 @@ struct Active {
     stop: Arc<Stop>,
     /// Whether the program of this turn runs in the sandbox; set once its command is built.
     sandbox: Option<bool>,
+}
+
+/// The agent, the program and the extra arguments a review's turns run with from the moment it
+/// is opened, whatever Config › Harness says meanwhile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Pinned {
+    pub kind: HarnessKind,
+    pub program: Option<String>,
+    pub extra_args: String,
+}
+
+impl Pinned {
+    fn of(harness: &Harness) -> Self {
+        Self {
+            kind: harness.kind,
+            program: harness.program.clone(),
+            extra_args: harness.extra_args.clone(),
+        }
+    }
 }
 
 /// A security check or audit whose program runs.
@@ -128,6 +151,11 @@ pub(crate) struct Sessions {
     /// The last state announced for each review, told again whenever its log is read. A lock
     /// of its own: states are announced while `table` is held.
     states: Mutex<HashMap<PrRef, SessionStateKind>>,
+    /// The harness each open review's turns run on; set when it opens or at its first message.
+    pinned: Mutex<HashMap<PrRef, Pinned>>,
+    /// Saved reviews closed while a turn still ran: the last turn to end releases their pin and
+    /// their Codex process.
+    closed: Mutex<HashSet<PrRef>>,
 }
 
 impl Default for Sessions {
@@ -138,6 +166,8 @@ impl Default for Sessions {
             live: watch::channel(0).0,
             closing: AtomicBool::new(false),
             states: Mutex::new(HashMap::new()),
+            pinned: Mutex::new(HashMap::new()),
+            closed: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -181,6 +211,80 @@ fn announce(shared: &Shared, pr: &PrRef, state: SessionStateKind) {
 }
 
 impl Sessions {
+    /// Pins the harness `harness` names for the turns of `pr`, unless the review has one.
+    pub(crate) fn pin(&self, pr: &PrRef, harness: &Harness) {
+        self.pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(pr.clone())
+            .or_insert_with(|| Pinned::of(harness));
+    }
+
+    /// The review opens: it runs on the config's harness, unless a turn of an earlier open still
+    /// runs, which keeps the one it started with. A close waiting for that turn is cancelled. A
+    /// Codex server of an earlier open ends when the review moves to another kind.
+    pub(crate) async fn repin(&self, shared: &Shared, pr: &PrRef, harness: &Harness) {
+        self.closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
+        if self.any_running(pr) {
+            self.pin(pr, harness);
+            return;
+        }
+        let replaced = self
+            .pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(pr.clone(), Pinned::of(harness));
+        if replaced.is_some_and(|old| old.kind == HarnessKind::Codex && harness.kind != old.kind) {
+            crate::codex::close(shared, pr).await;
+        }
+    }
+
+    /// The harness `pr`'s turns are pinned to; `None` for a review that is not open.
+    pub(crate) fn pinned(&self, pr: &PrRef) -> Option<Pinned> {
+        self.pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(pr)
+            .cloned()
+    }
+
+    /// The review was saved and closed: its next turns follow the config again.
+    pub(crate) fn unpin(&self, pr: &PrRef) {
+        self.pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
+    }
+
+    /// The review was saved and closed: its pin and its Codex process go now, or, while a turn
+    /// still runs, when the last one ends.
+    pub(crate) async fn close_review(&self, shared: &Shared, pr: &PrRef) {
+        self.closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(pr.clone());
+        self.release_closed(shared, pr).await;
+    }
+
+    /// Releases a closed review once no turn of it runs. A no-op for a review that is open.
+    pub(crate) async fn release_closed(&self, shared: &Shared, pr: &PrRef) {
+        if self.any_running(pr) {
+            return;
+        }
+        let was_closed = self
+            .closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
+        if was_closed {
+            self.unpin(pr);
+            crate::codex::close(shared, pr).await;
+        }
+    }
+
     /// Starts a turn for `pr`, or queues it behind the running one. Returns the turn id.
     pub(crate) async fn submit(
         shared: &Arc<Shared>,
@@ -197,6 +301,14 @@ impl Sessions {
                 "no review for {pr}; open it first"
             )));
         }
+        // A message to a saved review brings it back: no close waits for its turns any more.
+        sessions
+            .closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
+        let harness = shared.config.read().await.harness.clone();
+        sessions.pin(pr, &harness);
         let log = shared.paths.agent_log(pr);
         let floor = {
             let log = log.clone();
@@ -325,6 +437,14 @@ impl Sessions {
             .unwrap_or_else(|p| p.into_inner())
             .remove(pr)
             .is_some();
+        self.pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
+        self.closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
         if removed {
             announce(shared, pr, SessionStateKind::None);
         }
@@ -516,12 +636,13 @@ impl Sessions {
         }
     }
 
-    /// `--resume` for a session the CLI knows, `--session-id` with a fresh uuid otherwise.
-    pub(crate) fn session_for(&self, shared: &Shared, pr: &PrRef) -> SessionArg {
+    /// `--resume` for a session `kind` made and the CLI knows, `--session-id` with a fresh uuid
+    /// otherwise: a session of another harness is not resumed.
+    pub(crate) fn session_for(&self, shared: &Shared, pr: &PrRef, kind: HarnessKind) -> SessionArg {
         if let Ok(Some(review)) = reviews::load_stored(shared, pr)
-            && let Some(id) = review.harness_session
+            && let Some(id) = review.session_of(kind)
         {
-            return SessionArg::Resume(id);
+            return SessionArg::Resume(id.to_string());
         }
         let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
         let slot = table.entry(pr.clone()).or_default();
@@ -533,12 +654,21 @@ impl Sessions {
 
     /// A session a check runs in: a fork of the review's session, which keeps the chat's
     /// history out of reach of the check and the check's out of the chat's, or a new session of
-    /// its own when the review has none yet. Neither is ever recorded as the review's session.
-    pub(crate) fn fork_session(&self, shared: &Shared, pr: &PrRef) -> SessionArg {
+    /// its own when the review has none yet, or only one of another harness. Neither is ever
+    /// recorded as the review's session.
+    pub(crate) fn fork_session(
+        &self,
+        shared: &Shared,
+        pr: &PrRef,
+        kind: HarnessKind,
+    ) -> SessionArg {
         let id = uuid::Uuid::new_v4().to_string();
         match reviews::load_stored(shared, pr) {
-            Ok(Some(review)) => match review.harness_session {
-                Some(parent) => SessionArg::Fork { parent, id },
+            Ok(Some(review)) => match review.session_of(kind) {
+                Some(parent) => SessionArg::Fork {
+                    parent: parent.to_string(),
+                    id,
+                },
                 None => SessionArg::New(id),
             },
             _ => SessionArg::New(id),
@@ -569,13 +699,16 @@ async fn drive(
             tracing::error!(pr = %pr, turn, "an agent turn failed inside the daemon");
             Out::new(&shared, &pr, turn).error(
                 AgentErrorKind::Crashed,
-                AgentErrorKind::Crashed.default_message().to_string(),
+                current_agent(&shared)
+                    .await
+                    .message_for(AgentErrorKind::Crashed),
             );
         }
         // Whatever the turn was still asking, it asks no more.
         crate::permissions::cancel_turn(&shared, &pr, turn).await;
         next = shared.sessions.next_after(&shared, &pr, turn);
     }
+    shared.sessions.release_closed(&shared, &pr).await;
 }
 
 /// Publishes what a turn does and writes it to the agent log.
@@ -716,6 +849,8 @@ struct ChatSink<'a> {
     summary_for: Option<String>,
     /// Why the turn was asked to stop: a turn whose review ended records and tells nothing.
     stop: Arc<Stop>,
+    /// The agent this turn runs on.
+    agent: Agent,
 }
 
 impl ChatSink<'_> {
@@ -739,7 +874,9 @@ impl ChatSink<'_> {
                     self.out.denied(tool, detail);
                 }
             }
-            AgentEvent::SessionId(id) => remember_session(self.shared, self.out.pr, &id).await,
+            AgentEvent::SessionId(id) => {
+                remember_session(self.shared, self.out.pr, &id, self.agent.kind()).await
+            }
             AgentEvent::Error { kind, message } => self.error(kind, message),
             AgentEvent::Final {
                 text,
@@ -756,7 +893,7 @@ impl ChatSink<'_> {
                 if is_error && !self.failed {
                     self.failed = true;
                     let message = match text.trim() {
-                        "" => AgentErrorKind::Crashed.default_message().to_string(),
+                        "" => self.agent.message_for(AgentErrorKind::Crashed),
                         said => said.to_string(),
                     };
                     self.out.error(AgentErrorKind::Crashed, message);
@@ -839,13 +976,15 @@ impl TurnSink for ChatSink<'_> {
     }
 }
 
-/// The CLI confirmed the session: from now on turns resume it. Stored in the review file.
-async fn remember_session(shared: &Shared, pr: &PrRef, id: &str) {
+/// The CLI confirmed the session: from now on turns of `kind` resume it. Stored in the review
+/// file together with the harness that made it.
+async fn remember_session(shared: &Shared, pr: &PrRef, id: &str, kind: HarnessKind) {
     let _guard = reviews::lock(shared, pr).await;
     if let Ok(Some(mut review)) = reviews::load_stored(shared, pr)
-        && review.harness_session.as_deref() != Some(id)
+        && review.session_of(kind) != Some(id)
     {
         review.harness_session = Some(id.to_string());
+        review.harness_session_kind = Some(kind);
         if reviews::save(shared, &review).is_err() {
             tracing::warn!(pr = %pr, "cannot store the agent session in the review");
         }
@@ -864,6 +1003,7 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         streamed: false,
         summary_for: prompt.summary_for.clone(),
         stop: stop.clone(),
+        agent: agent_for(&shared, &pr).await,
     };
     let is_summary = prompt.summary_for.is_some();
     let run = TurnRun {
@@ -932,6 +1072,16 @@ pub(crate) fn close_unfinished(shared: &Shared) {
     }
 }
 
+/// The agent the config names now.
+pub(crate) async fn current_agent(shared: &Shared) -> Agent {
+    Agent::from(shared.config.read().await.harness.kind)
+}
+
+/// The agent a turn of `pr` runs on: the one the review pinned, else the config's.
+pub(crate) async fn agent_for(shared: &Shared, pr: &PrRef) -> Agent {
+    Agent::from(crate::turns::harness_for(shared, pr).await.kind)
+}
+
 pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcome {
     let text = text.trim();
     if text.is_empty() {
@@ -947,7 +1097,7 @@ pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcom
     };
     match Sessions::submit(shared, pr, prompt).await {
         Ok(turn) => Outcome::Ok(Reply::AgentTurn { turn }),
-        Err(refusal) => refusal.into_outcome(),
+        Err(refusal) => refusal.into_outcome(agent_for(shared, pr).await.name()),
     }
 }
 
@@ -992,55 +1142,194 @@ pub(crate) async fn log(shared: &Shared, pr: &PrRef) -> Outcome {
     }
 }
 
-/// Asks the program for its version: the Config › Harness probe card.
-pub(crate) async fn probe(shared: &Shared) -> Outcome {
-    let harness = shared.config.read().await.harness.clone();
-    let program = program_path(shared, &harness);
-    let started = Instant::now();
-    let env: Vec<_> = std::env::vars_os().collect();
-    let mut command = Command::from(probe_command(&program, &env));
+/// What a working agent told the probe.
+struct Found {
+    version: String,
+    /// Whether the login check passed; `None` for an agent that has none.
+    signed_in: Option<bool>,
+    account: Option<String>,
+}
+
+/// Why the probe found the agent unusable, with what it did learn.
+struct Refused {
+    version: Option<String>,
+    signed_in: Option<bool>,
+    error: String,
+}
+
+impl Refused {
+    fn unknown(error: String) -> Self {
+        Self {
+            version: None,
+            signed_in: None,
+            error,
+        }
+    }
+}
+
+/// `line` with an API key hidden: from `sk-` on, nothing of it is kept.
+fn mask_keys(line: &str) -> String {
+    let at = line.match_indices("sk-").find_map(|(at, _)| {
+        let word_start = line[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric());
+        word_start.then_some(at)
+    });
+    match at {
+        Some(at) => format!("{}sk-…", &line[..at]),
+        None => line.to_string(),
+    }
+}
+
+/// `<program> --version` with the environment rules of `agent`'s own turns, so the OpenAI keys
+/// and the GitHub tokens never reach it either.
+fn version_command(
+    agent: Agent,
+    program: &Path,
+    env: &[(OsString, OsString)],
+) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command.arg("--version");
+    agent.set_env(&mut command, env);
+    command
+}
+
+/// Runs a probe command with the probe's time limit.
+async fn probe_output(
+    command: std::process::Command,
+    agent: Agent,
+) -> Result<std::process::Output, String> {
+    let mut command = Command::from(command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let found: Result<String, String> =
-        match tokio::time::timeout(PROBE_LIMIT, command.output()).await {
-            Err(_) => Err(format!(
-                "Claude Code did not answer within {} seconds",
-                PROBE_LIMIT.as_secs()
-            )),
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(AgentErrorKind::NotInstalled.default_message().to_string())
-            }
-            Ok(Err(e)) => Err(e.to_string()),
-            Ok(Ok(output)) if output.status.success() => {
-                parse_probe(&String::from_utf8_lossy(&output.stdout))
-            }
-            Ok(Ok(output)) => {
-                let said = String::from_utf8_lossy(&output.stderr);
-                Err(match said.trim() {
-                    "" => format!("Claude Code exited with {}", output.status),
-                    said => said.to_string(),
-                })
-            }
-        };
+    match tokio::time::timeout(PROBE_LIMIT, command.output()).await {
+        Err(_) => Err(format!(
+            "{} did not answer within {} seconds",
+            agent.name(),
+            PROBE_LIMIT.as_secs()
+        )),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(agent.message_for(AgentErrorKind::NotInstalled))
+        }
+        Ok(Err(e)) => Err(e.to_string()),
+        Ok(Ok(output)) => Ok(output),
+    }
+}
+
+/// Asks `agent` for its version, checks it against the minimum Clúsia needs and, for an agent
+/// that has one, asks whether it is signed in.
+async fn check_agent(
+    agent: Agent,
+    program: &Path,
+    env: &[(OsString, OsString)],
+) -> Result<Found, Refused> {
+    let output = probe_output(version_command(agent, program, env), agent)
+        .await
+        .map_err(Refused::unknown)?;
+    let version = if output.status.success() {
+        agent.parse_version(&String::from_utf8_lossy(&output.stdout))
+    } else {
+        let said = String::from_utf8_lossy(&output.stderr);
+        Err(match said.trim() {
+            "" => format!("{} exited with {}", agent.name(), output.status),
+            said => said.to_string(),
+        })
+    }
+    .map_err(Refused::unknown)?;
+    if let Some(min) = agent.min_version()
+        && !version_at_least(&version, min)
+    {
+        return Err(Refused {
+            error: format!(
+                "{} {version} is older than {min}, which Clúsia needs",
+                agent.name()
+            ),
+            version: Some(version),
+            signed_in: None,
+        });
+    }
+    let Some(login) = agent.signed_in_command(program, env) else {
+        return Ok(Found {
+            version,
+            signed_in: None,
+            account: None,
+        });
+    };
+    let output = match probe_output(login, agent).await {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(Refused {
+                version: Some(version),
+                signed_in: None,
+                error,
+            });
+        }
+    };
+    if !output.status.success() {
+        return Err(Refused {
+            error: format!(
+                "{} is not signed in. Run `{} login` in a terminal",
+                agent.name(),
+                agent.program()
+            ),
+            version: Some(version),
+            signed_in: Some(false),
+        });
+    }
+    // `login status` writes to standard error; the first line says how the user signed in.
+    let (stderr, stdout) = (
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let account = [stderr, stdout]
+        .iter()
+        .flat_map(|text| text.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(mask_keys);
+    Ok(Found {
+        version,
+        signed_in: Some(true),
+        account,
+    })
+}
+
+/// Asks the program for its version, and its login when it has one: the Config › Harness probe
+/// card.
+pub(crate) async fn probe(shared: &Shared) -> Outcome {
+    let harness = shared.config.read().await.harness.clone();
+    let agent = Agent::from(harness.kind);
+    let program = program_path(shared, &harness);
+    let started = Instant::now();
+    let env: Vec<_> = std::env::vars_os().collect();
+    let checked = check_agent(agent, &program, &env).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let program = program.display().to_string();
-    Outcome::Ok(Reply::Probe(match found {
-        Ok(version) => ProbeResult {
+    let name = agent.name().to_string();
+    Outcome::Ok(Reply::Probe(match checked {
+        Ok(found) => ProbeResult {
             ok: true,
-            version: Some(version),
+            version: Some(found.version),
             program,
             elapsed_ms,
             error: None,
+            harness: name,
+            signed_in: found.signed_in,
+            account: found.account,
         },
-        Err(error) => ProbeResult {
+        Err(refused) => ProbeResult {
             ok: false,
-            version: None,
+            version: refused.version,
             program,
             elapsed_ms,
-            error: Some(error),
+            error: Some(refused.error),
+            harness: name,
+            signed_in: refused.signed_in,
+            account: None,
         },
     }))
 }
@@ -1062,6 +1351,7 @@ mod tests {
     fn shared_for(paths: Paths, config: Config) -> Arc<Shared> {
         let options = crate::options::DaemonOptions {
             claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
             github_api: Some("http://127.0.0.1:9".into()),
             github_token: None,
             gh_program: "/nonexistent/gh".into(),
@@ -1269,7 +1559,7 @@ mod tests {
         wait_calls(&lab, 1).await;
         assert_eq!(lab.send(&pr, "three").await, Err(Refusal::Busy));
         assert_eq!(
-            Refusal::Busy.into_outcome(),
+            Refusal::Busy.into_outcome("Claude Code"),
             Outcome::Err(ProtocolError::new(
                 ErrorCode::Busy,
                 "The agent is busy: wait for the current turn"
@@ -1895,6 +2185,24 @@ mod tests {
         assert_eq!(lab.send(&pr, "hi").await, Ok(6));
     }
 
+    #[test]
+    fn an_api_key_is_never_kept_in_the_account_line() {
+        assert_eq!(
+            mask_keys("Logged in using an API key - sk-proj-abcdef0123"),
+            "Logged in using an API key - sk-…"
+        );
+        assert_eq!(mask_keys("sk-live-1234"), "sk-…");
+        assert_eq!(
+            mask_keys("Logged in using ChatGPT"),
+            "Logged in using ChatGPT"
+        );
+        assert_eq!(
+            mask_keys("Logged in as task-bot (ChatGPT)"),
+            "Logged in as task-bot (ChatGPT)",
+            "a word that only ends in sk- is not a key"
+        );
+    }
+
     #[tokio::test]
     async fn the_probe_reports_the_version_or_why_not() {
         let lab = lab(Script::one(Turn::answer("x")));
@@ -1916,6 +2224,165 @@ mod tests {
         assert_eq!(
             found.error.as_deref(),
             Some("Install Claude Code or set its path")
+        );
+        assert_eq!(
+            (found.harness.as_str(), found.signed_in, found.account),
+            ("Claude Code", None, None)
+        );
+    }
+
+    /// A program that prints what `codex --version` prints.
+    fn version_script(dir: &Path, said: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let program = dir.join("codex");
+        std::fs::write(&program, format!("#!/bin/sh\necho '{said}'\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    #[tokio::test]
+    async fn the_probe_of_codex_reads_its_version_and_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = version_script(dir.path(), "codex-cli 0.162.1");
+        let lab = lab_with(Script::one(Turn::answer("x")), |c| {
+            c.harness.kind = HarnessKind::Codex;
+            c.harness.program = Some(program.display().to_string());
+        });
+        let Outcome::Ok(Reply::Probe(found)) = probe(&lab.shared).await else {
+            panic!("a probe reply");
+        };
+        assert!(found.ok, "{found:?}");
+        assert_eq!(found.version.as_deref(), Some("0.162.1"));
+        assert_eq!(found.harness, "Codex");
+
+        let missing = lab_with(Script::one(Turn::answer("x")), |c| {
+            c.harness.kind = HarnessKind::Codex;
+            c.harness.program = Some("/nonexistent/codex".into());
+        });
+        let Outcome::Ok(Reply::Probe(found)) = probe(&missing.shared).await else {
+            panic!("a probe reply");
+        };
+        assert_eq!(
+            found.error.as_deref(),
+            Some("Install Codex or set its path")
+        );
+        assert_eq!(found.harness, "Codex");
+    }
+
+    #[test]
+    fn a_version_run_gets_no_github_token_for_either_agent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("agent");
+        std::fs::write(&program, "#!/bin/sh\nexec /usr/bin/env\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env: Vec<(OsString, OsString)> = [
+            ("GH_TOKEN", "t1"),
+            ("GITHUB_TOKEN", "t2"),
+            ("CLUSIA_HOME", "/x"),
+            ("KEEP", "x"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        for agent in [Agent::ClaudeCode, Agent::Codex] {
+            let out = version_command(agent, &program, &env).output().unwrap();
+            let seen = String::from_utf8_lossy(&out.stdout);
+            assert!(seen.contains("KEEP=x"), "{agent:?}: {seen}");
+            for dropped in ["GH_TOKEN=", "GITHUB_TOKEN=", "CLUSIA_"] {
+                assert!(!seen.contains(dropped), "{agent:?}: {seen}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_program_follows_the_harness_kind() {
+        let lab = lab(Script::one(Turn::answer("x")));
+        let mut harness = Harness::default();
+        assert_eq!(
+            crate::turns::program_path(&lab.shared, &harness),
+            Path::new("/nonexistent/claude")
+        );
+        harness.kind = HarnessKind::Codex;
+        assert_eq!(
+            crate::turns::program_path(&lab.shared, &harness),
+            Path::new("/nonexistent/codex")
+        );
+        harness.program = Some(" /opt/tools/codex ".into());
+        assert_eq!(
+            crate::turns::program_path(&lab.shared, &harness),
+            Path::new("/opt/tools/codex"),
+            "the configured program wins for either kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_of_another_kind_is_not_resumed() {
+        let lab = lab(Script::one(Turn::answer("x")));
+        let pr = pr(7);
+        let sessions = &lab.shared.sessions;
+        let store = |kind: Option<HarnessKind>| {
+            let mut review = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+            review.harness_session = Some("thr-1".into());
+            review.harness_session_kind = kind;
+            save_review(&lab.shared.paths, &review).unwrap();
+        };
+        store(Some(HarnessKind::Codex));
+        let shared = &lab.shared;
+        assert_eq!(
+            sessions.session_for(shared, &pr, HarnessKind::Codex),
+            SessionArg::Resume("thr-1".into())
+        );
+        assert!(matches!(
+            sessions.session_for(shared, &pr, HarnessKind::ClaudeCode),
+            SessionArg::New(_)
+        ));
+        assert!(matches!(
+            sessions.fork_session(shared, &pr, HarnessKind::Codex),
+            SessionArg::Fork { parent, .. } if parent == "thr-1"
+        ));
+        assert!(matches!(
+            sessions.fork_session(shared, &pr, HarnessKind::ClaudeCode),
+            SessionArg::New(_)
+        ));
+        // A session stored before the kind existed is Claude Code's.
+        store(None);
+        assert_eq!(
+            sessions.session_for(shared, &pr, HarnessKind::ClaudeCode),
+            SessionArg::Resume("thr-1".into())
+        );
+        assert!(matches!(
+            sessions.session_for(shared, &pr, HarnessKind::Codex),
+            SessionArg::New(_)
+        ));
+        assert!(matches!(
+            sessions.fork_session(shared, &pr, HarnessKind::Codex),
+            SessionArg::New(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_session_is_stored_with_the_kind_that_made_it() {
+        let lab = lab(Script::one(Turn::answer("x")));
+        let pr = pr(7);
+        remember_session(&lab.shared, &pr, "thr-9", HarnessKind::Codex).await;
+        let stored = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+        assert_eq!(stored.harness_session.as_deref(), Some("thr-9"));
+        assert_eq!(stored.harness_session_kind, Some(HarnessKind::Codex));
+        assert_eq!(
+            lab.shared
+                .sessions
+                .session_for(&lab.shared, &pr, HarnessKind::Codex),
+            SessionArg::Resume("thr-9".into())
+        );
+        remember_session(&lab.shared, &pr, "uuid-1", HarnessKind::ClaudeCode).await;
+        let stored = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+        assert_eq!(
+            (
+                stored.harness_session.as_deref(),
+                stored.harness_session_kind
+            ),
+            (Some("uuid-1"), Some(HarnessKind::ClaudeCode))
         );
     }
 
@@ -2320,6 +2787,7 @@ mod tests {
                     streamed: false,
                     summary_for: Some("abc123".into()),
                     stop,
+                    agent: Agent::ClaudeCode,
                 };
                 run.handle(AgentEvent::Final {
                     text: "The summary.".into(),

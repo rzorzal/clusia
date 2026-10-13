@@ -225,7 +225,8 @@ impl Daemon {
         tokio::join!(
             crate::checks::shutdown(&self.shared),
             crate::revalidate::shutdown(&self.shared),
-            self.shared.sessions.shutdown(&self.shared)
+            self.shared.sessions.shutdown(&self.shared),
+            crate::codex::shutdown(&self.shared)
         );
         if let Some(tray) = tray {
             // The supervisor kills the tray on shutdown; give it a moment to reap it.

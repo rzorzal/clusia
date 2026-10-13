@@ -38,6 +38,7 @@ impl Home {
             .env("CLUSIA_SECRET_STORE", "memory")
             .env("CLUSIA_TRAY_BIN", "none")
             .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
             .env_remove("CLUSIA_GITHUB_TOKEN")
             .output()
             .unwrap()
@@ -169,6 +170,76 @@ fn invalid_config_value_exits_1() {
 }
 
 #[test]
+fn switching_the_harness_clears_the_program_of_the_old_one() {
+    let h = Home::new();
+    assert!(h.clusia(&["daemon", "start"]).status.success());
+    let o = h.clusia(&[
+        "config",
+        "set",
+        "harness.program",
+        "/opt/homebrew/bin/claude",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = h.clusia(&["config", "set", "harness.kind", "codex"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&h.clusia(&["config", "get", "harness.program"])), "");
+    // Setting the same kind again leaves a program alone.
+    let o = h.clusia(&["config", "set", "harness.program", "/opt/bin/codex"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = h.clusia(&["config", "set", "harness.kind", "codex"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&h.clusia(&["config", "get", "harness.program"])),
+        "/opt/bin/codex"
+    );
+}
+
+#[test]
+fn the_harness_can_be_switched_to_codex_and_keeps_its_own_flags() {
+    let h = Home::new();
+    assert!(h.clusia(&["daemon", "start"]).status.success());
+    let o = h.clusia(&["config", "set", "harness.kind", "codex"]);
+    assert_eq!(stdout(&o), "harness.kind = codex", "{}", stderr(&o));
+    assert_eq!(
+        stdout(&h.clusia(&["config", "get", "harness.kind"])),
+        "codex"
+    );
+    // `--sandbox` is Codex's to set; `--permission-mode` is only Claude Code's.
+    let o = h.clusia(&[
+        "config",
+        "set",
+        "harness.extra_args",
+        "--",
+        "--sandbox read-only",
+    ]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("must not set --sandbox"),
+        "{}",
+        stderr(&o)
+    );
+    let o = h.clusia(&[
+        "config",
+        "set",
+        "harness.extra_args",
+        "--",
+        "--permission-mode plan",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = h.clusia(&["config", "set", "harness.kind", "claude-code"]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("must not set --permission-mode"),
+        "{}",
+        stderr(&o)
+    );
+    assert_eq!(
+        stdout(&h.clusia(&["config", "get", "harness.kind"])),
+        "codex"
+    );
+}
+
+#[test]
 fn start_twice_reports_already_running() {
     let h = Home::new();
     assert!(h.clusia(&["daemon", "start"]).status.success());
@@ -234,6 +305,7 @@ impl Home {
             .env("CLUSIA_SECRET_STORE", "memory")
             .env("CLUSIA_TRAY_BIN", "none")
             .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
             .env_remove("CLUSIA_GITHUB_TOKEN")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -403,6 +475,7 @@ fn too_long_home_fails_before_running() {
             .env("CLUSIA_DAEMON_BIN", clusiad_bin())
             .env("CLUSIA_TRAY_BIN", "none")
             .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
             .output()
             .unwrap();
         assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
@@ -1558,6 +1631,7 @@ mod review_flow {
             .arg(home)
             .args(["ask", "acme/widgets#7", "run the tests"])
             .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
             .stdin(stdin)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1959,6 +2033,7 @@ mod check_against_a_scripted_daemon {
             .arg(home)
             .args(["check", "acme/widgets#7", "--security"])
             .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()

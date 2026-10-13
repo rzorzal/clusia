@@ -2,6 +2,7 @@
 // Bevy systems take many queries and parameters by design.
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
+pub mod agent_name;
 pub mod app;
 pub mod args;
 pub mod bridge;

@@ -344,6 +344,7 @@ pub fn row_views(
     review: &Review,
     files: &[FileDiff],
     waiting: &BTreeSet<String>,
+    agent: &str,
 ) -> Vec<RowView> {
     let mut rows = Vec::new();
     for p in &round.proposals {
@@ -385,7 +386,7 @@ pub fn row_views(
                 note = reason.as_deref().map(printable);
             }
             (Verdict::NotChecked, _) => {
-                note = Some("Claude Code did not return a result for this comment".into());
+                note = Some(format!("{agent} did not return a result for this comment"));
             }
             _ => {}
         }
@@ -503,6 +504,7 @@ fn banner_view(
     round: &Revalidation,
     rows: &[RowView],
     harness: bool,
+    agent: &str,
     pending_rows: usize,
     accepting: bool,
 ) -> BannerView {
@@ -528,26 +530,25 @@ fn banner_view(
         _ if !harness && !matches!(round.state, RoundState::Done | RoundState::Running { .. }) => {
             banner(
                 sp1_summary(round),
-                "Set up a harness in Config › Harness to have Claude Code check your comments."
-                    .into(),
+                format!(
+                    "Set up a harness in Config › Harness to have {agent} check your comments."
+                ),
                 vec![TopAction::SetUp, TopAction::Back],
             )
         }
         RoundState::Scheduled { .. } => banner(
             "Waiting for pushes to settle".into(),
-            format!(
-                "Claude Code checks your {comments} once no new commit has arrived for a while."
-            ),
+            format!("{agent} checks your {comments} once no new commit has arrived for a while."),
             vec![TopAction::RevalidateNow, TopAction::Back],
         ),
         RoundState::Waiting => banner(
             "Waiting for another check to finish".into(),
-            format!("Claude Code checks your {comments} as soon as a place is free."),
+            format!("{agent} checks your {comments} as soon as a place is free."),
             vec![TopAction::Stop, TopAction::Back],
         ),
         RoundState::Running { activity } => banner(
             format!(
-                "Claude Code is checking your {comments} against {}…",
+                "{agent} is checking your {comments} against {}…",
                 plural(commits.max(1), "new commit")
             ),
             activity
@@ -561,7 +562,7 @@ fn banner_view(
             if message == "Stopped" {
                 "Stopped".into()
             } else {
-                "Claude Code could not check your comments".into()
+                format!("{agent} could not check your comments")
             },
             if message == "Stopped" {
                 "Your comments followed the code, and nothing else changed.".into()
@@ -578,7 +579,7 @@ fn banner_view(
             actions.push(TopAction::Back);
             let mut done = banner(
                 format!(
-                    "{new_commits}. Claude Code checked your {comments} against {}.",
+                    "{new_commits}. {agent} checked your {comments} against {}.",
                     if commits == 1 { "it" } else { "them" }
                 ),
                 counts_line(rows, round.unreadable),
@@ -606,13 +607,14 @@ pub fn screen_view(
     tab: &Tab,
     model: Option<&RevalidationModel>,
     harness: bool,
+    agent: &str,
 ) -> Option<ScreenView> {
     let ready = tab.ready()?;
     let round = round_of(tab, model)?;
     let review = &ready.view.review;
     let waiting = model.map(|m| m.pending.clone()).unwrap_or_default();
     let rows = if matches!(round.state, RoundState::Done) {
-        row_views(round, review, &ready.view.diff, &waiting)
+        row_views(round, review, &ready.view.diff, &waiting, agent)
     } else {
         Vec::new()
     };
@@ -628,7 +630,7 @@ pub fn screen_view(
         } else {
             ("outdated", Tone::Orange)
         },
-        banner: banner_view(round, &rows, harness, pending_rows, accepting),
+        banner: banner_view(round, &rows, harness, agent, pending_rows, accepting),
         rows,
     })
 }
@@ -740,8 +742,15 @@ fn fill_revalidation(
         let Some(tab) = tabs.0.get(&root.pr) else {
             continue;
         };
-        let Some(view) = screen_view(tab, rounds.0.get(&root.pr), harness_ready(&model.snapshot))
-        else {
+        let Some(view) = screen_view(
+            tab,
+            rounds.0.get(&root.pr),
+            harness_ready(
+                &model.snapshot,
+                crate::agent_name::kind_of_tab(&model.snapshot, tab),
+            ),
+            crate::agent_name::of_tab(&model.snapshot, tab),
+        ) else {
             continue;
         };
         if root.built.as_ref() == Some(&view) {
@@ -1320,6 +1329,18 @@ mod tests {
             .expect("a round")
     }
 
+    /// Pins the open tab of `pr` to Codex, as a review that began on it.
+    fn pin_codex(app: &mut App, pr: &PrRef) {
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(pr)
+            .expect("a tab")
+            .ui
+            .opened_with = Some(clusia_core::config::HarnessKind::Codex);
+        testing::settle(app);
+    }
+
     fn rows_of(app: &App) -> Vec<RowView> {
         let ready = testing::ready(app, &pr());
         row_views(
@@ -1327,6 +1348,7 @@ mod tests {
             &ready.view.review,
             &ready.view.diff,
             &BTreeSet::new(),
+            "Claude Code",
         )
     }
 
@@ -1393,11 +1415,16 @@ mod tests {
 
     #[test]
     fn the_screen_says_what_was_checked() {
-        let (mut app, _) = done_app();
+        let (mut app, pr) = done_app();
         assert_eq!(testing::count::<RevalidationRow>(&mut app), 5);
         assert!(testing::shows(
             &mut app,
             "2 new commits since you saved this review. Claude Code checked your 5 comments against them."
+        ));
+        pin_codex(&mut app, &pr);
+        assert!(testing::shows(
+            &mut app,
+            "2 new commits since you saved this review. Codex checked your 5 comments against them."
         ));
         assert!(testing::shows(
             &mut app,
@@ -1511,6 +1538,7 @@ mod tests {
                 &ready.view.review,
                 &ready.view.diff,
                 &BTreeSet::new(),
+                "Claude Code",
             )
         };
         assert!(rows(&round)[1].actions.iter().all(|a| a.enabled));
@@ -1532,6 +1560,7 @@ mod tests {
             &ready.view.review,
             &ready.view.diff,
             &BTreeSet::new(),
+            "Claude Code",
         );
         assert_eq!(rows.len(), 4);
     }
@@ -1610,6 +1639,7 @@ mod tests {
             &ready.view.review,
             &ready.view.diff,
             &BTreeSet::new(),
+            "Claude Code",
         );
         assert!(rows[1].actions.is_empty());
         assert_eq!(pending(&round, &ready.view.review.draft), 2);
@@ -1731,6 +1761,11 @@ mod tests {
         assert!(testing::shows(
             &mut app,
             "Claude Code is checking your 5 comments against 2 new commits…"
+        ));
+        pin_codex(&mut app, &pr);
+        assert!(testing::shows(
+            &mut app,
+            "Codex is checking your 5 comments against 2 new commits…"
         ));
         assert!(testing::shows(&mut app, "Reading src/cache.rs…"));
         assert_eq!(testing::count::<RevalidationRow>(&mut app), 0);

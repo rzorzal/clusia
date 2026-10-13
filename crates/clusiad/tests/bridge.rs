@@ -14,6 +14,7 @@ fn bridge(socket: &std::path::Path) -> Command {
         .arg(socket)
         .args(["--pr", "acme/widgets#7", "--turn", "1"])
         .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+        .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -80,6 +81,7 @@ async fn a_bad_flag_set_is_refused() {
     let output = Command::new(env!("CARGO_BIN_EXE_clusiad"))
         .args(["permission-bridge", "--turn", "x"])
         .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+        .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
         .output()
         .await
         .unwrap();

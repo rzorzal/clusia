@@ -170,6 +170,7 @@ fn short(text: &str, max: usize) -> String {
 pub fn build(
     p: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
+    name: &str,
     areas: &[AuditArea],
     error: &Option<String>,
     form: &Option<AreaForm>,
@@ -177,7 +178,7 @@ pub fn build(
     super::heading(p, fonts, "Audit areas");
     p.spawn(text(
         fonts,
-        "Claude Code audits the change one area at a time. A built-in area can be switched off but not deleted.",
+        format!("{name} audits the change one area at a time. A built-in area can be switched off but not deleted."),
         Type::MUTED,
     ));
     p.spawn(Node {

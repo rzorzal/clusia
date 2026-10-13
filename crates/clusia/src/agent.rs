@@ -3,6 +3,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
+use clusia_core::config::HarnessKind;
 use clusia_core::printable::is_invisible;
 pub(crate) use clusia_core::printable::printable;
 use clusia_core::{Paths, PrRef};
@@ -46,22 +47,22 @@ impl Waiting {
     }
 
     /// The question on a terminal, ending where the answer is typed.
-    fn prompt(&self) -> String {
+    fn prompt(&self, harness: &str) -> String {
         let choices = match &self.prefix {
             Some(prefix) => format!("[o]nce / [r]eview ({}) / [d]eny? ", printable(prefix)),
             None => "[o]nce / [d]eny? ".to_string(),
         };
         format!(
-            "Claude Code wants to {}: {}  {choices}",
+            "{harness} wants to {}: {}  {choices}",
             self.verb(),
             printable(&self.summary)
         )
     }
 
     /// What is said when nobody can answer here: the window or the notification does.
-    fn elsewhere(&self) -> String {
+    fn elsewhere(&self, harness: &str) -> String {
         format!(
-            "waiting for an answer in the window: Claude Code wants to {}: {}",
+            "waiting for an answer in the window: {harness} wants to {}: {}",
             self.verb(),
             printable(&self.summary)
         )
@@ -111,6 +112,8 @@ pub(crate) struct Turn {
     prompt_open: bool,
     /// When the question now on the screen was printed.
     prompted_at: Option<std::time::Instant>,
+    /// The display name of the agent that asks.
+    harness: HarnessKind,
 }
 
 impl Turn {
@@ -129,7 +132,14 @@ impl Turn {
             running: false,
             prompt_open: false,
             prompted_at: None,
+            harness: HarnessKind::default(),
         }
+    }
+
+    /// Names the agent in what is printed.
+    pub(crate) fn harness(mut self, kind: HarnessKind) -> Self {
+        self.harness = kind;
+        self
     }
 
     /// Lets this terminal answer permission requests.
@@ -157,7 +167,7 @@ impl Turn {
     /// Prints the question of the first waiting request.
     fn show_prompt(&mut self, err: &mut dyn Write) -> io::Result<()> {
         if let Some(front) = self.waiting.first() {
-            write!(err, "{}", front.prompt())?;
+            write!(err, "{}", front.prompt(self.harness.name()))?;
             err.flush()?;
             self.prompt_open = true;
             self.prompted_at = Some(std::time::Instant::now());
@@ -285,7 +295,10 @@ impl Turn {
                 });
                 if !self.json {
                     if !self.interactive {
-                        let said = self.waiting.last().map(Waiting::elsewhere);
+                        let said = self
+                            .waiting
+                            .last()
+                            .map(|w| w.elsewhere(self.harness.name()));
                         writeln!(err, "{}", said.unwrap_or_default())?;
                     } else if self.waiting.len() == 1 {
                         self.show_prompt(err)?;
@@ -343,7 +356,7 @@ impl Turn {
             }
             Event::AgentDone { .. } => return Ok(Flow::Finished),
             Event::AgentError { kind, message, .. } => {
-                self.failure = Some(failure_message(*kind, message));
+                self.failure = Some(failure_message(*kind, message, self.harness));
                 return Ok(Flow::Finished);
             }
             _ => {}
@@ -370,9 +383,9 @@ impl Turn {
     }
 }
 
-fn failure_message(kind: AgentErrorKind, message: &str) -> String {
+fn failure_message(kind: AgentErrorKind, message: &str, harness: HarnessKind) -> String {
     if message.trim().is_empty() {
-        kind.to_string()
+        kind.message_for(harness.name(), harness.sign_in_hint())
     } else {
         printable(message)
     }
@@ -407,7 +420,7 @@ fn turn_of(entry: &AgentLogEntry) -> u64 {
 /// The chat as lines: consecutive text entries of one turn are one answer. A turn of a check or
 /// a revalidation (one with a `Check` or `Revalidation` entry) is not part of the chat: none of
 /// its entries is shown.
-pub(crate) fn log_lines(entries: &[AgentLogEntry]) -> Vec<String> {
+pub(crate) fn log_lines(entries: &[AgentLogEntry], harness: HarnessKind) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut joining: Option<u64> = None;
     let checks: std::collections::HashSet<u64> = entries
@@ -450,7 +463,7 @@ pub(crate) fn log_lines(entries: &[AgentLogEntry]) -> Vec<String> {
                 format!("  done in {:.1} s", *duration_ms as f64 / 1000.0)
             }
             AgentLogEntry::Error { kind, message, .. } => {
-                format!("  error: {}", failure_message(*kind, message))
+                format!("  error: {}", failure_message(*kind, message, harness))
             }
             AgentLogEntry::Permission {
                 tool,
@@ -616,7 +629,10 @@ pub(crate) async fn ask(
         Err(e) => return Err(e.into()),
     };
     let interactive = io::stdin().is_terminal() && !json;
-    let mut run = Turn::new(pr, turn, json).interactive(interactive);
+    let harness = crate::harness::kind_of(&mut client, &pr).await;
+    let mut run = Turn::new(pr, turn, json)
+        .harness(harness)
+        .interactive(interactive);
     let mut typed = interactive.then(stdin_lines);
     let mut noted_end_of_input = false;
     let (mut out, mut err) = (io::stdout(), io::stderr());
@@ -660,6 +676,7 @@ pub(crate) async fn ask(
 pub(crate) async fn log(paths: &Paths, home: Option<&Path>, pr: &str) -> Result<Output, CliError> {
     let pr = parse_pr(pr)?;
     let mut client = connect(paths, home).await?;
+    let harness = crate::harness::kind_of(&mut client, &pr).await;
     match client
         .request(Request::GetAgentLog { pr: pr.clone() })
         .await?
@@ -668,7 +685,7 @@ pub(crate) async fn log(paths: &Paths, home: Option<&Path>, pr: &str) -> Result<
             human: if entries.is_empty() {
                 format!("No agent log for {pr}")
             } else {
-                log_lines(&entries).join("\n")
+                log_lines(&entries, harness).join("\n")
             },
             json: serde_json::to_value(&entries).unwrap_or_default(),
         }),
@@ -892,13 +909,16 @@ mod tests {
     #[test]
     fn permission_lines_say_who_decided() {
         let line = |tool: &str, summary: &str, outcome| {
-            log_lines(&[AgentLogEntry::Permission {
-                at: 1,
-                turn: 1,
-                tool: tool.into(),
-                summary: summary.into(),
-                outcome,
-            }])
+            log_lines(
+                &[AgentLogEntry::Permission {
+                    at: 1,
+                    turn: 1,
+                    tool: tool.into(),
+                    summary: summary.into(),
+                    outcome,
+                }],
+                HarnessKind::ClaudeCode,
+            )
             .remove(0)
         };
         let bash = |outcome| line("Bash", "cargo test", outcome);
@@ -1003,7 +1023,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            log_lines(&entries),
+            log_lines(&entries, HarnessKind::ClaudeCode),
             [
                 "you: Is the lock needed?",
                 "  ✓ Read src/auth/store.rs",
@@ -1093,7 +1113,7 @@ mod tests {
                 state: "stopped".into(),
             },
         ];
-        assert_eq!(log_lines(&entries), ["you: hi"]);
+        assert_eq!(log_lines(&entries, HarnessKind::ClaudeCode), ["you: hi"]);
     }
 
     #[test]
@@ -1120,7 +1140,7 @@ mod tests {
                 state: "done".into(),
             },
         ];
-        assert_eq!(log_lines(&entries), ["you: hi"]);
+        assert_eq!(log_lines(&entries, HarnessKind::ClaudeCode), ["you: hi"]);
     }
 
     #[test]
@@ -1221,6 +1241,38 @@ mod tests {
             "✓ ran cargo test -p clusia-core (allowed for this review)\n"
         );
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn the_questions_and_failures_name_the_harness_in_use() {
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.harness(HarnessKind::Codex).interactive(true);
+        let ask = requested("p1", 2, "Bash", "make", None);
+        turn.feed(&ask, &mut out, &mut err).unwrap();
+        assert_eq!(said(&err), "Codex wants to run: make  [o]nce / [d]eny? ");
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.harness(HarnessKind::Codex);
+        turn.feed(&ask, &mut out, &mut err).unwrap();
+        assert_eq!(
+            said(&err),
+            "waiting for an answer in the window: Codex wants to run: make\n"
+        );
+        assert_eq!(
+            failure_message(AgentErrorKind::Crashed, "", HarnessKind::Codex),
+            "Codex stopped unexpectedly"
+        );
+        assert_eq!(
+            failure_message(AgentErrorKind::NotSignedIn, "", HarnessKind::Codex),
+            "Run `codex login` once in a terminal"
+        );
+        assert_eq!(
+            failure_message(AgentErrorKind::NotSignedIn, "", HarnessKind::ClaudeCode),
+            "Run `claude` once in a terminal"
+        );
+        assert_eq!(
+            failure_message(AgentErrorKind::Crashed, "boom", HarnessKind::Codex),
+            "boom"
+        );
     }
 
     #[test]
@@ -1564,7 +1616,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            log_lines(&entries),
+            log_lines(&entries, HarnessKind::ClaudeCode),
             [
                 format!("you: {SHOWN}"),
                 format!("  ✓ {SHOWN}"),

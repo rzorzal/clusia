@@ -1,0 +1,6 @@
+{"id":0,"result":{"userAgent":"codex-cli/0.162.1","codexHome":"/home/octo/.codex"}}
+{"id":1,"result":{"thread":{"id":"thr-1","preview":"","modelProvider":"openai","createdAt":1,"updatedAt":1,"status":{"type":"idle"},"cwd":"/work/acme-widgets","turns":[]},"model":"gpt-5","modelProvider":"openai","cwd":"/work/acme-widgets","approvalPolicy":"on-request","sandbox":{"type":"readOnly"}}}
+{"id":2,"result":{"turn":{"id":"turn-1","items":[],"status":"inProgress","error":null}}}
+{"id":3,"error":{"code":-32600,"message":"thread not found: thr-9"}}
+{"id":4,"result":{}}
+{"id":"x","result":{}}

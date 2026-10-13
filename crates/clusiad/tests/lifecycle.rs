@@ -322,6 +322,7 @@ fn a_daemon_that_loses_the_lock_leaves_the_logs_alone() {
         .arg("--home")
         .arg(dir.path())
         .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+        .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap();

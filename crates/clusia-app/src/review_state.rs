@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use bevy::prelude::*;
-use clusia_core::config::DiffView;
+use clusia_core::config::{DiffView, HarnessKind};
 use clusia_core::{PrRef, Side, ThreadRef, Verdict};
 use clusia_protocol::{
     ErrorCode, LoadStep, LoadStepKind, NewsItem, PublishResult, ReviewView, StepStatus,
@@ -191,6 +191,9 @@ pub struct TabUi {
     pub revalidation: RevalView,
     /// The draft item the Diff asks a new place for (*Keep and re-anchor*).
     pub reanchor: Option<String>,
+    /// The config kind when the tab was opened: it pins the agent until the review's session
+    /// says which one it started with.
+    pub opened_with: Option<HarnessKind>,
 }
 
 impl Default for TabUi {
@@ -210,6 +213,7 @@ impl Default for TabUi {
             audit_area: None,
             revalidation: RevalView::Auto,
             reanchor: None,
+            opened_with: None,
         }
     }
 }
@@ -354,7 +358,9 @@ pub fn open_new_tabs(
         .collect();
     let mode = DiffMode::from(model.snapshot.config.appearance.diff_view);
     for pr in new {
-        tabs.0.insert(pr.clone(), Tab::loading(mode));
+        let mut tab = Tab::loading(mode);
+        tab.ui.opened_with = Some(model.snapshot.config.harness.kind);
+        tabs.0.insert(pr.clone(), tab);
         asks.send(Ask::OpenReview(pr));
     }
 }
@@ -548,6 +554,33 @@ mod tests {
             .resource_mut::<Messages<ReviewEvent>>()
             .drain()
             .collect()
+    }
+
+    #[test]
+    fn a_new_tab_remembers_the_agent_it_was_opened_with() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::set_config_locally(&mut app, "harness.kind", "codex");
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Review { pr: pr() });
+        testing::settle(&mut app);
+        let tab = testing::tab(&app, &pr());
+        assert_eq!(
+            tab.ui.opened_with,
+            Some(clusia_core::config::HarnessKind::Codex)
+        );
+        // A later switch leaves the open tab's agent alone.
+        testing::set_config_locally(&mut app, "harness.kind", "claude-code");
+        testing::settle(&mut app);
+        let tab = testing::tab(&app, &pr());
+        assert_eq!(
+            tab.ui.opened_with,
+            Some(clusia_core::config::HarnessKind::Codex)
+        );
+        assert_eq!(
+            crate::agent_name::of_tab(&app.world().resource::<Model>().snapshot, &tab),
+            "Codex"
+        );
     }
 
     #[test]

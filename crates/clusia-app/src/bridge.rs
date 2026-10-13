@@ -519,7 +519,8 @@ pub enum ProbeState {
 /// What a refused `AgentSend` says in the chat.
 fn refusal_text(code: ErrorCode, message: &str) -> String {
     if code == ErrorCode::Busy {
-        AgentErrorKind::Busy.to_string()
+        // The busy line names no harness.
+        AgentErrorKind::Busy.message_for("", "")
     } else {
         message.to_string()
     }
@@ -533,6 +534,9 @@ fn failed_probe(message: impl Into<String>) -> ProbeResult {
         program: String::new(),
         elapsed_ms: 0,
         error: Some(message.into()),
+        harness: String::new(),
+        signed_in: None,
+        account: None,
     }
 }
 
@@ -2262,7 +2266,13 @@ pub(crate) fn demo_answers(
             }
             Ask::AgentLog { .. } => {}
             Ask::AgentSend { pr, text } => {
-                tells.extend(demo_agent_reply(&pr, &text, now * 1000, *rule_granted));
+                tells.extend(demo_agent_reply(
+                    &pr,
+                    &text,
+                    now * 1000,
+                    *rule_granted,
+                    model.snapshot.config.harness.kind.name(),
+                ));
             }
             Ask::PermissionAnswer { id, answer } => {
                 *rule_granted |= answer == PermissionAnswerKind::Review && queue.get(&id).is_some();
@@ -2494,7 +2504,13 @@ fn demo_open(pr: PrRef, now: i64) -> Vec<Tell> {
 /// The demo agent's answer to a question: it works, reads a file, says what it is, and is
 /// ready again. Nothing leaves the window. A question about tests stops at the permission
 /// request instead, unless a rule granted for the review covers it.
-fn demo_agent_reply(pr: &PrRef, text: &str, now_ms: i64, rule_granted: bool) -> Vec<Tell> {
+fn demo_agent_reply(
+    pr: &PrRef,
+    text: &str,
+    now_ms: i64,
+    rule_granted: bool,
+    name: &str,
+) -> Vec<Tell> {
     let turn = 3;
     let agent = Tell::Agent;
     let mut tells = vec![
@@ -2524,7 +2540,7 @@ fn demo_agent_reply(pr: &PrRef, text: &str, now_ms: i64, rule_granted: bool) -> 
         })
     };
     tells.extend([
-        chunk("This is demo data: nothing was sent to Claude Code. ".into()),
+        chunk(format!("This is demo data: nothing was sent to {name}. ")),
         chunk(format!(
             "With a real session, the answer to “{}” would stream here.",
             text.trim()
@@ -3015,6 +3031,32 @@ mod tests {
             .add_systems(Update, demo_answers);
         app.update();
         inbox.0.try_iter().collect()
+    }
+
+    #[test]
+    fn choosing_codex_in_demo_mode_leaves_no_program() {
+        use clusia_core::config::HarnessKind;
+        let (_inbox, outbox) = local_link();
+        let mut model = Model::default();
+        model.snapshot.config.harness.program = Some("/opt/homebrew/bin/claude".into());
+        let mut asks = Asks::default();
+        crate::screens::config::harness::write_kind(&mut asks, &mut model, "codex");
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .insert_resource(asks)
+            .insert_resource(model)
+            .insert_resource(Toasts::default())
+            .insert_resource(ReviewTabs::default())
+            .init_resource::<Revalidations>()
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .insert_resource(PermissionQueue::default())
+            .insert_resource(outbox)
+            .add_systems(Update, demo_answers);
+        app.update();
+        let config = &app.world().resource::<Model>().snapshot.config;
+        assert_eq!(config.harness.kind, HarnessKind::Codex);
+        assert_eq!(config.harness.program, None);
     }
 
     /// The queue as the window has it after the demo request was told.

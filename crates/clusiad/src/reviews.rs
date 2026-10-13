@@ -256,6 +256,8 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     if let Err(out) = save(shared, &review) {
         return out;
     }
+    let harness = shared.config.read().await.harness.clone();
+    shared.sessions.repin(shared, pr, &harness).await;
     if let Err(e) = pin_commit(&repo, &reviewed_ref(pr.number), &review.head_sha).await {
         tracing::warn!(error = %e, pr = %pr, "cannot pin the reviewed commit");
     }
@@ -887,6 +889,7 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
     // Out of the lock: a run that is finishing needs it to store its result.
     drop(guard);
     crate::checks::stop_all(shared, pr, crate::turns::Why::User).await;
+    shared.sessions.close_review(shared, pr).await;
     Outcome::Ok(Reply::Ack)
 }
 

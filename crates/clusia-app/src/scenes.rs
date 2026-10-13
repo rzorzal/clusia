@@ -181,6 +181,15 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
             );
             world.resource_mut::<Model>().probe = ProbeState::Done(fixture::demo_probe());
         }
+        Scene::ConfigHarnessCodex => {
+            set_demo_config(world, &fixture::CODEX_DEMO_SETTINGS);
+            let areas = demo_areas();
+            set_demo_config(world, &[("harness.audit_areas", &areas)]);
+            world.resource_mut::<Model>().probe = ProbeState::Done(fixture::demo_codex_probe());
+        }
+        Scene::AgentChatCodex | Scene::PermissionCodex | Scene::HomeFooter => {
+            set_demo_config(world, &fixture::CODEX_DEMO_SETTINGS);
+        }
         Scene::AgentChat
         | Scene::Permission
         | Scene::Security
@@ -191,7 +200,7 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
         }
         _ => {}
     }
-    if scene != Scene::FirstRun {
+    if !matches!(scene, Scene::FirstRun | Scene::FirstRunBoth) {
         return;
     }
     let mut model = world.resource_mut::<Model>();
@@ -205,7 +214,11 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
         state: SyncState::Unauthorized,
         ..SyncStatus::default()
     });
-    model.snapshot.first_run = Some(fixture::demo_first_run());
+    model.snapshot.first_run = Some(if scene == Scene::FirstRunBoth {
+        fixture::demo_first_run_both()
+    } else {
+        fixture::demo_first_run()
+    });
 }
 
 /// Puts the demo review `rzorzal/clusia#123` in the state `scene` shows (Config pages and
@@ -218,14 +231,17 @@ pub fn stage(world: &mut World, scene: Scene) {
         }
         Scene::ConfigMedia => Some(Section::Media),
         Scene::ConfigAbout => Some(Section::About),
-        Scene::ConfigHarness => Some(Section::Harness),
+        Scene::ConfigHarness | Scene::ConfigHarnessCodex => Some(Section::Harness),
         _ => None,
     };
     if let Some(section) = section {
         world.resource_mut::<Nav>().open_section(section);
         return;
     }
-    if scene == Scene::FirstRun {
+    if matches!(
+        scene,
+        Scene::FirstRun | Scene::FirstRunBoth | Scene::HomeFooter
+    ) {
         return;
     }
     let now = world.resource::<Clock>().now();
@@ -246,13 +262,18 @@ pub fn stage(world: &mut World, scene: Scene) {
     match scene {
         Scene::Diff | Scene::Loading | Scene::Failed | Scene::Palette => {}
         Scene::FirstRun
+        | Scene::FirstRunBoth
+        | Scene::HomeFooter
         | Scene::ConfigGeneral
         | Scene::ConfigNotifications
         | Scene::ConfigNotificationsBottom
         | Scene::ConfigMedia
         | Scene::ConfigAbout
-        | Scene::ConfigHarness => {}
-        Scene::AgentChat | Scene::Permission => ui.file = Some("src/auth/refresh.rs".into()),
+        | Scene::ConfigHarness
+        | Scene::ConfigHarnessCodex => {}
+        Scene::AgentChat | Scene::AgentChatCodex | Scene::Permission | Scene::PermissionCodex => {
+            ui.file = Some("src/auth/refresh.rs".into())
+        }
         Scene::Security => {
             ui.section = ReviewSection::Security;
             accept_demo_finding(&mut ready, now);
@@ -332,7 +353,10 @@ pub fn stage(world: &mut World, scene: Scene) {
             nav.go(&WindowTarget::Home);
         }
     }
-    if matches!(scene, Scene::AgentChat | Scene::Permission) {
+    if matches!(
+        scene,
+        Scene::AgentChat | Scene::AgentChatCodex | Scene::Permission | Scene::PermissionCodex
+    ) {
         // As in the mockup, only the question turn: the log is not asked for again.
         let question = fixture::demo_agent_turns(now).remove(1);
         let mut chats = world.resource_mut::<Chats>();
@@ -357,7 +381,7 @@ pub fn stage(world: &mut World, scene: Scene) {
                 round: Some(round),
             }));
     }
-    if scene == Scene::Permission {
+    if matches!(scene, Scene::Permission | Scene::PermissionCodex) {
         // A frozen clock keeps the countdown at 1:52 for as long as the render takes.
         *world.resource_mut::<Clock>() = Clock(Some(now));
         // Asked 8 s ago of a 2-minute wait, so the bar is a little short of full, as the
@@ -444,12 +468,15 @@ mod tests {
             if matches!(
                 scene,
                 Scene::FirstRun
+                    | Scene::FirstRunBoth
                     | Scene::ConfigGeneral
                     | Scene::ConfigNotifications
                     | Scene::ConfigNotificationsBottom
                     | Scene::ConfigMedia
                     | Scene::ConfigAbout
                     | Scene::ConfigHarness
+                    | Scene::ConfigHarnessCodex
+                    | Scene::HomeFooter
             ) {
                 continue;
             }
@@ -496,15 +523,18 @@ mod tests {
                 Scene::WhatsNew => assert!(modal_shown(&mut app, Modal::WhatsNew)),
                 Scene::Leave => assert_eq!(testing::count::<LeaveModal>(&mut app), 1),
                 Scene::FirstRun
+                | Scene::FirstRunBoth
                 | Scene::ConfigGeneral
                 | Scene::ConfigNotifications
                 | Scene::ConfigNotificationsBottom
                 | Scene::ConfigMedia
                 | Scene::ConfigAbout
-                | Scene::ConfigHarness => {
+                | Scene::ConfigHarness
+                | Scene::ConfigHarnessCodex
+                | Scene::HomeFooter => {
                     unreachable!("skipped above")
                 }
-                Scene::AgentChat => {
+                Scene::AgentChat | Scene::AgentChatCodex => {
                     assert_eq!(tab.ui.file.as_deref(), Some("src/auth/refresh.rs"));
                     let chats = app
                         .world()
@@ -516,7 +546,7 @@ mod tests {
                     );
                     assert_eq!(chat.state, clusia_protocol::SessionStateKind::Running);
                 }
-                Scene::Permission => {
+                Scene::Permission | Scene::PermissionCodex => {
                     assert_eq!(tab.ui.file.as_deref(), Some("src/auth/refresh.rs"));
                     assert_eq!(
                         testing::count::<crate::screens::review::agent::PermissionModal>(&mut app),
@@ -592,6 +622,91 @@ mod tests {
     }
 
     #[test]
+    fn the_first_run_both_scene_finds_both_and_selects_claude_code() {
+        let mut app = staged_outside_review(Scene::FirstRunBoth);
+        assert_eq!(app.world().resource::<Nav>().screen, Screen::FirstRun);
+        let v = crate::screens::first_run::view(
+            &app.world().resource::<Model>().snapshot,
+            &crate::screens::first_run::FirstRunUi::default(),
+            None,
+        );
+        assert!(v.harnesses.iter().all(|h| h.found && h.selectable));
+        assert_eq!(
+            v.harnesses.iter().map(|h| h.selected).collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert!(testing::shows(&mut app, "Found · /opt/homebrew/bin/codex"));
+    }
+
+    #[test]
+    fn the_home_footer_scene_names_codex() {
+        let mut app = staged_outside_review(Scene::HomeFooter);
+        assert_eq!(app.world().resource::<Nav>().screen, Screen::Home);
+        assert!(testing::shows(&mut app, "Agent: Codex"));
+        testing::find::<crate::screens::home::AgentConfigButton>(&mut app, |_| true);
+    }
+
+    #[test]
+    fn the_codex_harness_scene_shows_codex_selected_and_locked() {
+        let mut app = staged_outside_review(Scene::ConfigHarnessCodex);
+        assert_eq!(
+            app.world().resource::<Nav>().screen,
+            Screen::Config(Section::Harness)
+        );
+        for needle in [
+            "codex app-server, with your login",
+            "Codex 0.162.1 answered in 0.4 s · Logged in using ChatGPT",
+            "Found at /opt/homebrew/bin/codex",
+            "Codex always runs in its read-only sandbox",
+            "Each check is one Codex turn on your account.",
+            "Codex audits the change one area at a time.",
+            "Test again",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        for gone in [
+            "Also allow what my Claude Code settings already allow",
+            "Run commands in a sandbox: no network, writes only in the review worktree",
+            "Claude Code 2.1.294 answered in 1.8 s",
+        ] {
+            assert!(!testing::shows(&mut app, gone), "{gone}");
+        }
+        let marks: Vec<bool> = app
+            .world_mut()
+            .query::<&crate::screens::config::harness::RadioMark>()
+            .iter(app.world())
+            .map(|m| m.selected)
+            .collect();
+        assert_eq!(marks, [false, true, false]);
+        let config = &app.world().resource::<Model>().snapshot.config;
+        assert_eq!(config.harness.kind, clusia_core::config::HarnessKind::Codex);
+    }
+
+    #[test]
+    fn the_codex_chat_and_permission_scenes_say_codex() {
+        let mut chat = staged(Scene::AgentChatCodex);
+        for needle in [
+            "Codex · thinking…",
+            "session resumed · knows this review",
+            "Is the new lock needed at all, or would re-checking the expiry be enough?",
+        ] {
+            assert!(testing::shows(&mut chat, needle), "{needle}");
+        }
+        assert!(!testing::shows(&mut chat, "Claude Code"));
+
+        let mut modal = staged(Scene::PermissionCodex);
+        for needle in [
+            "Codex wants to run a command",
+            "cargo test -p clusia-auth refresh_race -- --nocapture",
+            "Allow once",
+            "Codex · thinking…",
+        ] {
+            assert!(testing::shows(&mut modal, needle), "{needle}");
+        }
+        assert!(!testing::shows(&mut modal, "Claude Code"));
+    }
+
+    #[test]
     fn config_scenes_open_their_sections() {
         for (scene, section) in [
             (Scene::ConfigGeneral, Section::General),
@@ -600,6 +715,7 @@ mod tests {
             (Scene::ConfigMedia, Section::Media),
             (Scene::ConfigAbout, Section::About),
             (Scene::ConfigHarness, Section::Harness),
+            (Scene::ConfigHarnessCodex, Section::Harness),
         ] {
             let mut app = staged_outside_review(scene);
             assert_eq!(
@@ -899,7 +1015,7 @@ mod tests {
         for needle in [
             "Connect your AI harness",
             "Found · /opt/homebrew/bin/claude",
-            "Coming soon",
+            "Not found on your PATH",
             "When I open a review",
             "Check security",
             "Audit the change",

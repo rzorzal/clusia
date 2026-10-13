@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use clusia_protocol::AgentErrorKind;
+
+use crate::Agent;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,7 +205,7 @@ fn result(value: &Value, state: &mut ParseState) -> Vec<AgentEvent> {
             .is_some_and(|s| s.starts_with("error"));
     if failed {
         let message = if text.is_empty() {
-            AgentErrorKind::Crashed.default_message().to_string()
+            Agent::ClaudeCode.message_for(AgentErrorKind::Crashed)
         } else {
             text.to_string()
         };
@@ -308,7 +310,7 @@ fn describe_tool(block: &Value, root: Option<&Path>) -> (String, String) {
     (cut(&summary), cut(&asked))
 }
 
-fn relative(path: &str, root: Option<&Path>) -> String {
+pub(crate) fn relative(path: &str, root: Option<&Path>) -> String {
     root.and_then(|root| Path::new(path).strip_prefix(root).ok())
         .map_or_else(
             || path.to_string(),
@@ -319,7 +321,7 @@ fn relative(path: &str, root: Option<&Path>) -> String {
         )
 }
 
-fn cut(text: &str) -> String {
+pub(crate) fn cut(text: &str) -> String {
     if text.chars().count() > DETAIL_CHARS {
         let head: String = text.chars().take(DETAIL_CHARS).collect();
         format!("{head}…")
@@ -501,7 +503,7 @@ mod tests {
             events,
             [AgentEvent::Error {
                 kind: AgentErrorKind::Crashed,
-                message: AgentErrorKind::Crashed.default_message().into()
+                message: Agent::ClaudeCode.message_for(AgentErrorKind::Crashed)
             }]
         );
         let events = parse_line(

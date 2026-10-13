@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::HarnessKind;
 use crate::revalidation::Revalidation;
 use crate::{Draft, PrRef};
 
@@ -108,6 +109,9 @@ pub struct Review {
     /// Harness session for running agents in a step (when available).
     #[serde(default)]
     pub harness_session: Option<String>,
+    /// The harness that made `harness_session`; a session without one is Claude Code's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_kind: Option<HarnessKind>,
     /// Whether the pull request is still open; a closed or merged one is not checked again
     /// in the background.
     #[serde(default, skip_serializing_if = "PrState::is_open")]
@@ -122,6 +126,13 @@ pub struct Review {
 }
 
 impl Review {
+    /// The stored session when `kind` made it; a session of another harness is not `kind`'s to
+    /// resume.
+    pub fn session_of(&self, kind: HarnessKind) -> Option<&str> {
+        let made_by = self.harness_session_kind.unwrap_or(HarnessKind::ClaudeCode);
+        self.harness_session.as_deref().filter(|_| made_by == kind)
+    }
+
     pub fn new(pr: PrRef, title: String, base_sha: String, head_sha: String, now: i64) -> Self {
         Self {
             pr,
@@ -135,6 +146,7 @@ impl Review {
             last_seen_at: None,
             last_checks: None,
             harness_session: None,
+            harness_session_kind: None,
             pr_state: PrState::Open,
             revalidation: None,
             removed: BTreeSet::new(),
@@ -279,5 +291,38 @@ mod tests {
             serde_json::to_string(&Verdict::RequestChanges).unwrap(),
             r#""request_changes""#
         );
+    }
+
+    #[test]
+    fn a_session_belongs_to_the_harness_that_made_it() {
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let mut review = Review::new(pr, "t".into(), "b".into(), "h".into(), 1);
+        assert_eq!(review.session_of(HarnessKind::ClaudeCode), None);
+        review.harness_session = Some("uuid".into());
+        assert_eq!(
+            review.session_of(HarnessKind::ClaudeCode),
+            Some("uuid"),
+            "no kind recorded: Claude Code's"
+        );
+        assert_eq!(review.session_of(HarnessKind::Codex), None);
+        review.harness_session_kind = Some(HarnessKind::Codex);
+        assert_eq!(review.session_of(HarnessKind::Codex), Some("uuid"));
+        assert_eq!(review.session_of(HarnessKind::ClaudeCode), None);
+    }
+
+    #[test]
+    fn the_session_kind_is_stored_only_when_there_is_one() {
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        let mut review = Review::new(pr, "t".into(), "b".into(), "h".into(), 1);
+        let plain = serde_json::to_string(&review).unwrap();
+        assert!(!plain.contains("harness_session_kind"), "{plain}");
+        let old: Review = serde_json::from_str(&plain).unwrap();
+        assert_eq!(old.harness_session_kind, None);
+        review.harness_session = Some("thr-1".into());
+        review.harness_session_kind = Some(HarnessKind::Codex);
+        let text = serde_json::to_string(&review).unwrap();
+        assert!(text.contains(r#""harness_session_kind":"codex""#), "{text}");
+        let back: Review = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, review);
     }
 }

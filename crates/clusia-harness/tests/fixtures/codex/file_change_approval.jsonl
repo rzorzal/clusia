@@ -1,0 +1,3 @@
+{"method":"item/started","params":{"threadId":"thr-1","turnId":"turn-3","item":{"type":"fileChange","id":"call-9","changes":[{"path":"/work/acme-widgets/src/auth/refresh.rs","kind":{"type":"update","move_path":null},"diff":"@@ -1 +1 @@\n-a\n+b\n"},{"path":"/work/acme-widgets/notes.md","kind":{"type":"add"},"diff":"hello\n"}],"status":"inProgress"}}}
+{"id":1,"method":"item/fileChange/requestApproval","params":{"threadId":"thr-1","turnId":"turn-3","itemId":"call-9","startedAtMs":1760000002000,"reason":"Write the fix"}}
+{"method":"item/completed","params":{"threadId":"thr-1","turnId":"turn-3","item":{"type":"fileChange","id":"call-9","changes":[{"path":"/work/acme-widgets/src/auth/refresh.rs","kind":{"type":"update","move_path":null},"diff":""}],"status":"completed"}}}
