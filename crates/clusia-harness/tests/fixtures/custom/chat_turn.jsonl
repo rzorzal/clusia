@@ -1,0 +1,5 @@
+{"type":"session","id":"sess-1"}
+{"type":"tool","summary":"Read src/auth/refresh.rs"}
+{"type":"text","text":"The refresh "}
+{"type":"text","text":"holds the lock across the call."}
+{"type":"final","text":"The refresh holds the lock across the call."}

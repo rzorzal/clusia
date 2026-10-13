@@ -16,8 +16,10 @@
 //! `permission_denials`, as the real program does.
 
 mod codex_fake;
+mod custom_fake;
 
 pub use codex_fake::{CodexCall, CodexScript, CodexTurn, FakeCodex};
+pub use custom_fake::{CustomCall, CustomScript, CustomTurnScript, FakeCustom};
 
 use std::collections::BTreeMap;
 use std::fs;

@@ -1,0 +1,5 @@
+{"type":"session","id":"sess-2"}
+{"type":"permission","id":"p1","kind":"command","detail":"cargo test -p clusia-core","reason":"run the tests"}
+{"type":"permission","id":"p2","kind":"edit","detail":"","reason":"fix the typo","paths":["src/lib.rs","docs/readme.md"]}
+{"type":"permission","id":"p3","kind":"other","detail":"Open the issue tracker","reason":"look for duplicates"}
+{"type":"final","text":"Done."}
