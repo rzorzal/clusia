@@ -1,5 +1,5 @@
 //! Revalidation of a saved review's draft: when the pull request gets new commits and stays quiet
-//! for a while, one forked Claude Code turn re-reads every comment against them. What it says is
+//! for a while, one forked agent turn re-reads every comment against them. What it says is
 //! stored as proposals; the draft changes only when the user decides one.
 
 use std::collections::{BTreeMap, HashMap};
@@ -270,7 +270,7 @@ fn note_log(shared: &Shared, pr: &PrRef, turn: u64, state: &str) {
 
 /// Opens, or extends, the round of a review that was just moved to a new head, and returns the
 /// time the quiet period ends. `None` when nothing is to be revalidated: the switch is off, no
-/// Claude Code is configured or the draft has nothing to re-read. `immediate` is a review that
+/// agent is installed or the draft has nothing to re-read. `immediate` is a review that
 /// is being opened in a window: it does not wait.
 ///
 /// Call it after the relocation, with the anchors taken by [`snapshot`] before it, then save the
@@ -716,7 +716,7 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Job) {
         complete(&shared, &pr, &job, String::new()).await;
         return;
     }
-    let agent = crate::sessions::current_agent(&shared).await;
+    let agent = crate::sessions::agent_for(&shared, &pr).await;
     let mut sink = RunSink::new(shared.clone(), pr.clone(), job.turn, agent);
     let run = TurnRun {
         pr: pr.clone(),
@@ -729,7 +729,12 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Job) {
         limit: Some(job.limit),
         stop: job.stop.clone(),
     };
-    match turns::run(&shared, run, &mut sink).await {
+    let end = turns::run(&shared, run, &mut sink).await;
+    // A round of a review that is not open leaves no Codex process behind.
+    if shared.sessions.pinned(&pr).is_none() && !shared.sessions.any_running(&pr) {
+        crate::codex::close(&shared, &pr).await;
+    }
+    match end {
         TurnEnd::Done => {
             let text = sink.answer.unwrap_or(sink.streamed);
             complete(&shared, &pr, &job, text).await;

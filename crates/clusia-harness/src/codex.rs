@@ -129,6 +129,11 @@ pub fn approval_reply(request_id: &Value, decision: Decision) -> Value {
     json!({ "id": request_id, "result": { "decision": decision.wire() } })
 }
 
+/// The reply to a server request that has no decision to give: a JSON-RPC error.
+pub fn error_reply(id: &Value, code: i64, message: &str) -> Value {
+    json!({ "id": id, "error": { "code": code, "message": message } })
+}
+
 /// `message` as one line, ready to write to the process.
 pub fn to_line(message: &Value) -> String {
     format!("{message}\n")
@@ -247,6 +252,7 @@ pub fn read_line(line: &str) -> Incoming {
         return Incoming::Ignored;
     };
     let Some(object) = value.as_object() else {
+        tracing::debug!("a line from codex is not an object");
         return Incoming::Ignored;
     };
     let params = object.get("params").unwrap_or(&Value::Null);
@@ -271,6 +277,7 @@ pub fn read_line(line: &str) -> Incoming {
         },
         (None, Some(id)) => {
             let Some(id) = id.as_u64() else {
+                tracing::debug!("ignored a codex answer with an id that is not a number");
                 return Incoming::Ignored;
             };
             let result = match object.get("error") {
@@ -279,7 +286,10 @@ pub fn read_line(line: &str) -> Incoming {
             };
             Incoming::Response { id, result }
         }
-        (None, None) => Incoming::Ignored,
+        (None, None) => {
+            tracing::debug!("ignored a codex line with neither a method nor an id");
+            Incoming::Ignored
+        }
     }
 }
 
@@ -324,7 +334,7 @@ fn note(method: &str, params: &Value) -> Option<(Option<String>, Note)> {
             let turn = &params["turn"];
             // A status Clúsia does not know ends the turn as a failure: waiting for a better
             // one would run the turn to its deadline.
-            let status = match turn["status"].as_str()? {
+            let status = match turn["status"].as_str().unwrap_or_default() {
                 "completed" => TurnStatus::Completed,
                 "interrupted" => TurnStatus::Interrupted,
                 _ => TurnStatus::Failed,
@@ -448,6 +458,7 @@ impl CodexTurn {
             Note::ItemStarted(info) => self.item_started(info),
             Note::ItemCompleted(info) => self.item_completed(info),
             Note::TurnCompleted { status, error } => self.turn_completed(status, error),
+            Note::Error(_) if self.errored => Vec::new(),
             Note::Error(message) => {
                 self.errored = true;
                 vec![AgentEvent::Error {
@@ -486,12 +497,14 @@ impl CodexTurn {
                 Vec::new()
             }
             ItemKind::Command { command } => {
-                let summary = format!("Ran `{}`", command.unwrap_or_default());
+                let summary = ran(command);
                 self.announce(&info.id, summary)
             }
             ItemKind::FileChange { paths } => {
                 let shown = self.shown(&paths);
-                self.paths.insert(info.id.clone(), shown.clone());
+                if !shown.is_empty() {
+                    self.paths.insert(info.id.clone(), shown.clone());
+                }
                 self.announce(&info.id, edited(&shown))
             }
             ItemKind::Other(_) => Vec::new(),
@@ -526,7 +539,7 @@ impl CodexTurn {
                 self.announce(&info.id, edited(&seen))
             }
             ItemKind::Command { command } => {
-                let summary = format!("Ran `{}`", command.unwrap_or_default());
+                let summary = ran(command);
                 self.announce(&info.id, summary)
             }
             ItemKind::Other(_) => Vec::new(),
@@ -555,6 +568,14 @@ impl CodexTurn {
                 }]
             }
         }
+    }
+}
+
+/// `Ran `cargo test``, or `Ran a command` when Codex did not say which.
+fn ran(command: Option<String>) -> String {
+    match command {
+        Some(command) => format!("Ran `{command}`"),
+        None => "Ran a command".to_string(),
     }
 }
 
@@ -947,10 +968,18 @@ mod tests {
                 error: Some("boom".into())
             }
         );
+        let Incoming::Notification { note, .. } =
+            read_line(r#"{"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u"}}}"#)
+        else {
+            panic!("a notification");
+        };
         assert_eq!(
-            read_line(r#"{"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u"}}}"#),
-            Incoming::Ignored,
-            "no status at all says nothing"
+            note,
+            Note::TurnCompleted {
+                status: TurnStatus::Failed,
+                error: None
+            },
+            "no status at all reads as a failure, like an unknown one"
         );
     }
 
@@ -1083,6 +1112,47 @@ mod tests {
         let mut turn = CodexTurn::new(PathBuf::from("/w"));
         let got = events(&mut turn, &fixture("interrupted"));
         assert_eq!(got, [AgentEvent::Text("Looking at".into())]);
+    }
+
+    #[test]
+    fn a_second_error_of_the_turn_says_nothing() {
+        let mut turn = CodexTurn::new(PathBuf::from("/w"));
+        assert_eq!(turn.on(Note::Error("first".into())).len(), 1);
+        assert!(turn.on(Note::Error("second".into())).is_empty());
+    }
+
+    #[test]
+    fn a_file_change_that_starts_without_paths_does_not_hide_the_ones_that_complete_it() {
+        let mut turn = CodexTurn::new(PathBuf::from("/work/acme-widgets"));
+        turn.on(Note::ItemStarted(ItemInfo {
+            id: "i".into(),
+            kind: ItemKind::FileChange { paths: Vec::new() },
+        }));
+        turn.on(Note::ItemCompleted(ItemInfo {
+            id: "i".into(),
+            kind: ItemKind::FileChange {
+                paths: vec!["/work/acme-widgets/src/a.rs".into()],
+            },
+        }));
+        assert_eq!(turn.paths_of("i"), ["src/a.rs"]);
+    }
+
+    #[test]
+    fn a_command_without_its_text_is_a_command() {
+        let mut turn = CodexTurn::new(PathBuf::from("/w"));
+        let got = turn.on(Note::ItemStarted(ItemInfo {
+            id: "c".into(),
+            kind: ItemKind::Command { command: None },
+        }));
+        assert_eq!(got, [AgentEvent::ToolUse("Ran a command".into())]);
+    }
+
+    #[test]
+    fn an_error_reply_carries_the_code_and_the_message() {
+        assert_eq!(
+            error_reply(&json!(7), -32601, "no such method"),
+            json!({"id": 7, "error": {"code": -32601, "message": "no such method"}})
+        );
     }
 
     #[test]

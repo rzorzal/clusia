@@ -657,13 +657,17 @@ pub(crate) async fn review_outdated(shared: &Shared, review: &Review, old_head: 
 }
 
 /// The display name of the harness a review talks about: the one that made its session, or the
-/// configured one while it has no session yet.
+/// one the review is pinned to, or the configured one while it has neither.
 pub(crate) async fn harness_name(shared: &Shared, review: Option<&Review>) -> &'static str {
     let kind = match review {
         Some(review) if review.harness_session.is_some() => review
             .harness_session_kind
             .unwrap_or(clusia_core::config::HarnessKind::ClaudeCode),
-        _ => shared.config.read().await.harness.kind,
+        Some(review) => match shared.sessions.pinned(&review.pr) {
+            Some(pinned) => pinned.kind,
+            None => shared.config.read().await.harness.kind,
+        },
+        None => shared.config.read().await.harness.kind,
     };
     kind.name()
 }

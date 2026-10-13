@@ -190,7 +190,8 @@ impl CodexTurn {
         self
     }
 
-    /// Pauses `ms` after every line of the turn.
+    /// Pauses `ms` after every line of the turn. A `turn/interrupt` is answered only after the
+    /// scripted lines end, so a test of an interrupted end uses `hang()`, which has none.
     pub fn delay_ms(mut self, ms: u64) -> Self {
         self.delay_ms = ms;
         self

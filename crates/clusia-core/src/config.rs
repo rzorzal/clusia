@@ -813,11 +813,14 @@ fn cluster(kind: HarnessKind, arg: &str) -> Option<(&'static str, Takes, bool)> 
         .chars()
         .take_while(char::is_ascii_alphabetic)
         .find_map(|c| match (kind, c) {
-            (_, 'p') => Some(("-p", Takes::Nothing)),
-            (_, 'c') => Some(("-c", Takes::Nothing)),
+            (HarnessKind::ClaudeCode, 'p') => Some(("-p", Takes::Nothing)),
+            (HarnessKind::ClaudeCode, 'c') => Some(("-c", Takes::Nothing)),
             (HarnessKind::ClaudeCode, 'r') => Some(("-r", Takes::Nothing)),
-            (HarnessKind::Codex, 's') => Some(("-s", Takes::Nothing)),
-            (HarnessKind::Codex, 'a') => Some(("-a", Takes::Nothing)),
+            // Codex's short flags each take a value, which is the next word.
+            (HarnessKind::Codex, 'p') => Some(("-p", Takes::One)),
+            (HarnessKind::Codex, 'c') => Some(("-c", Takes::One)),
+            (HarnessKind::Codex, 's') => Some(("-s", Takes::One)),
+            (HarnessKind::Codex, 'a') => Some(("-a", Takes::One)),
             _ => None,
         })?;
     Some((flag, takes, false))
@@ -1745,6 +1748,21 @@ mod tests {
 
     fn words(text: &str) -> Vec<String> {
         text.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn a_codex_cluster_takes_the_value_of_its_reserved_letter() {
+        for said in [
+            "-xs read-only --search",
+            "-xa never --search",
+            "-pc x --search",
+        ] {
+            assert_eq!(
+                strip_reserved_flags_for(HarnessKind::Codex, &words(said)),
+                words("--search"),
+                "{said}"
+            );
+        }
     }
 
     #[test]

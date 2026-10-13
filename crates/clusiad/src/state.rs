@@ -76,6 +76,8 @@ pub(crate) struct Shared {
     /// The running security and audit checks of every review. Not `checks_wake`, which wakes
     /// the task that looks at the continuous-integration checks of your pull requests.
     pub checks: Checks,
+    /// The `codex app-server` processes, one per open review.
+    pub codex: crate::codex::Servers,
     /// The timers and runs that revalidate the drafts of saved reviews.
     pub revalidations: Revalidations,
     /// Which reviews a connected client has open, so the daemon knows when no window shows one.
@@ -161,6 +163,7 @@ impl Shared {
             permissions: Permissions::default(),
             sessions: Sessions::default(),
             checks: Checks::default(),
+            codex: crate::codex::Servers::default(),
             revalidations: Revalidations::default(),
             holds: Holds::default(),
             window_listeners: AtomicUsize::new(0),

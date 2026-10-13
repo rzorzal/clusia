@@ -346,6 +346,7 @@ pub(crate) async fn stop(shared: &Shared, pr: &PrRef) {
     crate::checks::stop_all(shared, pr, crate::turns::Why::Ended).await;
     crate::revalidate::stop_all(shared, pr, crate::turns::Why::Ended).await;
     shared.sessions.end(shared, pr).await;
+    crate::codex::close(shared, pr).await;
     shared.permissions.forget_review(shared, pr);
 }
 

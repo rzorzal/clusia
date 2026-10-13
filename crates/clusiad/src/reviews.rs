@@ -169,6 +169,8 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     } = opened;
 
     let _guard = lock(shared, pr).await;
+    let harness = shared.config.read().await.harness.clone();
+    shared.sessions.pin(pr, &harness);
     let now = now_unix();
     let stored = match load_review(&shared.paths, pr) {
         Ok(ReviewLoad::Found(r)) => Some(r),
@@ -887,6 +889,10 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
     // Out of the lock: a run that is finishing needs it to store its result.
     drop(guard);
     crate::checks::stop_all(shared, pr, crate::turns::Why::User).await;
+    if !shared.sessions.any_running(pr) {
+        shared.sessions.unpin(pr);
+        crate::codex::close(shared, pr).await;
+    }
     Outcome::Ok(Reply::Ack)
 }
 

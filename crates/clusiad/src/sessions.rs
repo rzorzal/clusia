@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
-use clusia_core::config::HarnessKind;
+use clusia_core::config::{Harness, HarnessKind};
 use clusia_harness::{Agent, AgentEvent, SessionArg, extract_suggestions, probe_command};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, ErrorCode, Event, Outcome, ProbeResult, ProtocolError, Reply,
@@ -56,7 +56,7 @@ impl Refusal {
         let (code, message) = match self {
             Refusal::Busy => (
                 ErrorCode::Busy,
-                Agent::ClaudeCode.message_for(AgentErrorKind::Busy),
+                AgentErrorKind::Busy.message_for(harness, ""),
             ),
             Refusal::NoReview(message) => (ErrorCode::InvalidState, message),
             Refusal::Stopping => (ErrorCode::InvalidState, "clusiad is stopping".to_string()),
@@ -74,6 +74,25 @@ struct Active {
     stop: Arc<Stop>,
     /// Whether the program of this turn runs in the sandbox; set once its command is built.
     sandbox: Option<bool>,
+}
+
+/// The agent, the program and the extra arguments a review's turns run with from the moment it
+/// is opened, whatever Config › Harness says meanwhile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Pinned {
+    pub kind: HarnessKind,
+    pub program: Option<String>,
+    pub extra_args: String,
+}
+
+impl Pinned {
+    fn of(harness: &Harness) -> Self {
+        Self {
+            kind: harness.kind,
+            program: harness.program.clone(),
+            extra_args: harness.extra_args.clone(),
+        }
+    }
 }
 
 /// A security check or audit whose program runs.
@@ -130,6 +149,8 @@ pub(crate) struct Sessions {
     /// The last state announced for each review, told again whenever its log is read. A lock
     /// of its own: states are announced while `table` is held.
     states: Mutex<HashMap<PrRef, SessionStateKind>>,
+    /// The harness each open review's turns run on; set when it opens or at its first message.
+    pinned: Mutex<HashMap<PrRef, Pinned>>,
 }
 
 impl Default for Sessions {
@@ -140,6 +161,7 @@ impl Default for Sessions {
             live: watch::channel(0).0,
             closing: AtomicBool::new(false),
             states: Mutex::new(HashMap::new()),
+            pinned: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -183,6 +205,32 @@ fn announce(shared: &Shared, pr: &PrRef, state: SessionStateKind) {
 }
 
 impl Sessions {
+    /// Pins the harness `harness` names for the turns of `pr`, unless the review has one.
+    pub(crate) fn pin(&self, pr: &PrRef, harness: &Harness) {
+        self.pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(pr.clone())
+            .or_insert_with(|| Pinned::of(harness));
+    }
+
+    /// The harness `pr`'s turns are pinned to; `None` for a review that is not open.
+    pub(crate) fn pinned(&self, pr: &PrRef) -> Option<Pinned> {
+        self.pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(pr)
+            .cloned()
+    }
+
+    /// The review was saved and closed: its next turns follow the config again.
+    pub(crate) fn unpin(&self, pr: &PrRef) {
+        self.pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
+    }
+
     /// Starts a turn for `pr`, or queues it behind the running one. Returns the turn id.
     pub(crate) async fn submit(
         shared: &Arc<Shared>,
@@ -193,6 +241,8 @@ impl Sessions {
         if sessions.closing.load(Ordering::SeqCst) {
             return Err(Refusal::Stopping);
         }
+        let harness = shared.config.read().await.harness.clone();
+        sessions.pin(pr, &harness);
         let has_review = matches!(reviews::load_stored(shared, pr), Ok(Some(_)));
         if !has_review || !shared.paths.worktree_for(pr).is_dir() {
             return Err(Refusal::NoReview(format!(
@@ -327,6 +377,10 @@ impl Sessions {
             .unwrap_or_else(|p| p.into_inner())
             .remove(pr)
             .is_some();
+        self.pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
         if removed {
             announce(shared, pr, SessionStateKind::None);
         }
@@ -884,7 +938,7 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         streamed: false,
         summary_for: prompt.summary_for.clone(),
         stop: stop.clone(),
-        agent: current_agent(&shared).await,
+        agent: agent_for(&shared, &pr).await,
     };
     let is_summary = prompt.summary_for.is_some();
     let run = TurnRun {
@@ -958,6 +1012,11 @@ pub(crate) async fn current_agent(shared: &Shared) -> Agent {
     Agent::from(shared.config.read().await.harness.kind)
 }
 
+/// The agent a turn of `pr` runs on: the one the review pinned, else the config's.
+pub(crate) async fn agent_for(shared: &Shared, pr: &PrRef) -> Agent {
+    Agent::from(crate::turns::harness_for(shared, pr).await.kind)
+}
+
 pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcome {
     let text = text.trim();
     if text.is_empty() {
@@ -973,7 +1032,7 @@ pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcom
     };
     match Sessions::submit(shared, pr, prompt).await {
         Ok(turn) => Outcome::Ok(Reply::AgentTurn { turn }),
-        Err(refusal) => refusal.into_outcome(current_agent(shared).await.name()),
+        Err(refusal) => refusal.into_outcome(agent_for(shared, pr).await.name()),
     }
 }
 
@@ -2085,22 +2144,6 @@ mod tests {
             ),
             (Some("uuid-1"), Some(HarnessKind::ClaudeCode))
         );
-    }
-
-    #[tokio::test]
-    async fn a_codex_turn_is_refused_until_its_server_exists() {
-        let mut lab = lab_with(Script::one(Turn::answer("x")), |c| {
-            c.harness.kind = HarnessKind::Codex;
-        });
-        let pr = pr(7);
-        lab.send(&pr, "hi").await.unwrap();
-        let seen = until(&mut lab.events, |e| matches!(e, Event::AgentError { .. })).await;
-        let message = seen.iter().find_map(|e| match e {
-            Event::AgentError { message, .. } => Some(message.as_str()),
-            _ => None,
-        });
-        assert_eq!(message, Some("Codex turns are not available yet"));
-        assert!(lab.calls().is_empty(), "no claude ran");
     }
 
     #[tokio::test]

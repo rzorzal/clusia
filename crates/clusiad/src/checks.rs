@@ -1,4 +1,4 @@
-//! Security and audit checks: each one is a Claude Code turn forked from the review's session,
+//! Security and audit checks: each one is an agent turn forked from the review's session,
 //! run beside the chat. A review has at most one run of each kind, and at most `CHECK_PLACES`
 //! runs go at once across all reviews.
 
@@ -398,7 +398,7 @@ async fn drive(_live: Live, shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job
 }
 
 async fn execute(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job: Job) {
-    let agent = crate::sessions::current_agent(&shared).await;
+    let agent = crate::sessions::agent_for(&shared, &pr).await;
     let mut sink = CheckSink::new(shared.clone(), pr.clone(), kind, job.turn, agent);
     let run = TurnRun {
         pr: pr.clone(),

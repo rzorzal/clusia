@@ -132,7 +132,7 @@ impl Turn {
             running: false,
             prompt_open: false,
             prompted_at: None,
-            harness: crate::harness::DEFAULT_NAME,
+            harness: HarnessKind::default().name(),
         }
     }
 
