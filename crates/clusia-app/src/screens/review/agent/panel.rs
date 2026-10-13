@@ -167,12 +167,12 @@ pub struct AgentPanel;
 
 impl Plugin for AgentPanel {
     fn build(&self, app: &mut App) {
+        app.add_systems(PreUpdate, super::name_chats.before(crate::bridge::pump));
         app.add_systems(
             Update,
             (
                 drop_closed_chats,
                 open_chats,
-                super::name_chats,
                 toggle_with_shortcut,
                 layout,
                 rebuild_tabs,
@@ -191,15 +191,14 @@ impl Plugin for AgentPanel {
     }
 }
 
-/// Whether an agent is set up: a program is configured, or the first-run scan found the one the
-/// settings name.
-pub fn harness_ready(snap: &Snapshot) -> bool {
-    snap.config.harness.program.is_some()
+/// Whether the agent `kind` (the one a review is pinned to) is set up: the configured program
+/// serves it (it is the configured kind's), or the first-run scan found it.
+pub fn harness_ready(snap: &Snapshot, kind: clusia_core::config::HarnessKind) -> bool {
+    (snap.config.harness.program.is_some() && snap.config.harness.kind == kind)
         || snap.first_run.as_ref().is_some_and(|f| {
-            f.harnesses.iter().any(|h| {
-                clusia_core::config::HarnessKind::from(h.kind) == snap.config.harness.kind
-                    && h.path.is_some()
-            })
+            f.harnesses
+                .iter()
+                .any(|h| clusia_core::config::HarnessKind::from(h.kind) == kind && h.path.is_some())
         })
 }
 
@@ -247,9 +246,9 @@ fn drop_closed_chats(tabs: Res<ReviewTabs>, mut chats: ResMut<Chats>) {
     }
 }
 
-/// Every review that is ready (not the cached copy) gets a chat, its first tab (Agent when a
-/// harness is set up, Draft otherwise), and its log is asked once. The first tab follows the
-/// harness until the user picks a tab or the chat has a line: `claude` found on the PATH
+/// Every review that is ready (not the cached copy) gets a chat, its first tab (Agent when the
+/// agent the review is pinned to is set up, Draft otherwise), and its log is asked once. The first tab follows the
+/// harness until the user picks a tab or the chat has a line: the agent found on the PATH
 /// arrives with a scan that can end after the review opened.
 fn open_chats(
     tabs: Res<ReviewTabs>,
@@ -264,7 +263,10 @@ fn open_chats(
         }
         let chat = chats.entry(pr);
         if !chat.tab_set && chat.lines.is_empty() {
-            let first = if harness_ready(&model.snapshot) {
+            let first = if harness_ready(
+                &model.snapshot,
+                crate::agent_name::kind_of_tab(&model.snapshot, tab),
+            ) {
                 PanelTab::Agent
             } else {
                 PanelTab::Draft
@@ -578,7 +580,14 @@ fn rebuild_header(
         let want = HeaderView {
             state: chat.state,
             resumed: chat.resumed,
-            ready: harness_ready(&model.snapshot),
+            ready: harness_ready(
+                &model.snapshot,
+                tabs.0
+                    .get(&header.pr)
+                    .map_or(model.snapshot.config.harness.kind, |t| {
+                        crate::agent_name::kind_of_tab(&model.snapshot, t)
+                    }),
+            ),
             name: tabs.0.get(&header.pr).map_or_else(
                 || crate::agent_name::active(&model.snapshot),
                 |t| crate::agent_name::of_tab(&model.snapshot, t),
@@ -1275,6 +1284,50 @@ mod tests {
     }
 
     #[test]
+    fn an_error_in_the_frame_the_pin_changes_is_worded_for_the_new_agent() {
+        use clusia_core::config::HarnessKind as Kind;
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        let pr = pr();
+        assert_eq!(
+            app.world().resource::<Chats>().0[&pr].kind,
+            Kind::ClaudeCode
+        );
+        match &mut app
+            .world_mut()
+            .resource_mut::<crate::review_state::ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .phase
+        {
+            crate::review_state::Phase::Ready(ready) => {
+                ready.view.review.harness_session = Some("thr-1".into());
+                ready.view.review.harness_session_kind = Some(Kind::Codex);
+            }
+            other => panic!("not ready: {other:?}"),
+        }
+        testing::tell(
+            &mut app,
+            Tell::Agent(AgentTell::Error {
+                pr: pr.clone(),
+                turn: 1,
+                kind: clusia_protocol::AgentErrorKind::NotSignedIn,
+                message: String::new(),
+            }),
+        );
+        let chat = &app.world().resource::<Chats>().0[&pr];
+        assert!(
+            chat.lines.iter().any(|l| matches!(
+                l,
+                crate::screens::review::agent::ChatLine::Error(m) if m.contains("codex login")
+            )),
+            "{:?}",
+            chat.lines
+        );
+    }
+
+    #[test]
     fn a_first_run_harness_counts_only_when_it_is_the_configured_kind() {
         use clusia_core::config::HarnessKind as Kind;
         use clusia_protocol::HarnessKind;
@@ -1292,13 +1345,25 @@ mod tests {
             ..Snapshot::default()
         };
         assert!(
-            !harness_ready(&snap),
-            "Claude Code is configured, only Codex was found"
+            !harness_ready(&snap, Kind::ClaudeCode),
+            "Claude Code was not found, only Codex"
         );
-        snap.config.harness.kind = Kind::Codex;
-        assert!(harness_ready(&snap));
+        assert!(harness_ready(&snap, Kind::Codex));
         snap.first_run = Some(found(HarnessKind::ClaudeCode));
-        assert!(!harness_ready(&snap));
+        assert!(!harness_ready(&snap, Kind::Codex));
+        assert!(harness_ready(&snap, Kind::ClaudeCode));
+    }
+
+    #[test]
+    fn a_program_only_serves_the_configured_kind() {
+        use clusia_core::config::HarnessKind as Kind;
+        let mut snap = Snapshot::default();
+        snap.config.harness.program = Some("/opt/homebrew/bin/claude".into());
+        assert!(harness_ready(&snap, Kind::ClaudeCode));
+        assert!(
+            !harness_ready(&snap, Kind::Codex),
+            "a review pinned to Codex is not served by Claude Code's program"
+        );
     }
 
     #[test]
@@ -1333,9 +1398,15 @@ mod tests {
         );
 
         let mut found = Snapshot::default();
-        assert!(!harness_ready(&found));
+        assert!(!harness_ready(
+            &found,
+            clusia_core::config::HarnessKind::ClaudeCode
+        ));
         found.first_run = Some(fixture::demo_first_run());
-        assert!(harness_ready(&found), "claude was found on the PATH");
+        assert!(
+            harness_ready(&found, clusia_core::config::HarnessKind::ClaudeCode),
+            "claude was found on the PATH"
+        );
     }
 
     #[test]

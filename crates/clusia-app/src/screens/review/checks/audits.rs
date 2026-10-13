@@ -331,7 +331,10 @@ pub(super) fn fill_audits(
         let view = audits_view(
             checks.0.get(&body.pr),
             &model.snapshot.config.harness.audit_areas,
-            harness_ready(&model.snapshot),
+            harness_ready(
+                &model.snapshot,
+                crate::agent_name::kind_of_tab(&model.snapshot, tab),
+            ),
             crate::agent_name::of_tab(&model.snapshot, tab),
             &files,
             clock.now(),

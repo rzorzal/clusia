@@ -34,10 +34,15 @@ pub fn of_review(snap: &Snapshot, review: &Review) -> &'static str {
 /// tab was opened with), so a later switch in Config never renames an open review. A tab with no
 /// review yet shows the kind it was opened with, else the active one.
 pub fn of_tab(snap: &Snapshot, tab: &Tab) -> &'static str {
+    kind_of_tab(snap, tab).name()
+}
+
+/// The kind `of_tab` names.
+pub fn kind_of_tab(snap: &Snapshot, tab: &Tab) -> HarnessKind {
     let opened = tab.ui.opened_with.unwrap_or(snap.config.harness.kind);
     match tab.ready() {
-        Some(ready) => kind_of(&ready.view.review, opened).name(),
-        None => opened.name(),
+        Some(ready) => kind_of(&ready.view.review, opened),
+        None => opened,
     }
 }
 

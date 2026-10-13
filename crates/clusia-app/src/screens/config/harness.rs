@@ -229,8 +229,13 @@ pub fn open_checkboxes(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &OpenCh
 
 impl HarnessView {
     /// The same view with the note that follows a change of agent.
+    /// The note shows once the write was accepted: until the configured kind is the one chosen,
+    /// nothing has changed and nothing is said.
     pub fn with_switched(mut self, switched: &Switched) -> Self {
-        self.switched = switched.0.map(HarnessKind::name);
+        self.switched = switched
+            .0
+            .filter(|kind| *kind == self.kind)
+            .map(HarnessKind::name);
         self
     }
 
@@ -1105,6 +1110,17 @@ mod tests {
         );
         let v = v.with_switched(&Switched(Some(HarnessKind::Codex)));
         assert_eq!(v.switched, Some("Codex"));
+    }
+
+    #[test]
+    fn the_switched_note_waits_for_the_accepted_write() {
+        let snap = Snapshot::default();
+        let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
+        let v = v.with_switched(&Switched(Some(HarnessKind::Codex)));
+        assert_eq!(
+            v.switched, None,
+            "the daemon has not accepted Codex (or refused it): the page still says Claude Code"
+        );
     }
 
     #[test]

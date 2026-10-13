@@ -242,7 +242,10 @@ pub(super) fn fill_security(
         let files: Vec<&str> = ready.view.files.iter().map(|f| f.path.as_str()).collect();
         let view = security_view(
             checks.0.get(&body.pr),
-            harness_ready(&model.snapshot),
+            harness_ready(
+                &model.snapshot,
+                crate::agent_name::kind_of_tab(&model.snapshot, tab),
+            ),
             crate::agent_name::of_tab(&model.snapshot, tab),
             &files,
             clock.now(),

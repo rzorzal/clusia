@@ -3033,6 +3033,32 @@ mod tests {
         inbox.0.try_iter().collect()
     }
 
+    #[test]
+    fn choosing_codex_in_demo_mode_leaves_no_program() {
+        use clusia_core::config::HarnessKind;
+        let (_inbox, outbox) = local_link();
+        let mut model = Model::default();
+        model.snapshot.config.harness.program = Some("/opt/homebrew/bin/claude".into());
+        let mut asks = Asks::default();
+        crate::screens::config::harness::write_kind(&mut asks, &mut model, "codex");
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .insert_resource(asks)
+            .insert_resource(model)
+            .insert_resource(Toasts::default())
+            .insert_resource(ReviewTabs::default())
+            .init_resource::<Revalidations>()
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .insert_resource(PermissionQueue::default())
+            .insert_resource(outbox)
+            .add_systems(Update, demo_answers);
+        app.update();
+        let config = &app.world().resource::<Model>().snapshot.config;
+        assert_eq!(config.harness.kind, HarnessKind::Codex);
+        assert_eq!(config.harness.program, None);
+    }
+
     /// The queue as the window has it after the demo request was told.
     fn demo_queue() -> PermissionQueue {
         let mut queue = PermissionQueue::default();

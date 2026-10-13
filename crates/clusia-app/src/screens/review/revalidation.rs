@@ -745,7 +745,10 @@ fn fill_revalidation(
         let Some(view) = screen_view(
             tab,
             rounds.0.get(&root.pr),
-            harness_ready(&model.snapshot),
+            harness_ready(
+                &model.snapshot,
+                crate::agent_name::kind_of_tab(&model.snapshot, tab),
+            ),
             crate::agent_name::of_tab(&model.snapshot, tab),
         ) else {
             continue;

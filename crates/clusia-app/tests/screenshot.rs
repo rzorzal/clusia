@@ -49,6 +49,11 @@ fn demo_screenshots() {
         "audits",
         "revalidated",
         "revalidated-banner",
+        "config-harness-codex",
+        "agent-chat-codex",
+        "permission-codex",
+        "first-run-both",
+        "home-footer",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((

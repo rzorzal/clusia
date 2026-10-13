@@ -81,8 +81,8 @@ pub struct ChatModel {
     pub prefill: Option<String>,
     /// The rules granted for this review, as the daemon told them (`Bash(cargo test:*)`, `Edit`).
     pub rules: Vec<String>,
-    /// The name of the agent this chat talks to, for an error the daemon sent no message for.
-    pub agent: &'static str,
+    /// The agent this chat talks to, for an error the daemon sent no message for.
+    pub kind: HarnessKind,
     /// The turn whose answer the last `Text` line is still receiving.
     streaming: Option<u64>,
     /// The turn that was still running when the log was read. The daemon logs an answer's
@@ -101,7 +101,7 @@ impl Default for ChatModel {
     fn default() -> Self {
         Self {
             lines: Vec::new(),
-            agent: HarnessKind::ClaudeCode.name(),
+            kind: HarnessKind::ClaudeCode,
             state: SessionStateKind::None,
             open: true,
             tab: PanelTab::Draft,
@@ -274,7 +274,7 @@ impl ChatModel {
                 ..
             } => {
                 self.spoke();
-                self.push(ChatLine::Error(error_text(*kind, message, self.agent)));
+                self.push(ChatLine::Error(error_text(*kind, message, self.kind)));
                 return self.ended(*turn);
             }
             AgentTell::State { state, .. } => {
@@ -354,7 +354,7 @@ impl ChatModel {
                     state: SuggestionState::Waiting,
                 }),
                 AgentLogEntry::Error { kind, message, .. } => {
-                    lines.push(ChatLine::Error(error_text(*kind, message, self.agent)));
+                    lines.push(ChatLine::Error(error_text(*kind, message, self.kind)));
                 }
                 AgentLogEntry::Permission {
                     tool,
@@ -425,14 +425,9 @@ impl ChatModel {
 }
 
 /// The daemon's message, or the kind's default one when it sent none.
-fn error_text(kind: AgentErrorKind, message: &str, agent: &str) -> String {
+fn error_text(kind: AgentErrorKind, message: &str, agent: HarnessKind) -> String {
     if message.trim().is_empty() {
-        let harness = if agent == HarnessKind::Codex.name() {
-            HarnessKind::Codex
-        } else {
-            HarnessKind::ClaudeCode
-        };
-        kind.message_for(agent, harness.sign_in_hint())
+        kind.message_for(agent.name(), agent.sign_in_hint())
     } else {
         message.to_string()
     }
@@ -529,7 +524,7 @@ mod tests {
     #[test]
     fn an_error_with_no_message_names_the_chats_agent() {
         let mut chat = ChatModel {
-            agent: clusia_core::config::HarnessKind::Codex.name(),
+            kind: clusia_core::config::HarnessKind::Codex,
             ..ChatModel::default()
         };
         chat.apply(&AgentTell::Error {
@@ -550,8 +545,8 @@ mod tests {
             chat.lines
         );
         assert_eq!(
-            ChatModel::default().agent,
-            "Claude Code",
+            ChatModel::default().kind,
+            clusia_core::config::HarnessKind::ClaudeCode,
             "a chat nobody named yet keeps Claude Code's wording"
         );
     }

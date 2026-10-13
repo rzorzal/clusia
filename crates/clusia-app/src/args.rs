@@ -37,6 +37,11 @@ pub enum Scene {
     Audits,
     Revalidated,
     RevalidatedBanner,
+    ConfigHarnessCodex,
+    AgentChatCodex,
+    PermissionCodex,
+    FirstRunBoth,
+    HomeFooter,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -188,6 +193,11 @@ mod tests {
             ("audits", Scene::Audits),
             ("revalidated", Scene::Revalidated),
             ("revalidated-banner", Scene::RevalidatedBanner),
+            ("config-harness-codex", Scene::ConfigHarnessCodex),
+            ("agent-chat-codex", Scene::AgentChatCodex),
+            ("permission-codex", Scene::PermissionCodex),
+            ("first-run-both", Scene::FirstRunBoth),
+            ("home-footer", Scene::HomeFooter),
         ] {
             assert_eq!(
                 parse(&["--demo", "--scene", name]).unwrap().scene,

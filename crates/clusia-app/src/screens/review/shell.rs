@@ -526,7 +526,10 @@ fn mount(
             tab,
             revalidations.0.get(pr),
             mounted == Some(&Mounted::Revalidation),
-            harness_ready(&model.snapshot),
+            harness_ready(
+                &model.snapshot,
+                crate::agent_name::kind_of_tab(&model.snapshot, tab),
+            ),
         ) {
             Mounted::Revalidation
         } else {
