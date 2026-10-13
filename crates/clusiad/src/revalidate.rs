@@ -734,6 +734,7 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Job) {
     if shared.sessions.pinned(&pr).is_none() && !shared.sessions.any_running(&pr) {
         crate::codex::close(&shared, &pr).await;
     }
+    shared.sessions.release_closed(&shared, &pr).await;
     match end {
         TurnEnd::Done => {
             let text = sink.answer.unwrap_or(sink.streamed);

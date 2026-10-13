@@ -91,9 +91,15 @@ impl Link {
                 .map_err(|e| e.to_string())?;
             stdin.flush().await.map_err(|e| e.to_string())
         };
-        tokio::time::timeout(SEND_LIMIT, write)
-            .await
-            .unwrap_or_else(|_| Err("Codex does not read its input".to_string()))
+        match tokio::time::timeout(SEND_LIMIT, write).await {
+            Ok(sent) => sent,
+            Err(_) => {
+                // The cut write may have left half a line in the pipe, so nothing sent after it
+                // can be trusted: the next lease starts a new server.
+                self.close();
+                Err("Codex does not read its input".to_string())
+            }
+        }
     }
 
     /// Sends the request `build` makes for a fresh id and waits for its answer.

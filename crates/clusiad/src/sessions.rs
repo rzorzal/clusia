@@ -294,6 +294,12 @@ impl Sessions {
                 "no review for {pr}; open it first"
             )));
         }
+        // A message to a saved review brings it back: no close waits for its turns any more.
+        sessions
+            .closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
         let harness = shared.config.read().await.harness.clone();
         sessions.pin(pr, &harness);
         let log = shared.paths.agent_log(pr);

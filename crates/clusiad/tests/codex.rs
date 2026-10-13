@@ -10,7 +10,9 @@ use clusia_harness::testkit::{
 use clusia_protocol::{AgentLogEntry, Client, Command, Event, Reply};
 use common::agent::{calls, ready, send, set_config, until, use_fake, value_of, watching};
 use common::codex::{codex_after, codex_calls, codex_gone, use_fake_codex};
-use common::revalidation::{FILE, push, review_of, run_round, saved};
+use common::revalidation::{
+    FILE, is_failed, is_running, push, review_of, reviews_watcher, round_is, run_round, saved,
+};
 use common::review_world::{open, pr7, world};
 use serde_json::json;
 
@@ -370,6 +372,70 @@ async fn a_saved_review_closed_during_a_chat_turn_releases_its_process_when_the_
 
     c.request(Command::AgentCancel { pr: pr7() }).await.unwrap();
     until(&mut watcher, ready).await;
+    assert!(codex_gone(pid).await, "the closed review kept its process");
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_message_to_a_saved_review_cancels_the_close_that_waited_for_its_turn() {
+    let w = world().await;
+    let dir = use_fake_codex(
+        &w,
+        CodexScript::turns(vec![
+            CodexTurn::answer("first").delay_ms(1500),
+            CodexTurn::answer("second"),
+        ]),
+    )
+    .await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(Command::AddDraftItem {
+        pr: pr7(),
+        kind: DraftKind::General,
+        anchor: None,
+        thread: None,
+        body: "Looks fine".into(),
+    })
+    .await
+    .unwrap();
+    c.request(send("hi")).await.unwrap();
+    let pid = codex_after(&dir, 0, "turn/start", 1).await.pid;
+    c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
+    c.request(send("again")).await.unwrap();
+
+    until(&mut watcher, ready).await;
+    codex_after(&dir, 0, "turn/start", 2).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        FakeCodex::is_running(pid),
+        "the message brought the review back, so its process stays"
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_saved_review_closed_during_a_round_releases_its_process_when_the_round_ends() {
+    let w = world().await;
+    let (mut c, _ids) = saved(&w).await;
+    let dir = use_fake_codex(&w, CodexScript::one(CodexTurn::hang())).await;
+    push(&w, &mut c, "zero\n").await;
+    let mut watcher = reviews_watcher(&w).await;
+
+    open(&mut c).await;
+    until(&mut watcher, round_is(is_running)).await;
+    let pid = codex_after(&dir, 0, "turn/start", 1).await.pid;
+
+    c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
+    assert!(
+        FakeCodex::is_running(pid),
+        "the round still runs, so does its process"
+    );
+
+    c.request(Command::StopRevalidation { pr: pr7() })
+        .await
+        .unwrap();
+    until(&mut watcher, round_is(is_failed)).await;
     assert!(codex_gone(pid).await, "the closed review kept its process");
     w.daemon.stop().await;
 }
