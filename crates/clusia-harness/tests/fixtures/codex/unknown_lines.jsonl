@@ -1,0 +1,13 @@
+this is not json
+[1,2,3]
+"a string"
+{}
+{"jsonrpc":"2.0"}
+{"method":"warning","params":{"message":"careful"}}
+{"method":"configWarning","params":{"summary":"x"}}
+{"method":"hook/started","params":{"threadId":"thr-1","hook":{}}}
+{"method":"model/rerouted","params":{"threadId":"thr-1","turnId":"turn-8"}}
+{"method":"item/started","params":{"threadId":"thr-1","turnId":"turn-8"}}
+{"method":"item/agentMessage/delta","params":{"threadId":"thr-1","turnId":"turn-8","itemId":"item-1"}}
+{"method":"error","params":{"threadId":"thr-1","turnId":"turn-8","willRetry":true,"error":{"message":"Reconnecting... 1/5"}}}
+{"method":"brand/new/notification","params":{"threadId":"thr-1","x":1}}

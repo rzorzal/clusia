@@ -310,7 +310,7 @@ fn describe_tool(block: &Value, root: Option<&Path>) -> (String, String) {
     (cut(&summary), cut(&asked))
 }
 
-fn relative(path: &str, root: Option<&Path>) -> String {
+pub(crate) fn relative(path: &str, root: Option<&Path>) -> String {
     root.and_then(|root| Path::new(path).strip_prefix(root).ok())
         .map_or_else(
             || path.to_string(),
@@ -321,7 +321,7 @@ fn relative(path: &str, root: Option<&Path>) -> String {
         )
 }
 
-fn cut(text: &str) -> String {
+pub(crate) fn cut(text: &str) -> String {
     if text.chars().count() > DETAIL_CHARS {
         let head: String = text.chars().take(DETAIL_CHARS).collect();
         format!("{head}…")

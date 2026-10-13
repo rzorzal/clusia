@@ -1,0 +1,2 @@
+{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-5","items":[],"status":"inProgress","error":null}}}
+{"method":"turn/completed","params":{"threadId":"thr-1","turn":{"id":"turn-5","items":[],"status":"failed","error":{"message":"Not logged in. Run codex login.","codexErrorInfo":"unauthorized","additionalDetails":null}}}}

@@ -4,6 +4,7 @@
 
 mod agent;
 mod check_blocks;
+pub mod codex;
 mod command;
 mod parse;
 mod probe;

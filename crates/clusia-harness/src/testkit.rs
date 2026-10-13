@@ -15,6 +15,10 @@
 //! `calls/<n>/answers`. Asks that were not allowed are listed in the result line's
 //! `permission_denials`, as the real program does.
 
+mod codex_fake;
+
+pub use codex_fake::{CodexCall, CodexScript, CodexTurn, FakeCodex};
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

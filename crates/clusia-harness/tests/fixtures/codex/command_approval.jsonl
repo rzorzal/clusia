@@ -1,0 +1,6 @@
+{"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-2","items":[],"status":"inProgress","error":null}}}
+{"method":"item/started","params":{"threadId":"thr-1","turnId":"turn-2","item":{"type":"commandExecution","id":"call-7","command":"cargo test -p widgets-core","cwd":"/work/acme-widgets","status":"inProgress","commandActions":[{"type":"unknown","command":"cargo test -p widgets-core"}],"aggregatedOutput":null,"exitCode":null,"durationMs":null}}}
+{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr-1","turnId":"turn-2","itemId":"call-7","startedAtMs":1760000001000,"command":"cargo test -p widgets-core","cwd":"/work/acme-widgets","reason":"Needs to run the tests","commandActions":[{"type":"unknown","command":"cargo test -p widgets-core"}],"availableDecisions":["accept","acceptForSession","decline","cancel"]}}
+{"method":"serverRequest/resolved","params":{"threadId":"thr-1","requestId":0}}
+{"method":"item/completed","params":{"threadId":"thr-1","turnId":"turn-2","item":{"type":"commandExecution","id":"call-7","command":"cargo test -p widgets-core","cwd":"/work/acme-widgets","status":"declined","commandActions":[],"aggregatedOutput":null,"exitCode":null,"durationMs":null}}}
+{"method":"turn/completed","params":{"threadId":"thr-1","turn":{"id":"turn-2","items":[],"status":"completed","error":null}}}

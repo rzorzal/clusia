@@ -1,0 +1,3 @@
+{"id":2,"method":"item/permissions/requestApproval","params":{"threadId":"thr-1","turnId":"turn-7","itemId":"call-1","startedAtMs":1,"permissions":{"network":{"enabled":true}}}}
+{"id":"srv-3","method":"mcpServer/elicitation/request","params":{"threadId":"thr-1","turnId":"turn-7","serverName":"docs","message":"Pick one"}}
+{"id":4,"method":"tool/requestUserInput","params":{"threadId":"thr-1","turnId":"turn-7","itemId":"call-2","questions":[]}}
