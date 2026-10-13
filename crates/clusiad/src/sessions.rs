@@ -1035,6 +1035,18 @@ async fn remember_session(
     shared.sessions.session_confirmed(pr);
 }
 
+/// The program no longer knows the chat's session: the review forgets it, so the next turn starts
+/// a new one.
+pub(crate) async fn forget_session(shared: &Shared, pr: &PrRef) {
+    let _guard = reviews::lock(shared, pr).await;
+    if let Ok(Some(mut review)) = reviews::load_stored(shared, pr) {
+        review.forget_session();
+        if reviews::save(shared, &review).is_err() {
+            tracing::warn!(pr = %pr, "cannot clear the agent session of the review");
+        }
+    }
+}
+
 /// Runs one chat turn: the process part is `turns::run`, the chat's part is the sink.
 async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, stop: Arc<Stop>) {
     let harness = turns::harness_for(&shared, &pr).await;
@@ -2643,7 +2655,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_custom_turn_without_a_runner_says_so() {
+    async fn a_custom_turn_with_a_missing_program_never_runs_claude_code() {
         let mut lab = lab_with(Script::one(Turn::answer("x")), |config| {
             config.harness.kind = HarnessKind::Custom;
             config.harness.program = Some("/bin/echo-a".into());

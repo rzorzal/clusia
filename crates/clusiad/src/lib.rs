@@ -8,6 +8,7 @@ mod bridge;
 mod checks;
 mod codex;
 mod connection;
+mod custom;
 mod first_run;
 mod giphy;
 mod handlers;

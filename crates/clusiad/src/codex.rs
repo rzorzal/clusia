@@ -523,7 +523,7 @@ impl Server {
         // The process goes first: a write that is stuck on it fails then and frees the lock.
         let child = self.child.lock().await.take();
         if let Some(mut child) = child {
-            turns::terminate(&mut child).await;
+            turns::terminate(&mut child, KILL_GRACE).await;
         }
         self.link.stdin.lock().await.take();
     }

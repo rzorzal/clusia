@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod codex;
+pub mod custom;
 pub mod git_fixture;
 pub mod github_mock;
 pub mod revalidation;
