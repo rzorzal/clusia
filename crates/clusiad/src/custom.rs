@@ -75,13 +75,33 @@ fn shown(text: &str) -> String {
 /// that the program does not read must not hold the lock for ever (a stop would wait for it), so
 /// every write is bounded.
 struct Link {
-    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    stdin: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
 }
 
 impl Link {
     fn new(stdin: ChildStdin) -> Arc<Self> {
         Arc::new(Self {
-            stdin: tokio::sync::Mutex::new(Some(stdin)),
+            stdin: Arc::new(tokio::sync::Mutex::new(Some(stdin))),
+        })
+    }
+
+    /// Takes the pipe before anything else can write and sends `line` first, from a task of its
+    /// own: a program that never reads must not hold the turn, and no answer can overtake the
+    /// turn line because they all wait for the lock this task already holds.
+    async fn send_first(&self, line: String) -> JoinHandle<()> {
+        let mut stdin = self.stdin.clone().lock_owned().await;
+        tokio::spawn(async move {
+            let write = async {
+                let Some(pipe) = stdin.as_mut() else {
+                    return;
+                };
+                let _ = pipe.write_all(line.as_bytes()).await;
+                let _ = pipe.flush().await;
+            };
+            if tokio::time::timeout(SEND_LIMIT, write).await.is_err() {
+                // A cut write may have left half a line in the pipe.
+                stdin.take();
+            }
         })
     }
 
@@ -258,23 +278,70 @@ async fn settle_answers(asked: &mut Vec<JoinHandle<()>>) {
     }
 }
 
-/// How long a stopped program gets to leave after SIGTERM: less when the daemon is stopping.
-fn grace_for(stop: &Stop) -> Duration {
-    if stop.why() == Why::Shutdown {
-        KILL_GRACE
-    } else {
-        STOP_GRACE
+/// A program of the turn, owned until it is reaped: a turn that is dropped before that takes the
+/// whole group with it instead of leaving what the program started behind.
+struct Held {
+    child: Child,
+    /// Once reaped its pid, and so the group id, may be reused, so it is never signalled again.
+    reaped: bool,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if !self.reaped {
+            turns::signal_group(self.child.id(), libc::SIGKILL);
+        }
     }
 }
 
-/// Waits up to `grace` for the program to leave on its own, ends it if it does not, and reaps it
-/// with whatever its group still holds.
-async fn leave(child: &mut Child, grace: Duration) {
-    let pid = child.id();
+/// Whether the turn was stopped because the daemon or the review is going away: nobody is left
+/// to wait for the program, so its grace shrinks to `KILL_GRACE`.
+fn hurried(stop: &Stop) -> bool {
+    stop.fired() && matches!(stop.why(), Why::Shutdown | Why::Ended)
+}
+
+/// Waits up to `grace` for the program to end, leaving it unreaped. A stop for a reason that
+/// `hurried` names cuts what is left of the wait to `KILL_GRACE`, whenever it comes.
+async fn wait_exit(pid: u32, grace: Duration, stop: &Stop) -> bool {
+    let mut deadline = Instant::now() + grace;
+    let mut cut = false;
+    loop {
+        if turns::has_exited(pid) {
+            return true;
+        }
+        if !cut && hurried(stop) {
+            cut = true;
+            deadline = deadline.min(Instant::now() + KILL_GRACE);
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// SIGTERM to the program's group, SIGKILL to what is left of it after `grace`, then reaps it.
+async fn end_group(held: &mut Held, grace: Duration, stop: &Stop) {
+    let pid = held.child.id();
+    turns::signal_group(pid, libc::SIGTERM);
+    if let Some(pid) = pid {
+        wait_exit(pid, grace, stop).await;
+    }
+    turns::sweep_and_reap(&mut held.child, pid).await;
+    held.reaped = true;
+}
+
+/// Waits up to `STOP_GRACE` for the program to leave on its own, ends it if it does not, and
+/// reaps it with whatever its group still holds.
+async fn leave(held: &mut Held, stop: &Stop) {
+    let pid = held.child.id();
     match pid {
-        Some(id) if !turns::exited_within(id, grace).await => turns::terminate(child, grace).await,
+        Some(id) if !wait_exit(id, STOP_GRACE, stop).await => {
+            end_group(held, STOP_GRACE, stop).await
+        }
         _ => {
-            turns::sweep_and_reap(child, pid).await;
+            turns::sweep_and_reap(&mut held.child, pid).await;
+            held.reaped = true;
         }
     }
 }
@@ -326,7 +393,8 @@ pub(crate) async fn run_turn(
         }
     };
     let cwd = shared.paths.worktree_for(pr);
-    let base_env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let mut base_env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    base_env.extend(shared.harness_env.iter().cloned());
     let mut spawn = Command::from(command(&program, &extra_args, &cwd, &base_env));
     spawn
         .stdin(Stdio::piped())
@@ -334,7 +402,7 @@ pub(crate) async fn run_turn(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
-    let mut child = match spawn.spawn() {
+    let child = match spawn.spawn() {
         Ok(child) => child,
         Err(e)
             if matches!(
@@ -357,10 +425,15 @@ pub(crate) async fn run_turn(
         }
     };
     sink.started();
+    let mut held = Held {
+        child,
+        reaped: false,
+    };
+    let child = &mut held.child;
 
     let link = Link::new(child.stdin.take().expect("stdin is piped"));
     let stdout = child.stdout.take().expect("stdout is piped");
-    let stderr = tokio::spawn(turns::read_tail(child.stderr.take()));
+    let mut stderr = tokio::spawn(turns::read_tail(child.stderr.take()));
     let limit = limit.unwrap_or_else(|| Duration::from_secs(u64::from(harness.turn_timeout_secs)));
     let first = custom::turn_line(
         &prompt,
@@ -369,15 +442,7 @@ pub(crate) async fn run_turn(
         &cwd,
         limit.as_secs(),
     );
-    let mut asked: Vec<JoinHandle<()>> = Vec::new();
-    // A program that does not read its input must not hold the turn back: the line goes out from
-    // a task, and every later answer waits behind it on the same lock.
-    asked.push(tokio::spawn({
-        let link = link.clone();
-        async move {
-            let _ = link.send(&first).await;
-        }
-    }));
+    let mut asked: Vec<JoinHandle<()>> = vec![link.send_first(first).await];
 
     let chat = shared.sessions.origin_of(pr, turn) == Some(TurnOrigin::Chat);
     let mut lines = LineReader::new(BufReader::new(stdout));
@@ -426,17 +491,16 @@ pub(crate) async fn run_turn(
     link.close().await;
 
     let (said_result, had_failed) = (sink.saw_final(), sink.failed());
-    let grace = grace_for(stop);
     match ending {
         Ending::Ended => {
-            leave(&mut child, STOP_GRACE).await;
+            leave(&mut held, stop).await;
             sink.release();
         }
         Ending::Eof => {
-            leave(&mut child, STOP_GRACE).await;
+            leave(&mut held, stop).await;
             sink.release();
             if !said_result && !had_failed {
-                let tail = tokio::time::timeout(Duration::from_secs(1), stderr)
+                let tail = tokio::time::timeout(Duration::from_secs(1), &mut stderr)
                     .await
                     .ok()
                     .and_then(Result::ok)
@@ -467,10 +531,10 @@ pub(crate) async fn run_turn(
                 AgentErrorKind::Crashed,
                 format!("{name} wrote more than Clúsia reads in one turn"),
             );
-            turns::terminate(&mut child, STOP_GRACE).await;
+            end_group(&mut held, STOP_GRACE, stop).await;
         }
         Ending::Stopped => {
-            turns::terminate(&mut child, grace).await;
+            end_group(&mut held, STOP_GRACE, stop).await;
             sink.release();
             if !said_result && !had_failed {
                 sink.error(
@@ -480,11 +544,11 @@ pub(crate) async fn run_turn(
             }
         }
         Ending::TimedOut if said_result || had_failed => {
-            turns::terminate(&mut child, grace).await;
+            end_group(&mut held, STOP_GRACE, stop).await;
             sink.release();
         }
         Ending::TimedOut => {
-            turns::terminate(&mut child, grace).await;
+            end_group(&mut held, STOP_GRACE, stop).await;
             sink.release();
             sink.error(
                 AgentErrorKind::Interrupted,
@@ -495,6 +559,7 @@ pub(crate) async fn run_turn(
             );
         }
     }
+    stderr.abort();
     sink.flush();
     tracing::debug!(pr = %pr, turn, elapsed_ms = began.elapsed().as_millis() as u64, "custom turn ended");
     match (said_result, had_failed, ending) {
@@ -545,6 +610,7 @@ mod tests {
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
             bridge_program: None,
+            harness_env: Vec::new(),
         };
         Arc::new(Shared::new(paths, config, options))
     }

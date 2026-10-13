@@ -19,7 +19,7 @@ use common::custom::{
     custom_calls, custom_decisions, custom_hung, group_alive, group_gone, use_fake_custom,
 };
 use common::revalidation::{FILE, push, review_of, run_round, saved};
-use common::review_world::{World, open, pr7, world};
+use common::review_world::{World, open, pr7, world, world_with_harness_env};
 use serde_json::json;
 
 fn turn() -> CustomTurnScript {
@@ -143,21 +143,6 @@ async fn a_custom_chat_streams_logs_and_the_next_message_resumes_its_session() {
     c.request(send("And the tests?")).await.unwrap();
     until(&mut watcher, ready).await;
     let calls = custom_calls(&dir, 2).await;
-    for token in ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"] {
-        assert_eq!(
-            calls[0].env_value(token),
-            None,
-            "{token} reached the program"
-        );
-    }
-    assert!(
-        !calls[0]
-            .env
-            .iter()
-            .any(|(key, _)| key.starts_with("CLUSIA_")),
-        "a CLUSIA_ variable reached the program: {:?}",
-        calls[0].env
-    );
     let first = calls[0].turn_line().expect("a turn line");
     assert_eq!(first["type"], "turn");
     assert_eq!(first["protocol"], 1);
@@ -907,4 +892,51 @@ async fn custom_revalidation_sends_no_session_and_stores_none() {
         "a round's session is never the chat's"
     );
     w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn custom_env_has_no_tokens() {
+    let w = world_with_harness_env(&[
+        ("GH_TOKEN", "x"),
+        ("GITHUB_TOKEN", "x"),
+        ("GH_ENTERPRISE_TOKEN", "x"),
+        ("CLUSIA_FOO", "y"),
+        ("KEEP", "z"),
+    ])
+    .await;
+    let dir = use_fake_custom(
+        &w,
+        CustomScript::new().turn(turn().session("s1").final_("ok")),
+    )
+    .await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(send("go")).await.unwrap();
+    until(&mut watcher, ready).await;
+    let call = &custom_calls(&dir, 1).await[0];
+    for key in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "CLUSIA_FOO",
+    ] {
+        assert_eq!(call.env_value(key), None, "{key} reached the program");
+    }
+    assert_eq!(call.env_value("KEEP"), Some("z"));
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn custom_shutdown_after_final_leaves_no_process() {
+    let (w, dir, mut c, _watcher) =
+        started(CustomScript::new().turn(turn().session("s1").final_("x").hang())).await;
+    c.request(send("go")).await.unwrap();
+    let pid = custom_hung(&dir, 0).await.pid;
+
+    w.daemon.stop().await;
+    assert!(
+        group_gone(pid, 10).await,
+        "a program that outlives its answer is ended with the daemon"
+    );
 }

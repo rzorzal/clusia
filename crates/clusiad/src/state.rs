@@ -69,6 +69,8 @@ pub(crate) struct Shared {
     pub codex_program: Option<PathBuf>,
     /// The `clusiad` that runs as the permission bridge; this executable when `None`.
     pub bridge_program: Option<PathBuf>,
+    /// Added to the daemon's environment for a custom command's process; empty in production.
+    pub harness_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// The permission requests waiting for the reviewer.
     pub permissions: Permissions,
     /// The running agent turns of every review.
@@ -160,6 +162,7 @@ impl Shared {
             claude_program: options.claude_program,
             codex_program: options.codex_program,
             bridge_program: options.bridge_program,
+            harness_env: options.harness_env,
             permissions: Permissions::default(),
             sessions: Sessions::default(),
             checks: Checks::default(),

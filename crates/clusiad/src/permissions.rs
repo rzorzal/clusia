@@ -726,6 +726,7 @@ mod tests {
             claude_program: Some("/nonexistent/claude".into()),
             codex_program: Some("/nonexistent/codex".into()),
             bridge_program: None,
+            harness_env: Vec::new(),
             github_api: Some("http://127.0.0.1:9".into()),
             github_token: None,
             gh_program: "/nonexistent/gh".into(),

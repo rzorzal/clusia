@@ -1436,6 +1436,7 @@ mod tests {
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
             bridge_program: None,
+            harness_env: Vec::new(),
         };
         Arc::new(Shared::new(paths, config, options))
     }

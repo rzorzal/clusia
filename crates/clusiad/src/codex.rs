@@ -1154,6 +1154,7 @@ mod tests {
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
             bridge_program: None,
+            harness_env: Vec::new(),
         };
         let shared = Arc::new(Shared::new(Paths::new(home.path()), config, options));
         let lab = Lab {
