@@ -194,7 +194,8 @@ fn the_run_asks_before_it_does_anything_and_stops_on_no() {
     assert!(said.contains("Codex"), "{said}");
     assert!(said.contains("answer every request for a"), "{said}");
     assert!(said.contains("you push"), "{said}");
-    assert!(said.contains("you publish"), "{said}");
+    assert!(said.contains("publishes nothing"), "{said}");
+    assert!(said.contains("asks you before it discards"), "{said}");
     assert!(said.contains("Nothing was run"), "{said}");
 }
 
@@ -268,4 +269,70 @@ fn a_no_to_the_settings_question_keeps_everything_as_it_was() {
     assert!(said.contains("Nothing was changed"), "{said}");
     let asked = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(!asked.contains("config set"), "settings changed: {asked}");
+}
+
+#[test]
+fn the_review_is_discarded_only_after_the_owner_says_so() {
+    let source = source();
+    let question = source
+        .find("yes_or_no \"Discard the review now?")
+        .expect("the discard is not asked");
+    let discard = source
+        .find("clusia review discard")
+        .expect("the review is never discarded");
+    assert!(question < discard, "the review is discarded before asking");
+    assert!(source.contains("asks you before it discards the review"));
+}
+
+#[test]
+fn it_refuses_when_an_old_setting_cannot_be_read_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let log = dir.path().join("clusia.log");
+    // `harness.audit` has no readable value: the daemon is down for that key.
+    fake(
+        &bin,
+        "clusia",
+        &format!(
+            "echo \"$*\" >> {}\ncase \"$*\" in \"config get harness.audit\") exit 1 ;; esac\necho old\nexit 0",
+            log.display()
+        ),
+    );
+    fake(
+        &bin,
+        "codex",
+        "case \"$*\" in \"--version\") echo 'codex-cli 0.162.1' ;; esac\nexit 0",
+    );
+    let mut child = Command::new(script())
+        .args(["--yes", "--pr", "rzorzal/clusia#123"])
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("SP2_CHECK_WAIT", "2")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A yes to the settings question must not matter: the script refuses before it asks.
+    child.stdin.take().unwrap().write_all(b"y\ny\ny\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(said.contains("harness.audit"), "{said}");
+    assert!(said.contains("Nothing was changed"), "{said}");
+    assert!(!said.contains("Change those seven settings"), "{said}");
+    let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!asked.contains("config set"), "settings changed: {asked}");
+}
+
+#[test]
+fn every_settings_write_and_the_one_process_proof_are_checked() {
+    let source = source();
+    assert!(source.contains("set_setting"), "writes are not checked");
+    assert!(
+        source.contains("the same codex app-server"),
+        "the one-process proof is missing"
+    );
 }

@@ -192,7 +192,9 @@ impl Plugin for AgentPanel {
 }
 
 /// Whether the agent `kind` (the one a review is pinned to) is set up: the configured program
-/// serves it (it is the configured kind's), or the first-run scan found it.
+/// serves it (it is the configured kind's), or the first-run scan found it. The configured
+/// program counts only for the configured kind: a review still pinned to the other agent reads
+/// "not set up" until the scan has found that agent on the PATH.
 pub fn harness_ready(snap: &Snapshot, kind: clusia_core::config::HarnessKind) -> bool {
     (snap.config.harness.program.is_some() && snap.config.harness.kind == kind)
         || snap.first_run.as_ref().is_some_and(|f| {
@@ -247,9 +249,9 @@ fn drop_closed_chats(tabs: Res<ReviewTabs>, mut chats: ResMut<Chats>) {
 }
 
 /// Every review that is ready (not the cached copy) gets a chat, its first tab (Agent when the
-/// agent the review is pinned to is set up, Draft otherwise), and its log is asked once. The first tab follows the
-/// harness until the user picks a tab or the chat has a line: the agent found on the PATH
-/// arrives with a scan that can end after the review opened.
+/// agent the review is pinned to is set up, Draft otherwise), and its log is asked once. The
+/// first tab follows the harness until the user picks a tab or the chat has a line: the agent
+/// found on the PATH arrives with a scan that can end after the review opened.
 fn open_chats(
     tabs: Res<ReviewTabs>,
     model: Res<Model>,

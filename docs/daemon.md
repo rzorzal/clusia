@@ -22,7 +22,7 @@ the variable is set.
 
 `gh` and the agent tools (`claude`, `codex`) are looked up in order: the folders of `PATH`,
 `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`. A bare `PATH` therefore
-does not hide a Homebrew install. The agent's turns start the program of `harness.program` (default: `claude` on the `PATH`) with the daemon's environment minus `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and every `CLUSIA_*` variable. With `harness.kind = codex` the program is `codex` (or `CLUSIA_CODEX_BIN`), looked up in the same folders.
+does not hide a Homebrew install. The agent's turns start the program of `harness.program` (default: `claude` on the `PATH`) with the daemon's environment minus `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and every `CLUSIA_*` variable. With `harness.kind = codex` and no `harness.program`, the program is `CLUSIA_CODEX_BIN` when it is set (it replaces the lookup) and `codex` otherwise, looked up in the same folders. `scripts/sp2-m5-check.sh` tests the `codex` found on the `PATH`.
 
 The agent's turns run in `--permission-mode default` and ask `clusiad permission-bridge`, a small stdio server that `claude` itself starts (from `--mcp-config`, with `--strict-mcp-config`, so your own MCP servers are not loaded in those turns). The bridge forwards each request over the daemon's socket and only the daemon decides: no answer, an error or a bridge that cannot reach it means deny. With `harness.sandbox` on (default), the turn also gets `--settings` with the sandbox enabled (no network, writes only in the worktree). `harness.permission_timeout_secs` (default 120, 30 to 600) is how long a request waits.
 
