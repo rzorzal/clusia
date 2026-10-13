@@ -28,11 +28,11 @@ while ! mkdir "$dir/calls/$n" 2>/dev/null; do n=$((n+1)); done
 c="$dir/calls/$n"
 : > "$c/argv"
 for a in "$@"; do printf '%s\0' "$a" >> "$c/argv"; done
-env > "$c/env"
+env -0 > "$c/env"
 pwd > "$c/cwd"
-echo $$ > "$c/pid"
 IFS= read -r first
 printf '%s\n' "$first" >> "$c/stdin"
+echo $$ > "$c/pid"
 case "$first" in
   *'"type":"probe"'*) . "$dir/probe.sh"; exit 0 ;;
 esac
@@ -421,11 +421,15 @@ fn read_call(dir: &Path, index: usize) -> Option<CustomCall> {
         .collect();
     // Every argument ends with a NUL, so the split leaves one empty piece at the end.
     argv.pop();
-    let env = fs::read_to_string(dir.join("env"))
+    let env = fs::read(dir.join("env"))
         .ok()?
-        .lines()
-        .filter_map(|l| l.split_once('='))
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .split(|b| *b == 0)
+        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .filter_map(|entry| {
+            entry
+                .split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
         .collect();
     let cwd = fs::read_to_string(dir.join("cwd"))
         .ok()?
@@ -594,6 +598,28 @@ mod tests {
             std::fs::canonicalize(work.path()).unwrap()
         );
         assert!(call.replies().is_empty());
+    }
+
+    #[test]
+    fn an_environment_value_with_a_newline_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = FakeCustom::install(dir.path(), CustomScript::new());
+        let mut child = Command::new(&program)
+            .env("MULTI", "one\ntwo=three")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(turn("x").as_bytes())
+            .unwrap();
+        child.wait().unwrap();
+        let call = &FakeCustom::wait_for_calls(dir.path(), 1, WAIT)[0];
+        assert_eq!(call.env_value("MULTI"), Some("one\ntwo=three"));
+        assert!(call.env_value("two").is_none(), "no stray key");
     }
 
     #[test]

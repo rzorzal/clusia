@@ -245,7 +245,16 @@ impl<R: AsyncBufRead + Unpin> LineReader<R> {
     async fn read_one(&mut self) -> Result<Option<String>, Overflow> {
         let mut line: Vec<u8> = Vec::new();
         let mut ended_by_newline = false;
-        while let Ok(available) = self.reader.fill_buf().await {
+        loop {
+            let available = match self.reader.fill_buf().await {
+                Ok(available) => available,
+                Err(err) => {
+                    // A broken pipe ends the output like EOF; the runner reports a turn that
+                    // never reached its `final`.
+                    tracing::debug!(%err, "reading a custom command's output failed");
+                    break;
+                }
+            };
             if available.is_empty() {
                 break;
             }

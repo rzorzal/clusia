@@ -73,10 +73,10 @@ One JSON object per line on standard output. Every line below needs its `type`.
 
 | `kind` | Clúsia shows |
 |---|---|
-| `auth` | `{name}: {message}` |
+| `auth` | `{name}: {message}`, or `{name} is not signed in` when `message` is empty |
 | `limit` | `{name} reached its usage limit` |
 | `session` | `{name} no longer knows this session; the next turn starts a new one`, and the stored session is forgotten |
-| `other` | `{name}: {message}` |
+| `other` | `{name}: {message}`, or `{name} reported an error` when `message` is empty |
 
 ### What Clúsia does with a line it does not understand
 
@@ -95,7 +95,7 @@ A program that writes more than Clúsia reads in one turn is stopped: the turn f
 
 | Cap | Value |
 |---|---|
-| One line | 1 MiB (1 048 576 bytes) |
+| One line | 1 MiB (1 048 576 bytes), counting any `\r` before the newline |
 | Lines in one turn | 10 000 |
 | Bytes in one turn | 8 MiB |
 
@@ -123,11 +123,10 @@ standard input. The program must not do the thing before it has an `allow`.
 `id` is yours to choose and must be unique within the turn. `reason` is optional and shown to
 the reviewer.
 
-Every request gets a reply, with these exceptions, where Clúsia writes nothing back:
-
-- a request with no `id`, or with an `id` it has already seen in the turn, is denied and not
-  answered a second time;
-- a request whose `kind` it does not know is answered with one `deny`.
+Every request gets exactly one reply, except a request with no `id` or with an `id` already seen
+in the turn: it is denied and nothing is written back. A request whose `kind` Clúsia does not
+know, or whose fields cannot be read (for example a `paths` that is not a list of strings), is
+answered with one `deny`.
 
 If the reviewer does not answer within the permission timeout (Config › Harness), if the turn is
 stopped, or if Clúsia cannot ask, the reply is `deny`. A reply is only written while standard
@@ -148,11 +147,11 @@ the chat's history.
 
 ## Stopping a turn
 
-When the reviewer presses Stop, when the turn passes its deadline, or when Clúsia shuts down,
-Clúsia closes standard input and sends `SIGTERM` to the program's **process group**. A program
+When the reviewer presses Stop or when the turn passes its deadline, Clúsia closes standard input and sends `SIGTERM` to the program's **process group**. A program
 that has not exited 10 seconds later gets `SIGKILL`. Children the program starts are in the same
 group and are stopped with it. When the program finishes its turn by itself, Clúsia closes
-standard input and gives it 10 seconds to exit.
+standard input and gives it 10 seconds to exit. When Clúsia shuts down, the program gets 2
+seconds before `SIGKILL`.
 
 ## The probe
 
