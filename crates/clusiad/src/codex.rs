@@ -299,13 +299,33 @@ impl Approval {
     async fn run(self) {
         let reply = match &self.ask {
             ServerAsk::Command {
-                command, reason, ..
+                command,
+                reason,
+                cwd,
+                ..
             } => {
-                let input = json!({
-                    "command": command.as_deref().unwrap_or_default(),
-                    "description": reason,
-                });
-                codex::approval_reply(&self.id, self.decide("Bash", input).await)
+                let root = self.shared.paths.worktree_for(&self.pr);
+                let text = command.as_deref().unwrap_or_default();
+                let cwd = cwd.as_deref().filter(|cwd| !cwd.is_empty());
+                if text.trim().is_empty()
+                    || cwd.is_some_and(|cwd| !inside_worktree(Path::new(cwd), &root))
+                {
+                    // Nobody can judge a command with no text, and a rule of the review must
+                    // never cover one that runs outside the worktree, so nobody is asked.
+                    permissions::refuse(&self.shared, &self.pr, self.turn, "Bash", text);
+                    codex::approval_reply(&self.id, self.refused())
+                } else {
+                    let folder = cwd
+                        .map(|cwd| relative_to(cwd, &root))
+                        .filter(|folder| !folder.is_empty() && Path::new(folder).is_relative());
+                    let description = match (folder, reason) {
+                        (Some(folder), Some(reason)) => Some(format!("In {folder}: {reason}")),
+                        (Some(folder), None) => Some(format!("In {folder}")),
+                        (None, reason) => reason.clone(),
+                    };
+                    let input = json!({ "command": text, "description": description });
+                    codex::approval_reply(&self.id, self.decide("Bash", input).await)
+                }
             }
             ServerAsk::FileChange {
                 reason, grant_root, ..
@@ -329,12 +349,7 @@ impl Approval {
                         (None, None, None) => "a file change with no listed files".to_string(),
                     };
                     permissions::refuse(&self.shared, &self.pr, self.turn, "Edit", &summary);
-                    let decision = if self.stop.fired() {
-                        Decision::Cancel
-                    } else {
-                        Decision::Decline
-                    };
-                    codex::approval_reply(&self.id, decision)
+                    codex::approval_reply(&self.id, self.refused())
                 } else {
                     let checked = shown[0].clone();
                     let input = json!({
@@ -348,6 +363,15 @@ impl Approval {
             other => refusal(&self.id, other),
         };
         let _ = self.link.send(&reply).await;
+    }
+
+    /// The answer to a request nobody was asked about.
+    fn refused(&self) -> Decision {
+        if self.stop.fired() {
+            Decision::Cancel
+        } else {
+            Decision::Decline
+        }
     }
 
     async fn decide(&self, tool: &str, input: Value) -> Decision {
@@ -740,11 +764,13 @@ enum Ending {
 
 /// Waits for the approval answers in `asked` to go out, each for a moment at most.
 async fn settle_answers(asked: &mut Vec<JoinHandle<()>>) {
-    for task in asked.drain(..) {
-        if tokio::time::timeout(Duration::from_secs(1), task)
+    for mut task in asked.drain(..) {
+        if tokio::time::timeout(Duration::from_secs(1), &mut task)
             .await
             .is_err()
         {
+            // Left running it could still answer after the interrupt, or after the turn.
+            task.abort();
             tracing::debug!("an approval answer did not finish");
         }
     }
@@ -2017,6 +2043,70 @@ mod tests {
     async fn a_file_change_with_no_known_paths_is_declined_without_asking() {
         let lab = lab_changing(|_| Vec::new());
         declined_without_asking(&lab).await;
+    }
+
+    #[tokio::test]
+    async fn a_file_through_a_link_that_leaves_the_worktree_is_declined_without_asking() {
+        let lab = lab_changing(|worktree| {
+            std::fs::create_dir_all(worktree).unwrap();
+            std::os::unix::fs::symlink("/etc", worktree.join("link")).unwrap();
+            vec![worktree.join("link/hosts").display().to_string()]
+        });
+        declined_without_asking(&lab).await;
+    }
+
+    /// A lab whose fake asks to run `command` in `cwd(worktree)`.
+    fn lab_running_in(command: &str, cwd: impl FnOnce(&Path) -> String) -> Lab {
+        let home = tempfile::tempdir().unwrap();
+        let worktree = Paths::new(home.path()).worktree_for(&pr(7));
+        let cwd = cwd(&worktree);
+        lab_in(
+            home,
+            CodexScript::one(Scripted::answer("done").ask_command_in(command, &cwd)),
+            |_| {},
+        )
+    }
+
+    #[tokio::test]
+    async fn a_command_outside_the_worktree_is_declined_without_asking() {
+        let lab = lab_running_in("cargo test", |_| "/tmp".to_string());
+        declined_without_asking(&lab).await;
+    }
+
+    #[tokio::test]
+    async fn a_command_with_no_text_is_declined_without_asking() {
+        let lab = lab(asking(""));
+        declined_without_asking(&lab).await;
+    }
+
+    #[tokio::test]
+    async fn a_command_in_a_worktree_folder_says_where_it_runs() {
+        let lab = lab_running_in("cargo test", |worktree| {
+            worktree.join("crates/app").display().to_string()
+        });
+        let mut events = lab.shared.events.subscribe();
+        let (task, _stop) = run_as_check(&lab, 5);
+        let (id, asked) = next_request(&mut events).await;
+        match asked {
+            Event::PermissionRequested {
+                tool,
+                summary,
+                reason,
+                ..
+            } => {
+                assert_eq!(tool, "Bash");
+                assert_eq!(summary, "cargo test");
+                assert!(
+                    reason.is_some_and(|r| r.contains("crates/app")),
+                    "the folder is shown"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        answer_request(&lab, &id, PermissionAnswerKind::Once).await;
+        let (end, _) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert_eq!(decisions(&lab, 1).await, ["accept"]);
     }
 
     #[tokio::test]

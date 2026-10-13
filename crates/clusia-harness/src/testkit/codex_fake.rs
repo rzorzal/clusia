@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 /// One thing a turn asks before it goes on.
 #[derive(Debug, Clone)]
 enum Ask {
-    Command(String),
+    Command(String, Option<String>),
     Files(Vec<String>, Option<String>),
     Other(String),
 }
@@ -152,7 +152,15 @@ impl CodexTurn {
     /// Before the rest of the turn, asks to run `command`. `accept` completes its item,
     /// `decline` declines it and the turn goes on, `cancel` ends the turn as `interrupted`.
     pub fn ask_command(mut self, command: &str) -> Self {
-        self.asks.push(Ask::Command(command.to_string()));
+        self.asks.push(Ask::Command(command.to_string(), None));
+        self
+    }
+
+    /// Like [`ask_command`](Self::ask_command), and the request says the command runs in `cwd`.
+    /// Without it the request carries no directory.
+    pub fn ask_command_in(mut self, command: &str, cwd: &str) -> Self {
+        self.asks
+            .push(Ask::Command(command.to_string(), Some(cwd.to_string())));
         self
     }
 
@@ -214,7 +222,7 @@ impl CodexTurn {
         }
         for (n, ask) in self.asks.iter().enumerate() {
             match ask {
-                Ask::Command(command) => {
+                Ask::Command(command, cwd) => {
                     let id = format!("cmd-{n}");
                     let running = json!({
                         "type": "commandExecution", "id": id, "command": command,
@@ -229,13 +237,16 @@ impl CodexTurn {
                     out.push(format!("L {}", item("item/started", running)));
                     out.push(format!(
                         "A {}",
-                        request(
-                            "item/commandExecution/requestApproval",
-                            json!({
+                        request("item/commandExecution/requestApproval", {
+                            let mut params = json!({
                                 "threadId": "__THREAD__", "turnId": "__TURN__",
-                                "itemId": id, "startedAtMs": 0, "command": command, "cwd": "/",
-                            }),
-                        )
+                                "itemId": id, "startedAtMs": 0, "command": command,
+                            });
+                            if let Some(cwd) = cwd {
+                                params["cwd"] = json!(cwd);
+                            }
+                            params
+                        },)
                     ));
                     out.push(format!(
                         "Y {}",

@@ -609,8 +609,8 @@ async fn a_codex_that_is_not_signed_in_says_how_to_sign_in() {
 #[tokio::test]
 async fn a_missing_codex_is_not_installed_and_claude_code_keeps_its_own_probe() {
     let w = world().await;
-    common::agent::set_config(&w, "harness.kind", "codex").await;
-    common::agent::set_config(&w, "harness.program", "/nonexistent/codex").await;
+    set_config(&w, "harness.kind", "codex").await;
+    set_config(&w, "harness.program", "/nonexistent/codex").await;
     let found = probe(&w).await;
     assert!(!found.ok);
     assert_eq!(found.harness, "Codex");
@@ -619,8 +619,8 @@ async fn a_missing_codex_is_not_installed_and_claude_code_keeps_its_own_probe() 
         Some("Install Codex or set its path")
     );
 
-    common::agent::set_config(&w, "harness.kind", "claude-code").await;
-    common::agent::set_config(&w, "harness.program", "/nonexistent/claude").await;
+    set_config(&w, "harness.kind", "claude-code").await;
+    set_config(&w, "harness.program", "/nonexistent/claude").await;
     let found = probe(&w).await;
     assert!(!found.ok);
     assert_eq!(found.harness, "Claude Code");

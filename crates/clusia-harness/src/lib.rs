@@ -19,6 +19,6 @@ pub use check_blocks::extract_check_blocks;
 pub use codex_command::{CodexServerSpec, codex_server_command};
 pub use command::{BridgeSpec, ClaudeCode, ROLE_PROMPT, SessionArg, TurnSpec};
 pub use parse::{AgentEvent, ParseState, parse_line};
-pub use probe::{parse_probe, probe_command};
+pub use probe::parse_probe;
 pub use revalidation_blocks::{RawVerdict, extract_revalidation_blocks};
 pub use suggestions::extract_suggestions;
