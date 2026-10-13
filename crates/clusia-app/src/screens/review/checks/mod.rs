@@ -393,6 +393,7 @@ pub fn notice_of(
     kind: CheckKind,
     k: &KindModel,
     harness: bool,
+    agent: &str,
     loaded: bool,
     offline: bool,
 ) -> Option<Notice> {
@@ -401,13 +402,13 @@ pub fn notice_of(
             "Security check",
             "Checking security…",
             "The security check failed",
-            "Claude Code has not checked this change for security problems.",
+            format!("{agent} has not checked this change for security problems."),
         ),
         CheckKind::Audit => (
             "Audit",
             "Auditing the change…",
             "The audit failed",
-            "Claude Code has not audited this change yet.",
+            format!("{agent} has not audited this change yet."),
         ),
     };
     let notice = |title: &str, line: String, action, setup| {
@@ -433,7 +434,7 @@ pub fn notice_of(
                 .as_deref()
                 .map(printable)
                 .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "Claude Code is reading the change…".to_string());
+                .unwrap_or_else(|| format!("{agent} is reading the change…"));
             if k.found > 0 {
                 line.push_str(&format!(" · {} found so far", k.found));
             }
@@ -452,7 +453,7 @@ pub fn notice_of(
             None,
             true,
         ),
-        _ => notice(name, not_run.into(), Some(CheckAction::Run), false),
+        _ => notice(name, not_run, Some(CheckAction::Run), false),
     }
 }
 
@@ -1004,12 +1005,30 @@ mod tests {
     }
 
     #[test]
+    fn the_empty_states_name_the_agent() {
+        let k = KindModel::default();
+        let n = notice_of(CheckKind::Security, &k, true, "Codex", true, false).unwrap();
+        assert_eq!(
+            n.line,
+            "Codex has not checked this change for security problems."
+        );
+        let n = notice_of(CheckKind::Audit, &k, true, "Codex", true, false).unwrap();
+        assert_eq!(n.line, "Codex has not audited this change yet.");
+        let running = KindModel {
+            state: CheckState::Running { activity: None },
+            ..KindModel::default()
+        };
+        let n = notice_of(CheckKind::Audit, &running, true, "Codex", true, false).unwrap();
+        assert_eq!(n.line, "Codex is reading the change…");
+    }
+
+    #[test]
     fn notices_cover_every_state_without_a_result() {
         let mut k = KindModel::default();
-        let n = notice_of(CheckKind::Security, &k, false, true, false).unwrap();
+        let n = notice_of(CheckKind::Security, &k, false, "Claude Code", true, false).unwrap();
         assert_eq!(n.line, "Set up a harness in Config › Harness");
         assert!(n.setup && n.action.is_none());
-        let n = notice_of(CheckKind::Security, &k, true, true, false).unwrap();
+        let n = notice_of(CheckKind::Security, &k, true, "Claude Code", true, false).unwrap();
         assert_eq!(n.action, Some(CheckAction::Run));
         assert_eq!(
             CheckAction::Run.label(CheckKind::Security),
@@ -1018,7 +1037,7 @@ mod tests {
         assert_eq!(CheckAction::Run.label(CheckKind::Audit), "Run audit");
         k.state = CheckState::Waiting;
         assert_eq!(
-            notice_of(CheckKind::Audit, &k, true, true, false)
+            notice_of(CheckKind::Audit, &k, true, "Claude Code", true, false)
                 .unwrap()
                 .line,
             "Waiting for another check"
@@ -1027,14 +1046,14 @@ mod tests {
             activity: Some("Reading src/auth/store.rs…".into()),
         };
         k.found = 2;
-        let n = notice_of(CheckKind::Security, &k, true, true, false).unwrap();
+        let n = notice_of(CheckKind::Security, &k, true, "Claude Code", true, false).unwrap();
         assert_eq!(n.line, "Reading src/auth/store.rs… · 2 found so far");
         assert_eq!(n.action, Some(CheckAction::Stop));
         k.state = CheckState::Running {
             activity: Some("Run\u{1b}[31m this".into()),
         };
         assert!(
-            !notice_of(CheckKind::Security, &k, true, true, false)
+            !notice_of(CheckKind::Security, &k, true, "Claude Code", true, false)
                 .unwrap()
                 .line
                 .contains('\u{1b}'),
@@ -1043,12 +1062,15 @@ mod tests {
         k.state = CheckState::Failed {
             message: "The check took too long".into(),
         };
-        let n = notice_of(CheckKind::Security, &k, true, true, false).unwrap();
+        let n = notice_of(CheckKind::Security, &k, true, "Claude Code", true, false).unwrap();
         assert_eq!(n.line, "The check took too long");
         assert_eq!(n.action, Some(CheckAction::TryAgain));
         k.state = CheckState::Done;
         k.result = fixture::demo_checks(NOW).0.into_iter().next();
-        assert_eq!(notice_of(CheckKind::Security, &k, true, true, false), None);
+        assert_eq!(
+            notice_of(CheckKind::Security, &k, true, "Claude Code", true, false),
+            None
+        );
     }
 
     fn open_security(app: &mut App) -> PrRef {
@@ -1570,7 +1592,7 @@ mod tests {
                 accepted: false,
             });
         }
-        let v = security::security_view(Some(&m), true, &[], NOW, None, false);
+        let v = security::security_view(Some(&m), true, "Claude Code", &[], NOW, None, false);
         assert!(!v.line.contains("found no security issues"), "{}", v.line);
         assert_eq!(
             v.line,
@@ -1585,7 +1607,7 @@ mod tests {
         let result = m.security.result.as_mut().unwrap();
         result.findings.clear();
         result.unreadable = 3;
-        let v = security::security_view(Some(&m), true, &[], NOW, None, false);
+        let v = security::security_view(Some(&m), true, "Claude Code", &[], NOW, None, false);
         assert!(!v.line.contains("found no security issues"), "{}", v.line);
         assert_eq!(
             v.line,

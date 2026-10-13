@@ -93,6 +93,8 @@ pub struct Detail {
 pub struct AuditsView {
     /// Whole-tab state (no harness, not run, waiting, running, failed): no list then.
     pub notice: Option<Notice>,
+    /// The agent that runs the audit, for the intro under the list.
+    pub agent: String,
     /// `AUDIT · 6 AREAS`
     pub heading: String,
     pub rows: Vec<AreaRow>,
@@ -110,9 +112,10 @@ fn plural(n: usize, one: &str) -> String {
     }
 }
 
-fn empty_view(notice: Option<Notice>) -> AuditsView {
+fn empty_view(agent: &str, notice: Option<Notice>) -> AuditsView {
     AuditsView {
         notice,
+        agent: agent.to_string(),
         heading: String::new(),
         rows: Vec::new(),
         action: None,
@@ -130,6 +133,7 @@ pub fn audits_view(
     model: Option<&ChecksModel>,
     areas: &[AuditArea],
     harness: bool,
+    agent: &str,
     files: &[&str],
     now: i64,
     selected: Option<&str>,
@@ -145,18 +149,21 @@ pub fn audits_view(
         && k.state == CheckState::NotRun
         && !areas.iter().any(|a| a.enabled)
     {
-        return empty_view(Some(Notice {
-            title: "Audit".into(),
-            line: "No audit areas are switched on. Switch one on in Config › Harness.".into(),
-            action: None,
-            setup: true,
-        }));
+        return empty_view(
+            agent,
+            Some(Notice {
+                title: "Audit".into(),
+                line: "No audit areas are switched on. Switch one on in Config › Harness.".into(),
+                action: None,
+                setup: true,
+            }),
+        );
     }
-    if let Some(notice) = notice_of(CheckKind::Audit, k, harness, m.loaded, offline) {
-        return empty_view(Some(notice));
+    if let Some(notice) = notice_of(CheckKind::Audit, k, harness, agent, m.loaded, offline) {
+        return empty_view(agent, Some(notice));
     }
     let Some(result) = &k.result else {
-        return empty_view(None);
+        return empty_view(agent, None);
     };
     let name_of = |id: &str| {
         areas
@@ -230,7 +237,7 @@ pub fn audits_view(
         Detail {
             name: name_of(&id),
             empty: (status == Some(RowStatus::NotChecked))
-                .then(|| "Not checked: Claude Code returned nothing for this area.".to_string()),
+                .then(|| format!("Not checked: {agent} returned nothing for this area.")),
             clean: (status == Some(RowStatus::Ok) && findings.is_empty())
                 .then(|| "No findings in this area.".to_string()),
             id,
@@ -253,6 +260,7 @@ pub fn audits_view(
     }
     AuditsView {
         notice: None,
+        agent: agent.to_string(),
         heading: format!(
             "AUDIT · {} {}",
             rows.len(),
@@ -324,6 +332,7 @@ pub(super) fn fill_audits(
             checks.0.get(&body.pr),
             &model.snapshot.config.harness.audit_areas,
             harness_ready(&model.snapshot),
+            crate::agent_name::of_tab(&model.snapshot, tab),
             &files,
             clock.now(),
             tab.ui.audit_area.as_deref(),
@@ -461,7 +470,10 @@ fn draw(
         });
         left.spawn(text(
             fonts,
-            "Run by Claude Code with your audit areas. Findings the agent proposes wait for your OK before they join the draft.",
+            format!(
+                "Run by {} with your audit areas. Findings the agent proposes wait for your OK before they join the draft.",
+                v.agent
+            ),
             Type::META,
         ));
     });
@@ -811,12 +823,31 @@ mod tests {
             Some(m),
             &default_areas(),
             true,
+            "Claude Code",
             &FILES,
             NOW,
             selected,
             None,
             false,
         )
+    }
+
+    #[test]
+    fn the_audit_names_the_agent() {
+        let v = audits_view(
+            Some(&read()),
+            &default_areas(),
+            true,
+            "Codex",
+            &FILES,
+            NOW,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(v.agent, "Codex");
+        let line = v.notice.map(|n| n.line).unwrap_or_default();
+        assert!(!line.contains("Claude"), "{line}");
     }
 
     fn rows(v: &AuditsView) -> Vec<(&str, &RowStatus)> {
@@ -985,7 +1016,17 @@ mod tests {
         for a in &mut areas {
             a.enabled = false;
         }
-        let v = audits_view(Some(&read()), &areas, true, &FILES, NOW, None, None, false);
+        let v = audits_view(
+            Some(&read()),
+            &areas,
+            true,
+            "Claude Code",
+            &FILES,
+            NOW,
+            None,
+            None,
+            false,
+        );
         let n = v.notice.expect("a notice");
         assert_eq!(
             n.line,
@@ -996,6 +1037,7 @@ mod tests {
             Some(&read()),
             &default_areas(),
             true,
+            "Claude Code",
             &FILES,
             NOW,
             None,
@@ -1027,7 +1069,17 @@ mod tests {
         let mut areas: Vec<AuditArea> = default_areas();
         areas.retain(|a| a.id != "docs");
         areas[0].name = "Is it right?".into();
-        let v = audits_view(Some(&model()), &areas, true, &FILES, NOW, None, None, false);
+        let v = audits_view(
+            Some(&model()),
+            &areas,
+            true,
+            "Claude Code",
+            &FILES,
+            NOW,
+            None,
+            None,
+            false,
+        );
         assert_eq!(v.rows[0].name, "Is it right?");
         assert_eq!(v.rows[5].name, "docs");
     }
@@ -1061,6 +1113,7 @@ mod tests {
             Some(&m),
             &areas,
             true,
+            "Claude Code",
             &FILES,
             NOW,
             Some("correctness"),
@@ -1084,6 +1137,7 @@ mod tests {
             Some(&read()),
             &default_areas(),
             false,
+            "Claude Code",
             &FILES,
             NOW,
             None,
@@ -1097,6 +1151,7 @@ mod tests {
             Some(&read()),
             &default_areas(),
             true,
+            "Claude Code",
             &FILES,
             NOW,
             None,
@@ -1112,6 +1167,7 @@ mod tests {
             Some(&m),
             &default_areas(),
             true,
+            "Claude Code",
             &FILES,
             NOW,
             None,

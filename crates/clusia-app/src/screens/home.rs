@@ -98,7 +98,17 @@ pub struct HomeView {
     pub stats: Vec<Stat>,
     pub chips: Vec<RepoChip>,
     pub lists: Vec<ListView>,
+    /// The agent the settings name, for the footer.
+    pub agent: &'static str,
 }
+
+/// The footer's **Config** button: opens Config › Harness.
+#[derive(Component)]
+pub struct AgentConfigButton;
+
+/// The footer line under the lists; `0` is the agent it was built for.
+#[derive(Component, Default)]
+struct FooterPart(Option<&'static str>);
 
 /// "1 minute", "5 hours", "8 days".
 pub fn long_age(secs: i64) -> String {
@@ -276,6 +286,7 @@ pub fn home_view(snap: &Snapshot, state: &HomeState, now: i64) -> HomeView {
         stats,
         chips,
         lists,
+        agent: crate::agent_name::active(snap),
     }
 }
 
@@ -561,6 +572,14 @@ fn build_home(
                         ));
                     }
                 });
+                c.spawn((
+                    Node {
+                        column_gap: px(6),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    FooterPart::default(),
+                ));
             });
         });
     }
@@ -608,6 +627,7 @@ fn rebuild_home(
     mut stats: Query<(Entity, &mut StatsPart)>,
     mut chips: Query<(Entity, &mut ChipsPart)>,
     mut lists: Query<(Entity, &mut ListPart)>,
+    mut footers: Query<(Entity, &mut FooterPart)>,
 ) {
     if headers.is_empty() {
         return; // Home is not showing
@@ -665,6 +685,23 @@ fn rebuild_home(
         }
         refill(&mut commands, e, |p| list_card(p, fonts, list));
         part.built = Some(list.clone());
+    }
+    for (e, mut part) in &mut footers {
+        if part.0 == Some(v.agent) {
+            continue;
+        }
+        refill(&mut commands, e, |p| {
+            p.spawn(text(fonts, format!("Agent: {}", v.agent), Type::META));
+            p.spawn(text(fonts, "·", Type::META));
+            p.spawn((
+                button(fonts, "Config", Variant::Ghost),
+                AgentConfigButton,
+                observe(crate::screens::review::shell::on_harness),
+            ))
+            .entry::<Node>()
+            .and_modify(|mut node| node.padding = UiRect::ZERO);
+        });
+        part.0 = Some(v.agent);
     }
 }
 
@@ -1004,6 +1041,32 @@ mod tests {
 
     fn view(snap: &Snapshot, state: &HomeState) -> HomeView {
         home_view(snap, state, NOW)
+    }
+
+    #[test]
+    fn the_view_names_the_agent() {
+        let mut snap = fixture::demo(NOW);
+        assert_eq!(view(&snap, &HomeState::default()).agent, "Claude Code");
+        snap.config.harness.kind = clusia_core::config::HarnessKind::Codex;
+        assert_eq!(view(&snap, &HomeState::default()).agent, "Codex");
+    }
+
+    #[test]
+    fn the_footer_names_the_agent_and_opens_the_harness_page() {
+        use crate::nav::{Nav, Screen, Section};
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Agent: Claude Code"));
+        testing::set_config_locally(&mut app, "harness.kind", "codex");
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Agent: Codex"));
+        assert!(!testing::shows(&mut app, "Agent: Claude Code"));
+        let config = testing::find::<AgentConfigButton>(&mut app, |_| true);
+        testing::activate(&mut app, config);
+        assert_eq!(
+            app.world().resource::<Nav>().screen,
+            Screen::Config(Section::Harness)
+        );
     }
 
     #[test]

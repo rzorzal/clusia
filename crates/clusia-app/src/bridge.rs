@@ -2266,7 +2266,13 @@ pub(crate) fn demo_answers(
             }
             Ask::AgentLog { .. } => {}
             Ask::AgentSend { pr, text } => {
-                tells.extend(demo_agent_reply(&pr, &text, now * 1000, *rule_granted));
+                tells.extend(demo_agent_reply(
+                    &pr,
+                    &text,
+                    now * 1000,
+                    *rule_granted,
+                    model.snapshot.config.harness.kind.name(),
+                ));
             }
             Ask::PermissionAnswer { id, answer } => {
                 *rule_granted |= answer == PermissionAnswerKind::Review && queue.get(&id).is_some();
@@ -2498,7 +2504,13 @@ fn demo_open(pr: PrRef, now: i64) -> Vec<Tell> {
 /// The demo agent's answer to a question: it works, reads a file, says what it is, and is
 /// ready again. Nothing leaves the window. A question about tests stops at the permission
 /// request instead, unless a rule granted for the review covers it.
-fn demo_agent_reply(pr: &PrRef, text: &str, now_ms: i64, rule_granted: bool) -> Vec<Tell> {
+fn demo_agent_reply(
+    pr: &PrRef,
+    text: &str,
+    now_ms: i64,
+    rule_granted: bool,
+    name: &str,
+) -> Vec<Tell> {
     let turn = 3;
     let agent = Tell::Agent;
     let mut tells = vec![
@@ -2528,7 +2540,7 @@ fn demo_agent_reply(pr: &PrRef, text: &str, now_ms: i64, rule_granted: bool) -> 
         })
     };
     tells.extend([
-        chunk("This is demo data: nothing was sent to Claude Code. ".into()),
+        chunk(format!("This is demo data: nothing was sent to {name}. ")),
         chunk(format!(
             "With a real session, the answer to “{}” would stream here.",
             text.trim()

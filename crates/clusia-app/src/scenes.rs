@@ -899,7 +899,7 @@ mod tests {
         for needle in [
             "Connect your AI harness",
             "Found · /opt/homebrew/bin/claude",
-            "Coming soon",
+            "Not found on your PATH",
             "When I open a review",
             "Check security",
             "Audit the change",

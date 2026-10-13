@@ -12,6 +12,7 @@ use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
+use clusia_core::config::HarnessKind as ConfigKind;
 use clusia_protocol::{FirstRun, GithubLogin, Harness, HarnessKind, RepoFolder};
 
 use crate::bridge::{Ask, Asks, Model, Toasts};
@@ -19,7 +20,7 @@ use crate::fonts::UiFonts;
 use crate::nav::{FirstRunScreen, Leaf, Nav, NavSystems, Screen};
 use crate::screens::config::git::token_from_clipboard;
 use crate::screens::config::harness::{OpenChecks, open_checkboxes, open_checks};
-use crate::screens::config::{clipboard_text, link, repos, setter, warn};
+use crate::screens::config::{clipboard_text, link, repos, warn};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
@@ -110,6 +111,8 @@ pub struct FolderChip {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HarnessView {
     pub name: &'static str,
+    /// The `harness.kind` value a click on its card writes.
+    pub value: &'static str,
     pub found: bool,
     /// The harness Clúsia will use.
     pub selected: bool,
@@ -125,6 +128,8 @@ pub struct FirstRunView {
     /// `None` while the daemon has not answered.
     pub folders: Option<Vec<FolderChip>>,
     pub harnesses: Vec<HarnessView>,
+    /// The agent Clúsia will use, for the cost note.
+    pub agent: &'static str,
     pub open: OpenChecks,
     pub harness_skipped: bool,
     /// Why **Continue** is off, or `None` when it is on.
@@ -162,34 +167,53 @@ fn folder_note(f: &RepoFolder) -> String {
     }
 }
 
-fn harness_view(kind: HarnessKind, found: Option<&Harness>) -> HarnessView {
-    match kind {
-        HarnessKind::Codex => HarnessView {
-            name: "Codex",
+/// The agent Clúsia will use: the only one the first-run scan found, or, with both found (or
+/// neither), the configured one. `None` when none was found.
+pub fn chosen_kind(snap: &Snapshot) -> Option<ConfigKind> {
+    let found = |kind| {
+        snap.first_run.as_ref().is_some_and(|s| {
+            s.harnesses
+                .iter()
+                .any(|h| h.kind == kind && h.path.is_some())
+        })
+    };
+    match (found(HarnessKind::ClaudeCode), found(HarnessKind::Codex)) {
+        (false, false) => None,
+        (true, false) => Some(ConfigKind::ClaudeCode),
+        (false, true) => Some(ConfigKind::Codex),
+        (true, true) => Some(snap.config.harness.kind),
+    }
+}
+
+fn harness_view(
+    kind: HarnessKind,
+    found: Option<&Harness>,
+    chosen: Option<ConfigKind>,
+) -> HarnessView {
+    let config_kind = ConfigKind::from(kind);
+    let value = match config_kind {
+        ConfigKind::ClaudeCode => "claude-code",
+        ConfigKind::Codex => "codex",
+    };
+    match found {
+        Some(h) => HarnessView {
+            name: config_kind.name(),
+            value,
+            found: true,
+            selected: chosen == Some(config_kind),
+            selectable: true,
+            line: match &h.path {
+                Some(path) => format!("Found · {path}"),
+                None => "Found".to_string(),
+            },
+        },
+        None => HarnessView {
+            name: config_kind.name(),
+            value,
             found: false,
             selected: false,
             selectable: false,
-            line: "Coming soon".to_string(),
-        },
-        HarnessKind::ClaudeCode => match found {
-            Some(h) => HarnessView {
-                name: "Claude Code",
-                found: true,
-                // Claude Code is the only harness the config can name.
-                selected: true,
-                selectable: true,
-                line: match &h.path {
-                    Some(path) => format!("Found · {path}"),
-                    None => "Found".to_string(),
-                },
-            },
-            None => HarnessView {
-                name: "Claude Code",
-                found: false,
-                selected: false,
-                selectable: false,
-                line: "Not found on your PATH".to_string(),
-            },
+            line: "Not found on your PATH".to_string(),
         },
     }
 }
@@ -229,6 +253,7 @@ pub fn view(snap: &Snapshot, ui: &FirstRunUi, home: Option<&str>) -> FirstRunVie
                 .find(|h| h.kind == kind && h.path.is_some())
         })
     };
+    let chosen = chosen_kind(snap);
     let any_folder = status.is_some_and(|s| s.folders.iter().any(|f| f.exists));
     let blocked = if !connected {
         Some("Connect GitHub to continue.")
@@ -242,9 +267,14 @@ pub fn view(snap: &Snapshot, ui: &FirstRunUi, home: Option<&str>) -> FirstRunVie
         token_open: ui.token_open,
         folders,
         harnesses: vec![
-            harness_view(HarnessKind::ClaudeCode, found(HarnessKind::ClaudeCode)),
-            harness_view(HarnessKind::Codex, found(HarnessKind::Codex)),
+            harness_view(
+                HarnessKind::ClaudeCode,
+                found(HarnessKind::ClaudeCode),
+                chosen,
+            ),
+            harness_view(HarnessKind::Codex, found(HarnessKind::Codex), chosen),
         ],
+        agent: chosen.unwrap_or(snap.config.harness.kind).name(),
         open: open_checks(&snap.config.harness),
         harness_skipped: ui.harness_skipped,
         blocked,
@@ -704,12 +734,13 @@ fn harness_step(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &FirstRunView)
             })
             .with_children(|r| {
                 for h in &v.harnesses {
-                    harness_card(r, fonts, h.name, &h.line, h.selected, h.selectable);
+                    harness_card(r, fonts, h.name, h.value, &h.line, h.selected, h.selectable);
                 }
                 harness_card(
                     r,
                     fonts,
                     "Custom command",
+                    "",
                     "Any tool that speaks JSON",
                     false,
                     false,
@@ -725,7 +756,7 @@ fn harness_step(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &FirstRunView)
                 open_checkboxes(o, fonts, &v.open);
                 o.spawn(text(
                     fonts,
-                    crate::screens::config::harness::COST_NOTE,
+                    crate::screens::config::harness::cost_note(v.agent),
                     Type::META,
                 ));
             });
@@ -759,6 +790,7 @@ fn harness_card(
     r: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
     name: &'static str,
+    value: &'static str,
     line: &str,
     selected: bool,
     selectable: bool,
@@ -796,13 +828,29 @@ fn harness_card(
             } else {
                 Swatch::Hover
             }),
-            setter("harness.kind", "claude-code"),
+            CardValue(value),
+            observe(on_card),
         ));
     }
     card.with_children(|b| {
         b.spawn(text(fonts, name, Type::STRONG));
         b.spawn(text(fonts, line.to_string(), Type::META.ink(ink)));
     });
+}
+
+/// The `harness.kind` value a first-run card writes.
+#[derive(Component, Debug, Clone, Copy)]
+struct CardValue(&'static str);
+
+fn on_card(
+    activate: On<Activate>,
+    cards: Query<&CardValue>,
+    mut asks: ResMut<Asks>,
+    mut model: ResMut<Model>,
+) {
+    if let Ok(CardValue(value)) = cards.get(activate.entity) {
+        crate::screens::config::harness::write_kind(&mut asks, &mut model, value);
+    }
 }
 
 fn on_skip_harness(_activate: On<Activate>, mut ui: ResMut<FirstRunUi>) {
@@ -856,9 +904,23 @@ fn on_add_folder(_activate: On<Activate>, mut picks: MessageWriter<PickFolder>) 
     picks.write(PickFolder);
 }
 
-fn on_continue(_activate: On<Activate>, mut ui: ResMut<FirstRunUi>, mut asks: ResMut<Asks>) {
+fn on_continue(
+    _activate: On<Activate>,
+    mut ui: ResMut<FirstRunUi>,
+    mut asks: ResMut<Asks>,
+    mut model: ResMut<Model>,
+) {
     ui.harness_skipped = false;
     ui.pending = false;
+    if let Some(kind) = chosen_kind(&model.snapshot)
+        && kind != model.snapshot.config.harness.kind
+    {
+        let value = match kind {
+            ConfigKind::ClaudeCode => "claude-code",
+            ConfigKind::Codex => "codex",
+        };
+        crate::screens::config::harness::write_kind(&mut asks, &mut model, value);
+    }
     asks.send(Ask::FirstRunDone);
 }
 
@@ -911,6 +973,22 @@ mod tests {
     fn absent_codex() -> Harness {
         Harness {
             kind: HarnessKind::Codex,
+            path: None,
+            version: None,
+        }
+    }
+
+    fn codex() -> Harness {
+        Harness {
+            kind: HarnessKind::Codex,
+            path: Some("/opt/homebrew/bin/codex".into()),
+            version: Some("0.162.1".into()),
+        }
+    }
+
+    fn absent_claude() -> Harness {
+        Harness {
+            kind: HarnessKind::ClaudeCode,
             path: None,
             version: None,
         }
@@ -1280,6 +1358,7 @@ mod tests {
             [
                 HarnessView {
                     name: "Claude Code",
+                    value: "claude-code",
                     found: true,
                     selected: true,
                     selectable: true,
@@ -1287,13 +1366,15 @@ mod tests {
                 },
                 HarnessView {
                     name: "Codex",
+                    value: "codex",
                     found: false,
                     selected: false,
                     selectable: false,
-                    line: "Coming soon".into()
+                    line: "Not found on your PATH".into()
                 },
             ]
         );
+        assert_eq!(v.agent, "Claude Code");
         assert_eq!(
             v.open,
             OpenChecks {
@@ -1302,18 +1383,52 @@ mod tests {
                 audit: true
             }
         );
-        let none = status(GithubLogin::SignedOut, Vec::new(), vec![absent_codex()]);
-        let v = view(&signed_out_snap(Some(none)), &FirstRunUi::default(), None);
-        assert_eq!(
-            v.harnesses[0],
-            HarnessView {
-                name: "Claude Code",
-                found: false,
-                selected: false,
-                selectable: false,
-                line: "Not found on your PATH".into()
-            }
+        let none = status(
+            GithubLogin::SignedOut,
+            Vec::new(),
+            vec![absent_claude(), absent_codex()],
         );
+        let v = view(&signed_out_snap(Some(none)), &FirstRunUi::default(), None);
+        assert!(v.harnesses.iter().all(|h| !h.found && !h.selected));
+        assert_eq!(chosen_kind(&signed_out_snap(None)), None);
+    }
+
+    #[test]
+    fn the_only_harness_found_is_the_one_selected() {
+        let only_codex = status(
+            GithubLogin::SignedOut,
+            Vec::new(),
+            vec![absent_claude(), codex()],
+        );
+        let snap = signed_out_snap(Some(only_codex));
+        let v = view(&snap, &FirstRunUi::default(), None);
+        assert_eq!(
+            v.harnesses.iter().map(|h| h.selected).collect::<Vec<_>>(),
+            [false, true]
+        );
+        assert_eq!(v.agent, "Codex");
+        assert_eq!(
+            chosen_kind(&snap),
+            Some(clusia_core::config::HarnessKind::Codex)
+        );
+    }
+
+    #[test]
+    fn with_both_found_claude_code_stays_the_default_until_codex_is_chosen() {
+        let both = status(GithubLogin::SignedOut, Vec::new(), vec![claude(), codex()]);
+        let mut snap = signed_out_snap(Some(both));
+        let v = view(&snap, &FirstRunUi::default(), None);
+        assert_eq!(
+            v.harnesses.iter().map(|h| h.selected).collect::<Vec<_>>(),
+            [true, false]
+        );
+        snap.config.harness.kind = clusia_core::config::HarnessKind::Codex;
+        let v = view(&snap, &FirstRunUi::default(), None);
+        assert_eq!(
+            v.harnesses.iter().map(|h| h.selected).collect::<Vec<_>>(),
+            [false, true]
+        );
+        assert_eq!(v.agent, "Codex");
     }
 
     fn step_three_app() -> App {
@@ -1336,7 +1451,7 @@ mod tests {
         };
         names.sort_unstable();
         assert_eq!(names, ["Claude Code", "Codex", "Custom command"]);
-        assert!(testing::shows(&mut app, "Coming soon"));
+        assert!(!testing::shows(&mut app, "Coming soon"));
         let claude = testing::find::<HarnessCard>(&mut app, |c| c.0 == "Claude Code");
         testing::activate(&mut app, claude);
         assert_eq!(
@@ -1354,6 +1469,87 @@ mod tests {
                 "{name} cannot be chosen"
             );
         }
+    }
+
+    #[test]
+    fn a_found_codex_card_writes_its_kind() {
+        let both = status(GithubLogin::SignedOut, Vec::new(), vec![claude(), codex()]);
+        let mut app = testing::app(signed_out_snap(Some(both)));
+        testing::settle(&mut app);
+        let card = testing::find::<HarnessCard>(&mut app, |c| c.0 == "Codex");
+        testing::activate(&mut app, card);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.kind".into(),
+                value: "codex".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn choosing_the_other_agent_clears_a_configured_program() {
+        let both = status(GithubLogin::SignedOut, Vec::new(), vec![claude(), codex()]);
+        let mut snap = signed_out_snap(Some(both));
+        snap.config.harness.program = Some("/opt/homebrew/bin/claude".into());
+        let mut app = testing::app(snap);
+        testing::settle(&mut app);
+        let card = testing::find::<HarnessCard>(&mut app, |c| c.0 == "Codex");
+        testing::activate(&mut app, card);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [
+                Ask::SetConfig {
+                    key: "harness.kind".into(),
+                    value: "codex".into()
+                },
+                Ask::SetConfig {
+                    key: "harness.program".into(),
+                    value: String::new()
+                },
+            ]
+        );
+        let same = testing::find::<HarnessCard>(&mut app, |c| c.0 == "Claude Code");
+        // Claude Code is still the configured kind in the snapshot, so its program stays.
+        testing::activate(&mut app, same);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.kind".into(),
+                value: "claude-code".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn continue_writes_the_kind_when_only_codex_was_found() {
+        let only_codex = status(
+            GithubLogin::SignedOut,
+            vec![folder("/Users/maria/Repos", true, 12)],
+            vec![absent_claude(), codex()],
+        );
+        let mut app = testing::app(signed_out_snap(Some(only_codex.clone())));
+        testing::settle(&mut app);
+        let mut signed_in = fixture::demo(NOW);
+        signed_in.first_run = Some(only_codex);
+        signed_in.config.harness.program = Some("/opt/homebrew/bin/claude".into());
+        set_snapshot(&mut app, signed_in);
+        let go = testing::find::<Continue>(&mut app, |_| true);
+        testing::activate(&mut app, go);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [
+                Ask::SetConfig {
+                    key: "harness.kind".into(),
+                    value: "codex".into()
+                },
+                Ask::SetConfig {
+                    key: "harness.program".into(),
+                    value: String::new()
+                },
+                Ask::FirstRunDone
+            ]
+        );
     }
 
     #[test]

@@ -85,6 +85,7 @@ fn severity_of(f: &Finding) -> (&'static str, Tone) {
 pub fn security_view(
     model: Option<&ChecksModel>,
     harness: bool,
+    agent: &str,
     files: &[&str],
     now: i64,
     editing: Option<&str>,
@@ -93,7 +94,7 @@ pub fn security_view(
     let default = ChecksModel::default();
     let m = model.unwrap_or(&default);
     let k = m.kind(CheckKind::Security);
-    if let Some(n) = notice_of(CheckKind::Security, k, harness, m.loaded, offline) {
+    if let Some(n) = notice_of(CheckKind::Security, k, harness, agent, m.loaded, offline) {
         return SecurityView {
             title: n.title,
             line: n.line,
@@ -126,23 +127,23 @@ pub fn security_view(
     } else if result.findings.is_empty() && result.unreadable == 0 {
         // A claim about what the agent found, so only for a result with nothing in it.
         format!(
-            "Claude Code found no security issues in {}.",
+            "{agent} found no security issues in {}.",
             plural(result.files as usize, "file")
         )
     } else if result.findings.is_empty() {
         format!(
-            "Claude Code checked {}; {} could not be read.",
+            "{agent} checked {}; {} could not be read.",
             plural(result.files as usize, "file"),
             plural(result.unreadable as usize, "result")
         )
     } else if shown.is_empty() {
         format!(
-            "Claude Code checked the {} {age} ago. No findings wait for your OK.",
+            "{agent} checked the {} {age} ago. No findings wait for your OK.",
             plural(result.files as usize, "changed file")
         )
     } else {
         format!(
-            "Claude Code checked the {} {age} ago. Accepted findings become draft comments.",
+            "{agent} checked the {} {age} ago. Accepted findings become draft comments.",
             plural(result.files as usize, "changed file")
         )
     };
@@ -242,6 +243,7 @@ pub(super) fn fill_security(
         let view = security_view(
             checks.0.get(&body.pr),
             harness_ready(&model.snapshot),
+            crate::agent_name::of_tab(&model.snapshot, tab),
             &files,
             clock.now(),
             editor.and_then(|e| match &e.target {
@@ -468,8 +470,23 @@ mod tests {
     }
 
     #[test]
+    fn the_result_line_names_the_agent() {
+        let v = security_view(Some(&model()), true, "Codex", &FILES, NOW, None, false);
+        assert!(v.line.starts_with("Codex "), "{}", v.line);
+        assert!(!v.line.contains("Claude"), "{}", v.line);
+    }
+
+    #[test]
     fn the_mockup_view() {
-        let v = security_view(Some(&model()), true, &FILES, NOW, None, false);
+        let v = security_view(
+            Some(&model()),
+            true,
+            "Claude Code",
+            &FILES,
+            NOW,
+            None,
+            false,
+        );
         assert_eq!(v.title, "3 security findings");
         assert_eq!(
             v.line,
@@ -505,7 +522,15 @@ mod tests {
 
     #[test]
     fn a_file_outside_the_pull_request_has_no_show_in_diff() {
-        let v = security_view(Some(&model()), true, &["src/config.rs"], NOW, None, false);
+        let v = security_view(
+            Some(&model()),
+            true,
+            "Claude Code",
+            &["src/config.rs"],
+            NOW,
+            None,
+            false,
+        );
         assert!(v.cards.iter().all(|c| c.show.is_none()));
     }
 
@@ -520,7 +545,7 @@ mod tests {
         for id in &ids[1..] {
             m.dismissed.insert(id.clone());
         }
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert_eq!(v.title, "1 security finding");
         assert_eq!(v.chips, [("1 high".to_string(), Tone::Orange)]);
     }
@@ -532,7 +557,7 @@ mod tests {
         m.accepted.insert(id.clone());
         m.pending
             .insert(m.findings(CheckKind::Security)[0].id.clone(), true);
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert!(v.cards[1].accepted);
         assert!(v.cards[0].busy);
     }
@@ -541,7 +566,7 @@ mod tests {
     fn an_unanchored_finding_joins_as_a_general_comment() {
         let mut m = model();
         m.security.result.as_mut().unwrap().findings[0].anchored = false;
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert!(v.cards[0].general);
         assert!(
             v.cards[0].comment.starts_with("src/client/http.rs:17: "),
@@ -558,7 +583,7 @@ mod tests {
             .map(|f| f.id.clone())
             .collect();
         m.accepted.insert(ids[1].clone());
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert_eq!(v.title, "2 security findings");
         assert_eq!(
             v.chips,
@@ -570,7 +595,7 @@ mod tests {
         assert_eq!(v.cards.len(), 3);
         assert!(v.cards[1].accepted);
         m.accepted.extend(ids);
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert_eq!(v.title, "All security findings are in your draft");
         assert!(v.chips.is_empty());
     }
@@ -583,7 +608,7 @@ mod tests {
         f.line = None;
         f.start_line = Some(5);
         f.end_line = Some(7);
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert!(
             v.cards[0].comment.starts_with("src/client/http.rs:5-7: "),
             "{}",
@@ -592,7 +617,7 @@ mod tests {
         let f = &mut m.security.result.as_mut().unwrap().findings[0];
         f.start_line = Some(5);
         f.end_line = Some(5);
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert!(v.cards[0].comment.starts_with("src/client/http.rs:5-5: "));
     }
 
@@ -600,7 +625,7 @@ mod tests {
     fn a_stale_result_marks_every_card_stale() {
         let mut m = model();
         m.security.state = CheckState::Stale;
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert!(v.cards.iter().all(|c| c.stale));
     }
 
@@ -608,12 +633,12 @@ mod tests {
     fn a_clean_stale_or_unreadable_result_is_worded_for_what_it_is() {
         let mut m = model();
         m.security.result.as_mut().unwrap().findings.clear();
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert_eq!(v.title, "No security findings");
         assert_eq!(v.line, "Claude Code found no security issues in 7 files.");
         assert!(v.cards.is_empty() && v.chips.is_empty());
         m.security.state = CheckState::Stale;
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert_eq!(
             v.line,
             "Checked an older commit, 2 minutes ago. Check again to look at the latest one.",
@@ -621,14 +646,14 @@ mod tests {
         );
         assert_eq!(v.action, Some(CheckAction::CheckAgain));
         m.security.result = model().security.result;
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert_eq!(
             v.line,
             "Checked an older commit, 2 minutes ago. Check again to add these to your draft."
         );
         m.security.state = CheckState::Done;
         m.security.result.as_mut().unwrap().unreadable = 1;
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         assert!(
             v.line.ends_with("1 result could not be read."),
             "{}",
@@ -644,7 +669,7 @@ mod tests {
         f.body = "line one\nline\u{202e}two".into();
         f.code = Some("+ ok\u{7}".into());
         f.comment = "Please\u{1b}[0m fix".into();
-        let v = security_view(Some(&m), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&m), true, "Claude Code", &FILES, NOW, None, false);
         let c = &v.cards[0];
         for text in [&c.title, &c.body, &c.comment, c.code.as_ref().unwrap()] {
             assert!(
@@ -661,10 +686,10 @@ mod tests {
             loaded: true,
             ..ChecksModel::default()
         };
-        let v = security_view(Some(&read), false, &FILES, NOW, None, false);
+        let v = security_view(Some(&read), false, "Claude Code", &FILES, NOW, None, false);
         assert_eq!(v.line, "Set up a harness in Config › Harness");
         assert!(v.setup && v.cards.is_empty() && v.action.is_none());
-        let v = security_view(Some(&read), true, &FILES, NOW, None, false);
+        let v = security_view(Some(&read), true, "Claude Code", &FILES, NOW, None, false);
         assert_eq!(v.action, Some(CheckAction::Run));
         assert_eq!(v.title, "Security check");
     }

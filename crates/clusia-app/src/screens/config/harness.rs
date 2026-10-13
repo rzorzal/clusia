@@ -7,12 +7,14 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, observe};
 use clusia_core::checks::AuditArea;
-use clusia_core::config::{Harness, OnOpen};
+use clusia_core::config::{Harness, HarnessKind, OnOpen};
+use clusia_harness::Agent;
 use clusia_protocol::ProbeResult;
 
 use super::{ConfigField, areas, field_row, option_card, page_header, row, setter};
 use crate::bridge::{Ask, Asks, Model, ProbeState, set_config};
 use crate::fonts::UiFonts;
+use crate::nav::{Nav, Screen, Section};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
@@ -26,11 +28,14 @@ pub enum ProbeCard {
     Idle,
     Testing,
     Ok {
+        name: String,
         version: String,
         program: String,
         seconds: String,
+        account: Option<String>,
     },
     Failed {
+        name: String,
         message: String,
     },
 }
@@ -39,6 +44,13 @@ pub enum ProbeCard {
 pub struct HarnessView {
     /// The configured path; empty when Clúsia looks on the PATH.
     pub program: String,
+    /// The agent the settings name.
+    pub kind: HarnessKind,
+    pub name: &'static str,
+    /// The program Clúsia looks for on the PATH when none is configured.
+    pub program_name: &'static str,
+    /// The agent just chosen in this visit, for the note under the cards.
+    pub switched: Option<&'static str>,
     pub extra_args: String,
     pub on_open: OnOpen,
     pub timeout: String,
@@ -88,10 +100,77 @@ pub fn open_checks(h: &Harness) -> OpenChecks {
 }
 
 /// The note under the checks.
-pub const COST_NOTE: &str = "Each check is one Claude Code turn on your account.";
+pub fn cost_note(name: &str) -> String {
+    format!("Each check is one {name} turn on your account.")
+}
 
 /// The note under *Revalidate my draft*.
-pub const REVALIDATE_NOTE: &str = "Claude Code reads each draft comment against the new commits and proposes keeping, moving, removing or rewording it. Nothing changes until you accept it. It is one Claude Code turn per round, on your account.";
+pub fn revalidate_note(name: &str) -> String {
+    format!(
+        "{name} reads each draft comment against the new commits and proposes keeping, moving, removing or rewording it. Nothing changes until you accept it. It is one {name} turn per round, on your account."
+    )
+}
+
+/// What the page shows right after the user chose another agent: the kind chosen, until the
+/// page is left.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Switched(pub Option<HarnessKind>);
+
+/// An agent card: a click makes it the one Clúsia uses for reviews opened from then on.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KindCard(pub HarnessKind);
+
+fn kind_value(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::ClaudeCode => "claude-code",
+        HarnessKind::Codex => "codex",
+    }
+}
+
+fn on_kind(
+    activate: On<Activate>,
+    cards: Query<&KindCard>,
+    mut model: ResMut<Model>,
+    mut asks: ResMut<Asks>,
+    mut switched: ResMut<Switched>,
+) {
+    let Ok(KindCard(kind)) = cards.get(activate.entity) else {
+        return;
+    };
+    if model.snapshot.config.harness.kind == *kind {
+        return;
+    }
+    switched.0 = Some(*kind);
+    write_kind(&mut asks, &mut model, kind_value(*kind));
+}
+
+/// Writes `harness.kind`. When the kind changes while a program is configured, that program
+/// served the other agent (`claude` run as `codex app-server` is wrong), so it is cleared too,
+/// after the kind. The daemon clears it as well; the second write is what the window shows at
+/// once and what demo mode keeps.
+pub fn write_kind(asks: &mut Asks, model: &mut Model, value: &'static str) {
+    let changes = kind_value(model.snapshot.config.harness.kind) != value;
+    let program_set = model.snapshot.config.harness.program.is_some();
+    set_config(asks, model, "harness.kind", value);
+    if changes && program_set {
+        set_config(asks, model, "harness.program", "");
+    }
+}
+
+/// The note after a change of agent lasts until the user leaves Config › Harness.
+pub fn forget_switch(nav: Res<Nav>, mut switched: ResMut<Switched>) {
+    if switched.0.is_some() && nav.screen != Screen::Config(Section::Harness) {
+        switched.0 = None;
+    }
+}
+
+/// The first line of the Test card when the agent answered.
+pub fn ok_title(name: &str, version: &str, seconds: &str, account: Option<&str>) -> String {
+    match account {
+        Some(account) => format!("{name} {version} answered in {seconds} s · {account}"),
+        None => format!("{name} {version} answered in {seconds} s"),
+    }
+}
 
 /// A *When I open a review* checkbox (and *Revalidate my draft*): the key it flips.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -149,6 +228,12 @@ pub fn open_checkboxes(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &OpenCh
 }
 
 impl HarnessView {
+    /// The same view with the note that follows a change of agent.
+    pub fn with_switched(mut self, switched: &Switched) -> Self {
+        self.switched = switched.0.map(HarnessKind::name);
+        self
+    }
+
     /// The same view with the add/edit form, which lives in a resource of its own.
     pub fn with_form(mut self, form: &areas::AreaForm) -> Self {
         self.form = form.target.is_some().then(|| form.clone());
@@ -172,6 +257,10 @@ pub fn view(
     let refusal = |key: &str| rejected.get(key).cloned();
     HarnessView {
         program: h.program.clone().unwrap_or_default(),
+        kind: h.kind,
+        name: h.kind.name(),
+        program_name: Agent::from(h.kind).program(),
+        switched: None,
         extra_args: h.extra_args.clone(),
         on_open: h.on_open,
         timeout: h.turn_timeout_secs.to_string(),
@@ -185,7 +274,7 @@ pub fn view(
         permission_timeout: h.permission_timeout_secs.to_string(),
         sandbox_error: refusal("harness.sandbox"),
         permission_timeout_error: refusal("harness.permission_timeout_secs"),
-        probe: probe_card(probe),
+        probe: probe_card(probe, h.kind.name()),
         open: open_checks(h),
         check_timeout: h.check_timeout_secs.to_string(),
         check_timeout_error: refusal("harness.check_timeout_secs"),
@@ -199,27 +288,43 @@ pub fn view(
     }
 }
 
-pub fn probe_card(state: &ProbeState) -> ProbeCard {
+pub fn probe_card(state: &ProbeState, active: &str) -> ProbeCard {
+    let named = |result: &ProbeResult| {
+        if result.harness.is_empty() {
+            active.to_string()
+        } else {
+            result.harness.clone()
+        }
+    };
     match state {
         ProbeState::Idle => ProbeCard::Idle,
         ProbeState::Testing => ProbeCard::Testing,
-        ProbeState::Done(ProbeResult {
-            ok: true,
-            version,
-            program,
-            elapsed_ms,
-            ..
-        }) => ProbeCard::Ok {
+        ProbeState::Done(
+            result @ ProbeResult {
+                ok: true,
+                version,
+                program,
+                elapsed_ms,
+                account,
+                ..
+            },
+        ) => ProbeCard::Ok {
+            name: named(result),
             version: version.clone().unwrap_or_default(),
             program: program.clone(),
             seconds: format!("{:.1}", *elapsed_ms as f64 / 1000.0),
+            account: account.clone(),
         },
-        ProbeState::Done(result) => ProbeCard::Failed {
-            message: result
-                .error
-                .clone()
-                .unwrap_or_else(|| "Claude Code did not answer".into()),
-        },
+        ProbeState::Done(result) => {
+            let name = named(result);
+            ProbeCard::Failed {
+                message: result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| format!("{name} did not answer")),
+                name,
+            }
+        }
     }
 }
 
@@ -227,7 +332,7 @@ pub fn probe_card(state: &ProbeState) -> ProbeCard {
 pub fn program_hint(v: &HarnessView) -> String {
     match &v.probe {
         ProbeCard::Ok { program, .. } if !program.is_empty() => format!("Found at {program}"),
-        _ if v.program.is_empty() => "Looks for claude on your PATH".into(),
+        _ if v.program.is_empty() => format!("Looks for {} on your PATH", v.program_name),
         _ => "Using this path".into(),
     }
 }
@@ -287,28 +392,49 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
         ..default()
     })
     .with_children(|r| {
-        r.spawn(option_card(true, 250.0)).with_children(|c| {
-            title_with_radio(c, fonts, "Claude Code", Type::STRONG, true);
-            c.spawn(text(fonts, "claude, with your settings", Type::META));
-        });
-        for (name, about) in [
-            ("Codex", "codex CLI"),
-            ("Custom command", "any tool that speaks JSON"),
+        for (kind, about) in [
+            (HarnessKind::ClaudeCode, "claude, with your settings"),
+            (HarnessKind::Codex, "codex app-server, with your login"),
         ] {
-            r.spawn(card(Node {
-                width: px(250),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(4),
-                padding: UiRect::axes(px(14), px(12)),
-                ..default()
-            }))
+            let selected = v.kind == kind;
+            r.spawn((
+                option_card(selected, 250.0),
+                KindCard(kind),
+                observe(on_kind),
+            ))
             .with_children(|c| {
-                title_with_radio(c, fonts, name, Type::STRONG.ink(Swatch::Faint), false);
+                title_with_radio(c, fonts, kind.name(), Type::STRONG, selected);
                 c.spawn(text(fonts, about, Type::META));
-                c.spawn(text(fonts, "Arrives in a later milestone", Type::META));
             });
         }
+        r.spawn(card(Node {
+            width: px(250),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            padding: UiRect::axes(px(14), px(12)),
+            ..default()
+        }))
+        .with_children(|c| {
+            title_with_radio(
+                c,
+                fonts,
+                "Custom command",
+                Type::STRONG.ink(Swatch::Faint),
+                false,
+            );
+            c.spawn(text(fonts, "any tool that speaks JSON", Type::META));
+            c.spawn(text(fonts, "Arrives in a later milestone", Type::META));
+        });
     });
+    if let Some(name) = v.switched {
+        p.spawn(text(
+            fonts,
+            format!(
+                "Reviews you open from now on use {name}. Open reviews keep their current agent."
+            ),
+            Type::META,
+        ));
+    }
     row(
         p,
         fonts,
@@ -340,7 +466,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
         fonts,
         "When I open a review",
         |r| open_checkboxes(r, fonts, &v.open),
-        COST_NOTE,
+        &cost_note(v.name),
         None,
     );
     if let Some(message) = &v.on_open_error {
@@ -379,7 +505,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
         "Seconds, 30 to 600. No answer means deny, and you get a notification",
         &v.permission_timeout_error,
     );
-    probe_row(p, fonts, &v.probe);
+    probe_row(p, fonts, &v.probe, v.name);
     super::heading(p, fonts, "When new commits arrive on a saved review");
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
@@ -400,7 +526,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
             ));
             r.spawn(text(fonts, "Revalidate my draft", Type::BODY));
         });
-        c.spawn(text(fonts, REVALIDATE_NOTE, Type::META));
+        c.spawn(text(fonts, revalidate_note(v.name), Type::META));
         if let Some(message) = &v.revalidate_error {
             c.spawn((
                 super::FieldError("harness.revalidate"),
@@ -438,30 +564,33 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
                 Type::BODY,
             ));
         });
-        c.spawn(Node {
-            column_gap: px(10),
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_children(|r| {
-            r.spawn((
-                checkbox(v.use_cli_permissions),
-                setter(
-                    "harness.use_cli_permissions",
-                    (!v.use_cli_permissions).to_string(),
-                ),
-            ));
-            r.spawn(text(
-                fonts,
-                "Also allow what my Claude Code settings already allow",
-                Type::BODY,
-            ));
-        });
-        if let Some(message) = &v.permissions_error {
-            c.spawn((
-                super::FieldError("harness.use_cli_permissions"),
-                children![text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange))],
-            ));
+        let codex = v.kind == HarnessKind::Codex;
+        if !codex {
+            c.spawn(Node {
+                column_gap: px(10),
+                align_items: AlignItems::Center,
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn((
+                    checkbox(v.use_cli_permissions),
+                    setter(
+                        "harness.use_cli_permissions",
+                        (!v.use_cli_permissions).to_string(),
+                    ),
+                ));
+                r.spawn(text(
+                    fonts,
+                    "Also allow what my Claude Code settings already allow",
+                    Type::BODY,
+                ));
+            });
+            if let Some(message) = &v.permissions_error {
+                c.spawn((
+                    super::FieldError("harness.use_cli_permissions"),
+                    children![text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange))],
+                ));
+            }
         }
         c.spawn(Node {
             column_gap: px(10),
@@ -469,17 +598,26 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
             ..default()
         })
         .with_children(|r| {
-            r.spawn((
-                checkbox(v.sandbox),
-                setter("harness.sandbox", (!v.sandbox).to_string()),
-            ));
-            r.spawn(text(
-                fonts,
-                "Run commands in a sandbox: no network, writes only in the review worktree",
-                Type::BODY,
-            ));
+            if codex {
+                r.spawn(disabled_checkbox(true));
+                r.spawn(text(
+                    fonts,
+                    "Codex always runs in its read-only sandbox",
+                    Type::BODY,
+                ));
+            } else {
+                r.spawn((
+                    checkbox(v.sandbox),
+                    setter("harness.sandbox", (!v.sandbox).to_string()),
+                ));
+                r.spawn(text(
+                    fonts,
+                    "Run commands in a sandbox: no network, writes only in the review worktree",
+                    Type::BODY,
+                ));
+            }
         });
-        if !v.sandbox {
+        if !codex && !v.sandbox {
             // Outside the sandbox a command also reaches clusiad's socket, which trusts any
             // program of the user.
             c.spawn(text(fonts, SANDBOX_OFF, Type::MUTED));
@@ -491,13 +629,13 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
             ));
         }
     });
-    areas::build(p, fonts, &v.areas, &v.areas_error, &v.form);
+    areas::build(p, fonts, v.name, &v.areas, &v.areas_error, &v.form);
 }
 
 /// What turning the sandbox off lets an allowed command do.
 const SANDBOX_OFF: &str = "With the sandbox off, an allowed command can reach the network, write outside the worktree and act through Clúsia as you: answer its own requests, change the draft or publish.";
 
-fn probe_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, state: &ProbeCard) {
+fn probe_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, state: &ProbeCard, active: &str) {
     let (fill, stroke) = match state {
         ProbeCard::Ok { .. } => (Swatch::GreenSoft, Swatch::Green),
         ProbeCard::Failed { .. } => (Swatch::OrangeSoft, Swatch::Orange),
@@ -506,24 +644,25 @@ fn probe_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, state: &ProbeCard) {
     let (title, detail) = match state {
         ProbeCard::Idle => (
             "Not tested yet".to_string(),
-            "Press Test to check that Clúsia can find Claude Code and see how fast it answers."
-                .to_string(),
+            format!(
+                "Press Test to check that Clúsia can find {active} and see how fast it answers."
+            ),
         ),
         ProbeCard::Testing => (
-            "Testing Claude Code…".to_string(),
+            format!("Testing {active}…"),
             "Waiting for an answer".to_string(),
         ),
         ProbeCard::Ok {
+            name,
             version,
             program,
             seconds,
+            account,
         } => (
-            format!("Claude Code {version} answered in {seconds} s"),
+            ok_title(name, version, seconds, account.as_deref()),
             format!("Found at {program}"),
         ),
-        ProbeCard::Failed { message } => {
-            ("Claude Code did not answer".to_string(), message.clone())
-        }
+        ProbeCard::Failed { name, message } => (format!("{name} did not answer"), message.clone()),
     };
     p.spawn((
         Node {
@@ -586,6 +725,7 @@ fn on_test(_activate: On<Activate>, mut model: ResMut<Model>, mut asks: ResMut<A
 mod tests {
     use super::*;
     use crate::snapshot::Snapshot;
+    use clusia_core::config::HarnessKind;
 
     fn probe(ok: bool) -> ProbeResult {
         ProbeResult {
@@ -668,26 +808,64 @@ mod tests {
     #[test]
     fn the_probe_card_follows_the_answer() {
         assert_eq!(
-            probe_card(&ProbeState::Done(probe(true))),
+            probe_card(&ProbeState::Done(probe(true)), "Claude Code"),
             ProbeCard::Ok {
+                name: "Claude Code".into(),
                 version: "2.1.294".into(),
                 program: "/opt/homebrew/bin/claude".into(),
-                seconds: "1.8".into()
+                seconds: "1.8".into(),
+                account: None,
             }
         );
         assert_eq!(
-            probe_card(&ProbeState::Done(probe(false))),
+            probe_card(&ProbeState::Done(probe(false)), "Claude Code"),
             ProbeCard::Failed {
+                name: "Claude Code".into(),
                 message: "Run `claude` once in a terminal".into()
             }
         );
         let mut silent = probe(false);
         silent.error = None;
         assert_eq!(
-            probe_card(&ProbeState::Done(silent)),
+            probe_card(&ProbeState::Done(silent), "Codex"),
             ProbeCard::Failed {
+                name: "Claude Code".into(),
                 message: "Claude Code did not answer".into()
+            },
+            "the answer names the agent that was tested"
+        );
+    }
+
+    #[test]
+    fn a_codex_answer_shows_its_name_and_login() {
+        let answer = ProbeResult {
+            ok: true,
+            version: Some("0.162.1".into()),
+            program: "/opt/homebrew/bin/codex".into(),
+            elapsed_ms: 400,
+            error: None,
+            harness: "Codex".into(),
+            signed_in: Some(true),
+            account: Some("Logged in using ChatGPT".into()),
+        };
+        let card = probe_card(&ProbeState::Done(answer), "Claude Code");
+        assert_eq!(
+            card,
+            ProbeCard::Ok {
+                name: "Codex".into(),
+                version: "0.162.1".into(),
+                program: "/opt/homebrew/bin/codex".into(),
+                seconds: "0.4".into(),
+                account: Some("Logged in using ChatGPT".into()),
             }
+        );
+        assert_eq!(
+            ok_title("Codex", "0.162.1", "0.4", Some("Logged in using ChatGPT")),
+            "Codex 0.162.1 answered in 0.4 s · Logged in using ChatGPT"
+        );
+        assert_eq!(
+            ok_title("Claude Code", "2.1.294", "1.8", None),
+            "Claude Code 2.1.294 answered in 1.8 s"
         );
     }
 
@@ -698,11 +876,18 @@ mod tests {
         v.program = "/usr/local/bin/claude".into();
         assert_eq!(program_hint(&v), "Using this path");
         v.probe = ProbeCard::Ok {
+            name: "Claude Code".into(),
             version: "2.1.294".into(),
             program: "/usr/local/bin/claude".into(),
             seconds: "1.8".into(),
+            account: None,
         };
         assert_eq!(program_hint(&v), "Found at /usr/local/bin/claude");
+
+        let mut snap = Snapshot::default();
+        snap.config.harness.kind = HarnessKind::Codex;
+        let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
+        assert_eq!(program_hint(&v), "Looks for codex on your PATH");
     }
 
     fn harness_app() -> App {
@@ -772,7 +957,7 @@ mod tests {
             "Summarize it",
             "Check security",
             "Audit the change",
-            COST_NOTE,
+            &cost_note("Claude Code"),
             "Check timeout",
         ] {
             assert!(crate::testing::shows(&mut app, needle), "{needle}");
@@ -875,7 +1060,7 @@ mod tests {
             "When new commits arrive on a saved review",
             "Revalidate my draft",
             "Wait for pushes to settle",
-            REVALIDATE_NOTE,
+            &revalidate_note("Claude Code"),
         ] {
             assert!(crate::testing::shows(&mut app, needle), "{needle}");
         }
@@ -902,5 +1087,160 @@ mod tests {
         let e =
             crate::testing::find::<ConfigField>(&mut app, |f| f.0 == "harness.check_timeout_secs");
         assert_eq!(app.world().get::<Field>(e).unwrap().committed, "600");
+    }
+
+    #[test]
+    fn the_view_names_the_configured_agent() {
+        let v = view(&Snapshot::default(), &HashMap::new(), &ProbeState::Idle);
+        assert_eq!(
+            (v.kind, v.name, v.program_name, v.switched),
+            (HarnessKind::ClaudeCode, "Claude Code", "claude", None)
+        );
+        let mut snap = Snapshot::default();
+        snap.config.harness.kind = HarnessKind::Codex;
+        let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
+        assert_eq!(
+            (v.kind, v.name, v.program_name),
+            (HarnessKind::Codex, "Codex", "codex")
+        );
+        let v = v.with_switched(&Switched(Some(HarnessKind::Codex)));
+        assert_eq!(v.switched, Some("Codex"));
+    }
+
+    #[test]
+    fn the_notes_take_the_agent_name() {
+        assert_eq!(
+            cost_note("Codex"),
+            "Each check is one Codex turn on your account."
+        );
+        assert!(revalidate_note("Codex").starts_with("Codex reads each draft comment"));
+        assert!(revalidate_note("Codex").contains("one Codex turn per round"));
+        assert!(!revalidate_note("Codex").contains("Claude"));
+    }
+
+    #[test]
+    fn both_kind_cards_can_be_chosen_and_custom_waits() {
+        let mut app = harness_app();
+        for needle in [
+            "claude, with your settings",
+            "codex app-server, with your login",
+        ] {
+            assert!(crate::testing::shows(&mut app, needle), "{needle}");
+        }
+        assert_eq!(
+            crate::testing::count::<KindCard>(&mut app),
+            2,
+            "Claude Code and Codex"
+        );
+        assert!(!crate::testing::shows(
+            &mut app,
+            "Reviews you open from now on use"
+        ));
+
+        let codex = crate::testing::find::<KindCard>(&mut app, |c| c.0 == HarnessKind::Codex);
+        crate::testing::activate(&mut app, codex);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.kind".into(),
+                value: "codex".into()
+            }]
+        );
+        crate::testing::set_config_locally(&mut app, "harness.kind", "codex");
+        crate::testing::settle(&mut app);
+        assert!(crate::testing::shows(
+            &mut app,
+            "Reviews you open from now on use Codex. Open reviews keep their current agent."
+        ));
+        let marks: Vec<bool> = app
+            .world_mut()
+            .query::<&RadioMark>()
+            .iter(app.world())
+            .map(|m| m.selected)
+            .collect();
+        assert_eq!(marks, [false, true, false], "Codex is the selected card");
+
+        let same = crate::testing::find::<KindCard>(&mut app, |c| c.0 == HarnessKind::Codex);
+        crate::testing::activate(&mut app, same);
+        assert!(
+            crate::testing::recorded(&mut app).is_empty(),
+            "choosing the card already chosen writes nothing"
+        );
+    }
+
+    #[test]
+    fn switching_the_kind_clears_the_program_that_belonged_to_the_other_agent() {
+        let mut app = harness_app();
+        crate::testing::set_config_locally(&mut app, "harness.program", "/opt/homebrew/bin/claude");
+        crate::testing::settle(&mut app);
+        let codex = crate::testing::find::<KindCard>(&mut app, |c| c.0 == HarnessKind::Codex);
+        crate::testing::activate(&mut app, codex);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [
+                Ask::SetConfig {
+                    key: "harness.kind".into(),
+                    value: "codex".into()
+                },
+                Ask::SetConfig {
+                    key: "harness.program".into(),
+                    value: String::new()
+                },
+            ],
+            "the kind first, then the program that served the other agent"
+        );
+    }
+
+    #[test]
+    fn a_kind_change_with_no_program_writes_only_the_kind() {
+        let mut app = harness_app();
+        let codex = crate::testing::find::<KindCard>(&mut app, |c| c.0 == HarnessKind::Codex);
+        crate::testing::activate(&mut app, codex);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.kind".into(),
+                value: "codex".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn codex_hides_the_claude_switch_and_locks_the_sandbox() {
+        let mut app = harness_app();
+        assert!(crate::testing::shows(
+            &mut app,
+            "Also allow what my Claude Code settings already allow"
+        ));
+        crate::testing::set_config_locally(&mut app, "harness.kind", "codex");
+        crate::testing::settle(&mut app);
+        assert!(!crate::testing::shows(
+            &mut app,
+            "Also allow what my Claude Code settings already allow"
+        ));
+        assert!(crate::testing::shows(
+            &mut app,
+            "Codex always runs in its read-only sandbox"
+        ));
+        assert!(!crate::testing::shows(
+            &mut app,
+            "Run commands in a sandbox: no network, writes only in the review worktree"
+        ));
+        assert!(crate::testing::shows(
+            &mut app,
+            "Each check is one Codex turn on your account."
+        ));
+        assert!(crate::testing::shows(
+            &mut app,
+            "Codex audits the change one area at a time."
+        ));
+        assert!(crate::testing::shows(
+            &mut app,
+            "Looks for codex on your PATH"
+        ));
+        assert!(
+            crate::testing::recorded(&mut app).is_empty(),
+            "the locked sandbox row writes nothing"
+        );
     }
 }

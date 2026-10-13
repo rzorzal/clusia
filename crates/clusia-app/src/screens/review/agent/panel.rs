@@ -16,7 +16,7 @@ use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_core::printable::printable;
-use clusia_protocol::{HarnessKind, SessionStateKind};
+use clusia_protocol::SessionStateKind;
 
 use super::model::{ChatLine, Chats, DEFAULT_WIDTH, PanelTab, display_text};
 use crate::bridge::{Ask, Asks, Model};
@@ -119,8 +119,10 @@ pub struct ChatResize(pub PrRef);
 struct HeaderView {
     state: SessionStateKind,
     resumed: bool,
-    /// Claude Code is set up; without it the header leads to Config › Harness.
+    /// The agent is set up; without it the header leads to Config › Harness.
     ready: bool,
+    /// The agent the review is pinned to.
+    name: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +172,7 @@ impl Plugin for AgentPanel {
             (
                 drop_closed_chats,
                 open_chats,
+                super::name_chats,
                 toggle_with_shortcut,
                 layout,
                 rebuild_tabs,
@@ -188,13 +191,15 @@ impl Plugin for AgentPanel {
     }
 }
 
-/// Whether Claude Code is set up: a program is configured, or the first-run scan found one.
+/// Whether an agent is set up: a program is configured, or the first-run scan found the one the
+/// settings name.
 pub fn harness_ready(snap: &Snapshot) -> bool {
     snap.config.harness.program.is_some()
         || snap.first_run.as_ref().is_some_and(|f| {
-            f.harnesses
-                .iter()
-                .any(|h| h.kind == HarnessKind::ClaudeCode && h.path.is_some())
+            f.harnesses.iter().any(|h| {
+                clusia_core::config::HarnessKind::from(h.kind) == snap.config.harness.kind
+                    && h.path.is_some()
+            })
         })
 }
 
@@ -561,6 +566,7 @@ fn footer(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef) {
 fn rebuild_header(
     mut commands: Commands,
     chats: Res<Chats>,
+    tabs: Res<ReviewTabs>,
     model: Res<Model>,
     fonts: Res<UiFonts>,
     mut headers: Query<(Entity, &mut ChatHeader)>,
@@ -573,6 +579,10 @@ fn rebuild_header(
             state: chat.state,
             resumed: chat.resumed,
             ready: harness_ready(&model.snapshot),
+            name: tabs.0.get(&header.pr).map_or_else(
+                || crate::agent_name::active(&model.snapshot),
+                |t| crate::agent_name::of_tab(&model.snapshot, t),
+            ),
         };
         if header.built.as_ref() == Some(&want) {
             continue;
@@ -582,7 +592,7 @@ fn rebuild_header(
         if !want.ready {
             commands
                 .entity(entity)
-                .with_children(|h| not_set_up(h, &fonts));
+                .with_children(|h| not_set_up(h, &fonts, want.name));
             header.built = Some(want);
             continue;
         }
@@ -601,7 +611,7 @@ fn rebuild_header(
                 },
             ));
             h.spawn((
-                text(&fonts, "Claude Code", Type::STRONG),
+                text(&fonts, want.name, Type::STRONG),
                 TextLayout::no_wrap(),
                 Node {
                     flex_shrink: 0.0,
@@ -647,8 +657,8 @@ fn rebuild_header(
 }
 
 /// The header without a harness: what the tab is for, and the way to set one up.
-fn not_set_up(h: &mut ChildSpawnerCommands, fonts: &UiFonts) {
-    h.spawn(text(fonts, "Claude Code", Type::STRONG));
+fn not_set_up(h: &mut ChildSpawnerCommands, fonts: &UiFonts, name: &str) {
+    h.spawn(text(fonts, name.to_string(), Type::STRONG));
     h.spawn(badge(fonts, "not set up", Tone::Neutral));
     h.spawn(Node {
         flex_grow: 1.0,
@@ -1262,6 +1272,33 @@ mod tests {
         testing::activate(&mut app, draft);
         testing::settle(&mut app);
         assert_eq!(display_of::<RightPanel>(&mut app, |_| true), Display::Flex);
+    }
+
+    #[test]
+    fn a_first_run_harness_counts_only_when_it_is_the_configured_kind() {
+        use clusia_core::config::HarnessKind as Kind;
+        use clusia_protocol::HarnessKind;
+        let found = |kind| clusia_protocol::FirstRun {
+            github: clusia_protocol::GithubLogin::SignedOut,
+            folders: Vec::new(),
+            harnesses: vec![clusia_protocol::Harness {
+                kind,
+                path: Some("/opt/homebrew/bin/x".into()),
+                version: None,
+            }],
+        };
+        let mut snap = Snapshot {
+            first_run: Some(found(HarnessKind::Codex)),
+            ..Snapshot::default()
+        };
+        assert!(
+            !harness_ready(&snap),
+            "Claude Code is configured, only Codex was found"
+        );
+        snap.config.harness.kind = Kind::Codex;
+        assert!(harness_ready(&snap));
+        snap.first_run = Some(found(HarnessKind::ClaudeCode));
+        assert!(!harness_ready(&snap));
     }
 
     #[test]

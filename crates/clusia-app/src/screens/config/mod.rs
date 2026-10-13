@@ -60,6 +60,7 @@ pub fn page_view(
     paths: &Paths,
     probe: &ProbeState,
     form: &areas::AreaForm,
+    switched: &harness::Switched,
 ) -> PageView {
     match section {
         Section::General => PageView::General(general::view(snap, rejected)),
@@ -71,7 +72,9 @@ pub fn page_view(
         Section::About => PageView::About(about::view(snap)),
         Section::Notifications => PageView::Notifications(notifications::view(snap, rejected)),
         Section::Harness => PageView::Harness(Box::new(
-            harness::view(snap, rejected, probe).with_form(form),
+            harness::view(snap, rejected, probe)
+                .with_form(form)
+                .with_switched(switched),
         )),
         Section::Plugins => PageView::Plugins,
     }
@@ -117,22 +120,25 @@ pub struct ConfigPlugin;
 
 impl Plugin for ConfigPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<areas::AreaForm>().add_systems(
-            Update,
-            (
-                build_config,
-                commit_fields,
-                areas::keep_form_text,
-                areas::settle_area_write,
-                areas::reset_form_off_page,
-                repos::commit_roots,
-                rebuild_config,
-                git::refresh_last_sync,
-                notifications::poll_permission,
-            )
-                .chain()
-                .after(NavSystems),
-        );
+        app.init_resource::<areas::AreaForm>()
+            .init_resource::<harness::Switched>()
+            .add_systems(
+                Update,
+                (
+                    build_config,
+                    commit_fields,
+                    areas::keep_form_text,
+                    areas::settle_area_write,
+                    areas::reset_form_off_page,
+                    harness::forget_switch,
+                    repos::commit_roots,
+                    rebuild_config,
+                    git::refresh_last_sync,
+                    notifications::poll_permission,
+                )
+                    .chain()
+                    .after(NavSystems),
+            );
     }
 }
 
@@ -282,6 +288,7 @@ fn rebuild_config(
     nav: Res<Nav>,
     model: Res<Model>,
     area_form: Res<areas::AreaForm>,
+    switched: Res<harness::Switched>,
     paths: Res<AppPaths>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
@@ -334,6 +341,7 @@ fn rebuild_config(
         &paths.0,
         &model.probe,
         &area_form,
+        &switched,
     );
     // Half-typed input survives: a rebuild of the same page waits until the focused field is
     // committed (or reverted) so the field entity is not despawned under the cursor.
@@ -1321,8 +1329,8 @@ mod tests {
                 .iter()
                 .filter(|t| *t == "Arrives in a later milestone")
                 .count(),
-            2,
-            "Codex and Custom command"
+            1,
+            "only Custom command"
         );
         for key in [
             "harness.program",
