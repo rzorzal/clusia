@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use clusia_core::PrRef;
+use clusia_core::config::HarnessKind;
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, PermissionOutcome, SessionStateKind, Suggestion,
 };
@@ -423,7 +424,10 @@ impl ChatModel {
 /// The daemon's message, or the kind's default one when it sent none.
 fn error_text(kind: AgentErrorKind, message: &str) -> String {
     if message.trim().is_empty() {
-        kind.to_string()
+        kind.message_for(
+            HarnessKind::ClaudeCode.name(),
+            HarnessKind::ClaudeCode.sign_in_hint(),
+        )
     } else {
         message.to_string()
     }

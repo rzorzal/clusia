@@ -34,8 +34,10 @@ pub fn test_options() -> DaemonOptions {
         media_resolve: Vec::new(),
         giphy_api: Some("http://127.0.0.1:9".into()),
         harness_search_paths: Vec::new(),
-        // No test starts the real claude: this is what CLUSIA_CLAUDE_BIN would say too.
+        // No test starts the real claude or codex: this is what CLUSIA_CLAUDE_BIN and CLUSIA_CODEX_BIN
+        // would say too.
         claude_program: Some("/nonexistent/claude".into()),
+        codex_program: Some("/nonexistent/codex".into()),
         bridge_program: Some(env!("CARGO_BIN_EXE_clusiad").into()),
     }
 }

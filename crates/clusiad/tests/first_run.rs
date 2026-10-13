@@ -17,6 +17,9 @@ async fn daemon(gh: PathBuf, harness_dirs: Vec<PathBuf>) -> TestDaemon {
     let mut o = test_options();
     o.gh_program = gh;
     o.harness_search_paths = harness_dirs;
+    // These tests look in the search folders, as a daemon with no override does.
+    o.claude_program = None;
+    o.codex_program = None;
     TestDaemon::start_with(tempfile::tempdir().unwrap(), o).await
 }
 
@@ -137,6 +140,37 @@ async fn counts_repos_two_levels_deep() {
         (folders[1].exists, folders[1].repos),
         (false, 0),
         "a missing folder is listed, empty"
+    );
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn the_programs_the_daemon_was_told_to_use_are_the_ones_it_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let told = script(dir.path(), "my-claude", r#"echo "2.1.300 (Claude Code)""#);
+    // A `codex` in a search folder is not looked at while an override names another program.
+    let folder = dir.path().join("bin");
+    std::fs::create_dir_all(&folder).unwrap();
+    script(&folder, "codex", r#"echo "codex-cli 0.162.1""#);
+    let mut o = test_options();
+    o.harness_search_paths = vec![folder];
+    o.claude_program = Some(told.clone());
+    o.codex_program = Some("/nonexistent/codex".into());
+    let d = TestDaemon::start_with(tempfile::tempdir().unwrap(), o).await;
+    assert_eq!(
+        status(&d).await.harnesses,
+        vec![
+            Harness {
+                kind: HarnessKind::ClaudeCode,
+                path: Some(told.display().to_string()),
+                version: Some("2.1.300".into())
+            },
+            Harness {
+                kind: HarnessKind::Codex,
+                path: None,
+                version: None
+            }
+        ]
     );
     d.stop().await;
 }

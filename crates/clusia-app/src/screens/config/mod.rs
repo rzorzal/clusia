@@ -1434,6 +1434,9 @@ mod tests {
                 program: "/opt/homebrew/bin/claude".into(),
                 elapsed_ms: 1800,
                 error: None,
+                harness: "Claude Code".into(),
+                signed_in: None,
+                account: None,
             }),
         );
         testing::settle(&mut app);
@@ -1460,6 +1463,9 @@ mod tests {
                 program: String::new(),
                 elapsed_ms: 0,
                 error: Some("Install Claude Code or set its path".into()),
+                harness: "Claude Code".into(),
+                signed_in: None,
+                account: None,
             }),
         );
         testing::settle(&mut app);

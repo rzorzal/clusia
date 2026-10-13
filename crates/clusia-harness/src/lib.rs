@@ -1,6 +1,8 @@
-//! The agent adapter for reviews: the command line of one Claude Code turn, a parser for its
-//! `stream-json` output and the suggestions in its answer. It starts no process.
+//! The agent adapters for reviews: what differs between Claude Code and Codex, the command
+//! line of one Claude Code turn, a parser for its `stream-json` output and the suggestions in
+//! its answer. It starts no process.
 
+mod agent;
 mod check_blocks;
 mod command;
 mod parse;
@@ -10,6 +12,7 @@ mod suggestions;
 #[cfg(any(test, feature = "test-kit"))]
 pub mod testkit;
 
+pub use agent::{Agent, version_at_least};
 pub use check_blocks::extract_check_blocks;
 pub use command::{BridgeSpec, ClaudeCode, ROLE_PROMPT, SessionArg, TurnSpec};
 pub use parse::{AgentEvent, ParseState, parse_line};

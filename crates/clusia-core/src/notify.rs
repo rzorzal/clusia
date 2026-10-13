@@ -275,15 +275,22 @@ impl NotifyEvent {
     }
 
     /// A saved review's draft was re-read against new commits; `summary` says what changed.
-    pub fn review_revalidated(pr: &PrRef, summary: &str, key: impl Into<String>, at: i64) -> Self {
+    pub fn review_revalidated(
+        pr: &PrRef,
+        harness: &str,
+        summary: &str,
+        key: impl Into<String>,
+        at: i64,
+    ) -> Self {
         Self::about(
             EventKind::CommitsAfterReview,
             pr,
             key,
             at,
             format!("Review #{} revalidated: {summary}", pr.number),
-            "Claude Code checked your draft against the new commits. Nothing changes until you accept it."
-                .to_string(),
+            format!(
+                "{harness} checked your draft against the new commits. Nothing changes until you accept it."
+            ),
             Self::review_of(pr, None),
         )
     }
@@ -348,13 +355,19 @@ impl NotifyEvent {
         )
     }
 
-    pub fn agent_finished(pr: &PrRef, pr_title: &str, key: impl Into<String>, at: i64) -> Self {
+    pub fn agent_finished(
+        pr: &PrRef,
+        harness: &str,
+        pr_title: &str,
+        key: impl Into<String>,
+        at: i64,
+    ) -> Self {
         Self::about(
             EventKind::AgentFinished,
             pr,
             key,
             at,
-            format!("Claude Code finished on #{}", pr.number),
+            format!("{harness} finished on #{}", pr.number),
             format!("{pr_title}. Its answer is ready to read."),
             Self::review_of(pr, None),
         )
@@ -364,6 +377,7 @@ impl NotifyEvent {
     /// which `verb` already says ("run", "edit", "write").
     pub fn agent_permission(
         pr: &PrRef,
+        harness: &str,
         pr_title: &str,
         verb: &str,
         summary: &str,
@@ -375,7 +389,7 @@ impl NotifyEvent {
             pr,
             key,
             at,
-            format!("Claude Code needs your permission on #{}", pr.number),
+            format!("{harness} needs your permission on #{}", pr.number),
             format!("It wants to {verb}: {summary} · {pr_title}"),
             Self::review_of(pr, None),
         )
@@ -474,11 +488,21 @@ mod tests {
     };
 
     #[test]
+    fn a_revalidation_names_the_harness() {
+        let e = NotifyEvent::review_revalidated(&pr(7), "Codex", "2 kept", "k", 1);
+        assert!(e.body.starts_with("Codex checked your draft"), "{}", e.body);
+    }
+
+    #[test]
     fn an_agent_finishing_opens_its_review() {
-        let e = NotifyEvent::agent_finished(&pr(7), "Add feature", "k", 5);
+        let e = NotifyEvent::agent_finished(&pr(7), "Claude Code", "Add feature", "k", 5);
         assert_eq!(e.kind, EventKind::AgentFinished);
         assert_eq!(e.pr, Some(pr(7)));
         assert_eq!(e.title, "Claude Code finished on #7");
+        assert_eq!(
+            NotifyEvent::agent_finished(&pr(7), "Codex", "Add feature", "k", 5).title,
+            "Codex finished on #7"
+        );
         assert_eq!(e.body, "Add feature. Its answer is ready to read.");
         assert_eq!(
             e.open,
@@ -495,6 +519,7 @@ mod tests {
     fn a_permission_request_bypasses_quiet_hours_and_bursts() {
         let e = NotifyEvent::agent_permission(
             &pr(7),
+            "Claude Code",
             "Add feature",
             "run",
             "cargo test -p clusia-core",
@@ -503,6 +528,10 @@ mod tests {
         );
         assert_eq!(e.kind, EventKind::AgentPermission);
         assert_eq!(e.title, "Claude Code needs your permission on #7");
+        assert_eq!(
+            NotifyEvent::agent_permission(&pr(7), "Codex", "t", "run", "ls", "k", 1).title,
+            "Codex needs your permission on #7"
+        );
         assert_eq!(
             e.body,
             "It wants to run: cargo test -p clusia-core · Add feature"
@@ -528,7 +557,7 @@ mod tests {
         recent.record(&GroupKey(pr(7)), 90);
         let d = decide(&e, &cfg, NOON, &recent);
         assert!(d.tray && d.macos && d.sound.is_some(), "{d:?}");
-        let finished = NotifyEvent::agent_finished(&pr(7), "Add feature", "k2", 100);
+        let finished = NotifyEvent::agent_finished(&pr(7), "Claude Code", "Add feature", "k2", 100);
         assert!(!finished.is_urgent());
         assert!(
             !decide(&finished, &cfg, NOON, &recent).macos,

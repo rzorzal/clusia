@@ -133,6 +133,7 @@ pub(crate) fn report_lines(
     accepted: &BTreeSet<String>,
     dismissed: &BTreeSet<String>,
     area_names: &BTreeMap<String, String>,
+    harness: &str,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     let mut unreadable_said = false;
@@ -141,12 +142,12 @@ pub(crate) fn report_lines(
             lines.push("Security".to_string());
             if result.findings.is_empty() && result.unreadable == 0 {
                 lines.push(format!(
-                    "Claude Code found no security issues in {}.",
+                    "{harness} found no security issues in {}.",
                     files_of(result.files)
                 ));
             } else if result.findings.is_empty() {
                 lines.push(format!(
-                    "Claude Code checked {}; {}.",
+                    "{harness} checked {}; {}.",
                     files_of(result.files),
                     unreadable_line(result.unreadable).unwrap_or_default()
                 ));
@@ -249,10 +250,11 @@ fn permission_note(
     going: &[CheckKind],
     tool: &str,
     summary: &str,
+    harness: &str,
 ) -> Option<String> {
     let kind = kind_of(origin).filter(|kind| going.contains(kind))?;
     Some(format!(
-        "{}: waiting for an answer in the window: Claude Code wants to use {}: {}",
+        "{}: waiting for an answer in the window: {harness} wants to use {}: {}",
         kind.label(),
         line_of(tool),
         line_of(summary)
@@ -302,6 +304,7 @@ pub(crate) async fn check(
             "the daemon did not answer GetChecks".into(),
         ));
     };
+    let harness = crate::harness::name_of(&mut client).await;
     let mut going: Vec<CheckKind> = Vec::new();
     let mut started: Vec<CheckKind> = Vec::new();
     for &kind in &wanted {
@@ -394,7 +397,7 @@ pub(crate) async fn check(
                 origin,
                 ..
             } if of == pr => {
-                if let Some(note) = permission_note(origin, &going, &tool, &summary)
+                if let Some(note) = permission_note(origin, &going, &tool, &summary, harness)
                     && asked.insert(id)
                     && !json
                 {
@@ -448,6 +451,7 @@ pub(crate) async fn check(
                     &accepted_ids,
                     &dismissed_ids,
                     &area_names,
+                    harness,
                 ));
                 shown.push(result);
             }
@@ -536,15 +540,41 @@ mod tests {
     }
 
     #[test]
+    fn the_report_and_the_note_name_the_harness_in_use() {
+        let clean = result(CheckKind::Security, Vec::new(), Vec::new());
+        assert_eq!(
+            report_lines(&clean, &none(), &none(), &BTreeMap::new(), "Codex")[1],
+            "Codex found no security issues in 7 files."
+        );
+        assert_eq!(
+            permission_note(
+                TurnOrigin::Audit,
+                &[CheckKind::Audit],
+                "Bash",
+                "make",
+                "Codex"
+            )
+            .as_deref(),
+            Some("Audit: waiting for an answer in the window: Codex wants to use Bash: make")
+        );
+    }
+
+    #[test]
     fn a_permission_note_names_only_a_check_this_command_follows() {
         let audit_only = [CheckKind::Audit];
         assert_eq!(
-            permission_note(TurnOrigin::Security, &audit_only, "Bash", "make"),
+            permission_note(
+                TurnOrigin::Security,
+                &audit_only,
+                "Bash",
+                "make",
+                "Claude Code"
+            ),
             None,
             "a Security request is not news under --audit"
         );
         assert_eq!(
-            permission_note(TurnOrigin::Chat, &audit_only, "Bash", "make"),
+            permission_note(TurnOrigin::Chat, &audit_only, "Bash", "make", "Claude Code"),
             None
         );
         assert_eq!(
@@ -552,13 +582,21 @@ mod tests {
                 TurnOrigin::Revalidation,
                 &[CheckKind::Security, CheckKind::Audit],
                 "Bash",
-                "make"
+                "make",
+                "Claude Code"
             ),
             None,
             "a revalidation request is not a check's"
         );
         assert_eq!(
-            permission_note(TurnOrigin::Audit, &audit_only, "Bash", "make\u{1b}[2K").as_deref(),
+            permission_note(
+                TurnOrigin::Audit,
+                &audit_only,
+                "Bash",
+                "make\u{1b}[2K",
+                "Claude Code"
+            )
+            .as_deref(),
             Some(
                 "Audit: waiting for an answer in the window: Claude Code wants to use Bash: make\\u{1b}[2K"
             )
@@ -654,7 +692,7 @@ mod tests {
     fn a_clean_security_result_says_what_the_agent_found_never_that_it_is_safe() {
         let clean = result(CheckKind::Security, Vec::new(), Vec::new());
         assert_eq!(
-            report_lines(&clean, &none(), &none(), &BTreeMap::new()),
+            report_lines(&clean, &none(), &none(), &BTreeMap::new(), "Claude Code"),
             [
                 "Security",
                 "Claude Code found no security issues in 7 files."
@@ -663,7 +701,7 @@ mod tests {
         let mut one = result(CheckKind::Security, Vec::new(), Vec::new());
         one.files = 1;
         assert_eq!(
-            report_lines(&one, &none(), &none(), &BTreeMap::new())[1],
+            report_lines(&one, &none(), &none(), &BTreeMap::new(), "Claude Code")[1],
             "Claude Code found no security issues in 1 file."
         );
     }
@@ -704,7 +742,7 @@ mod tests {
         r.unreadable = 2;
         let dismissed: BTreeSet<String> = ["id-security-Dismissed".to_string()].into();
         assert_eq!(
-            report_lines(&r, &none(), &dismissed, &BTreeMap::new()),
+            report_lines(&r, &none(), &dismissed, &BTreeMap::new(), "Claude Code"),
             [
                 "Security",
                 "HIGH  client/http.rs:2  Token in the log",
@@ -716,7 +754,7 @@ mod tests {
         );
         r.unreadable = 1;
         assert_eq!(
-            report_lines(&r, &none(), &none(), &BTreeMap::new())
+            report_lines(&r, &none(), &none(), &BTreeMap::new(), "Claude Code")
                 .last()
                 .unwrap(),
             "1 result could not be read"
@@ -748,7 +786,8 @@ mod tests {
                 &two_security_findings(),
                 &accepted,
                 &none(),
-                &BTreeMap::new()
+                &BTreeMap::new(),
+                "Claude Code"
             ),
             [
                 "Security",
@@ -766,6 +805,7 @@ mod tests {
             &accepted,
             &none(),
             &BTreeMap::new(),
+            "Claude Code",
         );
         assert!(!lines.iter().any(|l| l == CLEAN), "{lines:?}");
         assert_eq!(
@@ -786,6 +826,7 @@ mod tests {
             &none(),
             &dismissed,
             &BTreeMap::new(),
+            "Claude Code",
         );
         assert!(!lines.iter().any(|l| l == CLEAN), "{lines:?}");
         assert_eq!(lines, ["Security", "2 dismissed"]);
@@ -795,7 +836,7 @@ mod tests {
     fn only_unreadable_blocks_is_not_a_clean_result() {
         let mut r = result(CheckKind::Security, Vec::new(), Vec::new());
         r.unreadable = 3;
-        let lines = report_lines(&r, &none(), &none(), &BTreeMap::new());
+        let lines = report_lines(&r, &none(), &none(), &BTreeMap::new(), "Claude Code");
         assert!(!lines.iter().any(|l| l == CLEAN), "{lines:?}");
         assert_eq!(
             lines,
@@ -816,7 +857,7 @@ mod tests {
         r.areas = vec!["correctness".into()];
         let accepted = ids(&["id-correctness-Off by one"]);
         assert_eq!(
-            report_lines(&r, &accepted, &none(), &BTreeMap::new()),
+            report_lines(&r, &accepted, &none(), &BTreeMap::new(), "Claude Code"),
             [
                 "Audit · correctness",
                 "client/http.rs:3  Off by one  (in your draft)"
@@ -835,7 +876,7 @@ mod tests {
         let names: BTreeMap<String, String> =
             [("correctness".to_string(), "Correctness".to_string())].into();
         assert_eq!(
-            report_lines(&r, &none(), &none(), &names),
+            report_lines(&r, &none(), &none(), &names, "Claude Code"),
             [
                 "Audit · Correctness",
                 "client/http.rs:3  Off by one",
@@ -847,7 +888,7 @@ mod tests {
             ]
         );
         let dismissed: BTreeSet<String> = ["id-correctness-Off by one".to_string()].into();
-        let after = report_lines(&r, &none(), &dismissed, &names);
+        let after = report_lines(&r, &none(), &dismissed, &names, "Claude Code");
         assert_eq!(
             after[..2],
             ["Audit · Correctness", "No findings in this area."],

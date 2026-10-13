@@ -44,7 +44,11 @@ pub(crate) async fn status(shared: &Shared) -> FirstRun {
     .unwrap_or_default();
     let mut harnesses = Vec::new();
     for (kind, name) in HARNESSES {
-        harnesses.push(harness(kind, name, &shared.harness_search_paths).await);
+        let own = match kind {
+            HarnessKind::ClaudeCode => shared.claude_program.as_deref(),
+            HarnessKind::Codex => shared.codex_program.as_deref(),
+        };
+        harnesses.push(harness(kind, name, own, &shared.harness_search_paths).await);
     }
     FirstRun {
         github,
@@ -152,11 +156,15 @@ pub(crate) fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-/// The first `name` in `dirs` that runs and reports a version. A stale link or a script that
-/// fails does not count.
-async fn harness(kind: HarnessKind, name: &str, dirs: &[PathBuf]) -> Harness {
-    for dir in dirs {
-        let path = dir.join(name);
+/// The program the daemon was told to use (`own`: `CLUSIA_CLAUDE_BIN`, `CLUSIA_CODEX_BIN`), or
+/// else the first `name` in `dirs`, that runs and reports a version. A stale link or a script
+/// that fails does not count.
+async fn harness(kind: HarnessKind, name: &str, own: Option<&Path>, dirs: &[PathBuf]) -> Harness {
+    let candidates: Vec<PathBuf> = match own {
+        Some(program) => vec![program.to_path_buf()],
+        None => dirs.iter().map(|dir| dir.join(name)).collect(),
+    };
+    for path in candidates {
         if !is_executable(&path) {
             continue;
         }

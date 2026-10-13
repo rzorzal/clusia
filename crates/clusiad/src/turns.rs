@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use clusia_core::PrRef;
 use clusia_core::config::Harness;
 use clusia_harness::{
-    AgentEvent, BridgeSpec, ClaudeCode, ParseState, SessionArg, TurnSpec, parse_line,
+    Agent, AgentEvent, BridgeSpec, ClaudeCode, ParseState, SessionArg, TurnSpec, parse_line,
 };
 use clusia_protocol::{AgentErrorKind, TurnOrigin};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -86,19 +86,25 @@ impl Stop {
     }
 }
 
-/// Where the `claude` command is: the program set in Config › Harness, else the daemon's own
-/// override, else `claude` on the daemon's `PATH` or in the usual install folders. A name that
-/// is nowhere is returned as is, so starting it fails with "not found".
+/// Where the agent's command is: the program set in Config › Harness, else the daemon's own
+/// override for the harness's kind, else the kind's command (`claude` or `codex`) on the
+/// daemon's `PATH` or in the usual install folders. A name that is nowhere is returned as is,
+/// so starting it fails with "not found".
 pub(crate) fn program_path(shared: &Shared, harness: &Harness) -> PathBuf {
+    let agent = Agent::from(harness.kind);
     let configured = harness
         .program
         .as_deref()
         .map(str::trim)
         .filter(|p| !p.is_empty());
-    let name = match (configured, &shared.claude_program) {
+    let own = match agent {
+        Agent::ClaudeCode => &shared.claude_program,
+        Agent::Codex => &shared.codex_program,
+    };
+    let name = match (configured, own) {
         (Some(program), _) => program,
         (None, Some(program)) => return program.clone(),
-        (None, None) => "claude",
+        (None, None) => agent.program(),
     };
     if name.contains('/') {
         return PathBuf::from(name);
@@ -389,6 +395,15 @@ async fn execute(
             return TurnEnd::Failed;
         }
     };
+    let agent = Agent::from(harness.kind);
+    if agent == Agent::Codex {
+        sink.error(
+            AgentErrorKind::Crashed,
+            format!("{} turns are not available yet", agent.name()),
+        );
+        return TurnEnd::Failed;
+    }
+    let kind = harness.kind;
     let cwd = shared.paths.worktree_for(pr);
     let Some(bridge_program) = shared
         .bridge_program
@@ -415,9 +430,9 @@ async fn execute(
     // when the setting changes before the turn ends.
     shared.sessions.set_turn_sandbox(pr, turn, harness.sandbox);
     let (session, prompt) = match session {
-        SessionSource::Chat => (shared.sessions.session_for(shared, pr), prompt),
+        SessionSource::Chat => (shared.sessions.session_for(shared, pr, kind), prompt),
         SessionSource::Fork => {
-            let session = shared.sessions.fork_session(shared, pr);
+            let session = shared.sessions.fork_session(shared, pr, kind);
             let prompt = match (&session, fresh_prompt) {
                 (SessionArg::New(_), Some(fresh)) => fresh,
                 _ => prompt,
@@ -456,12 +471,12 @@ async fn execute(
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let kind = AgentErrorKind::NotInstalled;
-            sink.error(kind, kind.default_message().to_string());
+            sink.error(kind, agent.message_for(kind));
             return TurnEnd::Failed;
         }
         Err(e) => {
             let kind = AgentErrorKind::Crashed;
-            sink.error(kind, format!("{}: {e}", kind.default_message()));
+            sink.error(kind, format!("{}: {e}", agent.message_for(kind)));
             return TurnEnd::Failed;
         }
     };
@@ -515,7 +530,7 @@ async fn execute(
                 }
                 _ => sweep_and_reap(&mut child, pid).await,
             };
-            ended(sink, status, &tail(stderr).await);
+            ended(agent, sink, status, &tail(stderr).await);
         }
         Ending::Stopped => {
             terminate(&mut child).await;
@@ -555,7 +570,7 @@ async fn execute(
 
 /// The program ended without a result line and without an error of its own: says what its
 /// exit and its standard error tell.
-fn ended(sink: &mut dyn TurnSink, status: Option<ExitStatus>, stderr: &str) {
+fn ended(agent: Agent, sink: &mut dyn TurnSink, status: Option<ExitStatus>, stderr: &str) {
     sink.release();
     if sink.saw_final() || sink.failed() {
         return;
@@ -566,10 +581,10 @@ fn ended(sink: &mut dyn TurnSink, status: Option<ExitStatus>, stderr: &str) {
         .rev()
         .map(str::trim)
         .find(|line| !line.is_empty());
-    let mut message = kind.default_message().to_string();
+    let mut message = agent.message_for(kind);
     match (said, status.and_then(|s| s.code())) {
         (Some(said), _) => message = format!("{message}: {said}"),
-        (None, Some(0)) => message = "Claude Code ended without an answer".to_string(),
+        (None, Some(0)) => message = format!("{} ended without an answer", agent.name()),
         (None, Some(code)) => message = format!("{message} (exit code {code})"),
         (None, None) => {}
     }

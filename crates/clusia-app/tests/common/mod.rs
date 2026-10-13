@@ -47,6 +47,7 @@ impl Daemon {
             harness_search_paths: Vec::new(),
             bridge_program: None,
             claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
         };
         // A restart in the same home can find the lock still held: a child forked by a parallel
         // test keeps the descriptor (and so the flock) until it execs. Wait for it to let go.

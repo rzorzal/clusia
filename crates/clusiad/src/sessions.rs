@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
-use clusia_harness::{AgentEvent, SessionArg, extract_suggestions, parse_probe, probe_command};
+use clusia_core::config::HarnessKind;
+use clusia_harness::{Agent, AgentEvent, SessionArg, extract_suggestions, probe_command};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, ErrorCode, Event, Outcome, ProbeResult, ProtocolError, Reply,
     SessionStateKind, Suggestion, TurnOrigin, topics,
@@ -50,17 +51,18 @@ pub(crate) enum Refusal {
 }
 
 impl Refusal {
-    pub(crate) fn into_outcome(self) -> Outcome {
+    /// `harness` is the display name of the agent the refusal talks about.
+    pub(crate) fn into_outcome(self, harness: &str) -> Outcome {
         let (code, message) = match self {
             Refusal::Busy => (
                 ErrorCode::Busy,
-                AgentErrorKind::Busy.default_message().into(),
+                Agent::ClaudeCode.message_for(AgentErrorKind::Busy),
             ),
             Refusal::NoReview(message) => (ErrorCode::InvalidState, message),
             Refusal::Stopping => (ErrorCode::InvalidState, "clusiad is stopping".to_string()),
             Refusal::Summarizing => (
                 ErrorCode::Busy,
-                "Claude Code is already reading this version".to_string(),
+                format!("{harness} is already reading this version"),
             ),
         };
         Outcome::Err(ProtocolError::new(code, message))
@@ -516,12 +518,13 @@ impl Sessions {
         }
     }
 
-    /// `--resume` for a session the CLI knows, `--session-id` with a fresh uuid otherwise.
-    pub(crate) fn session_for(&self, shared: &Shared, pr: &PrRef) -> SessionArg {
+    /// `--resume` for a session `kind` made and the CLI knows, `--session-id` with a fresh uuid
+    /// otherwise: a session of another harness is not resumed.
+    pub(crate) fn session_for(&self, shared: &Shared, pr: &PrRef, kind: HarnessKind) -> SessionArg {
         if let Ok(Some(review)) = reviews::load_stored(shared, pr)
-            && let Some(id) = review.harness_session
+            && let Some(id) = review.session_of(kind)
         {
-            return SessionArg::Resume(id);
+            return SessionArg::Resume(id.to_string());
         }
         let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
         let slot = table.entry(pr.clone()).or_default();
@@ -533,12 +536,21 @@ impl Sessions {
 
     /// A session a check runs in: a fork of the review's session, which keeps the chat's
     /// history out of reach of the check and the check's out of the chat's, or a new session of
-    /// its own when the review has none yet. Neither is ever recorded as the review's session.
-    pub(crate) fn fork_session(&self, shared: &Shared, pr: &PrRef) -> SessionArg {
+    /// its own when the review has none yet, or only one of another harness. Neither is ever
+    /// recorded as the review's session.
+    pub(crate) fn fork_session(
+        &self,
+        shared: &Shared,
+        pr: &PrRef,
+        kind: HarnessKind,
+    ) -> SessionArg {
         let id = uuid::Uuid::new_v4().to_string();
         match reviews::load_stored(shared, pr) {
-            Ok(Some(review)) => match review.harness_session {
-                Some(parent) => SessionArg::Fork { parent, id },
+            Ok(Some(review)) => match review.session_of(kind) {
+                Some(parent) => SessionArg::Fork {
+                    parent: parent.to_string(),
+                    id,
+                },
                 None => SessionArg::New(id),
             },
             _ => SessionArg::New(id),
@@ -569,7 +581,9 @@ async fn drive(
             tracing::error!(pr = %pr, turn, "an agent turn failed inside the daemon");
             Out::new(&shared, &pr, turn).error(
                 AgentErrorKind::Crashed,
-                AgentErrorKind::Crashed.default_message().to_string(),
+                current_agent(&shared)
+                    .await
+                    .message_for(AgentErrorKind::Crashed),
             );
         }
         // Whatever the turn was still asking, it asks no more.
@@ -716,6 +730,8 @@ struct ChatSink<'a> {
     summary_for: Option<String>,
     /// Why the turn was asked to stop: a turn whose review ended records and tells nothing.
     stop: Arc<Stop>,
+    /// The agent this turn runs on.
+    agent: Agent,
 }
 
 impl ChatSink<'_> {
@@ -739,7 +755,9 @@ impl ChatSink<'_> {
                     self.out.denied(tool, detail);
                 }
             }
-            AgentEvent::SessionId(id) => remember_session(self.shared, self.out.pr, &id).await,
+            AgentEvent::SessionId(id) => {
+                remember_session(self.shared, self.out.pr, &id, self.agent.kind()).await
+            }
             AgentEvent::Error { kind, message } => self.error(kind, message),
             AgentEvent::Final {
                 text,
@@ -756,7 +774,7 @@ impl ChatSink<'_> {
                 if is_error && !self.failed {
                     self.failed = true;
                     let message = match text.trim() {
-                        "" => AgentErrorKind::Crashed.default_message().to_string(),
+                        "" => self.agent.message_for(AgentErrorKind::Crashed),
                         said => said.to_string(),
                     };
                     self.out.error(AgentErrorKind::Crashed, message);
@@ -839,13 +857,15 @@ impl TurnSink for ChatSink<'_> {
     }
 }
 
-/// The CLI confirmed the session: from now on turns resume it. Stored in the review file.
-async fn remember_session(shared: &Shared, pr: &PrRef, id: &str) {
+/// The CLI confirmed the session: from now on turns of `kind` resume it. Stored in the review
+/// file together with the harness that made it.
+async fn remember_session(shared: &Shared, pr: &PrRef, id: &str, kind: HarnessKind) {
     let _guard = reviews::lock(shared, pr).await;
     if let Ok(Some(mut review)) = reviews::load_stored(shared, pr)
-        && review.harness_session.as_deref() != Some(id)
+        && review.session_of(kind) != Some(id)
     {
         review.harness_session = Some(id.to_string());
+        review.harness_session_kind = Some(kind);
         if reviews::save(shared, &review).is_err() {
             tracing::warn!(pr = %pr, "cannot store the agent session in the review");
         }
@@ -864,6 +884,7 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         streamed: false,
         summary_for: prompt.summary_for.clone(),
         stop: stop.clone(),
+        agent: current_agent(&shared).await,
     };
     let is_summary = prompt.summary_for.is_some();
     let run = TurnRun {
@@ -932,6 +953,11 @@ pub(crate) fn close_unfinished(shared: &Shared) {
     }
 }
 
+/// The agent the config names now.
+pub(crate) async fn current_agent(shared: &Shared) -> Agent {
+    Agent::from(shared.config.read().await.harness.kind)
+}
+
 pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcome {
     let text = text.trim();
     if text.is_empty() {
@@ -947,7 +973,7 @@ pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcom
     };
     match Sessions::submit(shared, pr, prompt).await {
         Ok(turn) => Outcome::Ok(Reply::AgentTurn { turn }),
-        Err(refusal) => refusal.into_outcome(),
+        Err(refusal) => refusal.into_outcome(current_agent(shared).await.name()),
     }
 }
 
@@ -995,6 +1021,7 @@ pub(crate) async fn log(shared: &Shared, pr: &PrRef) -> Outcome {
 /// Asks the program for its version: the Config › Harness probe card.
 pub(crate) async fn probe(shared: &Shared) -> Outcome {
     let harness = shared.config.read().await.harness.clone();
+    let agent = Agent::from(harness.kind);
     let program = program_path(shared, &harness);
     let started = Instant::now();
     let env: Vec<_> = std::env::vars_os().collect();
@@ -1007,20 +1034,21 @@ pub(crate) async fn probe(shared: &Shared) -> Outcome {
     let found: Result<String, String> =
         match tokio::time::timeout(PROBE_LIMIT, command.output()).await {
             Err(_) => Err(format!(
-                "Claude Code did not answer within {} seconds",
+                "{} did not answer within {} seconds",
+                agent.name(),
                 PROBE_LIMIT.as_secs()
             )),
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(AgentErrorKind::NotInstalled.default_message().to_string())
+                Err(agent.message_for(AgentErrorKind::NotInstalled))
             }
             Ok(Err(e)) => Err(e.to_string()),
             Ok(Ok(output)) if output.status.success() => {
-                parse_probe(&String::from_utf8_lossy(&output.stdout))
+                agent.parse_version(&String::from_utf8_lossy(&output.stdout))
             }
             Ok(Ok(output)) => {
                 let said = String::from_utf8_lossy(&output.stderr);
                 Err(match said.trim() {
-                    "" => format!("Claude Code exited with {}", output.status),
+                    "" => format!("{} exited with {}", agent.name(), output.status),
                     said => said.to_string(),
                 })
             }
@@ -1034,6 +1062,9 @@ pub(crate) async fn probe(shared: &Shared) -> Outcome {
             program,
             elapsed_ms,
             error: None,
+            harness: agent.name().to_string(),
+            signed_in: None,
+            account: None,
         },
         Err(error) => ProbeResult {
             ok: false,
@@ -1041,6 +1072,9 @@ pub(crate) async fn probe(shared: &Shared) -> Outcome {
             program,
             elapsed_ms,
             error: Some(error),
+            harness: agent.name().to_string(),
+            signed_in: None,
+            account: None,
         },
     }))
 }
@@ -1062,6 +1096,7 @@ mod tests {
     fn shared_for(paths: Paths, config: Config) -> Arc<Shared> {
         let options = crate::options::DaemonOptions {
             claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
             github_api: Some("http://127.0.0.1:9".into()),
             github_token: None,
             gh_program: "/nonexistent/gh".into(),
@@ -1269,7 +1304,7 @@ mod tests {
         wait_calls(&lab, 1).await;
         assert_eq!(lab.send(&pr, "three").await, Err(Refusal::Busy));
         assert_eq!(
-            Refusal::Busy.into_outcome(),
+            Refusal::Busy.into_outcome("Claude Code"),
             Outcome::Err(ProtocolError::new(
                 ErrorCode::Busy,
                 "The agent is busy: wait for the current turn"
@@ -1917,6 +1952,155 @@ mod tests {
             found.error.as_deref(),
             Some("Install Claude Code or set its path")
         );
+        assert_eq!(
+            (found.harness.as_str(), found.signed_in, found.account),
+            ("Claude Code", None, None)
+        );
+    }
+
+    /// A program that prints what `codex --version` prints.
+    fn version_script(dir: &Path, said: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let program = dir.join("codex");
+        std::fs::write(&program, format!("#!/bin/sh\necho '{said}'\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    #[tokio::test]
+    async fn the_probe_of_codex_reads_its_version_and_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = version_script(dir.path(), "codex-cli 0.162.1");
+        let lab = lab_with(Script::one(Turn::answer("x")), |c| {
+            c.harness.kind = HarnessKind::Codex;
+            c.harness.program = Some(program.display().to_string());
+        });
+        let Outcome::Ok(Reply::Probe(found)) = probe(&lab.shared).await else {
+            panic!("a probe reply");
+        };
+        assert!(found.ok, "{found:?}");
+        assert_eq!(found.version.as_deref(), Some("0.162.1"));
+        assert_eq!(found.harness, "Codex");
+
+        let missing = lab_with(Script::one(Turn::answer("x")), |c| {
+            c.harness.kind = HarnessKind::Codex;
+            c.harness.program = Some("/nonexistent/codex".into());
+        });
+        let Outcome::Ok(Reply::Probe(found)) = probe(&missing.shared).await else {
+            panic!("a probe reply");
+        };
+        assert_eq!(
+            found.error.as_deref(),
+            Some("Install Codex or set its path")
+        );
+        assert_eq!(found.harness, "Codex");
+    }
+
+    #[tokio::test]
+    async fn the_program_follows_the_harness_kind() {
+        let lab = lab(Script::one(Turn::answer("x")));
+        let mut harness = Harness::default();
+        assert_eq!(
+            crate::turns::program_path(&lab.shared, &harness),
+            Path::new("/nonexistent/claude")
+        );
+        harness.kind = HarnessKind::Codex;
+        assert_eq!(
+            crate::turns::program_path(&lab.shared, &harness),
+            Path::new("/nonexistent/codex")
+        );
+        harness.program = Some(" /opt/tools/codex ".into());
+        assert_eq!(
+            crate::turns::program_path(&lab.shared, &harness),
+            Path::new("/opt/tools/codex"),
+            "the configured program wins for either kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_of_another_kind_is_not_resumed() {
+        let lab = lab(Script::one(Turn::answer("x")));
+        let pr = pr(7);
+        let sessions = &lab.shared.sessions;
+        let store = |kind: Option<HarnessKind>| {
+            let mut review = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+            review.harness_session = Some("thr-1".into());
+            review.harness_session_kind = kind;
+            save_review(&lab.shared.paths, &review).unwrap();
+        };
+        store(Some(HarnessKind::Codex));
+        let shared = &lab.shared;
+        assert_eq!(
+            sessions.session_for(shared, &pr, HarnessKind::Codex),
+            SessionArg::Resume("thr-1".into())
+        );
+        assert!(matches!(
+            sessions.session_for(shared, &pr, HarnessKind::ClaudeCode),
+            SessionArg::New(_)
+        ));
+        assert!(matches!(
+            sessions.fork_session(shared, &pr, HarnessKind::Codex),
+            SessionArg::Fork { parent, .. } if parent == "thr-1"
+        ));
+        assert!(matches!(
+            sessions.fork_session(shared, &pr, HarnessKind::ClaudeCode),
+            SessionArg::New(_)
+        ));
+        // A session stored before the kind existed is Claude Code's.
+        store(None);
+        assert_eq!(
+            sessions.session_for(shared, &pr, HarnessKind::ClaudeCode),
+            SessionArg::Resume("thr-1".into())
+        );
+        assert!(matches!(
+            sessions.session_for(shared, &pr, HarnessKind::Codex),
+            SessionArg::New(_)
+        ));
+        assert!(matches!(
+            sessions.fork_session(shared, &pr, HarnessKind::Codex),
+            SessionArg::New(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_session_is_stored_with_the_kind_that_made_it() {
+        let lab = lab(Script::one(Turn::answer("x")));
+        let pr = pr(7);
+        remember_session(&lab.shared, &pr, "thr-9", HarnessKind::Codex).await;
+        let stored = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+        assert_eq!(stored.harness_session.as_deref(), Some("thr-9"));
+        assert_eq!(stored.harness_session_kind, Some(HarnessKind::Codex));
+        assert_eq!(
+            lab.shared
+                .sessions
+                .session_for(&lab.shared, &pr, HarnessKind::Codex),
+            SessionArg::Resume("thr-9".into())
+        );
+        remember_session(&lab.shared, &pr, "uuid-1", HarnessKind::ClaudeCode).await;
+        let stored = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
+        assert_eq!(
+            (
+                stored.harness_session.as_deref(),
+                stored.harness_session_kind
+            ),
+            (Some("uuid-1"), Some(HarnessKind::ClaudeCode))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_codex_turn_is_refused_until_its_server_exists() {
+        let mut lab = lab_with(Script::one(Turn::answer("x")), |c| {
+            c.harness.kind = HarnessKind::Codex;
+        });
+        let pr = pr(7);
+        lab.send(&pr, "hi").await.unwrap();
+        let seen = until(&mut lab.events, |e| matches!(e, Event::AgentError { .. })).await;
+        let message = seen.iter().find_map(|e| match e {
+            Event::AgentError { message, .. } => Some(message.as_str()),
+            _ => None,
+        });
+        assert_eq!(message, Some("Codex turns are not available yet"));
+        assert!(lab.calls().is_empty(), "no claude ran");
     }
 
     #[tokio::test]
@@ -2320,6 +2504,7 @@ mod tests {
                     streamed: false,
                     summary_for: Some("abc123".into()),
                     stop,
+                    agent: Agent::ClaudeCode,
                 };
                 run.handle(AgentEvent::Final {
                     text: "The summary.".into(),

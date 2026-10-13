@@ -65,6 +65,8 @@ pub(crate) struct Shared {
     pub harness_search_paths: Vec<PathBuf>,
     /// The `claude` program of `DaemonOptions` (see `sessions::program_path`).
     pub claude_program: Option<PathBuf>,
+    /// The `codex` program of `DaemonOptions` (see `turns::program_path`).
+    pub codex_program: Option<PathBuf>,
     /// The `clusiad` that runs as the permission bridge; this executable when `None`.
     pub bridge_program: Option<PathBuf>,
     /// The permission requests waiting for the reviewer.
@@ -154,6 +156,7 @@ impl Shared {
                 .unwrap_or_else(|| "https://api.giphy.com".to_string()),
             harness_search_paths: options.harness_search_paths,
             claude_program: options.claude_program,
+            codex_program: options.codex_program,
             bridge_program: options.bridge_program,
             permissions: Permissions::default(),
             sessions: Sessions::default(),

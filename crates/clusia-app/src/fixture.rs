@@ -503,6 +503,9 @@ pub fn demo_probe() -> ProbeResult {
         program: "/opt/homebrew/bin/claude".into(),
         elapsed_ms: 1800,
         error: None,
+        harness: "Claude Code".into(),
+        signed_in: None,
+        account: None,
     }
 }
 

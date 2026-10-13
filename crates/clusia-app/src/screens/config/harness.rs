@@ -594,6 +594,9 @@ mod tests {
             program: "/opt/homebrew/bin/claude".into(),
             elapsed_ms: 1800,
             error: (!ok).then(|| "Run `claude` once in a terminal".to_string()),
+            harness: "Claude Code".into(),
+            signed_in: None,
+            account: None,
         }
     }
 

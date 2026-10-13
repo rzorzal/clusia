@@ -209,14 +209,15 @@ pub(crate) async fn update_state(
 /// Starts the summary turn when the review opens, unless the agent already read this head or
 /// the user chose to ask first. Returns how the "agent" load step went.
 pub(crate) async fn on_open(shared: &Arc<Shared>, pr: &PrRef, head: &str) -> (StepStatus, String) {
-    let skipped = |why: &str| (StepStatus::Skipped, why.to_string());
+    let skipped = |why: String| (StepStatus::Skipped, why);
+    let name = crate::sessions::current_agent(shared).await.name();
     let wait = matches!(shared.config.read().await.harness.on_open, OnOpen::Wait);
     if wait {
-        return skipped("Waiting for your first question");
+        return skipped("Waiting for your first question".to_string());
     }
     let state = load_agent_state(&shared.paths, pr).unwrap_or_default();
     if state.last_summary_head.as_deref() == Some(head) {
-        return skipped("Claude Code already read this version");
+        return skipped(format!("{name} already read this version"));
     }
     let again = state.last_summary_head.is_some();
     let text = match load_review_cache(&shared.paths, pr) {
@@ -229,9 +230,9 @@ pub(crate) async fn on_open(shared: &Arc<Shared>, pr: &PrRef, head: &str) -> (St
         summary_for: Some(head.to_string()),
     };
     match Sessions::submit(shared, pr, prompt).await {
-        Ok(_) => (StepStatus::Done, "Claude Code is reading it".to_string()),
-        Err(Refusal::Summarizing) => skipped("Claude Code is already reading this version"),
-        Err(_) => skipped("Claude Code is busy with this review"),
+        Ok(_) => (StepStatus::Done, format!("{name} is reading it")),
+        Err(Refusal::Summarizing) => skipped(format!("{name} is already reading this version")),
+        Err(_) => skipped(format!("{name} is busy with this review")),
     }
 }
 
@@ -324,13 +325,17 @@ pub(crate) async fn dismiss(shared: &Shared, pr: &PrRef, id: &str) -> Outcome {
 
 /// A turn ended well and no window or terminal was watching the review: tells the user.
 pub(crate) async fn notify_finished(shared: &Shared, pr: &PrRef, turn: u64) {
-    let title = match reviews::load_stored(shared, pr) {
-        Ok(Some(review)) => review.title,
-        _ => String::new(),
-    };
+    let stored = reviews::load_stored(shared, pr).ok().flatten();
+    let harness = notifications::harness_name(shared, stored.as_ref()).await;
+    let title = stored.map(|review| review.title).unwrap_or_default();
     let at = now_unix();
-    let event =
-        NotifyEvent::agent_finished(pr, &title, format!("agent_finished:{pr}:{turn}:{at}"), at);
+    let event = NotifyEvent::agent_finished(
+        pr,
+        harness,
+        &title,
+        format!("agent_finished:{pr}:{turn}:{at}"),
+        at,
+    );
     notifications::deliver(shared, vec![event]).await;
 }
 

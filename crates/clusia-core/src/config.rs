@@ -596,6 +596,25 @@ impl Default for Harness {
 pub enum HarnessKind {
     #[default]
     ClaudeCode,
+    Codex,
+}
+
+impl HarnessKind {
+    /// What the pages and messages call this harness.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
+    /// What to do when the harness is not signed in.
+    pub fn sign_in_hint(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Run `claude` once in a terminal",
+            Self::Codex => "Run `codex login` once in a terminal",
+        }
+    }
 }
 
 /// What happens when a review opens.
@@ -696,7 +715,7 @@ enum Takes {
 /// Flags that decide what the agent may do, which settings load, which session it joins, which
 /// prompt it follows and how it prints. Clúsia sets them itself, so the user's extra
 /// arguments never carry them.
-const RESERVED: [(&str, Takes); 26] = [
+const CLAUDE_RESERVED: [(&str, Takes); 26] = [
     ("--dangerously-skip-permissions", Takes::Nothing),
     ("--allow-dangerously-skip-permissions", Takes::Nothing),
     ("--permission-mode", Takes::One),
@@ -725,27 +744,67 @@ const RESERVED: [(&str, Takes); 26] = [
     ("--input-format", Takes::One),
 ];
 
-/// The names of the reserved flags.
-pub fn reserved_flags() -> impl Iterator<Item = &'static str> {
-    RESERVED.iter().map(|(name, _)| *name)
+/// The same for Codex: flags that set its sandbox, approvals, config, hooks, profile or
+/// transport, which Clúsia sets itself on every thread.
+const CODEX_RESERVED: [(&str, Takes); 16] = [
+    ("--dangerously-bypass-approvals-and-sandbox", Takes::Nothing),
+    ("--yolo", Takes::Nothing),
+    ("--dangerously-bypass-hook-trust", Takes::Nothing),
+    ("--approve-for-me", Takes::Nothing),
+    ("--not-so-yolo", Takes::Nothing),
+    ("--full-auto", Takes::Nothing),
+    ("--config", Takes::One),
+    ("-c", Takes::One),
+    ("--enable", Takes::One),
+    ("--disable", Takes::One),
+    ("--sandbox", Takes::One),
+    ("-s", Takes::One),
+    ("--ask-for-approval", Takes::One),
+    ("-a", Takes::One),
+    ("--profile", Takes::One),
+    ("-p", Takes::One),
+];
+
+/// Codex's `--listen` and `--stdio` choose the transport Clúsia speaks.
+const CODEX_TRANSPORT: [(&str, Takes); 2] = [("--listen", Takes::One), ("--stdio", Takes::Nothing)];
+
+fn table(kind: HarnessKind) -> Vec<(&'static str, Takes)> {
+    match kind {
+        HarnessKind::ClaudeCode => CLAUDE_RESERVED.to_vec(),
+        HarnessKind::Codex => CODEX_RESERVED
+            .iter()
+            .chain(&CODEX_TRANSPORT)
+            .copied()
+            .collect(),
+    }
 }
 
-fn reserved(arg: &str) -> Option<(&'static str, Takes, bool)> {
+/// The names of the reserved flags of Claude Code.
+pub fn reserved_flags() -> impl Iterator<Item = &'static str> {
+    reserved_flags_for(HarnessKind::ClaudeCode)
+}
+
+/// The names of the reserved flags of `kind`.
+pub fn reserved_flags_for(kind: HarnessKind) -> impl Iterator<Item = &'static str> {
+    table(kind).into_iter().map(|(name, _)| name)
+}
+
+fn reserved(kind: HarnessKind, arg: &str) -> Option<(&'static str, Takes, bool)> {
     let (name, has_value) = match arg.split_once('=') {
         Some((name, _)) => (name, true),
         None => (arg, false),
     };
-    RESERVED
-        .iter()
+    table(kind)
+        .into_iter()
         .find(|(flag, _)| *flag == name)
-        .map(|(flag, takes)| (*flag, *takes, has_value))
-        .or_else(|| cluster(arg))
+        .map(|(flag, takes)| (flag, takes, has_value))
+        .or_else(|| cluster(kind, arg))
 }
 
-/// A single-dash word such as `-cp`, `-xr` or `-r<uuid>`: Claude Code reads each leading letter
+/// A single-dash word such as `-cp`, `-xr` or `-r<uuid>`: both agents read each leading letter
 /// as a flag of its own and whatever follows as the value of the last one, so a word whose
 /// leading run of letters holds a reserved letter is as reserved as the flag alone.
-fn cluster(arg: &str) -> Option<(&'static str, Takes, bool)> {
+fn cluster(kind: HarnessKind, arg: &str) -> Option<(&'static str, Takes, bool)> {
     let word = arg.strip_prefix('-')?;
     if word.len() < 2 || word.starts_with('-') {
         return None;
@@ -753,28 +812,40 @@ fn cluster(arg: &str) -> Option<(&'static str, Takes, bool)> {
     let (flag, takes) = word
         .chars()
         .take_while(char::is_ascii_alphabetic)
-        .find_map(|c| match c {
-            'p' => Some(("-p", Takes::Nothing)),
-            'c' => Some(("-c", Takes::Nothing)),
-            'r' => Some(("-r", Takes::Nothing)),
+        .find_map(|c| match (kind, c) {
+            (_, 'p') => Some(("-p", Takes::Nothing)),
+            (_, 'c') => Some(("-c", Takes::Nothing)),
+            (HarnessKind::ClaudeCode, 'r') => Some(("-r", Takes::Nothing)),
+            (HarnessKind::Codex, 's') => Some(("-s", Takes::Nothing)),
+            (HarnessKind::Codex, 'a') => Some(("-a", Takes::Nothing)),
             _ => None,
         })?;
     Some((flag, takes, false))
 }
 
-/// The first reserved flag in `args`, if any.
+/// The first reserved flag of Claude Code in `args`, if any.
 pub fn first_reserved_flag(args: &[String]) -> Option<&'static str> {
-    args.iter()
-        .find_map(|a| reserved(a).map(|(flag, _, _)| flag))
+    first_reserved_flag_for(HarnessKind::ClaudeCode, args)
 }
 
-/// `args` without the reserved flags and the values that follow them (`--flag value`; a
-/// `--flag=value` is one word).
+/// The first flag of `kind`'s reserved list in `args`, if any.
+pub fn first_reserved_flag_for(kind: HarnessKind, args: &[String]) -> Option<&'static str> {
+    args.iter()
+        .find_map(|a| reserved(kind, a).map(|(flag, _, _)| flag))
+}
+
+/// `args` without Claude Code's reserved flags (see `strip_reserved_flags_for`).
 pub fn strip_reserved_flags(args: &[String]) -> Vec<String> {
+    strip_reserved_flags_for(HarnessKind::ClaudeCode, args)
+}
+
+/// `args` without the flags `kind` reserves and the values that follow them (`--flag value`; a
+/// `--flag=value` is one word).
+pub fn strip_reserved_flags_for(kind: HarnessKind, args: &[String]) -> Vec<String> {
     let mut kept = Vec::with_capacity(args.len());
     let mut rest = args.iter().peekable();
     while let Some(arg) = rest.next() {
-        let Some((_, takes, has_value)) = reserved(arg) else {
+        let Some((_, takes, has_value)) = reserved(kind, arg) else {
             kept.push(arg.clone());
             continue;
         };
@@ -961,7 +1032,7 @@ impl Config {
             .harness
             .extra_args_list()
             .map_err(|e| format!("harness.extra_args: {e}"))?;
-        if let Some(flag) = first_reserved_flag(&args) {
+        if let Some(flag) = first_reserved_flag_for(self.harness.kind, &args) {
             return Err(format!(
                 "harness.extra_args must not set {flag}: Clúsia sets permissions, settings, session, prompt and output itself"
             ));
@@ -1646,6 +1717,124 @@ mod tests {
             assert_eq!(first_reserved_flag(&args), None, "{fine}");
             assert_eq!(strip_reserved_flags(&args), args, "{fine}");
         }
+    }
+
+    #[test]
+    fn codex_is_a_harness_kind_with_a_name() {
+        let c: Config = serde_json::from_str(r#"{"harness":{"kind":"codex"}}"#).unwrap();
+        assert_eq!(c.harness.kind, HarnessKind::Codex);
+        assert_eq!(
+            serde_json::to_string(&HarnessKind::Codex).unwrap(),
+            r#""codex""#
+        );
+        assert_eq!(
+            serde_json::to_string(&HarnessKind::ClaudeCode).unwrap(),
+            r#""claude-code""#
+        );
+        assert_eq!(HarnessKind::ClaudeCode.name(), "Claude Code");
+        assert_eq!(HarnessKind::Codex.name(), "Codex");
+        assert_eq!(
+            HarnessKind::Codex.sign_in_hint(),
+            "Run `codex login` once in a terminal"
+        );
+        assert_eq!(
+            HarnessKind::ClaudeCode.sign_in_hint(),
+            "Run `claude` once in a terminal"
+        );
+    }
+
+    fn words(text: &str) -> Vec<String> {
+        text.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn every_codex_flag_that_changes_the_run_is_reserved() {
+        let names: Vec<&str> = reserved_flags_for(HarnessKind::Codex).collect();
+        for flag in [
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--yolo",
+            "--dangerously-bypass-hook-trust",
+            "--approve-for-me",
+            "--full-auto",
+            "-c",
+            "--config",
+            "--enable",
+            "--disable",
+            "-s",
+            "--sandbox",
+            "-a",
+            "--ask-for-approval",
+            "--profile",
+            "-p",
+            "--listen",
+            "--stdio",
+        ] {
+            assert!(names.contains(&flag), "{flag}");
+            let args = words(flag);
+            assert_eq!(
+                first_reserved_flag_for(HarnessKind::Codex, &args),
+                Some(flag)
+            );
+        }
+        for (said, rest) in [
+            ("--sandbox danger-full-access", ""),
+            ("--sandbox=danger-full-access", ""),
+            ("-c features.hooks=true", ""),
+            ("--config notify=[]", ""),
+            ("--model gpt-5 --yolo --search", "--model gpt-5 --search"),
+            ("-a never --search", "--search"),
+            ("--listen ws://127.0.0.1:1 --search", "--search"),
+            ("-cfeatures.hooks=true", ""),
+            ("--enable hooks --disable x --search", "--search"),
+        ] {
+            assert_eq!(
+                strip_reserved_flags_for(HarnessKind::Codex, &words(said)),
+                words(rest),
+                "{said}"
+            );
+        }
+        for fine in ["--search", "--model", "-m", "--add-dir", "-"] {
+            assert_eq!(
+                first_reserved_flag_for(HarnessKind::Codex, &words(fine)),
+                None,
+                "{fine}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_kind_refuses_only_its_own_flags() {
+        // Claude Code's `-r` and `--resume` mean nothing to Codex, and Codex's `--yolo` nothing
+        // to Claude Code.
+        assert_eq!(
+            first_reserved_flag_for(HarnessKind::Codex, &words("--resume abc -r")),
+            None
+        );
+        assert_eq!(
+            first_reserved_flag_for(HarnessKind::ClaudeCode, &words("--yolo --sandbox x -a")),
+            None
+        );
+        assert_eq!(first_reserved_flag(&words("-r")), Some("-r"));
+        assert_eq!(
+            strip_reserved_flags(&words("--session-id x --keep")),
+            ["--keep"]
+        );
+    }
+
+    #[test]
+    fn validation_checks_extra_args_against_the_kind_in_use() {
+        let mut c = Config::default();
+        c.harness.extra_args = "--sandbox danger-full-access".into();
+        assert_eq!(c.validate(), Ok(()), "not reserved for Claude Code");
+        c.harness.kind = HarnessKind::Codex;
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "harness.extra_args must not set --sandbox: Clúsia sets permissions, settings, session, prompt and output itself"
+        );
+        c.harness.extra_args = "--permission-mode plan".into();
+        assert_eq!(c.validate(), Ok(()), "not reserved for Codex");
+        c.harness.kind = HarnessKind::ClaudeCode;
+        assert!(c.validate().unwrap_err().contains("must not set"));
     }
 
     #[test]

@@ -76,7 +76,7 @@ pub enum Command {
         #[arg(long)]
         audit: bool,
     },
-    /// Have Claude Code re-read the draft of a saved review against the new commits of its pull
+    /// Have the agent re-read the draft of a saved review against the new commits of its pull
     /// request, now, and print what it found for each comment.
     Revalidate {
         /// `owner/repo#number` or a pull request URL.

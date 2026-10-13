@@ -519,7 +519,8 @@ pub enum ProbeState {
 /// What a refused `AgentSend` says in the chat.
 fn refusal_text(code: ErrorCode, message: &str) -> String {
     if code == ErrorCode::Busy {
-        AgentErrorKind::Busy.to_string()
+        // The busy line names no harness.
+        AgentErrorKind::Busy.message_for("", "")
     } else {
         message.to_string()
     }
@@ -533,6 +534,9 @@ fn failed_probe(message: impl Into<String>) -> ProbeResult {
         program: String::new(),
         elapsed_ms: 0,
         error: Some(message.into()),
+        harness: String::new(),
+        signed_in: None,
+        account: None,
     }
 }
 

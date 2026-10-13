@@ -27,6 +27,8 @@ pub(crate) struct NewsInput {
     pub checks_label: Option<String>,
     pub last_checks: Option<String>,
     pub local: Vec<Activity>,
+    /// The display name of the harness that revalidated the draft.
+    pub harness: String,
 }
 
 fn plural(n: usize, word: &str) -> String {
@@ -158,7 +160,7 @@ pub(crate) fn news_items(input: &NewsInput) -> Vec<NewsItem> {
             }),
             ActivityKind::ReviewRevalidated => items.push(NewsItem {
                 kind: NewsKind::Revalidated,
-                source: "Claude Code".into(),
+                source: input.harness.clone(),
                 who: None,
                 at: a.ts,
                 summary: format!("Draft revalidated: {}", a.note.as_deref().unwrap_or("")),
@@ -222,6 +224,9 @@ pub(crate) async fn whats_new(shared: &Shared, pr: &PrRef) -> Outcome {
         checks_label,
         last_checks: review.last_checks.clone(),
         local,
+        harness: crate::notifications::harness_name(shared, Some(&review))
+            .await
+            .to_string(),
     };
     Outcome::Ok(Reply::WhatsNew(news_items(&input)))
 }
@@ -553,6 +558,7 @@ mod tests {
                     note: None,
                 },
             ],
+            harness: "Claude Code".into(),
         }
     }
 
@@ -604,6 +610,12 @@ mod tests {
             "Draft revalidated: 1 moved, 1 obsolete, 1 new wording"
         );
         assert_eq!((row.who, row.at), (None, SINCE + 3800));
+        i.harness = "Codex".into();
+        let row = news_items(&i)
+            .into_iter()
+            .find(|row| row.kind == NewsKind::Revalidated)
+            .expect("a revalidated row");
+        assert_eq!(row.source, "Codex");
     }
 
     #[test]

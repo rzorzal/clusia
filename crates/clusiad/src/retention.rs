@@ -232,6 +232,7 @@ mod tests {
             harness_search_paths: Vec::new(),
             bridge_program: None,
             claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
         };
         let shared = Shared::new(Paths::new(dir.path()), Config::default(), options);
         (dir, shared)

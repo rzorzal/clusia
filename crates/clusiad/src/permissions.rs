@@ -487,12 +487,12 @@ impl Drop for Abandoned<'_> {
 
 /// Tells the tray, because no window holds the review to show the question.
 async fn notify(shared: &Shared, pr: &PrRef, id: &str, tool: &str, summary: &str) {
-    let title = match reviews::load_stored(shared, pr) {
-        Ok(Some(review)) => review.title,
-        _ => String::new(),
-    };
+    let stored = reviews::load_stored(shared, pr).ok().flatten();
+    let harness = notifications::harness_name(shared, stored.as_ref()).await;
+    let title = stored.map(|review| review.title).unwrap_or_default();
     let event = NotifyEvent::agent_permission(
         pr,
+        harness,
         &title,
         verb(tool),
         summary,
@@ -708,6 +708,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let options = crate::options::DaemonOptions {
             claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
             bridge_program: None,
             github_api: Some("http://127.0.0.1:9".into()),
             github_token: None,

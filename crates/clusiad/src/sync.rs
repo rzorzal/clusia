@@ -319,6 +319,7 @@ mod tests {
             harness_search_paths: Vec::new(),
             bridge_program: None,
             claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
         };
         let shared = Arc::new(Shared::new(
             clusia_core::Paths::new(dir.path()),
