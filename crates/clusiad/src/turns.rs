@@ -155,7 +155,7 @@ pub(crate) fn classify_stderr(text: &str) -> Option<AgentErrorKind> {
     }
 }
 
-fn signal_group(pid: Option<u32>, signal: i32) {
+pub(crate) fn signal_group(pid: Option<u32>, signal: i32) {
     if let Some(pid) = pid {
         // SAFETY: `killpg` only sends a signal. The group is the one the child leads
         // (`process_group(0)` at spawn), so no other process is addressed.

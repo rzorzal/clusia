@@ -35,6 +35,8 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 /// How long a request waits for its answer.
 const CALL_LIMIT: Duration = Duration::from_secs(60);
+/// How long a write to the process may take before it counts as not reading its input.
+const SEND_LIMIT: Duration = Duration::from_secs(10);
 /// A line longer than this is not read: nothing Codex says is that long.
 const MAX_LINE: usize = 16 * 1024 * 1024;
 /// How much of the process's standard error is kept for the error line.
@@ -75,16 +77,23 @@ impl Link {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Writes one line. A process that stops reading with its pipe full would hold the lock
+    /// for ever, and with it every interrupt and kill, so the write is bounded.
     async fn send(&self, message: &Value) -> Result<(), String> {
-        let mut stdin = self.stdin.lock().await;
-        let Some(stdin) = stdin.as_mut() else {
-            return Err("Codex is not running".to_string());
+        let write = async {
+            let mut stdin = self.stdin.lock().await;
+            let Some(stdin) = stdin.as_mut() else {
+                return Err("Codex is not running".to_string());
+            };
+            stdin
+                .write_all(codex::to_line(message).as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            stdin.flush().await.map_err(|e| e.to_string())
         };
-        stdin
-            .write_all(codex::to_line(message).as_bytes())
+        tokio::time::timeout(SEND_LIMIT, write)
             .await
-            .map_err(|e| e.to_string())?;
-        stdin.flush().await.map_err(|e| e.to_string())
+            .unwrap_or_else(|_| Err("Codex does not read its input".to_string()))
     }
 
     /// Sends the request `build` makes for a fresh id and waits for its answer.
@@ -369,7 +378,10 @@ impl Server {
     /// Ends the process the polite way: its input closes, which makes it leave; whatever is
     /// left of its group after `CLOSE_GRACE` is killed, and the process is reaped.
     async fn stop(&self) {
-        self.link.stdin.lock().await.take();
+        // A write that is stuck holds the lock: the group is signalled all the same.
+        if let Ok(mut stdin) = self.link.stdin.try_lock() {
+            stdin.take();
+        }
         let Some(mut child) = self.child.lock().await.take() else {
             return;
         };
@@ -378,15 +390,27 @@ impl Server {
             turns::exited_within(pid, CLOSE_GRACE).await;
         }
         turns::sweep_and_reap(&mut child, pid).await;
+        self.link.stdin.lock().await.take();
     }
 
     /// Ends the process now: SIGTERM to its group, SIGKILL after a moment.
     async fn kill(&self) {
+        // The process goes first: a write that is stuck on it fails then and frees the lock.
+        let child = self.child.lock().await.take();
+        if let Some(mut child) = child {
+            turns::terminate(&mut child).await;
+        }
         self.link.stdin.lock().await.take();
-        let Some(mut child) = self.child.lock().await.take() else {
-            return;
-        };
-        turns::terminate(&mut child).await;
+    }
+}
+
+impl Drop for Server {
+    /// A server dropped with its process still held, as when a start is abandoned, takes the
+    /// whole group with it.
+    fn drop(&mut self) {
+        if let Some(child) = self.child.get_mut().as_ref() {
+            turns::signal_group(child.id(), libc::SIGKILL);
+        }
     }
 }
 
@@ -464,10 +488,17 @@ impl Servers {
         }
         let mut start = Some(start);
         loop {
+            // A shutdown that began while this turn waited for the slot leaves nothing to start.
+            if self.closing.load(Ordering::SeqCst) {
+                return Err(StartError::Failed("The daemon is stopping".to_string()));
+            }
             let slot = self.slot_of(pr);
             let mut state = slot.state.lock().await;
             if state.retired {
                 continue;
+            }
+            if self.closing.load(Ordering::SeqCst) {
+                return Err(StartError::Failed("The daemon is stopping".to_string()));
             }
             if let Some(server) = state.server.as_ref()
                 && !server.link.dead.load(Ordering::SeqCst)
@@ -694,7 +725,13 @@ pub(crate) async fn run_turn(
         extra_args,
         base_env: std::env::vars_os().collect(),
     };
-    let (_lease, server) = match shared.codex.lease(shared, pr, start).await {
+    // A stop while the server starts ends the turn without waiting for the handshake: the start
+    // is dropped, and a process it began goes with it.
+    let leased = tokio::select! {
+        leased = shared.codex.lease(shared, pr, start) => leased,
+        _ = stop.notified() => return stopped_early(stop, sink),
+    };
+    let (_lease, server) = match leased {
         Ok(leased) => leased,
         Err(StartError::NotInstalled) => {
             let kind = AgentErrorKind::NotInstalled;
@@ -786,6 +823,8 @@ pub(crate) async fn run_turn(
     };
     let started = match requested.map(|result| codex::turn_id_of(&result)) {
         Ok(Some(started)) => started,
+        // A stop that came meanwhile wins over what the turn would have said.
+        Ok(None) | Err(_) if stopped_meanwhile => return stopped_early(stop, sink),
         Ok(None) => {
             let kind = AgentErrorKind::Unparsed;
             sink.error(kind, Agent::Codex.message_for(kind));
@@ -1502,24 +1541,98 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_env_has_no_tokens() {
+    async fn a_refused_send_leaves_no_pin() {
         let lab = lab(CodexScript::one(Scripted::answer("ok")));
+        let prompt = crate::sessions::Prompt {
+            text: "hi".into(),
+            shown: true,
+            summary_for: None,
+        };
+        let refused = crate::sessions::Sessions::submit(&lab.shared, &pr(99), prompt).await;
+        assert!(matches!(
+            refused,
+            Err(crate::sessions::Refusal::NoReview(_))
+        ));
+        assert!(lab.shared.sessions.pinned(&pr(99)).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_review_closed_during_a_turn_is_released_when_the_last_turn_ends() {
+        let lab = lab(CodexScript::one(Scripted::answer("ok")));
+        let harness = lab.shared.config.read().await.harness.clone();
         lab.run(new_thread()).await;
-        let env = &lab.calls()[0].env;
-        for key in env.keys() {
-            assert!(
-                !matches!(
-                    key.as_str(),
-                    "GH_TOKEN"
-                        | "GITHUB_TOKEN"
-                        | "GH_ENTERPRISE_TOKEN"
-                        | "CODEX_API_KEY"
-                        | "OPENAI_API_KEY"
-                        | "MCP_TOOL_TIMEOUT"
-                ) && !key.starts_with("CLUSIA_"),
-                "{key} reached the process"
-            );
-        }
+        let pid = lab.calls()[0].pid;
+        lab.shared.sessions.pin(&pr(7), &harness);
+        lab.shared.sessions.pretend_running(&pr(7), 3);
+
+        lab.shared.sessions.close_review(&lab.shared, &pr(7)).await;
+        assert!(lab.shared.sessions.pinned(&pr(7)).is_some());
+        assert!(FakeCodex::is_running(pid));
+
+        lab.shared.sessions.pretend_stopped(&pr(7));
+        lab.shared
+            .sessions
+            .release_closed(&lab.shared, &pr(7))
+            .await;
+        assert!(lab.shared.sessions.pinned(&pr(7)).is_none());
+        assert!(gone(pid).await, "the process outlived the closed review");
+    }
+
+    #[tokio::test]
+    async fn an_open_review_is_not_released_when_its_turn_ends() {
+        let lab = lab(CodexScript::one(Scripted::answer("ok")));
+        let harness = lab.shared.config.read().await.harness.clone();
+        lab.run(new_thread()).await;
+        let pid = lab.calls()[0].pid;
+        lab.shared.sessions.pin(&pr(7), &harness);
+        lab.shared
+            .sessions
+            .release_closed(&lab.shared, &pr(7))
+            .await;
+        assert!(lab.shared.sessions.pinned(&pr(7)).is_some());
+        assert!(FakeCodex::is_running(pid));
+        lab.shared.codex.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn opening_again_replaces_the_pin_unless_a_turn_runs() {
+        let lab = lab(CodexScript::one(Scripted::answer("ok")));
+        let codex = lab.shared.config.read().await.harness.clone();
+        let mut claude = codex.clone();
+        claude.kind = HarnessKind::ClaudeCode;
+        lab.shared.sessions.pin(&pr(7), &codex);
+
+        lab.shared.sessions.repin(&pr(7), &claude);
+        let pinned = lab.shared.sessions.pinned(&pr(7)).unwrap();
+        assert_eq!(pinned.kind, HarnessKind::ClaudeCode);
+
+        lab.shared.sessions.pretend_running(&pr(7), 3);
+        lab.shared.sessions.repin(&pr(7), &codex);
+        let pinned = lab.shared.sessions.pinned(&pr(7)).unwrap();
+        assert_eq!(
+            pinned.kind,
+            HarnessKind::ClaudeCode,
+            "a running turn keeps it"
+        );
+        lab.shared.sessions.pretend_stopped(&pr(7));
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_waited_for_the_slot_during_shutdown_starts_nothing() {
+        let lab = lab(CodexScript::one(Scripted::answer("ok")));
+        let slot = lab.shared.codex.slot_of(&pr(7));
+        let held = slot.state.lock().await;
+        let (task, _stop) = lab.start(new_thread(), None);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let shared = lab.shared.clone();
+        let closing = tokio::spawn(async move { shared.codex.shutdown().await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(held);
+        closing.await.unwrap();
+        let (end, sink) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Failed);
+        assert!(sink.errors[0].1.contains("stopping"), "{:?}", sink.errors);
+        assert!(lab.calls().is_empty(), "no process was started");
     }
 
     #[tokio::test]

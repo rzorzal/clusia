@@ -151,6 +151,9 @@ pub(crate) struct Sessions {
     states: Mutex<HashMap<PrRef, SessionStateKind>>,
     /// The harness each open review's turns run on; set when it opens or at its first message.
     pinned: Mutex<HashMap<PrRef, Pinned>>,
+    /// Saved reviews closed while a turn still ran: the last turn to end releases their pin and
+    /// their Codex process.
+    closed: Mutex<HashSet<PrRef>>,
 }
 
 impl Default for Sessions {
@@ -162,6 +165,7 @@ impl Default for Sessions {
             closing: AtomicBool::new(false),
             states: Mutex::new(HashMap::new()),
             pinned: Mutex::new(HashMap::new()),
+            closed: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -214,6 +218,23 @@ impl Sessions {
             .or_insert_with(|| Pinned::of(harness));
     }
 
+    /// The review opens: it runs on the config's harness, unless a turn of an earlier open still
+    /// runs, which keeps the one it started with. A close waiting for that turn is cancelled.
+    pub(crate) fn repin(&self, pr: &PrRef, harness: &Harness) {
+        self.closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
+        if self.any_running(pr) {
+            self.pin(pr, harness);
+        } else {
+            self.pinned
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(pr.clone(), Pinned::of(harness));
+        }
+    }
+
     /// The harness `pr`'s turns are pinned to; `None` for a review that is not open.
     pub(crate) fn pinned(&self, pr: &PrRef) -> Option<Pinned> {
         self.pinned
@@ -231,6 +252,32 @@ impl Sessions {
             .remove(pr);
     }
 
+    /// The review was saved and closed: its pin and its Codex process go now, or, while a turn
+    /// still runs, when the last one ends.
+    pub(crate) async fn close_review(&self, shared: &Shared, pr: &PrRef) {
+        self.closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(pr.clone());
+        self.release_closed(shared, pr).await;
+    }
+
+    /// Releases a closed review once no turn of it runs. A no-op for a review that is open.
+    pub(crate) async fn release_closed(&self, shared: &Shared, pr: &PrRef) {
+        if self.any_running(pr) {
+            return;
+        }
+        let was_closed = self
+            .closed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
+        if was_closed {
+            self.unpin(pr);
+            crate::codex::close(shared, pr).await;
+        }
+    }
+
     /// Starts a turn for `pr`, or queues it behind the running one. Returns the turn id.
     pub(crate) async fn submit(
         shared: &Arc<Shared>,
@@ -241,14 +288,14 @@ impl Sessions {
         if sessions.closing.load(Ordering::SeqCst) {
             return Err(Refusal::Stopping);
         }
-        let harness = shared.config.read().await.harness.clone();
-        sessions.pin(pr, &harness);
         let has_review = matches!(reviews::load_stored(shared, pr), Ok(Some(_)));
         if !has_review || !shared.paths.worktree_for(pr).is_dir() {
             return Err(Refusal::NoReview(format!(
                 "no review for {pr}; open it first"
             )));
         }
+        let harness = shared.config.read().await.harness.clone();
+        sessions.pin(pr, &harness);
         let log = shared.paths.agent_log(pr);
         let floor = {
             let log = log.clone();
@@ -378,6 +425,10 @@ impl Sessions {
             .remove(pr)
             .is_some();
         self.pinned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pr);
+        self.closed
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(pr);
@@ -644,6 +695,7 @@ async fn drive(
         crate::permissions::cancel_turn(&shared, &pr, turn).await;
         next = shared.sessions.next_after(&shared, &pr, turn);
     }
+    shared.sessions.release_closed(&shared, &pr).await;
 }
 
 /// Publishes what a turn does and writes it to the agent log.

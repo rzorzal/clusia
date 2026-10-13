@@ -395,6 +395,7 @@ async fn drive(_live: Live, shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job
             "The check stopped unexpectedly".to_string(),
         );
     }
+    shared.sessions.release_closed(&shared, &pr).await;
 }
 
 async fn execute(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job: Job) {

@@ -344,6 +344,37 @@ async fn closing_a_saved_review_ends_its_idle_codex_process() {
 }
 
 #[tokio::test]
+async fn a_saved_review_closed_during_a_chat_turn_releases_its_process_when_the_turn_ends() {
+    let w = world().await;
+    let dir = use_fake_codex(&w, CodexScript::one(CodexTurn::hang())).await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(Command::AddDraftItem {
+        pr: pr7(),
+        kind: DraftKind::General,
+        anchor: None,
+        thread: None,
+        body: "Looks fine".into(),
+    })
+    .await
+    .unwrap();
+    c.request(send("hi")).await.unwrap();
+    let pid = codex_after(&dir, 0, "turn/start", 1).await.pid;
+
+    c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
+    assert!(
+        FakeCodex::is_running(pid),
+        "the turn still runs, so does its process"
+    );
+
+    c.request(Command::AgentCancel { pr: pr7() }).await.unwrap();
+    until(&mut watcher, ready).await;
+    assert!(codex_gone(pid).await, "the closed review kept its process");
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
 async fn the_daemon_stopping_ends_the_codex_process() {
     let w = world().await;
     let dir = use_fake_codex(&w, CodexScript::one(CodexTurn::answer("ok"))).await;
