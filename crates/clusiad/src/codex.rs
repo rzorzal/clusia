@@ -5,23 +5,25 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
+use clusia_core::permissions::inside_worktree;
 use clusia_harness::codex::{self, CodexTurn, Decision, Incoming, Note, ServerAsk};
 use clusia_harness::{
     Agent, AgentEvent, CodexServerSpec, ROLE_PROMPT, SessionArg, codex_server_command,
 };
 use clusia_protocol::AgentErrorKind;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::permissions::{self, PermissionAsk};
 use crate::state::Shared;
 use crate::turns::{self, KILL_GRACE, Stop, TurnEnd, TurnSink, Why};
 
@@ -265,9 +267,107 @@ fn refusal(id: &Value, ask: &ServerAsk) -> Value {
     }
 }
 
-/// Replies to one request of the server. Nothing here decides for the reviewer: it is refused.
-async fn answer_ask(link: Arc<Link>, id: Value, ask: ServerAsk) {
-    let _ = link.send(&refusal(&id, &ask)).await;
+/// `path` as the worktree `root` shows it: relative when it lies under it.
+fn relative_to(path: &str, root: &Path) -> String {
+    let path = Path::new(path);
+    let shown = path.strip_prefix(root).ok().or_else(|| {
+        let root = root.canonicalize().ok()?;
+        path.strip_prefix(root).ok()
+    });
+    shown.unwrap_or(path).display().to_string()
+}
+
+/// One approval request of the server, put to the reviewer through the same model as every
+/// other request of the agent: the rules of the review, the deadline, the window and the
+/// notification.
+struct Approval {
+    shared: Arc<Shared>,
+    link: Arc<Link>,
+    pr: PrRef,
+    turn: u64,
+    stop: Arc<Stop>,
+    id: Value,
+    ask: ServerAsk,
+    /// The paths the file change touches, as Codex listed them.
+    paths: Vec<String>,
+}
+
+impl Approval {
+    /// Puts the request to the reviewer and answers the server. A command is a `Bash` request
+    /// and a file change an `Edit`; only an answer from the reviewer or a rule of the review
+    /// accepts, and Codex is never asked to remember a decision.
+    async fn run(self) {
+        let reply = match &self.ask {
+            ServerAsk::Command {
+                command, reason, ..
+            } => {
+                let input = json!({
+                    "command": command.as_deref().unwrap_or_default(),
+                    "description": reason,
+                });
+                codex::approval_reply(&self.id, self.decide("Bash", input).await)
+            }
+            ServerAsk::FileChange {
+                reason, grant_root, ..
+            } => {
+                let root = self.shared.paths.worktree_for(&self.pr);
+                let shown: Vec<String> = self
+                    .paths
+                    .iter()
+                    .map(|path| relative_to(path, &root))
+                    .collect();
+                let outside = shown
+                    .iter()
+                    .find(|path| !inside_worktree(Path::new(path), &root));
+                if shown.is_empty() || grant_root.is_some() || outside.is_some() {
+                    // Nobody can judge a change whose files are unknown, that asks to write
+                    // under a root for the session or that reaches outside the worktree, so
+                    // nobody is asked and nothing is accepted.
+                    let summary = match (grant_root, outside, shown.first()) {
+                        (Some(grant), _, _) => format!("write access under {grant}"),
+                        (None, Some(path), _) | (None, None, Some(path)) => path.clone(),
+                        (None, None, None) => "a file change with no listed files".to_string(),
+                    };
+                    permissions::refuse(&self.shared, &self.pr, self.turn, "Edit", &summary);
+                    let decision = if self.stop.fired() {
+                        Decision::Cancel
+                    } else {
+                        Decision::Decline
+                    };
+                    codex::approval_reply(&self.id, decision)
+                } else {
+                    let checked = shown[0].clone();
+                    let input = json!({
+                        "file_path": checked,
+                        "paths": shown,
+                        "description": reason,
+                    });
+                    codex::approval_reply(&self.id, self.decide("Edit", input).await)
+                }
+            }
+            other => refusal(&self.id, other),
+        };
+        let _ = self.link.send(&reply).await;
+    }
+
+    async fn decide(&self, tool: &str, input: Value) -> Decision {
+        let asked = permissions::ask(
+            &self.shared,
+            PermissionAsk {
+                pr: self.pr.clone(),
+                turn: self.turn,
+                tool: tool.to_string(),
+                input,
+            },
+        )
+        .await;
+        match asked {
+            // A stop ends the turn, not just this request.
+            _ if self.stop.fired() => Decision::Cancel,
+            Ok(decision) if decision.allow => Decision::Accept,
+            _ => Decision::Decline,
+        }
+    }
 }
 
 /// Why a server could not be started.
@@ -877,7 +977,21 @@ pub(crate) async fn run_turn(
                     }
                 }
                 Some(Routed::Ask { id, ask }) => {
-                    asked.push(tokio::spawn(answer_ask(link.clone(), id, ask)));
+                    let paths = match &ask {
+                        ServerAsk::FileChange { item_id, .. } => fold.paths_of(item_id),
+                        _ => Vec::new(),
+                    };
+                    let approval = Approval {
+                        shared: shared.clone(),
+                        link: link.clone(),
+                        pr: pr.clone(),
+                        turn,
+                        stop: stop.clone(),
+                        id,
+                        ask,
+                        paths,
+                    };
+                    asked.push(tokio::spawn(approval.run()));
                 }
                 Some(Routed::Closed) | None => {
                     break interrupted.unwrap_or(if stop.fired() {
@@ -965,7 +1079,7 @@ mod tests {
     use clusia_core::config::HarnessKind;
     use clusia_core::{Config, Paths, Review};
     use clusia_harness::testkit::{CodexCall, CodexScript, CodexTurn as Scripted, FakeCodex};
-    use clusia_protocol::TurnOrigin;
+    use clusia_protocol::{Event, PermissionAnswerKind, PermissionOutcome, TurnOrigin};
     use clusia_store::save_review;
     use tokio::sync::Semaphore;
 
@@ -1657,20 +1771,316 @@ mod tests {
         assert_eq!(decisions, ["error"]);
     }
 
-    #[tokio::test]
-    async fn a_command_request_is_declined() {
-        let lab = lab(CodexScript::one(
-            Scripted::answer("done").ask_command("cargo test"),
-        ));
-        let (end, sink) = lab.run(new_thread()).await;
-        assert_eq!(end, TurnEnd::Done);
-        assert_eq!(sink.tools, ["Ran `cargo test`"]);
+    type Events = tokio::sync::broadcast::Receiver<(String, Event)>;
+
+    /// The next permission request the daemon announces.
+    async fn next_request(events: &mut Events) -> (String, Event) {
+        loop {
+            let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+                .await
+                .expect("a request is announced")
+                .expect("the channel stays open");
+            if let Event::PermissionRequested { id, .. } = &event {
+                return (id.clone(), event);
+            }
+        }
+    }
+
+    /// How the daemon says the request `id` ended.
+    async fn outcome_of(events: &mut Events, id: &str) -> PermissionOutcome {
+        loop {
+            let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+                .await
+                .expect("the request ends")
+                .expect("the channel stays open");
+            if let Event::PermissionResolved {
+                id: got, outcome, ..
+            } = event
+                && got == id
+            {
+                return outcome;
+            }
+        }
+    }
+
+    /// Every decision the fake received, once `count` of them arrived.
+    async fn decisions(lab: &Lab, count: usize) -> Vec<String> {
         let dir = lab.fake.path().to_path_buf();
-        let decisions = tokio::task::spawn_blocking(move || {
-            FakeCodex::wait_for_decisions(&dir, 1, Duration::from_secs(5))
+        tokio::task::spawn_blocking(move || {
+            FakeCodex::wait_for_decisions(&dir, count, Duration::from_secs(5))
         })
         .await
-        .unwrap();
-        assert_eq!(decisions, ["decline"]);
+        .unwrap()
+    }
+
+    fn asking(command: &str) -> CodexScript {
+        CodexScript::one(Scripted::answer("done").ask_command(command))
+    }
+
+    /// Runs turn `turn` as a check, which the permission model knows while it runs.
+    fn run_as_check(lab: &Lab, turn: u64) -> (JoinHandle<(TurnEnd, Recorder)>, Arc<Stop>) {
+        lab.start_as(&pr(7), turn, TurnOrigin::Security, new_thread(), None)
+    }
+
+    async fn answer_request(lab: &Lab, id: &str, kind: PermissionAnswerKind) {
+        permissions::answer(&lab.shared, id, kind).await;
+    }
+
+    #[tokio::test]
+    async fn codex_command_asks_and_decline_on_timeout() {
+        let lab = lab_with(asking("cargo test -p clusia-core"), |config| {
+            config.harness.permission_timeout_secs = 1;
+        });
+        let mut events = lab.shared.events.subscribe();
+        let (task, _stop) = run_as_check(&lab, 5);
+        let (id, asked) = next_request(&mut events).await;
+        match asked {
+            Event::PermissionRequested {
+                tool,
+                summary,
+                origin,
+                sandbox,
+                turn,
+                ..
+            } => {
+                assert_eq!(tool, "Bash");
+                assert_eq!(summary, "cargo test -p clusia-core");
+                assert_eq!(origin, TurnOrigin::Security);
+                assert!(
+                    !sandbox,
+                    "what Codex asks about leaves its sandbox, and the modal says so"
+                );
+                assert_eq!(turn, 5);
+            }
+            other => panic!("{other:?}"),
+        }
+        let (end, sink) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done, "the turn goes on after a decline");
+        assert_eq!(sink.finals, ["done"]);
+        assert_eq!(
+            outcome_of(&mut events, &id).await,
+            PermissionOutcome::Expired
+        );
+        assert_eq!(decisions(&lab, 1).await, ["decline"]);
+    }
+
+    #[tokio::test]
+    async fn allowing_once_accepts() {
+        let lab = lab(asking("cargo test -p clusia-core"));
+        let mut events = lab.shared.events.subscribe();
+        let (task, _stop) = run_as_check(&lab, 5);
+        let (id, _) = next_request(&mut events).await;
+        answer_request(&lab, &id, PermissionAnswerKind::Once).await;
+        let (end, _) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert_eq!(decisions(&lab, 1).await, ["accept"]);
+    }
+
+    #[tokio::test]
+    async fn denying_declines_and_the_turn_goes_on() {
+        let lab = lab(asking("rm -rf target"));
+        let mut events = lab.shared.events.subscribe();
+        let (task, _stop) = run_as_check(&lab, 5);
+        let (id, _) = next_request(&mut events).await;
+        answer_request(&lab, &id, PermissionAnswerKind::Deny).await;
+        let (end, sink) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert_eq!(sink.finals, ["done"]);
+        assert_eq!(decisions(&lab, 1).await, ["decline"]);
+    }
+
+    #[tokio::test]
+    async fn allowing_for_the_review_covers_the_next_command_without_asking() {
+        let lab = lab(asking("cargo test -p clusia-core"));
+        let mut events = lab.shared.events.subscribe();
+        let (task, _stop) = run_as_check(&lab, 5);
+        let (id, _) = next_request(&mut events).await;
+        answer_request(&lab, &id, PermissionAnswerKind::Review).await;
+        task.await.unwrap();
+
+        let (task, _stop) = run_as_check(&lab, 6);
+        let (end, _) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert_eq!(decisions(&lab, 2).await, ["accept", "accept"]);
+        while let Ok((_, event)) = events.try_recv() {
+            assert!(
+                !matches!(event, Event::PermissionRequested { turn: 6, .. }),
+                "the rule of the review covered it"
+            );
+        }
+    }
+
+    /// A lab whose fake lists `files` (written under the worktree of review 7) in a file change.
+    fn lab_changing(files: impl FnOnce(&Path) -> Vec<String>) -> Lab {
+        let home = tempfile::tempdir().unwrap();
+        let worktree = Paths::new(home.path()).worktree_for(&pr(7));
+        let files = files(&worktree);
+        let listed: Vec<&str> = files.iter().map(String::as_str).collect();
+        lab_in(
+            home,
+            CodexScript::one(Scripted::answer("done").ask_files(&listed)),
+            |_| {},
+        )
+    }
+
+    #[tokio::test]
+    async fn a_file_change_asks_as_an_edit_with_its_path_in_the_worktree() {
+        let lab =
+            lab_changing(|worktree| vec![worktree.join("src/auth/store.rs").display().to_string()]);
+        let mut events = lab.shared.events.subscribe();
+        let (task, _stop) = run_as_check(&lab, 5);
+        let (id, asked) = next_request(&mut events).await;
+        match asked {
+            Event::PermissionRequested { tool, summary, .. } => {
+                assert_eq!(tool, "Edit");
+                assert_eq!(summary, "src/auth/store.rs");
+            }
+            other => panic!("{other:?}"),
+        }
+        answer_request(&lab, &id, PermissionAnswerKind::Once).await;
+        let (end, _) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert_eq!(decisions(&lab, 1).await, ["accept"]);
+    }
+
+    #[tokio::test]
+    async fn a_file_change_outside_the_worktree_is_declined_without_asking() {
+        let lab = lab_changing(|_| vec!["/etc/hosts".to_string()]);
+        let mut events = lab.shared.events.subscribe();
+        let (task, _stop) = run_as_check(&lab, 5);
+        let (end, _) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert_eq!(decisions(&lab, 1).await, ["decline"]);
+        let mut resolved = Vec::new();
+        while let Ok((_, event)) = events.try_recv() {
+            match event {
+                Event::PermissionRequested { .. } => panic!("nobody was asked"),
+                Event::PermissionResolved { outcome, .. } => resolved.push(outcome),
+                _ => {}
+            }
+        }
+        assert_eq!(resolved, [PermissionOutcome::Denied]);
+    }
+
+    #[tokio::test]
+    async fn one_path_outside_the_worktree_declines_the_whole_change() {
+        let lab = lab_changing(|worktree| {
+            vec![
+                worktree.join("src/lib.rs").display().to_string(),
+                "../../outside.txt".to_string(),
+            ]
+        });
+        let mut events = lab.shared.events.subscribe();
+        let (task, _stop) = run_as_check(&lab, 5);
+        let (end, _) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert_eq!(decisions(&lab, 1).await, ["decline"]);
+        while let Ok((_, event)) = events.try_recv() {
+            assert!(
+                !matches!(event, Event::PermissionRequested { .. }),
+                "nobody was asked"
+            );
+        }
+    }
+
+    /// Runs a check whose fake sends the file change `lab` was built with, and expects it
+    /// declined with no question and one denial told.
+    async fn declined_without_asking(lab: &Lab) {
+        let mut events = lab.shared.events.subscribe();
+        let (task, _stop) = run_as_check(lab, 5);
+        let (end, _) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        assert_eq!(decisions(lab, 1).await, ["decline"]);
+        let mut resolved = Vec::new();
+        while let Ok((_, event)) = events.try_recv() {
+            match event {
+                Event::PermissionRequested { .. } => panic!("nobody was asked"),
+                Event::PermissionResolved { outcome, .. } => resolved.push(outcome),
+                _ => {}
+            }
+        }
+        assert_eq!(resolved, [PermissionOutcome::Denied]);
+    }
+
+    #[tokio::test]
+    async fn a_second_path_outside_the_worktree_declines_the_change_without_asking() {
+        let lab = lab_changing(|worktree| {
+            vec![
+                worktree.join("src/lib.rs").display().to_string(),
+                "/etc/hosts".to_string(),
+            ]
+        });
+        declined_without_asking(&lab).await;
+    }
+
+    #[tokio::test]
+    async fn a_file_change_with_no_known_paths_is_declined_without_asking() {
+        let lab = lab_changing(|_| Vec::new());
+        declined_without_asking(&lab).await;
+    }
+
+    #[tokio::test]
+    async fn a_file_change_that_asks_for_a_root_is_declined_without_asking() {
+        let lab = lab(CodexScript::one(
+            Scripted::answer("done").ask_files_with_root(&["src/lib.rs"], "/"),
+        ));
+        declined_without_asking(&lab).await;
+    }
+
+    #[tokio::test]
+    async fn stopping_the_turn_while_it_asks_answers_cancel() {
+        let lab = lab(asking("make"));
+        let mut events = lab.shared.events.subscribe();
+        let (task, stop) = run_as_check(&lab, 5);
+        let (id, _) = next_request(&mut events).await;
+        stop.fire(Why::User);
+        let (end, _) = task.await.unwrap();
+        assert_eq!(end, TurnEnd::Stopped(Why::User));
+        assert_eq!(
+            outcome_of(&mut events, &id).await,
+            PermissionOutcome::Cancelled
+        );
+        assert_eq!(decisions(&lab, 1).await, ["cancel"]);
+        assert_eq!(lab.shared.permissions.waiting(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_turn_the_daemon_does_not_know_cannot_ask() {
+        let lab = lab(asking("make"));
+        let mut events = lab.shared.events.subscribe();
+        let (end, _) = lab.run(new_thread()).await;
+        assert_eq!(end, TurnEnd::Done);
+        assert_eq!(decisions(&lab, 1).await, ["decline"]);
+        while let Ok((_, event)) = events.try_recv() {
+            assert!(!matches!(event, Event::PermissionRequested { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_never_sends_accept_for_session() {
+        let lab = lab(asking("cargo test -p clusia-core"));
+        let mut events = lab.shared.events.subscribe();
+        // Denied, allowed once, then allowed for the review: every kind of answer.
+        for (turn, kind) in [
+            (1, PermissionAnswerKind::Deny),
+            (2, PermissionAnswerKind::Once),
+            (3, PermissionAnswerKind::Review),
+        ] {
+            let (task, _stop) = run_as_check(&lab, turn);
+            let (id, _) = next_request(&mut events).await;
+            answer_request(&lab, &id, kind).await;
+            task.await.unwrap();
+        }
+        // A fourth is covered by the rule and accepted at once.
+        let (task, _stop) = run_as_check(&lab, 4);
+        task.await.unwrap();
+        let sent = decisions(&lab, 4).await;
+        assert_eq!(sent, ["decline", "accept", "accept", "accept"]);
+        for call in lab.calls() {
+            for line in &call.lines {
+                assert!(!line.contains("acceptForSession"), "{line}");
+                assert!(!line.contains("Amendment"), "{line}");
+            }
+        }
     }
 }

@@ -282,6 +282,22 @@ fn decided_at_once(
     );
 }
 
+/// Denies a request that needs no reviewer, because Clúsia never allows what it asks, and tells
+/// the log and the windows like any other denial. A turn that can no longer ask says nothing.
+pub(crate) fn refuse(shared: &Shared, pr: &PrRef, turn: u64, tool: &str, summary: &str) {
+    if let Ok(origin) = may_ask(shared, pr, turn) {
+        decided_at_once(
+            shared,
+            pr,
+            turn,
+            tool,
+            summary,
+            PermissionOutcome::Denied,
+            origin,
+        );
+    }
+}
+
 fn new_id() -> String {
     format!("perm-{}", uuid::Uuid::new_v4().simple())
 }

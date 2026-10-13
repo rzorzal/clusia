@@ -1,6 +1,8 @@
 //! Agent turns: one `claude -p` process per message, run one at a time for each review.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
 use clusia_core::config::{Harness, HarnessKind};
-use clusia_harness::{Agent, AgentEvent, SessionArg, extract_suggestions, probe_command};
+use clusia_harness::{Agent, AgentEvent, SessionArg, extract_suggestions, version_at_least};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, ErrorCode, Event, Outcome, ProbeResult, ProtocolError, Reply,
     SessionStateKind, Suggestion, TurnOrigin, topics,
@@ -1135,62 +1137,193 @@ pub(crate) async fn log(shared: &Shared, pr: &PrRef) -> Outcome {
     }
 }
 
-/// Asks the program for its version: the Config › Harness probe card.
+/// What a working agent told the probe.
+struct Found {
+    version: String,
+    /// Whether the login check passed; `None` for an agent that has none.
+    signed_in: Option<bool>,
+    account: Option<String>,
+}
+
+/// Why the probe found the agent unusable, with what it did learn.
+struct Refused {
+    version: Option<String>,
+    signed_in: Option<bool>,
+    error: String,
+}
+
+impl Refused {
+    fn unknown(error: String) -> Self {
+        Self {
+            version: None,
+            signed_in: None,
+            error,
+        }
+    }
+}
+
+/// `line` with an API key hidden: from `sk-` on, nothing of it is kept.
+fn mask_keys(line: &str) -> String {
+    let at = line.match_indices("sk-").find_map(|(at, _)| {
+        let word_start = line[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric());
+        word_start.then_some(at)
+    });
+    match at {
+        Some(at) => format!("{}sk-…", &line[..at]),
+        None => line.to_string(),
+    }
+}
+
+/// `<program> --version` with the environment rules of `agent`'s own turns, so the OpenAI keys
+/// and the GitHub tokens never reach it either.
+fn version_command(
+    agent: Agent,
+    program: &Path,
+    env: &[(OsString, OsString)],
+) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command.arg("--version");
+    agent.set_env(&mut command, env);
+    command
+}
+
+/// Runs a probe command with the probe's time limit.
+async fn probe_output(
+    command: std::process::Command,
+    agent: Agent,
+) -> Result<std::process::Output, String> {
+    let mut command = Command::from(command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    match tokio::time::timeout(PROBE_LIMIT, command.output()).await {
+        Err(_) => Err(format!(
+            "{} did not answer within {} seconds",
+            agent.name(),
+            PROBE_LIMIT.as_secs()
+        )),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(agent.message_for(AgentErrorKind::NotInstalled))
+        }
+        Ok(Err(e)) => Err(e.to_string()),
+        Ok(Ok(output)) => Ok(output),
+    }
+}
+
+/// Asks `agent` for its version, checks it against the minimum Clúsia needs and, for an agent
+/// that has one, asks whether it is signed in.
+async fn check_agent(
+    agent: Agent,
+    program: &Path,
+    env: &[(OsString, OsString)],
+) -> Result<Found, Refused> {
+    let output = probe_output(version_command(agent, program, env), agent)
+        .await
+        .map_err(Refused::unknown)?;
+    let version = if output.status.success() {
+        agent.parse_version(&String::from_utf8_lossy(&output.stdout))
+    } else {
+        let said = String::from_utf8_lossy(&output.stderr);
+        Err(match said.trim() {
+            "" => format!("{} exited with {}", agent.name(), output.status),
+            said => said.to_string(),
+        })
+    }
+    .map_err(Refused::unknown)?;
+    if let Some(min) = agent.min_version()
+        && !version_at_least(&version, min)
+    {
+        return Err(Refused {
+            error: format!(
+                "{} {version} is older than {min}, which Clúsia needs",
+                agent.name()
+            ),
+            version: Some(version),
+            signed_in: None,
+        });
+    }
+    let Some(login) = agent.signed_in_command(program, env) else {
+        return Ok(Found {
+            version,
+            signed_in: None,
+            account: None,
+        });
+    };
+    let output = match probe_output(login, agent).await {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(Refused {
+                version: Some(version),
+                signed_in: None,
+                error,
+            });
+        }
+    };
+    if !output.status.success() {
+        return Err(Refused {
+            error: format!(
+                "{} is not signed in. Run `{} login` in a terminal",
+                agent.name(),
+                agent.program()
+            ),
+            version: Some(version),
+            signed_in: Some(false),
+        });
+    }
+    // `login status` writes to standard error; the first line says how the user signed in.
+    let (stderr, stdout) = (
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let account = [stderr, stdout]
+        .iter()
+        .flat_map(|text| text.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(mask_keys);
+    Ok(Found {
+        version,
+        signed_in: Some(true),
+        account,
+    })
+}
+
+/// Asks the program for its version, and its login when it has one: the Config › Harness probe
+/// card.
 pub(crate) async fn probe(shared: &Shared) -> Outcome {
     let harness = shared.config.read().await.harness.clone();
     let agent = Agent::from(harness.kind);
     let program = program_path(shared, &harness);
     let started = Instant::now();
     let env: Vec<_> = std::env::vars_os().collect();
-    let mut command = Command::from(probe_command(&program, &env));
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let found: Result<String, String> =
-        match tokio::time::timeout(PROBE_LIMIT, command.output()).await {
-            Err(_) => Err(format!(
-                "{} did not answer within {} seconds",
-                agent.name(),
-                PROBE_LIMIT.as_secs()
-            )),
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(agent.message_for(AgentErrorKind::NotInstalled))
-            }
-            Ok(Err(e)) => Err(e.to_string()),
-            Ok(Ok(output)) if output.status.success() => {
-                agent.parse_version(&String::from_utf8_lossy(&output.stdout))
-            }
-            Ok(Ok(output)) => {
-                let said = String::from_utf8_lossy(&output.stderr);
-                Err(match said.trim() {
-                    "" => format!("{} exited with {}", agent.name(), output.status),
-                    said => said.to_string(),
-                })
-            }
-        };
+    let checked = check_agent(agent, &program, &env).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let program = program.display().to_string();
-    Outcome::Ok(Reply::Probe(match found {
-        Ok(version) => ProbeResult {
+    let name = agent.name().to_string();
+    Outcome::Ok(Reply::Probe(match checked {
+        Ok(found) => ProbeResult {
             ok: true,
-            version: Some(version),
+            version: Some(found.version),
             program,
             elapsed_ms,
             error: None,
-            harness: agent.name().to_string(),
-            signed_in: None,
-            account: None,
+            harness: name,
+            signed_in: found.signed_in,
+            account: found.account,
         },
-        Err(error) => ProbeResult {
+        Err(refused) => ProbeResult {
             ok: false,
-            version: None,
+            version: refused.version,
             program,
             elapsed_ms,
-            error: Some(error),
-            harness: agent.name().to_string(),
-            signed_in: None,
+            error: Some(refused.error),
+            harness: name,
+            signed_in: refused.signed_in,
             account: None,
         },
     }))
@@ -2045,6 +2178,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lab.send(&pr, "hi").await, Ok(6));
+    }
+
+    #[test]
+    fn an_api_key_is_never_kept_in_the_account_line() {
+        assert_eq!(
+            mask_keys("Logged in using an API key - sk-proj-abcdef0123"),
+            "Logged in using an API key - sk-…"
+        );
+        assert_eq!(mask_keys("sk-live-1234"), "sk-…");
+        assert_eq!(
+            mask_keys("Logged in using ChatGPT"),
+            "Logged in using ChatGPT"
+        );
+        assert_eq!(
+            mask_keys("Logged in as task-bot (ChatGPT)"),
+            "Logged in as task-bot (ChatGPT)",
+            "a word that only ends in sk- is not a key"
+        );
     }
 
     #[tokio::test]

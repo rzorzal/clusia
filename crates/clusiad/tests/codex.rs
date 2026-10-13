@@ -1,5 +1,7 @@
 mod common;
 
+use std::time::Duration;
+
 use clusia_core::checks::{CheckKind, CheckResult};
 use clusia_core::config::HarnessKind;
 use clusia_core::revalidation::{Decision, Verdict as Judged};
@@ -7,7 +9,9 @@ use clusia_core::{DraftKind, Review};
 use clusia_harness::testkit::{
     CodexScript, CodexTurn, FakeCodex, Script, Turn, finding_block, revalidation_block,
 };
-use clusia_protocol::{AgentLogEntry, Client, Command, Event, Reply};
+use clusia_protocol::{
+    AgentLogEntry, Client, Command, Event, PermissionAnswerKind, ProbeResult, Reply, TurnOrigin,
+};
 use common::agent::{calls, ready, send, set_config, until, use_fake, value_of, watching};
 use common::codex::{codex_after, codex_calls, codex_gone, use_fake_codex};
 use common::revalidation::{
@@ -455,4 +459,175 @@ async fn the_daemon_stopping_ends_the_codex_process() {
 
     w.daemon.stop().await;
     assert!(codex_gone(pid).await, "the process outlived the daemon");
+}
+
+fn requested(e: &Event) -> bool {
+    matches!(e, Event::PermissionRequested { .. })
+}
+
+#[tokio::test]
+async fn a_codex_chat_asks_the_reviewer_before_it_runs_a_command() {
+    let w = world().await;
+    let dir = use_fake_codex(
+        &w,
+        CodexScript::one(CodexTurn::answer("Ran it.").ask_command("cargo test -p clusia-core")),
+    )
+    .await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(send("run the tests")).await.unwrap();
+
+    let asked = until(&mut watcher, requested).await;
+    let Some(Event::PermissionRequested {
+        id,
+        tool,
+        summary,
+        origin,
+        sandbox,
+        ..
+    }) = asked.last()
+    else {
+        panic!("a request");
+    };
+    assert_eq!(
+        (tool.as_str(), summary.as_str()),
+        ("Bash", "cargo test -p clusia-core")
+    );
+    assert_eq!(*origin, TurnOrigin::Chat);
+    assert!(!*sandbox);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        FakeCodex::calls(&dir)[0].decisions.is_empty(),
+        "Codex waits for the reviewer"
+    );
+
+    c.request(Command::PermissionAnswer {
+        id: id.clone(),
+        answer: PermissionAnswerKind::Once,
+    })
+    .await
+    .unwrap();
+    until(&mut watcher, ready).await;
+    let decisions = tokio::task::spawn_blocking({
+        let dir = dir.clone();
+        move || FakeCodex::wait_for_decisions(&dir, 1, Duration::from_secs(5))
+    })
+    .await
+    .unwrap();
+    assert_eq!(decisions, ["accept"]);
+    w.daemon.stop().await;
+}
+
+async fn probe(w: &common::review_world::World) -> ProbeResult {
+    match w
+        .daemon
+        .client()
+        .await
+        .request(Command::HarnessProbe)
+        .await
+        .unwrap()
+    {
+        Reply::Probe(found) => found,
+        other => panic!("expected a probe, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_probe_reports_codex_with_its_version_and_login() {
+    let w = world().await;
+    let dir = use_fake_codex(&w, CodexScript::one(CodexTurn::answer("x"))).await;
+    let found = probe(&w).await;
+    assert!(found.ok, "{found:?}");
+    assert_eq!(found.harness, "Codex");
+    assert_eq!(found.version.as_deref(), Some("0.162.1"));
+    assert_eq!(found.signed_in, Some(true));
+    assert_eq!(found.account.as_deref(), Some("Logged in using ChatGPT"));
+    assert!(found.error.is_none());
+    assert!(FakeCodex::calls(&dir).is_empty(), "the probe is not a turn");
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn probe_masks_api_keys() {
+    let w = world().await;
+    use_fake_codex(
+        &w,
+        CodexScript::one(CodexTurn::answer("x"))
+            .account("Logged in using an API key - sk-proj-abcdef0123456789"),
+    )
+    .await;
+    let found = probe(&w).await;
+    assert!(found.ok, "{found:?}");
+    assert_eq!(
+        found.account.as_deref(),
+        Some("Logged in using an API key - sk-…")
+    );
+    let wire = serde_json::to_string(&found).unwrap();
+    assert!(!wire.contains("abcdef"), "{wire}");
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn an_old_codex_is_refused_with_the_minimum() {
+    let w = world().await;
+    use_fake_codex(
+        &w,
+        CodexScript::one(CodexTurn::answer("x")).version("0.161.9"),
+    )
+    .await;
+    let found = probe(&w).await;
+    assert!(!found.ok);
+    assert_eq!(found.version.as_deref(), Some("0.161.9"));
+    assert_eq!(
+        found.error.as_deref(),
+        Some("Codex 0.161.9 is older than 0.162.0, which Clúsia needs")
+    );
+    assert_eq!(
+        found.signed_in, None,
+        "the login is not asked of a version it refuses"
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_codex_that_is_not_signed_in_says_how_to_sign_in() {
+    let w = world().await;
+    use_fake_codex(&w, CodexScript::one(CodexTurn::answer("x")).signed_out()).await;
+    let found = probe(&w).await;
+    assert!(!found.ok);
+    assert_eq!(found.signed_in, Some(false));
+    assert_eq!(found.version.as_deref(), Some("0.162.1"));
+    assert_eq!(
+        found.error.as_deref(),
+        Some("Codex is not signed in. Run `codex login` in a terminal")
+    );
+    assert_eq!(found.account, None);
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_missing_codex_is_not_installed_and_claude_code_keeps_its_own_probe() {
+    let w = world().await;
+    common::agent::set_config(&w, "harness.kind", "codex").await;
+    common::agent::set_config(&w, "harness.program", "/nonexistent/codex").await;
+    let found = probe(&w).await;
+    assert!(!found.ok);
+    assert_eq!(found.harness, "Codex");
+    assert_eq!(
+        found.error.as_deref(),
+        Some("Install Codex or set its path")
+    );
+
+    common::agent::set_config(&w, "harness.kind", "claude-code").await;
+    common::agent::set_config(&w, "harness.program", "/nonexistent/claude").await;
+    let found = probe(&w).await;
+    assert!(!found.ok);
+    assert_eq!(found.harness, "Claude Code");
+    assert_eq!(found.signed_in, None);
+    assert_eq!(
+        found.error.as_deref(),
+        Some("Install Claude Code or set its path")
+    );
+    w.daemon.stop().await;
 }
