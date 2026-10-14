@@ -656,20 +656,40 @@ pub(crate) async fn review_outdated(shared: &Shared, review: &Review, old_head: 
     .await;
 }
 
-/// The display name of the harness a review talks about: the one that made its session, or the
-/// one the review is pinned to, or the configured one while it has neither.
-pub(crate) async fn harness_name(shared: &Shared, review: Option<&Review>) -> &'static str {
-    let kind = match review {
-        Some(review) if review.harness_session.is_some() => review
-            .harness_session_kind
-            .unwrap_or(clusia_core::config::HarnessKind::ClaudeCode),
-        Some(review) => match shared.sessions.pinned(&review.pr) {
-            Some(pinned) => pinned.kind,
-            None => shared.config.read().await.harness.kind,
+/// The name of the harness a review talks about: the one that made its session; the pinned one
+/// when an open review is pinned to a custom command that did not make that session, or when there
+/// is no session; else the configured one.
+pub(crate) async fn harness_name(shared: &Shared, review: Option<&Review>) -> String {
+    use clusia_core::config::HarnessKind;
+    match review {
+        Some(review) if review.harness_session.is_some() => {
+            // An open review whose next turn runs another custom program than the one that made
+            // the session is named after the program it will run. The built-in agents keep the
+            // name of the session's agent.
+            let next = crate::turns::harness_for(shared, &review.pr).await;
+            if next.kind == HarnessKind::Custom
+                && review.harness_session_kind == Some(HarnessKind::Custom)
+                && shared.sessions.pinned(&review.pr).is_some()
+                && review
+                    .session_of(next.kind, next.program.as_deref())
+                    .is_none()
+            {
+                return next.display_name();
+            }
+            let kind = review
+                .harness_session_kind
+                .unwrap_or(HarnessKind::ClaudeCode);
+            match (kind, review.harness_session_name.as_deref()) {
+                (HarnessKind::Custom, Some(name)) if !name.is_empty() => name.to_owned(),
+                _ => kind.name().to_owned(),
+            }
+        }
+        Some(review) => match shared.sessions.pinned_name(&review.pr) {
+            Some(name) => name,
+            None => crate::sessions::current_name(shared).await,
         },
-        None => shared.config.read().await.harness.kind,
-    };
-    kind.name()
+        None => crate::sessions::current_name(shared).await,
+    }
 }
 
 /// A saved review's draft was re-read against the commits its pull request got; `summary` says
@@ -677,7 +697,7 @@ pub(crate) async fn harness_name(shared: &Shared, review: Option<&Review>) -> &'
 pub(crate) async fn review_revalidated(shared: &Shared, review: &Review, summary: &str) {
     let event = NotifyEvent::review_revalidated(
         &review.pr,
-        harness_name(shared, Some(review)).await,
+        &harness_name(shared, Some(review)).await,
         summary,
         format!("revalidated:{}:{}", review.pr, review.head_sha),
         now_unix(),

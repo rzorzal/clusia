@@ -17,7 +17,7 @@ use clusia_core::{
     ReviewState, Side,
 };
 use clusia_git::{diff_for_prompt, repo_of_worktree};
-use clusia_harness::{Agent, AgentEvent, RawVerdict, extract_revalidation_blocks};
+use clusia_harness::{AgentEvent, RawVerdict, extract_revalidation_blocks};
 use clusia_protocol::{AgentErrorKind, AgentLogEntry, Event, TurnOrigin, topics};
 use clusia_store::{list_reviews, load_review_cache};
 use tokio::sync::watch;
@@ -716,8 +716,8 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Job) {
         complete(&shared, &pr, &job, String::new()).await;
         return;
     }
-    let agent = crate::sessions::agent_for(&shared, &pr).await;
-    let mut sink = RunSink::new(shared.clone(), pr.clone(), job.turn, agent);
+    let name = crate::sessions::name_for(&shared, &pr).await;
+    let mut sink = RunSink::new(shared.clone(), pr.clone(), job.turn, name.clone());
     let run = TurnRun {
         pr: pr.clone(),
         turn: job.turn,
@@ -743,7 +743,7 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Job) {
         TurnEnd::Failed => {
             let message = sink
                 .message
-                .unwrap_or_else(|| format!("{} could not finish the revalidation", agent.name()));
+                .unwrap_or_else(|| format!("{name} could not finish the revalidation"));
             finish(&shared, &pr, &job, Ending::Failed(message)).await;
         }
         TurnEnd::TimedOut => {
@@ -778,13 +778,13 @@ struct RunSink {
     saw_final: bool,
     failed: bool,
     message: Option<String>,
-    agent: Agent,
+    name: String,
 }
 
 impl RunSink {
-    fn new(shared: Arc<Shared>, pr: PrRef, turn: u64, agent: Agent) -> Self {
+    fn new(shared: Arc<Shared>, pr: PrRef, turn: u64, name: String) -> Self {
         Self {
-            agent,
+            name,
             shared,
             pr,
             turn,
@@ -832,10 +832,7 @@ impl RunSink {
                 if !is_error {
                     self.answer = Some(text);
                 } else if text.trim().is_empty() {
-                    self.fail_with(format!(
-                        "{} could not finish the revalidation",
-                        self.agent.name()
-                    ));
+                    self.fail_with(format!("{} could not finish the revalidation", self.name));
                 } else {
                     self.fail_with(text.trim().to_string());
                 }
@@ -1337,6 +1334,7 @@ mod tests {
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
             bridge_program: None,
+            harness_env: Vec::new(),
         };
         let shared = Arc::new(Shared::new(
             Paths::new(home.path()),

@@ -12,7 +12,7 @@ use clusia_core::checks::{
     security_prompt,
 };
 use clusia_core::{AgentState, DraftKind, FileDiff, Origin, PrRef, ReviewState, Side};
-use clusia_harness::{Agent, AgentEvent, extract_check_blocks};
+use clusia_harness::{AgentEvent, extract_check_blocks};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, AnchorInput, CheckState, CheckStatus, ErrorCode, Event, Outcome,
     ProtocolError, Reply, topics,
@@ -399,8 +399,8 @@ async fn drive(_live: Live, shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job
 }
 
 async fn execute(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job: Job) {
-    let agent = crate::sessions::agent_for(&shared, &pr).await;
-    let mut sink = CheckSink::new(shared.clone(), pr.clone(), kind, job.turn, agent);
+    let name = crate::sessions::name_for(&shared, &pr).await;
+    let mut sink = CheckSink::new(shared.clone(), pr.clone(), kind, job.turn, name.clone());
     let run = TurnRun {
         pr: pr.clone(),
         turn: job.turn,
@@ -418,7 +418,7 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, job: Job) {
         TurnEnd::Failed => {
             let message = sink
                 .message
-                .unwrap_or_else(|| format!("{} could not finish the check", agent.name()));
+                .unwrap_or_else(|| format!("{name} could not finish the check"));
             fail(&shared, &pr, kind, job.turn, message);
         }
         TurnEnd::TimedOut => fail(
@@ -448,13 +448,13 @@ struct CheckSink {
     saw_final: bool,
     failed: bool,
     message: Option<String>,
-    agent: Agent,
+    name: String,
 }
 
 impl CheckSink {
-    fn new(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, turn: u64, agent: Agent) -> Self {
+    fn new(shared: Arc<Shared>, pr: PrRef, kind: CheckKind, turn: u64, name: String) -> Self {
         Self {
-            agent,
+            name,
             shared,
             pr,
             kind,
@@ -491,7 +491,7 @@ impl CheckSink {
                 if !is_error {
                     self.answer = Some(text);
                 } else if text.trim().is_empty() {
-                    self.fail_with(format!("{} could not finish the check", self.agent.name()));
+                    self.fail_with(format!("{} could not finish the check", self.name));
                 } else {
                     self.fail_with(text.trim().to_string());
                 }
@@ -1061,6 +1061,7 @@ mod tests {
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
             bridge_program: None,
+            harness_env: Vec::new(),
         };
         let shared = Arc::new(Shared::new(Paths::new(home.path()), config, options));
         for n in 1..=reviews {

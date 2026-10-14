@@ -46,6 +46,7 @@ impl Daemon {
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
             bridge_program: None,
+            harness_env: Vec::new(),
             claude_program: Some("/nonexistent/claude".into()),
             codex_program: Some("/nonexistent/codex".into()),
         };

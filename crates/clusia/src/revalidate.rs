@@ -148,12 +148,7 @@ async fn finish(client: &mut Client, pr: &PrRef, round: Revalidation) -> Result<
         return Err(no_answer("GetReview"));
     };
     Ok(Output {
-        human: report_lines(
-            &round,
-            &review,
-            crate::harness::kind_of(client, pr).await.name(),
-        )
-        .join("\n"),
+        human: report_lines(&round, &review, &crate::harness::name_of(client, pr).await).join("\n"),
         json: json!({ "revalidation": round }),
     })
 }
@@ -225,7 +220,7 @@ async fn follow(
             .request(Request::Revalidate { pr: pr.clone() })
             .await?;
     }
-    let harness = crate::harness::kind_of(client, pr).await.name();
+    let harness = crate::harness::name_of(client, pr).await;
     let mut asked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let finished = loop {
         let (_, event) = tokio::select! {
@@ -290,8 +285,8 @@ async fn follow(
             } if of == *pr => {
                 if asked.insert(id) && !json {
                     eprintln!(
-                        "Revalidation: waiting for an answer in the window: {harness} wants to use {}: {}",
-                        line_of(&tool),
+                        "Revalidation: waiting for an answer in the window: {harness} wants to {}: {}",
+                        crate::agent::wants_to(&tool, &line_of(&tool)),
                         line_of(&summary)
                     );
                 }

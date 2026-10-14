@@ -1,5 +1,6 @@
 //! How the daemon reaches GitHub and stores secrets. Tests replace every outside dependency.
 
+use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +46,9 @@ pub struct DaemonOptions {
     /// The `clusiad` that `claude` starts as the permission bridge. Env: `CLUSIA_BRIDGE_BIN`;
     /// default: this executable.
     pub bridge_program: Option<PathBuf>,
+    /// Variables added to the daemon's environment for a custom command's process, before the
+    /// ones it must not see are dropped. Empty in production; tests use it to prove the drop.
+    pub harness_env: Vec<(OsString, OsString)>,
 }
 
 impl DaemonOptions {
@@ -76,6 +80,7 @@ impl DaemonOptions {
             claude_program: var("CLUSIA_CLAUDE_BIN").map(PathBuf::from),
             codex_program: var("CLUSIA_CODEX_BIN").map(PathBuf::from),
             bridge_program: var("CLUSIA_BRIDGE_BIN").map(PathBuf::from),
+            harness_env: Vec::new(),
         }
     }
 }

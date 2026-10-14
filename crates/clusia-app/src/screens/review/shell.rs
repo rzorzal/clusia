@@ -472,7 +472,11 @@ pub fn shell_view(
         sections,
         draft: items.iter().map(draft_card).collect(),
         status: StatusView {
-            agent: agent_status(SessionStateKind::None, crate::agent_name::of_tab(snap, tab)).0,
+            agent: agent_status(
+                SessionStateKind::None,
+                &crate::agent_name::of_tab(snap, tab),
+            )
+            .0,
             agent_live: false,
             draft: if items.is_empty() {
                 "Draft empty".into()
@@ -1248,7 +1252,7 @@ fn rebuild_status(
             || crate::agent_name::active(&model.snapshot),
             |t| crate::agent_name::of_tab(&model.snapshot, t),
         );
-        let (agent, agent_live) = agent_status(chats.state(&bar.pr), name);
+        let (agent, agent_live) = agent_status(chats.state(&bar.pr), &name);
         let mut status = v.status.clone();
         status.agent = agent;
         status.agent_live = agent_live;

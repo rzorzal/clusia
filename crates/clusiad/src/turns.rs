@@ -89,9 +89,18 @@ impl Stop {
 /// Where the agent's command is: the program set in Config › Harness, else the daemon's own
 /// override for the harness's kind, else the kind's command (`claude` or `codex`) on the
 /// daemon's `PATH` or in the usual install folders. A name that is nowhere is returned as is,
-/// so starting it fails with "not found".
+/// so starting it fails with "not found". A custom command has no default and no lookup: its
+/// path is the configured one, or empty when none is set.
 pub(crate) fn program_path(shared: &Shared, harness: &Harness) -> PathBuf {
     let agent = Agent::from(harness.kind);
+    if agent == Agent::Custom {
+        return harness
+            .program
+            .as_deref()
+            .map(str::trim)
+            .map(PathBuf::from)
+            .unwrap_or_default();
+    }
     let configured = harness
         .program
         .as_deref()
@@ -100,6 +109,7 @@ pub(crate) fn program_path(shared: &Shared, harness: &Harness) -> PathBuf {
     let own = match agent {
         Agent::ClaudeCode => &shared.claude_program,
         Agent::Codex => &shared.codex_program,
+        Agent::Custom => &None,
     };
     let name = match (configured, own) {
         (Some(program), _) => program,
@@ -121,7 +131,7 @@ pub(crate) fn program_path(shared: &Shared, harness: &Harness) -> PathBuf {
 }
 
 /// Reads what the program wrote to standard error, keeping only the end.
-async fn read_tail(stderr: Option<ChildStderr>) -> String {
+pub(crate) async fn read_tail(stderr: Option<ChildStderr>) -> String {
     let Some(mut stderr) = stderr else {
         return String::new();
     };
@@ -216,13 +226,13 @@ pub(crate) async fn sweep_and_reap(child: &mut Child, pid: Option<u32>) -> Optio
 }
 
 /// SIGTERM to the child's whole group, SIGKILL to the group once the child ended or after
-/// `KILL_GRACE`, then reaps the child. The child is reaped last, so its group id is never
-/// reused while it is signalled.
-pub(crate) async fn terminate(child: &mut Child) {
+/// `grace`, then reaps the child. The child is reaped last, so its group id is never reused
+/// while it is signalled.
+pub(crate) async fn terminate(child: &mut Child, grace: Duration) {
     let pid = child.id();
     signal_group(pid, libc::SIGTERM);
     if let Some(pid) = pid {
-        exited_within(pid, KILL_GRACE).await;
+        exited_within(pid, grace).await;
     }
     sweep_and_reap(child, pid).await;
 }
@@ -385,6 +395,21 @@ async fn execute(
     sink: &mut dyn TurnSink,
 ) -> TurnEnd {
     let harness = harness_for(shared, pr).await;
+    if harness.kind == HarnessKind::Custom {
+        return execute_custom(
+            shared,
+            pr,
+            turn,
+            &harness,
+            prompt,
+            fresh_prompt,
+            session,
+            limit,
+            stop,
+            sink,
+        )
+        .await;
+    }
     if harness.kind == HarnessKind::Codex {
         return execute_codex(
             shared,
@@ -435,8 +460,15 @@ async fn execute(
     // Requests of this turn show, and are judged by, the sandbox its program runs with, even
     // when the setting changes before the turn ends.
     shared.sessions.set_turn_sandbox(pr, turn, harness.sandbox);
-    let (session, prompt) =
-        resolve_session(shared, pr, session, prompt, fresh_prompt, harness.kind);
+    let (session, prompt) = resolve_session(
+        shared,
+        pr,
+        session,
+        prompt,
+        fresh_prompt,
+        harness.kind,
+        harness.program.as_deref(),
+    );
     let spec = TurnSpec {
         program: program_path(shared, &harness),
         prompt,
@@ -521,7 +553,7 @@ async fn execute(
             let pid = child.id();
             let status = match pid {
                 Some(id) if !exited_within(id, KILL_GRACE).await => {
-                    terminate(&mut child).await;
+                    terminate(&mut child, KILL_GRACE).await;
                     None
                 }
                 _ => sweep_and_reap(&mut child, pid).await,
@@ -529,7 +561,7 @@ async fn execute(
             ended(agent, sink, status, &tail(stderr).await);
         }
         Ending::Stopped => {
-            terminate(&mut child).await;
+            terminate(&mut child, KILL_GRACE).await;
             sink.release();
             if !said_result && !had_failed {
                 sink.error(
@@ -539,11 +571,11 @@ async fn execute(
             }
         }
         Ending::TimedOut if said_result || had_failed => {
-            terminate(&mut child).await;
+            terminate(&mut child, KILL_GRACE).await;
             sink.release();
         }
         Ending::TimedOut => {
-            terminate(&mut child).await;
+            terminate(&mut child, KILL_GRACE).await;
             sink.release();
             sink.error(
                 AgentErrorKind::Interrupted,
@@ -564,20 +596,28 @@ async fn execute(
     }
 }
 
-/// The harness a turn of `pr` runs with: the config's, except that the agent, the program and
-/// the extra arguments are the ones the review pinned when it opened, so a change in Config ›
-/// Harness applies to reviews opened afterwards. A review with nothing pinned (a saved one that
-/// is not open) follows the config. The pinned program and arguments count only once the config
-/// names another agent: while it names the same one, an edit of its program or arguments reaches
-/// the next turn as it always did.
+/// The harness a turn of `pr` runs with: the config's, except that the agent, the program, the
+/// extra arguments and a custom command's name are the ones the review pinned when it opened, so
+/// a change in Config › Harness applies to reviews opened afterwards. A review with nothing
+/// pinned (a saved one that is not open) follows the config. The pin counts once the config
+/// names another agent, or, for a custom command that was pinned with a program, another
+/// program, arguments or name: while a built-in agent stays the same, an edit of its program or
+/// arguments reaches the next turn as it always did.
 pub(crate) async fn harness_for(shared: &Shared, pr: &PrRef) -> Harness {
     let mut harness = shared.config.read().await.harness.clone();
-    if let Some(pinned) = shared.sessions.pinned(pr)
-        && pinned.kind != harness.kind
-    {
-        harness.kind = pinned.kind;
-        harness.program = pinned.program;
-        harness.extra_args = pinned.extra_args;
+    if let Some(pinned) = shared.sessions.pinned(pr) {
+        // A pin with no program is not a choice: a program set later is the one to run.
+        let custom_changed = harness.kind == HarnessKind::Custom
+            && pinned.program.is_some()
+            && (pinned.program != harness.program
+                || pinned.extra_args != harness.extra_args
+                || pinned.custom_name != harness.custom_name);
+        if pinned.kind != harness.kind || custom_changed {
+            harness.kind = pinned.kind;
+            harness.program = pinned.program;
+            harness.extra_args = pinned.extra_args;
+            harness.custom_name = pinned.custom_name;
+        }
     }
     harness
 }
@@ -591,11 +631,15 @@ pub(crate) fn resolve_session(
     prompt: String,
     fresh_prompt: Option<String>,
     kind: HarnessKind,
+    program: Option<&str>,
 ) -> (SessionArg, String) {
     match source {
-        SessionSource::Chat => (shared.sessions.session_for(shared, pr, kind), prompt),
+        SessionSource::Chat => (
+            shared.sessions.session_for(shared, pr, kind, program),
+            prompt,
+        ),
         SessionSource::Fork => {
-            let session = shared.sessions.fork_session(shared, pr, kind);
+            let session = shared.sessions.fork_session(shared, pr, kind, program);
             let prompt = match (&session, fresh_prompt) {
                 (SessionArg::New(_), Some(fresh)) => fresh,
                 _ => prompt,
@@ -604,6 +648,51 @@ pub(crate) fn resolve_session(
         }
         SessionSource::Given(session) => (session, prompt),
     }
+}
+
+/// Runs one turn on the user's own program. The chat resumes the session this program stored for
+/// the review; a check or a revalidation starts a session of its own and gets the prompt that
+/// does not rely on the chat's, so the chat's session is never reached.
+#[allow(clippy::too_many_arguments)]
+async fn execute_custom(
+    shared: &Arc<Shared>,
+    pr: &PrRef,
+    turn: u64,
+    harness: &Harness,
+    prompt: String,
+    fresh_prompt: Option<String>,
+    session: SessionSource,
+    limit: Option<Duration>,
+    stop: &Arc<Stop>,
+    sink: &mut dyn TurnSink,
+) -> TurnEnd {
+    let (session_id, prompt) = match session {
+        SessionSource::Chat => (stored_custom_session(shared, pr, harness), prompt),
+        SessionSource::Fork => (None, fresh_prompt.unwrap_or(prompt)),
+        SessionSource::Given(SessionArg::Resume(id)) => (Some(id), prompt),
+        SessionSource::Given(_) => (None, prompt),
+    };
+    crate::custom::run_turn(
+        shared,
+        pr,
+        turn,
+        harness,
+        harness.display_name(),
+        prompt,
+        session_id,
+        limit,
+        stop,
+        sink,
+    )
+    .await
+}
+
+/// The session the review's chat holds with this very program, if any.
+fn stored_custom_session(shared: &Shared, pr: &PrRef, harness: &Harness) -> Option<String> {
+    let review = crate::reviews::load_stored(shared, pr).ok().flatten()?;
+    review
+        .session_of(HarnessKind::Custom, harness.program.as_deref())
+        .map(str::to_owned)
 }
 
 /// Runs one turn on `codex app-server`.
@@ -630,6 +719,7 @@ async fn execute_codex(
         prompt,
         fresh_prompt,
         HarnessKind::Codex,
+        None,
     );
     crate::codex::run_turn(shared, pr, turn, session, prompt, limit, stop, sink).await
 }

@@ -246,7 +246,7 @@ pub(super) fn fill_security(
                 &model.snapshot,
                 crate::agent_name::kind_of_tab(&model.snapshot, tab),
             ),
-            crate::agent_name::of_tab(&model.snapshot, tab),
+            &crate::agent_name::of_tab(&model.snapshot, tab),
             &files,
             clock.now(),
             editor.and_then(|e| match &e.target {

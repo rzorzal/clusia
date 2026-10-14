@@ -536,6 +536,8 @@ pub struct Harness {
     /// string in `config.toml` when unset, so the key can always be read and set by name.
     #[serde(with = "empty_is_none")]
     pub program: Option<String>,
+    /// What the pages call a custom command; empty until it is set or a probe fills it in.
+    pub custom_name: String,
     /// Appended to every turn's command line, split like a shell would.
     pub extra_args: String,
     pub on_open: OnOpen,
@@ -563,10 +565,29 @@ pub struct Harness {
 impl Harness {
     pub const DEFAULT_TIMEOUT_SECS: u32 = 600;
     pub const DEFAULT_PERMISSION_TIMEOUT_SECS: u32 = 120;
+    pub const MAX_CUSTOM_NAME_CHARS: usize = 40;
 
     /// `extra_args` split into words; an unbalanced quote is an error.
     pub fn extra_args_list(&self) -> Result<Vec<String>, String> {
         split_args(&self.extra_args)
+    }
+
+    /// What the pages call this harness: a custom command's own name, else the file name of its
+    /// program, else the kind's name.
+    pub fn display_name(&self) -> String {
+        if self.kind != HarnessKind::Custom {
+            return self.kind.name().to_owned();
+        }
+        let named = self.custom_name.trim();
+        if !named.is_empty() {
+            return named.to_owned();
+        }
+        self.program
+            .as_deref()
+            .and_then(|program| std::path::Path::new(program).file_name())
+            .map(|file| file.to_string_lossy().into_owned())
+            .filter(|file| !file.is_empty())
+            .unwrap_or_else(|| HarnessKind::Custom.name().to_owned())
     }
 }
 
@@ -575,6 +596,7 @@ impl Default for Harness {
         Self {
             kind: HarnessKind::ClaudeCode,
             program: None,
+            custom_name: String::new(),
             extra_args: String::new(),
             on_open: OnOpen::Summarize,
             use_cli_permissions: true,
@@ -597,6 +619,8 @@ pub enum HarnessKind {
     #[default]
     ClaudeCode,
     Codex,
+    /// Any program that speaks Clúsia's JSON-lines protocol.
+    Custom,
 }
 
 impl HarnessKind {
@@ -605,6 +629,7 @@ impl HarnessKind {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::Custom => "Custom command",
         }
     }
 
@@ -613,6 +638,7 @@ impl HarnessKind {
         match self {
             Self::ClaudeCode => "Run `claude` once in a terminal",
             Self::Codex => "Run `codex login` once in a terminal",
+            Self::Custom => "Sign in with the program's own login",
         }
     }
 }
@@ -776,6 +802,7 @@ fn table(kind: HarnessKind) -> Vec<(&'static str, Takes)> {
             .chain(&CODEX_TRANSPORT)
             .copied()
             .collect(),
+        HarnessKind::Custom => Vec::new(),
     }
 }
 
@@ -1030,6 +1057,15 @@ impl Config {
             return Err(format!(
                 "harness.audit_areas: the built-in area {id} cannot be removed; switch it off instead"
             ));
+        }
+        let name = &self.harness.custom_name;
+        if name.chars().count() > Harness::MAX_CUSTOM_NAME_CHARS
+            || name.chars().any(char::is_control)
+        {
+            return Err(
+                "harness.custom_name must be at most 40 characters, with no control characters"
+                    .into(),
+            );
         }
         let args = self
             .harness
@@ -1720,6 +1756,77 @@ mod tests {
             assert_eq!(first_reserved_flag(&args), None, "{fine}");
             assert_eq!(strip_reserved_flags(&args), args, "{fine}");
         }
+    }
+
+    #[test]
+    fn custom_is_a_harness_kind_with_a_name_and_no_reserved_flags() {
+        let c: Config = serde_json::from_str(r#"{"harness":{"kind":"custom"}}"#).unwrap();
+        assert_eq!(c.harness.kind, HarnessKind::Custom);
+        assert_eq!(
+            serde_json::to_string(&HarnessKind::Custom).unwrap(),
+            r#""custom""#
+        );
+        assert_eq!(HarnessKind::Custom.name(), "Custom command");
+        assert_eq!(
+            HarnessKind::Custom.sign_in_hint(),
+            "Sign in with the program's own login"
+        );
+        assert_eq!(reserved_flags_for(HarnessKind::Custom).count(), 0);
+        let mut c = Config::default();
+        c.harness.kind = HarnessKind::Custom;
+        c.harness.extra_args = "-p --model small --sandbox".into();
+        assert_eq!(
+            c.validate(),
+            Ok(()),
+            "a custom command has no reserved flags"
+        );
+        assert_eq!(
+            c.harness.program, None,
+            "a program is never required to validate"
+        );
+    }
+
+    #[test]
+    fn the_display_name_is_the_name_the_file_or_the_kind() {
+        let mut h = Harness::default();
+        assert_eq!(h.display_name(), "Claude Code");
+        h.kind = HarnessKind::Codex;
+        assert_eq!(h.display_name(), "Codex");
+        h.kind = HarnessKind::Custom;
+        assert_eq!(h.display_name(), "Custom command");
+        h.program = Some("/usr/local/bin/echo-harness".into());
+        assert_eq!(h.display_name(), "echo-harness");
+        h.custom_name = "  Echo  ".into();
+        assert_eq!(h.display_name(), "Echo");
+        h.custom_name = "   ".into();
+        assert_eq!(h.display_name(), "echo-harness");
+        h.kind = HarnessKind::Codex;
+        h.custom_name = "Echo".into();
+        assert_eq!(
+            h.display_name(),
+            "Codex",
+            "the name belongs to a custom command"
+        );
+    }
+
+    #[test]
+    fn the_custom_name_is_short_and_has_no_control_characters() {
+        let mut c = Config::default();
+        c.harness.custom_name = "x".repeat(40);
+        assert_eq!(c.validate(), Ok(()));
+        c.harness.custom_name = "x".repeat(41);
+        let want = "harness.custom_name must be at most 40 characters, with no control characters";
+        assert_eq!(c.validate(), Err(want.into()));
+        c.harness.custom_name = "Ec\nho".into();
+        assert_eq!(c.validate(), Err(want.into()));
+    }
+
+    #[test]
+    fn a_config_without_a_custom_name_reads_it_as_empty() {
+        let old: Config = serde_json::from_str(r#"{"harness":{"kind":"codex"}}"#).unwrap();
+        assert_eq!(old.harness.custom_name, "");
+        let text = serde_json::to_string(&Config::default()).unwrap();
+        assert!(text.contains(r#""custom_name":"""#), "{text}");
     }
 
     #[test]

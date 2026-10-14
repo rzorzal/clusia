@@ -122,7 +122,7 @@ struct HeaderView {
     /// The agent is set up; without it the header leads to Config › Harness.
     ready: bool,
     /// The agent the review is pinned to.
-    name: &'static str,
+    name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,7 +194,8 @@ impl Plugin for AgentPanel {
 /// Whether the agent `kind` (the one a review is pinned to) is set up: the configured program
 /// serves it (it is the configured kind's), or the first-run scan found it. The configured
 /// program counts only for the configured kind: a review still pinned to the other agent reads
-/// "not set up" until the scan has found that agent on the PATH.
+/// "not set up" until the scan has found that agent on the PATH. A configured custom program
+/// counts as the configured kind's.
 pub fn harness_ready(snap: &Snapshot, kind: clusia_core::config::HarnessKind) -> bool {
     (snap.config.harness.program.is_some() && snap.config.harness.kind == kind)
         || snap.first_run.as_ref().is_some_and(|f| {
@@ -603,7 +604,7 @@ fn rebuild_header(
         if !want.ready {
             commands
                 .entity(entity)
-                .with_children(|h| not_set_up(h, &fonts, want.name));
+                .with_children(|h| not_set_up(h, &fonts, &want.name));
             header.built = Some(want);
             continue;
         }
@@ -622,7 +623,7 @@ fn rebuild_header(
                 },
             ));
             h.spawn((
-                text(&fonts, want.name, Type::STRONG),
+                text(&fonts, want.name.clone(), Type::STRONG),
                 TextLayout::no_wrap(),
                 Node {
                     flex_shrink: 0.0,
@@ -1366,6 +1367,38 @@ mod tests {
             !harness_ready(&snap, Kind::Codex),
             "a review pinned to Codex is not served by Claude Code's program"
         );
+    }
+
+    #[test]
+    fn a_configured_custom_program_makes_the_agent_ready() {
+        use clusia_core::config::HarnessKind as Kind;
+        let mut snap = Snapshot::default();
+        snap.config.harness.kind = Kind::Custom;
+        assert!(
+            !harness_ready(&snap, Kind::Custom),
+            "no program: a custom command is not set up"
+        );
+        snap.config.harness.program = Some("/usr/local/bin/echo-harness".into());
+        assert!(harness_ready(&snap, Kind::Custom));
+        assert!(
+            !harness_ready(&snap, Kind::Codex),
+            "a custom program does not serve Codex"
+        );
+    }
+
+    #[test]
+    fn the_header_of_an_unset_custom_command_names_it() {
+        let mut snap = fixture::demo(NOW);
+        snap.config.harness.kind = clusia_core::config::HarnessKind::Custom;
+        snap.config.harness.custom_name = "Echo".into();
+        let mut app = testing::app(snap);
+        testing::open_ready(&mut app, false);
+        let agent = testing::find::<PanelTabButton>(&mut app, |b| b.tab == PanelTab::Agent);
+        testing::activate(&mut app, agent);
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Echo"));
+        assert!(testing::shows(&mut app, "not set up"));
+        assert!(!testing::shows(&mut app, "Claude Code"));
     }
 
     #[test]

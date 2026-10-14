@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod codex;
+pub mod custom;
 pub mod git_fixture;
 pub mod github_mock;
 pub mod revalidation;
@@ -40,6 +41,7 @@ pub fn test_options() -> DaemonOptions {
         claude_program: Some("/nonexistent/claude".into()),
         codex_program: Some("/nonexistent/codex".into()),
         bridge_program: Some(env!("CARGO_BIN_EXE_clusiad").into()),
+        harness_env: Vec::new(),
     }
 }
 

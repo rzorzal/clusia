@@ -451,9 +451,9 @@ pub(crate) async fn ask(
         turn,
         tool: tool.clone(),
         summary: summary.clone(),
-        reason: (tool == "Bash")
-            .then(|| input.get("description").and_then(Value::as_str))
-            .flatten()
+        reason: input
+            .get("description")
+            .and_then(Value::as_str)
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
             .map(str::to_string),
@@ -508,7 +508,7 @@ async fn notify(shared: &Shared, pr: &PrRef, id: &str, tool: &str, summary: &str
     let title = stored.map(|review| review.title).unwrap_or_default();
     let event = NotifyEvent::agent_permission(
         pr,
-        harness,
+        &harness,
         &title,
         verb(tool),
         summary,
@@ -726,6 +726,7 @@ mod tests {
             claude_program: Some("/nonexistent/claude".into()),
             codex_program: Some("/nonexistent/codex".into()),
             bridge_program: None,
+            harness_env: Vec::new(),
             github_api: Some("http://127.0.0.1:9".into()),
             github_token: None,
             gh_program: "/nonexistent/gh".into(),
@@ -1492,15 +1493,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_command_gives_a_reason() {
+    async fn every_tool_gives_the_reason_it_carries() {
         let mut lab = lab();
         let path = lab.worktree().join("src/a.rs").display().to_string();
         let asked = lab.ask("Edit", json!({"file_path": path, "description": "tidy up"}));
         let (id, requested) = lab.requested().await;
         assert!(matches!(
+            &requested,
+            Event::PermissionRequested { reason: Some(reason), .. } if reason == "tidy up"
+        ));
+        answer(&lab.shared, &id, PermissionAnswerKind::Deny).await;
+        asked.await.unwrap().unwrap();
+        let asked = lab.ask("Edit", json!({"file_path": path, "description": "  "}));
+        let (id, requested) = lab.requested().await;
+        assert!(matches!(
             requested,
             Event::PermissionRequested { reason: None, .. }
         ));
+        answer(&lab.shared, &id, PermissionAnswerKind::Deny).await;
+        asked.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_other_request_shows_its_detail_and_offers_no_rule() {
+        let mut lab = lab();
+        let asked = lab.ask(
+            "Other",
+            json!({"detail": "Delete the build cache", "description": "frees space"}),
+        );
+        let (id, requested) = lab.requested().await;
+        let Event::PermissionRequested {
+            tool,
+            summary,
+            reason,
+            prefix,
+            ..
+        } = requested
+        else {
+            unreachable!()
+        };
+        assert_eq!(tool, "Other");
+        assert_eq!(summary, "Delete the build cache");
+        assert_eq!(reason.as_deref(), Some("frees space"));
+        assert_eq!(prefix, None, "only Allow once and Deny");
         answer(&lab.shared, &id, PermissionAnswerKind::Deny).await;
         asked.await.unwrap().unwrap();
     }

@@ -205,6 +205,7 @@ pub fn title_for_origin(tool: &str, origin: TurnOrigin, agent: &str) -> String {
         "Bash" => format!("{who} wants to run a command"),
         "Edit" | "MultiEdit" | "NotebookEdit" => format!("{who} wants to edit a file"),
         "Write" => format!("{who} wants to write a file"),
+        "Other" => format!("{who} asks to do something"),
         other => format!("{who} wants to use {}", printable(other)),
     }
 }
@@ -441,7 +442,7 @@ fn rebuild_body(
             || crate::agent_name::active(&model.snapshot),
             |t| crate::agent_name::of_tab(&model.snapshot, t),
         );
-        let view = modal_view(pending, worktree, queue.others(pr), agent);
+        let view = modal_view(pending, worktree, queue.others(pr), &agent);
         let key = (view, pending.answered);
         if body.built.as_ref() == Some(&key) {
             continue;
@@ -859,6 +860,75 @@ mod tests {
 
     fn answer_button(app: &mut App, answer: PermissionAnswerKind) -> Entity {
         testing::find::<AnswerButton>(app, |b| b.answer == answer)
+    }
+
+    #[test]
+    fn the_other_tool_asks_to_do_something() {
+        assert_eq!(title_for("Other", "Echo"), "Echo asks to do something");
+        assert_eq!(
+            title_for_origin("Other", TurnOrigin::Security, "Echo"),
+            "Security check asks to do something"
+        );
+        assert_eq!(
+            review_label("Other", None),
+            None,
+            "nothing to grant for the review"
+        );
+        assert_eq!(
+            permission_line(
+                "Other",
+                "Remove the build cache",
+                PermissionOutcome::Allowed
+            )
+            .2,
+            "used Remove the build cache (you allowed it)"
+        );
+    }
+
+    #[test]
+    fn an_other_request_offers_only_allow_once_and_deny() {
+        let mut app = open();
+        let mut request = request("perm-o", "Other", "Remove the build cache");
+        request.prefix = None;
+        ask(&mut app, request);
+        assert_eq!(testing::count::<PermissionModal>(&mut app), 1);
+        assert!(testing::shows(&mut app, "Claude Code asks to do something"));
+        assert!(testing::shows(&mut app, "Remove the build cache"));
+        assert!(testing::shows(
+            &mut app,
+            "To check that two refreshes at once don't exchange the token twice."
+        ));
+        assert!(!testing::shows(&mut app, "for this review"));
+        age(&mut app);
+        testing::recorded(&mut app);
+        let once = answer_button(&mut app, PermissionAnswerKind::Once);
+        testing::activate(&mut app, once);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::PermissionAnswer {
+                id: "perm-o".into(),
+                answer: PermissionAnswerKind::Once
+            }]
+        );
+    }
+
+    #[test]
+    fn the_modal_names_the_pinned_custom_command() {
+        let mut app = open();
+        testing::set_config_locally(&mut app, "harness.kind", "custom");
+        testing::set_config_locally(&mut app, "harness.custom_name", "Echo");
+        app.world_mut()
+            .resource_mut::<crate::review_state::ReviewTabs>()
+            .0
+            .get_mut(&pr())
+            .unwrap()
+            .ui
+            .opened_with = Some((clusia_core::config::HarnessKind::Custom, "Echo".into()));
+        let mut request = request("perm-o", "Other", "Remove the build cache");
+        request.prefix = None;
+        ask(&mut app, request);
+        assert!(testing::shows(&mut app, "Echo asks to do something"));
+        assert!(!testing::shows(&mut app, "Claude Code"));
     }
 
     #[test]

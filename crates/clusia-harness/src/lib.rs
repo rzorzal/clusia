@@ -7,6 +7,7 @@ mod check_blocks;
 pub mod codex;
 mod codex_command;
 mod command;
+pub mod custom;
 mod parse;
 mod probe;
 mod revalidation_blocks;

@@ -539,6 +539,55 @@ pub fn demo_codex_probe() -> ProbeResult {
     }
 }
 
+/// The settings that make the demo use a custom command called Echo. The program is only a
+/// string to show: the demo never starts it.
+pub const CUSTOM_DEMO_SETTINGS: [(&str, &str); 3] = [
+    ("harness.kind", "custom"),
+    ("harness.program", "/usr/local/bin/echo-harness"),
+    ("harness.custom_name", "Echo"),
+];
+
+/// The demo with a custom command chosen as the agent.
+pub fn demo_custom(now: i64) -> Snapshot {
+    let mut snap = demo(now);
+    for (key, value) in CUSTOM_DEMO_SETTINGS {
+        crate::snapshot::apply_config_locally(&mut snap.config, key, value)
+            .expect("the demo setting is valid");
+    }
+    snap
+}
+
+/// A good custom-command test: Echo answered the probe in 0.2 s.
+pub fn demo_custom_probe() -> ProbeResult {
+    ProbeResult {
+        ok: true,
+        version: Some("1.0".into()),
+        program: "/usr/local/bin/echo-harness".into(),
+        elapsed_ms: 200,
+        error: None,
+        harness: "Echo".into(),
+        signed_in: None,
+        account: None,
+    }
+}
+
+/// A request of kind `other`: it names no command or path, so it has no rule to grant.
+pub fn demo_permission_other(now_ms: i64) -> PermissionRequest {
+    PermissionRequest {
+        id: "perm-other-1".into(),
+        pr: demo_pr(),
+        turn: 3,
+        tool: "Other".into(),
+        summary: "Remove the build cache".into(),
+        reason: Some("To rebuild from a clean state before running the tests.".into()),
+        prefix: None,
+        sandbox: false,
+        deadline: now_ms + 112_000,
+        detail: None,
+        origin: clusia_protocol::TurnOrigin::Chat,
+    }
+}
+
 /// The first-run scan when both harnesses are installed.
 pub fn demo_first_run_both() -> FirstRun {
     let mut first_run = demo_first_run();
@@ -1318,6 +1367,44 @@ mod tests {
         assert_eq!(p.version.as_deref(), Some("0.162.1"));
         assert_eq!(p.account.as_deref(), Some("Logged in using ChatGPT"));
         assert_eq!(p.signed_in, Some(true));
+    }
+
+    #[test]
+    fn the_custom_demo_is_the_demo_with_a_custom_command_chosen() {
+        use clusia_core::config::HarnessKind as Kind;
+        let snap = demo_custom(1_700_000_000);
+        assert_eq!(snap.config.harness.kind, Kind::Custom);
+        assert_eq!(
+            snap.config.harness.program.as_deref(),
+            Some("/usr/local/bin/echo-harness")
+        );
+        assert_eq!(snap.config.harness.custom_name, "Echo");
+        assert_eq!(snap.config.harness.display_name(), "Echo");
+        assert_eq!(
+            demo(1_700_000_000).config.harness.kind,
+            Kind::ClaudeCode,
+            "the plain demo stays on Claude Code"
+        );
+    }
+
+    #[test]
+    fn the_custom_probe_names_echo_and_has_no_account() {
+        let p = demo_custom_probe();
+        assert!(p.ok);
+        assert_eq!(p.harness, "Echo");
+        assert_eq!(p.version.as_deref(), Some("1.0"));
+        assert_eq!(p.elapsed_ms, 200);
+        assert_eq!((p.signed_in, p.account), (None, None));
+    }
+
+    #[test]
+    fn the_other_request_has_no_rule_to_grant() {
+        let r = demo_permission_other(1_000);
+        assert_eq!(r.tool, "Other");
+        assert_eq!(r.summary, "Remove the build cache");
+        assert_eq!(r.prefix, None);
+        assert!(r.reason.is_some());
+        assert_eq!(r.deadline, 113_000);
     }
 
     #[test]

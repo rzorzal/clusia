@@ -26,6 +26,9 @@ const CODEX_DROPPED: [&str; 6] = [
 pub enum Agent {
     ClaudeCode,
     Codex,
+    /// A program of the user's that speaks Clúsia's JSON lines. The user's name for it is not
+    /// part of this `Copy` value: see `Harness::display_name`.
+    Custom,
 }
 
 impl From<HarnessKind> for Agent {
@@ -33,6 +36,7 @@ impl From<HarnessKind> for Agent {
         match kind {
             HarnessKind::ClaudeCode => Self::ClaudeCode,
             HarnessKind::Codex => Self::Codex,
+            HarnessKind::Custom => Self::Custom,
         }
     }
 }
@@ -42,6 +46,7 @@ impl From<Agent> for HarnessKind {
         match agent {
             Agent::ClaudeCode => HarnessKind::ClaudeCode,
             Agent::Codex => HarnessKind::Codex,
+            Agent::Custom => HarnessKind::Custom,
         }
     }
 }
@@ -52,11 +57,12 @@ impl Agent {
         HarnessKind::from(self).name()
     }
 
-    /// The command looked up on `PATH` when Config sets no program.
+    /// The command looked up on `PATH` when Config sets no program; a custom command has none.
     pub fn program(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
+            Self::Custom => "",
         }
     }
 
@@ -69,6 +75,7 @@ impl Agent {
         match self {
             Self::ClaudeCode => parse_probe(stdout),
             Self::Codex => parse_codex_version(stdout),
+            Self::Custom => Err("a custom command answers a probe line instead".into()),
         }
     }
 
@@ -77,6 +84,7 @@ impl Agent {
         match self {
             Self::ClaudeCode => None,
             Self::Codex => Some("0.162.0"),
+            Self::Custom => None,
         }
     }
 
@@ -88,7 +96,7 @@ impl Agent {
         base_env: &[(OsString, OsString)],
     ) -> Option<Command> {
         match self {
-            Self::ClaudeCode => None,
+            Self::ClaudeCode | Self::Custom => None,
             Self::Codex => {
                 let mut cmd = Command::new(program);
                 cmd.args(["login", "status"]);
@@ -114,7 +122,8 @@ impl Agent {
     /// inherit.
     pub fn set_env(self, cmd: &mut Command, base_env: &[(OsString, OsString)]) {
         match self {
-            Self::ClaudeCode => claude_env(cmd, base_env),
+            // A custom command's own keys (`MCP_TOOL_TIMEOUT`, API keys) are the user's to give.
+            Self::ClaudeCode | Self::Custom => claude_env(cmd, base_env),
             Self::Codex => {
                 cmd.env_clear();
                 for (key, value) in base_env {
@@ -329,6 +338,40 @@ mod tests {
         ] {
             assert!(!text.contains(&format!("{gone}=")), "{gone}: {text}");
         }
+    }
+
+    #[test]
+    fn custom_children_get_no_tokens_and_keep_the_users_keys() {
+        let text = printed_env(Agent::Custom);
+        for kept in ["KEEP=x", "MCP_TOOL_TIMEOUT=x", "OPENAI_API_KEY=x"] {
+            assert!(text.contains(kept), "{kept}: {text}");
+        }
+        for gone in [
+            "GH_TOKEN=",
+            "GITHUB_TOKEN=",
+            "GH_ENTERPRISE_TOKEN=",
+            "CLUSIA_HOME=",
+        ] {
+            assert!(!text.contains(gone), "{gone}: {text}");
+        }
+    }
+
+    #[test]
+    fn custom_has_no_program_version_or_login_check() {
+        let env: Vec<(OsString, OsString)> = Vec::new();
+        assert_eq!(Agent::Custom.program(), "");
+        assert_eq!(Agent::Custom.min_version(), None);
+        assert!(
+            Agent::Custom
+                .signed_in_command(Path::new("x"), &env)
+                .is_none()
+        );
+        assert_eq!(
+            Agent::Custom.parse_version("1.0"),
+            Err("a custom command answers a probe line instead".into())
+        );
+        assert_eq!(Agent::from(HarnessKind::Custom), Agent::Custom);
+        assert_eq!(Agent::Custom.name(), "Custom command");
     }
 
     #[test]

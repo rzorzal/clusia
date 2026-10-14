@@ -17,15 +17,27 @@ pub struct World {
 
 /// acme/widgets#7 with `feature.txt` = "one\ntwo\nthree\n", served by a mock GitHub and a local origin.
 pub async fn world() -> World {
-    world_with(false).await
+    world_with(false, Vec::new()).await
+}
+
+/// Like `world`, with `env` added to the environment the daemon starts a custom command in.
+pub async fn world_with_harness_env(env: &[(&str, &str)]) -> World {
+    let env = env
+        .iter()
+        .map(|(k, v)| ((*k).into(), (*v).into()))
+        .collect();
+    world_with(false, env).await
 }
 
 /// Like `world`, with the daemon's background sync loop running (it also checks saved reviews).
 pub async fn world_syncing() -> World {
-    world_with(true).await
+    world_with(true, Vec::new()).await
 }
 
-async fn world_with(background_sync: bool) -> World {
+async fn world_with(
+    background_sync: bool,
+    harness_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+) -> World {
     let tmp = tempfile::tempdir().unwrap();
     let origin = origin_with_pr(tmp.path(), 7);
     let head = advance_pr(tmp.path(), 7, "feature.txt", "one\ntwo\nthree\n");
@@ -48,6 +60,7 @@ async fn world_with(background_sync: bool) -> World {
     options.github_api = Some(server.uri());
     options.github_token = Some("tok".into());
     options.background_sync = background_sync;
+    options.harness_env = harness_env;
     let daemon = TestDaemon::start_with(tempfile::tempdir().unwrap(), options).await;
     let empty_roots = tmp.path().join("roots");
     std::fs::create_dir_all(&empty_roots).unwrap();

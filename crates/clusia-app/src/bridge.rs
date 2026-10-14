@@ -2097,6 +2097,11 @@ pub(crate) fn pump(
                 if s.giphy_key != model.snapshot.giphy_key {
                     model.rejected.remove(GIPHY_KEY_REFUSAL);
                 }
+                // A Test result describes the harness it was run on: another one makes it stale.
+                let (old, new) = (&model.snapshot.config.harness, &s.config.harness);
+                if old.kind != new.kind || old.program != new.program {
+                    model.probe = ProbeState::Idle;
+                }
                 model.snapshot = *s;
                 model.connection = Connection::Live;
             }
@@ -2200,7 +2205,10 @@ pub(crate) fn pump(
                 }
                 revalidations.apply(&tell);
             }
-            Tell::Probe(result) => model.probe = ProbeState::Done(result),
+            // An answer nobody is waiting for (the harness changed meanwhile) is dropped.
+            Tell::Probe(result) if model.probe == ProbeState::Testing => {
+                model.probe = ProbeState::Done(result);
+            }
             _ => {} // the other review tells were applied above
         }
     }
@@ -2271,7 +2279,7 @@ pub(crate) fn demo_answers(
                     &text,
                     now * 1000,
                     *rule_granted,
-                    model.snapshot.config.harness.kind.name(),
+                    &model.snapshot.config.harness.display_name(),
                 ));
             }
             Ask::PermissionAnswer { id, answer } => {

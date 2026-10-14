@@ -224,9 +224,7 @@ pub(crate) async fn whats_new(shared: &Shared, pr: &PrRef) -> Outcome {
         checks_label,
         last_checks: review.last_checks.clone(),
         local,
-        harness: crate::notifications::harness_name(shared, Some(&review))
-            .await
-            .to_string(),
+        harness: crate::notifications::harness_name(shared, Some(&review)).await,
     };
     Outcome::Ok(Reply::WhatsNew(news_items(&input)))
 }

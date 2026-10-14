@@ -240,6 +240,43 @@ fn the_harness_can_be_switched_to_codex_and_keeps_its_own_flags() {
 }
 
 #[test]
+fn a_custom_command_is_switched_on_named_and_cleared_on_the_way_out() {
+    let h = Home::new();
+    assert!(h.clusia(&["daemon", "start"]).status.success());
+    let o = h.clusia(&["config", "set", "harness.kind", "custom"]);
+    assert_eq!(stdout(&o), "harness.kind = custom", "{}", stderr(&o));
+    let o = h.clusia(&["config", "set", "harness.program", "/opt/bin/echo-harness"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = h.clusia(&["config", "set", "harness.custom_name", "Echo"]);
+    assert_eq!(stdout(&o), "harness.custom_name = Echo", "{}", stderr(&o));
+    // Setting the same kind again changes nothing.
+    assert!(
+        h.clusia(&["config", "set", "harness.kind", "custom"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        stdout(&h.clusia(&["config", "get", "harness.custom_name"])),
+        "Echo"
+    );
+
+    let long = "x".repeat(41);
+    let o = h.clusia(&["config", "set", "harness.custom_name", &long]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("harness.custom_name must be at most 40 characters"),
+        "{}",
+        stderr(&o)
+    );
+
+    let o = h.clusia(&["config", "set", "harness.kind", "codex"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    for key in ["harness.program", "harness.custom_name"] {
+        assert_eq!(stdout(&h.clusia(&["config", "get", key])), "", "{key}");
+    }
+}
+
+#[test]
 fn start_twice_reports_already_running() {
     let h = Home::new();
     assert!(h.clusia(&["daemon", "start"]).status.success());

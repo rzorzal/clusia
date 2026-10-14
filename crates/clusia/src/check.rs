@@ -254,9 +254,9 @@ fn permission_note(
 ) -> Option<String> {
     let kind = kind_of(origin).filter(|kind| going.contains(kind))?;
     Some(format!(
-        "{}: waiting for an answer in the window: {harness} wants to use {}: {}",
+        "{}: waiting for an answer in the window: {harness} wants to {}: {}",
         kind.label(),
-        line_of(tool),
+        crate::agent::wants_to(tool, &line_of(tool)),
         line_of(summary)
     ))
 }
@@ -304,7 +304,7 @@ pub(crate) async fn check(
             "the daemon did not answer GetChecks".into(),
         ));
     };
-    let harness = crate::harness::kind_of(&mut client, &pr).await.name();
+    let harness = crate::harness::name_of(&mut client, &pr).await;
     let mut going: Vec<CheckKind> = Vec::new();
     let mut started: Vec<CheckKind> = Vec::new();
     for &kind in &wanted {
@@ -397,7 +397,7 @@ pub(crate) async fn check(
                 origin,
                 ..
             } if of == pr => {
-                if let Some(note) = permission_note(origin, &going, &tool, &summary, harness)
+                if let Some(note) = permission_note(origin, &going, &tool, &summary, &harness)
                     && asked.insert(id)
                     && !json
                 {
@@ -451,7 +451,7 @@ pub(crate) async fn check(
                     &accepted_ids,
                     &dismissed_ids,
                     &area_names,
-                    harness,
+                    &harness,
                 ));
                 shown.push(result);
             }
@@ -556,6 +556,23 @@ mod tests {
             )
             .as_deref(),
             Some("Audit: waiting for an answer in the window: Codex wants to use Bash: make")
+        );
+    }
+
+    #[test]
+    fn a_permission_note_for_an_other_request_says_do_something() {
+        assert_eq!(
+            permission_note(
+                TurnOrigin::Security,
+                &[CheckKind::Security],
+                "Other",
+                "Send a report",
+                "Echo"
+            )
+            .as_deref(),
+            Some(
+                "Security: waiting for an answer in the window: Echo wants to do something: Send a report"
+            )
         );
     }
 

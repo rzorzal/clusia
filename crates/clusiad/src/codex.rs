@@ -523,7 +523,7 @@ impl Server {
         // The process goes first: a write that is stuck on it fails then and frees the lock.
         let child = self.child.lock().await.take();
         if let Some(mut child) = child {
-            turns::terminate(&mut child).await;
+            turns::terminate(&mut child, KILL_GRACE).await;
         }
         self.link.stdin.lock().await.take();
     }
@@ -1154,6 +1154,7 @@ mod tests {
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
             bridge_program: None,
+            harness_env: Vec::new(),
         };
         let shared = Arc::new(Shared::new(Paths::new(home.path()), config, options));
         let lab = Lab {

@@ -1324,13 +1324,9 @@ mod tests {
         ] {
             assert!(texts.iter().any(|t| t == needle), "{needle}\n{texts:?}");
         }
-        assert_eq!(
-            texts
-                .iter()
-                .filter(|t| *t == "Arrives in a later milestone")
-                .count(),
-            1,
-            "only Custom command"
+        assert!(
+            !texts.iter().any(|t| t == "Arrives in a later milestone"),
+            "Custom command is a real card now"
         );
         for key in [
             "harness.program",
@@ -1463,6 +1459,10 @@ mod tests {
         );
         assert!(texts.contains(&"Test again".to_string()));
 
+        let again = testing::find::<harness::TestHarness>(&mut app, |_| true);
+        testing::activate(&mut app, again);
+        testing::settle(&mut app);
+        let _ = testing::recorded(&mut app);
         testing::tell(
             &mut app,
             Tell::Probe(clusia_protocol::ProbeResult {

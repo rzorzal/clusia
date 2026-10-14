@@ -85,6 +85,7 @@ pub(crate) struct Pinned {
     pub kind: HarnessKind,
     pub program: Option<String>,
     pub extra_args: String,
+    pub custom_name: String,
 }
 
 impl Pinned {
@@ -93,7 +94,19 @@ impl Pinned {
             kind: harness.kind,
             program: harness.program.clone(),
             extra_args: harness.extra_args.clone(),
+            custom_name: harness.custom_name.clone(),
         }
+    }
+
+    /// What the pages call the pinned harness.
+    pub(crate) fn display_name(&self) -> String {
+        Harness {
+            kind: self.kind,
+            program: self.program.clone(),
+            custom_name: self.custom_name.clone(),
+            ..Harness::default()
+        }
+        .display_name()
     }
 }
 
@@ -249,6 +262,11 @@ impl Sessions {
             .unwrap_or_else(|p| p.into_inner())
             .get(pr)
             .cloned()
+    }
+
+    /// What the pages call the harness `pr` is pinned to; `None` for a review that is not open.
+    pub(crate) fn pinned_name(&self, pr: &PrRef) -> Option<String> {
+        self.pinned(pr).map(|pinned| pinned.display_name())
     }
 
     /// The review was saved and closed: its next turns follow the config again.
@@ -637,10 +655,17 @@ impl Sessions {
     }
 
     /// `--resume` for a session `kind` made and the CLI knows, `--session-id` with a fresh uuid
-    /// otherwise: a session of another harness is not resumed.
-    pub(crate) fn session_for(&self, shared: &Shared, pr: &PrRef, kind: HarnessKind) -> SessionArg {
+    /// otherwise: a session of another harness is not resumed, and a custom command resumes only
+    /// the sessions of the same `program`.
+    pub(crate) fn session_for(
+        &self,
+        shared: &Shared,
+        pr: &PrRef,
+        kind: HarnessKind,
+        program: Option<&str>,
+    ) -> SessionArg {
         if let Ok(Some(review)) = reviews::load_stored(shared, pr)
-            && let Some(id) = review.session_of(kind)
+            && let Some(id) = review.session_of(kind, program)
         {
             return SessionArg::Resume(id.to_string());
         }
@@ -661,10 +686,11 @@ impl Sessions {
         shared: &Shared,
         pr: &PrRef,
         kind: HarnessKind,
+        program: Option<&str>,
     ) -> SessionArg {
         let id = uuid::Uuid::new_v4().to_string();
         match reviews::load_stored(shared, pr) {
-            Ok(Some(review)) => match review.session_of(kind) {
+            Ok(Some(review)) => match review.session_of(kind, program) {
                 Some(parent) => SessionArg::Fork {
                     parent: parent.to_string(),
                     id,
@@ -699,9 +725,7 @@ async fn drive(
             tracing::error!(pr = %pr, turn, "an agent turn failed inside the daemon");
             Out::new(&shared, &pr, turn).error(
                 AgentErrorKind::Crashed,
-                current_agent(&shared)
-                    .await
-                    .message_for(AgentErrorKind::Crashed),
+                AgentErrorKind::Crashed.message_for(&current_name(&shared).await, ""),
             );
         }
         // Whatever the turn was still asking, it asks no more.
@@ -851,6 +875,10 @@ struct ChatSink<'a> {
     stop: Arc<Stop>,
     /// The agent this turn runs on.
     agent: Agent,
+    /// What the pages call it.
+    name: String,
+    /// The configured program of the turn's harness; a custom command's sessions are its own.
+    program: Option<String>,
 }
 
 impl ChatSink<'_> {
@@ -875,7 +903,15 @@ impl ChatSink<'_> {
                 }
             }
             AgentEvent::SessionId(id) => {
-                remember_session(self.shared, self.out.pr, &id, self.agent.kind()).await
+                remember_session(
+                    self.shared,
+                    self.out.pr,
+                    &id,
+                    self.agent.kind(),
+                    self.program.as_deref(),
+                    &self.name,
+                )
+                .await
             }
             AgentEvent::Error { kind, message } => self.error(kind, message),
             AgentEvent::Final {
@@ -893,7 +929,7 @@ impl ChatSink<'_> {
                 if is_error && !self.failed {
                     self.failed = true;
                     let message = match text.trim() {
-                        "" => self.agent.message_for(AgentErrorKind::Crashed),
+                        "" => AgentErrorKind::Crashed.message_for(&self.name, ""),
                         said => said.to_string(),
                     };
                     self.out.error(AgentErrorKind::Crashed, message);
@@ -977,14 +1013,21 @@ impl TurnSink for ChatSink<'_> {
 }
 
 /// The CLI confirmed the session: from now on turns of `kind` resume it. Stored in the review
-/// file together with the harness that made it.
-async fn remember_session(shared: &Shared, pr: &PrRef, id: &str, kind: HarnessKind) {
+/// file together with the harness that made it: its kind, its configured `program` when it is a
+/// custom command, and the name the pages used.
+async fn remember_session(
+    shared: &Shared,
+    pr: &PrRef,
+    id: &str,
+    kind: HarnessKind,
+    program: Option<&str>,
+    name: &str,
+) {
     let _guard = reviews::lock(shared, pr).await;
     if let Ok(Some(mut review)) = reviews::load_stored(shared, pr)
-        && review.session_of(kind) != Some(id)
+        && review.session_of(kind, program) != Some(id)
     {
-        review.harness_session = Some(id.to_string());
-        review.harness_session_kind = Some(kind);
+        review.remember_session(id, kind, program, name);
         if reviews::save(shared, &review).is_err() {
             tracing::warn!(pr = %pr, "cannot store the agent session in the review");
         }
@@ -992,8 +1035,21 @@ async fn remember_session(shared: &Shared, pr: &PrRef, id: &str, kind: HarnessKi
     shared.sessions.session_confirmed(pr);
 }
 
+/// The program no longer knows the chat's session: the review forgets it, so the next turn starts
+/// a new one.
+pub(crate) async fn forget_session(shared: &Shared, pr: &PrRef) {
+    let _guard = reviews::lock(shared, pr).await;
+    if let Ok(Some(mut review)) = reviews::load_stored(shared, pr) {
+        review.forget_session();
+        if reviews::save(shared, &review).is_err() {
+            tracing::warn!(pr = %pr, "cannot clear the agent session of the review");
+        }
+    }
+}
+
 /// Runs one chat turn: the process part is `turns::run`, the chat's part is the sink.
 async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, stop: Arc<Stop>) {
+    let harness = turns::harness_for(&shared, &pr).await;
     let mut sink = ChatSink {
         shared: &shared,
         out: Out::new(&shared, &pr, turn),
@@ -1003,7 +1059,9 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
         streamed: false,
         summary_for: prompt.summary_for.clone(),
         stop: stop.clone(),
-        agent: agent_for(&shared, &pr).await,
+        agent: Agent::from(harness.kind),
+        name: harness.display_name(),
+        program: harness.program.clone(),
     };
     let is_summary = prompt.summary_for.is_some();
     let run = TurnRun {
@@ -1072,14 +1130,15 @@ pub(crate) fn close_unfinished(shared: &Shared) {
     }
 }
 
-/// The agent the config names now.
-pub(crate) async fn current_agent(shared: &Shared) -> Agent {
-    Agent::from(shared.config.read().await.harness.kind)
+/// What the pages call the harness the config names now.
+pub(crate) async fn current_name(shared: &Shared) -> String {
+    shared.config.read().await.harness.display_name()
 }
 
-/// The agent a turn of `pr` runs on: the one the review pinned, else the config's.
-pub(crate) async fn agent_for(shared: &Shared, pr: &PrRef) -> Agent {
-    Agent::from(crate::turns::harness_for(shared, pr).await.kind)
+/// What the pages call the harness `pr`'s next turn runs on: the one `harness_for` picks, the
+/// pinned one or the config's.
+pub(crate) async fn name_for(shared: &Shared, pr: &PrRef) -> String {
+    turns::harness_for(shared, pr).await.display_name()
 }
 
 pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcome {
@@ -1097,7 +1156,7 @@ pub(crate) async fn send(shared: &Arc<Shared>, pr: &PrRef, text: &str) -> Outcom
     };
     match Sessions::submit(shared, pr, prompt).await {
         Ok(turn) => Outcome::Ok(Reply::AgentTurn { turn }),
-        Err(refusal) => refusal.into_outcome(agent_for(shared, pr).await.name()),
+        Err(refusal) => refusal.into_outcome(&name_for(shared, pr).await),
     }
 }
 
@@ -1302,6 +1361,9 @@ async fn check_agent(
 /// card.
 pub(crate) async fn probe(shared: &Shared) -> Outcome {
     let harness = shared.config.read().await.harness.clone();
+    if harness.kind == HarnessKind::Custom {
+        return crate::custom::probe(shared, &harness).await;
+    }
     let agent = Agent::from(harness.kind);
     let program = program_path(shared, &harness);
     let started = Instant::now();
@@ -1365,6 +1427,7 @@ mod tests {
             giphy_api: Some("http://127.0.0.1:9".into()),
             harness_search_paths: Vec::new(),
             bridge_program: None,
+            harness_env: Vec::new(),
         };
         Arc::new(Shared::new(paths, config, options))
     }
@@ -2330,33 +2393,33 @@ mod tests {
         store(Some(HarnessKind::Codex));
         let shared = &lab.shared;
         assert_eq!(
-            sessions.session_for(shared, &pr, HarnessKind::Codex),
+            sessions.session_for(shared, &pr, HarnessKind::Codex, None),
             SessionArg::Resume("thr-1".into())
         );
         assert!(matches!(
-            sessions.session_for(shared, &pr, HarnessKind::ClaudeCode),
+            sessions.session_for(shared, &pr, HarnessKind::ClaudeCode, None),
             SessionArg::New(_)
         ));
         assert!(matches!(
-            sessions.fork_session(shared, &pr, HarnessKind::Codex),
+            sessions.fork_session(shared, &pr, HarnessKind::Codex, None),
             SessionArg::Fork { parent, .. } if parent == "thr-1"
         ));
         assert!(matches!(
-            sessions.fork_session(shared, &pr, HarnessKind::ClaudeCode),
+            sessions.fork_session(shared, &pr, HarnessKind::ClaudeCode, None),
             SessionArg::New(_)
         ));
         // A session stored before the kind existed is Claude Code's.
         store(None);
         assert_eq!(
-            sessions.session_for(shared, &pr, HarnessKind::ClaudeCode),
+            sessions.session_for(shared, &pr, HarnessKind::ClaudeCode, None),
             SessionArg::Resume("thr-1".into())
         );
         assert!(matches!(
-            sessions.session_for(shared, &pr, HarnessKind::Codex),
+            sessions.session_for(shared, &pr, HarnessKind::Codex, None),
             SessionArg::New(_)
         ));
         assert!(matches!(
-            sessions.fork_session(shared, &pr, HarnessKind::Codex),
+            sessions.fork_session(shared, &pr, HarnessKind::Codex, None),
             SessionArg::New(_)
         ));
     }
@@ -2365,17 +2428,25 @@ mod tests {
     async fn the_session_is_stored_with_the_kind_that_made_it() {
         let lab = lab(Script::one(Turn::answer("x")));
         let pr = pr(7);
-        remember_session(&lab.shared, &pr, "thr-9", HarnessKind::Codex).await;
+        remember_session(&lab.shared, &pr, "thr-9", HarnessKind::Codex, None, "Codex").await;
         let stored = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
         assert_eq!(stored.harness_session.as_deref(), Some("thr-9"));
         assert_eq!(stored.harness_session_kind, Some(HarnessKind::Codex));
         assert_eq!(
             lab.shared
                 .sessions
-                .session_for(&lab.shared, &pr, HarnessKind::Codex),
+                .session_for(&lab.shared, &pr, HarnessKind::Codex, None),
             SessionArg::Resume("thr-9".into())
         );
-        remember_session(&lab.shared, &pr, "uuid-1", HarnessKind::ClaudeCode).await;
+        remember_session(
+            &lab.shared,
+            &pr,
+            "uuid-1",
+            HarnessKind::ClaudeCode,
+            None,
+            "Claude Code",
+        )
+        .await;
         let stored = reviews::load_stored(&lab.shared, &pr).unwrap().unwrap();
         assert_eq!(
             (
@@ -2384,6 +2455,208 @@ mod tests {
             ),
             (Some("uuid-1"), Some(HarnessKind::ClaudeCode))
         );
+    }
+
+    #[tokio::test]
+    async fn a_session_of_another_program_is_not_resumed() {
+        let lab = lab(Script::one(Turn::answer("x")));
+        let pr = pr(7);
+        let shared = &lab.shared;
+        remember_session(
+            shared,
+            &pr,
+            "abc",
+            HarnessKind::Custom,
+            Some("/bin/a"),
+            "Echo",
+        )
+        .await;
+        let sessions = &shared.sessions;
+        assert_eq!(
+            sessions.session_for(shared, &pr, HarnessKind::Custom, Some("/bin/a")),
+            SessionArg::Resume("abc".into())
+        );
+        assert!(matches!(
+            sessions.session_for(shared, &pr, HarnessKind::Custom, Some("/bin/b")),
+            SessionArg::New(_)
+        ));
+        assert!(matches!(
+            sessions.fork_session(shared, &pr, HarnessKind::Custom, Some("/bin/b")),
+            SessionArg::New(_)
+        ));
+        let stored = reviews::load_stored(shared, &pr).unwrap().unwrap();
+        assert_eq!(stored.harness_session_program.as_deref(), Some("/bin/a"));
+        assert_eq!(stored.harness_session_name.as_deref(), Some("Echo"));
+    }
+
+    #[tokio::test]
+    async fn a_custom_pin_holds_when_the_program_or_the_name_changes() {
+        let lab = lab_with(Script::one(Turn::answer("x")), |config| {
+            config.harness.kind = HarnessKind::Custom;
+            config.harness.program = Some("/bin/echo-a".into());
+            config.harness.custom_name = "Echo".into();
+        });
+        let (shared, pr) = (&lab.shared, pr(7));
+        let opened = shared.config.read().await.harness.clone();
+        shared.sessions.repin(shared, &pr, &opened).await;
+        assert_eq!(turns::harness_for(shared, &pr).await, opened);
+        {
+            let mut config = shared.config.write().await;
+            config.harness.program = Some("/bin/echo-b".into());
+            config.harness.custom_name = "Other".into();
+            config.harness.extra_args = "--fast".into();
+        }
+        assert_eq!(
+            turns::harness_for(shared, &pr).await,
+            opened,
+            "the pin wins"
+        );
+        assert_eq!(shared.sessions.pinned_name(&pr).as_deref(), Some("Echo"));
+        assert_eq!(name_for(shared, &pr).await, "Echo");
+        assert_eq!(current_name(shared).await, "Other");
+        shared.sessions.unpin(&pr);
+        assert_eq!(name_for(shared, &pr).await, "Other");
+    }
+
+    #[tokio::test]
+    async fn a_custom_pin_without_a_program_gives_way_to_the_program_set_later() {
+        let lab = lab_with(Script::one(Turn::answer("x")), |config| {
+            config.harness.kind = HarnessKind::Custom;
+            config.harness.program = None;
+        });
+        let (shared, pr) = (&lab.shared, pr(7));
+        let opened = shared.config.read().await.harness.clone();
+        assert_eq!(opened.program, None);
+        shared.sessions.repin(shared, &pr, &opened).await;
+        shared.config.write().await.harness.program = Some("/bin/echo-a".into());
+        let now = turns::harness_for(shared, &pr).await;
+        assert_eq!(now.program.as_deref(), Some("/bin/echo-a"));
+        assert_eq!(name_for(shared, &pr).await, "echo-a");
+        // A pin that names another kind still wins.
+        shared.config.write().await.harness.kind = HarnessKind::ClaudeCode;
+        assert_eq!(
+            turns::harness_for(shared, &pr).await.kind,
+            HarnessKind::Custom
+        );
+    }
+
+    #[tokio::test]
+    async fn an_open_review_is_named_after_the_program_it_will_run() {
+        let lab = lab_with(Script::one(Turn::answer("x")), |config| {
+            config.harness.kind = HarnessKind::Custom;
+            config.harness.program = Some("/bin/echo-b".into());
+            config.harness.custom_name = "Second".into();
+        });
+        let (shared, pr) = (&lab.shared, pr(7));
+        remember_session(
+            shared,
+            &pr,
+            "abc",
+            HarnessKind::Custom,
+            Some("/bin/echo-a"),
+            "First",
+        )
+        .await;
+        let review = reviews::load_stored(shared, &pr).unwrap().unwrap();
+        async fn name(shared: &Shared, review: &Review) -> String {
+            crate::notifications::harness_name(shared, Some(review)).await
+        }
+        assert_eq!(
+            name(shared, &review).await,
+            "First",
+            "not open: the session's name"
+        );
+        let opened = shared.config.read().await.harness.clone();
+        shared.sessions.repin(shared, &pr, &opened).await;
+        assert_eq!(
+            name(shared, &review).await,
+            "Second",
+            "pinned to a program that did not make it"
+        );
+        remember_session(
+            shared,
+            &pr,
+            "def",
+            HarnessKind::Custom,
+            Some("/bin/echo-b"),
+            "Second",
+        )
+        .await;
+        let review = reviews::load_stored(shared, &pr).unwrap().unwrap();
+        assert_eq!(name(shared, &review).await, "Second");
+    }
+
+    #[tokio::test]
+    async fn a_codex_pin_over_a_claude_session_keeps_naming_the_session() {
+        let lab = lab_with(Script::one(Turn::answer("x")), |config| {
+            config.harness.kind = HarnessKind::Codex;
+        });
+        let (shared, pr) = (&lab.shared, pr(7));
+        remember_session(
+            shared,
+            &pr,
+            "uuid-1",
+            HarnessKind::ClaudeCode,
+            None,
+            "Claude Code",
+        )
+        .await;
+        let opened = shared.config.read().await.harness.clone();
+        shared.sessions.repin(shared, &pr, &opened).await;
+        let review = reviews::load_stored(shared, &pr).unwrap().unwrap();
+        assert_eq!(
+            crate::notifications::harness_name(shared, Some(&review)).await,
+            "Claude Code",
+            "the wording of the built-in agents is unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_built_in_pin_still_lets_program_edits_through() {
+        let lab = lab(Script::one(Turn::answer("x")));
+        let (shared, pr) = (&lab.shared, pr(7));
+        let opened = shared.config.read().await.harness.clone();
+        shared.sessions.repin(shared, &pr, &opened).await;
+        shared.config.write().await.harness.program = Some("/bin/other-claude".into());
+        let now = turns::harness_for(shared, &pr).await;
+        assert_eq!(now.program.as_deref(), Some("/bin/other-claude"));
+        assert_eq!(
+            shared.sessions.pinned_name(&pr).as_deref(),
+            Some("Claude Code")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saved_custom_review_names_the_program_that_answered() {
+        let lab = lab(Script::one(Turn::answer("x")));
+        let (shared, pr) = (&lab.shared, pr(7));
+        remember_session(
+            shared,
+            &pr,
+            "abc",
+            HarnessKind::Custom,
+            Some("/bin/a"),
+            "Echo",
+        )
+        .await;
+        let review = reviews::load_stored(shared, &pr).unwrap().unwrap();
+        assert_eq!(
+            crate::notifications::harness_name(shared, Some(&review)).await,
+            "Echo"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_turn_with_a_missing_program_never_runs_claude_code() {
+        let mut lab = lab_with(Script::one(Turn::answer("x")), |config| {
+            config.harness.kind = HarnessKind::Custom;
+            config.harness.program = Some("/bin/echo-a".into());
+        });
+        let pr = pr(7);
+        lab.send(&pr, "hi").await.unwrap();
+        let events = until(&mut lab.events, ready(&pr)).await;
+        assert_eq!(error_kind(&events), Some(AgentErrorKind::NotInstalled));
+        assert!(lab.calls().is_empty(), "no Claude Code command line ran");
     }
 
     #[tokio::test]
@@ -2788,6 +3061,8 @@ mod tests {
                     summary_for: Some("abc123".into()),
                     stop,
                     agent: Agent::ClaudeCode,
+                    name: "Claude Code".into(),
+                    program: None,
                 };
                 run.handle(AgentEvent::Final {
                     text: "The summary.".into(),
