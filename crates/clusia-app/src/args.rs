@@ -42,6 +42,10 @@ pub enum Scene {
     PermissionCodex,
     FirstRunBoth,
     HomeFooter,
+    ConfigHarnessCustom,
+    AgentChatCustom,
+    PermissionOther,
+    FirstRunCustom,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -198,6 +202,10 @@ mod tests {
             ("permission-codex", Scene::PermissionCodex),
             ("first-run-both", Scene::FirstRunBoth),
             ("home-footer", Scene::HomeFooter),
+            ("config-harness-custom", Scene::ConfigHarnessCustom),
+            ("agent-chat-custom", Scene::AgentChatCustom),
+            ("permission-other", Scene::PermissionOther),
+            ("first-run-custom", Scene::FirstRunCustom),
         ] {
             assert_eq!(
                 parse(&["--demo", "--scene", name]).unwrap().scene,

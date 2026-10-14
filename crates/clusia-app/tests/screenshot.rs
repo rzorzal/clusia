@@ -54,6 +54,10 @@ fn demo_screenshots() {
         "permission-codex",
         "first-run-both",
         "home-footer",
+        "config-harness-custom",
+        "agent-chat-custom",
+        "permission-other",
+        "first-run-custom",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((
