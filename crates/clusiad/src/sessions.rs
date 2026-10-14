@@ -725,7 +725,7 @@ async fn drive(
             tracing::error!(pr = %pr, turn, "an agent turn failed inside the daemon");
             Out::new(&shared, &pr, turn).error(
                 AgentErrorKind::Crashed,
-                format!("{} stopped unexpectedly", current_name(&shared).await),
+                AgentErrorKind::Crashed.message_for(&current_name(&shared).await, ""),
             );
         }
         // Whatever the turn was still asking, it asks no more.
@@ -929,7 +929,7 @@ impl ChatSink<'_> {
                 if is_error && !self.failed {
                     self.failed = true;
                     let message = match text.trim() {
-                        "" => format!("{} stopped unexpectedly", self.name),
+                        "" => AgentErrorKind::Crashed.message_for(&self.name, ""),
                         said => said.to_string(),
                     };
                     self.out.error(AgentErrorKind::Crashed, message);

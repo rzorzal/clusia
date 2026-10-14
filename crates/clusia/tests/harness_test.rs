@@ -435,6 +435,20 @@ fn what_the_program_writes_to_stderr_is_shown_with_a_failed_check_only() {
     );
 }
 
+#[test]
+fn the_turns_stderr_goes_with_the_first_failed_check_only() {
+    let home = tempfile::tempdir().unwrap();
+    let (_dir, program) = fake(
+        CustomScript::new()
+            .probe("Fake", "1.0", 1)
+            .turn(turn().stderr("model not loaded").crash(3)),
+    );
+    let o = clusia(home.path(), &["harness", "test", program.to_str().unwrap()]);
+    let text = out(&o);
+    assert_eq!(o.status.code(), Some(1), "{text}");
+    assert_eq!(text.matches("model not loaded").count(), 1, "{text}");
+}
+
 /// A program that answers the probe, then closes its input before it asks for permission, so the
 /// `deny` reply cannot be written.
 #[test]

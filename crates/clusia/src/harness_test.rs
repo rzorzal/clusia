@@ -457,6 +457,17 @@ pub(crate) async fn run(
             with_stderr(detail, stderr)
         }
     };
+    // The turn's standard error goes with the first of its checks that failed, not with each.
+    let told = std::cell::Cell::new(false);
+    let turn_explained = |ok: bool, detail: Option<String>| {
+        if ok {
+            None
+        } else if told.replace(true) {
+            detail
+        } else {
+            with_stderr(detail, &turned.stderr)
+        }
+    };
     let mut checks = vec![
         Check {
             label: "answers the probe",
@@ -477,17 +488,17 @@ pub(crate) async fn run(
         Check {
             label: "every line is JSON",
             ok: turned.started && turned.every_json,
-            detail: explained(turned.started && turned.every_json, None, &turned.stderr),
+            detail: turn_explained(turned.started && turned.every_json, None),
         },
         Check {
             label: "returns a session id",
             ok: turned.started && turned.session,
-            detail: explained(turned.started && turned.session, None, &turned.stderr),
+            detail: turn_explained(turned.started && turned.session, None),
         },
         Check {
             label: "ends with final",
             ok: turned.finished,
-            detail: explained(turned.finished, turned.detail.clone(), &turned.stderr),
+            detail: turn_explained(turned.finished, turned.detail.clone()),
         },
     ];
     if permission {
@@ -502,7 +513,7 @@ pub(crate) async fn run(
         checks.push(Check {
             label: "asks permission and reads the reply",
             ok,
-            detail: explained(ok, detail, &turned.stderr),
+            detail: turn_explained(ok, detail),
         });
     }
     let all_ok = checks.iter().all(|check| check.ok);

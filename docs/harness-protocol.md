@@ -5,7 +5,8 @@ in Config › Harness, set the program, and the chat, the permission modal, Secu
 revalidation run on it. The pages show the name you give it.
 
 Set **Program** to the program's absolute path (for example `/Users/octo/bin/mine.py`); Clúsia
-does not search `PATH`, and a relative path is refused.
+does not search `PATH`, and a relative path is refused (`clusia harness test` makes a path with a
+`/` absolute).
 
 Clúsia starts **one process per turn**. It writes one JSON line to the program's standard input,
 reads JSON lines from its standard output, and answers permission requests on standard input.
@@ -138,7 +139,9 @@ Permissions are Clúsia's, not the program's. Allowing a command once allows tha
 
 `session_id` on a chat turn is the id the program wrote in its last `session` line, as long as
 the kind of harness and the **program** are the same. If you change the program in Config ›
-Harness, or the last turn failed with `error` kind `session`, the next chat turn sends `null`.
+Harness, the next chat turn of a review opened after the change sends `null`; an open review keeps
+the program it opened with. The same happens when the last turn failed with `error` kind
+`session`.
 
 **Checks, audits and revalidation never get a session**: they always send `session_id: null` with
 a prompt that carries the pull request's context and tells the program to read
@@ -150,12 +153,13 @@ the chat's history.
 When the reviewer presses Stop or when the turn passes its deadline, Clúsia closes standard input and sends `SIGTERM` to the program's **process group**. A program
 that has not exited 10 seconds later gets `SIGKILL`. Children the program starts are in the same
 group and are stopped with it. When the program finishes its turn by itself, Clúsia closes
-standard input and gives it 10 seconds to exit. When Clúsia shuts down, the program gets 2
-seconds before `SIGKILL`.
+standard input and gives it 10 seconds to exit, then sends `SIGTERM` to the group and `SIGKILL`
+10 seconds later. When Clúsia shuts down, or the review is closed, published or discarded, each
+of these waits is cut to 2 seconds.
 
 ## The probe
 
-Config › Harness has a **Test** button, and `clusia harness test` runs the same step first. It
+Config › Harness has a **Test** button, and `clusia harness test` runs a probe of its own, in a fresh private folder. It
 writes the `probe` line, waits up to 5 seconds for a `probe` answer, and stops the program. The
 answer's `name` becomes the display name when none is set, and `protocol` must be `1`.
 
@@ -166,6 +170,10 @@ answer's `name` becomes the display name when none is set, and `protocol` must b
 | Not found or not executable | `{path} was not found or cannot run` |
 | No answer in time | `{name} did not answer the probe in 5 s; it can still run turns` |
 | Another protocol | `{name} speaks protocol {n}; Clúsia knows protocol 1` |
+| Program not an absolute path | `{program} is not an absolute path. Set it in Config › Harness` |
+| Settings unreadable | `Config › Harness: {error}` |
+| Ended without answering | `{name} ended without answering the probe; it can still run turns` |
+| No protocol in the answer | `{name} did not say which protocol it speaks; Clúsia knows protocol 1` |
 
 ## The environment
 

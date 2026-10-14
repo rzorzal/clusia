@@ -636,6 +636,39 @@ async fn custom_permissions_a_duplicate_or_missing_id_is_refused_and_never_answe
 }
 
 #[tokio::test]
+async fn custom_permissions_past_eight_waiting_requests_one_deny_is_sent() {
+    let line = |id: &str| {
+        format!(r#"{{"type":"permission","id":"{id}","kind":"command","detail":"cargo test"}}"#)
+    };
+    let mut turn = turn().session("s1");
+    for n in 1..=8 {
+        turn = turn.raw(&line(&format!("p{n}")));
+    }
+    let (w, dir, mut c, mut watcher) =
+        started(CustomScript::new().turn(turn.ask_raw(&line("p9")).final_("Done."))).await;
+    c.request(send("go")).await.unwrap();
+    let events = until(&mut watcher, ready).await;
+    assert_eq!(
+        events.iter().filter(|e| requested(e)).count(),
+        8,
+        "{events:?}"
+    );
+    let crowded = events
+        .iter()
+        .filter(|e| {
+            matches!(e, Event::PermissionResolved { summary, .. }
+                if summary == "too many requests at once")
+        })
+        .count();
+    assert_eq!(crowded, 1, "{events:?}");
+    assert_eq!(
+        custom_decisions(&dir, 1).await,
+        [("p9".to_string(), "deny".to_string())]
+    );
+    w.daemon.stop().await;
+}
+
+#[tokio::test]
 async fn custom_permissions_an_unknown_kind_is_refused_with_one_deny() {
     let (w, dir, mut c, mut watcher) = started(
         CustomScript::new().turn(

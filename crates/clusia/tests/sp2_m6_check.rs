@@ -195,35 +195,33 @@ fn the_run_asks_before_it_does_anything_and_stops_on_no() {
 
 #[test]
 fn it_refuses_a_machine_where_python_does_not_run_and_changes_nothing() {
-    {
-        let python = "echo 'killed' >&2; exit 137";
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let log = dir.path().join("clusia.log");
-        // `clusia` records what it is asked and answers every command.
-        fake(
-            &bin,
-            "clusia",
-            &format!("echo \"$*\" >> {}\necho old\nexit 0", log.display()),
-        );
-        fake(&bin, "python3", python);
-        let out = Command::new(script())
-            .args(["--yes", "--pr", "rzorzal/clusia#123"])
-            .env_clear()
-            .env("HOME", dir.path())
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let said = String::from_utf8_lossy(&out.stdout).to_string();
-        assert_eq!(out.status.code(), Some(1), "{said}");
-        assert!(said.contains("python3 --version"), "{said}");
-        assert!(said.contains("Nothing was changed"), "{said}");
-        let asked = std::fs::read_to_string(&log).unwrap_or_default();
-        assert!(!asked.contains("config set"), "settings changed: {asked}");
-        assert!(!asked.contains("open "), "a review was opened: {asked}");
-    }
+    let python = "echo 'killed' >&2; exit 137";
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let log = dir.path().join("clusia.log");
+    // `clusia` records what it is asked and answers every command.
+    fake(
+        &bin,
+        "clusia",
+        &format!("echo \"$*\" >> {}\necho old\nexit 0", log.display()),
+    );
+    fake(&bin, "python3", python);
+    let out = Command::new(script())
+        .args(["--yes", "--pr", "rzorzal/clusia#123"])
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(said.contains("python3 --version"), "{said}");
+    assert!(said.contains("Nothing was changed"), "{said}");
+    let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!asked.contains("config set"), "settings changed: {asked}");
+    assert!(!asked.contains("open "), "a review was opened: {asked}");
 }
 
 #[test]
@@ -260,4 +258,62 @@ fn a_no_to_the_settings_question_keeps_everything_as_it_was() {
     assert!(said.contains("Nothing was changed"), "{said}");
     let asked = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(!asked.contains("config set"), "settings changed: {asked}");
+}
+
+#[test]
+fn a_yes_puts_the_settings_back_after_a_step_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let log = dir.path().join("clusia.log");
+    // The last step of the check fails; the settings come back after it.
+    fake(
+        &bin,
+        "clusia",
+        &format!(
+            "echo \"$*\" >> {}\ncase \"$*\" in \"review discard\"*) exit 1 ;; esac\necho old\nexit 0",
+            log.display()
+        ),
+    );
+    fake(
+        &bin,
+        "python3",
+        "case \"$*\" in \"--version\") echo 'Python 3.12.0' ;; esac\nexit 0",
+    );
+    let mut child = Command::new(script())
+        .args(["--yes", "--pr", "rzorzal/clusia#123"])
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("SP2_CHECK_WAIT", "1")
+        .env("SP2_CHECK_APP", dir.path().join("no-such-window"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    let asked = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = asked.lines().collect();
+    let failed = lines
+        .iter()
+        .position(|l| l.starts_with("review discard"))
+        .unwrap_or_else(|| panic!("the last step never ran: {asked}"));
+    let after: Vec<&str> = lines[failed + 1..]
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("config set"))
+        .collect();
+    assert_eq!(
+        &after[..3],
+        [
+            "config set harness.kind old",
+            "config set harness.program old",
+            "config set harness.custom_name old",
+        ],
+        "{asked}"
+    );
 }

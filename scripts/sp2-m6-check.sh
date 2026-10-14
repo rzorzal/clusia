@@ -42,6 +42,7 @@ OLD_SECURITY=""
 OLD_AUDIT=""
 CHANGED=0
 APP_PID=""
+ASK_PID=""
 BASELINE_PROCS=0
 # Set to wait at most this many seconds at every step, instead of each step's own time.
 WAIT_CAP="${SP2_CHECK_WAIT:-}"
@@ -68,13 +69,21 @@ restore_settings() {
   [ -n "$OLD_AUDIT" ] || echo "Could not read the old harness.audit; check Config › Harness: Audit." >&2
   return 0
 }
+# Stops a `clusia ask` still waiting for the owner, so the next one starts alone.
+end_ask() {
+  if [ -n "$ASK_PID" ]; then
+    kill "$ASK_PID" 2>/dev/null
+    wait "$ASK_PID" 2>/dev/null
+    ASK_PID=""
+  fi
+}
 close_window() {
   if [ -n "$APP_PID" ]; then kill "$APP_PID" 2>/dev/null; fi
 }
 drop_work() {
   if [ -n "$WORK" ]; then find "$WORK" -delete 2>/dev/null; fi
 }
-trap 'close_window; restore_settings; drop_work; rm -f "$ERR" "$ERR.out" "$ERR.out.more" "$ERR.out.sec" "$ERR.out.audit"' EXIT
+trap 'end_ask; close_window; restore_settings; drop_work; rm -f "$ERR" "$ERR".*' EXIT
 # clusia exits 130 on a Ctrl-C by status, not by the signal, so bash would go on to the next
 # step; the script ends instead (the EXIT trap still cleans up).
 trap 'exit 130' INT TERM HUP
@@ -280,15 +289,21 @@ step_isolation() {
 
 step_approve() {
   say "6. A command asks you"
-  clusia ask "$PR" "Ask permission to run the command true, then say what happened." </dev/null >"$ERR.out" 2>"$ERR" &
+  clusia ask "$PR" "Ask permission to run the command true, then say what happened." </dev/null >"$ERR.deny.out" 2>"$ERR.deny" &
+  ASK_PID=$!
   echo "  The window shows 'Echo wants to run a command'. Choose Deny, and watch the chat go on."
-  wait_for "Echo read the answer: Permission denied" 120 said_in "Permission denied" "$ERR.out"
-  clusia ask "$PR" "Ask permission to run the command true, once more." </dev/null >"$ERR.out" 2>"$ERR" &
+  wait_for "Echo read the answer: Permission denied" 120 said_in "Permission denied" "$ERR.deny.out"
+  end_ask
+  clusia ask "$PR" "Ask permission to run the command true, once more." </dev/null >"$ERR.allow.out" 2>"$ERR.allow" &
+  ASK_PID=$!
   echo "  Choose Allow once this time."
-  wait_for "Echo read the answer: Permission allowed" 120 said_in "Permission allowed" "$ERR.out"
-  clusia ask "$PR" "Ask permission to run the command true, and wait." </dev/null >"$ERR.out" 2>"$ERR" &
+  wait_for "Echo read the answer: Permission allowed" 120 said_in "Permission allowed" "$ERR.allow.out"
+  end_ask
+  clusia ask "$PR" "Ask permission to run the command true, and wait." </dev/null >"$ERR.late.out" 2>"$ERR.late" &
+  ASK_PID=$!
   echo "  This time do not answer. The request is denied when the time in Config › Harness passes."
-  wait_for "the unanswered request was denied by itself" 300 said_in "Permission denied" "$ERR.out"
+  wait_for "the unanswered request was denied by itself" 300 said_in "Permission denied" "$ERR.late.out"
+  end_ask
   ask "Was there a notification for the unanswered request and a line in the chat saying nobody answered in time?"
 }
 
@@ -364,6 +379,10 @@ fi
   usage
   exit 2
 }
+case "$PR" in
+  rzorzal/*) ;;
+  *) echo "Warning: $PR is not on rzorzal/*" >&2 ;;
+esac
 confirm || {
   echo "Nothing was run."
   exit 1

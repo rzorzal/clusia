@@ -1459,6 +1459,10 @@ mod tests {
         );
         assert!(texts.contains(&"Test again".to_string()));
 
+        let again = testing::find::<harness::TestHarness>(&mut app, |_| true);
+        testing::activate(&mut app, again);
+        testing::settle(&mut app);
+        let _ = testing::recorded(&mut app);
         testing::tell(
             &mut app,
             Tell::Probe(clusia_protocol::ProbeResult {

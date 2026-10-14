@@ -656,9 +656,9 @@ pub(crate) async fn review_outdated(shared: &Shared, review: &Review, old_head: 
     .await;
 }
 
-/// The display name of the harness a review talks about: the one that made its session, unless
-/// the open review is pinned to a custom command that did not make it, or the one the review is pinned
-/// to, or the configured one while it has neither.
+/// The name of the harness a review talks about: the one that made its session; the pinned one
+/// when an open review is pinned to a custom command that did not make that session, or when there
+/// is no session; else the configured one.
 pub(crate) async fn harness_name(shared: &Shared, review: Option<&Review>) -> String {
     use clusia_core::config::HarnessKind;
     match review {

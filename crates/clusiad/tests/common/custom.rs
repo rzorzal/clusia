@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! A fake custom program for the tests that run the daemon on Custom command.
 
 use std::path::{Path, PathBuf};

@@ -215,9 +215,12 @@ impl Approval {
     }
 }
 
+/// The requests of one turn that may wait for the reviewer at once.
+const MAX_WAITING: usize = 8;
+
 /// Judges one request in the read loop and starts the task that answers it. A request with no id
 /// or an id seen before is refused and gets no answer: an id is answered once. Any other refused
-/// request gets one `deny`.
+/// request, among them one made while `crowded`, gets one `deny`.
 #[allow(clippy::too_many_arguments)]
 fn on_permission(
     shared: &Arc<Shared>,
@@ -226,6 +229,7 @@ fn on_permission(
     turn: u64,
     stop: &Arc<Stop>,
     seen: &mut HashSet<String>,
+    crowded: bool,
     id: String,
     kind: AskKind,
     detail: String,
@@ -240,6 +244,13 @@ fn on_permission(
         let summary = format!("a second request with the id {}", shown(&id));
         permissions::refuse(shared, pr, turn, "Other", &summary);
         return None;
+    }
+    if crowded {
+        permissions::refuse(shared, pr, turn, "Other", "too many requests at once");
+        let link = link.clone();
+        return Some(tokio::spawn(async move {
+            let _ = link.send(&custom::reply_line(&id, false)).await;
+        }));
     }
     let root = shared.paths.worktree_for(pr);
     match judge(&root, kind, &detail, reason, &paths) {
@@ -457,8 +468,11 @@ pub(crate) async fn run_turn(
                 Ok(Some(line)) => {
                     let out = match custom::read_line(&line) {
                         Output::Permission { id, kind, detail, reason, paths } => {
+                            let crowded =
+                                asked.iter().filter(|task| !task.is_finished()).count() >= MAX_WAITING;
                             asked.extend(on_permission(
-                                shared, &link, pr, turn, stop, &mut seen, id, kind, detail, reason, paths,
+                                shared, &link, pr, turn, stop, &mut seen, crowded, id, kind, detail,
+                                reason, paths,
                             ));
                             continue;
                         }

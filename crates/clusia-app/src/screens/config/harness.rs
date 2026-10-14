@@ -189,9 +189,14 @@ pub fn forget_switch(nav: Res<Nav>, mut switched: ResMut<Switched>) {
 
 /// The first line of the Test card when the agent answered.
 pub fn ok_title(name: &str, version: &str, seconds: &str, account: Option<&str>) -> String {
+    let who = if version.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {version}")
+    };
     match account {
-        Some(account) => format!("{name} {version} answered in {seconds} s · {account}"),
-        None => format!("{name} {version} answered in {seconds} s"),
+        Some(account) => format!("{who} answered in {seconds} s · {account}"),
+        None => format!("{who} answered in {seconds} s"),
     }
 }
 
@@ -945,6 +950,10 @@ mod tests {
             ok_title("Claude Code", "2.1.294", "1.8", None),
             "Claude Code 2.1.294 answered in 1.8 s"
         );
+        assert_eq!(
+            ok_title("Echo", "", "0.2", Some("protocol 1")),
+            "Echo answered in 0.2 s · protocol 1"
+        );
     }
 
     #[test]
@@ -1396,6 +1405,35 @@ mod tests {
             ],
             "the kind first, then what belonged to the custom command"
         );
+    }
+
+    #[test]
+    fn an_answer_nobody_waits_for_is_dropped() {
+        let mut app = harness_app();
+        crate::testing::tell(&mut app, crate::bridge::Tell::Probe(probe(true)));
+        assert_eq!(
+            app.world().resource::<Model>().probe,
+            ProbeState::Idle,
+            "no Test is running, so a late answer shows nothing"
+        );
+    }
+
+    #[test]
+    fn a_new_program_in_the_snapshot_drops_the_test_result() {
+        let mut app = harness_app();
+        app.world_mut().resource_mut::<Model>().probe = ProbeState::Done(probe(true));
+        let mut snapshot = app.world().resource::<Model>().snapshot.clone();
+        crate::testing::tell(
+            &mut app,
+            crate::bridge::Tell::Snapshot(Box::new(snapshot.clone())),
+        );
+        assert!(
+            matches!(app.world().resource::<Model>().probe, ProbeState::Done(_)),
+            "a snapshot that changes nothing keeps the result"
+        );
+        snapshot.config.harness.program = Some("/Users/octo/bin/mine.py".into());
+        crate::testing::tell(&mut app, crate::bridge::Tell::Snapshot(Box::new(snapshot)));
+        assert_eq!(app.world().resource::<Model>().probe, ProbeState::Idle);
     }
 
     #[test]
