@@ -1361,19 +1361,10 @@ async fn check_agent(
 /// card.
 pub(crate) async fn probe(shared: &Shared) -> Outcome {
     let harness = shared.config.read().await.harness.clone();
-    let agent = Agent::from(harness.kind);
-    if agent == Agent::Custom {
-        return Outcome::Ok(Reply::Probe(ProbeResult {
-            ok: false,
-            version: None,
-            program: harness.program.clone().unwrap_or_default(),
-            elapsed_ms: 0,
-            error: Some("A custom command's probe arrives with its runner".into()),
-            harness: harness.display_name(),
-            signed_in: None,
-            account: None,
-        }));
+    if harness.kind == HarnessKind::Custom {
+        return crate::custom::probe(shared, &harness).await;
     }
+    let agent = Agent::from(harness.kind);
     let program = program_path(shared, &harness);
     let started = Instant::now();
     let env: Vec<_> = std::env::vars_os().collect();

@@ -14,11 +14,11 @@ use clusia_core::PrRef;
 use clusia_core::config::Harness;
 use clusia_core::permissions::inside_worktree;
 use clusia_harness::custom::{
-    self, AskKind, CustomErrorKind, CustomTurn, LineReader, Output, Overflow, SEND_LIMIT,
-    STOP_GRACE,
+    self, AskKind, CustomErrorKind, CustomTurn, LineReader, Output, Overflow, PROBE_LIMIT,
+    PROTOCOL, SEND_LIMIT, STOP_GRACE,
 };
 use clusia_harness::{Agent, ROLE_PROMPT};
-use clusia_protocol::{AgentErrorKind, TurnOrigin};
+use clusia_protocol::{AgentErrorKind, Outcome, ProbeResult, Reply, TurnOrigin};
 use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -570,6 +570,175 @@ pub(crate) async fn run_turn(
     }
 }
 
+/// The longest a name written by the program is kept: what Config's Name field takes.
+const NAME_LIMIT: usize = 40;
+
+/// A probe line the program answered with.
+struct Probed {
+    name: String,
+    version: Option<String>,
+    protocol: Option<u64>,
+}
+
+/// Why the probe got no probe line.
+enum Unanswered {
+    /// The program could not be started.
+    Unreachable,
+    /// It ran, and said nothing in time.
+    Silent,
+    /// It ended before it said anything.
+    Ended,
+}
+
+/// `name` as a program's name for the pages: no control character, trimmed, cut to `NAME_LIMIT`.
+fn cleaned(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(NAME_LIMIT)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Starts the program as a turn would, asks it to identify itself and ends it. No model is
+/// called: the probe line is answered from the program's own state.
+async fn ask_probe(
+    program: &Path,
+    extra_args: &[String],
+    cwd: &Path,
+    base_env: &[(OsString, OsString)],
+) -> Result<Probed, Unanswered> {
+    let mut spawn = Command::from(command(program, extra_args, cwd, base_env));
+    spawn
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0);
+    let mut child = spawn.spawn().map_err(|_| Unanswered::Unreachable)?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let answer = tokio::time::timeout(PROBE_LIMIT, async {
+        // The write is inside the window: a program that never reads must not hold the probe.
+        // A program that already left makes it fail, and the read below says so.
+        let _ = stdin.write_all(custom::probe_line().as_bytes()).await;
+        let _ = stdin.flush().await;
+        let mut lines = LineReader::new(BufReader::new(stdout));
+        loop {
+            match lines.next().await {
+                Ok(Some(line)) => {
+                    if let Output::Probe {
+                        name,
+                        version,
+                        protocol,
+                    } = custom::read_line(&line)
+                    {
+                        return Some(Probed {
+                            name,
+                            version,
+                            protocol,
+                        });
+                    }
+                }
+                _ => return None,
+            }
+        }
+    })
+    .await;
+    drop(stdin);
+    turns::terminate(&mut child, STOP_GRACE).await;
+    match answer {
+        Ok(Some(probed)) => Ok(probed),
+        Ok(None) => Err(Unanswered::Ended),
+        Err(_) => Err(Unanswered::Silent),
+    }
+}
+
+/// The Config › Harness test of a custom command: does it answer the probe, and does it speak
+/// protocol 1. A name the user has not set yet is filled in from the one the program gives.
+pub(crate) async fn probe(shared: &Shared, harness: &Harness) -> Outcome {
+    let started = Instant::now();
+    let display = harness.display_name();
+    let result = |ok: bool,
+                  version: Option<String>,
+                  program: String,
+                  error: Option<String>,
+                  name: String| {
+        Outcome::Ok(Reply::Probe(ProbeResult {
+            ok,
+            version,
+            program,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            error,
+            harness: name,
+            signed_in: None,
+            account: None,
+        }))
+    };
+    let program = match program_of(harness) {
+        Ok(program) => program,
+        Err(message) => return result(false, None, String::new(), Some(message), display),
+    };
+    let path = program.display().to_string();
+    let extra_args = match harness.extra_args_list() {
+        Ok(args) => args,
+        Err(message) => {
+            let error = format!("Config › Harness: {message}");
+            return result(false, None, path, Some(error), display);
+        }
+    };
+    let mut base_env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    base_env.extend(shared.harness_env.iter().cloned());
+    let probed = match ask_probe(&program, &extra_args, shared.paths.root(), &base_env).await {
+        Ok(probed) => probed,
+        Err(Unanswered::Unreachable) => {
+            let error = format!("{path} was not found or cannot run");
+            return result(false, None, path, Some(error), display);
+        }
+        Err(Unanswered::Silent) => {
+            let error = format!(
+                "{display} did not answer the probe in {} s; it can still run turns",
+                PROBE_LIMIT.as_secs()
+            );
+            return result(false, None, path, Some(error), display);
+        }
+        Err(Unanswered::Ended) => {
+            let error =
+                format!("{display} ended without answering the probe; it can still run turns");
+            return result(false, None, path, Some(error), display);
+        }
+    };
+    let name = match cleaned(&probed.name) {
+        name if name.is_empty() => display,
+        name => name,
+    };
+    if probed.protocol != Some(PROTOCOL) {
+        let error = match probed.protocol {
+            Some(other) => {
+                format!("{name} speaks protocol {other}; Clúsia knows protocol {PROTOCOL}")
+            }
+            None => format!(
+                "{name} did not say which protocol it speaks; Clúsia knows protocol {PROTOCOL}"
+            ),
+        };
+        return result(false, probed.version, path, Some(error), name);
+    }
+    if harness.custom_name.trim().is_empty() {
+        // A name the config refuses leaves the setting empty, and the pages fall back to the
+        // program's file name.
+        let _ = crate::handlers::set_config_value(
+            shared,
+            "harness.custom_name".to_string(),
+            name.clone(),
+        )
+        .await;
+    }
+    result(true, probed.version, path, None, name)
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -729,6 +898,19 @@ mod tests {
     fn group_alive(pid: u32) -> bool {
         // SAFETY: signal 0 only checks whether the group exists; nothing is sent.
         unsafe { libc::killpg(pid as i32, 0) == 0 }
+    }
+
+    #[test]
+    fn a_name_is_cleaned_and_cut() {
+        assert_eq!(cleaned("  Ollama\u{7} "), "Ollama");
+        assert_eq!(cleaned("\u{1b}[31m"), "[31m");
+        assert_eq!(cleaned("\n\t"), "");
+        let long = "é".repeat(60);
+        assert_eq!(cleaned(&long).chars().count(), 40);
+        assert_eq!(
+            cleaned(&format!("{} {}", "a".repeat(39), "b")),
+            "a".repeat(39)
+        );
     }
 
     #[test]

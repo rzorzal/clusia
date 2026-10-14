@@ -10,9 +10,10 @@ use clusia_protocol::{
 use serde_json::json;
 
 use crate::cli::{
-    AgentCommand, AuthCommand, Command, ConfigCommand, DaemonCommand, InstallArgs, UninstallArgs,
+    AgentCommand, AuthCommand, Command, ConfigCommand, DaemonCommand, HarnessCommand, InstallArgs,
+    UninstallArgs,
 };
-use crate::{agent, check, install, revalidate, review, spawn};
+use crate::{agent, check, harness_test, install, revalidate, review, spawn};
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
 pub struct Output {
@@ -30,6 +31,8 @@ pub enum CliError {
     Launch(LaunchError),
     #[error("{0}")]
     Other(String),
+    #[error("{0}")]
+    Usage(String),
 }
 
 impl From<LaunchError> for CliError {
@@ -54,6 +57,7 @@ impl CliError {
     pub fn exit_code(&self) -> u8 {
         match self {
             CliError::NotRunning => 3,
+            CliError::Usage(_) => 2,
             _ => 1,
         }
     }
@@ -66,6 +70,7 @@ impl CliError {
             CliError::Client(_) => "connection",
             CliError::Launch(_) => "launch",
             CliError::Other(_) => "other",
+            CliError::Usage(_) => "usage",
         }
     }
 }
@@ -97,6 +102,10 @@ pub async fn run(
         Command::Revalidate { pr, again } => {
             revalidate::revalidate(paths, home, &pr, again, json).await
         }
+        Command::Harness(HarnessCommand::Test {
+            program,
+            permission,
+        }) => harness_test::run(paths, program, permission, json).await,
         Command::Agent(AgentCommand::Log { pr }) => agent::log(paths, home, &pr).await,
         Command::Agent(AgentCommand::Stop { pr }) => agent::stop(paths, home, &pr).await,
         Command::Install(args) => install_command(paths, home, &args),

@@ -86,6 +86,9 @@ pub enum Command {
         #[arg(long)]
         again: bool,
     },
+    /// Check a custom command against Clúsia's JSON-lines protocol.
+    #[command(subcommand)]
+    Harness(HarnessCommand),
     /// Put Clúsia.app, the login agent and the `clusia` command in place.
     Install(InstallArgs),
     /// Remove Clúsia.app, the login agent and the `clusia` link; your data stays.
@@ -108,6 +111,20 @@ pub enum AgentCommand {
     Log { pr: String },
     /// Stop the turn the review's agent is running.
     Stop { pr: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HarnessCommand {
+    /// Run a program through the probe and one short turn, and list what passed. It uses one
+    /// turn of the program's model.
+    Test {
+        /// The program to test; the configured custom command when left out.
+        program: Option<String>,
+        /// Also ask the program to request a harmless command, to check the permission round
+        /// trip.
+        #[arg(long)]
+        permission: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
