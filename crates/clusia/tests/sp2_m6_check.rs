@@ -317,3 +317,26 @@ fn a_yes_puts_the_settings_back_after_a_step_fails() {
         "{asked}"
     );
 }
+
+#[test]
+fn a_failing_mktemp_ends_the_script_and_deletes_nothing_around_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    fake(&bin, "mktemp", "exit 1");
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    let dotfile = work.join(".keep");
+    std::fs::write(&dotfile, "mine").unwrap();
+    let out = Command::new(script())
+        .args(["--yes", "--pr", "rzorzal/clusia#123"])
+        .current_dir(&work)
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read_to_string(&dotfile).unwrap(), "mine");
+}

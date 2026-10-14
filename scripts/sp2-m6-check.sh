@@ -24,7 +24,10 @@ LIST=0
 ASSUME_YES=0
 passed=0
 failed=0
-ERR="$(mktemp -t sp2-m6-check.XXXXXX)"
+ERR="$(mktemp -t sp2-m6-check.XXXXXX)" || {
+  echo "Cannot create a temp file." >&2
+  exit 1
+}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ECHO="$(cd "$SCRIPT_DIR/.." && pwd)/examples/harness/echo.py"
 WORK=""
@@ -83,7 +86,10 @@ close_window() {
 drop_work() {
   if [ -n "$WORK" ]; then find "$WORK" -delete 2>/dev/null; fi
 }
-trap 'end_ask; close_window; restore_settings; drop_work; rm -f "$ERR" "$ERR".*' EXIT
+drop_err() {
+  if [ -n "$ERR" ]; then rm -f "$ERR" "$ERR".*; fi
+}
+trap 'end_ask; close_window; restore_settings; drop_work; drop_err' EXIT
 # clusia exits 130 on a Ctrl-C by status, not by the signal, so bash would go on to the next
 # step; the script ends instead (the EXIT trap still cleans up).
 trap 'exit 130' INT TERM HUP
@@ -189,7 +195,10 @@ start_window() {
 
 # The wrapper records the environment each start of the program sees, then becomes echo.py.
 write_wrapper() {
-  WORK="$(mktemp -d -t sp2-m6-work.XXXXXX)"
+  WORK="$(mktemp -d -t sp2-m6-work.XXXXXX)" || {
+    echo "Cannot create a temp folder." >&2
+    exit 1
+  }
   WRAPPER="$WORK/echo-wrapper.sh"
   ENVLOG="$WORK/env.log"
   {
