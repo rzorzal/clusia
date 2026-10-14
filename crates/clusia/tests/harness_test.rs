@@ -411,6 +411,69 @@ fn json_prints_the_report_and_keeps_the_exit_code() {
     assert_eq!(report["ok"], false);
 }
 
+#[test]
+fn what_the_program_writes_to_stderr_is_shown_with_a_failed_check_only() {
+    let home = tempfile::tempdir().unwrap();
+    let (_dir, program) = fake(
+        CustomScript::new().probe("Fake", "1.0", 1).turn(
+            turn()
+                .session("s")
+                .stderr("\u{1b}[2Kmodel not loaded")
+                .crash(3),
+        ),
+    );
+    let o = clusia(home.path(), &["harness", "test", program.to_str().unwrap()]);
+    let text = out(&o);
+    assert_eq!(o.status.code(), Some(1), "{text}");
+    assert!(text.contains("it wrote to stderr: "), "{text}");
+    assert!(text.contains("model not loaded"), "{text}");
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(
+        !err(&o).contains("model not loaded"),
+        "the program's stderr never reaches the terminal raw: {}",
+        err(&o)
+    );
+}
+
+/// A program that answers the probe, then closes its input before it asks for permission, so the
+/// `deny` reply cannot be written.
+#[test]
+fn a_reply_that_cannot_be_written_fails_the_permission_check() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("deaf");
+    std::fs::write(
+        &program,
+        r#"#!/bin/bash
+read -r line
+case "$line" in
+  *'"type":"probe"'*)
+    echo '{"type":"probe","name":"Deaf","version":"1","protocol":1}'
+    exit 0;;
+esac
+exec 0<&-
+echo '{"type":"session","id":"s"}'
+echo '{"type":"permission","id":"p1","kind":"command","detail":"true"}'
+sleep 1
+echo '{"type":"final","text":"ok"}'
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let o = clusia(
+        home.path(),
+        &["harness", "test", program.to_str().unwrap(), "--permission"],
+    );
+    let text = out(&o);
+    assert_eq!(o.status.code(), Some(1), "{text}\n{}", err(&o));
+    assert!(
+        failed(&text, "asks permission and reads the reply"),
+        "{text}"
+    );
+    assert!(passed(&text, "ends with final"), "{text}");
+}
+
 /// `examples/harness/echo.py` needs python3 only; a machine without it skips the test and says so.
 fn echo() -> Option<PathBuf> {
     if Command::new("python3").arg("--version").output().is_err() {

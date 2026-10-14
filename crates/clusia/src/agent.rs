@@ -358,8 +358,8 @@ impl Turn {
             Event::AgentDenied { tool, detail, .. } if !self.json => {
                 writeln!(
                     err,
-                    "⊘ wanted to use {}: {} (denied)",
-                    printable(tool),
+                    "⊘ wanted to {}: {} (denied)",
+                    wants_to(tool, &printable(tool)),
                     printable(detail)
                 )?;
             }
@@ -472,8 +472,8 @@ pub(crate) fn log_lines(
             AgentLogEntry::ToolUse { summary, .. } => format!("  ✓ {}", printable(summary)),
             AgentLogEntry::Denied { tool, detail, .. } => {
                 format!(
-                    "  ⊘ wanted to use {}: {}",
-                    printable(tool),
+                    "  ⊘ wanted to {}: {}",
+                    wants_to(tool, &printable(tool)),
                     printable(detail)
                 )
             }
@@ -513,6 +513,7 @@ pub(crate) fn permission_line(tool: &str, summary: &str, outcome: PermissionOutc
         "Bash" => "ran",
         "Edit" | "MultiEdit" | "NotebookEdit" => "edited",
         "Write" => "wrote",
+        "Other" => "did something:",
         _ => "used",
     };
     match outcome {
@@ -963,6 +964,37 @@ mod tests {
         assert_eq!(
             bash(PermissionOutcome::Cancelled),
             "  ⊘ cargo test was not run: the turn ended"
+        );
+    }
+
+    #[test]
+    fn an_other_request_reads_do_something_when_denied_logged_or_decided() {
+        assert_eq!(
+            permission_line("Other", "Delete the cache", PermissionOutcome::Allowed),
+            "  ✓ did something: Delete the cache (you allowed it)"
+        );
+        let entries = [AgentLogEntry::Denied {
+            at: 1,
+            turn: 1,
+            tool: "Other".into(),
+            detail: "Delete the cache".into(),
+        }];
+        assert_eq!(
+            log_lines(&entries, HarnessKind::Custom, "Echo"),
+            ["  ⊘ wanted to do something: Delete the cache"]
+        );
+        let (turn, mut out, mut err) = run(false);
+        let mut turn = turn.harness(HarnessKind::Custom, "Echo");
+        let denied = Event::AgentDenied {
+            pr: pr(),
+            turn: 2,
+            tool: "Other".into(),
+            detail: "Delete the cache".into(),
+        };
+        turn.feed(&denied, &mut out, &mut err).unwrap();
+        assert_eq!(
+            said(&err),
+            "⊘ wanted to do something: Delete the cache (denied)\n"
         );
     }
 

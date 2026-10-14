@@ -4,6 +4,7 @@
 //! `CLUSIA_*` variable.
 
 use std::ffi::OsString;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -15,8 +16,9 @@ use clusia_harness::custom::{
 };
 use clusia_harness::{Agent, ROLE_PROMPT};
 use serde_json::{Value, json};
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::task::JoinHandle;
 
 use crate::agent::printable;
 use crate::run::{CliError, Output};
@@ -39,7 +41,15 @@ impl Scratch {
             "clusia-harness-test-{}-{nanos}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&path)
+        Self::create(path)
+    }
+
+    /// Makes `path` and only `path`: a folder that already exists is somebody else's, and the
+    /// program must not run in it. Only the user may enter it.
+    fn create(path: PathBuf) -> Result<Self, CliError> {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
             .map_err(|e| CliError::Other(format!("cannot create {}: {e}", path.display())))?;
         Ok(Self(path))
     }
@@ -61,11 +71,82 @@ fn signal_group(pid: Option<u32>, signal: i32) {
     }
 }
 
-/// One process of the program, with both of its pipes.
+/// How much of what the program wrote to its standard error a failed check shows.
+const STDERR_TAIL: usize = 2048;
+
+/// Whether the child ended, without reaping it: until it is reaped its pid, and so the id of the
+/// group it leads, cannot be reused, so the group can still be signalled safely.
+fn has_exited(pid: u32) -> bool {
+    loop {
+        // SAFETY: `waitid` only writes into `info`, which is zeroed and owned here; `WNOWAIT`
+        // leaves the child waitable for `Child::wait`.
+        let (found, info) = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let found = libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            );
+            (found, info)
+        };
+        if found == 0 {
+            return info.si_signo == libc::SIGCHLD;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::ECHILD) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Reads the program's standard error to its end, keeping the last `STDERR_TAIL` bytes.
+fn collect_tail(mut stderr: ChildStderr) -> JoinHandle<Vec<u8>> {
+    tokio::spawn(async move {
+        let mut tail: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            tail.extend_from_slice(&chunk[..n]);
+            if tail.len() > STDERR_TAIL {
+                tail.drain(..tail.len() - STDERR_TAIL);
+            }
+        }
+        tail
+    })
+}
+
+/// The last lines of what the program wrote to its standard error, as one line safe to print.
+fn shown_tail(tail: &[u8]) -> String {
+    let text = String::from_utf8_lossy(tail);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let from = lines.len().saturating_sub(3);
+    printable(&lines[from..].join(" / "))
+}
+
+/// `detail` of a failed check with what the program said on its standard error, when it said
+/// anything.
+fn with_stderr(detail: Option<String>, stderr: &str) -> Option<String> {
+    match (detail, stderr.is_empty()) {
+        (detail, true) => detail,
+        (Some(detail), false) => Some(format!("{detail}; it wrote to stderr: {stderr}")),
+        (None, false) => Some(format!("it wrote to stderr: {stderr}")),
+    }
+}
+
+/// One process of the program, with its pipes.
 struct Running {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: LineReader<BufReader<ChildStdout>>,
+    stderr: JoinHandle<Vec<u8>>,
 }
 
 impl Running {
@@ -78,45 +159,63 @@ impl Running {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .process_group(0);
         let mut child = command.spawn()?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = collect_tail(child.stderr.take().expect("stderr is piped"));
         Ok(Self {
             child,
             stdin,
             lines: LineReader::new(BufReader::new(stdout)),
+            stderr,
         })
     }
 
-    /// Writes one line; a program that does not read it loses its input.
-    async fn send(&mut self, line: &str) {
+    /// Writes one line and says whether it was written; a program that does not read it loses
+    /// its input.
+    async fn send(&mut self, line: &str) -> bool {
         let Some(stdin) = self.stdin.as_mut() else {
-            return;
+            return false;
         };
         let write = async {
             stdin.write_all(line.as_bytes()).await?;
             stdin.flush().await
         };
-        if !matches!(tokio::time::timeout(SEND_LIMIT, write).await, Ok(Ok(()))) {
+        if matches!(tokio::time::timeout(SEND_LIMIT, write).await, Ok(Ok(()))) {
+            true
+        } else {
             self.stdin = None;
+            false
         }
     }
 
     /// Ends the process: its input closes, SIGTERM goes to its group, and SIGKILL to the group
     /// once the leader left or the grace is over, so a child that ignores SIGTERM does not
-    /// outlive the test. A group with no member left answers the signal with an error, which is
-    /// harmless.
-    async fn end(mut self) {
+    /// outlive the test. The leader is reaped only after the last signal, so its pid, and the
+    /// group's, cannot belong to somebody else while it is signalled. Returns what it wrote to
+    /// its standard error, ready to print.
+    async fn end(mut self) -> String {
         self.stdin = None;
         let pid = self.child.id();
         signal_group(pid, libc::SIGTERM);
-        let left = tokio::time::timeout(STOP_GRACE, self.child.wait()).await;
+        if let Some(pid) = pid {
+            let give_up = std::time::Instant::now() + STOP_GRACE;
+            while !has_exited(pid) && std::time::Instant::now() < give_up {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
         signal_group(pid, libc::SIGKILL);
-        if left.is_err() {
-            let _ = self.child.wait().await;
+        let _ = self.child.wait().await;
+        // A child of the program may hold the pipe open after the group is gone.
+        match tokio::time::timeout(Duration::from_secs(1), &mut self.stderr).await {
+            Ok(Ok(tail)) => shown_tail(&tail),
+            _ => {
+                self.stderr.abort();
+                String::new()
+            }
         }
     }
 }
@@ -127,6 +226,7 @@ struct Probed {
     name: Option<String>,
     protocol: Option<u64>,
     detail: Option<String>,
+    stderr: String,
 }
 
 async fn probe(program: &Path, extra_args: &[String], cwd: &Path) -> Probed {
@@ -153,20 +253,23 @@ async fn probe(program: &Path, extra_args: &[String], cwd: &Path) -> Probed {
         }
     })
     .await;
-    running.end().await;
+    let stderr = running.end().await;
     match answer {
         Ok(Some((name, protocol))) => Probed {
             answered: true,
             name: Some(name),
             protocol,
             detail: None,
+            stderr,
         },
         Ok(None) => Probed {
             detail: Some("it ended without answering the probe".to_string()),
+            stderr,
             ..Probed::default()
         },
         Err(_) => Probed {
             detail: Some(format!("no answer within {} s", PROBE_LIMIT.as_secs())),
+            stderr,
             ..Probed::default()
         },
     }
@@ -177,8 +280,12 @@ struct Turned {
     every_json: bool,
     session: bool,
     finished: bool,
+    /// A command request arrived.
     asked: bool,
+    /// Its `deny` reply was written.
+    answered: bool,
     detail: Option<String>,
+    stderr: String,
 }
 
 async fn turn(program: &Path, extra_args: &[String], cwd: &Path, prompt: &str) -> Turned {
@@ -188,7 +295,9 @@ async fn turn(program: &Path, extra_args: &[String], cwd: &Path, prompt: &str) -
         session: false,
         finished: false,
         asked: false,
+        answered: false,
         detail: None,
+        stderr: String::new(),
     };
     let mut running = match Running::start(program, extra_args, cwd) {
         Ok(running) => running,
@@ -207,8 +316,11 @@ async fn turn(program: &Path, extra_args: &[String], cwd: &Path, prompt: &str) -
                     Line::NotJson(_) => turned.every_json = false,
                     Line::Session(_) => turned.session = true,
                     Line::Permission { id, kind, .. } => {
-                        turned.asked |= kind == AskKind::Command;
-                        running.send(&custom::reply_line(&id, false)).await;
+                        let sent = running.send(&custom::reply_line(&id, false)).await;
+                        if kind == AskKind::Command {
+                            turned.asked = true;
+                            turned.answered |= sent;
+                        }
                     }
                     Line::Final(_) => {
                         turned.finished = true;
@@ -235,7 +347,7 @@ async fn turn(program: &Path, extra_args: &[String], cwd: &Path, prompt: &str) -
     if read.is_err() {
         turned.detail = Some(format!("no final line within {} s", STEP_LIMIT.as_secs()));
     }
-    running.end().await;
+    turned.stderr = running.end().await;
     turned
 }
 
@@ -337,11 +449,19 @@ pub(crate) async fn run(
     };
     let turned = turn(&program, &extra_args, &scratch.0, prompt).await;
 
+    // What the program wrote to its standard error explains a check only when it failed.
+    let explained = |ok: bool, detail: Option<String>, stderr: &str| {
+        if ok {
+            None
+        } else {
+            with_stderr(detail, stderr)
+        }
+    };
     let mut checks = vec![
         Check {
             label: "answers the probe",
             ok: probed.answered,
-            detail: probed.detail.clone(),
+            detail: explained(probed.answered, probed.detail.clone(), &probed.stderr),
         },
         Check {
             label: "speaks protocol 1",
@@ -357,24 +477,32 @@ pub(crate) async fn run(
         Check {
             label: "every line is JSON",
             ok: turned.started && turned.every_json,
-            detail: None,
+            detail: explained(turned.started && turned.every_json, None, &turned.stderr),
         },
         Check {
             label: "returns a session id",
             ok: turned.started && turned.session,
-            detail: None,
+            detail: explained(turned.started && turned.session, None, &turned.stderr),
         },
         Check {
             label: "ends with final",
             ok: turned.finished,
-            detail: turned.detail.clone(),
+            detail: explained(turned.finished, turned.detail.clone(), &turned.stderr),
         },
     ];
     if permission {
+        let ok = turned.asked && turned.answered && turned.finished;
+        let detail = if !turned.asked {
+            Some("no command request arrived".to_string())
+        } else if !turned.answered {
+            Some("it did not read the deny reply".to_string())
+        } else {
+            None
+        };
         checks.push(Check {
             label: "asks permission and reads the reply",
-            ok: turned.asked && turned.finished,
-            detail: (!turned.asked).then(|| "no command request arrived".to_string()),
+            ok,
+            detail: explained(ok, detail, &turned.stderr),
         });
     }
     let all_ok = checks.iter().all(|check| check.ok);
@@ -417,5 +545,43 @@ pub(crate) async fn run(
         Err(CliError::Other(
             "the custom command did not pass every check".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[test]
+    fn the_scratch_folder_is_new_and_private() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("scratch");
+        let made = Scratch::create(path.clone()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert!(
+            Scratch::create(path.clone()).is_err(),
+            "a folder that exists is never taken"
+        );
+        drop(made);
+        assert!(!path.exists(), "removed at the end");
+    }
+
+    #[test]
+    fn stderr_is_one_printable_line_of_its_last_lines() {
+        assert_eq!(shown_tail(b""), "");
+        let shown = shown_tail(b"a\n\nb\n\x1b[2Kc\nd\n");
+        assert!(!shown.contains('\u{1b}'), "{shown:?}");
+        assert!(
+            shown.ends_with("c / d") && !shown.contains('a'),
+            "{shown:?}"
+        );
+        assert_eq!(
+            with_stderr(Some("it ended".into()), "boom").as_deref(),
+            Some("it ended; it wrote to stderr: boom")
+        );
+        assert_eq!(with_stderr(None, ""), None);
     }
 }

@@ -621,6 +621,11 @@ async fn ask_probe(
     let mut child = spawn.spawn().map_err(|_| Unanswered::Unreachable)?;
     let mut stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
+    // Held from here on: a probe that is dropped takes the program's whole group with it.
+    let mut held = Held {
+        child,
+        reaped: false,
+    };
     let answer = tokio::time::timeout(PROBE_LIMIT, async {
         // The write is inside the window: a program that never reads must not hold the probe.
         // A program that already left makes it fail, and the read below says so.
@@ -649,7 +654,7 @@ async fn ask_probe(
     })
     .await;
     drop(stdin);
-    turns::terminate(&mut child, STOP_GRACE).await;
+    end_group(&mut held, STOP_GRACE, &Stop::new()).await;
     match answer {
         Ok(Some(probed)) => Ok(probed),
         Ok(None) => Err(Unanswered::Ended),
