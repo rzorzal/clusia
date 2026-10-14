@@ -749,7 +749,7 @@ fn fill_revalidation(
                 &model.snapshot,
                 crate::agent_name::kind_of_tab(&model.snapshot, tab),
             ),
-            crate::agent_name::of_tab(&model.snapshot, tab),
+            &crate::agent_name::of_tab(&model.snapshot, tab),
         ) else {
             continue;
         };
@@ -1337,7 +1337,7 @@ mod tests {
             .get_mut(pr)
             .expect("a tab")
             .ui
-            .opened_with = Some(clusia_core::config::HarnessKind::Codex);
+            .opened_with = Some((clusia_core::config::HarnessKind::Codex, "Codex".to_string()));
         testing::settle(app);
     }
 

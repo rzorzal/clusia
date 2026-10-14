@@ -83,6 +83,9 @@ pub struct ChatModel {
     pub rules: Vec<String>,
     /// The agent this chat talks to, for an error the daemon sent no message for.
     pub kind: HarnessKind,
+    /// The agent's display name; `None` until the panel names the chat, when the kind's name
+    /// is used.
+    pub name: Option<String>,
     /// The turn whose answer the last `Text` line is still receiving.
     streaming: Option<u64>,
     /// The turn that was still running when the log was read. The daemon logs an answer's
@@ -102,6 +105,7 @@ impl Default for ChatModel {
         Self {
             lines: Vec::new(),
             kind: HarnessKind::ClaudeCode,
+            name: None,
             state: SessionStateKind::None,
             open: true,
             tab: PanelTab::Draft,
@@ -120,6 +124,13 @@ impl Default for ChatModel {
 }
 
 impl ChatModel {
+    /// The name this chat's agent is called in the pages.
+    pub fn agent_name(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.kind.name().to_string())
+    }
+
     pub fn waiting(&self) -> usize {
         self.lines
             .iter()
@@ -274,7 +285,12 @@ impl ChatModel {
                 ..
             } => {
                 self.spoke();
-                self.push(ChatLine::Error(error_text(*kind, message, self.kind)));
+                self.push(ChatLine::Error(error_text(
+                    *kind,
+                    message,
+                    &self.agent_name(),
+                    self.kind.sign_in_hint(),
+                )));
                 return self.ended(*turn);
             }
             AgentTell::State { state, .. } => {
@@ -354,7 +370,12 @@ impl ChatModel {
                     state: SuggestionState::Waiting,
                 }),
                 AgentLogEntry::Error { kind, message, .. } => {
-                    lines.push(ChatLine::Error(error_text(*kind, message, self.kind)));
+                    lines.push(ChatLine::Error(error_text(
+                        *kind,
+                        message,
+                        &self.agent_name(),
+                        self.kind.sign_in_hint(),
+                    )));
                 }
                 AgentLogEntry::Permission {
                     tool,
@@ -425,9 +446,9 @@ impl ChatModel {
 }
 
 /// The daemon's message, or the kind's default one when it sent none.
-fn error_text(kind: AgentErrorKind, message: &str, agent: HarnessKind) -> String {
+fn error_text(kind: AgentErrorKind, message: &str, name: &str, sign_in_hint: &str) -> String {
     if message.trim().is_empty() {
-        kind.message_for(agent.name(), agent.sign_in_hint())
+        kind.message_for(name, sign_in_hint)
     } else {
         message.to_string()
     }
@@ -549,6 +570,33 @@ mod tests {
             clusia_core::config::HarnessKind::ClaudeCode,
             "a chat nobody named yet keeps Claude Code's wording"
         );
+    }
+
+    #[test]
+    fn an_error_with_no_message_names_a_custom_command_by_its_name() {
+        let mut chat = ChatModel {
+            kind: clusia_core::config::HarnessKind::Custom,
+            name: Some("Echo".into()),
+            ..ChatModel::default()
+        };
+        chat.apply(&AgentTell::Error {
+            pr: pr(),
+            turn: 1,
+            kind: AgentErrorKind::UsageLimit,
+            message: String::new(),
+        });
+        assert!(
+            chat.lines
+                .contains(&ChatLine::Error("Echo reached its usage limit".into())),
+            "{:?}",
+            chat.lines
+        );
+        let unnamed = ChatModel {
+            kind: clusia_core::config::HarnessKind::Custom,
+            ..ChatModel::default()
+        };
+        assert_eq!(unnamed.agent_name(), "Custom command");
+        assert_eq!(ChatModel::default().name, None);
     }
 
     fn suggestion(id: &str, line: u32) -> Suggestion {

@@ -25,6 +25,7 @@ use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Type, Variant, button, card, disabled_button, text,
+    text_field,
 };
 
 /// What this window has done with the first-run screen.
@@ -121,6 +122,14 @@ pub struct HarnessView {
     pub line: String,
 }
 
+/// The Custom command card: never scanned, so it only knows whether it is the chosen one and
+/// the program typed for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomView {
+    pub selected: bool,
+    pub program: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FirstRunView {
     pub github: GithubStep,
@@ -129,7 +138,9 @@ pub struct FirstRunView {
     pub folders: Option<Vec<FolderChip>>,
     pub harnesses: Vec<HarnessView>,
     /// The agent Clúsia will use, for the cost note.
-    pub agent: &'static str,
+    pub agent: String,
+    /// The Custom command card: never scanned.
+    pub custom: CustomView,
     pub open: OpenChecks,
     pub harness_skipped: bool,
     /// Why **Continue** is off, or `None` when it is on.
@@ -170,6 +181,10 @@ fn folder_note(f: &RepoFolder) -> String {
 /// The agent Clúsia will use: the only one the first-run scan found, or, with both found (or
 /// neither), the configured one. `None` when none was found.
 pub fn chosen_kind(snap: &Snapshot) -> Option<ConfigKind> {
+    if snap.config.harness.kind == ConfigKind::Custom {
+        // Never found by the scan: only a click or `clusia config set` selects it.
+        return Some(ConfigKind::Custom);
+    }
     let found = |kind| {
         snap.first_run.as_ref().is_some_and(|s| {
             s.harnesses
@@ -191,11 +206,7 @@ fn harness_view(
     chosen: Option<ConfigKind>,
 ) -> HarnessView {
     let config_kind = ConfigKind::from(kind);
-    let value = match config_kind {
-        ConfigKind::ClaudeCode => "claude-code",
-        ConfigKind::Codex => "codex",
-        ConfigKind::Custom => "custom",
-    };
+    let value = crate::screens::config::harness::kind_value(config_kind);
     match found {
         Some(h) => HarnessView {
             name: config_kind.name(),
@@ -260,8 +271,22 @@ pub fn view(snap: &Snapshot, ui: &FirstRunUi, home: Option<&str>) -> FirstRunVie
         Some("Connect GitHub to continue.")
     } else if !any_folder {
         Some("Add a folder with your clones to continue.")
+    } else if chosen == Some(ConfigKind::Custom)
+        && snap
+            .config
+            .harness
+            .program
+            .as_deref()
+            .is_none_or(|p| p.trim().is_empty())
+    {
+        Some("Set the program first")
     } else {
         None
+    };
+    let h = &snap.config.harness;
+    let agent = match chosen {
+        Some(ConfigKind::Custom) | None => h.display_name(),
+        Some(kind) => kind.name().to_string(),
     };
     FirstRunView {
         github,
@@ -275,7 +300,11 @@ pub fn view(snap: &Snapshot, ui: &FirstRunUi, home: Option<&str>) -> FirstRunVie
             ),
             harness_view(HarnessKind::Codex, found(HarnessKind::Codex), chosen),
         ],
-        agent: chosen.unwrap_or(snap.config.harness.kind).name(),
+        agent,
+        custom: CustomView {
+            selected: chosen == Some(ConfigKind::Custom),
+            program: h.program.clone().unwrap_or_default(),
+        },
         open: open_checks(&snap.config.harness),
         harness_skipped: ui.harness_skipped,
         blocked,
@@ -741,12 +770,27 @@ fn harness_step(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &FirstRunView)
                     r,
                     fonts,
                     "Custom command",
-                    "",
-                    "Any tool that speaks JSON",
-                    false,
-                    false,
+                    "custom",
+                    "Any program that speaks Clúsia's JSON lines",
+                    v.custom.selected,
+                    true,
                 );
             });
+            if v.custom.selected {
+                c.spawn(Node {
+                    column_gap: px(12),
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|r| {
+                    r.spawn(text(fonts, "Program", Type::MUTED));
+                    r.spawn((
+                        text_field(fonts, &v.custom.program, 380.0, true),
+                        crate::screens::config::ConfigField("harness.program"),
+                    ));
+                    r.spawn(text(fonts, "Required. Runs once per turn", Type::META));
+                });
+            }
             c.spawn(Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: px(8),
@@ -757,7 +801,7 @@ fn harness_step(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &FirstRunView)
                 open_checkboxes(o, fonts, &v.open);
                 o.spawn(text(
                     fonts,
-                    crate::screens::config::harness::cost_note(v.agent),
+                    crate::screens::config::harness::cost_note(&v.agent),
                     Type::META,
                 ));
             });
@@ -916,11 +960,7 @@ fn on_continue(
     if let Some(kind) = chosen_kind(&model.snapshot)
         && kind != model.snapshot.config.harness.kind
     {
-        let value = match kind {
-            ConfigKind::ClaudeCode => "claude-code",
-            ConfigKind::Codex => "codex",
-            ConfigKind::Custom => "custom",
-        };
+        let value = crate::screens::config::harness::kind_value(kind);
         crate::screens::config::harness::write_kind(&mut asks, &mut model, value);
     }
     asks.send(Ask::FirstRunDone);
@@ -1463,14 +1503,22 @@ mod tests {
                 value: "claude-code".into()
             }]
         );
-        for name in ["Codex", "Custom command"] {
-            let card = testing::find::<HarnessCard>(&mut app, |c| c.0 == name);
-            testing::activate(&mut app, card);
-            assert!(
-                testing::recorded(&mut app).is_empty(),
-                "{name} cannot be chosen"
-            );
-        }
+        let codex = testing::find::<HarnessCard>(&mut app, |c| c.0 == "Codex");
+        testing::activate(&mut app, codex);
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "Codex was not found, so it cannot be chosen"
+        );
+        let custom = testing::find::<HarnessCard>(&mut app, |c| c.0 == "Custom command");
+        testing::activate(&mut app, custom);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.kind".into(),
+                value: "custom".into()
+            }],
+            "a custom command is always selectable"
+        );
     }
 
     #[test]
@@ -1609,5 +1657,126 @@ mod tests {
         let go = testing::find::<Continue>(&mut app, |_| true);
         testing::activate(&mut app, go);
         assert!(!app.world().resource::<FirstRunUi>().harness_skipped);
+    }
+
+    #[test]
+    fn a_custom_command_is_never_auto_detected() {
+        let both = status(GithubLogin::SignedOut, Vec::new(), vec![claude(), codex()]);
+        let snap = signed_out_snap(Some(both));
+        let v = view(&snap, &FirstRunUi::default(), None);
+        assert!(!v.custom.selected, "a found Claude Code stays the default");
+        assert_eq!(v.agent, "Claude Code");
+        assert_eq!(
+            chosen_kind(&snap),
+            Some(clusia_core::config::HarnessKind::ClaudeCode)
+        );
+        let none = signed_out_snap(Some(status(
+            GithubLogin::SignedOut,
+            Vec::new(),
+            vec![absent_claude(), absent_codex()],
+        )));
+        assert!(!view(&none, &FirstRunUi::default(), None).custom.selected);
+        assert_eq!(chosen_kind(&none), None);
+    }
+
+    #[test]
+    fn choosing_custom_shows_the_program_field_and_names_the_command() {
+        let both = status(GithubLogin::SignedOut, Vec::new(), vec![claude(), codex()]);
+        let mut snap = signed_out_snap(Some(both));
+        snap.config.harness.kind = clusia_core::config::HarnessKind::Custom;
+        let v = view(&snap, &FirstRunUi::default(), None);
+        assert!(v.custom.selected);
+        assert_eq!(v.custom.program, "");
+        assert!(v.harnesses.iter().all(|h| !h.selected));
+        assert_eq!(v.agent, "Custom command");
+        assert_eq!(
+            chosen_kind(&snap),
+            Some(clusia_core::config::HarnessKind::Custom)
+        );
+        snap.config.harness.program = Some("/usr/local/bin/echo-harness".into());
+        snap.config.harness.custom_name = "Echo".into();
+        let v = view(&snap, &FirstRunUi::default(), None);
+        assert_eq!(v.custom.program, "/usr/local/bin/echo-harness");
+        assert_eq!(v.agent, "Echo");
+    }
+
+    #[test]
+    fn continue_waits_for_the_program_of_a_custom_command() {
+        let first_run = status(
+            GithubLogin::SignedOut,
+            vec![folder("/Users/maria/Repos", true, 12)],
+            vec![claude(), absent_codex()],
+        );
+        let mut snap = fixture::demo(NOW);
+        snap.first_run = Some(first_run);
+        assert_eq!(view(&snap, &FirstRunUi::default(), None).blocked, None);
+        snap.config.harness.kind = clusia_core::config::HarnessKind::Custom;
+        assert_eq!(
+            view(&snap, &FirstRunUi::default(), None).blocked,
+            Some("Set the program first")
+        );
+        snap.config.harness.program = Some("   ".into());
+        assert_eq!(
+            view(&snap, &FirstRunUi::default(), None).blocked,
+            Some("Set the program first"),
+            "blank is empty"
+        );
+        let mut app = testing::app(signed_out_snap(snap.first_run.clone()));
+        testing::settle(&mut app);
+        set_snapshot(&mut app, snap.clone());
+        assert_eq!(testing::count::<Continue>(&mut app), 0, "Continue is off");
+        assert!(testing::shows(&mut app, "Set the program first"));
+        snap.config.harness.program = Some("/usr/local/bin/echo-harness".into());
+        assert_eq!(view(&snap, &FirstRunUi::default(), None).blocked, None);
+    }
+
+    #[test]
+    fn the_program_field_writes_the_program_and_continue_adds_nothing() {
+        let first_run = status(
+            GithubLogin::SignedOut,
+            vec![folder("/Users/maria/Repos", true, 12)],
+            vec![claude(), absent_codex()],
+        );
+        let mut app = testing::app(signed_out_snap(Some(first_run.clone())));
+        testing::settle(&mut app);
+        let mut snap = fixture::demo(NOW);
+        snap.first_run = Some(first_run);
+        set_snapshot(&mut app, snap);
+        assert_eq!(
+            testing::count::<crate::screens::config::ConfigField>(&mut app),
+            0,
+            "no Program field until Custom command is chosen"
+        );
+        let card = testing::find::<HarnessCard>(&mut app, |c| c.0 == "Custom command");
+        testing::activate(&mut app, card);
+        testing::recorded(&mut app);
+        testing::set_config_locally(&mut app, "harness.kind", "custom");
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Required. Runs once per turn"));
+        let field = testing::find::<crate::screens::config::ConfigField>(&mut app, |f| {
+            f.0 == "harness.program"
+        });
+        app.world_mut()
+            .write_message(crate::ui::kit::FieldCommitted {
+                entity: field,
+                value: " /usr/local/bin/echo-harness ".into(),
+            });
+        app.update();
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.program".into(),
+                value: "/usr/local/bin/echo-harness".into()
+            }]
+        );
+        testing::set_config_locally(&mut app, "harness.program", "/usr/local/bin/echo-harness");
+        testing::settle(&mut app);
+        let go = testing::find::<Continue>(&mut app, |_| true);
+        testing::activate(&mut app, go);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::FirstRunDone],
+            "the kind and the program were written as they were chosen"
+        );
     }
 }

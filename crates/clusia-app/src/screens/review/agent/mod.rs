@@ -15,14 +15,25 @@ use crate::review_state::ReviewTabs;
 /// are applied, so an error or a replay that creates a line already words it for that agent.
 pub fn name_chats(tabs: Res<ReviewTabs>, model: Res<Model>, mut chats: ResMut<Chats>) {
     for (pr, chat) in chats.0.iter_mut() {
-        let kind = tabs
-            .0
-            .get(pr)
-            .map_or(model.snapshot.config.harness.kind, |t| {
-                crate::agent_name::kind_of_tab(&model.snapshot, t)
-            });
+        let (kind, name) = tabs.0.get(pr).map_or_else(
+            || {
+                (
+                    model.snapshot.config.harness.kind,
+                    crate::agent_name::active(&model.snapshot),
+                )
+            },
+            |t| {
+                (
+                    crate::agent_name::kind_of_tab(&model.snapshot, t),
+                    crate::agent_name::of_tab(&model.snapshot, t),
+                )
+            },
+        );
         if chat.kind != kind {
             chat.kind = kind;
+        }
+        if chat.name.as_deref() != Some(name.as_str()) {
+            chat.name = Some(name);
         }
     }
 }

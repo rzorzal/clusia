@@ -1324,13 +1324,9 @@ mod tests {
         ] {
             assert!(texts.iter().any(|t| t == needle), "{needle}\n{texts:?}");
         }
-        assert_eq!(
-            texts
-                .iter()
-                .filter(|t| *t == "Arrives in a later milestone")
-                .count(),
-            1,
-            "only Custom command"
+        assert!(
+            !texts.iter().any(|t| t == "Arrives in a later milestone"),
+            "Custom command is a real card now"
         );
         for key in [
             "harness.program",

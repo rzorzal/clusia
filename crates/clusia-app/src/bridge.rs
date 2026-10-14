@@ -2271,7 +2271,7 @@ pub(crate) fn demo_answers(
                     &text,
                     now * 1000,
                     *rule_granted,
-                    model.snapshot.config.harness.kind.name(),
+                    &model.snapshot.config.harness.display_name(),
                 ));
             }
             Ask::PermissionAnswer { id, answer } => {

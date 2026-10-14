@@ -191,9 +191,12 @@ pub struct TabUi {
     pub revalidation: RevalView,
     /// The draft item the Diff asks a new place for (*Keep and re-anchor*).
     pub reanchor: Option<String>,
-    /// The config kind when the tab was opened: it pins the agent until the review's session
-    /// says which one it started with.
-    pub opened_with: Option<HarnessKind>,
+    /// The config kind and display name when the tab was opened: they pin the agent until the
+    /// review's session says which one it started with.
+    pub opened_with: Option<(HarnessKind, String)>,
+    /// The configured program when the tab was opened (a custom command's pin), so a session
+    /// that belongs to another program does not name the review.
+    pub opened_program: Option<String>,
 }
 
 impl Default for TabUi {
@@ -214,6 +217,7 @@ impl Default for TabUi {
             revalidation: RevalView::Auto,
             reanchor: None,
             opened_with: None,
+            opened_program: None,
         }
     }
 }
@@ -359,7 +363,9 @@ pub fn open_new_tabs(
     let mode = DiffMode::from(model.snapshot.config.appearance.diff_view);
     for pr in new {
         let mut tab = Tab::loading(mode);
-        tab.ui.opened_with = Some(model.snapshot.config.harness.kind);
+        let harness = &model.snapshot.config.harness;
+        tab.ui.opened_with = Some((harness.kind, harness.display_name()));
+        tab.ui.opened_program = harness.program.clone();
         tabs.0.insert(pr.clone(), tab);
         asks.send(Ask::OpenReview(pr));
     }
@@ -567,7 +573,7 @@ mod tests {
         let tab = testing::tab(&app, &pr());
         assert_eq!(
             tab.ui.opened_with,
-            Some(clusia_core::config::HarnessKind::Codex)
+            Some((clusia_core::config::HarnessKind::Codex, "Codex".to_string()))
         );
         // A later switch leaves the open tab's agent alone.
         testing::set_config_locally(&mut app, "harness.kind", "claude-code");
@@ -575,11 +581,37 @@ mod tests {
         let tab = testing::tab(&app, &pr());
         assert_eq!(
             tab.ui.opened_with,
-            Some(clusia_core::config::HarnessKind::Codex)
+            Some((clusia_core::config::HarnessKind::Codex, "Codex".to_string()))
         );
         assert_eq!(
             crate::agent_name::of_tab(&app.world().resource::<Model>().snapshot, &tab),
             "Codex"
+        );
+    }
+
+    #[test]
+    fn a_new_tab_remembers_a_custom_commands_name() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::set_config_locally(&mut app, "harness.kind", "custom");
+        testing::set_config_locally(&mut app, "harness.custom_name", "Echo");
+        testing::set_config_locally(&mut app, "harness.program", "/usr/local/bin/echo-harness");
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Review { pr: pr() });
+        testing::settle(&mut app);
+        let tab = testing::tab(&app, &pr());
+        assert_eq!(
+            tab.ui.opened_with,
+            Some((clusia_core::config::HarnessKind::Custom, "Echo".to_string()))
+        );
+        testing::set_config_locally(&mut app, "harness.custom_name", "Other");
+        testing::settle(&mut app);
+        assert_eq!(
+            crate::agent_name::of_tab(
+                &app.world().resource::<Model>().snapshot,
+                &testing::tab(&app, &pr())
+            ),
+            "Echo"
         );
     }
 

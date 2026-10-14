@@ -99,7 +99,7 @@ pub struct HomeView {
     pub chips: Vec<RepoChip>,
     pub lists: Vec<ListView>,
     /// The agent the settings name, for the footer.
-    pub agent: &'static str,
+    pub agent: String,
 }
 
 /// The footer's **Config** button: opens Config › Harness.
@@ -108,7 +108,7 @@ pub struct AgentConfigButton;
 
 /// The footer line under the lists; `0` is the agent it was built for.
 #[derive(Component, Default)]
-struct FooterPart(Option<&'static str>);
+struct FooterPart(Option<String>);
 
 /// "1 minute", "5 hours", "8 days".
 pub fn long_age(secs: i64) -> String {
@@ -687,7 +687,7 @@ fn rebuild_home(
         part.built = Some(list.clone());
     }
     for (e, mut part) in &mut footers {
-        if part.0 == Some(v.agent) {
+        if part.0.as_deref() == Some(v.agent.as_str()) {
             continue;
         }
         refill(&mut commands, e, |p| {
@@ -701,7 +701,7 @@ fn rebuild_home(
             .entry::<Node>()
             .and_modify(|mut node| node.padding = UiRect::ZERO);
         });
-        part.0 = Some(v.agent);
+        part.0 = Some(v.agent.clone());
     }
 }
 
@@ -1049,6 +1049,15 @@ mod tests {
         assert_eq!(view(&snap, &HomeState::default()).agent, "Claude Code");
         snap.config.harness.kind = clusia_core::config::HarnessKind::Codex;
         assert_eq!(view(&snap, &HomeState::default()).agent, "Codex");
+    }
+
+    #[test]
+    fn the_view_names_a_custom_command() {
+        let mut snap = Snapshot::default();
+        snap.config.harness.kind = clusia_core::config::HarnessKind::Custom;
+        assert_eq!(view(&snap, &HomeState::default()).agent, "Custom command");
+        snap.config.harness.custom_name = "Echo".into();
+        assert_eq!(view(&snap, &HomeState::default()).agent, "Echo");
     }
 
     #[test]
