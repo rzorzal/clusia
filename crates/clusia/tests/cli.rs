@@ -1218,8 +1218,32 @@ mod review_flow {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let mut second = w.spawn(&["diagrams", "acme/widgets#7", "--draw"]);
-        // Long enough for the second command to be told the run exists.
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        let (said, heard) = std::sync::mpsc::channel();
+        let stderr = second.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+            {
+                let _ = said.send(line);
+            }
+        });
+        let joined = loop {
+            match heard.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(line) if line.contains("following that drawing") => break line,
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = second.kill();
+                    let _ = first.kill();
+                    panic!("the second command never joined the run: {e}");
+                }
+            }
+        };
+        assert_eq!(
+            joined,
+            "Diagrams are already being drawn; following that drawing."
+        );
         // SAFETY: signals a child this test spawned and still owns.
         assert_eq!(unsafe { libc::kill(first.id() as i32, libc::SIGINT) }, 0);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -1235,7 +1259,14 @@ mod review_flow {
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
         assert!(status.success(), "{status:?}");
-        let _ = first.wait();
+        let mut listed = String::new();
+        std::io::Read::read_to_string(&mut second.stdout.take().unwrap(), &mut listed).unwrap();
+        assert_eq!(
+            listed.trim_end(),
+            stdout(&w.run(&["diagrams", "acme/widgets#7"])),
+            "it prints the listing the run ended with"
+        );
+        assert_eq!(first.wait().unwrap().code(), Some(130), "Ctrl-C exits 130");
     }
 
     /// The id a `review comment` or `review note` prints: `<id> added`.

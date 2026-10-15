@@ -5,10 +5,13 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use clusia_core::diagram::DiagramVersion;
+use clusia_core::diagram::{DiagramVersion, MAX_DIAGRAMS, MAX_SPEC_BYTES};
 use clusia_core::{Paths, PrRef};
 
 use crate::atomic::write_atomic;
+
+/// The biggest file a version can be: every drawing at its cap, and room for the rest.
+const MAX_VERSION_BYTES: u64 = (MAX_DIAGRAMS * MAX_SPEC_BYTES) as u64 + 64 * 1024;
 
 fn version_file(paths: &Paths, pr: &PrRef, n: u32) -> std::path::PathBuf {
     paths.diagrams_for(pr).join(format!("v{n}.json"))
@@ -30,9 +33,8 @@ fn any_number(name: &str) -> Option<u32> {
         .unwrap_or(rest.len());
     let (digits, tail) = rest.split_at(end);
     let named = tail == ".json" || tail.starts_with(".json.");
-    (named && !digits.is_empty())
-        .then(|| digits.parse().ok())
-        .flatten()
+    // Digits past `u32::MAX` still name a version: they take the last number.
+    (named && !digits.is_empty()).then(|| digits.parse().unwrap_or(u32::MAX))
 }
 
 /// Writes `version` as `v<number>.json`, replacing the file of the same number.
@@ -42,6 +44,11 @@ pub fn save_diagram_version(paths: &Paths, pr: &PrRef, version: &DiagramVersion)
 }
 
 fn read_version(path: &Path, n: u32) -> Option<DiagramVersion> {
+    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if size > MAX_VERSION_BYTES {
+        tracing::warn!(file = %path.display(), size, "a diagram version is too big to be one and was skipped");
+        return None;
+    }
     let parsed = fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| {
         serde_json::from_slice::<DiagramVersion>(&bytes).map_err(|e| e.to_string())
     });
@@ -75,6 +82,19 @@ pub fn load_diagram_versions(paths: &Paths, pr: &PrRef) -> Vec<DiagramVersion> {
     versions
 }
 
+/// The highest version of `pr` that can be read, reading no file below it.
+pub fn load_latest_diagram_version(paths: &Paths, pr: &PrRef) -> Option<DiagramVersion> {
+    let mut numbered: Vec<(u32, std::path::PathBuf)> = fs::read_dir(paths.diagrams_for(pr))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|e| Some((exact_number(&e.file_name().to_string_lossy())?, e.path())))
+        .collect();
+    numbered.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+    numbered
+        .into_iter()
+        .find_map(|(n, path)| read_version(&path, n))
+}
+
 /// Version `n` of `pr`, if it exists and can be read.
 pub fn load_diagram_version(paths: &Paths, pr: &PrRef, n: u32) -> Option<DiagramVersion> {
     let path = version_file(paths, pr, n);
@@ -82,8 +102,9 @@ pub fn load_diagram_version(paths: &Paths, pr: &PrRef, n: u32) -> Option<Diagram
 }
 
 /// The number the next version takes: one more than the highest `v<n>.json` file, whether or
-/// not it can be read, so an unreadable file is never overwritten.
-pub fn next_diagram_number(paths: &Paths, pr: &PrRef) -> u32 {
+/// not it can be read, so an unreadable file is never overwritten. `None` when the highest is
+/// already `u32::MAX`: there is no number left.
+pub fn next_diagram_number(paths: &Paths, pr: &PrRef) -> Option<u32> {
     let highest = fs::read_dir(paths.diagrams_for(pr))
         .into_iter()
         .flatten()
@@ -91,7 +112,7 @@ pub fn next_diagram_number(paths: &Paths, pr: &PrRef) -> u32 {
         .filter_map(|e| any_number(&e.file_name().to_string_lossy()))
         .max()
         .unwrap_or(0);
-    highest.saturating_add(1)
+    highest.checked_add(1)
 }
 
 /// Removes every version of `pr`; there being none is fine.
@@ -149,7 +170,7 @@ mod tests {
         let (_d, p) = setup();
         assert!(load_diagram_versions(&p, &pr()).is_empty());
         assert!(load_diagram_version(&p, &pr(), 1).is_none());
-        assert_eq!(next_diagram_number(&p, &pr()), 1);
+        assert_eq!(next_diagram_number(&p, &pr()), Some(1));
         assert!(!p.diagrams_dir().exists());
         delete_diagrams(&p, &pr()).unwrap();
     }
@@ -201,7 +222,19 @@ mod tests {
         assert_eq!(numbers, [1, 3]);
         assert_eq!(fs::read_to_string(&bad).unwrap(), "{ not json");
         assert!(load_diagram_version(&p, &pr(), 2).is_none());
-        assert_eq!(next_diagram_number(&p, &pr()), 4);
+        assert_eq!(next_diagram_number(&p, &pr()), Some(4));
+    }
+
+    #[test]
+    fn the_latest_is_the_highest_version_that_reads() {
+        let (_d, p) = setup();
+        assert!(load_latest_diagram_version(&p, &pr()).is_none());
+        for n in [1, 2, 3] {
+            save_diagram_version(&p, &pr(), &version(n)).unwrap();
+        }
+        assert_eq!(load_latest_diagram_version(&p, &pr()), Some(version(3)));
+        fs::write(p.diagrams_for(&pr()).join("v3.json"), "{ not json").unwrap();
+        assert_eq!(load_latest_diagram_version(&p, &pr()), Some(version(2)));
     }
 
     #[test]
@@ -246,13 +279,13 @@ mod tests {
         let (_d, p) = setup();
         let dir = p.diagrams_for(&pr());
         fs::create_dir_all(&dir).unwrap();
-        assert_eq!(next_diagram_number(&p, &pr()), 1);
+        assert_eq!(next_diagram_number(&p, &pr()), Some(1));
         for (name, next) in [
-            ("v1.json", 2),
-            ("v7.json.corrupt-1700000000", 8),
-            ("v3.json", 8),
-            ("v4294967295.json", u32::MAX),
-            ("v99999999999.json", u32::MAX),
+            ("v1.json", Some(2)),
+            ("v7.json.corrupt-1700000000", Some(8)),
+            ("v3.json", Some(8)),
+            ("v4294967294.json", Some(u32::MAX)),
+            ("v4294967295.json", None),
         ] {
             fs::write(dir.join(name), "x").unwrap();
             assert_eq!(next_diagram_number(&p, &pr()), next, "{name}");
@@ -260,7 +293,33 @@ mod tests {
         fs::write(dir.join("v8x.json"), "x").unwrap();
         fs::write(dir.join("v9.jsonx"), "x").unwrap();
         fs::write(dir.join("w10.json"), "x").unwrap();
-        assert_eq!(next_diagram_number(&p, &pr()), u32::MAX);
+        assert_eq!(next_diagram_number(&p, &pr()), None);
+    }
+
+    #[test]
+    fn a_number_past_the_last_one_leaves_no_number_to_take() {
+        let (_d, p) = setup();
+        let dir = p.diagrams_for(&pr());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("v99999999999.json"), "x").unwrap();
+        assert_eq!(next_diagram_number(&p, &pr()), None);
+    }
+
+    #[test]
+    fn a_file_bigger_than_any_version_is_not_read() {
+        let (_d, p) = setup();
+        save_diagram_version(&p, &pr(), &version(1)).unwrap();
+        let file = p.diagrams_for(&pr()).join("v1.json");
+        let mut padded = fs::read(&file).unwrap();
+        padded.resize(MAX_VERSION_BYTES as usize + 1, b' ');
+        fs::write(&file, &padded).unwrap();
+        assert!(load_diagram_version(&p, &pr(), 1).is_none());
+        assert!(load_diagram_versions(&p, &pr()).is_empty());
+        assert_eq!(
+            fs::read(&file).unwrap().len(),
+            padded.len(),
+            "left where it is"
+        );
     }
 
     #[test]

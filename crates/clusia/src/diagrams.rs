@@ -227,6 +227,9 @@ async fn draw_all(
             std::process::exit(130);
         }
     };
+    if begun && !json {
+        eprintln!("{BUSY}; following that drawing.");
+    }
     let harness = crate::harness::name_of(&mut client, pr).await;
     let mut titles: HashMap<String, String> = HashMap::new();
     let mut asked = std::collections::BTreeSet::new();

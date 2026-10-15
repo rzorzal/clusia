@@ -227,6 +227,47 @@ async fn the_plan_and_each_drawing_arrive_as_they_settle() {
 }
 
 #[tokio::test]
+async fn a_draw_with_no_version_number_left_is_refused_before_the_agent_runs() {
+    let (w, dir, mut c, _watcher) = drawing_world(plan_and_drawings()).await;
+    let folder = w.daemon.paths.diagrams_for(&pr7());
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("v4294967295.json"), "x").unwrap();
+    let refusal = refused(c.request(Command::DrawDiagrams { pr: pr7() }).await);
+    assert_eq!(refusal.code, ErrorCode::InvalidState);
+    assert_eq!(
+        refusal.message,
+        "There is no version number left for these diagrams"
+    );
+    assert!(FakeClaude::calls(&dir).is_empty(), "no turn was spent");
+    assert_eq!(
+        std::fs::read_to_string(folder.join("v4294967295.json")).unwrap(),
+        "x",
+        "the last file is left as it is"
+    );
+}
+
+#[tokio::test]
+async fn without_the_review_cache_the_code_links_still_know_the_pull_requests_files() {
+    let (w, _dir, mut c, mut watcher) = drawing_world(plan_and_drawings()).await;
+    std::fs::remove_file(w.daemon.paths.review_cache_file(&pr7())).unwrap();
+    c.request(Command::DrawDiagrams { pr: pr7() })
+        .await
+        .unwrap();
+    until(&mut watcher, idle).await;
+    let (_, latest, _) = diagrams_of(&mut c).await;
+    let latest = latest.expect("a version");
+    let EntryState::Ready { spec, notes } = &latest.entry("flow").expect("flow").state else {
+        panic!("ready: {latest:?}");
+    };
+    assert_eq!(
+        spec.nodes[0].anchor.as_ref().map(|a| a.path.as_str()),
+        Some("feature.txt"),
+        "a file of the pull request keeps its link"
+    );
+    assert_eq!(notes, &["1 code link dropped".to_string()], "only nope.txt");
+}
+
+#[tokio::test]
 async fn a_second_draw_is_refused_and_stop_ends_the_first_leaving_nothing() {
     let (w, dir, mut c, mut watcher) = drawing_world(Script::one(Turn::hanging())).await;
     c.request(Command::DrawDiagrams { pr: pr7() })

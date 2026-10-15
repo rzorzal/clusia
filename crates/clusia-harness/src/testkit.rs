@@ -176,7 +176,6 @@ pub fn revalidation_block(json: serde_json::Value) -> String {
     format!("```clusia-revalidation\n{json}\n```")
 }
 
-/// A fenced `clusia-pass` block holding `json`.
 /// A fenced `clusia-diagram-plan` block holding `json`, an array of plan entries.
 pub fn diagram_plan_block(json: serde_json::Value) -> String {
     format!("```clusia-diagram-plan\n{json}\n```")
@@ -187,6 +186,7 @@ pub fn diagram_block(json: serde_json::Value) -> String {
     format!("```clusia-diagram\n{json}\n```")
 }
 
+/// A fenced `clusia-pass` block holding `json`.
 pub fn pass_block(json: serde_json::Value) -> String {
     format!("```clusia-pass\n{json}\n```")
 }

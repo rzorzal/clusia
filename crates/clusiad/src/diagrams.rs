@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::diagram::{
-    DiagramContext, DiagramEntry, DiagramVersion, EntryState, PlanEntry, VersionPhase, draw_prompt,
-    plan_prompt, repair_prompt, validate, validate_plan,
+    DiagramContext, DiagramEntry, DiagramVersion, EntryState, ID_MAX, PlanEntry, VersionPhase,
+    draw_prompt, plan_prompt, repair_prompt, validate, validate_plan,
 };
 use clusia_core::printable::printable;
 use clusia_core::{
@@ -24,8 +24,8 @@ use clusia_protocol::{
     ProtocolError, Reply, TurnOrigin, topics,
 };
 use clusia_store::diagrams::{
-    delete_diagrams, load_diagram_version, load_diagram_versions, next_diagram_number,
-    save_diagram_version,
+    delete_diagrams, load_diagram_version, load_diagram_versions, load_latest_diagram_version,
+    next_diagram_number, save_diagram_version,
 };
 use clusia_store::load_review_cache;
 use tokio::sync::watch;
@@ -264,6 +264,11 @@ fn versions_of(shared: &Shared, pr: &PrRef) -> Vec<DiagramVersion> {
         .into_iter()
         .map(|version| as_shown(shared, pr, version))
         .collect()
+}
+
+/// A key the client sent, as it can be quoted: cut to an id's length, with escapes shown.
+fn shown_key(key: &str) -> String {
+    printable(&cut(key, ID_MAX))
 }
 
 /// `text` cut to `max` characters.
@@ -641,8 +646,12 @@ async fn draw_all(shared: &Arc<Shared>, pr: &PrRef, job: &Job) -> End {
             ));
         }
     };
+    // `start` refused a run with no number left; a file written since then ends it here.
+    let Some(number) = next_diagram_number(&shared.paths, pr) else {
+        return End::Failed(NO_NUMBER_LEFT.to_string());
+    };
     let mut version = DiagramVersion {
-        number: next_diagram_number(&shared.paths, pr),
+        number,
         commit: job.head.clone(),
         harness: job.name.clone(),
         drawn_at: now_unix(),
@@ -678,7 +687,10 @@ async fn draw_one(shared: &Arc<Shared>, pr: &PrRef, job: &Job, key: &str) -> End
         return End::Refused("There are no diagrams to draw again".to_string());
     };
     let Some(index) = version.entries.iter().position(|e| e.plan.key == key) else {
-        return End::Refused(format!("There is no diagram {key} in the latest version"));
+        return End::Refused(format!(
+            "There is no diagram {} in the latest version",
+            shown_key(key)
+        ));
     };
     version.phase = VersionPhase::Drawing;
     shared.diagrams.set_writing(pr, job.run, version.number);
@@ -744,7 +756,10 @@ fn check_redraw(shared: &Shared, pr: &PrRef, head: &str, key: &str) -> Result<()
     if latest.entry(key).is_none() {
         return Err(Outcome::Err(ProtocolError::new(
             ErrorCode::NotFound,
-            format!("there is no diagram {key} in the latest version"),
+            format!(
+                "there is no diagram {} in the latest version",
+                shown_key(key)
+            ),
         )));
     }
     if latest.commit != head {
@@ -754,6 +769,9 @@ fn check_redraw(shared: &Shared, pr: &PrRef, head: &str, key: &str) -> Result<()
     }
     Ok(())
 }
+
+/// Why a drawing cannot start once the last version number is taken.
+const NO_NUMBER_LEFT: &str = "There is no version number left for these diagrams";
 
 enum Refused {
     Busy,
@@ -779,19 +797,34 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, mode: Mode) -> Result<(), Outco
         }
         Err(out) => return Err(out),
     };
-    if let Mode::One(key) = &mode {
-        check_redraw(shared, pr, &review.head_sha, key)?;
+    match &mode {
+        Mode::One(key) => check_redraw(shared, pr, &review.head_sha, key)?,
+        Mode::All if next_diagram_number(&shared.paths, pr).is_none() => {
+            return Err(reviews::invalid_state(NO_NUMBER_LEFT));
+        }
+        Mode::All => {}
     }
     let limit = {
         let harness = &shared.config.read().await.harness;
         Duration::from_secs(u64::from(harness.check_timeout_secs))
     };
+    // Code links are kept only for the pull request's files, so a missing cache reads them
+    // again; only when that fails too is every link dropped.
     let (pr_title, files) = match load_review_cache(&shared.paths, pr) {
         Ok(Some(cache)) => (
             cache.pr.summary.title,
             cache.files.into_iter().map(|file| file.path).collect(),
         ),
-        _ => (review.title.clone(), Vec::new()),
+        _ => {
+            let files = match reviews::files_for(shared, pr, &review.head_sha).await {
+                Ok(files) => files.iter().map(|file| file.path.clone()).collect(),
+                Err(_) => {
+                    tracing::warn!(pr = %pr, "the pull request's files could not be read; the diagrams get no code links");
+                    Vec::new()
+                }
+            };
+            (review.title.clone(), files)
+        }
     };
     let first = match &mode {
         Mode::All => DiagramsState::Planning,
@@ -1018,17 +1051,26 @@ pub(crate) fn stored_version(shared: &Shared, pr: &PrRef, number: u32) -> Option
     load_diagram_version(&shared.paths, pr, number).map(|v| as_shown(shared, pr, v))
 }
 
+/// The latest version as stored, read off the async threads; only its file is parsed.
+async fn latest_stored(shared: &Shared, pr: &PrRef) -> Option<DiagramVersion> {
+    let (paths, pr) = (shared.paths.clone(), pr.clone());
+    tokio::task::spawn_blocking(move || load_latest_diagram_version(&paths, &pr))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// The commit the latest version was drawn from.
-pub(crate) fn latest_commit(shared: &Shared, pr: &PrRef) -> Option<String> {
-    load_diagram_versions(&shared.paths, pr)
-        .pop()
+pub(crate) async fn latest_commit(shared: &Shared, pr: &PrRef) -> Option<String> {
+    latest_stored(shared, pr)
+        .await
         .map(|version| version.commit)
 }
 
 /// The ready diagrams of the latest version, with the files their boxes point at, for the
 /// revalidation prompt; none when the review has no diagrams.
-pub(crate) fn digests(shared: &Shared, pr: &PrRef) -> Vec<clusia_core::DiagramDigest> {
-    let Some(latest) = load_diagram_versions(&shared.paths, pr).pop() else {
+pub(crate) async fn digests(shared: &Shared, pr: &PrRef) -> Vec<clusia_core::DiagramDigest> {
+    let Some(latest) = latest_stored(shared, pr).await else {
         return Vec::new();
     };
     latest
@@ -1132,12 +1174,14 @@ pub(crate) async fn add_comment(
     if comment.is_empty() {
         return reviews::bad_request("the comment is empty");
     }
-    let _guard = reviews::lock(shared, pr).await;
+    // The git diff and a GitHub read of the files run without the review's lock; only the
+    // write takes it, and a head that moved meanwhile sends the comment to the review body.
     let (commit, anchor) = match crate::diagram_code::anchored_node(shared, pr, number, key, node) {
         Ok(found) => found,
         Err(out) => return out,
     };
     let Some(anchor) = anchor else {
+        let _guard = reviews::lock(shared, pr).await;
         return add_general(shared, client, pr, comment).await;
     };
     let head = match reviews::load_existing(shared, pr) {
@@ -1151,7 +1195,7 @@ pub(crate) async fn add_comment(
             .map(|files| (lines, files)),
         None => None,
     };
-    if let Some(((path, start, end), files)) = placed {
+    let on_lines = placed.and_then(|((path, start, end), files)| {
         let at = Anchor {
             path: path.clone(),
             line: end,
@@ -1159,20 +1203,28 @@ pub(crate) async fn add_comment(
             side: Side::Right,
             commit: head.clone(),
         };
-        if fits_diff(&files, &at) {
-            let item = reviews::NewItem {
-                kind: DraftKind::LineComment,
-                anchor: Some(AnchorInput {
-                    path,
-                    line: end,
-                    start_line: at.start_line,
-                    side: Side::Right,
-                }),
-                thread: None,
-                body: comment,
-            };
-            return reviews::add_item_locked(shared, client, pr, Origin::Diagram, item).await;
-        }
+        fits_diff(&files, &at).then_some(AnchorInput {
+            path,
+            line: end,
+            start_line: at.start_line,
+            side: Side::Right,
+        })
+    });
+    let _guard = reviews::lock(shared, pr).await;
+    let head_now = match reviews::load_existing(shared, pr) {
+        Ok(review) => review.head_sha,
+        Err(out) => return out,
+    };
+    if let Some(anchor) = on_lines
+        && head_now == head
+    {
+        let item = reviews::NewItem {
+            kind: DraftKind::LineComment,
+            anchor: Some(anchor),
+            thread: None,
+            body: comment,
+        };
+        return reviews::add_item_locked(shared, client, pr, Origin::Diagram, item).await;
     }
     let lines = if anchor.start_line == anchor.end_line {
         anchor.start_line.to_string()
@@ -2261,11 +2313,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_key_the_client_sent_is_quoted_escaped_and_short() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        seed_version(&shared, 1, "h", None);
+        let key = format!("x\u{1b}[2J{}", "k".repeat(500));
+        let Err(Outcome::Err(e)) = check_redraw(&shared, &pr(1), "h", &key) else {
+            panic!("refused");
+        };
+        assert!(!e.message.contains('\u{1b}'), "{}", e.message);
+        assert!(e.message.contains("x\\u{1b}[2J"), "{}", e.message);
+        assert!(e.message.len() < 200, "{}", e.message);
+    }
+
+    #[tokio::test]
     async fn the_digests_list_what_each_ready_diagram_draws() {
         let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
-        assert!(digests(&shared, &pr(1)).is_empty());
+        assert!(digests(&shared, &pr(1)).await.is_empty());
         seed_version(&shared, 1, "h", Some(("src/a.rs", 1, 2)));
-        let found = digests(&shared, &pr(1));
+        let found = digests(&shared, &pr(1)).await;
         assert_eq!(found.len(), 1, "an entry not drawn is not described");
         assert_eq!(
             (found[0].key.as_str(), found[0].paths.as_slice()),

@@ -30,6 +30,8 @@ pub const ID_MAX: usize = 64;
 pub const END_MAX: usize = 8;
 /// The longest path of an anchor, in bytes.
 pub const PATH_MAX: usize = 1024;
+/// The most lines past its first that a box's code may span; a longer range is dropped.
+pub const ANCHOR_SPAN_MAX: u32 = 2_000;
 /// How much of an invalid answer a repair prompt quotes, in characters.
 pub const REPAIR_ECHO_MAX: usize = 20_000;
 /// The most validation errors one answer is told about.
@@ -594,7 +596,7 @@ pub fn validate(
         } else if !ids.insert(node.id.as_str()) {
             fail(
                 &mut errors,
-                format!("Two nodes share the id \"{}\".", node.id),
+                format!("Two nodes share the id \"{}\".", shown(&node.id)),
             );
         }
         if !rules.shapes.contains(&node.shape) {
@@ -656,7 +658,7 @@ pub fn validate(
         } else if !group_ids.insert(group.id.as_str()) {
             fail(
                 &mut errors,
-                format!("Two groups share the id \"{}\".", group.id),
+                format!("Two groups share the id \"{}\".", shown(&group.id)),
             );
         }
         if rules.groups && group.kind != GroupKind::Boundary {
@@ -704,7 +706,8 @@ pub fn validate(
             let usable = plain_relative(&anchor.path, PATH_MAX)
                 && files.contains(&anchor.path)
                 && anchor.start_line >= 1
-                && anchor.start_line <= anchor.end_line;
+                && anchor.start_line <= anchor.end_line
+                && anchor.end_line - anchor.start_line <= ANCHOR_SPAN_MAX;
             if !usable {
                 links += 1;
                 node.anchor = None;
@@ -819,7 +822,7 @@ pub fn validate_plan(raw: Vec<PlanEntry>) -> Result<Vec<PlanEntry>, Vec<String>>
         } else if !keys.insert(entry.key.clone()) {
             fail(
                 &mut errors,
-                format!("Two diagrams share the key \"{}\".", entry.key),
+                format!("Two diagrams share the key \"{}\".", shown(&entry.key)),
             );
         }
         let title = cleaner.text(&entry.title, LABEL_MAX);
@@ -1451,6 +1454,27 @@ mod tests {
         assert_eq!(checked.spec.edges.len(), 1);
         assert!(checked.spec.nodes.iter().all(|n| n.anchor.is_none()));
         assert_eq!(checked.notes, ["2 arrows dropped", "2 code links dropped"]);
+    }
+
+    #[test]
+    fn an_anchor_over_more_lines_than_a_box_stands_for_is_dropped() {
+        let anchor = |start, end| {
+            Some(CodeAnchor {
+                path: "src/auth/refresh.rs".into(),
+                start_line: start,
+                end_line: end,
+            })
+        };
+        let mut spec = flow();
+        spec.nodes[0].anchor = anchor(1, 4_000_000_000);
+        spec.nodes[1].anchor = anchor(10, 10 + ANCHOR_SPAN_MAX);
+        let checked = validate(spec, &entry(DiagramKind::Flow), &files()).unwrap();
+        assert!(checked.spec.nodes[0].anchor.is_none());
+        assert_eq!(
+            checked.spec.nodes[1].anchor,
+            anchor(10, 10 + ANCHOR_SPAN_MAX)
+        );
+        assert_eq!(checked.notes, ["1 code link dropped"]);
     }
 
     #[test]

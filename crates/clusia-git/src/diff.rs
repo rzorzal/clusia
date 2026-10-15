@@ -115,14 +115,18 @@ pub fn diagram_ref(number: u64, version: u32) -> String {
     format!("refs/clusia/diagrams/pr-{number}-v{version}")
 }
 
-/// Removes every diagram pin of pull request `number`.
+/// Removes every diagram pin of pull request `number`: each one is tried, and the first
+/// failure is returned after the rest are gone.
 pub async fn unpin_diagrams(repo: &Path, number: u64) -> Result<(), GitError> {
     let pattern = format!("refs/clusia/diagrams/pr-{number}-v*");
     let listed = git(repo, &["for-each-ref", "--format=%(refname)", &pattern]).await?;
+    let mut first = None;
     for name in listed.lines().filter(|name| !name.is_empty()) {
-        unpin(repo, name).await?;
+        if let Err(e) = unpin(repo, name).await {
+            first.get_or_insert(e);
+        }
     }
-    Ok(())
+    first.map_or(Ok(()), Err)
 }
 
 /// Keeps `sha` reachable (a force-push would otherwise let gc drop the reviewed commit).
@@ -260,6 +264,30 @@ mod tests {
             &["for-each-ref", "--format=%(refname)", "refs/clusia"],
         );
         assert_eq!(left, "refs/clusia/diagrams/pr-70-v1");
+        unpin_diagrams(&repo, 7).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pin_that_cannot_be_removed_does_not_keep_the_others() {
+        let (_t, repo, first, second) = repo_with_two_commits();
+        for (version, sha) in [(1, &first), (2, &second), (3, &first)] {
+            pin_commit(&repo, &diagram_ref(7, version), sha)
+                .await
+                .unwrap();
+        }
+        // A lock left by another git process makes deleting that one ref fail.
+        let lock = repo.join(".git/refs/clusia/diagrams/pr-7-v1.lock");
+        std::fs::write(&lock, "").unwrap();
+        assert!(
+            unpin_diagrams(&repo, 7).await.is_err(),
+            "the failure is told"
+        );
+        let left = sh(
+            &repo,
+            &["for-each-ref", "--format=%(refname)", "refs/clusia"],
+        );
+        assert_eq!(left, "refs/clusia/diagrams/pr-7-v1", "the others are gone");
+        std::fs::remove_file(&lock).unwrap();
         unpin_diagrams(&repo, 7).await.unwrap();
     }
 

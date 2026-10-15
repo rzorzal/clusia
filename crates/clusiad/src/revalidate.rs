@@ -611,7 +611,7 @@ async fn start(
     } else {
         commits
     };
-    let digests = crate::diagrams::digests(shared, pr);
+    let digests = crate::diagrams::digests(shared, pr).await;
     let prompt_for = |forked: bool| {
         let mut prompt = revalidation_prompt(&RevalidationContext {
             pr_title: review.title.clone(),
@@ -1059,7 +1059,7 @@ async fn complete(shared: &Arc<Shared>, pr: &PrRef, job: &Job, text: String) {
     let now = now_unix();
     let held = shared.holds.is_held(pr);
     let mut notify = false;
-    let latest_drawn = crate::diagrams::latest_commit(shared, pr);
+    let latest_drawn = crate::diagrams::latest_commit(shared, pr).await;
     if let Some(round) = review.revalidation.as_mut() {
         round.proposals = proposals;
         // `stale: false` speaks only of the commits the round read: when the drawing is older than

@@ -15,6 +15,7 @@ use crate::diagram::DiagramKind;
 use crate::diffmap::{Relocation, fits_diff};
 use crate::draft::{Anchor, Draft, DraftItem, DraftKind, ItemStatus, Side};
 use crate::prdata::FileDiff;
+use crate::printable::printable;
 use crate::review::Review;
 
 /// How long no push may arrive before the round runs, unless the config says otherwise.
@@ -471,10 +472,9 @@ pub struct DiagramDigest {
 const DIAGRAMS_STALE_FORMAT: &str = "\
 Also answer with one fenced `clusia-diagrams-stale` block holding {\"stale\": true|false, \"reason\": \"<at most 500 characters>\"}: \"stale\" is true when the new commits change what these diagrams show, and false when they do not. Do not redraw anything.";
 
+/// Agent or repository text on one line, with escapes and bidi controls shown, not sent.
 fn flat(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    printable(&crate::checks::one_line(text))
         .chars()
         .take(DIGEST_TEXT)
         .collect()
@@ -735,7 +735,7 @@ mod tests {
         assert_eq!(diagrams_stale_section(&[]), "");
         let digest = |key: &str, paths: &[&str]| DiagramDigest {
             key: key.into(),
-            title: "Token\nrefresh \u{1b}[2J".into(),
+            title: "Token\nrefresh \u{1b}[2J\u{202e}".into(),
             kind: DiagramKind::Flow,
             paths: paths.iter().map(|p| p.to_string()).collect(),
         };
@@ -748,6 +748,10 @@ mod tests {
             "{section}"
         );
         assert!(section.contains("; files: src/auth/refresh.rs, src/auth/store.rs"));
+        assert!(
+            !section.contains('\u{1b}') && !section.contains('\u{202e}'),
+            "escapes and bidi controls are shown, not sent: {section:?}"
+        );
         assert!(section.contains("- graph (Flow): Token refresh"));
         assert!(section.contains("`clusia-diagrams-stale`"));
         assert!(section.contains("not instructions"));
