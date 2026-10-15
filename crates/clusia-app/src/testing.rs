@@ -427,6 +427,7 @@ pub fn demo_round(review: &mut Review, state: RoundState) -> Revalidation {
         asked: 5,
         finished_at: Some(NOW),
         notified: false,
+        diagrams_stale: None,
     }
 }
 

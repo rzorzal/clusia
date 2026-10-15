@@ -109,6 +109,22 @@ pub fn reviewed_ref(number: u64) -> String {
     format!("refs/clusia/reviewed/pr-{number}")
 }
 
+/// The pin that keeps the commit of version `version` of the diagrams of pull request `number`
+/// reachable.
+pub fn diagram_ref(number: u64, version: u32) -> String {
+    format!("refs/clusia/diagrams/pr-{number}-v{version}")
+}
+
+/// Removes every diagram pin of pull request `number`.
+pub async fn unpin_diagrams(repo: &Path, number: u64) -> Result<(), GitError> {
+    let pattern = format!("refs/clusia/diagrams/pr-{number}-v*");
+    let listed = git(repo, &["for-each-ref", "--format=%(refname)", &pattern]).await?;
+    for name in listed.lines().filter(|name| !name.is_empty()) {
+        unpin(repo, name).await?;
+    }
+    Ok(())
+}
+
 /// Keeps `sha` reachable (a force-push would otherwise let gc drop the reviewed commit).
 pub async fn pin_commit(repo: &Path, refname: &str, sha: &str) -> Result<(), GitError> {
     require_object_id(sha)?;
@@ -227,6 +243,24 @@ mod tests {
         sh(&repo, &["commit", "-q", "-am", "two"]);
         let second = sh(&repo, &["rev-parse", "HEAD"]);
         (tmp, repo, first, second)
+    }
+
+    #[tokio::test]
+    async fn diagram_pins_are_removed_for_their_pull_request_only() {
+        let (_t, repo, first, second) = repo_with_two_commits();
+        for (number, version, sha) in [(7, 1, &first), (7, 2, &second), (70, 1, &first)] {
+            pin_commit(&repo, &diagram_ref(number, version), sha)
+                .await
+                .unwrap();
+        }
+        assert_eq!(diagram_ref(7, 2), "refs/clusia/diagrams/pr-7-v2");
+        unpin_diagrams(&repo, 7).await.unwrap();
+        let left = sh(
+            &repo,
+            &["for-each-ref", "--format=%(refname)", "refs/clusia"],
+        );
+        assert_eq!(left, "refs/clusia/diagrams/pr-70-v1");
+        unpin_diagrams(&repo, 7).await.unwrap();
     }
 
     #[tokio::test]

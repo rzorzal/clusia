@@ -24,5 +24,5 @@ pub use command::{BridgeSpec, ClaudeCode, ROLE_PROMPT, SessionArg, TurnSpec};
 pub use diagram_blocks::{extract_diagram, extract_plan};
 pub use parse::{AgentEvent, ParseState, parse_line};
 pub use probe::parse_probe;
-pub use revalidation_blocks::{RawVerdict, extract_revalidation_blocks};
+pub use revalidation_blocks::{RawVerdict, extract_diagrams_stale, extract_revalidation_blocks};
 pub use suggestions::extract_suggestions;

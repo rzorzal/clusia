@@ -902,6 +902,7 @@ pub(crate) async fn cleanup_checkout(shared: &Shared, pr: &PrRef) {
     if let Ok(repo) = repo_of_worktree(&path).await {
         let _ = unpin(&repo, &reviewed_ref(pr.number)).await;
         let _ = unpin(&repo, &base_pin_ref(pr.number)).await;
+        let _ = clusia_git::unpin_diagrams(&repo, pr.number).await;
         if let Err(e) = remove_worktree(&repo, &path).await {
             tracing::warn!(error = %e, "cannot remove the worktree");
         }

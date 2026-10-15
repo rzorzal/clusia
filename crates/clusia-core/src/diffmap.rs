@@ -283,6 +283,29 @@ pub fn commentable_lines(patch: &str) -> (BTreeSet<u32>, BTreeSet<u32>) {
     (left, right)
 }
 
+/// The line numbers, in the new file, of the lines a GitHub file patch adds.
+pub fn added_lines(patch: &str) -> BTreeSet<u32> {
+    let mut added = BTreeSet::new();
+    let mut new = 0u32;
+    for line in patch.lines() {
+        if line.starts_with("@@ ") {
+            if let Some(h) = parse_hunk_header(line) {
+                new = h.new_start;
+            }
+            continue;
+        }
+        match line.as_bytes().first() {
+            Some(b'+') => {
+                added.insert(new);
+                new += 1;
+            }
+            Some(b' ') => new += 1,
+            _ => {} // a removed line has no new number; "\ No newline at end of file"
+        }
+    }
+    added
+}
+
 pub fn can_comment(patch: &str, side: Side, line: u32) -> bool {
     let (left, right) = commentable_lines(patch);
     match side {
@@ -555,6 +578,14 @@ index 777..888 100644
         let report = relocate(&mut d, &DiffMap::parse(DIFF), None, "h2", "b2");
         assert_eq!(report, Relocation::default());
         assert_eq!(d.items[0].anchor.as_ref().unwrap().line, 3);
+    }
+
+    #[test]
+    fn added_lines_are_the_plus_lines_with_their_new_numbers() {
+        let patch = "@@ -1,3 +1,4 @@\n a\n+b\n c\n-d\n+e\n@@ -10,2 +11,2 @@\n x\n+y\n\\ No newline at end of file";
+        assert_eq!(added_lines(patch), BTreeSet::from([2, 4, 12]));
+        assert!(added_lines("").is_empty());
+        assert!(added_lines("@@ -1,2 +1,0 @@\n-a\n-b").is_empty());
     }
 
     #[test]

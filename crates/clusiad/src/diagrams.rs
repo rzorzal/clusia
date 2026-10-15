@@ -13,12 +13,15 @@ use clusia_core::diagram::{
     plan_prompt, repair_prompt, validate, validate_plan,
 };
 use clusia_core::printable::printable;
-use clusia_core::{PrRef, ReviewState};
+use clusia_core::{
+    Anchor, DiffMap, DraftKind, LineMap, Origin, PrRef, ReviewState, Side, fits_diff,
+};
+use clusia_git::{diagram_ref, diff_between, is_object_id, pin_commit, repo_of_worktree};
 use clusia_harness::AgentEvent;
 use clusia_harness::{extract_diagram, extract_plan};
 use clusia_protocol::{
-    AgentErrorKind, AgentLogEntry, DiagramsState, ErrorCode, Event, Outcome, ProtocolError, Reply,
-    TurnOrigin, topics,
+    AgentErrorKind, AgentLogEntry, AnchorInput, DiagramsState, ErrorCode, Event, Outcome,
+    ProtocolError, Reply, TurnOrigin, topics,
 };
 use clusia_store::diagrams::{
     delete_diagrams, load_diagram_version, load_diagram_versions, next_diagram_number,
@@ -523,6 +526,20 @@ fn previous_spec(
         })
 }
 
+/// Keeps the commit of a version reachable, so the code of an older drawing can still be read
+/// after a force-push. Best effort.
+async fn pin_version(shared: &Shared, pr: &PrRef, number: u32, commit: &str) {
+    if !is_object_id(commit) {
+        return;
+    }
+    let Ok(repo) = repo_of_worktree(&shared.paths.worktree_for(pr)).await else {
+        return;
+    };
+    if let Err(e) = pin_commit(&repo, &diagram_ref(pr.number, number), commit).await {
+        tracing::warn!(error = %e, pr = %pr, "cannot pin the commit of a diagram version");
+    }
+}
+
 /// Draws entry `index` of `version`. A drawing that stays unusable is that entry's failure, not
 /// the run's.
 async fn draw_entry(
@@ -642,6 +659,7 @@ async fn draw_all(shared: &Arc<Shared>, pr: &PrRef, job: &Job) -> End {
     if !keep(shared, pr, job, &version).await {
         return End::Over(Why::Ended);
     }
+    pin_version(shared, pr, version.number, &version.commit).await;
     shared.publish(
         topics::AGENT,
         Event::DiagramsPlanned {
@@ -968,8 +986,19 @@ pub(crate) async fn on_summary_over(shared: &Arc<Shared>, pr: &PrRef) {
 /// now, and whether the latest was drawn from another commit than the review's.
 pub(crate) fn get(shared: &Shared, pr: &PrRef) -> Outcome {
     let versions = versions_of(shared, pr);
-    let head = current_head(shared, pr).unwrap_or_default();
+    let review = reviews::load_stored(shared, pr).ok().flatten();
+    let head = review
+        .as_ref()
+        .map(|r| r.head_sha.clone())
+        .unwrap_or_default();
     let stale = !head.is_empty() && versions.last().is_some_and(|v| v.commit != head);
+    // What the agent said when the revalidation round asked it, for the latest commits only.
+    let stale_reason = review
+        .and_then(|r| r.revalidation)
+        .filter(|round| round.to_head == head)
+        .and_then(|round| round.diagrams_stale)
+        .map(|said| said.reason)
+        .filter(|reason| stale && !reason.is_empty());
     let infos = versions.iter().map(DiagramVersion::info).collect();
     Outcome::Ok(Reply::Diagrams {
         versions: infos,
@@ -980,20 +1009,181 @@ pub(crate) fn get(shared: &Shared, pr: &PrRef) -> Outcome {
             .unwrap_or(DiagramsState::Idle),
         head,
         stale,
-        stale_reason: None,
+        stale_reason,
     })
+}
+
+/// Version `number`, read as `get` reads it.
+pub(crate) fn stored_version(shared: &Shared, pr: &PrRef, number: u32) -> Option<DiagramVersion> {
+    load_diagram_version(&shared.paths, pr, number).map(|v| as_shown(shared, pr, v))
+}
+
+/// The ready diagrams of the latest version, with the files their boxes point at, for the
+/// revalidation prompt; none when the review has no diagrams.
+pub(crate) fn digests(shared: &Shared, pr: &PrRef) -> Vec<clusia_core::DiagramDigest> {
+    let Some(latest) = load_diagram_versions(&shared.paths, pr).pop() else {
+        return Vec::new();
+    };
+    latest
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let EntryState::Ready { spec, .. } = &entry.state else {
+                return None;
+            };
+            let mut paths: Vec<String> = spec
+                .nodes
+                .iter()
+                .filter_map(|node| node.anchor.as_ref().map(|a| a.path.clone()))
+                .collect();
+            paths.sort();
+            paths.dedup();
+            Some(clusia_core::DiagramDigest {
+                key: entry.plan.key.clone(),
+                title: entry.plan.title.clone(),
+                kind: entry.plan.kind,
+                paths,
+            })
+        })
+        .collect()
 }
 
 /// `GetDiagramVersion`: one version in full.
 pub(crate) fn version(shared: &Shared, pr: &PrRef, number: u32) -> Outcome {
-    let found = load_diagram_version(&shared.paths, pr, number).map(|v| as_shown(shared, pr, v));
-    match found {
+    match stored_version(shared, pr, number) {
         Some(version) => Outcome::Ok(Reply::DiagramVersion(Box::new(version))),
         None => Outcome::Err(ProtocolError::new(
             ErrorCode::NotFound,
             format!("there is no version {number} of the diagrams"),
         )),
     }
+}
+
+/// The longest range `lines_at_head` follows line by line.
+const MAX_MAPPED_LINES: u32 = 5_000;
+
+/// Where lines `anchor.start_line..=anchor.end_line` of `commit` are at `head`: the path and the
+/// first and last line. Every line of the range is followed: `None` when one was changed or
+/// deleted, when they no longer fall one after the other in one file (a line was inserted inside
+/// the range), when the range is very long, or when the commits cannot be compared.
+async fn lines_at_head(
+    shared: &Shared,
+    pr: &PrRef,
+    commit: &str,
+    head: &str,
+    anchor: &clusia_core::diagram::CodeAnchor,
+) -> Option<(String, u32, u32)> {
+    if commit == head {
+        return Some((anchor.path.clone(), anchor.start_line, anchor.end_line));
+    }
+    let repo = repo_of_worktree(&shared.paths.worktree_for(pr))
+        .await
+        .ok()?;
+    let map = DiffMap::parse(&diff_between(&repo, commit, head).await.ok()?);
+    let span = anchor.end_line.checked_sub(anchor.start_line)?;
+    if span >= MAX_MAPPED_LINES {
+        return None;
+    }
+    let mut start: Option<(String, u32)> = None;
+    for line in anchor.start_line..=anchor.end_line {
+        let (path, to) = match map.map_line(&anchor.path, line) {
+            LineMap::Same => (anchor.path.clone(), line),
+            LineMap::Moved { path, line } => (path, line),
+            LineMap::Changed | LineMap::Deleted => return None,
+        };
+        // Every line must still be there, in the same file and in the same order, one after the
+        // other: a line rewritten or an insertion inside the range is not the code the reviewer
+        // saw.
+        match &start {
+            None => start = Some((path, to)),
+            Some((first_path, first)) => {
+                if *first_path != path || to != first + (line - anchor.start_line) {
+                    return None;
+                }
+            }
+        }
+    }
+    let (path, first) = start?;
+    Some((path, first, first + span))
+}
+
+/// `AddDiagramComment`: the comment on a box becomes a draft item written by the diagram. A box
+/// whose lines are still in the pull request's diff at the review's head (mapped forward from the
+/// version's commit when the head moved) gets a line comment there. Any other box, and a box with
+/// no code, gets a general comment, which names `path:lines` when the box has code. The anchor is
+/// the stored one, never the client's.
+pub(crate) async fn add_comment(
+    shared: &Shared,
+    client: &str,
+    pr: &PrRef,
+    number: u32,
+    key: &str,
+    node: &str,
+    body: &str,
+) -> Outcome {
+    let comment = body.trim();
+    if comment.is_empty() {
+        return reviews::bad_request("the comment is empty");
+    }
+    let _guard = reviews::lock(shared, pr).await;
+    let (commit, anchor) = match crate::diagram_code::anchored_node(shared, pr, number, key, node) {
+        Ok(found) => found,
+        Err(out) => return out,
+    };
+    let Some(anchor) = anchor else {
+        return add_general(shared, client, pr, comment).await;
+    };
+    let head = match reviews::load_existing(shared, pr) {
+        Ok(review) => review.head_sha,
+        Err(out) => return out,
+    };
+    let placed = match lines_at_head(shared, pr, &commit, &head, &anchor).await {
+        Some(lines) => reviews::files_for(shared, pr, &head)
+            .await
+            .ok()
+            .map(|files| (lines, files)),
+        None => None,
+    };
+    if let Some(((path, start, end), files)) = placed {
+        let at = Anchor {
+            path: path.clone(),
+            line: end,
+            start_line: (start != end).then_some(start),
+            side: Side::Right,
+            commit: head.clone(),
+        };
+        if fits_diff(&files, &at) {
+            let item = reviews::NewItem {
+                kind: DraftKind::LineComment,
+                anchor: Some(AnchorInput {
+                    path,
+                    line: end,
+                    start_line: at.start_line,
+                    side: Side::Right,
+                }),
+                thread: None,
+                body: comment,
+            };
+            return reviews::add_item_locked(shared, client, pr, Origin::Diagram, item).await;
+        }
+    }
+    let lines = if anchor.start_line == anchor.end_line {
+        anchor.start_line.to_string()
+    } else {
+        format!("{}-{}", anchor.start_line, anchor.end_line)
+    };
+    let text = format!("{}:{lines}: {comment}", printable(&anchor.path));
+    add_general(shared, client, pr, &text).await
+}
+
+async fn add_general(shared: &Shared, client: &str, pr: &PrRef, text: &str) -> Outcome {
+    let item = reviews::NewItem {
+        kind: DraftKind::General,
+        anchor: None,
+        thread: None,
+        body: text,
+    };
+    reviews::add_item_locked(shared, client, pr, Origin::Diagram, item).await
 }
 
 #[cfg(test)]
@@ -1836,5 +2026,243 @@ mod tests {
         assert_eq!(previous_spec(&earlier, 3, "flow").unwrap().caption, "one");
         assert_eq!(previous_spec(&earlier, 1, "flow"), None);
         assert_eq!(previous_spec(&earlier, 4, "graph"), None);
+    }
+
+    /// A version `number` drawn from `commit` whose diagram `flow` has box `a` pointing at
+    /// `anchor` (when given) and a box `b` that is not tied to code.
+    fn seed_version(shared: &Shared, number: u32, commit: &str, anchor: Option<(&str, u32, u32)>) {
+        let mut node = json!({"id": "a", "label": "refresh()", "shape": "box"});
+        if let Some((path, start, end)) = anchor {
+            node["anchor"] = json!({"path": path, "start_line": start, "end_line": end});
+        }
+        let spec = serde_json::from_value(json!({
+            "key": "flow", "kind": "flow", "title": "The flow", "caption": "c",
+            "nodes": [node, {"id": "b", "label": "other", "shape": "box"}]
+        }))
+        .unwrap();
+        let version = DiagramVersion {
+            number,
+            commit: commit.into(),
+            harness: "Claude Code".into(),
+            drawn_at: 1,
+            phase: VersionPhase::Done,
+            entries: vec![
+                DiagramEntry {
+                    plan: PlanEntry {
+                        key: "flow".into(),
+                        kind: clusia_core::diagram::DiagramKind::Flow,
+                        title: "The flow".into(),
+                        purpose: "p".into(),
+                    },
+                    state: EntryState::Ready {
+                        spec,
+                        notes: Vec::new(),
+                    },
+                },
+                DiagramEntry {
+                    plan: PlanEntry {
+                        key: "graph".into(),
+                        kind: clusia_core::diagram::DiagramKind::Graph,
+                        title: "The graph".into(),
+                        purpose: "p".into(),
+                    },
+                    state: EntryState::NotDrawn,
+                },
+            ],
+        };
+        save_diagram_version(&shared.paths, &pr(1), &version).unwrap();
+    }
+
+    /// What GitHub says the pull request changed at `head`: `src/a.rs` gets five new lines.
+    async fn serve_files(shared: &Shared, head: &str) {
+        let files = vec![clusia_core::FileDiff {
+            path: "src/a.rs".into(),
+            previous_path: None,
+            status: "added".into(),
+            additions: 5,
+            deletions: 0,
+            patch: Some("@@ -0,0 +1,5 @@\n+a\n+b\n+c\n+d\n+e".into()),
+        }];
+        shared
+            .files_cache
+            .lock()
+            .await
+            .insert(pr(1), (head.to_string(), Arc::new(files)));
+    }
+
+    async fn comment(shared: &Shared, key: &str, node: &str, number: u32) -> Outcome {
+        add_comment(shared, "test", &pr(1), number, key, node, "  Why this?\n").await
+    }
+
+    fn item_of(out: Outcome) -> clusia_core::DraftItem {
+        let Outcome::Ok(Reply::DraftItem(item)) = out else {
+            panic!("a draft item, got {out:?}");
+        };
+        item
+    }
+
+    #[tokio::test]
+    async fn a_box_with_no_code_becomes_a_general_comment_of_the_diagram() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        seed_version(&shared, 1, "h", None);
+        let item = item_of(comment(&shared, "flow", "a", 1).await);
+        assert_eq!(item.kind, DraftKind::General);
+        assert_eq!(item.origin, Origin::Diagram);
+        assert_eq!((item.anchor, item.body.as_str()), (None, "Why this?"));
+    }
+
+    #[tokio::test]
+    async fn a_box_on_lines_of_the_diff_becomes_a_line_comment_at_the_head() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        seed_version(&shared, 1, "h", Some(("src/a.rs", 2, 3)));
+        serve_files(&shared, "h").await;
+        let item = item_of(comment(&shared, "flow", "a", 1).await);
+        assert_eq!(
+            (item.kind, item.origin),
+            (DraftKind::LineComment, Origin::Diagram)
+        );
+        let anchor = item.anchor.expect("an anchor");
+        assert_eq!(
+            (
+                anchor.path.as_str(),
+                anchor.start_line,
+                anchor.line,
+                anchor.side
+            ),
+            ("src/a.rs", Some(2), 3, Side::Right)
+        );
+        assert_eq!(
+            (anchor.commit.as_str(), item.body.as_str()),
+            ("h", "Why this?")
+        );
+        // One line: no range.
+        seed_version(&shared, 2, "h", Some(("src/a.rs", 4, 4)));
+        let single = item_of(comment(&shared, "flow", "a", 2).await);
+        assert_eq!(
+            single.anchor.map(|a| (a.start_line, a.line)),
+            Some((None, 4))
+        );
+    }
+
+    #[tokio::test]
+    async fn code_the_diff_does_not_have_becomes_a_general_comment_that_names_its_lines() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        serve_files(&shared, "h").await;
+        seed_version(&shared, 1, "h", Some(("src/a.rs", 10, 12)));
+        let range = item_of(comment(&shared, "flow", "a", 1).await);
+        assert_eq!(
+            (range.kind, range.origin),
+            (DraftKind::General, Origin::Diagram)
+        );
+        assert_eq!(range.body, "src/a.rs:10-12: Why this?");
+        seed_version(&shared, 2, "h", Some(("src/other.rs", 7, 7)));
+        let single = item_of(comment(&shared, "flow", "a", 2).await);
+        assert_eq!(single.body, "src/other.rs:7: Why this?");
+        // A range that crosses the end of the diff does not fit either.
+        seed_version(&shared, 3, "h", Some(("src/a.rs", 4, 8)));
+        assert_eq!(
+            item_of(comment(&shared, "flow", "a", 3).await).kind,
+            DraftKind::General
+        );
+    }
+
+    #[tokio::test]
+    async fn a_version_of_a_commit_that_cannot_be_compared_gives_a_general_comment() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        serve_files(&shared, "h").await;
+        seed_version(&shared, 1, "an-older-commit", Some(("src/a.rs", 2, 3)));
+        let item = item_of(comment(&shared, "flow", "a", 1).await);
+        assert_eq!(
+            (item.kind, item.body.as_str()),
+            (DraftKind::General, "src/a.rs:2-3: Why this?")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_comment_the_daemon_cannot_place_is_refused_with_its_reason() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        seed_version(&shared, 1, "h", None);
+        let refused = |out: Outcome| match out {
+            Outcome::Err(e) => e,
+            other => panic!("refused, got {other:?}"),
+        };
+        let empty = refused(add_comment(&shared, "t", &pr(1), 1, "flow", "a", " \n").await);
+        assert_eq!(empty.code, ErrorCode::BadRequest);
+        assert_eq!(
+            refused(comment(&shared, "flow", "a", 9).await).code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            refused(comment(&shared, "nope", "a", 1).await).code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            refused(comment(&shared, "flow", "zz", 1).await).code,
+            ErrorCode::NotFound
+        );
+        let not_drawn = refused(comment(&shared, "graph", "a", 1).await);
+        assert_eq!(not_drawn.code, ErrorCode::InvalidState);
+        let mut review = reviews::load_stored(&shared, &pr(1)).unwrap().unwrap();
+        review.state = ReviewState::Published;
+        save_review(&shared.paths, &review).unwrap();
+        assert!(matches!(
+            comment(&shared, "flow", "a", 1).await,
+            Outcome::Err(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn what_the_agent_said_about_the_diagrams_reaches_the_listing_only_for_the_head_it_read()
+    {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        seed_version(&shared, 1, "h", None);
+        let mut review = reviews::load_stored(&shared, &pr(1)).unwrap().unwrap();
+        review.head_sha = "h2".into();
+        clusia_core::open_round(
+            &mut review,
+            std::collections::BTreeMap::new(),
+            "h",
+            "h2",
+            clusia_core::Relocation::default(),
+            0,
+            0,
+        );
+        review.revalidation.as_mut().unwrap().diagrams_stale = Some(clusia_core::DiagramsStale {
+            stale: false,
+            reason: "Only docs changed.".into(),
+        });
+        save_review(&shared.paths, &review).unwrap();
+        let reason = |shared: &Shared| match get(shared, &pr(1)) {
+            Outcome::Ok(Reply::Diagrams {
+                stale,
+                stale_reason,
+                ..
+            }) => (stale, stale_reason),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            reason(&shared),
+            (true, Some("Only docs changed.".to_string()))
+        );
+        // The head moved on again: the answer was about another one.
+        review.head_sha = "h3".into();
+        save_review(&shared.paths, &review).unwrap();
+        assert_eq!(reason(&shared), (true, None));
+        // Nothing stale, nothing to explain.
+        seed_version(&shared, 2, "h3", None);
+        assert_eq!(reason(&shared), (false, None));
+    }
+
+    #[tokio::test]
+    async fn the_digests_list_what_each_ready_diagram_draws() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        assert!(digests(&shared, &pr(1)).is_empty());
+        seed_version(&shared, 1, "h", Some(("src/a.rs", 1, 2)));
+        let found = digests(&shared, &pr(1));
+        assert_eq!(found.len(), 1, "an entry not drawn is not described");
+        assert_eq!(
+            (found[0].key.as_str(), found[0].paths.as_slice()),
+            ("flow", ["src/a.rs".to_string()].as_slice())
+        );
     }
 }

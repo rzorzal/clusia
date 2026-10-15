@@ -13,7 +13,7 @@ use crate::cli::{
     AgentCommand, AuthCommand, Command, ConfigCommand, DaemonCommand, HarnessCommand, InstallArgs,
     UninstallArgs,
 };
-use crate::{agent, check, harness_test, install, revalidate, review, spawn};
+use crate::{agent, check, diagrams, harness_test, install, revalidate, review, spawn};
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
 pub struct Output {
@@ -99,6 +99,7 @@ pub async fn run(
             security,
             audit,
         } => check::check(paths, home, &pr, security, audit, json).await,
+        Command::Diagrams { pr, draw } => diagrams::diagrams(paths, home, &pr, draw, json).await,
         Command::Revalidate { pr, again } => {
             revalidate::revalidate(paths, home, &pr, again, json).await
         }

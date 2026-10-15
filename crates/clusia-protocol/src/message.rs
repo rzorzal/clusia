@@ -329,6 +329,24 @@ pub enum Command {
         pr: PrRef,
         number: u32,
     },
+    /// The code box `node` of diagram `key` in version `number` points at, a few lines around it.
+    ReadDiagramCode {
+        pr: PrRef,
+        number: u32,
+        key: String,
+        node: String,
+    },
+    /// Comment on box `node` of diagram `key` in version `number`: the comment joins the draft,
+    /// on the box's lines when GitHub can take them there, as a general comment naming them
+    /// otherwise. The lines come from the stored drawing, never from the client. Answers like
+    /// `AddDraftItem`.
+    AddDiagramComment {
+        pr: PrRef,
+        number: u32,
+        key: String,
+        node: String,
+        body: String,
+    },
     /// Accept or reject what the revalidation proposed for one draft item.
     DecideProposal {
         pr: PrRef,
@@ -424,6 +442,8 @@ pub enum Reply {
     },
     /// One version, for `GetDiagramVersion`.
     DiagramVersion(Box<DiagramVersion>),
+    /// The code of a box, for `ReadDiagramCode`.
+    DiagramCode(DiagramCode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1214,6 +1234,27 @@ pub enum DiagramsState {
     Drawing { done: u32, total: u32, key: String },
     /// The run could not go on: the plan could not be made, or the run broke.
     Failed { message: String },
+}
+
+/// The code a diagram box points at, at the commit the diagram was drawn from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagramCode {
+    pub path: String,
+    pub commit: String,
+    /// The number of the first line in `lines`.
+    pub start_line: u32,
+    pub lines: Vec<CodeLine>,
+    /// Why there are no lines, when the code cannot be shown.
+    #[serde(default)]
+    pub unavailable: Option<String>,
+}
+
+/// One line of code; `changed` when the pull request adds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeLine {
+    pub number: u32,
+    pub text: String,
+    pub changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3384,6 +3425,7 @@ mod tests {
             asked: 1,
             finished_at: None,
             notified: false,
+            diagrams_stale: None,
         }
     }
 
@@ -3598,6 +3640,48 @@ mod tests {
             }),
             r#"{"type":"request","id":5,"cmd":{"get_diagram_version":{"pr":"acme/widgets#7","number":2}}}"#
         );
+    }
+
+    #[test]
+    fn diagram_code_commands_and_replies_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        assert_eq!(
+            request(Command::ReadDiagramCode {
+                pr: acme(),
+                number: 2,
+                key: "flow".into(),
+                node: "a".into(),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"read_diagram_code":{"pr":"acme/widgets#7","number":2,"key":"flow","node":"a"}}}"#
+        );
+        assert_eq!(
+            request(Command::AddDiagramComment {
+                pr: acme(),
+                number: 2,
+                key: "flow".into(),
+                node: "a".into(),
+                body: "Why?".into(),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"add_diagram_comment":{"pr":"acme/widgets#7","number":2,"key":"flow","node":"a","body":"Why?"}}}"#
+        );
+        round_trip(Reply::DiagramCode(DiagramCode {
+            path: "src/a.rs".into(),
+            commit: "a".repeat(40),
+            start_line: 8,
+            lines: vec![CodeLine {
+                number: 8,
+                text: "fn refresh() {".into(),
+                changed: true,
+            }],
+            unavailable: None,
+        }));
+        round_trip(Reply::DiagramCode(DiagramCode {
+            path: "src/a.rs".into(),
+            commit: "a".repeat(40),
+            start_line: 1,
+            lines: Vec::new(),
+            unavailable: Some("The code at aaaaaaa is no longer available.".into()),
+        }));
     }
 
     #[test]

@@ -2,16 +2,20 @@ mod common;
 
 use std::time::Duration;
 
-use clusia_core::DraftKind;
 use clusia_core::diagram::{DiagramVersion, EntryState, VersionPhase};
+use clusia_core::revalidation::DiagramsStale;
+use clusia_core::{DraftKind, Origin};
 use clusia_harness::testkit::{
     CodexScript, CodexTurn, CustomScript, CustomTurnScript, FakeClaude, Script, Turn,
-    diagram_block, diagram_plan_block,
+    diagram_block, diagram_plan_block, revalidation_block,
 };
-use clusia_protocol::{Client, Command, DiagramsState, ErrorCode, Event, Reply};
+use clusia_protocol::{Client, Command, DiagramCode, DiagramsState, ErrorCode, Event, Reply};
 use common::agent::{calls, ready, refused, send, set_config, until, use_fake, watching};
 use common::codex::{codex_calls, use_fake_codex};
 use common::custom::{custom_calls, use_fake_custom};
+use common::git_fixture::{advance_pr, sh};
+use common::github_mock::{PrMock, mount_pr};
+use common::revalidation;
 use common::review_world::{World, open, pr7, world};
 use serde_json::json;
 
@@ -421,4 +425,343 @@ async fn a_custom_command_plans_and_draws_in_sessions_of_its_own() {
     );
     the_entry_is_ready_and_the_chat_stays_empty(&w, &mut c).await;
     w.daemon.stop().await;
+}
+
+async fn advance(w: &World, content: &str) -> String {
+    let head = advance_pr(w.tmp.path(), 7, "feature.txt", content);
+    w.server.reset().await;
+    mount_pr(
+        &w.server,
+        &PrMock::new(&head, &w.base, &w.origin).adding_feature(content),
+    )
+    .await;
+    head
+}
+
+fn read_code(number: u32, node: &str) -> Command {
+    Command::ReadDiagramCode {
+        pr: pr7(),
+        number,
+        key: "flow".into(),
+        node: node.into(),
+    }
+}
+
+fn comment_on(number: u32, node: &str) -> Command {
+    Command::AddDiagramComment {
+        pr: pr7(),
+        number,
+        key: "flow".into(),
+        node: node.into(),
+        body: "Why this?".into(),
+    }
+}
+
+async fn code_of(c: &mut Client, number: u32, node: &str) -> DiagramCode {
+    match c.request(read_code(number, node)).await.unwrap() {
+        Reply::DiagramCode(code) => code,
+        other => panic!("the code, got {other:?}"),
+    }
+}
+
+async fn item_of(c: &mut Client, number: u32, node: &str) -> clusia_core::DraftItem {
+    match c.request(comment_on(number, node)).await.unwrap() {
+        Reply::DraftItem(item) => item,
+        other => panic!("a draft item, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_code_of_a_box_is_read_from_the_worktree_and_from_the_pinned_commit_later() {
+    let (w, _dir, mut c, mut watcher) = drawing_world(plan_and_drawings()).await;
+    c.request(Command::DrawDiagrams { pr: pr7() })
+        .await
+        .unwrap();
+    until(&mut watcher, idle).await;
+
+    // At the head: the file as the worktree has it, with the lines the pull request adds marked.
+    let code = code_of(&mut c, 1, "a").await;
+    assert_eq!(
+        (code.path.as_str(), code.commit.as_str()),
+        ("feature.txt", w.head.as_str())
+    );
+    assert_eq!(code.start_line, 1);
+    let shown: Vec<(u32, &str, bool)> = code
+        .lines
+        .iter()
+        .map(|l| (l.number, l.text.as_str(), l.changed))
+        .collect();
+    assert_eq!(
+        shown,
+        [(1, "one", true), (2, "two", true), (3, "three", true)]
+    );
+    assert_eq!(code.unavailable, None);
+    let untied = refused(c.request(read_code(1, "b")).await);
+    assert!(
+        untied.message.contains("not tied to code"),
+        "{}",
+        untied.message
+    );
+    assert_eq!(
+        refused(c.request(read_code(1, "zz")).await).code,
+        ErrorCode::NotFound
+    );
+
+    // The commit is pinned, so a later head does not take its code away.
+    let pin = sh(
+        &w.daemon.paths.worktree_for(&pr7()),
+        &["rev-parse", "--verify", "refs/clusia/diagrams/pr-7-v1"],
+    );
+    assert_eq!(pin, w.head);
+    advance(&w, "zero\none\ntwo\nthree\n").await;
+    open(&mut c).await;
+    let old = code_of(&mut c, 1, "a").await;
+    assert_eq!(old.commit, w.head);
+    let texts: Vec<&str> = old.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        ["one", "two", "three"],
+        "the old file, not the new one"
+    );
+    assert!(
+        old.lines.iter().all(|l| !l.changed),
+        "an old version marks nothing"
+    );
+}
+
+#[tokio::test]
+async fn code_that_cannot_be_read_says_so_instead_of_failing() {
+    let (w, _dir, mut c, mut watcher) = drawing_world(plan_and_drawings()).await;
+    c.request(Command::DrawDiagrams { pr: pr7() })
+        .await
+        .unwrap();
+    until(&mut watcher, idle).await;
+    std::fs::remove_file(w.daemon.paths.worktree_for(&pr7()).join("feature.txt")).unwrap();
+    let gone = code_of(&mut c, 1, "a").await;
+    assert!(gone.lines.is_empty());
+    let why = gone.unavailable.expect("a reason");
+    assert_eq!(
+        why,
+        format!("The code at {} is no longer available.", &w.head[..7])
+    );
+}
+
+#[tokio::test]
+async fn a_box_comment_follows_its_lines_to_the_new_head_or_names_them() {
+    let (w, _dir, mut c, mut watcher) = drawing_world(plan_and_drawings()).await;
+    c.request(Command::DrawDiagrams { pr: pr7() })
+        .await
+        .unwrap();
+    until(&mut watcher, idle).await;
+
+    // At the head the lines are in the diff: a line comment, written by the diagram.
+    let first = item_of(&mut c, 1, "a").await;
+    assert_eq!(
+        (first.kind, first.origin),
+        (DraftKind::LineComment, Origin::Diagram)
+    );
+    let anchor = first.anchor.expect("an anchor");
+    assert_eq!(
+        (anchor.start_line, anchor.line, anchor.commit.as_str()),
+        (Some(1), 2, w.head.as_str())
+    );
+    assert_eq!(first.body, "Why this?");
+
+    // One line was added above: the same lines are two and three at the new head.
+    let head2 = advance(&w, "zero\none\ntwo\nthree\n").await;
+    open(&mut c).await;
+    let moved = item_of(&mut c, 1, "a").await;
+    assert_eq!(moved.kind, DraftKind::LineComment);
+    let anchor = moved.anchor.expect("an anchor");
+    assert_eq!(
+        (anchor.start_line, anchor.line, anchor.commit.as_str()),
+        (Some(2), 3, head2.as_str())
+    );
+
+    // A line of the range was rewritten: no line comment, a general one that says where.
+    advance(&w, "zero\none\nTWO\nthree\n").await;
+    open(&mut c).await;
+    let general = item_of(&mut c, 1, "a").await;
+    assert_eq!(
+        (general.kind, general.origin),
+        (DraftKind::General, Origin::Diagram)
+    );
+    assert_eq!(general.anchor, None);
+    assert_eq!(general.body, "feature.txt:1-2: Why this?");
+}
+
+#[tokio::test]
+async fn a_box_without_code_comments_on_the_review_itself() {
+    let (w, _dir, mut c, mut watcher) = drawing_world(plan_and_drawings()).await;
+    c.request(Command::DrawDiagrams { pr: pr7() })
+        .await
+        .unwrap();
+    until(&mut watcher, idle).await;
+    let item = item_of(&mut c, 1, "b").await;
+    assert_eq!(
+        (item.kind, item.origin),
+        (DraftKind::General, Origin::Diagram)
+    );
+    assert_eq!(item.body, "Why this?");
+    drop(w);
+}
+
+fn stale_block(json: serde_json::Value) -> String {
+    format!("```clusia-diagrams-stale\n{json}\n```")
+}
+
+#[tokio::test]
+async fn the_revalidation_asks_about_the_diagrams_and_keeps_the_answer() {
+    let w = world().await;
+    let dir = use_fake(&w, plan_and_drawings()).await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    let Reply::DraftItem(note) = c
+        .request(Command::AddDraftItem {
+            pr: pr7(),
+            kind: DraftKind::General,
+            anchor: None,
+            thread: None,
+            body: "Looks fine".into(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("the note");
+    };
+    c.request(Command::DrawDiagrams { pr: pr7() })
+        .await
+        .unwrap();
+    until(&mut watcher, idle).await;
+    c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
+
+    revalidation::use_script(
+        &w,
+        Script::one(Turn::answer_blocks(
+            "Checked.",
+            &[
+                revalidation_block(json!({"item": note.id, "verdict": "kept"})),
+                stale_block(json!({"stale": true, "reason": "The refresh path changed."})),
+            ],
+        )),
+    )
+    .await;
+    let head = revalidation::push(&w, &mut c, "zero\n").await;
+    revalidation::run_round(&w, &mut c).await;
+
+    let round = revalidation::review_of(&mut c)
+        .await
+        .revalidation
+        .expect("a round");
+    assert_eq!(
+        round.diagrams_stale,
+        Some(DiagramsStale {
+            stale: true,
+            reason: "The refresh path changed.".into()
+        })
+    );
+    let prompt = FakeClaude::calls(&dir)
+        .last()
+        .and_then(|call| common::agent::value_of(&call.argv, "-p"))
+        .expect("a prompt");
+    assert!(prompt.contains("clusia-diagrams-stale"), "{prompt}");
+    assert!(
+        prompt.contains("Token refresh") && prompt.contains("feature.txt"),
+        "{prompt}"
+    );
+
+    // Even without a round the listing knows: the review is at another commit.
+    let Reply::Diagrams {
+        stale,
+        stale_reason,
+        head: now,
+        ..
+    } = c.request(Command::GetDiagrams { pr: pr7() }).await.unwrap()
+    else {
+        panic!("the diagrams");
+    };
+    assert_eq!((stale, now), (true, head));
+    assert_eq!(stale_reason.as_deref(), Some("The refresh path changed."));
+}
+
+#[tokio::test]
+async fn a_review_without_diagrams_is_not_asked_about_them() {
+    let w = world().await;
+    let (mut c, ids) = revalidation::saved(&w).await;
+    let dir = revalidation::use_script(
+        &w,
+        Script::one(Turn::answer_blocks(
+            "Checked.",
+            &[
+                revalidation_block(json!({"item": ids.n, "verdict": "kept"})),
+                stale_block(json!({"stale": true, "reason": "Nothing was drawn."})),
+            ],
+        )),
+    )
+    .await;
+    revalidation::push(&w, &mut c, "zero\n").await;
+    revalidation::run_round(&w, &mut c).await;
+    let round = revalidation::review_of(&mut c)
+        .await
+        .revalidation
+        .expect("a round");
+    assert_eq!(round.diagrams_stale, None);
+    let prompt = FakeClaude::calls(&dir)
+        .last()
+        .and_then(|call| common::agent::value_of(&call.argv, "-p"))
+        .expect("a prompt");
+    assert!(!prompt.contains("clusia-diagrams-stale"), "{prompt}");
+}
+
+#[tokio::test]
+async fn a_range_with_a_line_rewritten_or_inserted_inside_it_is_not_a_line_comment() {
+    let drawing = Turn::answer_blocks(
+        "Drawn.",
+        &[diagram_block(json!({
+            "key": "flow", "kind": "flow", "title": "Token refresh", "caption": "Two steps",
+            "nodes": [{"id": "a", "label": "refresh()", "shape": "box",
+                       "anchor": {"path": "feature.txt", "start_line": 1, "end_line": 3}}]
+        }))],
+    );
+    let w = world().await;
+    use_fake(
+        &w,
+        Script::turns(vec![
+            Turn::answer_blocks("Plan.", &[one_plan_block()]),
+            drawing,
+        ]),
+    )
+    .await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(Command::DrawDiagrams { pr: pr7() })
+        .await
+        .unwrap();
+    until(&mut watcher, idle).await;
+
+    // The ends are where they were, but the middle line was rewritten.
+    advance(&w, "one\nTWO\nthree\n").await;
+    open(&mut c).await;
+    let rewritten = item_of(&mut c, 1, "a").await;
+    assert_eq!(rewritten.kind, DraftKind::General);
+    assert_eq!(rewritten.body, "feature.txt:1-3: Why this?");
+
+    // A line was inserted inside the range: the lines are no longer one after the other.
+    advance(&w, "one\nINSERTED\ntwo\nthree\n").await;
+    open(&mut c).await;
+    let inserted = item_of(&mut c, 1, "a").await;
+    assert_eq!(inserted.kind, DraftKind::General);
+    assert_eq!(inserted.body, "feature.txt:1-3: Why this?");
+
+    // Lines added above the range move it whole: still a line comment.
+    advance(&w, "zero\none\ntwo\nthree\n").await;
+    open(&mut c).await;
+    let moved = item_of(&mut c, 1, "a").await;
+    assert_eq!(moved.kind, DraftKind::LineComment);
+    assert_eq!(
+        moved.anchor.map(|a| (a.start_line, a.line)),
+        Some((Some(2), 4))
+    );
 }

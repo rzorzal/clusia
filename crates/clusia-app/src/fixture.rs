@@ -984,6 +984,7 @@ pub fn demo_revalidation(now: i64) -> (Draft, Revalidation) {
         asked: 5,
         finished_at: Some(now - 120),
         notified: false,
+        diagrams_stale: None,
     };
     (draft, round)
 }

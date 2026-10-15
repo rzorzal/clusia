@@ -10,14 +10,15 @@ use std::time::{Duration, Instant};
 use clusia_core::config::Harness;
 use clusia_core::revalidation::{
     AskedItem, CommitLine, DIFF_CAP, Decision, Proposal, Revalidation, RevalidationContext,
-    RoundState, RowKind, Verdict, fingerprint, open_round, revalidation_prompt, row_kind,
+    RoundState, RowKind, Verdict, diagrams_stale_section, fingerprint, open_round,
+    revalidation_prompt, row_kind,
 };
 use clusia_core::{
     ActivityKind, Anchor, Draft, DraftKind, FileDiff, PrRef, Relocation, Review, ReviewEvent,
     ReviewState, Side,
 };
 use clusia_git::{diff_for_prompt, repo_of_worktree};
-use clusia_harness::{AgentEvent, RawVerdict, extract_revalidation_blocks};
+use clusia_harness::{AgentEvent, RawVerdict, extract_diagrams_stale, extract_revalidation_blocks};
 use clusia_protocol::{AgentErrorKind, AgentLogEntry, Event, TurnOrigin, topics};
 use clusia_store::{list_reviews, load_review_cache};
 use tokio::sync::watch;
@@ -469,6 +470,8 @@ struct Job {
     fingerprints: HashMap<String, String>,
     /// The head the run reads.
     to_head: String,
+    /// The prompt also asks whether the review's diagrams are out of date.
+    asks_diagrams: bool,
     limit: Duration,
     stop: Arc<Stop>,
 }
@@ -608,14 +611,17 @@ async fn start(
     } else {
         commits
     };
+    let digests = crate::diagrams::digests(shared, pr);
     let prompt_for = |forked: bool| {
-        revalidation_prompt(&RevalidationContext {
+        let mut prompt = revalidation_prompt(&RevalidationContext {
             pr_title: review.title.clone(),
             diff: diff.clone(),
             commits: commits.clone(),
             items: asked.clone(),
             forked,
-        })
+        });
+        prompt.push_str(&diagrams_stale_section(&digests));
+        prompt
     };
     let turn = shared.sessions.next_turn(shared, pr).await;
     let stop = Stop::new();
@@ -649,6 +655,7 @@ async fn start(
         asked: asked.clone(),
         fingerprints,
         to_head,
+        asks_diagrams: !digests.is_empty(),
         limit: Duration::from_secs(u64::from(harness.check_timeout_secs)),
         stop,
     };
@@ -656,6 +663,7 @@ async fn start(
         round.commits = commits;
         round.state = RoundState::Waiting;
         round.proposals.clear();
+        round.diagrams_stale = None;
         round.unreadable = 0;
         round.asked = u32::try_from(asked.len()).unwrap_or(u32::MAX);
         round.finished_at = None;
@@ -976,6 +984,10 @@ async fn send_failure(shared: &Arc<Shared>, review: &Review) {
 async fn complete(shared: &Arc<Shared>, pr: &PrRef, job: &Job, text: String) {
     let asked_ids: Vec<String> = job.asked.iter().map(|a| a.id.clone()).collect();
     let (_prose, raw, mut unreadable) = extract_revalidation_blocks(&text, &asked_ids);
+    let diagrams_said = job
+        .asks_diagrams
+        .then(|| extract_diagrams_stale(&text))
+        .flatten();
     let files = if !raw
         .iter()
         .any(|r| matches!(r.verdict, Verdict::Moved { .. }))
@@ -1049,6 +1061,7 @@ async fn complete(shared: &Arc<Shared>, pr: &PrRef, job: &Job, text: String) {
     let mut notify = false;
     if let Some(round) = review.revalidation.as_mut() {
         round.proposals = proposals;
+        round.diagrams_stale = diagrams_said;
         round.unreadable = unreadable;
         round.state = RoundState::Done;
         round.finished_at = Some(now);
