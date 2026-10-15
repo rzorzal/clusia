@@ -277,8 +277,9 @@ pub(crate) fn assert_no_text_clash(geometry: &Geometry) {
 }
 
 /// Panics when `geometry` breaks an invariant every kind keeps: finite numbers, boxes apart,
-/// routes sideways or up and down only and clear of other boxes, labels off boxes and off the
-/// other texts of their edge, no two edges along one line, and everything inside `size` and starting at the
+/// routes sideways or up and down only and clear of other boxes, labels off boxes, off the
+/// other texts of their edge and off every route (their own may only run beside them), no two
+/// edges along one line, and everything inside `size` and starting at the
 /// margin.
 pub(crate) fn check(spec: &DiagramSpec, geometry: &Geometry) {
     let finite = |v: f32| assert!(v.is_finite(), "not finite: {v}");
@@ -355,6 +356,17 @@ pub(crate) fn check(spec: &DiagramSpec, geometry: &Geometry) {
     }
     for e in &geometry.edges {
         for l in e.label.iter().chain(e.ends.iter().flatten()) {
+            // Beside its own run a label may touch it, but no run of its own route may cut it.
+            let inside = l.rect().inflate(-0.5);
+            for w in e.points.windows(2) {
+                assert!(
+                    !touches(w[0], w[1], inside),
+                    "a label of edge {} ({:?}) is crossed by its own route: {:?}",
+                    e.index,
+                    l.lines,
+                    e.points
+                );
+            }
             let zone = l.rect().inflate(1.0);
             for other in geometry.edges.iter().filter(|o| o.index != e.index) {
                 for w in other.points.windows(2) {

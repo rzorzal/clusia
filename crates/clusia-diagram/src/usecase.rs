@@ -8,7 +8,7 @@ use clusia_core::diagram::{DiagramSpec, GroupKind, Shape};
 
 use crate::geometry::{
     Align, Arrow, BoxGeo, EdgeGeo, Geometry, GroupGeo, Point, Rect, STEP, TextLines,
-    crossed_by_other_route, overlap,
+    crossed_by_other_route, overlap, touches,
 };
 use crate::layered::{loop_reach, loop_rows, loop_zone};
 use crate::layout::{box_text, card};
@@ -649,7 +649,7 @@ pub(crate) fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
 }
 
 /// Gives each label the first place, near where it was asked for, that overlaps no box, no
-/// text already down and no route of another edge; a label with no such place is left out.
+/// text already down and no route of another edge, and is not cut by its own; a label with no such place is left out.
 /// Returns how many were left out.
 fn settle_labels(edges: &mut [EdgeGeo], mut taken: Vec<Rect>) -> u32 {
     let mut dropped = 0;
@@ -676,8 +676,10 @@ fn settle_labels(edges: &mut [EdgeGeo], mut taken: Vec<Rect>) -> u32 {
             .find(|l| {
                 let rect = l.rect();
                 let zone = rect.inflate(1.0);
+                let inside = rect.inflate(-0.5);
                 !taken.iter().any(|t| t.intersects(&rect))
                     && !crossed_by_other_route(&routes, own, zone)
+                    && !edge.points.windows(2).any(|w| touches(w[0], w[1], inside))
             });
         match free {
             Some(l) => {
@@ -773,7 +775,6 @@ fn separate_ports(edges: &mut [EdgeGeo], ends: &dyn Fn(&EdgeGeo) -> [Rect; 2]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::touches;
     use crate::measure::Fonts;
     use crate::testkit::{assert_no_text_clash, check, edge, node, node_sub, spec};
     use crate::{MARGIN, layout};

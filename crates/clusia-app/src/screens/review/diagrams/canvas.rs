@@ -2769,6 +2769,39 @@ mod tests {
     }
 
     #[test]
+    fn no_demo_label_is_cut_by_a_route() {
+        // Whether the axis-aligned run `a`–`b` passes through the inside of `r`.
+        let cuts = |a: Point, b: Point, r: GRect| {
+            a.x.max(b.x) > r.x
+                && a.x.min(b.x) < r.right()
+                && a.y.max(b.y) > r.y
+                && a.y.min(b.y) < r.bottom()
+        };
+        for version in fixture::demo_diagrams(NOW, &fixture::demo_pr()) {
+            for entry in &version.entries {
+                let EntryState::Ready { spec, .. } = &entry.state else {
+                    continue;
+                };
+                let g = clusia_diagram::layout(spec, &Fonts);
+                for e in &g.edges {
+                    for label in e.label.iter().chain(e.ends.iter().flatten()) {
+                        let r = label.rect().inflate(-0.5);
+                        for route in &g.edges {
+                            assert!(
+                                !route.points.windows(2).any(|w| cuts(w[0], w[1], r)),
+                                "{}: {:?} is cut by the route of edge {}",
+                                spec.key,
+                                label.lines,
+                                route.index
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_header_says_how_many_labels_had_no_room() {
         assert_eq!(hidden_note(0), None);
         assert_eq!(hidden_note(1).as_deref(), Some("1 label not shown"));
