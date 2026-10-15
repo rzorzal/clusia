@@ -859,26 +859,32 @@ fn dashed_ring(
             None => strip(p, at.0, at.1, t, len, ink),
         }
     }
-    let r = px(ring.radius);
+    // Bevy caps a corner's radius at half the node's shorter side, so each arc is the round
+    // corner of a node twice the radius across, clipped to the quarter that holds the arc.
+    let (r, d) = (ring.radius, 2.0 * ring.radius);
     let arcs = [
         (
+            (0.0, 0.0),
             UiRect::new(px(t), px(0), px(t), px(0)),
-            BorderRadius::top_left(r),
+            BorderRadius::top_left(px(r)),
         ),
         (
+            (-r, 0.0),
             UiRect::new(px(0), px(t), px(t), px(0)),
-            BorderRadius::top_right(r),
+            BorderRadius::top_right(px(r)),
         ),
         (
+            (0.0, -r),
             UiRect::new(px(t), px(0), px(0), px(t)),
-            BorderRadius::bottom_left(r),
+            BorderRadius::bottom_left(px(r)),
         ),
         (
+            (-r, -r),
             UiRect::new(px(0), px(t), px(0), px(t)),
-            BorderRadius::bottom_right(r),
+            BorderRadius::bottom_right(px(r)),
         ),
     ];
-    for (c, (border, border_radius)) in ring.corners.iter().zip(arcs) {
+    for (c, ((dx, dy), border, border_radius)) in ring.corners.iter().zip(arcs) {
         p.spawn((
             Node {
                 position_type: PositionType::Absolute,
@@ -886,15 +892,29 @@ fn dashed_ring(
                 top: px(c.y),
                 width: px(c.w),
                 height: px(c.h),
-                border,
-                border_radius,
+                overflow: Overflow::clip(),
                 ..default()
             },
-            BorderColor::default(),
-            Stroke(ink),
             ignore(),
             LinePiece,
-        ));
+        ))
+        .with_children(|q| {
+            q.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(dx),
+                    top: px(dy),
+                    width: px(d),
+                    height: px(d),
+                    border,
+                    border_radius,
+                    ..default()
+                },
+                BorderColor::default(),
+                Stroke(ink),
+                ignore(),
+            ));
+        });
     }
 }
 
