@@ -99,6 +99,8 @@ pub enum Modal {
     Leave {
         window: bool,
     },
+    /// The dialog of a diagram box, for `TabUi.diagram_node`.
+    DiagramNode,
 }
 
 /// What the comment editor writes.
