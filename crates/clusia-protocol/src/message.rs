@@ -1212,7 +1212,7 @@ pub enum DiagramsState {
     Planning,
     /// Entry `key` is being drawn; `done` entries are over, out of `total`.
     Drawing { done: u32, total: u32, key: String },
-    /// The plan could not be made.
+    /// The run could not go on: the plan could not be made, or the run broke.
     Failed { message: String },
 }
 

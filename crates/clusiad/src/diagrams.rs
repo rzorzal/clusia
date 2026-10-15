@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::diagram::{
-    DiagramContext, DiagramEntry, DiagramVersion, EntryState, PlanEntry, REPAIR_ECHO_MAX,
-    VersionPhase, draw_prompt, plan_prompt, repair_prompt, validate, validate_plan,
+    DiagramContext, DiagramEntry, DiagramVersion, EntryState, PlanEntry, VersionPhase, draw_prompt,
+    plan_prompt, repair_prompt, validate, validate_plan,
 };
 use clusia_core::printable::printable;
 use clusia_core::{PrRef, ReviewState};
@@ -212,6 +212,8 @@ enum End {
     Done,
     Failed(String),
     Over(Why),
+    /// The entry to draw again is not there any more; the run ends without drawing.
+    Refused(String),
 }
 
 fn tell_state(shared: &Shared, pr: &PrRef, state: DiagramsState) {
@@ -500,8 +502,7 @@ async fn ask_checked<T>(
         Ok(value) => return Ok(value),
         Err(errors) => errors,
     };
-    let echo = cut(&first, REPAIR_ECHO_MAX);
-    let again = |forked: bool| repair_prompt(&job.context(forked), &base(forked), &echo, &errors);
+    let again = |forked: bool| repair_prompt(&job.context(forked), &base(forked), &first, &errors);
     let second = ask(shared, pr, job, key, (again(true), again(false))).await?;
     parse(&second).map_err(|errors| Halt::Failed(reason_of(&errors)))
 }
@@ -637,10 +638,10 @@ async fn draw_all(shared: &Arc<Shared>, pr: &PrRef, job: &Job) -> End {
             })
             .collect(),
     };
+    shared.diagrams.set_writing(pr, job.run, version.number);
     if !keep(shared, pr, job, &version).await {
         return End::Over(Why::Ended);
     }
-    shared.diagrams.set_writing(pr, job.run, version.number);
     shared.publish(
         topics::AGENT,
         Event::DiagramsPlanned {
@@ -656,10 +657,10 @@ async fn draw_all(shared: &Arc<Shared>, pr: &PrRef, job: &Job) -> End {
 async fn draw_one(shared: &Arc<Shared>, pr: &PrRef, job: &Job, key: &str) -> End {
     let mut earlier = versions_of(shared, pr);
     let Some(mut version) = earlier.pop().map(DiagramVersion::recovered) else {
-        return End::Failed("There are no diagrams to draw again".to_string());
+        return End::Refused("There are no diagrams to draw again".to_string());
     };
     let Some(index) = version.entries.iter().position(|e| e.plan.key == key) else {
-        return End::Failed(format!("There is no diagram {key} in the latest version"));
+        return End::Refused(format!("There is no diagram {key} in the latest version"));
     };
     version.phase = VersionPhase::Drawing;
     shared.diagrams.set_writing(pr, job.run, version.number);
@@ -688,18 +689,27 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Job) {
         Mode::All => draw_all(&shared, &pr, &job).await,
         Mode::One(key) => draw_one(&shared, &pr, &job, key).await,
     };
+    // A run that was replaced or forgotten while it wound down tells nothing: the state now
+    // belongs to whatever came after it.
     match end {
         End::Done => {
-            shared.diagrams.end_run(&pr, job.run, None);
-            tell_state(&shared, &pr, DiagramsState::Idle);
+            if shared.diagrams.end_run(&pr, job.run, None) {
+                tell_state(&shared, &pr, DiagramsState::Idle);
+            }
         }
         End::Failed(message) => {
-            shared.diagrams.end_run(&pr, job.run, Some(message.clone()));
-            tell_state(&shared, &pr, DiagramsState::Failed { message });
+            if shared.diagrams.end_run(&pr, job.run, Some(message.clone())) {
+                tell_state(&shared, &pr, DiagramsState::Failed { message });
+            }
         }
         End::Over(why) => {
-            shared.diagrams.end_run(&pr, job.run, None);
-            if why != Why::Shutdown {
+            if shared.diagrams.end_run(&pr, job.run, None) && why != Why::Shutdown {
+                tell_state(&shared, &pr, DiagramsState::Idle);
+            }
+        }
+        End::Refused(message) => {
+            tracing::warn!(pr = %pr, %message, "a diagram could not be drawn again");
+            if shared.diagrams.end_run(&pr, job.run, None) {
                 tell_state(&shared, &pr, DiagramsState::Idle);
             }
         }
@@ -989,6 +999,7 @@ pub(crate) fn version(shared: &Shared, pr: &PrRef, number: u32) -> Outcome {
 #[cfg(test)]
 mod tests {
     use clusia_core::checks::CheckKind;
+    use clusia_core::diagram::REPAIR_ECHO_MAX;
     use clusia_harness::testkit::{
         Call, FakeClaude, Script, Turn, diagram_block, diagram_plan_block,
     };
@@ -1180,6 +1191,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_repair_prompt_says_when_the_answer_it_holds_was_cut() {
+        let long = format!("{}{}", "x".repeat(REPAIR_ECHO_MAX + 10), " no block");
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            Turn::answer(&long),
+            draw_turn("flow"),
+        ]);
+        let (_home, fake, _shared) = drawn(script, &["flow"]).await;
+        let calls = FakeClaude::calls(fake.path());
+        assert!(
+            prompt_of(&calls[2]).contains(", cut"),
+            "{}",
+            prompt_of(&calls[2])
+        );
+    }
+
+    #[tokio::test]
     async fn a_drawing_that_stays_unreadable_fails_only_its_entry() {
         let script = Script::turns(vec![
             plan_turn(&["flow", "graph"]),
@@ -1257,9 +1285,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_draw_is_refused_while_one_runs() {
-        let (_home, fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            plan_turn(&["flow"]),
+            Turn::hanging(),
+        ]);
+        let (_home, fake, shared) = drawn(script, &["flow"]).await;
         let _ = run(&shared, &pr(1)).await;
-        calls(&fake, 1).await;
+        calls(&fake, 4).await;
         let Outcome::Err(refusal) = run(&shared, &pr(1)).await else {
             panic!("refused");
         };
@@ -1269,6 +1303,7 @@ mod tests {
             panic!("refused");
         };
         assert_eq!(again.code, ErrorCode::InvalidState);
+        assert_eq!(again.message, "Diagrams are already being drawn");
         shutdown(&shared).await;
     }
 
