@@ -681,9 +681,30 @@ pub(crate) fn place(
         }
     }
 
-    Placed {
-        rects,
-        edges: geos.into_iter().flatten().collect(),
+    let mut edges: Vec<EdgeGeo> = geos.into_iter().flatten().collect();
+    clear_cardinalities(&mut edges);
+    Placed { rects, edges }
+}
+
+/// Leaves out a cardinality that touches the route of another edge: unlike a label it has no
+/// other place to go, and printing it over a line would hide both.
+fn clear_cardinalities(edges: &mut [EdgeGeo]) {
+    let routes: Vec<(usize, Vec<Point>)> =
+        edges.iter().map(|e| (e.index, e.points.clone())).collect();
+    for edge in edges.iter_mut() {
+        let own = edge.index;
+        for end in &mut edge.ends {
+            let zone = match end {
+                Some(text) => text.rect().inflate(1.0),
+                None => continue,
+            };
+            let crossed = routes.iter().any(|(other, points)| {
+                *other != own && points.windows(2).any(|w| touches(w[0], w[1], zone))
+            });
+            if crossed {
+                *end = None;
+            }
+        }
     }
 }
 

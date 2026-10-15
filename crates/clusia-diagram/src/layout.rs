@@ -6,6 +6,7 @@ use crate::geometry::{Align, Arrow, BoxGeo, Geometry, Point, Rect, TextLines};
 use crate::layered::{self, Direction, NodeSize, Options};
 use crate::measure::{Measure, TextStyle};
 use crate::text;
+use crate::{sequence, tables, usecase};
 
 /// Space around the drawing; it starts at `(MARGIN, MARGIN)`.
 pub const MARGIN: f32 = 24.0;
@@ -28,18 +29,25 @@ const SUB_LINES: usize = 2;
 pub fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
     let mut geometry = match spec.kind {
         DiagramKind::Graph => layered_geometry(spec, measure, Direction::TopToBottom, Arrow::End),
-        // Kinds without a pass of their own share the left-to-right layered one.
-        _ => layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End),
+        DiagramKind::Flow | DiagramKind::DataFlow | DiagramKind::States => {
+            layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End)
+        }
+        DiagramKind::EntityRelationship => {
+            layered_geometry(spec, measure, Direction::LeftToRight, Arrow::None)
+        }
+        DiagramKind::Classes => layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End),
+        DiagramKind::Sequence => sequence::layout(spec, measure),
+        DiagramKind::UseCases => usecase::layout(spec, measure),
     };
     geometry.normalise(MARGIN);
     geometry
 }
 
 /// A node's size and wrapped text before it has a place.
-struct Card {
-    w: f32,
-    h: f32,
-    fixed: bool,
+pub(crate) struct Card {
+    pub(crate) w: f32,
+    pub(crate) h: f32,
+    pub(crate) fixed: bool,
     centred: bool,
     inset: f32,
     title: Vec<String>,
@@ -59,7 +67,7 @@ impl Card {
     }
 }
 
-fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Card {
+pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Card {
     let title_style = TextStyle::Title;
     let sub_style = if node.change == Change::Unchanged {
         TextStyle::Sub
@@ -70,7 +78,7 @@ fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Card {
     let centred = match node.shape {
         Shape::Pill | Shape::Circle | Shape::Actor | Shape::Start => true,
         Shape::External => kind == DiagramKind::DataFlow,
-        _ => false,
+        _ => matches!(kind, DiagramKind::Sequence | DiagramKind::UseCases),
     };
     let mut card = Card {
         w: 0.0,
@@ -99,10 +107,12 @@ fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Card {
             card.sub = text::wrap(measure, sub_text, sub_style, inner, 2);
         }
         _ => {
-            let base = if node.shape == Shape::Pill {
-                PILL_WIDTH
-            } else {
-                BOX_WIDTH
+            let (base, min_w, max_w) = match (kind, node.shape) {
+                (DiagramKind::Sequence, _) => (130.0, 120.0, 180.0),
+                (DiagramKind::UseCases, Shape::Pill) => (190.0, MIN_WIDTH, MAX_WIDTH),
+                (DiagramKind::UseCases, _) => (150.0, 140.0, 200.0),
+                (_, Shape::Pill) => (PILL_WIDTH, MIN_WIDTH, MAX_WIDTH),
+                _ => (BOX_WIDTH, MIN_WIDTH, MAX_WIDTH),
             };
             let longest_word = |text: &str, style: TextStyle| {
                 text.split_whitespace()
@@ -112,14 +122,15 @@ fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Card {
             let wanted = longest_word(&node.label, title_style)
                 .max(longest_word(sub_text, sub_style))
                 + 2.0 * PAD;
-            card.w = base.max(wanted).clamp(MIN_WIDTH, MAX_WIDTH);
+            card.w = base.max(wanted).clamp(min_w, max_w);
             let inner = card.w - 2.0 * PAD;
             card.title = text::wrap(measure, &node.label, title_style, inner, TITLE_LINES);
             card.sub = text::wrap(measure, sub_text, sub_style, inner, SUB_LINES);
-            let min_h = if node.shape == Shape::Pill {
-                PILL_HEIGHT
-            } else {
-                0.0
+            let min_h = match (kind, node.shape) {
+                (_, Shape::Pill) | (DiagramKind::UseCases, Shape::Actor | Shape::External) => {
+                    PILL_HEIGHT
+                }
+                _ => 0.0,
             };
             card.h = (2.0 * PAD + card.text_height(measure)).max(min_h);
         }
@@ -133,30 +144,56 @@ fn layered_geometry(
     direction: Direction,
     arrow: Arrow,
 ) -> Geometry {
+    let tables = matches!(
+        spec.kind,
+        DiagramKind::EntityRelationship | DiagramKind::Classes
+    );
     let cards: Vec<Card> = spec
         .nodes
         .iter()
         .map(|n| card(spec.kind, n, measure))
         .collect();
+    let tabular: Vec<Option<tables::Table>> = spec
+        .nodes
+        .iter()
+        .map(|n| {
+            (tables && matches!(n.shape, Shape::Table | Shape::Class))
+                .then(|| tables::table(spec.kind, n, measure))
+        })
+        .collect();
     let sizes: Vec<NodeSize> = cards
         .iter()
-        .map(|c| NodeSize {
-            w: c.w,
-            h: c.h,
-            fixed: c.fixed,
+        .zip(&tabular)
+        .map(|(c, t)| match t {
+            Some(t) => NodeSize {
+                w: t.w,
+                h: t.h,
+                fixed: true,
+            },
+            None => NodeSize {
+                w: c.w,
+                h: c.h,
+                fixed: c.fixed,
+            },
         })
         .collect();
     let options = Options {
         direction,
         arrow,
-        top_aligned: false,
+        top_aligned: tables,
     };
     let placed = layered::place(spec, &sizes, measure, &options);
 
     let mut geometry = Geometry::empty();
     for (i, (node, card)) in spec.nodes.iter().zip(&cards).enumerate() {
         let rect = placed.rects[i];
-        let (title, sub) = box_text(card, rect, measure);
+        let (title, sub, rows) = match &tabular[i] {
+            Some(t) => t.geometry(node, rect, measure),
+            None => {
+                let (title, sub) = box_text(card, rect, measure);
+                (title, sub, Vec::new())
+            }
+        };
         if node.shape == Shape::Start {
             geometry.start_dot.get_or_insert(rect.centre());
         }
@@ -167,7 +204,7 @@ fn layered_geometry(
             shape: node.shape,
             title,
             sub,
-            rows: Vec::new(),
+            rows,
             change: node.change,
             history: node.history,
             anchored: node.anchor.is_some(),
@@ -179,7 +216,11 @@ fn layered_geometry(
 
 /// The title and sub text of a card inside its final rectangle: at the top left for a left
 /// aligned shape, in the middle for a centred one.
-fn box_text(card: &Card, rect: Rect, measure: &dyn Measure) -> (TextLines, Option<TextLines>) {
+pub(crate) fn box_text(
+    card: &Card,
+    rect: Rect,
+    measure: &dyn Measure,
+) -> (TextLines, Option<TextLines>) {
     let width = rect.w - 2.0 * card.inset;
     let align = if card.centred {
         Align::Center

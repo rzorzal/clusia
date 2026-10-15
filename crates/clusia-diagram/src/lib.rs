@@ -5,8 +5,11 @@ mod geometry;
 mod layered;
 mod layout;
 mod measure;
+mod sequence;
 mod spine;
+mod tables;
 mod text;
+mod usecase;
 
 #[cfg(test)]
 mod testkit;
