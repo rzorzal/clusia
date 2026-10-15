@@ -1,4 +1,4 @@
-//! The left side of the Diagrams tab (mockup `Diagrams.png`): the list of the version's
+//! The left side of the Diagrams tab (list, footer and notices): the list of the version's
 //! diagrams, the footer with the version stepper, and the whole-tab notices. The view is a pure
 //! struct of already printable text, compared with what was built so the tab redraws only when
 //! it changes. The right side is `Pane`: the canvas of the selected diagram, or what that entry
@@ -385,6 +385,11 @@ pub fn diagrams_view(i: &Inputs) -> DiagramsView {
                 key: e.key.clone(),
                 compare,
             },
+            EntryStateName::Ready if m.failed.contains(&info.number) => Pane::Entry {
+                title: "Diagrams".into(),
+                line: "This version could not be read.".into(),
+                retry: None,
+            },
             EntryStateName::Ready => Pane::Loading,
             EntryStateName::Waiting => Pane::Entry {
                 title: printable(&e.title),
@@ -584,6 +589,14 @@ pub(super) fn fill_diagrams(
             });
             continue;
         };
+        // Nothing to compare when nothing the view reads moved and both regions are built.
+        let unbuilt = root_children.into_iter().flatten().any(|c| {
+            lists.get(*c).is_ok_and(|(_, l)| l.built.is_none())
+                || panes.get(*c).is_ok_and(|(_, p)| p.built.is_none())
+        });
+        if !(unbuilt || tabs.is_changed() || diagrams.is_changed() || model.is_changed()) {
+            continue;
+        }
         let view = diagrams_view(&Inputs {
             model: diagrams.0.get(&body.pr),
             harness: harness_ready(
@@ -980,13 +993,13 @@ fn on_compare(
 fn on_step(
     activate: On<Activate>,
     steps: Query<&VersionStep>,
-    diagrams: Res<Diagrams>,
+    mut diagrams: ResMut<Diagrams>,
     mut tabs: ResMut<ReviewTabs>,
 ) {
     let Ok(VersionStep { pr, step }) = steps.get(activate.entity) else {
         return;
     };
-    let (Some(m), Some(tab)) = (diagrams.0.get(pr), tabs.0.get_mut(pr)) else {
+    let (Some(m), Some(tab)) = (diagrams.0.get_mut(pr), tabs.0.get_mut(pr)) else {
         return;
     };
     let Some((info, _)) = m.shown(tab.ui.diagram_version) else {
@@ -998,10 +1011,12 @@ fn on_step(
     } else {
         m.versions.iter().find(|v| v.number > now)
     };
-    if let Some(target) = target {
-        let latest = m.latest_number() == Some(target.number);
-        tab.ui.diagram_version = (!latest).then_some(target.number);
+    if let Some(target) = target.map(|t| t.number) {
+        let latest = m.latest_number() == Some(target);
+        tab.ui.diagram_version = (!latest).then_some(target);
         tab.ui.diagram_menu = None;
+        // Coming back to a version the daemon refused asks for it again.
+        m.failed.remove(&target);
     }
 }
 
@@ -1087,11 +1102,39 @@ fn on_backdrop(
 pub(super) fn sync_menu(
     mut commands: Commands,
     nav: Res<Nav>,
-    tabs: Res<ReviewTabs>,
+    mut tabs: ResMut<ReviewTabs>,
     diagrams: Res<Diagrams>,
     fonts: Res<UiFonts>,
     layers: Query<(Entity, &MenuLayer)>,
 ) {
+    // A menu the entry no longer offers (a run started, another version) is closed for good,
+    // so it does not open again by itself when the offer returns.
+    let gone: Vec<PrRef> = tabs
+        .0
+        .iter()
+        .filter(|(pr, tab)| {
+            let Some(key) = tab.ui.diagram_menu.as_deref() else {
+                return false;
+            };
+            let Some(m) = diagrams.0.get(*pr) else {
+                return false;
+            };
+            let Some((info, latest)) = m.shown(tab.ui.diagram_version) else {
+                return false;
+            };
+            !info
+                .entries
+                .iter()
+                .find(|e| e.key == key)
+                .is_some_and(|e| menu_of(e, latest, m.busy(), true).is_some())
+        })
+        .map(|(pr, _)| pr.clone())
+        .collect();
+    for pr in gone {
+        if let Some(tab) = tabs.0.get_mut(&pr) {
+            tab.ui.diagram_menu = None;
+        }
+    }
     let wanted = tabs.0.iter().find_map(|(pr, tab)| {
         let key = tab.ui.diagram_menu.clone()?;
         if tab.ui.section != ReviewSection::Diagrams || nav.screen != Screen::Review(pr.clone()) {
@@ -1534,6 +1577,43 @@ mod tests {
         assert_eq!(
             list_of(&diagrams_view(&inputs(Some(&m)))).footer.redraw,
             None
+        );
+    }
+
+    #[test]
+    fn a_redraw_of_the_new_commit_does_not_offer_itself_again() {
+        let mut m = model();
+        m.head = "feedfacefeedfacefeedfacefeedfacefeedface".into();
+        m.stale = true;
+        let mut v3 = fixture::demo_diagrams(NOW, &pr()).remove(1);
+        v3.number = 3;
+        v3.commit = m.head.clone();
+        m.apply(&DiagramsTell::Planned {
+            pr: pr(),
+            version: Box::new(v3),
+        });
+        assert_eq!(
+            list_of(&diagrams_view(&inputs(Some(&m)))).footer.redraw,
+            None
+        );
+    }
+
+    #[test]
+    fn an_unreadable_version_says_so() {
+        let mut m = model();
+        m.apply(&DiagramsTell::Unreadable {
+            pr: pr(),
+            number: 1,
+        });
+        let mut i = inputs(Some(&m));
+        i.version = Some(1);
+        assert_eq!(
+            diagrams_view(&i).pane,
+            Pane::Entry {
+                title: "Diagrams".into(),
+                line: "This version could not be read.".into(),
+                retry: None
+            }
         );
     }
 
@@ -1986,5 +2066,67 @@ mod tests {
         testing::set_section(&mut app, &pr, ReviewSection::Diagrams);
         assert_eq!(testing::count::<DiagramsRoot>(&mut app), 1);
         assert_eq!(testing::count::<DiagramCanvas>(&mut app), 1);
+    }
+
+    #[test]
+    fn an_unreadable_version_is_asked_again_after_stepping_away_and_back() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open(&mut app);
+        let step = |app: &mut App, n: i32| {
+            let e = testing::find::<VersionStep>(app, |s| s.step == n);
+            testing::activate(app, e);
+            testing::settle(app);
+        };
+        step(&mut app, -1);
+        assert_eq!(testing::recorded(&mut app).len(), 1);
+        testing::tell(
+            &mut app,
+            Tell::Diagrams(DiagramsTell::Unreadable {
+                pr: pr.clone(),
+                number: 1,
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "This version could not be read."));
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "not asked in a loop"
+        );
+        step(&mut app, 1);
+        step(&mut app, -1);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::GetDiagramVersion { pr, number: 1 }]
+        );
+    }
+
+    #[test]
+    fn a_menu_that_is_no_longer_offered_does_not_come_back() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open(&mut app);
+        let button = testing::find::<MenuButton>(&mut app, |b| b.key == "flow");
+        testing::activate(&mut app, button);
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<MenuLayer>(&mut app), 1);
+        let running = |state| {
+            Tell::Diagrams(DiagramsTell::State {
+                pr: pr.clone(),
+                state,
+            })
+        };
+        testing::tell(
+            &mut app,
+            running(DiagramsState::Drawing {
+                done: 0,
+                total: 2,
+                key: "deps".into(),
+            }),
+        );
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<MenuLayer>(&mut app), 0);
+        assert_eq!(testing::tab(&app, &pr).ui.diagram_menu, None);
+        testing::tell(&mut app, running(DiagramsState::Idle));
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<MenuLayer>(&mut app), 0);
     }
 }

@@ -523,6 +523,11 @@ pub enum DiagramsTell {
         pr: PrRef,
         version: Box<DiagramVersion>,
     },
+    /// The daemon could not send an older version.
+    Unreadable {
+        pr: PrRef,
+        number: u32,
+    },
     State {
         pr: PrRef,
         state: DiagramsState,
@@ -553,6 +558,7 @@ impl DiagramsTell {
         match self {
             DiagramsTell::Loaded { pr, .. }
             | DiagramsTell::Version { pr, .. }
+            | DiagramsTell::Unreadable { pr, .. }
             | DiagramsTell::State { pr, .. }
             | DiagramsTell::Planned { pr, .. }
             | DiagramsTell::Entry { pr, .. }
@@ -1561,7 +1567,7 @@ async fn answer(
         Ask::StopDiagrams(pr) => notify(client, teller, Command::StopDiagrams { pr }, "").await?,
         Ask::GetDiagrams(pr) => send_diagrams(client, teller, pr).await?,
         Ask::GetDiagramVersion { pr, number } => {
-            if let Some(Reply::DiagramVersion(version)) = request(
+            let tell = match request(
                 client,
                 Command::GetDiagramVersion {
                     pr: pr.clone(),
@@ -1570,8 +1576,10 @@ async fn answer(
             )
             .await?
             {
-                teller.send(Tell::Diagrams(DiagramsTell::Version { pr, version }));
-            }
+                Some(Reply::DiagramVersion(version)) => DiagramsTell::Version { pr, version },
+                _ => DiagramsTell::Unreadable { pr, number },
+            };
+            teller.send(Tell::Diagrams(tell));
         }
         Ask::ReadDiagramCode {
             pr,
@@ -2408,6 +2416,7 @@ pub(crate) fn pump(
                 for model in diagrams.0.values_mut() {
                     model.asked = false;
                     model.requested.clear();
+                    model.failed.clear();
                 }
                 // So are the rounds, and a decision in flight is never answered.
                 for model in revalidations.0.values_mut() {

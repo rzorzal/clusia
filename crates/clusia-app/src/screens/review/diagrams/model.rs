@@ -2,7 +2,7 @@
 //! drawings it has sent whole, and what the daemon is doing now. The bridge fills it from
 //! `DiagramsTell`s; the tab reads it and never writes to it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use bevy::prelude::*;
 use clusia_core::PrRef;
@@ -38,6 +38,10 @@ pub struct DiagramsModel {
     pub stale_reason: Option<String>,
     /// The code `ReadDiagramCode` answered, by version number, diagram key and box id.
     pub code: HashMap<(u32, String, String), DiagramCode>,
+    /// The keys of `code`, oldest answer first: the one that goes when the cache is full.
+    pub(super) code_order: VecDeque<(u32, String, String)>,
+    /// Older versions the daemon refused to send, until the tab steps to them again.
+    pub failed: BTreeSet<u32>,
 }
 
 impl Default for DiagramsModel {
@@ -53,6 +57,8 @@ impl Default for DiagramsModel {
             stale: false,
             stale_reason: None,
             code: HashMap::new(),
+            code_order: VecDeque::new(),
+            failed: BTreeSet::new(),
         }
     }
 }
@@ -84,8 +90,12 @@ impl DiagramsModel {
             })
             .map(|e| e.plan.key.clone())
             .collect();
-        self.code
-            .retain(|(n, k, _), _| *n != new.number || !stale.contains(k));
+        self.retain_code(|(n, k, _)| *n != new.number || !stale.contains(k));
+    }
+
+    fn retain_code(&mut self, keep: impl Fn(&(u32, String, String)) -> bool) {
+        self.code.retain(|key, _| keep(key));
+        self.code_order.retain(|key| keep(key));
     }
 
     fn upsert(&mut self, info: DiagramVersionInfo) {
@@ -115,8 +125,9 @@ impl DiagramsModel {
                 }
                 let listed: Vec<u32> = self.versions.iter().map(|v| v.number).collect();
                 self.loaded.retain(|n, _| listed.contains(n));
-                self.code.retain(|(n, _, _), _| listed.contains(n));
+                self.retain_code(|(n, _, _)| listed.contains(n));
                 self.requested.retain(|n| !self.loaded.contains_key(n));
+                self.failed.retain(|n| listed.contains(n));
                 self.state = state.clone();
                 self.head = head.clone();
                 self.stale = *stale;
@@ -125,10 +136,19 @@ impl DiagramsModel {
                 self.received = true;
             }
             DiagramsTell::Version { version, .. } => {
-                self.requested.remove(&version.number);
+                // A reply that outlived a shorter listing would bring a dropped version back.
+                let asked = self.requested.remove(&version.number);
+                if !asked && !self.versions.iter().any(|v| v.number == version.number) {
+                    return;
+                }
+                self.failed.remove(&version.number);
                 self.forget_changed_code(version);
                 self.upsert(version.info());
                 self.loaded.insert(version.number, (**version).clone());
+            }
+            DiagramsTell::Unreadable { number, .. } => {
+                self.requested.remove(number);
+                self.failed.insert(*number);
             }
             DiagramsTell::State { state, .. } => {
                 let was_busy = self.busy();
@@ -142,10 +162,10 @@ impl DiagramsModel {
                 self.forget_changed_code(version);
                 self.upsert(version.info());
                 self.loaded.insert(version.number, (**version).clone());
-                if !self.head.is_empty() && version.commit == self.head {
-                    self.stale = false;
-                    self.stale_reason = None;
-                }
+                // A plan is always drawn at the review's head.
+                self.head = version.commit.clone();
+                self.stale = false;
+                self.stale_reason = None;
             }
             DiagramsTell::Entry {
                 number, key, state, ..
@@ -156,8 +176,8 @@ impl DiagramsModel {
                 if let Some(entry) = version.entries.iter_mut().find(|e| e.plan.key == *key) {
                     entry.state = state.clone();
                 }
-                self.code.retain(|(n, k, _), _| !(n == number && k == key));
                 let info = version.info();
+                self.retain_code(|(n, k, _)| !(n == number && k == key));
                 self.upsert(info);
             }
             DiagramsTell::Code {
@@ -167,12 +187,16 @@ impl DiagramsModel {
                 code,
                 ..
             } => {
+                let id = (*number, key.clone(), node.clone());
                 // A reviewer opens a handful of boxes; the answers of a long session do not pile up.
-                if self.code.len() >= MAX_CODES {
-                    self.code.clear();
+                self.code_order.retain(|k| *k != id);
+                while self.code_order.len() >= MAX_CODES {
+                    if let Some(oldest) = self.code_order.pop_front() {
+                        self.code.remove(&oldest);
+                    }
                 }
-                self.code
-                    .insert((*number, key.clone(), node.clone()), code.clone());
+                self.code_order.push_back(id.clone());
+                self.code.insert(id, code.clone());
             }
         }
     }
@@ -255,9 +279,11 @@ impl Diagrams {
         self.0.entry(tell.pr().clone()).or_default().apply(tell);
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::Tell;
     use crate::fixture;
     use crate::testing::NOW;
     use clusia_core::diagram::EntryState;
@@ -274,8 +300,6 @@ mod tests {
         m.apply(&tell);
         m
     }
-
-    use crate::bridge::Tell;
 
     #[test]
     fn loaded_lists_both_versions_and_holds_the_latest_whole() {
@@ -521,6 +545,76 @@ mod tests {
             stale_reason: None,
         });
         assert!(m.code.is_empty());
+    }
+
+    #[test]
+    fn a_plan_makes_its_commit_the_head() {
+        let mut m = loaded();
+        let mut v3 = fixture::demo_diagrams(NOW, &pr()).remove(1);
+        v3.number = 3;
+        v3.commit = "feedfacefeedfacefeedfacefeedfacefeedface".into();
+        m.apply(&DiagramsTell::Planned {
+            pr: pr(),
+            version: Box::new(v3.clone()),
+        });
+        assert_eq!(m.head, v3.commit);
+    }
+
+    #[test]
+    fn a_version_nobody_asked_for_is_ignored() {
+        let mut m = loaded();
+        let mut ghost = fixture::demo_diagrams(NOW, &pr()).remove(0);
+        ghost.number = 7;
+        m.apply(&DiagramsTell::Version {
+            pr: pr(),
+            version: Box::new(ghost),
+        });
+        assert_eq!(m.versions.len(), 2);
+        assert!(!m.loaded.contains_key(&7));
+    }
+
+    #[test]
+    fn an_unreadable_version_is_no_longer_requested_and_is_remembered() {
+        let mut m = loaded();
+        m.requested.insert(1);
+        m.apply(&DiagramsTell::Unreadable {
+            pr: pr(),
+            number: 1,
+        });
+        assert!(m.requested.is_empty());
+        assert!(m.failed.contains(&1));
+        m.apply(&DiagramsTell::Version {
+            pr: pr(),
+            version: Box::new(fixture::demo_diagrams(NOW, &pr()).remove(0)),
+        });
+        assert!(m.failed.is_empty(), "a version that arrives is readable");
+    }
+
+    #[test]
+    fn the_oldest_code_goes_first_when_the_cache_is_full() {
+        let mut m = loaded();
+        for n in 0..=MAX_CODES {
+            m.apply(&DiagramsTell::Code {
+                pr: pr(),
+                number: 2,
+                key: "flow".into(),
+                node: format!("box{n}"),
+                code: answer(1),
+            });
+        }
+        assert_eq!(m.code.len(), MAX_CODES);
+        assert!(
+            !m.code
+                .contains_key(&(2, "flow".to_string(), "box0".to_string()))
+        );
+        assert!(
+            m.code
+                .contains_key(&(2, "flow".to_string(), "box1".to_string()))
+        );
+        assert!(
+            m.code
+                .contains_key(&(2, "flow".to_string(), format!("box{MAX_CODES}")))
+        );
     }
 
     #[test]

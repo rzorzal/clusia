@@ -1410,7 +1410,7 @@ fn dg_entry(spec: DiagramSpec) -> DiagramEntry {
 
 /// The review's drawings, oldest first: version 1 at an older commit with the flow, the
 /// sequence and the classes, and version 2 at the demo head with the eight diagrams of
-/// `Diagrams.png` and the other seven mockups (the three of version 1 carry their history).
+/// the demo review (the three of version 1 carry their history).
 /// They do not depend on the review; `_pr` names the demo review they belong to.
 pub fn demo_diagrams(now: i64, _pr: &PrRef) -> Vec<DiagramVersion> {
     let specs = vec![

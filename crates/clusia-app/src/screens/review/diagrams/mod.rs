@@ -1,4 +1,4 @@
-//! The Diagrams tab (mockups `Diagrams.png` and the seven `Diagram-*.png`): the list of the
+//! The Diagrams tab: the list of the
 //! version's diagrams, the footer with the version stepper, and the canvas the selected diagram
 //! is drawn on. `model` holds what the daemon said, `list` the view and its buttons; the canvas
 //! fills `DiagramCanvas`.
@@ -60,6 +60,7 @@ fn load_diagrams(
                     continue;
                 };
                 let wanted = m.received
+                    && !m.failed.contains(&number)
                     && !m.loaded.contains_key(&number)
                     && !m.requested.contains(&number)
                     && m.versions.iter().any(|v| v.number == number);
