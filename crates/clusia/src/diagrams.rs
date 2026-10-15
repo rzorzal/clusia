@@ -193,6 +193,8 @@ async fn draw_all(
     let mut interrupt =
         signal(SignalKind::interrupt()).map_err(|e| CliError::Other(e.to_string()))?;
     let mut client = connect(paths, home).await?;
+    // Set before `DrawDiagrams` goes out: from then on a run may exist that Ctrl-C must stop.
+    let sent = std::cell::Cell::new(false);
     let opened = async {
         client
             .request(Request::Subscribe {
@@ -203,24 +205,30 @@ async fn draw_all(
         client
             .request(Request::OpenReview { pr: pr.clone() })
             .await?;
+        sent.set(true);
         match client
             .request(Request::DrawDiagrams { pr: pr.clone() })
             .await
         {
-            Err(ClientError::Server(e)) if e.message == BUSY => Ok(Reply::Ack),
-            other => other,
+            Err(ClientError::Server(e)) if e.message == BUSY => Ok(true),
+            other => other.map(|_| false),
         }
     };
-    tokio::select! {
-        opened = opened => { opened?; }
+    // A run that already exists is followed from the subscription on, so its ending is the one
+    // to wait for.
+    let mut begun = tokio::select! {
+        opened = opened => opened?,
         _ = interrupt.recv() => {
-            eprintln!("Interrupted: nothing was drawn.");
+            if sent.get() {
+                stop(&mut client, pr, &mut interrupt).await;
+            } else {
+                eprintln!("Interrupted: nothing was drawn.");
+            }
             std::process::exit(130);
         }
-    }
+    };
     let harness = crate::harness::name_of(&mut client, pr).await;
     let mut titles: HashMap<String, String> = HashMap::new();
-    let mut begun = false;
     let mut asked = std::collections::BTreeSet::new();
     loop {
         let (_, event) = tokio::select! {

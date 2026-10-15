@@ -1205,6 +1205,39 @@ mod review_flow {
         );
     }
 
+    #[test]
+    fn diagrams_draw_joins_a_run_that_already_exists_and_lists_when_it_ends() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        let mut first = w.spawn(&["diagrams", "acme/widgets#7", "--draw"]);
+        let start = std::time::Instant::now();
+        while FakeClaude::calls(&w.fake_dir()).is_empty() {
+            assert!(
+                start.elapsed().as_secs() < 30,
+                "the fake claude never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut second = w.spawn(&["diagrams", "acme/widgets#7", "--draw"]);
+        // Long enough for the second command to be told the run exists.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        // SAFETY: signals a child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(first.id() as i32, libc::SIGINT) }, 0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = second.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = second.kill();
+                let _ = first.kill();
+                panic!("the command that joined the run never ended");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(status.success(), "{status:?}");
+        let _ = first.wait();
+    }
+
     /// The id a `review comment` or `review note` prints: `<id> added`.
     fn added_id(o: &Output) -> String {
         stdout(o).split_whitespace().next().unwrap().to_string()

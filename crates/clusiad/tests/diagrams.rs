@@ -765,3 +765,64 @@ async fn a_range_with_a_line_rewritten_or_inserted_inside_it_is_not_a_line_comme
         Some((Some(2), 4))
     );
 }
+
+#[tokio::test]
+async fn a_not_stale_answer_about_newer_commits_does_not_cover_an_older_drawing() {
+    let w = world().await;
+    let _dir = use_fake(&w, plan_and_drawings()).await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    let Reply::DraftItem(note) = c
+        .request(Command::AddDraftItem {
+            pr: pr7(),
+            kind: DraftKind::General,
+            anchor: None,
+            thread: None,
+            body: "Looks fine".into(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("the note");
+    };
+    c.request(Command::DrawDiagrams { pr: pr7() })
+        .await
+        .unwrap();
+    until(&mut watcher, idle).await;
+    c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
+    // The drawing is older than the commits the round will read.
+    let file = w.daemon.paths.diagrams_for(&pr7()).join("v1.json");
+    let stored = std::fs::read_to_string(&file).unwrap();
+    let mut version: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    version["commit"] = json!("0".repeat(40));
+    std::fs::write(&file, version.to_string()).unwrap();
+
+    revalidation::use_script(
+        &w,
+        Script::one(Turn::answer_blocks(
+            "Checked.",
+            &[
+                revalidation_block(json!({"item": note.id, "verdict": "kept"})),
+                stale_block(json!({"stale": false, "reason": "Only docs changed."})),
+            ],
+        )),
+    )
+    .await;
+    revalidation::push(&w, &mut c, "zero\n").await;
+    revalidation::run_round(&w, &mut c).await;
+    let round = revalidation::review_of(&mut c)
+        .await
+        .revalidation
+        .expect("a round");
+    assert_eq!(round.diagrams_stale, None);
+    let Reply::Diagrams {
+        stale,
+        stale_reason,
+        ..
+    } = c.request(Command::GetDiagrams { pr: pr7() }).await.unwrap()
+    else {
+        panic!("the diagrams");
+    };
+    assert_eq!((stale, stale_reason), (true, None));
+}

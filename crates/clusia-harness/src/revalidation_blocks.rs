@@ -49,7 +49,8 @@ pub fn extract_revalidation_blocks(text: &str, asked: &[String]) -> (String, Vec
 }
 
 const STALE_INFO: &str = "clusia-diagrams-stale";
-/// How many `clusia-diagrams-stale` blocks are read; the last usable one wins.
+/// How many `clusia-diagrams-stale` blocks are read, counted from the last; the last usable one
+/// wins.
 const STALE_BLOCKS: usize = 8;
 
 /// What the agent said about the diagrams: the last `clusia-diagrams-stale` block of the answer
@@ -60,6 +61,7 @@ pub fn extract_diagrams_stale(text: &str) -> Option<DiagramsStale> {
     let (_prose, blocks) = fenced_blocks(text, &[STALE_INFO]);
     blocks
         .iter()
+        .rev()
         .take(STALE_BLOCKS)
         .filter_map(|(_, json)| {
             let value: Value = serde_json::from_str(json).ok()?;
@@ -70,7 +72,7 @@ pub fn extract_diagrams_stale(text: &str) -> Option<DiagramsStale> {
                 reason: printable_lines(&reason),
             })
         })
-        .next_back()
+        .next()
 }
 
 fn number(value: &Value, key: &str) -> Option<Option<u32>> {
@@ -178,6 +180,23 @@ mod tests {
                 stale: true,
                 reason: String::new()
             })
+        );
+    }
+
+    #[test]
+    fn only_the_last_eight_diagrams_stale_blocks_are_read() {
+        let bad = stale_block("not json");
+        let good =
+            |reason: &str| stale_block(&format!(r#"{{"stale": true, "reason": "{reason}"}}"#));
+        let mut blocks = vec![good("first")];
+        blocks.extend(std::iter::repeat_n(bad.clone(), 8));
+        assert_eq!(extract_diagrams_stale(&blocks.join("\n\n")), None);
+        let mut blocks = vec![good("first")];
+        blocks.extend(std::iter::repeat_n(bad, 7));
+        blocks.push(good("last"));
+        assert_eq!(
+            extract_diagrams_stale(&blocks.join("\n\n")).map(|s| s.reason),
+            Some("last".to_string())
         );
     }
 

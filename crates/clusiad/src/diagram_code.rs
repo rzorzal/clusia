@@ -101,7 +101,8 @@ fn read_in_worktree(root: &Path, relative: &str) -> Option<String> {
     if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
         return None;
     }
-    let text = String::from_utf8(std::fs::read(&path).ok()?).ok()?;
+    // Lossy, like `file_at`, so a file reads the same at the head and at an older commit.
+    let text = String::from_utf8_lossy(&std::fs::read(&path).ok()?).into_owned();
     (!text.contains('\0')).then_some(text)
 }
 
@@ -292,6 +293,7 @@ mod tests {
         std::os::unix::fs::symlink("../secret.txt", root.join("link.txt")).unwrap();
         std::os::unix::fs::symlink("src/a.rs", root.join("inside.txt")).unwrap();
         std::fs::write(root.join("bin.dat"), b"a\0b").unwrap();
+        std::fs::write(root.join("latin.txt"), b"caf\xe9\n").unwrap();
         std::fs::write(
             root.join("big.txt"),
             vec![b'x'; MAX_FILE_BYTES as usize + 1],
@@ -305,6 +307,11 @@ mod tests {
             read_in_worktree(&root, "inside.txt").as_deref(),
             Some("one\ntwo\n"),
             "a link that stays inside is fine"
+        );
+        assert_eq!(
+            read_in_worktree(&root, "latin.txt").as_deref(),
+            Some("caf\u{fffd}\n"),
+            "text that is not UTF-8 is shown with replacement characters, as at an older commit"
         );
         for refused in [
             "link.txt",

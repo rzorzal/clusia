@@ -1018,6 +1018,13 @@ pub(crate) fn stored_version(shared: &Shared, pr: &PrRef, number: u32) -> Option
     load_diagram_version(&shared.paths, pr, number).map(|v| as_shown(shared, pr, v))
 }
 
+/// The commit the latest version was drawn from.
+pub(crate) fn latest_commit(shared: &Shared, pr: &PrRef) -> Option<String> {
+    load_diagram_versions(&shared.paths, pr)
+        .pop()
+        .map(|version| version.commit)
+}
+
 /// The ready diagrams of the latest version, with the files their boxes point at, for the
 /// revalidation prompt; none when the review has no diagrams.
 pub(crate) fn digests(shared: &Shared, pr: &PrRef) -> Vec<clusia_core::DiagramDigest> {

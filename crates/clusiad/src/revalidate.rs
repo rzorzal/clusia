@@ -1059,9 +1059,13 @@ async fn complete(shared: &Arc<Shared>, pr: &PrRef, job: &Job, text: String) {
     let now = now_unix();
     let held = shared.holds.is_held(pr);
     let mut notify = false;
+    let latest_drawn = crate::diagrams::latest_commit(shared, pr);
     if let Some(round) = review.revalidation.as_mut() {
         round.proposals = proposals;
-        round.diagrams_stale = diagrams_said;
+        // `stale: false` speaks only of the commits the round read: when the drawing is older than
+        // those, the daemon's own comparison of commits stays the answer.
+        round.diagrams_stale = diagrams_said
+            .filter(|said| said.stale || latest_drawn.as_deref() == Some(round.from_head.as_str()));
         round.unreadable = unreadable;
         round.state = RoundState::Done;
         round.finished_at = Some(now);
