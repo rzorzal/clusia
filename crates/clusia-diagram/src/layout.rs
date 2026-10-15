@@ -1,0 +1,802 @@
+//! `layout`: sizes the boxes of a spec, places them and assembles the `Geometry`.
+
+use clusia_core::diagram::{Change, DiagramKind, DiagramSpec, Node, Shape};
+
+use crate::geometry::{Align, Arrow, BoxGeo, Geometry, Point, Rect, TextLines};
+use crate::layered::{self, Direction, NodeSize, Options};
+use crate::measure::{Measure, TextStyle};
+use crate::text;
+
+/// Space around the drawing; it starts at `(MARGIN, MARGIN)`.
+pub const MARGIN: f32 = 24.0;
+
+const PAD: f32 = 12.0;
+const TITLE_SUB_GAP: f32 = 2.0;
+const MIN_WIDTH: f32 = 160.0;
+const MAX_WIDTH: f32 = 240.0;
+const BOX_WIDTH: f32 = 200.0;
+const PILL_WIDTH: f32 = 170.0;
+const PILL_HEIGHT: f32 = 56.0;
+const CIRCLE: f32 = 140.0;
+const CIRCLE_INSET: f32 = 20.0;
+const DOT: f32 = 18.0;
+const TITLE_LINES: usize = 3;
+const SUB_LINES: usize = 2;
+
+/// Turns `spec` into boxes with wrapped text and routed edges. Pure and deterministic: the
+/// same spec and measure always give the same geometry, down to the bit.
+pub fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
+    let mut geometry = match spec.kind {
+        DiagramKind::Graph => layered_geometry(spec, measure, Direction::TopToBottom, Arrow::End),
+        // Kinds without a pass of their own share the left-to-right layered one.
+        _ => layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End),
+    };
+    geometry.normalise(MARGIN);
+    geometry
+}
+
+/// A node's size and wrapped text before it has a place.
+struct Card {
+    w: f32,
+    h: f32,
+    fixed: bool,
+    centred: bool,
+    inset: f32,
+    title: Vec<String>,
+    sub: Vec<String>,
+    title_style: TextStyle,
+    sub_style: TextStyle,
+}
+
+impl Card {
+    fn text_height(&self, measure: &dyn Measure) -> f32 {
+        let title = self.title.len() as f32 * measure.line_height(self.title_style);
+        if self.sub.is_empty() {
+            title
+        } else {
+            title + TITLE_SUB_GAP + self.sub.len() as f32 * measure.line_height(self.sub_style)
+        }
+    }
+}
+
+fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Card {
+    let title_style = TextStyle::Title;
+    let sub_style = if node.change == Change::Unchanged {
+        TextStyle::Sub
+    } else {
+        TextStyle::SubStrong
+    };
+    let sub_text = node.sub.as_deref().unwrap_or("");
+    let centred = match node.shape {
+        Shape::Pill | Shape::Circle | Shape::Actor | Shape::Start => true,
+        Shape::External => kind == DiagramKind::DataFlow,
+        _ => false,
+    };
+    let mut card = Card {
+        w: 0.0,
+        h: 0.0,
+        fixed: false,
+        centred,
+        inset: PAD,
+        title: Vec::new(),
+        sub: Vec::new(),
+        title_style,
+        sub_style,
+    };
+    match node.shape {
+        Shape::Start => {
+            card.w = DOT;
+            card.h = DOT;
+            card.fixed = true;
+        }
+        Shape::Circle => {
+            let inner = CIRCLE - 2.0 * CIRCLE_INSET;
+            card.w = CIRCLE;
+            card.h = CIRCLE;
+            card.fixed = true;
+            card.inset = CIRCLE_INSET;
+            card.title = text::wrap(measure, &node.label, title_style, inner, 2);
+            card.sub = text::wrap(measure, sub_text, sub_style, inner, 2);
+        }
+        _ => {
+            let base = if node.shape == Shape::Pill {
+                PILL_WIDTH
+            } else {
+                BOX_WIDTH
+            };
+            let longest_word = |text: &str, style: TextStyle| {
+                text.split_whitespace()
+                    .map(|w| measure.width(w, style))
+                    .fold(0.0, f32::max)
+            };
+            let wanted = longest_word(&node.label, title_style)
+                .max(longest_word(sub_text, sub_style))
+                + 2.0 * PAD;
+            card.w = base.max(wanted).clamp(MIN_WIDTH, MAX_WIDTH);
+            let inner = card.w - 2.0 * PAD;
+            card.title = text::wrap(measure, &node.label, title_style, inner, TITLE_LINES);
+            card.sub = text::wrap(measure, sub_text, sub_style, inner, SUB_LINES);
+            let min_h = if node.shape == Shape::Pill {
+                PILL_HEIGHT
+            } else {
+                0.0
+            };
+            card.h = (2.0 * PAD + card.text_height(measure)).max(min_h);
+        }
+    }
+    card
+}
+
+fn layered_geometry(
+    spec: &DiagramSpec,
+    measure: &dyn Measure,
+    direction: Direction,
+    arrow: Arrow,
+) -> Geometry {
+    let cards: Vec<Card> = spec
+        .nodes
+        .iter()
+        .map(|n| card(spec.kind, n, measure))
+        .collect();
+    let sizes: Vec<NodeSize> = cards
+        .iter()
+        .map(|c| NodeSize {
+            w: c.w,
+            h: c.h,
+            fixed: c.fixed,
+        })
+        .collect();
+    let options = Options {
+        direction,
+        arrow,
+        top_aligned: false,
+    };
+    let placed = layered::place(spec, &sizes, measure, &options);
+
+    let mut geometry = Geometry::empty();
+    for (i, (node, card)) in spec.nodes.iter().zip(&cards).enumerate() {
+        let rect = placed.rects[i];
+        let (title, sub) = box_text(card, rect, measure);
+        if node.shape == Shape::Start {
+            geometry.start_dot.get_or_insert(rect.centre());
+        }
+        geometry.boxes.push(BoxGeo {
+            node: node.id.clone(),
+            index: i,
+            rect,
+            shape: node.shape,
+            title,
+            sub,
+            rows: Vec::new(),
+            change: node.change,
+            history: node.history,
+            anchored: node.anchor.is_some(),
+        });
+    }
+    geometry.edges = placed.edges;
+    geometry
+}
+
+/// The title and sub text of a card inside its final rectangle: at the top left for a left
+/// aligned shape, in the middle for a centred one.
+fn box_text(card: &Card, rect: Rect, measure: &dyn Measure) -> (TextLines, Option<TextLines>) {
+    let width = rect.w - 2.0 * card.inset;
+    let align = if card.centred {
+        Align::Center
+    } else {
+        Align::Left
+    };
+    let content = card.text_height(measure);
+    let top = if card.centred {
+        rect.y + (rect.h - content) / 2.0
+    } else {
+        rect.y + PAD
+    };
+    let x = rect.x + card.inset;
+    let title = text::block(
+        measure,
+        card.title.clone(),
+        card.title_style,
+        Point { x, y: top },
+        Some(width),
+        align,
+    );
+    let sub = if card.sub.is_empty() {
+        None
+    } else {
+        Some(text::block(
+            measure,
+            card.sub.clone(),
+            card.sub_style,
+            Point {
+                x,
+                y: top + title.height + TITLE_SUB_GAP,
+            },
+            Some(width),
+            align,
+        ))
+    };
+    (title, sub)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::measure::Fonts;
+    use crate::testkit::{
+        assert_no_text_clash, check, data_flow_mockup, deps_mockup, edge, flow_mockup, node,
+        node_sub, random_graph, spec, states_mockup,
+    };
+    use std::time::Instant;
+
+    fn run(spec: &DiagramSpec) -> Geometry {
+        let g = layout(spec, &Fonts);
+        check(spec, &g);
+        g
+    }
+
+    fn rect_of<'a>(g: &'a Geometry, id: &str) -> &'a Rect {
+        &g.boxes.iter().find(|b| b.node == id).expect("box").rect
+    }
+
+    /// Whether `lower` stands in the same column as `upper`, 72 px under it.
+    fn hangs_under(lower: &Rect, upper: &Rect) -> bool {
+        lower.x == upper.x && (lower.y - upper.bottom() - 72.0).abs() < 0.01
+    }
+
+    #[test]
+    fn the_flow_mockup_is_a_row_with_lock_under_refresh_and_save_under_oauth() {
+        let s = flow_mockup();
+        let g = run(&s);
+        let client = rect_of(&g, "client");
+        let refresh = rect_of(&g, "refresh");
+        let oauth = rect_of(&g, "oauth");
+        let lock = rect_of(&g, "lock");
+        let save = rect_of(&g, "save");
+        assert!(
+            refresh.x >= client.right() + 96.0 - 0.01,
+            "a rank gap of 96 px"
+        );
+        assert!(oauth.x >= refresh.right() + 96.0 - 0.01);
+        assert!(hangs_under(lock, refresh));
+        assert!(hangs_under(save, oauth));
+        let centre = |r: &Rect| r.centre().y;
+        assert_eq!(centre(client), centre(refresh));
+        assert_eq!(centre(refresh), centre(oauth));
+        assert_eq!(client.w, 200.0);
+        assert_eq!(client.x, MARGIN);
+        assert_eq!(g.edges.len(), 4);
+        assert!(g.edges.iter().all(|e| e.arrow == Arrow::End));
+        let label = g.edges[0].label.as_ref().expect("label");
+        assert_eq!(label.lines, vec!["token()".to_string()]);
+        assert!(g.edges[3].label.is_none());
+        let down = &g.edges[2].points;
+        assert_eq!(down.len(), 2, "a straight run down the column");
+        assert_eq!(down[0].x, down[1].x);
+        assert_eq!(down[0].y, refresh.bottom());
+        assert_eq!(down[1].y, lock.y);
+        assert_eq!(g.edges[2].label.as_ref().expect("label").lines, vec!["new"]);
+        assert_no_text_clash(&g);
+    }
+
+    #[test]
+    fn the_data_flow_mockup_keeps_the_file_under_the_circles() {
+        let s = data_flow_mockup();
+        let g = run(&s);
+        let (refresh, exchange) = (rect_of(&g, "refresh"), rect_of(&g, "exchange"));
+        let (client, github, file) = (
+            rect_of(&g, "client"),
+            rect_of(&g, "github"),
+            rect_of(&g, "file"),
+        );
+        assert!(client.right() < refresh.x && exchange.right() < github.x);
+        assert_eq!(refresh.centre().y, exchange.centre().y);
+        assert_eq!(client.centre().y, refresh.centre().y);
+        assert!(hangs_under(file, exchange));
+        assert!(file.centre().x > refresh.x && file.centre().x < exchange.right());
+        assert_no_text_clash(&g);
+    }
+
+    #[test]
+    fn the_states_mockup_keeps_failed_under_refreshing() {
+        let s = states_mockup();
+        let g = run(&s);
+        let (fresh, refreshing, failed) = (
+            rect_of(&g, "fresh"),
+            rect_of(&g, "refreshing"),
+            rect_of(&g, "failed"),
+        );
+        assert!(hangs_under(failed, refreshing));
+        assert_eq!(fresh.centre().y, refreshing.centre().y);
+        assert!(rect_of(&g, "start").right() < fresh.x);
+        let back = g.edges.iter().find(|e| e.index == 3).expect("edge");
+        let lane = back.points.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+        assert!(
+            lane > fresh.bottom(),
+            "the way back to Fresh runs in a lane beside the row"
+        );
+        assert_eq!(back.points[0].x, refreshing.x, "it leaves Refreshing");
+        assert_eq!(back.points[back.points.len() - 1].x, fresh.right());
+        assert_no_text_clash(&g);
+    }
+
+    #[test]
+    fn the_graph_mockup_still_runs_top_to_bottom() {
+        let s = deps_mockup();
+        let g = run(&s);
+        let (cli, auth, config) = (
+            rect_of(&g, "cli"),
+            rect_of(&g, "auth"),
+            rect_of(&g, "config"),
+        );
+        assert!(cli.bottom() + 72.0 - 0.01 <= auth.y);
+        assert!(auth.bottom() + 72.0 - 0.01 <= config.y);
+        assert_no_text_clash(&g);
+    }
+
+    #[test]
+    fn a_chain_with_no_branch_stays_one_row_of_ranks() {
+        let s = spec(
+            "flow",
+            (0..5)
+                .map(|i| node(&format!("n{i}"), &format!("Step {i}"), "box"))
+                .collect(),
+            (0..4)
+                .map(|i| edge(&format!("n{i}"), &format!("n{}", i + 1), None))
+                .collect(),
+        );
+        let g = run(&s);
+        let tops: Vec<f32> = g.boxes.iter().map(|b| b.rect.y).collect();
+        assert!(tops.windows(2).all(|w| w[0] == w[1]));
+        assert!(g.boxes.windows(2).all(|w| w[0].rect.right() < w[1].rect.x));
+    }
+
+    #[test]
+    fn a_diagram_with_a_part_off_the_spine_falls_back_to_ranks() {
+        let s = spec(
+            "flow",
+            vec![
+                node("a", "A", "box"),
+                node("b", "B", "box"),
+                node("c", "C", "box"),
+                node("d", "D", "box"),
+                node("e", "E", "box"),
+            ],
+            vec![
+                edge("a", "b", None),
+                edge("b", "c", None),
+                edge("b", "d", None),
+                edge("d", "e", None),
+                edge("e", "d", None),
+                edge("c", "e", None),
+            ],
+        );
+        let g = run(&s);
+        assert_eq!(g.edges.len(), 6);
+        let (b, d) = (rect_of(&g, "b"), rect_of(&g, "d"));
+        assert!(b.right() < d.x);
+    }
+
+    #[test]
+    fn a_label_sits_under_the_route_between_the_cardinalities() {
+        let mut s = flow_mockup();
+        s.edges[1].ends = [Some("1".into()), Some("0..N".into())];
+        let g = run(&s);
+        let e = &g.edges[1];
+        let (label, from, to) = (
+            e.label.as_ref().expect("label"),
+            e.ends[0].as_ref().expect("from"),
+            e.ends[1].as_ref().expect("to"),
+        );
+        let run_y = e.points[0].y;
+        assert!(label.at.y > run_y, "under the run");
+        assert!(
+            from.rect().bottom() <= run_y && to.rect().bottom() <= e.points[e.points.len() - 1].y
+        );
+        assert!(!label.rect().intersects(&from.rect()));
+        assert!(!label.rect().intersects(&to.rect()));
+    }
+
+    #[test]
+    fn labels_that_would_print_over_each_other_are_left_out() {
+        let nodes: Vec<_> = std::iter::once(node("hub", "Hub", "box"))
+            .chain((0..20).map(|i| node(&format!("s{i}"), &format!("Spoke {i}"), "box")))
+            .collect();
+        let edges = (0..20)
+            .map(|i| edge("hub", &format!("s{i}"), Some("calls")))
+            .collect();
+        let s = spec("flow", nodes, edges);
+        let g = run(&s);
+        let labels: Vec<_> = g.edges.iter().filter_map(|e| e.label.as_ref()).collect();
+        assert!(!labels.is_empty() && labels.len() < 20);
+        for (i, a) in labels.iter().enumerate() {
+            for b in &labels[i + 1..] {
+                assert!(!a.rect().intersects(&b.rect()));
+            }
+        }
+    }
+
+    #[test]
+    fn box_text_wraps_inside_the_box_and_sub_text_follows_the_title() {
+        let s = spec(
+            "flow",
+            vec![node_sub(
+                "a",
+                "An unusually long module title that has to wrap onto more lines",
+                "and a sub line",
+                "box",
+                "changed",
+            )],
+            vec![],
+        );
+        let g = run(&s);
+        let b = &g.boxes[0];
+        assert!(b.title.lines.len() >= 2 && b.title.lines.len() <= 3);
+        assert!(b.title.at.x >= b.rect.x + 11.99);
+        assert!(b.title.rect().right() <= b.rect.right());
+        let sub = b.sub.as_ref().expect("sub");
+        assert!(sub.at.y >= b.title.rect().bottom());
+        assert!(sub.rect().bottom() <= b.rect.bottom());
+        assert_eq!(sub.style, TextStyle::SubStrong);
+        assert_eq!(b.title.align, Align::Left);
+        assert_eq!(b.change, Change::Changed);
+    }
+
+    #[test]
+    fn a_word_with_no_spaces_cannot_stretch_a_box() {
+        let word = "x".repeat(120);
+        let s = spec(
+            "flow",
+            vec![node("a", &word, "box"), node("b", "B", "box")],
+            vec![edge("a", "b", Some(&word))],
+        );
+        let g = run(&s);
+        assert!(g.boxes[0].rect.w <= 240.0);
+        assert!(g.boxes[0].title.lines.len() <= 3);
+        let label = g.edges[0].label.as_ref().expect("label");
+        assert!(label.lines.len() <= 4);
+        assert!(
+            label
+                .lines
+                .iter()
+                .all(|l| Fonts.width(l, TextStyle::EdgeLabel) <= 88.5)
+        );
+    }
+
+    #[test]
+    fn graph_runs_top_to_bottom_with_72_px_between_ranks() {
+        let s = spec(
+            "graph",
+            vec![
+                node("cli", "cli", "box"),
+                node("auth", "auth", "box"),
+                node("config", "config", "box"),
+            ],
+            vec![
+                edge("cli", "auth", None),
+                edge("auth", "config", Some("reads refresh margin")),
+            ],
+        );
+        let g = run(&s);
+        let (cli, auth, config) = (
+            rect_of(&g, "cli"),
+            rect_of(&g, "auth"),
+            rect_of(&g, "config"),
+        );
+        assert!(auth.y >= cli.bottom() + 72.0 - 0.01);
+        assert!(config.y >= auth.bottom() + 72.0 - 0.01);
+        let label = g.edges[1].label.as_ref().expect("label");
+        assert!(label.lines.len() <= 2);
+        let first = g.edges[0].points[0];
+        assert!(
+            (first.y - cli.bottom()).abs() < 1e-3,
+            "an edge leaves the bottom side"
+        );
+    }
+
+    #[test]
+    fn a_cycle_is_laid_out_and_its_arrow_points_at_the_right_box() {
+        let s = spec(
+            "flow",
+            vec![
+                node("a", "A", "box"),
+                node("b", "B", "box"),
+                node("c", "C", "box"),
+            ],
+            vec![
+                edge("a", "b", None),
+                edge("b", "c", None),
+                edge("c", "a", Some("again")),
+            ],
+        );
+        let g = run(&s);
+        let a = rect_of(&g, "a");
+        let back = g
+            .edges
+            .iter()
+            .find(|e| e.index == 2)
+            .expect("the back edge");
+        let end = back.points.last().expect("points");
+        assert!(
+            (end.x - a.right()).abs() < 1e-3,
+            "the arrow ends on the right side of a: {end:?}"
+        );
+        let start = back.points[0];
+        assert!(
+            (start.x - rect_of(&g, "c").x).abs() < 1e-3,
+            "and starts at the left side of c"
+        );
+    }
+
+    #[test]
+    fn a_self_loop_has_three_segments_on_the_right_side() {
+        let s = spec(
+            "flow",
+            vec![node("a", "Retry", "box")],
+            vec![edge("a", "a", Some("again"))],
+        );
+        let g = run(&s);
+        let e = &g.edges[0];
+        assert_eq!(e.points.len(), 4);
+        let a = rect_of(&g, "a");
+        assert!(
+            (e.points[0].x - a.right()).abs() < 1e-3 && (e.points[3].x - a.right()).abs() < 1e-3
+        );
+        assert!(e.points[1].x > a.right());
+        assert!(e.label.is_some());
+    }
+
+    #[test]
+    fn every_loop_on_a_small_box_returns_to_the_box() {
+        let s = spec(
+            "states",
+            vec![node("start", "", "start"), node("a", "Ready", "pill")],
+            vec![
+                edge("start", "a", None),
+                edge("start", "start", None),
+                edge("start", "start", None),
+                edge("a", "a", None),
+                edge("a", "a", None),
+                edge("a", "a", None),
+                edge("a", "a", None),
+                edge("a", "a", None),
+                edge("a", "a", None),
+                edge("a", "a", None),
+            ],
+        );
+        let g = run(&s);
+        for e in g.edges.iter().filter(|e| e.points.len() == 4) {
+            let owner = if e.index < 3 { "start" } else { "a" };
+            let r = rect_of(&g, owner);
+            for p in [e.points[0], e.points[3]] {
+                assert!(
+                    p.y >= r.y - 1e-3 && p.y <= r.bottom() + 1e-3,
+                    "{p:?} off {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_edge_over_several_ranks_runs_through_a_lane_not_a_box() {
+        let s = spec(
+            "flow",
+            vec![
+                node("a", "A", "box"),
+                node("b", "B", "box"),
+                node("c", "C", "box"),
+                node("d", "D", "box"),
+            ],
+            vec![
+                edge("a", "b", None),
+                edge("b", "c", None),
+                edge("c", "d", None),
+                edge("a", "d", Some("skips two ranks")),
+            ],
+        );
+        let g = run(&s);
+        let long = g.edges.iter().find(|e| e.index == 3).expect("long edge");
+        assert!(
+            long.points.len() >= 4,
+            "it jogs around the boxes in between: {:?}",
+            long.points
+        );
+    }
+
+    #[test]
+    fn parallel_edges_leave_through_different_ports() {
+        let s = spec(
+            "flow",
+            vec![node("a", "A", "box"), node("b", "B", "box")],
+            vec![
+                edge("a", "b", Some("one")),
+                edge("a", "b", Some("two")),
+                edge("b", "a", None),
+            ],
+        );
+        let g = run(&s);
+        let ys: Vec<f32> = g.edges.iter().map(|e| e.points[0].y).collect();
+        assert!(
+            ys[0] != ys[1],
+            "two routes out of one side never share a line: {ys:?}"
+        );
+    }
+
+    #[test]
+    fn a_hub_with_twenty_edges_grows_to_hold_its_ports() {
+        let mut nodes = vec![node("hub", "Hub", "box")];
+        let mut edges = Vec::new();
+        for i in 0..20 {
+            nodes.push(node(&format!("n{i}"), &format!("Leaf {i}"), "box"));
+            edges.push(edge("hub", &format!("n{i}"), None));
+            edges.push(edge(&format!("n{i}"), "hub", None));
+        }
+        let g = run(&spec("flow", nodes, edges));
+        assert!(rect_of(&g, "hub").h >= 8.0 * 21.0 - 0.01);
+    }
+
+    #[test]
+    fn disconnected_parts_and_unknown_ends_are_laid_out() {
+        let s = spec(
+            "flow",
+            vec![
+                node("a", "A", "box"),
+                node("b", "B", "box"),
+                node("c", "Alone", "box"),
+            ],
+            vec![
+                edge("a", "b", None),
+                edge("a", "ghost", None),
+                edge("ghost", "b", None),
+            ],
+        );
+        let g = run(&s);
+        assert_eq!(g.edges.len(), 1, "an edge with an unknown end is not drawn");
+        assert_eq!(g.boxes.len(), 3);
+    }
+
+    #[test]
+    fn an_empty_spec_is_two_margins() {
+        let g = run(&spec("flow", vec![], vec![]));
+        assert_eq!(g.size, (48.0, 48.0));
+        assert!(g.boxes.is_empty());
+    }
+
+    #[test]
+    fn duplicate_node_ids_do_not_panic() {
+        let s = spec(
+            "flow",
+            vec![node("a", "A", "box"), node("a", "A again", "box")],
+            vec![edge("a", "a", None)],
+        );
+        let g = layout(&s, &Fonts);
+        assert_eq!(g.boxes.len(), 2);
+    }
+
+    #[test]
+    fn states_have_pills_and_a_start_dot() {
+        let s = spec(
+            "states",
+            vec![
+                node("start", "", "start"),
+                node("fresh", "Fresh", "pill"),
+                node_sub("expiring", "Expiring", "within 60 s · new", "pill", "new"),
+            ],
+            vec![
+                edge("start", "fresh", None),
+                edge("fresh", "expiring", Some("time passes")),
+                edge("expiring", "fresh", Some("new token saved")),
+            ],
+        );
+        let g = run(&s);
+        let dot = g.start_dot.expect("a start dot");
+        let start = rect_of(&g, "start");
+        assert_eq!((start.w, start.h), (18.0, 18.0));
+        assert_eq!(dot, start.centre());
+        let fresh = &g.boxes[1];
+        assert!(fresh.rect.h >= 56.0);
+        assert_eq!(fresh.title.align, Align::Center);
+        assert!(
+            fresh.title.at.y > fresh.rect.y,
+            "centred text sits in the middle"
+        );
+    }
+
+    #[test]
+    fn data_flow_circles_are_140_px_wide_and_tall() {
+        let s = spec(
+            "data_flow",
+            vec![
+                node_sub("client", "API client", "external", "external", "unchanged"),
+                node_sub("refresh", "1  Refresh", "margin 60 s", "circle", "changed"),
+                node_sub(
+                    "file",
+                    "D1  |  Token file",
+                    "written atomically",
+                    "store",
+                    "unchanged",
+                ),
+            ],
+            vec![
+                edge("client", "refresh", Some("token request")),
+                edge("refresh", "file", Some("write")),
+            ],
+        );
+        let g = run(&s);
+        let c = rect_of(&g, "refresh");
+        assert_eq!((c.w, c.h), (140.0, 140.0));
+        assert_eq!(g.boxes[1].title.align, Align::Center);
+        assert_eq!(
+            g.boxes[0].title.align,
+            Align::Center,
+            "an external node is centred in a data flow"
+        );
+    }
+
+    #[test]
+    fn anchored_boxes_are_flagged() {
+        let mut s = flow_mockup();
+        s.nodes[0].anchor = Some(clusia_core::diagram::CodeAnchor {
+            path: "client/http.rs".into(),
+            start_line: 1,
+            end_line: 4,
+        });
+        let g = run(&s);
+        assert!(g.boxes[0].anchored && !g.boxes[1].anchored);
+    }
+
+    #[test]
+    fn the_same_spec_gives_the_same_geometry() {
+        let s = random_graph("flow", 30, 60, 7);
+        assert_eq!(layout(&s, &Fonts), layout(&s, &Fonts));
+    }
+
+    #[test]
+    fn awkward_random_graphs_keep_every_invariant_inside_the_budget() {
+        for (kind, seed) in [("flow", 1), ("graph", 2), ("data_flow", 3), ("states", 4)] {
+            let s = random_graph(kind, 40, 80, seed);
+            let started = Instant::now();
+            let g = layout(&s, &Fonts);
+            let took = started.elapsed();
+            let budget = if cfg!(debug_assertions) { 200 } else { 20 };
+            assert!(took.as_millis() <= budget, "{kind}: {took:?}");
+            check(&s, &g);
+        }
+    }
+
+    #[test]
+    fn a_chain_of_forty_nodes_and_its_returns_stay_valid() {
+        let nodes: Vec<_> = (0..40)
+            .map(|i| node(&format!("n{i}"), &format!("Step {i}"), "box"))
+            .collect();
+        let mut edges: Vec<_> = (0..39)
+            .map(|i| edge(&format!("n{i}"), &format!("n{}", i + 1), None))
+            .collect();
+        edges.push(edge("n39", "n0", Some("start over")));
+        edges.push(edge("n0", "n39", None));
+        run(&spec("flow", nodes, edges));
+    }
+
+    #[test]
+    fn dense_random_graphs_never_put_two_routes_on_one_line() {
+        for seed in 0..80u64 {
+            for kind in ["flow", "graph", "states"] {
+                let s = random_graph(kind, 12, 20, seed);
+                check(&s, &layout(&s, &Fonts));
+            }
+        }
+    }
+
+    #[test]
+    fn many_small_random_graphs_keep_every_invariant() {
+        for seed in 0..80u64 {
+            let n = 2 + (seed as usize % 13);
+            let m = n + (seed as usize % (n + 3));
+            for kind in ["flow", "graph"] {
+                let s = random_graph(kind, n, m, seed);
+                let g = layout(&s, &Fonts);
+                check(&s, &g);
+            }
+        }
+    }
+}

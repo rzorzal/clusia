@@ -1821,6 +1821,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clusia-diagram"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "serde_json",
+]
+
+[[package]]
 name = "clusia-git"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,1204 @@
+//! Layered placement and orthogonal routing for the box-and-arrow kinds.
+//!
+//! Work happens in *rank* (`a`) and *cross* (`c`) coordinates: ranks are columns for
+//! `LeftToRight` and rows for `TopToBottom`, and `to_xy` turns a pair into a point at the end.
+//! Edges that span several ranks pass through one dummy vertex per rank they cross, so a route
+//! never runs through a box: it runs in the lane a dummy holds between two boxes.
+
+use std::cmp::Reverse;
+use std::collections::{HashMap, VecDeque};
+
+use clusia_core::diagram::DiagramSpec;
+
+use crate::geometry::{Align, Arrow, EdgeGeo, Point, Rect, TextLines};
+use crate::measure::{Measure, TextStyle};
+use crate::spine;
+use crate::text;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Direction {
+    LeftToRight,
+    TopToBottom,
+}
+
+/// A node's box size before placement. A `fixed` box keeps its size; any other grows along
+/// the cross axis so every edge end gets its own port.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NodeSize {
+    pub w: f32,
+    pub h: f32,
+    pub fixed: bool,
+}
+
+pub(crate) struct Options {
+    pub direction: Direction,
+    pub arrow: Arrow,
+    /// Whether the boxes of a row share their top edge rather than their middle line.
+    pub top_aligned: bool,
+}
+
+pub(crate) struct Placed {
+    pub rects: Vec<Rect>,
+    pub edges: Vec<EdgeGeo>,
+}
+
+/// Space between two boxes of one rank.
+const NODE_GAP: f32 = 48.0;
+/// Space between a lane and its neighbours in one rank.
+const LANE_GAP: f32 = 16.0;
+/// Space between the vertical runs of two routes in one gap.
+const STEP: f32 = 8.0;
+/// Space kept free after the last run of a gap.
+const END_PAD: f32 = 16.0;
+/// Space between a box and the box that hangs below it.
+const STACK_GAP: f32 = 72.0;
+/// Space between two ports on one side of a box.
+const PORT_PITCH: f32 = 8.0;
+/// How far a self-loop leaves its box.
+const LOOP_OUT: f32 = 20.0;
+const LOOP_SPAN: f32 = 12.0;
+
+/// The two rows self-loop `nth` of `count` on one side of a box `height` tall runs along: 12 px
+/// apart, each loop 5 px lower than the one before, or in a strip of its own on a box too short
+/// for that.
+pub(crate) fn loop_rows(top: f32, height: f32, count: usize, nth: usize) -> (f32, f32) {
+    if loop_zone(count) <= height {
+        let y1 = top + 6.0 + 5.0 * nth as f32;
+        (y1, y1 + LOOP_SPAN)
+    } else {
+        let slot = (height - 4.0) / count as f32;
+        (
+            top + 3.0 + slot * nth as f32,
+            top + 1.0 + slot * (nth + 1) as f32,
+        )
+    }
+}
+
+/// How far the last of `count` self-loops on one box reaches beyond its far side.
+pub(crate) fn loop_reach(count: usize) -> f32 {
+    let later = count.saturating_sub(1);
+    LOOP_OUT + 6.0 * later.min(4) as f32 + 2.0 * later.saturating_sub(4) as f32
+}
+
+/// How much of a box's side its `count` self-loops take from the top.
+pub(crate) fn loop_zone(count: usize) -> f32 {
+    6.0 + 5.0 * count.saturating_sub(1) as f32 + LOOP_SPAN + 4.0
+}
+
+/// Where the ports of a side start, counted from the top of a box `height` tall that has
+/// `count` self-loops: under them while 8 px are left, else from the middle.
+fn ports_from(count: usize, height: f32) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    loop_zone(count).min(height - PORT_PITCH).max(height * 0.5)
+}
+const SWEEPS: usize = 4;
+const RELAX_ROUNDS: usize = 3;
+
+impl Direction {
+    fn base_gap(self) -> f32 {
+        match self {
+            Direction::LeftToRight => 96.0,
+            Direction::TopToBottom => 72.0,
+        }
+    }
+
+    /// Space at the start of a gap kept for the labels of the edges that leave the rank before.
+    fn lead(self) -> f32 {
+        match self {
+            Direction::LeftToRight => 24.0,
+            Direction::TopToBottom => 32.0,
+        }
+    }
+
+    fn to_xy(self, a: f32, c: f32) -> Point {
+        match self {
+            Direction::LeftToRight => Point { x: a, y: c },
+            Direction::TopToBottom => Point { x: c, y: a },
+        }
+    }
+}
+
+struct Vertex {
+    /// The node index, or `None` for a dummy.
+    real: Option<usize>,
+    ext_a: f32,
+    ext_c: f32,
+}
+
+/// The nodes `(upper, lower)` of a column pair and the edges between them, each with its
+/// `from` node.
+type Column = ((usize, usize), Vec<(usize, usize)>);
+
+/// One edge as a path through ranks: `verts` run from the lower rank to the higher.
+struct Chain {
+    edge: usize,
+    reversed: bool,
+    verts: Vec<usize>,
+}
+
+/// Places the nodes of `spec` (sized by `sizes`) and routes its edges.
+pub(crate) fn place(
+    spec: &DiagramSpec,
+    sizes: &[NodeSize],
+    measure: &dyn Measure,
+    opts: &Options,
+) -> Placed {
+    let n = spec.nodes.len();
+    if n == 0 {
+        return Placed {
+            rects: Vec::new(),
+            edges: Vec::new(),
+        };
+    }
+    let dir = opts.direction;
+    let mut index: HashMap<&str, usize> = HashMap::new();
+    for (i, node) in spec.nodes.iter().enumerate() {
+        index.entry(node.id.as_str()).or_insert(i);
+    }
+    // (edge index, from, to) for the edges between two nodes; self-loops apart.
+    let mut links: Vec<(usize, usize, usize)> = Vec::new();
+    let mut loops: Vec<(usize, usize)> = Vec::new();
+    for (i, e) in spec.edges.iter().enumerate() {
+        let (Some(&a), Some(&b)) = (index.get(e.from.as_str()), index.get(e.to.as_str())) else {
+            continue;
+        };
+        if a == b {
+            loops.push((i, a));
+        } else {
+            links.push((i, a, b));
+        }
+    }
+
+    let reversed = back_edges(n, &links);
+    let dag: Vec<(usize, usize)> = links
+        .iter()
+        .zip(&reversed)
+        .map(|(&(_, a, b), &r)| if r { (b, a) } else { (a, b) })
+        .collect();
+    let mut rank = ranks(n, &dag);
+    let mut depth = vec![0usize; n];
+    if dir == Direction::LeftToRight
+        && let Some(plan) = spine::plan(sizes, &dag, &rank)
+    {
+        rank = plan.layer;
+        depth = plan.depth;
+    }
+    let stacked = depth.iter().any(|&d| d > 0);
+    let layer_count = rank.iter().copied().max().unwrap_or(0) + 1;
+
+    let mut verts: Vec<Vertex> = (0..n)
+        .map(|i| Vertex {
+            real: Some(i),
+            ext_a: 0.0,
+            ext_c: 0.0,
+        })
+        .collect();
+    let mut layer_of: Vec<usize> = rank.clone();
+    let mut chains: Vec<Chain> = Vec::new();
+    // Edges between two nodes of one column, which run straight down the column.
+    let mut verticals: Vec<(usize, usize, usize)> = Vec::new();
+    for &(edge, a, b) in &links {
+        if rank[a] == rank[b] {
+            verticals.push((edge, a, b));
+            continue;
+        }
+        let flipped = rank[a] > rank[b];
+        let (u, v) = if flipped { (b, a) } else { (a, b) };
+        let mut path = vec![u];
+        for r in rank[u] + 1..rank[v] {
+            verts.push(Vertex {
+                real: None,
+                ext_a: 0.0,
+                ext_c: 0.0,
+            });
+            layer_of.push(r);
+            path.push(verts.len() - 1);
+        }
+        path.push(v);
+        chains.push(Chain {
+            edge,
+            reversed: flipped,
+            verts: path,
+        });
+    }
+    let total = verts.len();
+    let mut up: Vec<Vec<usize>> = vec![Vec::new(); total];
+    let mut down: Vec<Vec<usize>> = vec![Vec::new(); total];
+    for chain in &chains {
+        for pair in chain.verts.windows(2) {
+            down[pair[0]].push(pair[1]);
+            up[pair[1]].push(pair[0]);
+        }
+    }
+
+    // Ports on each side of a box: how many routes start and end there.
+    let mut out_count = vec![0usize; n];
+    let mut in_count = vec![0usize; n];
+    for chain in &chains {
+        out_count[chain.verts[0]] += 1;
+        in_count[chain.verts[chain.verts.len() - 1]] += 1;
+    }
+    let mut loops_at = vec![0usize; n];
+    for &(_, node) in &loops {
+        loops_at[node] += 1;
+    }
+
+    // Extents along the rank and cross axes; a box grows to fit its ports.
+    let mut rects_size: Vec<(f32, f32)> = Vec::with_capacity(n);
+    for (i, s) in sizes.iter().enumerate().take(n) {
+        let (mut w, mut h) = (s.w, s.h);
+        if !s.fixed {
+            let need = (out_count[i].max(in_count[i]) + 1) as f32 * PORT_PITCH
+                + if loops_at[i] > 0 {
+                    loop_zone(loops_at[i])
+                } else {
+                    0.0
+                };
+            match dir {
+                Direction::LeftToRight => h = h.max(need),
+                Direction::TopToBottom => w = w.max(need),
+            }
+        }
+        rects_size.push((w, h));
+        match dir {
+            Direction::LeftToRight => {
+                verts[i].ext_a = w;
+                verts[i].ext_c = h;
+            }
+            Direction::TopToBottom => {
+                verts[i].ext_a = h;
+                verts[i].ext_c = w;
+            }
+        }
+    }
+
+    let mut layers: Vec<Vec<usize>> = vec![Vec::new(); layer_count];
+    for v in 0..total {
+        layers[layer_of[v]].push(v);
+    }
+    order_layers(&mut layers, &up, &down);
+    let c_top = if stacked {
+        gather_columns(&mut layers, &verts, &depth);
+        column_positions(&layers, &verts, opts.top_aligned)
+    } else {
+        cross_positions(&layers, &verts, &up, &down)
+    };
+
+    // Ports along the cross axis, for the start and the end of every chain.
+    let cross_mid = |v: usize| c_top[v] + verts[v].ext_c / 2.0;
+    let mut starts: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut ends: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (k, chain) in chains.iter().enumerate() {
+        starts[chain.verts[0]].push(k);
+        ends[chain.verts[chain.verts.len() - 1]].push(k);
+    }
+    let mut start_port = vec![0.0f32; chains.len()];
+    let mut end_port = vec![0.0f32; chains.len()];
+    for v in 0..n {
+        starts[v].sort_by(|&p, &q| {
+            let kp = cross_mid(chains[p].verts[1]);
+            let kq = cross_mid(chains[q].verts[1]);
+            kp.total_cmp(&kq).then(chains[p].edge.cmp(&chains[q].edge))
+        });
+        ends[v].sort_by(|&p, &q| {
+            let kp = cross_mid(chains[p].verts[chains[p].verts.len() - 2]);
+            let kq = cross_mid(chains[q].verts[chains[q].verts.len() - 2]);
+            kp.total_cmp(&kq).then(chains[p].edge.cmp(&chains[q].edge))
+        });
+        let top = c_top[v];
+        let ext = verts[v].ext_c;
+        let lo = top + ports_from(loops_at[v], ext);
+        for (slot, &k) in starts[v].iter().enumerate() {
+            start_port[k] =
+                lo + (top + ext - lo) * (slot + 1) as f32 / (starts[v].len() + 1) as f32;
+        }
+        for (slot, &k) in ends[v].iter().enumerate() {
+            end_port[k] = top + ext * (slot + 1) as f32 / (ends[v].len() + 1) as f32;
+        }
+    }
+    // The cross coordinate each chain has at each of its vertices.
+    let mut cross_of: Vec<Vec<f32>> = chains
+        .iter()
+        .enumerate()
+        .map(|(k, chain)| {
+            let last = chain.verts.len() - 1;
+            chain
+                .verts
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    if i == 0 {
+                        start_port[k]
+                    } else if i == last {
+                        end_port[k]
+                    } else {
+                        cross_mid(v)
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    // A lane that is all but level with the run before it joins that run exactly.
+    for lanes in cross_of.iter_mut() {
+        for i in 1..lanes.len() - 1 {
+            if (lanes[i] - lanes[i - 1]).abs() < 0.5 {
+                lanes[i] = lanes[i - 1];
+            }
+        }
+    }
+    separate_runs(
+        &chains,
+        &layer_of,
+        &verts,
+        &layers,
+        &c_top,
+        &loops_at,
+        &mut cross_of,
+    );
+
+    // Room each gap needs for the cardinalities and the label of an edge that has both.
+    let card_w =
+        |text: Option<&str>| text.map_or(0.0, |t| measure.width(t, TextStyle::Card).min(64.0));
+    let mut label_room = vec![0.0f32; layer_count];
+    if dir == Direction::LeftToRight {
+        for chain in &chains {
+            let edge = &spec.edges[chain.edge];
+            let wide = card_w(edge.ends[0].as_deref()).max(card_w(edge.ends[1].as_deref()));
+            if let (Some(text), true) = (edge.label.as_deref(), wide > 0.0) {
+                let natural = measure.width(text, TextStyle::EdgeLabel).min(120.0);
+                let first = layer_of[chain.verts[0]];
+                label_room[first] = label_room[first].max(natural + 8.0 + 2.0 * (wide + 4.0));
+            }
+        }
+    }
+
+    // Hops between neighbouring ranks and the vertical run each needs.
+    let band: Vec<f32> = layers
+        .iter()
+        .map(|l| l.iter().map(|&v| verts[v].ext_a).fold(0.0, f32::max))
+        .collect();
+    let mut hops: Vec<Vec<(f32, f32, usize, usize)>> = vec![Vec::new(); layer_count];
+    for (k, chain) in chains.iter().enumerate() {
+        for i in 0..chain.verts.len() - 1 {
+            let (p, q) = (cross_of[k][i], cross_of[k][i + 1]);
+            if p != q {
+                hops[layer_of[chain.verts[i]]].push((p.min(q), p.max(q), k, i));
+            }
+        }
+    }
+    // The first run of a gap starts past the self-loops of the boxes before it.
+    let lead_of: Vec<f32> = (0..layer_count)
+        .map(|l| {
+            let reach = layers[l]
+                .iter()
+                .filter_map(|&v| verts[v].real)
+                .filter(|&i| loops_at[i] > 0)
+                .map(|i| loop_reach(loops_at[i]) + 4.0)
+                .fold(0.0, f32::max);
+            dir.lead().max(reach)
+        })
+        .collect();
+    let mut slot_of: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut gap: Vec<f32> = Vec::new();
+    for (l, layer_hops) in hops
+        .iter_mut()
+        .enumerate()
+        .take(layer_count.saturating_sub(1))
+    {
+        layer_hops.sort_by(|x, y| {
+            x.0.total_cmp(&y.0)
+                .then(x.1.total_cmp(&y.1))
+                .then(x.2.cmp(&y.2))
+                .then(x.3.cmp(&y.3))
+        });
+        let mut slot_ends: Vec<f32> = Vec::new();
+        for &(lo, hi, k, i) in layer_hops.iter() {
+            let slot = match slot_ends.iter().position(|&end| end + 6.0 < lo) {
+                Some(s) => {
+                    slot_ends[s] = hi;
+                    s
+                }
+                None => {
+                    slot_ends.push(hi);
+                    slot_ends.len() - 1
+                }
+            };
+            slot_of.insert((k, i), slot);
+        }
+        gap.push(
+            dir.base_gap()
+                .max(lead_of[l] + slot_ends.len() as f32 * STEP + END_PAD)
+                .max(label_room[l]),
+        );
+    }
+    let mut band_start = vec![0.0f32; layer_count];
+    for l in 1..layer_count {
+        band_start[l] = band_start[l - 1] + band[l - 1] + gap[l - 1];
+    }
+    let band_end = |l: usize| band_start[l] + band[l];
+
+    // Rectangles of the nodes.
+    let rects: Vec<Rect> = (0..n)
+        .map(|v| {
+            let (w, h) = rects_size[v];
+            let p = dir.to_xy(band_start[layer_of[v]], c_top[v]);
+            Rect {
+                x: p.x,
+                y: p.y,
+                w,
+                h,
+            }
+        })
+        .collect();
+
+    // Routes.
+    let mut geos: Vec<Option<EdgeGeo>> = vec![None; spec.edges.len()];
+    // Labels wait until every cardinality is down, then each takes the first free place.
+    let mut texts = Texts::default();
+    for (k, chain) in chains.iter().enumerate() {
+        let edge = &spec.edges[chain.edge];
+        let mut pts: Vec<(f32, f32)> = Vec::new();
+        for i in 0..chain.verts.len() - 1 {
+            let (u, w) = (chain.verts[i], chain.verts[i + 1]);
+            let exit_a = if verts[u].real.is_some() {
+                band_start[layer_of[u]] + verts[u].ext_a
+            } else {
+                band_end(layer_of[u])
+            };
+            let enter_a = band_start[layer_of[w]];
+            let (p, q) = (cross_of[k][i], cross_of[k][i + 1]);
+            pts.push((exit_a, p));
+            if let Some(&slot) = slot_of.get(&(k, i)) {
+                let a = band_end(layer_of[u]) + lead_of[layer_of[u]] + slot as f32 * STEP;
+                pts.push((a, p));
+                pts.push((a, q));
+            }
+            pts.push((enter_a, q));
+        }
+        let mut points: Vec<Point> = simplify(&pts)
+            .into_iter()
+            .map(|(a, c)| dir.to_xy(a, c))
+            .collect();
+        if chain.reversed {
+            points.reverse();
+        }
+
+        // Labels: the edge's own in the first gap, the cardinalities at the two ends.
+        let first_layer = layer_of[chain.verts[0]];
+        let last_layer = layer_of[chain.verts[chain.verts.len() - 1]];
+        let (start_at, end_at) = (cross_of[k][0], cross_of[k][chain.verts.len() - 1]);
+        let near_start = end_label(
+            measure,
+            dir,
+            edge.ends[usize::from(chain.reversed)].as_deref(),
+            true,
+            band_start[first_layer] + verts[chain.verts[0]].ext_a,
+            start_at,
+        );
+        let near_end = end_label(
+            measure,
+            dir,
+            edge.ends[usize::from(!chain.reversed)].as_deref(),
+            false,
+            band_start[last_layer],
+            end_at,
+        );
+        let wide = card_w(edge.ends[0].as_deref()).max(card_w(edge.ends[1].as_deref()));
+        if let Some(text) = edge.label.as_deref() {
+            let label = edge_label(
+                measure,
+                dir,
+                text,
+                band_end(first_layer),
+                gap.get(first_layer).copied(),
+                start_at,
+                (wide > 0.0).then_some(wide),
+            );
+            texts.offer(chain.edge, (first_layer, start_at), label);
+        }
+        let mut tags = [None, None];
+        tags[usize::from(chain.reversed)] = near_start;
+        tags[usize::from(!chain.reversed)] = near_end;
+        texts.hold(tags.iter().flatten());
+        geos[chain.edge] = Some(EdgeGeo {
+            index: chain.edge,
+            points,
+            arrow: opts.arrow,
+            label: None,
+            ends: tags,
+            style: edge.style,
+            change: edge.change,
+            history: edge.history,
+        });
+    }
+
+    // Edges between a node and the node below it run straight down their column.
+    let mut columns: Vec<Column> = Vec::new();
+    for &(edge, a, b) in &verticals {
+        let key = if c_top[a] <= c_top[b] { (a, b) } else { (b, a) };
+        match columns.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, list)) => list.push((edge, a)),
+            None => columns.push((key, vec![(edge, a)])),
+        }
+    }
+    for ((upper, lower), list) in &columns {
+        let layer = layer_of[*upper];
+        let (w, _) = rects_size[*upper];
+        let across = w.min(rects_size[*lower].0);
+        let (y_top, y_bottom) = (c_top[*upper] + verts[*upper].ext_c, c_top[*lower]);
+        let room = band_start
+            .get(layer + 1)
+            .map_or(f32::INFINITY, |next| next - 4.0);
+        for (j, &(i, from)) in list.iter().enumerate() {
+            let edge = &spec.edges[i];
+            let x = band_start[layer] + across * (j + 1) as f32 / (list.len() + 1) as f32;
+            let mut points = vec![Point { x, y: y_top }, Point { x, y: y_bottom }];
+            let from_top = from == *upper;
+            if !from_top {
+                points.reverse();
+            }
+            let tops = [
+                card_text(measure, edge.ends[usize::from(!from_top)].as_deref()),
+                card_text(measure, edge.ends[usize::from(from_top)].as_deref()),
+            ];
+            let mut ends = [None, None];
+            let mut span = (y_top + 2.0, y_bottom - 2.0);
+            if let Some(mut card) = tops[0].clone() {
+                card.at = Point {
+                    x: x + 4.0,
+                    y: y_top + 2.0,
+                };
+                span.0 = card.rect().bottom() + 2.0;
+                ends[usize::from(!from_top)] = Some(card);
+            }
+            if let Some(mut card) = tops[1].clone() {
+                card.at = Point {
+                    x: x + 4.0,
+                    y: y_bottom - 2.0 - card.height,
+                };
+                span.1 = card.at.y - 2.0;
+                ends[usize::from(from_top)] = Some(card);
+            }
+            texts.hold(ends.iter().flatten());
+            if let Some(text) = edge.label.as_deref() {
+                let label = column_label(measure, text, x + 6.0, room, span);
+                texts.offer(i, (layer, y_top), label);
+            }
+            geos[i] = Some(EdgeGeo {
+                index: i,
+                points,
+                arrow: opts.arrow,
+                label: None,
+                ends,
+                style: edge.style,
+                change: edge.change,
+                history: edge.history,
+            });
+        }
+    }
+
+    // Self-loops leave the far side of the box and come back to it.
+    let mut seen = vec![0usize; n];
+    for &(i, node) in &loops {
+        let edge = &spec.edges[i];
+        let nth = seen[node];
+        seen[node] += 1;
+        let far = band_start[layer_of[node]] + verts[node].ext_a;
+        let out = far + loop_reach(nth + 1);
+        let (y1, y2) = loop_rows(c_top[node], verts[node].ext_c, loops_at[node], nth);
+        let points = vec![
+            dir.to_xy(far, y1),
+            dir.to_xy(out, y1),
+            dir.to_xy(out, y2),
+            dir.to_xy(far, y2),
+        ];
+        if let Some(text) = edge.label.as_deref() {
+            let label = loop_label(measure, dir, text, far, out, (y1, y2), nth);
+            texts.offer(i, (layer_of[node], y1), label);
+        }
+        geos[i] = Some(EdgeGeo {
+            index: i,
+            points,
+            arrow: opts.arrow,
+            label: None,
+            ends: [None, None],
+            style: edge.style,
+            change: edge.change,
+            history: edge.history,
+        });
+    }
+
+    for (edge, label) in texts.place() {
+        if let Some(Some(geo)) = geos.get_mut(edge) {
+            geo.label = Some(label);
+        }
+    }
+
+    Placed {
+        rects,
+        edges: geos.into_iter().flatten().collect(),
+    }
+}
+
+/// The labels of edges that ask for a place, and the texts already down. A label goes in when
+/// it overlaps nothing placed before it, so a crowded port leaves a label out instead of
+/// printing it over another.
+#[derive(Default)]
+struct Texts {
+    taken: Vec<Rect>,
+    offers: Vec<(usize, (usize, f32), TextLines)>,
+}
+
+impl Texts {
+    /// Marks texts that are always drawn.
+    fn hold<'a>(&mut self, texts: impl Iterator<Item = &'a TextLines>) {
+        self.taken.extend(texts.map(TextLines::rect));
+    }
+
+    /// Asks for a place for the label of `edge`; `at` orders the asks: the rank, then where the
+    /// edge leaves its box.
+    fn offer(&mut self, edge: usize, at: (usize, f32), label: TextLines) {
+        if !label.lines.is_empty() {
+            self.offers.push((edge, at, label));
+        }
+    }
+
+    fn place(mut self) -> Vec<(usize, TextLines)> {
+        self.offers.sort_by(|a, b| {
+            a.1.0
+                .cmp(&b.1.0)
+                .then(a.1.1.total_cmp(&b.1.1))
+                .then(a.0.cmp(&b.0))
+        });
+        let mut placed = Vec::new();
+        for (edge, _, label) in self.offers {
+            let rect = label.rect();
+            if self.taken.iter().any(|t| t.intersects(&rect)) {
+                continue;
+            }
+            self.taken.push(rect);
+            placed.push((edge, label));
+        }
+        placed
+    }
+}
+
+/// Moves a lane or a port by a few pixels where two edges would otherwise run along one line
+/// in the same gap, so no two routes lie on top of each other.
+fn separate_runs(
+    chains: &[Chain],
+    layer_of: &[usize],
+    verts: &[Vertex],
+    layers: &[Vec<usize>],
+    c_top: &[f32],
+    loops_at: &[usize],
+    cross_of: &mut [Vec<f32>],
+) {
+    let mut by_gap: Vec<Vec<(usize, usize)>> = vec![Vec::new(); layers.len()];
+    for (k, chain) in chains.iter().enumerate() {
+        for i in 0..chain.verts.len() - 1 {
+            by_gap[layer_of[chain.verts[i]]].push((k, i));
+        }
+    }
+    // How many of the four pairs of runs of two hops lie on one line.
+    let shared = |cross_of: &[Vec<f32>], a: (usize, usize), b: (usize, usize)| -> usize {
+        let (p1, q1) = (cross_of[a.0][a.1], cross_of[a.0][a.1 + 1]);
+        let (p2, q2) = (cross_of[b.0][b.1], cross_of[b.0][b.1 + 1]);
+        [(p1, p2), (q1, q2), (p1, q2), (q1, p2)]
+            .iter()
+            .filter(|&&(x, y)| (x - y).abs() < 1.0)
+            .count()
+    };
+    let clashes = |cross_of: &[Vec<f32>], k: usize| -> usize {
+        let mut count = 0;
+        for i in 0..chains[k].verts.len() - 1 {
+            for &other in &by_gap[layer_of[chains[k].verts[i]]] {
+                if other.0 != k {
+                    count += shared(cross_of, (k, i), other);
+                }
+            }
+        }
+        count
+    };
+    // Where vertex `at` of chain `k` may stand: inside its box, or clear of the boxes of its
+    // column when it is a lane.
+    let allowed = |k: usize, at: usize, y: f32| -> bool {
+        let v = chains[k].verts[at];
+        if let Some(node) = verts[v].real {
+            let ext = verts[v].ext_c;
+            let free = ports_from(loops_at[node], ext).max(3.0);
+            return y >= c_top[v] + free && y <= c_top[v] + ext - 3.0;
+        }
+        layers[layer_of[v]].iter().all(|&w| {
+            verts[w].real.is_none() || y < c_top[w] - 4.0 || y > c_top[w] + verts[w].ext_c + 4.0
+        })
+    };
+    for _ in 0..64 {
+        let mut moved = false;
+        for gap in &by_gap {
+            'gap: for (x, &a) in gap.iter().enumerate() {
+                for &b in &gap[x + 1..] {
+                    if a.0 == b.0 || shared(cross_of, a, b) == 0 {
+                        continue;
+                    }
+                    // The ends that stand in the way: lanes first, then the later edge.
+                    let mut slots = [(b.0, b.1), (b.0, b.1 + 1), (a.0, a.1), (a.0, a.1 + 1)];
+                    slots.sort_by_key(|&(k, at)| {
+                        let lane = verts[chains[k].verts[at]].real.is_none();
+                        (Reverse(lane), Reverse(k))
+                    });
+                    for (k, at) in slots {
+                        let before = clashes(cross_of, k);
+                        if before == 0 {
+                            continue;
+                        }
+                        let home = cross_of[k][at];
+                        for step in 1..=6 {
+                            for sign in [1.0, -1.0] {
+                                let y = home + sign * 4.0 * step as f32;
+                                let beside = |j: usize| (y - cross_of[k][j]).abs() < 1.0;
+                                let near = (at > 0 && beside(at - 1))
+                                    || (at + 1 < cross_of[k].len() && beside(at + 1));
+                                if near || !allowed(k, at, y) {
+                                    continue;
+                                }
+                                cross_of[k][at] = y;
+                                if clashes(cross_of, k) < before {
+                                    moved = true;
+                                    continue 'gap;
+                                }
+                            }
+                        }
+                        cross_of[k][at] = home;
+                    }
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+}
+
+/// Flags the edges to reverse so the graph has no cycle: the edges that close a loop in a
+/// depth-first walk that follows the nodes and edges in spec order.
+fn back_edges(n: usize, links: &[(usize, usize, usize)]) -> Vec<bool> {
+    let mut out: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+    for (k, &(_, a, b)) in links.iter().enumerate() {
+        out[a].push((k, b));
+    }
+    let mut flagged = vec![false; links.len()];
+    // 0 = not seen, 1 = on the walk's path, 2 = finished.
+    let mut state = vec![0u8; n];
+    for root in 0..n {
+        if state[root] != 0 {
+            continue;
+        }
+        state[root] = 1;
+        let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+        while let Some(&(u, next)) = stack.last() {
+            if next < out[u].len() {
+                let (k, v) = out[u][next];
+                if let Some(top) = stack.last_mut() {
+                    top.1 += 1;
+                }
+                match state[v] {
+                    0 => {
+                        state[v] = 1;
+                        stack.push((v, 0));
+                    }
+                    1 => flagged[k] = true,
+                    _ => {}
+                }
+            } else {
+                state[u] = 2;
+                stack.pop();
+            }
+        }
+    }
+    flagged
+}
+
+/// The rank of each node: the longest path from a node with no incoming edge.
+fn ranks(n: usize, dag: &[(usize, usize)]) -> Vec<usize> {
+    let mut indegree = vec![0usize; n];
+    let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(u, v) in dag {
+        indegree[v] += 1;
+        out[u].push(v);
+    }
+    let mut ready: VecDeque<usize> = (0..n).filter(|&v| indegree[v] == 0).collect();
+    let mut rank = vec![0usize; n];
+    while let Some(u) = ready.pop_front() {
+        for &v in &out[u] {
+            rank[v] = rank[v].max(rank[u] + 1);
+            indegree[v] -= 1;
+            if indegree[v] == 0 {
+                ready.push_back(v);
+            }
+        }
+    }
+    rank
+}
+
+/// Orders the vertices inside each layer with barycenter sweeps, down then up, `SWEEPS` times
+/// in all; a tie keeps the order the vertices already had.
+fn order_layers(layers: &mut [Vec<usize>], up: &[Vec<usize>], down: &[Vec<usize>]) {
+    let mut pos = vec![0usize; up.len()];
+    let refresh = |layer: &[usize], pos: &mut [usize]| {
+        for (i, &v) in layer.iter().enumerate() {
+            pos[v] = i;
+        }
+    };
+    for layer in layers.iter() {
+        refresh(layer, &mut pos);
+    }
+    let count = layers.len();
+    for sweep in 0..SWEEPS {
+        let order: Vec<usize> = if sweep % 2 == 0 {
+            (1..count).collect()
+        } else {
+            (0..count.saturating_sub(1)).rev().collect()
+        };
+        let nbrs = if sweep % 2 == 0 { up } else { down };
+        for l in order {
+            let mut keyed: Vec<(f64, usize, usize)> = layers[l]
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    let ns = &nbrs[v];
+                    let key = if ns.is_empty() {
+                        i as f64
+                    } else {
+                        ns.iter().map(|&w| pos[w] as f64).sum::<f64>() / ns.len() as f64
+                    };
+                    (key, i, v)
+                })
+                .collect();
+            keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            layers[l] = keyed.into_iter().map(|(_, _, v)| v).collect();
+            refresh(&layers[l], &mut pos);
+        }
+    }
+}
+
+/// Where each vertex starts on the cross axis. Layers start centred on each other, then a few
+/// rounds pull every vertex towards the middle of its neighbours without breaking the gaps.
+fn cross_positions(
+    layers: &[Vec<usize>],
+    verts: &[Vertex],
+    up: &[Vec<usize>],
+    down: &[Vec<usize>],
+) -> Vec<f32> {
+    let gap_between = |a: usize, b: usize| {
+        if verts[a].real.is_none() || verts[b].real.is_none() {
+            LANE_GAP
+        } else {
+            NODE_GAP
+        }
+    };
+    let extent = |layer: &[usize]| -> f32 {
+        let mut total = 0.0;
+        for (i, &v) in layer.iter().enumerate() {
+            total += verts[v].ext_c;
+            if i > 0 {
+                total += gap_between(layer[i - 1], v);
+            }
+        }
+        total
+    };
+    let widest = layers.iter().map(|l| extent(l)).fold(0.0, f32::max);
+    let mut c = vec![0.0f32; verts.len()];
+    for layer in layers {
+        let mut at = (widest - extent(layer)) / 2.0;
+        for (i, &v) in layer.iter().enumerate() {
+            if i > 0 {
+                at += gap_between(layer[i - 1], v);
+            }
+            c[v] = at;
+            at += verts[v].ext_c;
+        }
+    }
+    for _ in 0..RELAX_ROUNDS {
+        for pass in 0..2 {
+            let order: Vec<usize> = if pass == 0 {
+                (1..layers.len()).collect()
+            } else {
+                (0..layers.len().saturating_sub(1)).rev().collect()
+            };
+            let nbrs = if pass == 0 { up } else { down };
+            for l in order {
+                let layer = &layers[l];
+                let desired: Vec<f32> = layer
+                    .iter()
+                    .map(|&v| {
+                        if nbrs[v].is_empty() {
+                            c[v]
+                        } else {
+                            let mid = nbrs[v]
+                                .iter()
+                                .map(|&w| c[w] + verts[w].ext_c / 2.0)
+                                .sum::<f32>()
+                                / nbrs[v].len() as f32;
+                            mid - verts[v].ext_c / 2.0
+                        }
+                    })
+                    .collect();
+                let m = layer.len();
+                let mut forward = desired.clone();
+                for i in 1..m {
+                    let floor = forward[i - 1]
+                        + verts[layer[i - 1]].ext_c
+                        + gap_between(layer[i - 1], layer[i]);
+                    forward[i] = forward[i].max(floor);
+                }
+                let mut backward = desired;
+                for i in (0..m.saturating_sub(1)).rev() {
+                    let ceil = backward[i + 1]
+                        - gap_between(layer[i], layer[i + 1])
+                        - verts[layer[i]].ext_c;
+                    backward[i] = backward[i].min(ceil);
+                }
+                for (i, &v) in layer.iter().enumerate() {
+                    c[v] = (forward[i] + backward[i]) / 2.0;
+                }
+            }
+        }
+    }
+    c
+}
+
+/// Puts the nodes of each column next to each other, the spine node first, with the lanes of
+/// the long edges that pass through the column above or below them.
+fn gather_columns(layers: &mut [Vec<usize>], verts: &[Vertex], depth: &[usize]) {
+    for layer in layers.iter_mut() {
+        let mut members: Vec<(usize, usize)> = layer
+            .iter()
+            .enumerate()
+            .filter_map(|(at, &v)| verts[v].real.map(|node| (depth[node], at)))
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let middle = members.iter().map(|&(_, at)| at as f32).sum::<f32>() / members.len() as f32;
+        members.sort();
+        let stack: Vec<usize> = members.iter().map(|&(_, at)| layer[at]).collect();
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        for (at, &v) in layer.iter().enumerate() {
+            if verts[v].real.is_none() {
+                if (at as f32) < middle {
+                    before.push(v);
+                } else {
+                    after.push(v);
+                }
+            }
+        }
+        *layer = before.into_iter().chain(stack).chain(after).collect();
+    }
+}
+
+/// Where each vertex starts on the cross axis when columns hold stacks: the spine nodes are
+/// centred on one line (or all starting at the same one), the nodes that hang below them follow `STACK_GAP` apart, and the lanes
+/// of the long edges keep `LANE_GAP` from the stack, above or below.
+fn column_positions(layers: &[Vec<usize>], verts: &[Vertex], top_aligned: bool) -> Vec<f32> {
+    let mut c = vec![0.0f32; verts.len()];
+    for layer in layers {
+        let Some(first) = layer.iter().position(|&v| verts[v].real.is_some()) else {
+            continue;
+        };
+        let count = layer.iter().filter(|&&v| verts[v].real.is_some()).count();
+        let mut y = if top_aligned {
+            0.0
+        } else {
+            -verts[layer[first]].ext_c / 2.0
+        };
+        let top = y;
+        for (i, &v) in layer[first..first + count].iter().enumerate() {
+            if i > 0 {
+                y += STACK_GAP;
+            }
+            c[v] = y;
+            y += verts[v].ext_c;
+        }
+        for (j, &lane) in layer[..first].iter().enumerate() {
+            c[lane] = top - LANE_GAP * (first - j) as f32;
+        }
+        for (j, &lane) in layer[first + count..].iter().enumerate() {
+            c[lane] = y + LANE_GAP * (j + 1) as f32;
+        }
+    }
+    c
+}
+
+/// Drops repeated points and the middle point of three in a line.
+fn simplify(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    for &p in points {
+        if out.last() == Some(&p) {
+            continue;
+        }
+        while out.len() >= 2 {
+            let (a, b) = (out[out.len() - 2], out[out.len() - 1]);
+            if (a.0 == b.0 && b.0 == p.0) || (a.1 == b.1 && b.1 == p.1) {
+                out.pop();
+            } else {
+                break;
+            }
+        }
+        out.push(p);
+    }
+    out
+}
+
+/// The label of an edge, in the free space at the start of the first gap after the source; when
+/// the edge has cardinalities (`ends_w` is the widest) it sits under the route, between them.
+fn edge_label(
+    measure: &dyn Measure,
+    dir: Direction,
+    text_in: &str,
+    gap_start: f32,
+    gap: Option<f32>,
+    port: f32,
+    ends_w: Option<f32>,
+) -> TextLines {
+    let style = TextStyle::EdgeLabel;
+    match dir {
+        Direction::LeftToRight => {
+            let width = gap.unwrap_or_else(|| dir.base_gap());
+            let cap = match ends_w {
+                Some(w) => width - 8.0 - 2.0 * (w + 4.0),
+                None => width - 8.0,
+            };
+            let lines = text::wrap(measure, text_in, style, cap.max(24.0), 4);
+            let mut block = text::block(measure, lines, style, Point::default(), None, Align::Left);
+            block.at = match ends_w {
+                Some(_) => Point {
+                    x: gap_start + (width - block.width) / 2.0,
+                    y: port + 2.0,
+                },
+                None => Point {
+                    x: gap_start + 4.0,
+                    y: port - 2.0 - block.height,
+                },
+            };
+            block
+        }
+        Direction::TopToBottom => {
+            let lines = text::wrap(measure, text_in, style, 160.0, 2);
+            let mut block = text::block(measure, lines, style, Point::default(), None, Align::Left);
+            block.at = Point {
+                x: port + 6.0,
+                y: gap_start + 4.0,
+            };
+            block
+        }
+    }
+}
+
+/// A cardinality as a block of text, not yet placed.
+fn card_text(measure: &dyn Measure, text_in: Option<&str>) -> Option<TextLines> {
+    let style = TextStyle::Card;
+    let lines = text::wrap(measure, text_in?, style, 64.0, 1);
+    if lines.is_empty() {
+        return None;
+    }
+    Some(text::block(
+        measure,
+        lines,
+        style,
+        Point::default(),
+        None,
+        Align::Left,
+    ))
+}
+
+/// The label of an edge that runs straight down a column, to the right of the run, centred in
+/// the free span `(top, bottom)` between the two boxes and not reaching past `right`.
+fn column_label(
+    measure: &dyn Measure,
+    text_in: &str,
+    x: f32,
+    right: f32,
+    (top, bottom): (f32, f32),
+) -> TextLines {
+    let style = TextStyle::EdgeLabel;
+    let lines_fit = ((bottom - top) / measure.line_height(style))
+        .floor()
+        .max(0.0) as usize;
+    let cap = (right - x).clamp(24.0, 160.0);
+    let lines = text::wrap(measure, text_in, style, cap, lines_fit.min(4));
+    let mut block = text::block(measure, lines, style, Point::default(), None, Align::Left);
+    block.at = Point {
+        x,
+        y: top + ((bottom - top) - block.height) / 2.0,
+    };
+    block
+}
+
+/// A cardinality next to a box: above the route when it runs sideways, beside it when it
+/// runs down. `start` is the end where the route leaves its box.
+fn end_label(
+    measure: &dyn Measure,
+    dir: Direction,
+    text_in: Option<&str>,
+    start: bool,
+    edge_a: f32,
+    port: f32,
+) -> Option<TextLines> {
+    let mut block = card_text(measure, text_in)?;
+    block.at = match (dir, start) {
+        (Direction::LeftToRight, true) => Point {
+            x: edge_a + 4.0,
+            y: port - 2.0 - block.height,
+        },
+        (Direction::LeftToRight, false) => Point {
+            x: edge_a - 4.0 - block.width,
+            y: port - 2.0 - block.height,
+        },
+        (Direction::TopToBottom, true) => Point {
+            x: port + 4.0,
+            y: edge_a + 2.0,
+        },
+        (Direction::TopToBottom, false) => Point {
+            x: port + 4.0,
+            y: edge_a - 2.0 - block.height,
+        },
+    };
+    Some(block)
+}
+
+/// The label of a self-loop, beside its far side.
+fn loop_label(
+    measure: &dyn Measure,
+    dir: Direction,
+    text_in: &str,
+    far: f32,
+    out: f32,
+    (y1, y2): (f32, f32),
+    nth: usize,
+) -> TextLines {
+    let style = TextStyle::EdgeLabel;
+    match dir {
+        Direction::LeftToRight => {
+            let cap = (68.0 - 6.0 * nth.min(4) as f32).max(20.0);
+            let lines = text::wrap(measure, text_in, style, cap, 4);
+            let mut block = text::block(measure, lines, style, Point::default(), None, Align::Left);
+            block.at = Point {
+                x: out + 4.0,
+                y: y1,
+            };
+            block
+        }
+        Direction::TopToBottom => {
+            let lines = text::wrap(measure, text_in, style, 160.0, 2);
+            let mut block = text::block(measure, lines, style, Point::default(), None, Align::Left);
+            block.at = Point {
+                x: y2 + 6.0,
+                y: far + 4.0,
+            };
+            block
+        }
+    }
+}

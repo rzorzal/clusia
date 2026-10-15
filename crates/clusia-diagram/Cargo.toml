@@ -1,0 +1,17 @@
+[package]
+name = "clusia-diagram"
+description = "Clúsia diagram layout: a DiagramSpec in, boxes with text and orthogonal routes out"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+clusia-core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

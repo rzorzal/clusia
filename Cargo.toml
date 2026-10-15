@@ -20,6 +20,7 @@ clusia-git = { path = "crates/clusia-git" }
 clusia-analytics = { path = "crates/clusia-analytics" }
 clusia-view = { path = "crates/clusia-view" }
 clusia-highlight = { path = "crates/clusia-highlight" }
+clusia-diagram = { path = "crates/clusia-diagram" }
 clusia-harness = { path = "crates/clusia-harness" }
 clusiad = { path = "crates/clusiad" }
 security-framework = "3.7.0"
