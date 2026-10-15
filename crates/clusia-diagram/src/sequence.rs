@@ -325,6 +325,13 @@ mod tests {
             vec![false, false, false, false, false, true, true, true]
         );
         assert_eq!((g.boxes[0].rect.x, g.boxes[0].rect.y), (MARGIN, MARGIN));
+        for m in &g.messages {
+            assert!(
+                !m.label.lines.is_empty(),
+                "message {} keeps its label",
+                m.index
+            );
+        }
         let first_gap = g.messages[1].y - g.messages[0].y;
         assert_eq!(first_gap, 35.0, "one-line labels are 35 px apart");
         assert_eq!(g.boxes[0].title.align, Align::Center);

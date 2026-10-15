@@ -682,28 +682,87 @@ pub(crate) fn place(
     }
 
     let mut edges: Vec<EdgeGeo> = geos.into_iter().flatten().collect();
-    clear_cardinalities(&mut edges);
+    settle_cardinalities(&mut edges, &rects);
     Placed { rects, edges }
 }
 
-/// Leaves out a cardinality that touches the route of another edge: unlike a label it has no
-/// other place to go, and printing it over a line would hide both.
-fn clear_cardinalities(edges: &mut [EdgeGeo]) {
+/// Keeps every cardinality clear of other routes: one that touches the route of another edge
+/// is nudged along its own end, in 4 px steps, and flipped to the other side of the route, to
+/// the first place that overlaps no box and no text and touches no other route. A cardinality
+/// is data (`1` or `0..N`), so it is left out only when no such place exists.
+fn settle_cardinalities(edges: &mut [EdgeGeo], boxes: &[Rect]) {
     let routes: Vec<(usize, Vec<Point>)> =
         edges.iter().map(|e| (e.index, e.points.clone())).collect();
-    for edge in edges.iter_mut() {
-        let own = edge.index;
-        for end in &mut edge.ends {
-            let zone = match end {
-                Some(text) => text.rect().inflate(1.0),
-                None => continue,
+    let crossed = |text: &TextLines, own: usize| {
+        let zone = text.rect().inflate(1.0);
+        routes.iter().any(|(other, points)| {
+            *other != own && points.windows(2).any(|w| touches(w[0], w[1], zone))
+        })
+    };
+    for k in 0..edges.len() {
+        for slot in 0..2 {
+            let Some(text) = edges[k].ends[slot].clone() else {
+                continue;
             };
-            let crossed = routes.iter().any(|(other, points)| {
-                *other != own && points.windows(2).any(|w| touches(w[0], w[1], zone))
-            });
-            if crossed {
-                *end = None;
+            let own = edges[k].index;
+            if !crossed(&text, own) {
+                continue;
             }
+            let points = &edges[k].points;
+            let (first, last) = (points[0], points[points.len() - 1]);
+            let (anchor, next) = if slot == 0 {
+                (first, points[1])
+            } else {
+                (last, points[points.len() - 2])
+            };
+            let along_x = (anchor.y - next.y).abs() < 1e-3;
+            let others: Vec<Rect> = edges
+                .iter()
+                .flat_map(|e| e.label.iter().chain(e.ends.iter().flatten()))
+                .map(TextLines::rect)
+                .filter(|r| *r != text.rect())
+                .collect();
+            let moved = |dx: f32, dy: f32, flip: bool| {
+                let mut t = text.clone();
+                t.at = Point {
+                    x: text.at.x + dx,
+                    y: text.at.y + dy,
+                };
+                if flip {
+                    if along_x {
+                        t.at.y = 2.0 * anchor.y - (t.at.y + t.height);
+                    } else {
+                        t.at.x = 2.0 * anchor.x - (t.at.x + t.width);
+                    }
+                }
+                t
+            };
+            let mut found = None;
+            'search: for step in 0..=6 {
+                let d = 4.0 * step as f32;
+                for flip in [false, true] {
+                    for sign in [1.0, -1.0] {
+                        if step == 0 && sign < 0.0 {
+                            continue;
+                        }
+                        let (dx, dy) = if along_x {
+                            (sign * d, 0.0)
+                        } else {
+                            (0.0, sign * d)
+                        };
+                        let t = moved(dx, dy, flip);
+                        let rect = t.rect();
+                        if !crossed(&t, own)
+                            && !boxes.iter().any(|b| b.intersects(&rect))
+                            && !others.iter().any(|o| o.intersects(&rect))
+                        {
+                            found = Some(t);
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            edges[k].ends[slot] = found;
         }
     }
 }
@@ -1276,5 +1335,77 @@ fn loop_label(
             };
             block
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card(text: &str, at: (f32, f32)) -> TextLines {
+        text::block(
+            &crate::measure::Fonts,
+            vec![text.to_string()],
+            TextStyle::Card,
+            Point { x: at.0, y: at.1 },
+            None,
+            Align::Left,
+        )
+    }
+
+    fn run(index: usize, points: &[(f32, f32)], start: Option<TextLines>) -> EdgeGeo {
+        EdgeGeo {
+            index,
+            points: points.iter().map(|&(x, y)| Point { x, y }).collect(),
+            arrow: Arrow::None,
+            label: None,
+            ends: [start, None],
+            style: Default::default(),
+            change: Default::default(),
+            history: None,
+        }
+    }
+
+    #[test]
+    fn a_cardinality_clear_of_other_routes_stays_put() {
+        let tag = card("1", (4.0, 80.0));
+        let mut edges = vec![run(0, &[(0.0, 100.0), (200.0, 100.0)], Some(tag.clone()))];
+        settle_cardinalities(&mut edges, &[]);
+        assert_eq!(edges[0].ends[0], Some(tag));
+    }
+
+    #[test]
+    fn a_cardinality_on_another_route_is_nudged_along_its_end_and_kept() {
+        // A vertical route passes through the place the tag asked for.
+        let tag = card("0..N", (4.0, 84.0));
+        let mut edges = vec![
+            run(0, &[(0.0, 100.0), (200.0, 100.0)], Some(tag.clone())),
+            run(1, &[(8.0, 40.0), (8.0, 160.0)], None),
+        ];
+        settle_cardinalities(&mut edges, &[]);
+        let moved = edges[0].ends[0].as_ref().expect("nudged, not dropped");
+        assert_eq!(moved.lines, tag.lines);
+        assert_ne!(moved.at, tag.at);
+        let zone = moved.rect().inflate(1.0);
+        for w in edges[1].points.windows(2) {
+            assert!(!touches(w[0], w[1], zone));
+        }
+    }
+
+    #[test]
+    fn a_cardinality_with_no_place_left_is_dropped() {
+        let tag = card("1", (4.0, 84.0));
+        let mut edges = vec![
+            run(0, &[(0.0, 100.0), (200.0, 100.0)], Some(tag)),
+            run(1, &[(8.0, 40.0), (8.0, 160.0)], None),
+        ];
+        let wall = Rect {
+            x: -100.0,
+            y: -100.0,
+            w: 600.0,
+            h: 600.0,
+        };
+        settle_cardinalities(&mut edges, &[wall]);
+        assert!(edges[0].ends[0].is_none());
     }
 }

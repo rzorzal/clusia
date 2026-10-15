@@ -866,6 +866,14 @@ mod tests {
         );
         assert_eq!(open.h, 56.0);
         assert_eq!(g.edges.len(), 6);
+        for e in &g.edges {
+            assert_eq!(
+                e.label.is_some(),
+                s.edges[e.index].label.is_some(),
+                "edge {} keeps exactly the label the spec gives it",
+                e.index
+            );
+        }
         assert!(frame.rect.x > MARGIN);
         assert_no_text_clash(&g);
     }
@@ -1083,5 +1091,64 @@ mod tests {
         let g = layout(&s, &Fonts);
         assert!(started.elapsed().as_millis() <= if cfg!(debug_assertions) { 200 } else { 20 });
         check(&s, &g);
+    }
+
+    fn labelled(index: usize, points: [(f32, f32); 2], at: (f32, f32)) -> EdgeGeo {
+        let text = crate::text::block(
+            &Fonts,
+            vec!["uses".to_string()],
+            TextStyle::EdgeLabel,
+            Point { x: at.0, y: at.1 },
+            None,
+            Align::Left,
+        );
+        EdgeGeo {
+            index,
+            points: points.iter().map(|&(x, y)| Point { x, y }).collect(),
+            arrow: Arrow::End,
+            label: Some(text),
+            ends: [None, None],
+            style: Default::default(),
+            change: Default::default(),
+            history: None,
+        }
+    }
+
+    #[test]
+    fn a_label_in_a_clear_place_stays_where_it_was_asked() {
+        let mut edges = vec![labelled(0, [(0.0, 100.0), (200.0, 100.0)], (10.0, 84.0))];
+        let before = edges[0].label.clone();
+        settle_labels(&mut edges, Vec::new());
+        assert_eq!(edges[0].label, before);
+    }
+
+    #[test]
+    fn a_label_on_another_route_is_moved_clear_and_one_with_no_room_is_dropped() {
+        // The second edge runs through the place asked for by the first one's label.
+        let mut edges = vec![
+            labelled(0, [(0.0, 100.0), (200.0, 100.0)], (10.0, 84.0)),
+            labelled(1, [(30.0, 60.0), (30.0, 140.0)], (300.0, 300.0)),
+        ];
+        let blocker = edges[1].label.as_ref().expect("label").rect();
+        settle_labels(&mut edges, Vec::new());
+        let moved = edges[0].label.as_ref().expect("moved, not dropped").rect();
+        assert!(
+            moved.x != 10.0 || moved.y != 84.0,
+            "it left the crossed place"
+        );
+        assert!(!moved.intersects(&blocker));
+        for w in edges[1].points.windows(2) {
+            assert!(!touches(w[0], w[1], moved.inflate(1.0)));
+        }
+        // Boxes all around leave nowhere to go.
+        let mut edges = vec![labelled(0, [(0.0, 100.0), (200.0, 100.0)], (10.0, 84.0))];
+        let wall = Rect {
+            x: -100.0,
+            y: -100.0,
+            w: 600.0,
+            h: 600.0,
+        };
+        settle_labels(&mut edges, vec![wall]);
+        assert!(edges[0].label.is_none());
     }
 }

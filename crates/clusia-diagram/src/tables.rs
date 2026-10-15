@@ -401,6 +401,14 @@ mod tests {
         );
         assert_eq!(file.x, token.x);
         assert!((file.y - token.bottom() - 72.0).abs() < 0.01);
+        for e in &g.edges {
+            assert!(e.label.is_some(), "edge {} keeps its label", e.index);
+            assert!(
+                e.ends.iter().all(Option::is_some),
+                "edge {} keeps both cardinalities",
+                e.index
+            );
+        }
         let saved = &g.edges[2];
         assert_eq!(saved.points.len(), 2, "straight down the column");
         assert_eq!(saved.points[0].x, saved.points[1].x);
@@ -436,6 +444,12 @@ mod tests {
         let g = layout(&s, &Fonts);
         check(&s, &g);
         assert_no_text_clash(&g);
+        let labels: Vec<&str> = g
+            .edges
+            .iter()
+            .map(|e| e.label.as_ref().expect("label").lines[0].as_str())
+            .collect();
+        assert_eq!(labels, vec!["returns", "owns 1"]);
         let top = g.boxes[0].rect.y;
         assert!(g.boxes.iter().all(|b| b.rect.y == top));
         assert!(g.boxes.windows(2).all(|w| w[0].rect.right() < w[1].rect.x));
