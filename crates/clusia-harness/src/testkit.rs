@@ -177,6 +177,16 @@ pub fn revalidation_block(json: serde_json::Value) -> String {
 }
 
 /// A fenced `clusia-pass` block holding `json`.
+/// A fenced `clusia-diagram-plan` block holding `json`, an array of plan entries.
+pub fn diagram_plan_block(json: serde_json::Value) -> String {
+    format!("```clusia-diagram-plan\n{json}\n```")
+}
+
+/// A fenced `clusia-diagram` block holding `json`, one diagram spec.
+pub fn diagram_block(json: serde_json::Value) -> String {
+    format!("```clusia-diagram\n{json}\n```")
+}
+
 pub fn pass_block(json: serde_json::Value) -> String {
     format!("```clusia-pass\n{json}\n```")
 }
@@ -666,6 +676,14 @@ mod tests {
             dir.path(),
         );
         assert_eq!(FakeClaude::history(dir.path(), "f2"), ["x\ny"]);
+    }
+
+    #[test]
+    fn diagram_blocks_use_the_info_strings_the_extractors_read() {
+        let plan = diagram_plan_block(serde_json::json!([]));
+        let spec = diagram_block(serde_json::json!({"key": "k"}));
+        assert_eq!(plan, "```clusia-diagram-plan\n[]\n```");
+        assert_eq!(spec, "```clusia-diagram\n{\"key\":\"k\"}\n```");
     }
 
     #[test]

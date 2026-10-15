@@ -5,6 +5,7 @@ pub mod activity;
 pub mod agent;
 pub mod checks;
 pub mod config;
+pub mod diagram;
 pub mod diffmap;
 pub mod draft;
 pub mod editor;

@@ -13,6 +13,18 @@ pub fn is_invisible(c: char) -> bool {
         | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E007F}')
 }
 
+/// Whether `path` is a plain relative path: at most `max` bytes, not absolute (no leading `/`,
+/// no drive letter), no `\`, no `..` segment, and no control or invisible character, which a
+/// terminal or a draft would draw as something else.
+pub fn plain_relative(path: &str, max: usize) -> bool {
+    path.len() <= max
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && path.as_bytes().get(1) != Some(&b':')
+        && !path.chars().any(|c| c.is_control() || is_invisible(c))
+        && !path.split('/').any(|part| part == "..")
+}
+
 /// `text` as one safe line: a control character (a line break, a carriage return, an escape
 /// sequence) or an invisible one (a bidi override, a zero-width character) is shown as an escape.
 pub fn printable(text: &str) -> String {
@@ -62,6 +74,25 @@ mod tests {
             printable_lines("x\u{2028}y\u{202e}"),
             "x\\u{2028}y\\u{202e}"
         );
+    }
+
+    #[test]
+    fn a_plain_relative_path_has_no_tricks() {
+        assert!(plain_relative("src/a b/ação.rs", 1024));
+        for path in [
+            "/etc/passwd",
+            "a\\b.rs",
+            "C:/x.rs",
+            "c:x",
+            "a/../b.rs",
+            "..",
+            "a\u{202e}.rs",
+            "a.rs\nb",
+            "a\u{1b}[2J.rs",
+        ] {
+            assert!(!plain_relative(path, 1024), "{path:?}");
+        }
+        assert!(!plain_relative("abcd", 3), "longer than the cap");
     }
 
     #[test]

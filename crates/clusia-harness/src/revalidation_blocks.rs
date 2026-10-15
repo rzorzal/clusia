@@ -7,7 +7,9 @@ use serde_json::Value;
 
 use crate::check_blocks::{FILE_MAX, optional, plain_relative, text};
 
-const FENCE: &str = "```";
+#[cfg(test)]
+use crate::fenced::FENCE;
+use crate::fenced::fenced_blocks;
 const INFO: &str = "clusia-revalidation";
 
 /// What the agent said about one comment. A moved anchor has no `commit` yet: only the daemon
@@ -30,38 +32,20 @@ pub struct RawVerdict {
 /// escapes; the length caps apply to what the agent wrote, before those escapes, so a stored
 /// `text` or `reason` can run past them.
 pub fn extract_revalidation_blocks(text: &str, asked: &[String]) -> (String, Vec<RawVerdict>, u32) {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut kept: Vec<&str> = Vec::new();
+    let (kept, blocks) = fenced_blocks(text, &[INFO]);
     let mut verdicts: Vec<RawVerdict> = Vec::new();
-    let (mut blocks, mut unreadable) = (0usize, 0u32);
-    let mut i = 0;
-    while i < lines.len() {
-        if lines[i].trim() == format!("{FENCE}{INFO}")
-            && let Some(close) = lines[i + 1..].iter().position(|l| l.trim() == FENCE)
-        {
-            let json = lines[i + 1..i + 1 + close].join("\n");
-            blocks += 1;
-            match parse(&json, asked) {
-                Some(_) if blocks > MAX_BLOCKS => unreadable += 1,
-                Some(v) => {
-                    verdicts.retain(|old| old.item != v.item);
-                    verdicts.push(v);
-                }
-                None => unreadable += 1,
+    let mut unreadable = 0u32;
+    for (n, (_, json)) in blocks.iter().enumerate() {
+        match parse(json, asked) {
+            Some(_) if n >= MAX_BLOCKS => unreadable += 1,
+            Some(v) => {
+                verdicts.retain(|old| old.item != v.item);
+                verdicts.push(v);
             }
-            i += close + 2;
-            // The blank line that set the block apart goes with it.
-            if lines.get(i).is_some_and(|l| l.trim().is_empty())
-                && kept.last().is_none_or(|l| l.trim().is_empty())
-            {
-                i += 1;
-            }
-            continue;
+            None => unreadable += 1,
         }
-        kept.push(lines[i]);
-        i += 1;
     }
-    (kept.join("\n").trim_end().to_string(), verdicts, unreadable)
+    (kept, verdicts, unreadable)
 }
 
 fn number(value: &Value, key: &str) -> Option<Option<u32>> {

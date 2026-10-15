@@ -8,7 +8,9 @@ use clusia_core::checks::{
 };
 use serde_json::Value;
 
-const FENCE: &str = "```";
+#[cfg(test)]
+use crate::fenced::FENCE;
+use crate::fenced::fenced_blocks;
 const FINDING_INFO: &str = "clusia-finding";
 const PASS_INFO: &str = "clusia-pass";
 /// The most passes one run keeps; the rest count as unreadable.
@@ -39,54 +41,27 @@ pub fn extract_check_blocks(
         CheckKind::Security => area == SECURITY_AREA,
         CheckKind::Audit => areas.iter().any(|a| a == area),
     };
-    let lines: Vec<&str> = text.lines().collect();
-    let mut kept: Vec<&str> = Vec::new();
+    let (kept, blocks) = fenced_blocks(text, &[FINDING_INFO, PASS_INFO]);
     let (mut findings, mut passes) = (Vec::new(), Vec::new());
     let mut seen = HashSet::new();
     let mut unreadable = 0u32;
-    let mut i = 0;
-    while i < lines.len() {
-        let info = match lines[i].trim() {
-            l if l == format!("{FENCE}{FINDING_INFO}") => Some(FINDING_INFO),
-            l if l == format!("{FENCE}{PASS_INFO}") => Some(PASS_INFO),
-            _ => None,
-        };
-        if let Some(info) = info
-            && let Some(close) = lines[i + 1..].iter().position(|l| l.trim() == FENCE)
-        {
-            let json = lines[i + 1..i + 1 + close].join("\n");
-            if info == FINDING_INFO {
-                match parse_finding(&json, kind, &allowed) {
-                    Some(f) if !seen.insert(f.id.clone()) => {}
-                    Some(_) if findings.len() >= MAX_FINDINGS => unreadable += 1,
-                    Some(f) => findings.push(f),
-                    None => unreadable += 1,
-                }
-            } else {
-                match parse_pass(&json, &allowed) {
-                    Some(_) if passes.len() >= MAX_PASSES => unreadable += 1,
-                    Some(p) => passes.push(p),
-                    None => unreadable += 1,
-                }
+    for (info, json) in blocks {
+        if info == FINDING_INFO {
+            match parse_finding(&json, kind, &allowed) {
+                Some(f) if !seen.insert(f.id.clone()) => {}
+                Some(_) if findings.len() >= MAX_FINDINGS => unreadable += 1,
+                Some(f) => findings.push(f),
+                None => unreadable += 1,
             }
-            i += close + 2;
-            // The blank line that set the block apart goes with it.
-            if lines.get(i).is_some_and(|l| l.trim().is_empty())
-                && kept.last().is_none_or(|l| l.trim().is_empty())
-            {
-                i += 1;
+        } else {
+            match parse_pass(&json, &allowed) {
+                Some(_) if passes.len() >= MAX_PASSES => unreadable += 1,
+                Some(p) => passes.push(p),
+                None => unreadable += 1,
             }
-            continue;
         }
-        kept.push(lines[i]);
-        i += 1;
     }
-    (
-        kept.join("\n").trim_end().to_string(),
-        findings,
-        passes,
-        unreadable,
-    )
+    (kept, findings, passes, unreadable)
 }
 
 /// A required string: present, a string, not blank once trimmed and at most `max` characters.
@@ -112,14 +87,7 @@ pub(crate) fn optional(value: &Value, key: &str, max: usize) -> Option<Option<St
 /// as something else (a control or invisible character). The file ends up in the draft as text
 /// when the finding has no anchor.
 pub(crate) fn plain_relative(file: &str) -> bool {
-    file.len() <= FILE_MAX
-        && !file.starts_with('/')
-        && !file.contains('\\')
-        && file.as_bytes().get(1) != Some(&b':')
-        && !file
-            .chars()
-            .any(|c| c.is_control() || clusia_core::printable::is_invisible(c))
-        && !file.split('/').any(|part| part == "..")
+    clusia_core::printable::plain_relative(file, FILE_MAX)
 }
 
 fn parse_finding(json: &str, kind: CheckKind, allowed: &dyn Fn(&str) -> bool) -> Option<Finding> {
