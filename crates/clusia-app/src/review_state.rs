@@ -197,6 +197,16 @@ pub struct TabUi {
     /// The configured program when the tab was opened (a custom command's pin), so a session
     /// that belongs to another program does not name the review.
     pub opened_program: Option<String>,
+    /// The diagram selected in Diagrams (its key); `None`: the first one that is ready.
+    pub diagram: Option<String>,
+    /// The version of the drawings shown; `None`: the latest.
+    pub diagram_version: Option<u32>,
+    /// *Show changes since version n* is on.
+    pub diagram_compare: bool,
+    /// The box whose modal is open: the version's number, the diagram's key and the node's id.
+    pub diagram_node: Option<(u32, String, String)>,
+    /// The key of the row whose ⋯ menu is open.
+    pub diagram_menu: Option<String>,
 }
 
 impl Default for TabUi {
@@ -218,6 +228,11 @@ impl Default for TabUi {
             reanchor: None,
             opened_with: None,
             opened_program: None,
+            diagram: None,
+            diagram_version: None,
+            diagram_compare: false,
+            diagram_node: None,
+            diagram_menu: None,
         }
     }
 }
@@ -337,6 +352,7 @@ impl Plugin for ReviewStatePlugin {
             .init_resource::<Tickets>()
             .init_resource::<crate::screens::review::agent::Chats>()
             .init_resource::<crate::screens::review::checks::Checks>()
+            .init_resource::<crate::screens::review::diagrams::Diagrams>()
             .init_resource::<crate::screens::review::revalidation::Revalidations>()
             .add_message::<ReviewEvent>()
             .add_systems(Update, open_new_tabs.after(NavSystems));

@@ -704,7 +704,7 @@ mod tests {
             "Codex 0.162.1 answered in 0.4 s · Logged in using ChatGPT",
             "Found at /opt/homebrew/bin/codex",
             "Codex always runs in its read-only sandbox",
-            "Each check is one Codex turn on your account.",
+            "Each check or diagram is one Codex turn on your account.",
             "Codex audits the change one area at a time.",
             "Test again",
         ] {
@@ -767,7 +767,7 @@ mod tests {
             "Passed to every turn",
             "Shown on the pages. Filled in by Test",
             "Echo 1.0 answered in 0.2 s · protocol 1",
-            "Each check is one Echo turn on your account.",
+            "Each check or diagram is one Echo turn on your account.",
             "Echo audits the change one area at a time.",
             "Test again",
         ] {

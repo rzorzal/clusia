@@ -1422,7 +1422,8 @@ mod tests {
             OpenChecks {
                 summarize: true,
                 security: true,
-                audit: true
+                audit: true,
+                diagrams: false
             }
         );
         let none = status(

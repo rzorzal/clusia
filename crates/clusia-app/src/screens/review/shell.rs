@@ -257,22 +257,34 @@ fn is_placeholder(section: ReviewSection) -> bool {
             | ReviewSection::Comments
             | ReviewSection::Security
             | ReviewSection::Audits
+            | ReviewSection::Diagrams
     )
 }
 
 /// What a placeholder section says: (heading, text).
 pub fn placeholder_text(section: ReviewSection) -> (&'static str, &'static str) {
     match section {
-        ReviewSection::Diagrams => (
-            "Diagrams",
-            "Arrives with SP3 (#8): class, sequence and data-flow diagrams of this change.",
-        ),
         ReviewSection::Audits => ("", ""),
         ReviewSection::Tests => (
             "Tests",
             "Arrives with SP4 (#9): run and read the tests this change touches.",
         ),
-        ReviewSection::Diff | ReviewSection::Comments | ReviewSection::Security => ("", ""),
+        ReviewSection::Diff
+        | ReviewSection::Comments
+        | ReviewSection::Security
+        | ReviewSection::Diagrams => ("", ""),
+    }
+}
+
+/// What the status bar says while the diagrams are planned or drawn: `Claude Code · drawing
+/// diagrams 2 of 5`.
+pub fn drawing_status(state: &clusia_protocol::DiagramsState, name: &str) -> Option<String> {
+    match state {
+        clusia_protocol::DiagramsState::Planning => Some(format!("{name} · planning diagrams")),
+        clusia_protocol::DiagramsState::Drawing { done, total, .. } => {
+            Some(format!("{name} · drawing diagrams {} of {total}", done + 1))
+        }
+        _ => None,
     }
 }
 
@@ -1242,6 +1254,7 @@ fn rebuild_status(
     fonts: Res<UiFonts>,
     chats: Res<Chats>,
     checks: Res<crate::screens::review::checks::Checks>,
+    diagrams: Res<crate::screens::review::diagrams::Diagrams>,
     mut bars: Query<(Entity, &mut StatusBar)>,
 ) {
     for (entity, mut bar) in &mut bars {
@@ -1256,6 +1269,14 @@ fn rebuild_status(
         let mut status = v.status.clone();
         status.agent = agent;
         status.agent_live = agent_live;
+        if let Some(drawing) = diagrams
+            .0
+            .get(&bar.pr)
+            .and_then(|m| drawing_status(&m.state, &name))
+        {
+            status.agent = drawing;
+            status.agent_live = true;
+        }
         status.panel_open = chats.0.get(&bar.pr).is_none_or(|c| c.open);
         let waiting = checks.0.get(&bar.pr).map_or(0, |m| m.waiting_ok());
         if waiting > 0 {
@@ -1777,24 +1798,23 @@ mod tests {
             0,
             "Diff is not a placeholder"
         );
-        let diagrams =
-            testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Diagrams);
-        testing::activate(&mut app, diagrams);
+        let tests = testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Tests);
+        testing::activate(&mut app, tests);
         testing::settle(&mut app);
         assert_eq!(
             app.world().resource::<ReviewTabs>().0[&pr].ui.section,
-            ReviewSection::Diagrams
+            ReviewSection::Tests
         );
         let shown = testing::find::<Placeholder>(&mut app, |_| true);
         assert_eq!(
             app.world().get::<Placeholder>(shown),
-            Some(&Placeholder(ReviewSection::Diagrams))
+            Some(&Placeholder(ReviewSection::Tests))
         );
         let has = |app: &mut App, needle: &str| {
             let mut q = app.world_mut().query::<&Text>();
             q.iter(app.world()).any(|t| t.0.contains(needle))
         };
-        assert!(has(&mut app, "Arrives with SP3 (#8)"));
+        assert!(has(&mut app, "Arrives with SP4 (#9)"));
         let diff = testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Diff);
         testing::activate(&mut app, diff);
         testing::settle(&mut app);
