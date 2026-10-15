@@ -156,6 +156,8 @@ pub struct DiffView {
     pub editor_error: Option<String>,
     /// The index (among the listed lines) of the line `TabUi::focus_line` asks for.
     pub focus_row: Option<usize>,
+    /// `TabUi::focus_seq`: a new request scrolls even to the row that was shown.
+    pub focus_seq: u32,
 }
 
 /// One file's rows highlighted per side, indexed by row.
@@ -264,6 +266,9 @@ pub fn show_line(tab: &mut Tab, path: &str, lines: Option<(u32, u32)>) -> bool {
     });
     super::agent::suggestion::show_file(&mut tab.ui, path);
     tab.ui.focus_line = found.map(|(n, _)| (Side::Right, n));
+    if found.is_some() {
+        tab.ui.focus_seq = tab.ui.focus_seq.wrapping_add(1);
+    }
     if let Some((_, index)) = found {
         tab.ui.shown = tab.ui.shown.max((index / SHOW_STEP + 1) * SHOW_STEP);
     }
@@ -468,6 +473,7 @@ pub fn diff_view(
         more: 0,
         editor_error: ui.editor.as_ref().and_then(|e| e.error.clone()),
         focus_row: None,
+        focus_seq: ui.focus_seq,
     };
     let Some(path) = selected else {
         out.body = DiffBody::Empty("This pull request changes no files");
@@ -677,7 +683,7 @@ struct BodyKey {
     /// The editor waits for the daemon (**Saving…**).
     saving: bool,
     /// The line to scroll to.
-    focus: Option<usize>,
+    focus: Option<(usize, u32)>,
     opts: RenderOpts,
 }
 
@@ -877,7 +883,7 @@ fn rebuild_diff(
             code_size: v.code_size,
             error: v.editor_error.clone(),
             saving: editor.as_ref().is_some_and(|e| e.ticket.is_some()),
-            focus: v.focus_row,
+            focus: v.focus_row.map(|row| (row, v.focus_seq)),
             opts: opts.clone(),
         };
         if part.built.as_ref() == Some(&key) {
@@ -886,7 +892,7 @@ fn rebuild_diff(
         if part.built.as_ref().map(|b| &b.path) != Some(&key.path) {
             scroll.0 = Vec2::ZERO; // another file starts at its top
         }
-        if let Some(index) = key.focus
+        if let Some((index, _)) = key.focus
             && part.built.as_ref().map(|b| b.focus) != Some(key.focus)
         {
             scroll.0.y = focus_scroll(index);
@@ -2602,5 +2608,67 @@ mod tests {
         assert_eq!(ui.focus_line, Some((Side::Right, 44)));
         crate::screens::review::agent::suggestion::show_file(&mut ui, "CHANGELOG.md");
         assert_eq!(ui.focus_line, None);
+    }
+
+    fn body_scroll(app: &mut App) -> f32 {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&ScrollPosition, With<BodyPart>>();
+        q.iter(app.world()).map(|p| p.y).fold(0.0, f32::max)
+    }
+
+    fn reset_body_scroll(app: &mut App) {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut ScrollPosition, With<BodyPart>>();
+        for mut p in q.iter_mut(app.world_mut()) {
+            p.y = 0.0;
+        }
+    }
+
+    fn show_in(app: &mut App, pr: &PrRef, path: &str, lines: Option<(u32, u32)>) {
+        let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+        let tab = tabs.0.get_mut(pr).expect("a tab");
+        assert!(show_line(tab, path, lines));
+        testing::settle(app);
+    }
+
+    #[test]
+    fn asking_for_the_same_line_again_scrolls_to_it_again() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        show_in(&mut app, &pr, REFRESH, Some((44, 44)));
+        assert!(body_scroll(&mut app) > 0.0, "the first request scrolls");
+        reset_body_scroll(&mut app);
+        show_in(&mut app, &pr, REFRESH, Some((44, 44)));
+        assert!(body_scroll(&mut app) > 0.0, "a repeat scrolls again");
+    }
+
+    #[test]
+    fn the_same_row_of_another_file_scrolls_too() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).expect("a tab").phase else {
+                panic!("ready")
+            };
+            let mut twin = ready
+                .view
+                .diff
+                .iter()
+                .find(|f| f.path == REFRESH)
+                .expect("the demo file")
+                .clone();
+            twin.path = "src/auth/refresh_copy.rs".into();
+            ready.view.diff.push(twin);
+        }
+        show_in(&mut app, &pr, REFRESH, Some((44, 44)));
+        assert!(body_scroll(&mut app) > 0.0);
+        show_in(&mut app, &pr, "src/auth/refresh_copy.rs", Some((44, 44)));
+        assert!(
+            body_scroll(&mut app) > 0.0,
+            "another file starts at its top, then scrolls to the line"
+        );
     }
 }

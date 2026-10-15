@@ -356,3 +356,83 @@ fn ctrl_c_at_the_question_ends_the_script_instead_of_going_on() {
     drop(child.stdin.take());
     assert_eq!(status.code(), Some(130), "{status:?}");
 }
+
+/// A `clusia` for the comment step: each read of the draft shows one more item from a diagram
+/// box, and a drawing ignores Ctrl-C (as a job in the background of a script does) and writes
+/// its pid down.
+fn growing_clusia(dir: &Path) {
+    let counter = dir.join("count");
+    let pid = dir.join("draw.pid");
+    fake(
+        dir,
+        "clusia",
+        &format!(
+            r#"case "$*" in
+  *"--draw"*) echo $$ > {pid}; exec sleep 60 ;;
+  "diagrams "*"--json"*) echo '{{"version": {{"number": 2}}, "stale": true}}' ;;
+  "diagrams "*) printf 'flow  flow  Refresh flow  ready
+Version 2 · drawn by Claude Code from 9be1d07
+' ;;
+  "--json review status"*)
+    n=$(( $(cat {counter} 2>/dev/null || echo 0) + 1 ))
+    echo $n > {counter}
+    i=0; while [ $i -lt $n ]; do echo '"origin": "diagram"'; i=$((i+1)); done ;;
+  "review discard"*) exit 1 ;;
+  *) echo old ;;
+esac
+exit 0"#,
+            counter = counter.display(),
+            pid = pid.display()
+        ),
+    );
+}
+
+#[test]
+fn the_comment_step_sees_a_draft_item_appear_and_a_drawing_that_ignores_ctrl_c_is_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    growing_clusia(&bin);
+    // The fake lives in `bin`; its counter and pid files sit there too.
+    let mut child = Command::new(script())
+        .args(["--yes", "--pr", "rzorzal/clusia#123"])
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("SP3_CHECK_WAIT", "3")
+        .env("SP3_CHECK_APP", dir.path().join("no-such-window"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all("y\n".repeat(40).as_bytes())
+        .unwrap();
+    let started = std::time::Instant::now();
+    let out = child.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.lines()
+            .any(|l| l.contains("PASS") && l.contains("a draft item from a diagram box appeared")),
+        "{said}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "the script hung at the drawing"
+    );
+    let pid: i32 = std::fs::read_to_string(bin.join("draw.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only asks whether the process exists.
+    assert_ne!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "the drawing is still running"
+    );
+}

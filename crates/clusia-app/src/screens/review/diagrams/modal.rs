@@ -817,7 +817,11 @@ fn escape_closes(keys: Res<ButtonInput<KeyCode>>, nav: Res<Nav>, mut tabs: ResMu
     };
     if let Some(tab) = tabs.0.get_mut(pr)
         && tab.ui.modal == Some(Modal::DiagramNode)
-        && tab.ui.editor.as_ref().is_none_or(|e| e.ticket.is_none())
+        && tab
+            .ui
+            .editor
+            .as_ref()
+            .is_none_or(|e| e.ticket.is_none() && e.text.trim().is_empty())
     {
         close(&mut tab.ui);
     }
@@ -1374,6 +1378,26 @@ mod tests {
     }
 
     #[test]
+    fn escape_keeps_the_dialog_while_there_is_text_in_the_comment() {
+        let (mut app, pr) = app_with_box();
+        put_code(&mut app, &pr, "refresh", code_at(&head(), true));
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |a| a.0 == pr);
+        testing::type_into(&mut app, area, "Half a thought");
+        testing::settle(&mut app);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+        let tab = testing::tab(&app, &pr);
+        assert_eq!(tab.ui.modal, Some(Modal::DiagramNode));
+        assert_eq!(
+            tab.ui.editor.map(|e| e.text),
+            Some("Half a thought".to_string())
+        );
+    }
+
+    #[test]
     fn escape_waits_while_the_comment_is_being_saved() {
         let (mut app, pr) = app_with_box();
         put_code(&mut app, &pr, "refresh", code_at(&head(), true));
@@ -1559,7 +1583,16 @@ mod tests {
         testing::set_section(&mut app, &pr, ReviewSection::Diagrams);
         let refresh = testing::find::<DiagramBox>(&mut app, |b| b.node == "refresh");
         assert_eq!(testing::count::<NodeModal>(&mut app), 0);
+        let tabs_changed = app
+            .world_mut()
+            .register_system(|tabs: Res<ReviewTabs>| tabs.is_changed());
         testing::settle(&mut app);
+        app.world_mut().run_system(tabs_changed).expect("runs");
+        app.update();
+        assert!(
+            !app.world_mut().run_system(tabs_changed).expect("runs"),
+            "a settled frame with no click leaves ReviewTabs unchanged"
+        );
         testing::activate(&mut app, refresh);
         testing::settle(&mut app);
         assert_eq!(testing::tab(&app, &pr).ui.modal, Some(Modal::DiagramNode));

@@ -217,6 +217,8 @@ pub struct TabUi {
     /// The line of the file shown in Diff that was asked for (*Open in diff* from a diagram
     /// box): its row is lit and scrolled into view. Choosing another file clears it.
     pub focus_line: Option<(Side, u32)>,
+    /// Counts the requests for a line, so asking again scrolls again.
+    pub focus_seq: u32,
     /// The key of the row whose ⋯ menu is open.
     pub diagram_menu: Option<String>,
 }
@@ -245,6 +247,7 @@ impl Default for TabUi {
             diagram_compare: false,
             diagram_node: None,
             focus_line: None,
+            focus_seq: 0,
             diagram_menu: None,
         }
     }

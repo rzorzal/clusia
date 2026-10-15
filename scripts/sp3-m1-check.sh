@@ -31,6 +31,7 @@ OLD_SECURITY=""
 OLD_AUDIT=""
 OLD_DIAGRAMS=""
 CHANGED=0
+BEFORE_ITEMS=0
 APP_PID=""
 DRAW_PID=""
 # Set to wait at most this many seconds at every step, instead of each step's own time.
@@ -50,9 +51,20 @@ restore_settings() {
   return 0
 }
 # Stops a drawing the script started, so nothing keeps spending after the check ends.
+# A job started in the background of a script may ignore Ctrl-C, so the stop escalates.
 stop_draw() {
+  local i
   if [ -n "$DRAW_PID" ]; then
     kill -INT "$DRAW_PID" 2>/dev/null
+    for i in 1 2 3; do
+      kill -0 "$DRAW_PID" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$DRAW_PID" 2>/dev/null; then
+      kill -TERM "$DRAW_PID" 2>/dev/null
+      sleep 1
+    fi
+    if kill -0 "$DRAW_PID" 2>/dev/null; then kill -KILL "$DRAW_PID" 2>/dev/null; fi
     wait "$DRAW_PID" 2>/dev/null
     DRAW_PID=""
   fi
@@ -249,18 +261,22 @@ step_view() {
   ask "Does every kind that was drawn look like its mockup (arrows only horizontal or vertical, no box on top of another)?"
 }
 
+# Whether the draft holds more items from diagram boxes than when the step began. A function,
+# so the count is read again on every poll.
+items_grew() { [ "$(diagram_items)" -gt "$BEFORE_ITEMS" ]; }
+
 step_comment() {
-  local before after
+  local after
   say "4. Comment on a box"
-  before="$(diagram_items)"
+  BEFORE_ITEMS="$(diagram_items)"
   echo "  Click a box that has code behind it. The dialog should show its path and lines, the code"
   echo "  with the changed lines tinted, and a Comment field. Write a comment and click Add to draft."
-  wait_for "a draft item from a diagram box appeared" 300 test "$(diagram_items)" -gt "$before"
+  wait_for "a draft item from a diagram box appeared" 300 items_grew
   after="$(diagram_items)"
   ask "Did the dialog close, and does the draft show the comment (on a line, or as a general note naming path:lines)?"
   echo "  Then click a box that is not tied to code (if any): it should say so and put the comment in the review body."
   ask "Does 'Open in diff' go to the file (and light its line when that line is in the change)?"
-  echo "  Items from diagram boxes before: $before, now: $after."
+  echo "  Items from diagram boxes before: $BEFORE_ITEMS, now: $after."
 }
 
 step_push() {

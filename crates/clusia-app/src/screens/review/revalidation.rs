@@ -1391,6 +1391,10 @@ fn end_reanchor(
     nav: Res<crate::nav::Nav>,
     mut tabs: ResMut<ReviewTabs>,
 ) {
+    // Reading through `values()` leaves the resource unmarked when there is nothing to end.
+    if !tabs.0.values().any(|t| t.ui.reanchor.is_some()) {
+        return;
+    }
     let esc = escape_pressed(&keys);
     let shown = match &nav.screen {
         crate::nav::Screen::Review(pr) => Some(pr.clone()),
