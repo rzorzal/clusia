@@ -203,6 +203,8 @@ pub(crate) struct Plan {
     pub audit_areas: Option<usize>,
     /// A round of revalidation of the draft starts as the review opens.
     pub revalidating: bool,
+    /// The diagrams are drawn as the review opens.
+    pub diagrams: bool,
 }
 
 /// The Agent row's note: what the agent does as the review opens, only the parts that run.
@@ -217,6 +219,9 @@ pub(crate) fn note(summarizing: bool, plan: &Plan) -> Option<String> {
     if let Some(n) = plan.audit_areas {
         let unit = if n == 1 { "area" } else { "areas" };
         parts.push(format!("Auditing ({n} {unit})"));
+    }
+    if plan.diagrams {
+        parts.push("Drawing diagrams".into());
     }
     if plan.revalidating {
         parts.push("Revalidating your draft".into());
@@ -1021,7 +1026,7 @@ pub(crate) async fn dismiss(shared: &Shared, pr: &PrRef, id: &str) -> Outcome {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use clusia_core::{Config, Paths, Review};
     use clusia_harness::testkit::{FakeClaude, Script, Turn};
     use clusia_store::save_review;
@@ -1034,7 +1039,7 @@ mod tests {
 
     /// `reviews` saved reviews of acme/widgets (#1 and up), each with an empty worktree, and a
     /// fake `claude` playing `script`.
-    fn lab(
+    pub(crate) fn lab(
         script: Script,
         reviews: u64,
         tweak: impl FnOnce(&mut Config),
@@ -1094,6 +1099,7 @@ mod tests {
             security,
             audit_areas,
             revalidating: false,
+            diagrams: false,
         };
         assert_eq!(
             note(true, &plan(true, Some(6))).as_deref(),
@@ -1112,6 +1118,14 @@ mod tests {
             Some("Summarizing")
         );
         assert_eq!(note(false, &plan(false, None)), None);
+        let diagrams = Plan {
+            diagrams: true,
+            ..plan(true, None)
+        };
+        assert_eq!(
+            note(true, &diagrams).as_deref(),
+            Some("Summarizing · Checking security · Drawing diagrams")
+        );
         let revalidating = Plan {
             revalidating: true,
             ..plan(false, None)

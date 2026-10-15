@@ -150,7 +150,11 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         | Event::CheckFinding { .. }
         | Event::CheckPass { .. }
         | Event::CheckDone { .. }
-        | Event::FindingSettled { .. } => {}
+        | Event::FindingSettled { .. }
+        // The Diagrams section keeps its own model.
+        | Event::DiagramsChanged { .. }
+        | Event::DiagramsPlanned { .. }
+        | Event::DiagramEntryChanged { .. } => {}
     }
     (r, None)
 }

@@ -13,6 +13,7 @@ use clusia_provider::GitHub;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
 use crate::checks::Checks;
+use crate::diagrams::Diagrams;
 use crate::holds::Holds;
 use crate::inbox::InboxData;
 use crate::news::Backoff;
@@ -78,6 +79,8 @@ pub(crate) struct Shared {
     /// The running security and audit checks of every review. Not `checks_wake`, which wakes
     /// the task that looks at the continuous-integration checks of your pull requests.
     pub checks: Checks,
+    /// The running diagram drawings of every review.
+    pub diagrams: Diagrams,
     /// The `codex app-server` processes, one per open review.
     pub codex: crate::codex::Servers,
     /// The timers and runs that revalidate the drafts of saved reviews.
@@ -166,6 +169,7 @@ impl Shared {
             permissions: Permissions::default(),
             sessions: Sessions::default(),
             checks: Checks::default(),
+            diagrams: Diagrams::default(),
             codex: crate::codex::Servers::default(),
             revalidations: Revalidations::default(),
             holds: Holds::default(),

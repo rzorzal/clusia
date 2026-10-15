@@ -283,6 +283,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     // have been told to wait for it.
     let summarizing = shared.sessions.summarizing(pr);
     let mut plan = crate::checks::on_open(shared, pr, &review.head_sha, summarizing).await;
+    plan.diagrams = crate::diagrams::on_open(shared, pr, &review.head_sha, summarizing).await;
     if let Some(at) = round_at {
         crate::revalidate::reschedule(shared, pr, at);
         plan.revalidating = true;
@@ -889,6 +890,7 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
     // Out of the lock: a run that is finishing needs it to store its result.
     drop(guard);
     crate::checks::stop_all(shared, pr, crate::turns::Why::User).await;
+    crate::diagrams::stop_all(shared, pr, crate::turns::Why::User).await;
     shared.sessions.close_review(shared, pr).await;
     Outcome::Ok(Reply::Ack)
 }
