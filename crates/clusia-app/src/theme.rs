@@ -49,6 +49,23 @@ pub enum Swatch {
     PreviewBg(bool),
     PreviewInk(bool),
     PreviewGreen(bool),
+    /// The dots of the diagram canvas.
+    CanvasDot,
+    /// The lines and arrowheads of a diagram.
+    Edge,
+    /// `Edge` at 60 % over a surface: a reply arrow, a removed line.
+    EdgeSoft,
+    /// The fill of a changed box (softer than `GreenSoft`).
+    ChangedBg,
+    /// The fill of a box at risk.
+    RiskBg,
+    /// The text of a box that is gone in the version being compared.
+    GhostInk,
+    /// The fill of a box that is gone in the version being compared.
+    GhostFill,
+    /// The outline of a box that changed since the version being compared.
+    Amber,
+    AmberSoft,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,6 +95,15 @@ pub struct Tokens {
     pub selected: Color,
     pub knob: Color,
     pub heat: [Color; 5],
+    pub canvas_dot: Color,
+    pub edge: Color,
+    pub edge_soft: Color,
+    pub changed_bg: Color,
+    pub risk_bg: Color,
+    pub ghost_ink: Color,
+    pub ghost_fill: Color,
+    pub amber: Color,
+    pub amber_soft: Color,
 }
 
 impl Tokens {
@@ -129,6 +155,15 @@ impl Tokens {
                 }
             }
             Swatch::Heat(level) => self.heat[usize::from(level.min(4))],
+            Swatch::CanvasDot => self.canvas_dot,
+            Swatch::Edge => self.edge,
+            Swatch::EdgeSoft => self.edge_soft,
+            Swatch::ChangedBg => self.changed_bg,
+            Swatch::RiskBg => self.risk_bg,
+            Swatch::GhostInk => self.ghost_ink,
+            Swatch::GhostFill => self.ghost_fill,
+            Swatch::Amber => self.amber,
+            Swatch::AmberSoft => self.amber_soft,
         }
     }
 }
@@ -179,6 +214,15 @@ pub const LIGHT: Tokens = Tokens {
         Color::srgb_u8(0x55, 0xB0, 0x63),
         Color::srgb_u8(0x2F, 0x9E, 0x44),
     ],
+    canvas_dot: Color::srgb_u8(0xDD, 0xE2, 0xDD),
+    edge: Color::srgb_u8(0xA4, 0xAC, 0xA6),
+    edge_soft: Color::srgb_u8(0xC8, 0xCD, 0xCA),
+    changed_bg: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x1A),
+    risk_bg: Color::srgba_u8(0xD9, 0x57, 0x2B, 0x1A),
+    ghost_ink: Color::srgb_u8(0xA9, 0xB0, 0xAB),
+    ghost_fill: Color::srgba_u8(0x8A, 0x93, 0x8C, 0x1A),
+    amber: Color::srgb_u8(0xB7, 0x79, 0x1F),
+    amber_soft: Color::srgba_u8(0xB7, 0x79, 0x1F, 0x1A),
 };
 
 pub const DARK: Tokens = Tokens {
@@ -227,6 +271,15 @@ pub const DARK: Tokens = Tokens {
         Color::srgb_u8(0x3A, 0xA3, 0x4E),
         Color::srgb_u8(0x4C, 0xC3, 0x5F),
     ],
+    canvas_dot: Color::srgb_u8(0x2A, 0x30, 0x2C),
+    edge: Color::srgb_u8(0x59, 0x62, 0x5B),
+    edge_soft: Color::srgb_u8(0x40, 0x47, 0x42),
+    changed_bg: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x1F),
+    risk_bg: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x1F),
+    ghost_ink: Color::srgb_u8(0x59, 0x62, 0x5B),
+    ghost_fill: Color::srgba_u8(0x6B, 0x74, 0x6D, 0x24),
+    amber: Color::srgb_u8(0xE0, 0xA4, 0x3A),
+    amber_soft: Color::srgba_u8(0xE0, 0xA4, 0x3A, 0x1F),
 };
 
 /// The look in effect. Changes only when the result differs, so `restyle` runs only then.
@@ -351,6 +404,78 @@ mod tests {
             LIGHT.heat[4],
             "levels above 4 clamp"
         );
+    }
+
+    #[test]
+    fn the_diagram_tokens_follow_the_mockups() {
+        let get = |t: &Tokens, s| t.get(s);
+        assert_eq!(
+            get(&LIGHT, Swatch::CanvasDot),
+            Color::srgb_u8(0xDD, 0xE2, 0xDD)
+        );
+        assert_eq!(
+            get(&DARK, Swatch::CanvasDot),
+            Color::srgb_u8(0x2A, 0x30, 0x2C)
+        );
+        assert_eq!(get(&LIGHT, Swatch::Edge), Color::srgb_u8(0xA4, 0xAC, 0xA6));
+        assert_eq!(get(&DARK, Swatch::Edge), Color::srgb_u8(0x59, 0x62, 0x5B));
+        assert_eq!(
+            get(&LIGHT, Swatch::ChangedBg),
+            Color::srgba_u8(0x2F, 0x9E, 0x44, 0x1A)
+        );
+        assert_eq!(
+            get(&DARK, Swatch::ChangedBg),
+            Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x1F)
+        );
+        assert_eq!(
+            get(&LIGHT, Swatch::RiskBg),
+            Color::srgba_u8(0xD9, 0x57, 0x2B, 0x1A)
+        );
+        assert_eq!(
+            get(&DARK, Swatch::RiskBg),
+            Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x1F)
+        );
+        assert_eq!(get(&LIGHT, Swatch::Amber), Color::srgb_u8(0xB7, 0x79, 0x1F));
+        assert_eq!(get(&DARK, Swatch::Amber), Color::srgb_u8(0xE0, 0xA4, 0x3A));
+        assert_eq!(
+            get(&LIGHT, Swatch::AmberSoft),
+            Color::srgba_u8(0xB7, 0x79, 0x1F, 0x1A)
+        );
+        assert_eq!(
+            get(&DARK, Swatch::AmberSoft),
+            Color::srgba_u8(0xE0, 0xA4, 0x3A, 0x1F)
+        );
+        for tokens in [LIGHT, DARK] {
+            assert_ne!(
+                tokens.changed_bg, tokens.green_soft,
+                "softer than the diff's tint"
+            );
+            assert_ne!(tokens.edge_soft, tokens.edge);
+            assert_ne!(tokens.ghost_ink, tokens.fg);
+        }
+    }
+
+    #[test]
+    fn the_amber_is_readable_on_its_own_tint_over_the_surface() {
+        // Relative luminance contrast of a title ink over `surface` with `soft` laid on it.
+        fn lum(c: Color) -> f32 {
+            let c = c.to_linear();
+            0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue
+        }
+        fn over(top: Color, below: Color) -> Color {
+            let (t, b) = (top.to_srgba(), below.to_srgba());
+            Color::srgb(
+                t.red * t.alpha + b.red * (1.0 - t.alpha),
+                t.green * t.alpha + b.green * (1.0 - t.alpha),
+                t.blue * t.alpha + b.blue * (1.0 - t.alpha),
+            )
+        }
+        for tokens in [LIGHT, DARK] {
+            let ground = over(tokens.amber_soft, tokens.surface);
+            let (a, b) = (lum(tokens.amber), lum(ground));
+            let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+            assert!(ratio >= 2.5, "amber on its tint: {ratio}");
+        }
     }
 
     #[test]

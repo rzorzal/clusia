@@ -10,8 +10,10 @@ use crate::bridge::{Ask, Asks, Connection, Model};
 use crate::review_state::ReviewTabs;
 use crate::screens::review::ReviewSystems;
 
+pub mod canvas;
 pub mod list;
 pub mod model;
+pub mod view;
 
 pub use model::{Diagrams, DiagramsModel};
 
@@ -26,9 +28,15 @@ pub struct DiagramsPlugin;
 impl Plugin for DiagramsPlugin {
     fn build(&self, app: &mut App) {
         list::add_systems(app);
+        canvas::add_systems(app);
         app.add_systems(
             Update,
-            (load_diagrams, list::fill_diagrams, list::sync_menu)
+            (
+                load_diagrams,
+                list::fill_diagrams,
+                list::sync_menu,
+                canvas::fill_canvas,
+            )
                 .chain()
                 .after(ReviewSystems),
         );
