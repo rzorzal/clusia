@@ -55,10 +55,17 @@ pub const DRAG_GRACE: f64 = 0.25;
 const DOT_PITCH: u32 = 20;
 /// The border of a box that changed, is new or is at risk; a plain box has 1 px.
 const RING: f32 = 1.5;
-/// How far outside a box its dashed ring sits: a 3 px gap and the ring's own thickness.
-const RING_GAP: f32 = 4.5;
+/// How far outside a box the outer edge of its dashed ring is: a 2 px gap and the ring.
+const RING_GAP: f32 = 3.0;
+/// The thickness of the dashed ring of a new box.
+const RING_LINE: f32 = 1.0;
+/// The corner radius of a box that is not round.
+const BOX_RADIUS: f32 = 8.0;
 const DASH_ON: f32 = 5.0;
 const DASH_OFF: f32 = 3.0;
+/// The finer dash of a ring.
+const RING_ON: f32 = 3.0;
+const RING_OFF: f32 = 2.0;
 /// The thickness of a line of an edge.
 const LINE: f32 = 2.0;
 /// The side of the square an arrowhead glyph is centred in.
@@ -309,12 +316,15 @@ pub fn line_look(
     }
 }
 
-/// The tile of the dotted ground: one white dot, tinted with `CanvasDot` by the node.
+/// The tile of the dotted ground: one white dot of 2 × 2 pixels, tinted with `CanvasDot` by the
+/// node.
 pub fn dot_tile() -> Image {
     let side = DOT_PITCH;
     let mut data = vec![0_u8; (side * side * 4) as usize];
-    let at = (((side / 2) * side + side / 2) * 4) as usize;
-    data[at..at + 4].copy_from_slice(&[255, 255, 255, 255]);
+    for (row, col) in [(9, 9), (9, 10), (10, 9), (10, 10)] {
+        let at = ((row * side + col) * 4) as usize;
+        data[at..at + 4].copy_from_slice(&[255, 255, 255, 255]);
+    }
     Image::new(
         Extent3d {
             width: side,
@@ -331,10 +341,19 @@ pub fn dot_tile() -> Image {
 /// The tile of a dashed line: five opaque pixels and three clear ones along its length, one
 /// pixel across (the node stretches it to the line's thickness). `horizontal` runs along x.
 pub fn dash_tile(horizontal: bool) -> Image {
-    let pitch = (DASH_ON + DASH_OFF) as u32;
+    tile(horizontal, DASH_ON, DASH_OFF)
+}
+
+/// The tile of the dashed ring of a new box: three on, two off.
+pub fn ring_dash_tile(horizontal: bool) -> Image {
+    tile(horizontal, RING_ON, RING_OFF)
+}
+
+fn tile(horizontal: bool, on: f32, off: f32) -> Image {
+    let pitch = (on + off) as u32;
     let mut data = Vec::with_capacity(pitch as usize * 4);
     for i in 0..pitch {
-        let alpha = if (i as f32) < DASH_ON { 255 } else { 0 };
+        let alpha = if (i as f32) < on { 255 } else { 0 };
         data.extend_from_slice(&[255, 255, 255, alpha]);
     }
     let (width, height) = if horizontal { (pitch, 1) } else { (1, pitch) };
@@ -360,6 +379,8 @@ pub struct Dots {
     pub dot: Handle<Image>,
     pub dash_x: Handle<Image>,
     pub dash_y: Handle<Image>,
+    pub ring_x: Handle<Image>,
+    pub ring_y: Handle<Image>,
 }
 
 /// A tiled image node whose tint is a swatch, so a theme switch recolours it.
@@ -639,7 +660,7 @@ fn strip(p: &mut ChildSpawnerCommands, x: f32, y: f32, w: f32, h: f32, ink: Swat
 /// One node that draws a dashed line: a tiled dash image `len` long, `thickness` thick.
 fn dashed_strip(
     p: &mut ChildSpawnerCommands,
-    tiles: &Dots,
+    tile: &Handle<Image>,
     horizontal: bool,
     (x, y): (f32, f32),
     len: f32,
@@ -661,11 +682,7 @@ fn dashed_strip(
             ..default()
         },
         ImageNode {
-            image: if horizontal {
-                tiles.dash_x.clone()
-            } else {
-                tiles.dash_y.clone()
-            },
+            image: tile.clone(),
             color: Color::NONE,
             image_mode: NodeImageMode::Tiled {
                 tile_x: horizontal,
@@ -730,7 +747,14 @@ fn segment(
     let (r, horizontal) = strip_rect(a, b, grow.0, grow.1);
     let len = if horizontal { r.w } else { r.h };
     match tiles {
-        Some(tiles) if dashed => dashed_strip(p, tiles, horizontal, (r.x, r.y), len, LINE, ink),
+        Some(tiles) if dashed => {
+            let tile = if horizontal {
+                &tiles.dash_x
+            } else {
+                &tiles.dash_y
+            };
+            dashed_strip(p, tile, horizontal, (r.x, r.y), len, LINE, ink);
+        }
         _ => strip(p, r.x, r.y, r.w, r.h, ink),
     }
 }
@@ -760,29 +784,113 @@ fn head(p: &mut ChildSpawnerCommands, fonts: &UiFonts, tip: Point, dir: Dir, ink
     });
 }
 
-/// A dashed rectangle `gap` px outside `rect`: four nodes, solid strips when there are no tiles.
+/// Where the pieces of a dashed ring go: straight dashed sides (along x or not, top left, length)
+/// and four quarter circles, `radius` across, at the top left, top right, bottom left and
+/// bottom right.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RingParts {
+    pub radius: f32,
+    pub sides: Vec<(bool, (f32, f32), f32)>,
+    pub corners: [GRect; 4],
+}
+
+/// The ring whose outer edge is `gap` px outside `rect`, with the box's corner `radius` grown by
+/// the gap so it stays parallel to the border. Sides of no length (the ends of a pill) are left
+/// out.
+pub fn ring_parts(rect: GRect, radius: f32, gap: f32) -> RingParts {
+    let (x, y) = (rect.x - gap, rect.y - gap);
+    let (w, h) = (rect.w + 2.0 * gap, rect.h + 2.0 * gap);
+    let r = (radius + gap).min(w / 2.0).min(h / 2.0);
+    let t = RING_LINE;
+    let sides = [
+        (true, (x + r, y), w - 2.0 * r),
+        (true, (x + r, y + h - t), w - 2.0 * r),
+        (false, (x, y + r), h - 2.0 * r),
+        (false, (x + w - t, y + r), h - 2.0 * r),
+    ]
+    .into_iter()
+    .filter(|s| s.2 > 0.5)
+    .collect();
+    let corner = |cx, cy| GRect {
+        x: cx,
+        y: cy,
+        w: r,
+        h: r,
+    };
+    RingParts {
+        radius: r,
+        sides,
+        corners: [
+            corner(x, y),
+            corner(x + w - r, y),
+            corner(x, y + h - r),
+            corner(x + w - r, y + h - r),
+        ],
+    }
+}
+
+/// A dashed ring `gap` px outside `rect` (see `ring_parts`): a tiled node per side, solid when
+/// there are no tiles, and a bordered node per corner whose one round corner draws the arc.
 fn dashed_ring(
     p: &mut ChildSpawnerCommands,
     tiles: Option<&Dots>,
     rect: GRect,
+    radius: f32,
     gap: f32,
-    thickness: f32,
     ink: Swatch,
 ) {
-    let (x, y) = (rect.x - gap, rect.y - gap);
-    let (w, h) = (rect.w + 2.0 * gap, rect.h + 2.0 * gap);
-    let sides = [
-        (true, (x, y), w),
-        (true, (x, y + h - thickness), w),
-        (false, (x, y), h),
-        (false, (x + w - thickness, y), h),
-    ];
-    for (horizontal, at, len) in sides {
+    let ring = ring_parts(rect, radius, gap);
+    let t = RING_LINE;
+    for (horizontal, at, len) in ring.sides {
         match tiles {
-            Some(tiles) => dashed_strip(p, tiles, horizontal, at, len, thickness, ink),
-            None if horizontal => strip(p, at.0, at.1, len, thickness, ink),
-            None => strip(p, at.0, at.1, thickness, len, ink),
+            Some(tiles) => {
+                let tile = if horizontal {
+                    &tiles.ring_x
+                } else {
+                    &tiles.ring_y
+                };
+                dashed_strip(p, tile, horizontal, at, len, t, ink);
+            }
+            None if horizontal => strip(p, at.0, at.1, len, t, ink),
+            None => strip(p, at.0, at.1, t, len, ink),
         }
+    }
+    let r = px(ring.radius);
+    let arcs = [
+        (
+            UiRect::new(px(t), px(0), px(t), px(0)),
+            BorderRadius::top_left(r),
+        ),
+        (
+            UiRect::new(px(0), px(t), px(t), px(0)),
+            BorderRadius::top_right(r),
+        ),
+        (
+            UiRect::new(px(t), px(0), px(0), px(t)),
+            BorderRadius::bottom_left(r),
+        ),
+        (
+            UiRect::new(px(0), px(t), px(0), px(t)),
+            BorderRadius::bottom_right(r),
+        ),
+    ];
+    for (c, (border, border_radius)) in ring.corners.iter().zip(arcs) {
+        p.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(c.x),
+                top: px(c.y),
+                width: px(c.w),
+                height: px(c.h),
+                border,
+                border_radius,
+                ..default()
+            },
+            BorderColor::default(),
+            Stroke(ink),
+            ignore(),
+            LinePiece,
+        ));
     }
 }
 
@@ -1027,7 +1135,12 @@ fn spawn_content(
     for b in &g.boxes {
         let look = look(b.shape, b.change, b.history, compare);
         if look.dashed {
-            dashed_ring(p, ctx.tiles.as_ref(), b.rect, RING_GAP, RING, look.ring);
+            let radius = if matches!(b.shape, Shape::Pill | Shape::Circle | Shape::Start) {
+                b.rect.w.min(b.rect.h) / 2.0
+            } else {
+                BOX_RADIUS
+            };
+            dashed_ring(p, ctx.tiles.as_ref(), b.rect, radius, RING_GAP, look.ring);
         }
     }
     for i in reading_order(&g.boxes) {
@@ -1097,7 +1210,7 @@ fn draw_box(
             border_radius: if round {
                 BorderRadius::MAX
             } else {
-                BorderRadius::all(px(8))
+                BorderRadius::all(px(BOX_RADIUS))
             },
             ..default()
         },
@@ -1329,8 +1442,8 @@ fn legend_item(
                         w: 12.0,
                         h: 12.0,
                     },
+                    3.0,
                     0.0,
-                    1.5,
                     ring,
                 );
             }
@@ -1607,6 +1720,8 @@ fn make_dots(mut commands: Commands, images: Option<ResMut<Assets<Image>>>) {
             dot: images.add(dot_tile()),
             dash_x: images.add(dash_tile(true)),
             dash_y: images.add(dash_tile(false)),
+            ring_x: images.add(ring_dash_tile(true)),
+            ring_y: images.add(ring_dash_tile(false)),
         });
     }
 }
@@ -1783,6 +1898,61 @@ mod tests {
     }
 
     #[test]
+    fn the_ring_dash_tile_is_three_on_and_two_off() {
+        for horizontal in [true, false] {
+            let tile = ring_dash_tile(horizontal);
+            let (w, h) = (tile.width(), tile.height());
+            assert_eq!(if horizontal { (w, h) } else { (h, w) }, (5, 1));
+            let data = tile.data.as_ref().expect("pixels");
+            let alpha: Vec<u8> = data.chunks(4).map(|px| px[3]).collect();
+            assert_eq!(alpha, [255, 255, 255, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn a_ring_hugs_its_box_with_dashed_sides_and_round_corners() {
+        let rect = GRect {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 40.0,
+        };
+        let ring = ring_parts(rect, 8.0, 3.0);
+        assert_eq!(ring.radius, 11.0, "the box's radius plus the gap");
+        assert_eq!(
+            ring.sides,
+            vec![
+                (true, (18.0, 17.0), 84.0),
+                (true, (18.0, 62.0), 84.0),
+                (false, (7.0, 28.0), 24.0),
+                (false, (112.0, 28.0), 24.0),
+            ],
+            "each side stops where its corners start"
+        );
+        let corner = |x, y| GRect {
+            x,
+            y,
+            w: 11.0,
+            h: 11.0,
+        };
+        assert_eq!(
+            ring.corners,
+            [
+                corner(7.0, 17.0),
+                corner(102.0, 17.0),
+                corner(7.0, 52.0),
+                corner(102.0, 52.0)
+            ]
+        );
+        let pill = ring_parts(rect, 20.0, 3.0);
+        assert_eq!(pill.radius, 23.0);
+        assert!(
+            pill.sides.iter().all(|(horizontal, _, _)| *horizontal),
+            "a pill's ends are all corner"
+        );
+    }
+
+    #[test]
     fn an_elbow_fills_its_outer_corner() {
         let p = |x, y| Point { x, y };
         let (corner, down) = (p(100.0, 50.0), p(100.0, 120.0));
@@ -1916,7 +2086,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dot_tile_is_one_centred_dot() {
+    fn the_dot_tile_is_one_centred_two_pixel_dot() {
         let tile = dot_tile();
         assert_eq!((tile.width(), tile.height()), (20, 20));
         let data = tile.data.as_ref().expect("pixels");
@@ -1926,7 +2096,7 @@ mod tests {
             .filter(|(_, px)| px[3] != 0)
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(lit, [10 * 20 + 10]);
+        assert_eq!(lit, [9 * 20 + 9, 9 * 20 + 10, 10 * 20 + 9, 10 * 20 + 10]);
     }
 
     #[test]
