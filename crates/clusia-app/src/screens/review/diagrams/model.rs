@@ -187,6 +187,14 @@ impl DiagramsModel {
                 code,
                 ..
             } => {
+                // An answer that outlived a redraw may be for code the box no longer stands for.
+                let anchor = self
+                    .loaded
+                    .get(number)
+                    .and_then(|v| super::modal::node_anchor(v, key, node));
+                if !anchor.is_some_and(|a| code.unavailable.is_some() || a.path == code.path) {
+                    return;
+                }
                 let id = (*number, key.clone(), node.clone());
                 // A reviewer opens a handful of boxes; the answers of a long session do not pile up.
                 self.code_order.retain(|k| *k != id);
@@ -445,6 +453,7 @@ mod tests {
     #[test]
     fn code_is_kept_for_the_box_it_was_asked_about() {
         let mut m = loaded();
+        anchor_box(&mut m, 2, "flow", "refresh");
         m.apply(&DiagramsTell::Code {
             pr: pr(),
             number: 2,
@@ -465,14 +474,76 @@ mod tests {
         assert_eq!(m.code[&key].lines.len(), 5);
     }
 
+    /// Makes box `node` of `key` in version `number` stand for the file `answer` reads.
+    fn anchor_box(m: &mut DiagramsModel, number: u32, key: &str, node: &str) {
+        let version = m.loaded.get_mut(&number).expect("a version");
+        let entry = version.entries.iter_mut().find(|e| e.plan.key == key);
+        let Some(EntryState::Ready { spec, .. }) = entry.map(|e| &mut e.state) else {
+            panic!("{key} is ready");
+        };
+        let anchor = Some(clusia_core::diagram::CodeAnchor {
+            path: "src/auth/refresh.rs".into(),
+            start_line: 38,
+            end_line: 48,
+        });
+        match spec.nodes.iter_mut().find(|n| n.id == node) {
+            Some(n) => n.anchor = anchor,
+            None => {
+                let mut n = spec.nodes[0].clone();
+                n.id = node.into();
+                n.anchor = anchor;
+                spec.nodes.push(n);
+            }
+        }
+    }
+
+    /// The answer to a read of `node`: two lines of the file the box stands for.
     fn ask(m: &mut DiagramsModel, number: u32, key: &str, node: &str) {
+        let path = m
+            .loaded
+            .get(&number)
+            .and_then(|v| crate::screens::review::diagrams::modal::node_anchor(v, key, node))
+            .map(|a| a.path.clone())
+            .expect("a box that stands for code");
         m.apply(&DiagramsTell::Code {
             pr: pr(),
             number,
             key: key.into(),
             node: node.into(),
-            code: answer(2),
+            code: DiagramCode { path, ..answer(2) },
         });
+    }
+
+    #[test]
+    fn a_late_answer_for_a_box_that_no_longer_stands_for_that_file_is_dropped() {
+        let mut m = loaded();
+        let reply = |node: &str, code: DiagramCode| DiagramsTell::Code {
+            pr: pr(),
+            number: 2,
+            key: "flow".into(),
+            node: node.into(),
+            code,
+        };
+        // `http` stands for `src/client/http.rs` now; the answer is for another file.
+        m.apply(&reply("http", answer(3)));
+        assert!(
+            m.code.is_empty(),
+            "the redraw moved the box to another file"
+        );
+        m.apply(&reply("oauth", answer(3)));
+        assert!(m.code.is_empty(), "the box stands for no code any more");
+        m.apply(&reply("gone", answer(3)));
+        assert!(m.code.is_empty(), "the box is gone");
+        let unavailable = DiagramCode {
+            path: String::new(),
+            lines: Vec::new(),
+            unavailable: Some("The code at 9be1d07 is no longer available.".into()),
+            ..answer(0)
+        };
+        m.apply(&reply("http", unavailable));
+        assert_eq!(m.code.len(), 1, "why there is no code is kept");
+        m.apply(&reply("refresh", answer(3)));
+        assert_eq!(m.code.len(), 2);
     }
 
     #[test]
@@ -501,7 +572,7 @@ mod tests {
     fn a_new_read_of_a_changed_version_forgets_its_code() {
         let mut m = loaded();
         ask(&mut m, 2, "flow", "refresh");
-        ask(&mut m, 2, "er", "token");
+        ask(&mut m, 2, "classes", "token");
         let versions = fixture::demo_diagrams(NOW, &pr());
         let again = |v: &DiagramVersion| DiagramsTell::Loaded {
             pr: pr(),
@@ -520,7 +591,7 @@ mod tests {
         };
         m.apply(&again(&redrawn));
         assert!(!m.code.contains_key(&(2, "flow".into(), "refresh".into())));
-        assert!(m.code.contains_key(&(2, "er".into(), "token".into())));
+        assert!(m.code.contains_key(&(2, "classes".into(), "token".into())));
         let mut moved = redrawn.clone();
         moved.commit = "feedfacefeedfacefeedfacefeedfacefeedface".into();
         m.apply(&again(&moved));
@@ -533,7 +604,12 @@ mod tests {
     #[test]
     fn a_version_the_daemon_dropped_takes_its_code_with_it() {
         let mut m = loaded();
+        m.apply(&DiagramsTell::Version {
+            pr: pr(),
+            version: Box::new(fixture::demo_diagrams(NOW, &pr()).remove(0)),
+        });
         ask(&mut m, 1, "flow", "refresh");
+        assert_eq!(m.code.len(), 1);
         let v2 = fixture::demo_diagrams(NOW, &pr()).remove(1);
         m.apply(&DiagramsTell::Loaded {
             pr: pr(),
@@ -594,6 +670,7 @@ mod tests {
     fn the_oldest_code_goes_first_when_the_cache_is_full() {
         let mut m = loaded();
         for n in 0..=MAX_CODES {
+            anchor_box(&mut m, 2, "flow", &format!("box{n}"));
             m.apply(&DiagramsTell::Code {
                 pr: pr(),
                 number: 2,
@@ -621,6 +698,7 @@ mod tests {
     fn the_code_of_a_long_session_does_not_pile_up() {
         let mut m = loaded();
         for n in 0..(MAX_CODES + 5) {
+            anchor_box(&mut m, 2, "flow", &format!("box{n}"));
             m.apply(&DiagramsTell::Code {
                 pr: pr(),
                 number: 2,

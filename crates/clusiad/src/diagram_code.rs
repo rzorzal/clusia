@@ -13,8 +13,8 @@ use crate::diagrams::stored_version;
 use crate::reviews;
 use crate::state::Shared;
 
-/// Lines shown before and after the anchor.
-const AROUND: u32 = 3;
+/// Lines shown after the anchor; the window starts on its first line, as the header says.
+const AFTER: u32 = 2;
 /// The most lines one answer holds.
 const MAX_LINES: u32 = 200;
 /// The longest line kept, in characters.
@@ -106,12 +106,12 @@ fn read_in_worktree(root: &Path, relative: &str) -> Option<String> {
     (!text.contains('\0')).then_some(text)
 }
 
-/// The lines `start - AROUND ..= end + AROUND` of `text`, clamped to the file and to `MAX_LINES`:
+/// The lines `start ..= end + AFTER` of `text`, clamped to the file and to `MAX_LINES`:
 /// the number of the first and the lines. Empty when the window lies past the end.
 fn window(text: &str, start: u32, end: u32) -> (u32, Vec<String>) {
-    let first = start.saturating_sub(AROUND).max(1);
+    let first = start.max(1);
     let last = end
-        .saturating_add(AROUND)
+        .saturating_add(AFTER)
         .min(first.saturating_add(MAX_LINES - 1));
     let lines = text
         .lines()
@@ -195,6 +195,7 @@ pub(crate) async fn read(
             format!("These lines are not in the file at {}.", seven(&commit)),
         );
     }
+    // Only the box's own lines are tinted: the context after them is not what it stands for.
     let changed = if at_head {
         match reviews::files_for(shared, pr, &head).await {
             Ok(files) => files
@@ -212,7 +213,7 @@ pub(crate) async fn read(
         .zip(lines)
         .map(|(number, text)| CodeLine {
             number,
-            changed: changed.contains(&number),
+            changed: number <= anchor.end_line && changed.contains(&number),
             text,
         })
         .collect();
@@ -230,19 +231,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_window_is_three_lines_around_clamped_to_the_file() {
+    fn the_window_starts_at_the_anchor_and_ends_two_lines_after_it_clamped_to_the_file() {
         let text = (1..=20)
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
             .join("\n");
         let (first, lines) = window(&text, 10, 12);
-        assert_eq!(first, 7);
-        assert_eq!((lines[0].as_str(), lines.len()), ("line 7", 9));
-        assert_eq!(lines[8], "line 15");
+        assert_eq!(first, 10);
+        assert_eq!((lines[0].as_str(), lines.len()), ("line 10", 5));
+        assert_eq!(lines[4], "line 14");
         let (first, lines) = window(&text, 1, 2);
-        assert_eq!((first, lines.len()), (1, 5));
+        assert_eq!((first, lines.len()), (1, 4));
         let (first, lines) = window(&text, 19, 20);
-        assert_eq!((first, lines.len(), lines[4].as_str()), (16, 5, "line 20"));
+        assert_eq!((first, lines.len(), lines[1].as_str()), (19, 2, "line 20"));
         let (_, past) = window(&text, 40, 41);
         assert!(past.is_empty());
     }
@@ -254,7 +255,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let (first, lines) = window(&text, 10, 400);
-        assert_eq!((first, lines.len()), (7, 200));
+        assert_eq!((first, lines.len()), (10, 200));
         assert_eq!(lines[0].chars().count(), LINE_MAX + 1);
         assert!(lines[0].ends_with('…'));
     }

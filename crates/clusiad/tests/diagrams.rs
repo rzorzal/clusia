@@ -479,7 +479,8 @@ async fn the_code_of_a_box_is_read_from_the_worktree_and_from_the_pinned_commit_
         .unwrap();
     until(&mut watcher, idle).await;
 
-    // At the head: the file as the worktree has it, with the lines the pull request adds marked.
+    // At the head: the file as the worktree has it from the box's first line, with the lines of
+    // the box that the pull request adds marked (line 3 is added too, but it is only context).
     let code = code_of(&mut c, 1, "a").await;
     assert_eq!(
         (code.path.as_str(), code.commit.as_str()),
@@ -493,7 +494,7 @@ async fn the_code_of_a_box_is_read_from_the_worktree_and_from_the_pinned_commit_
         .collect();
     assert_eq!(
         shown,
-        [(1, "one", true), (2, "two", true), (3, "three", true)]
+        [(1, "one", true), (2, "two", true), (3, "three", false)]
     );
     assert_eq!(code.unavailable, None);
     let untied = refused(c.request(read_code(1, "b")).await);

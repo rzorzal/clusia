@@ -268,8 +268,10 @@ pub fn demo_diagram_code(
     lines: (u32, u32),
     at_head: bool,
 ) -> DiagramCode {
-    let from = lines.0.saturating_sub(3).max(1);
-    let to = lines.1.saturating_add(3);
+    // As the daemon reads it: from the box's first line to two lines past its last, with only
+    // the box's own added lines tinted.
+    let from = lines.0.max(1);
+    let to = lines.1.saturating_add(2);
     let shown: Vec<CodeLine> = patch
         .map(parse_patch)
         .unwrap_or_default()
@@ -279,7 +281,7 @@ pub fn demo_diagram_code(
             (row.kind != RowKind::Removed && (from..=to).contains(&number)).then(|| CodeLine {
                 number,
                 text: row.text,
-                changed: at_head && row.kind == RowKind::Added,
+                changed: at_head && row.kind == RowKind::Added && number <= lines.1,
             })
         })
         .take(200)
@@ -864,8 +866,8 @@ fn dg_flow() -> DiagramSpec {
                 Change::Unchanged,
             ),
             "src/client/http.rs",
-            10,
-            30,
+            12,
+            36,
         ),
         dg_at(
             dg_node(

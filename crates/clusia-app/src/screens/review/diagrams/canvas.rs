@@ -516,6 +516,10 @@ pub(super) fn fill_canvas(
     dots: Option<Res<Dots>>,
     canvases: Query<(Entity, &DiagramCanvas, Option<&CanvasState>)>,
 ) {
+    let fresh = canvases.iter().any(|(_, _, state)| state.is_none());
+    if !(fresh || tabs.is_changed() || diagrams.is_changed() || theme.is_changed()) {
+        return;
+    }
     for (entity, canvas, state) in &canvases {
         let (Some(tab), Some(model)) = (tabs.0.get(&canvas.0), diagrams.0.get(&canvas.0)) else {
             continue;
@@ -526,15 +530,16 @@ pub(super) fn fill_canvas(
         let EntryState::Ready { spec, .. } = &p.entry.state else {
             continue;
         };
-        let key = p.entry.plan.key.clone();
-        let compare = tab.ui.diagram_compare && model.compare_with(p.number, &key).is_some();
+        let key = &p.entry.plan.key;
+        let compare = tab.ui.diagram_compare && model.compare_with(p.number, key).is_some();
         if state.is_some_and(|s| {
             s.built
                 .as_ref()
-                .is_some_and(|b| (b.0, b.2) == (p.number, compare) && b.1 == key && b.3 == *spec)
+                .is_some_and(|b| (b.0, b.2) == (p.number, compare) && b.1 == *key && b.3 == *spec)
         }) {
             continue;
         }
+        let key = key.clone();
         let built: Built = (p.number, key.clone(), compare, spec.clone());
         let shown = shown_spec(spec, compare);
         let geometry = layout(&shown, &Fonts);
@@ -1472,9 +1477,10 @@ fn apply_view(
     }
     for (label, mut text) in &mut labels {
         if let Ok(state) = states.get(label.0) {
-            let want = format!("{}%", state.view.percent());
-            if text.0 != want {
-                text.0 = want;
+            let percent = state.view.percent();
+            let shown = text.0.strip_suffix('%').and_then(|n| n.parse::<u32>().ok());
+            if shown != Some(percent) {
+                text.0 = format!("{percent}%");
             }
         }
     }
@@ -2546,6 +2552,35 @@ mod tests {
         let again = testing::find::<DiagramCanvas>(&mut app, |_| true);
         assert_eq!(again, canvas, "the canvas node stays");
         assert!(!state_of(&app, canvas).fitted || state_of(&app, canvas).view.percent() <= 100);
+    }
+
+    #[test]
+    fn a_frame_where_nothing_changed_does_not_look_at_the_diagram() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (pr, _) = open(&mut app);
+        assert_eq!(testing::count::<DiagramBox>(&mut app), 5);
+        {
+            let mut diagrams = app.world_mut().resource_mut::<Diagrams>();
+            let model = diagrams.bypass_change_detection().0.get_mut(&pr).unwrap();
+            let entry = model
+                .loaded
+                .get_mut(&2)
+                .and_then(|v| v.entries.iter_mut().find(|e| e.plan.key == "flow"))
+                .unwrap();
+            if let EntryState::Ready { spec, .. } = &mut entry.state {
+                spec.nodes.retain(|n| n.id != "lock");
+                spec.edges.retain(|e| e.to != "lock");
+            }
+        }
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::count::<DiagramBox>(&mut app),
+            5,
+            "an unchanged frame compares nothing"
+        );
+        app.world_mut().resource_mut::<Diagrams>().set_changed();
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<DiagramBox>(&mut app), 4);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::ButtonInput;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, observe};
+use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::diagram::{Change, CodeAnchor, DiagramVersion, EntryState, Node as BoxNode};
 use clusia_core::draft::{Anchor, DraftKind, Origin, Side};
 use clusia_core::printable::{printable, printable_lines};
@@ -45,6 +45,10 @@ pub const NOT_IN_DIFF: &str = "This file is not in the diff";
 
 /// Rows of code the dialog shows at most (the daemon sends no more than this).
 const MAX_CODE_ROWS: usize = 200;
+
+/// The tallest the code block grows: nine 21 px rows and its padding. Longer code scrolls
+/// inside it, so the comment field and the footer stay in the window.
+const CODE_MAX_HEIGHT: f32 = 9.0 * 21.0 + 20.0;
 
 /// What the dialog shows in place of the code.
 #[derive(Debug, Clone, PartialEq)]
@@ -332,6 +336,10 @@ struct NodePart {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct NodeCancel(pub PrRef);
 
+/// The scrolling block that holds the code.
+#[derive(Component)]
+struct NodeCode;
+
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct NodeOpenDiff(pub PrRef);
 
@@ -441,7 +449,8 @@ fn open_node(
         });
 }
 
-/// Asks the daemon for the box's code once per opening, as soon as there is a connection.
+/// Asks the daemon for the box's code once per opening, as soon as there is a connection, and
+/// again when a redraw took the answer away.
 fn ask_code(
     nav: Res<Nav>,
     tabs: Res<ReviewTabs>,
@@ -470,8 +479,13 @@ fn ask_code(
         .0
         .get(&pr)
         .is_some_and(|m| m.code.contains_key(&(number, key.clone(), node.clone())));
+    // Once answered, a redraw that clears the code makes it wanted again.
+    if known {
+        *asked = None;
+        return;
+    }
     let id = (pr.clone(), number, key.clone(), node.clone());
-    if !has_anchor || known || model.connection != Connection::Live || asked.as_ref() == Some(&id) {
+    if !has_anchor || model.connection != Connection::Live || asked.as_ref() == Some(&id) {
         return;
     }
     *asked = Some(id);
@@ -485,12 +499,13 @@ fn ask_code(
 
 fn rebuild_modal(
     mut commands: Commands,
-    tabs: Res<ReviewTabs>,
+    mut tabs: ResMut<ReviewTabs>,
     diagrams: Res<Diagrams>,
     model: Res<Model>,
     fonts: Res<UiFonts>,
     mut parts: Query<(Entity, &mut NodePart)>,
 ) {
+    let mut gone = Vec::new();
     for (entity, mut part) in &mut parts {
         if part.built.is_some()
             && !tabs.is_changed()
@@ -511,6 +526,11 @@ fn rebuild_modal(
         let Some(version) = dm.loaded.get(&target.0) else {
             continue;
         };
+        // A redraw without the box leaves nothing for the comment to land on.
+        if node_of(version, &target.1, &target.2).is_none() {
+            gone.push(part.pr.clone());
+            continue;
+        }
         let live = model.connection == Connection::Live;
         let read_only = read_only_reason(&tabs, &model, &part.pr);
         let Some(view) = node_view(tab, &target, version, dm.code.get(&target), live, read_only)
@@ -537,6 +557,11 @@ fn rebuild_modal(
             .entity(entity)
             .with_children(|p| card_content(p, &fonts, &pr, &view, &typed, area));
         part.built = Some(view);
+    }
+    for pr in gone {
+        if let Some(tab) = tabs.0.get_mut(&pr) {
+            close(&mut tab.ui);
+        }
     }
 }
 
@@ -705,40 +730,48 @@ fn body_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, body: &NodeBody) {
         return;
     }
     let NodeBody::Code(rows) = body else { return };
-    p.spawn(panel(frame, Swatch::Bg)).with_children(|b| {
-        for row in rows {
-            b.spawn((
-                Node {
-                    min_height: px(21),
-                    align_items: AlignItems::Center,
-                    ..default()
-                },
-                BackgroundColor::default(),
-                Fill(if row.changed {
-                    Swatch::AddedBg
-                } else {
-                    Swatch::Clear
-                }),
-            ))
-            .with_children(|r| {
-                r.spawn(Node {
-                    width: px(40),
-                    flex_shrink: 0.0,
-                    justify_content: JustifyContent::FlexEnd,
-                    padding: UiRect::right(px(12)),
-                    ..default()
-                })
-                .with_children(|g| {
-                    g.spawn(text(
-                        fonts,
-                        row.number.to_string(),
-                        Type::MONO.size(12.0).ink(Swatch::Faint),
-                    ));
+    let scrolled = Node {
+        max_height: px(CODE_MAX_HEIGHT),
+        flex_shrink: 0.0,
+        overflow: Overflow::scroll_y(),
+        ..frame
+    };
+    p.spawn((panel(scrolled, Swatch::Bg), ScrollArea, NodeCode))
+        .with_children(|b| {
+            for row in rows {
+                b.spawn((
+                    Node {
+                        min_height: px(21),
+                        flex_shrink: 0.0,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    BackgroundColor::default(),
+                    Fill(if row.changed {
+                        Swatch::AddedBg
+                    } else {
+                        Swatch::Clear
+                    }),
+                ))
+                .with_children(|r| {
+                    r.spawn(Node {
+                        width: px(40),
+                        flex_shrink: 0.0,
+                        justify_content: JustifyContent::FlexEnd,
+                        padding: UiRect::right(px(12)),
+                        ..default()
+                    })
+                    .with_children(|g| {
+                        g.spawn(text(
+                            fonts,
+                            row.number.to_string(),
+                            Type::MONO.size(12.0).ink(Swatch::Faint),
+                        ));
+                    });
+                    r.spawn(code_line(fonts, 12.0, row.spans.clone()));
                 });
-                r.spawn(code_line(fonts, 12.0, row.spans.clone()));
-            });
-        }
-    });
+            }
+        });
 }
 
 fn on_cancel(activate: On<Activate>, buttons: Query<&NodeCancel>, mut tabs: ResMut<ReviewTabs>) {
@@ -815,14 +848,16 @@ fn escape_closes(keys: Res<ButtonInput<KeyCode>>, nav: Res<Nav>, mut tabs: ResMu
     let Screen::Review(pr) = &nav.screen else {
         return;
     };
-    if let Some(tab) = tabs.0.get_mut(pr)
-        && tab.ui.modal == Some(Modal::DiagramNode)
-        && tab
-            .ui
-            .editor
-            .as_ref()
-            .is_none_or(|e| e.ticket.is_none() && e.text.trim().is_empty())
-    {
+    // Read first: every Esc on any screen would otherwise mark the tabs changed.
+    let closes = tabs.0.get(pr).is_some_and(|tab| {
+        tab.ui.modal == Some(Modal::DiagramNode)
+            && tab
+                .ui
+                .editor
+                .as_ref()
+                .is_none_or(|e| e.ticket.is_none() && e.text.trim().is_empty())
+    });
+    if closes && let Some(tab) = tabs.0.get_mut(pr) {
         close(&mut tab.ui);
     }
 }
@@ -1087,6 +1122,28 @@ mod tests {
     }
 
     #[test]
+    fn the_demo_code_starts_on_the_first_line_of_the_box_and_tints_only_its_own_lines() {
+        let ready = demo_ready();
+        let code = fixture::demo_diagram_code(
+            REFRESH,
+            &head(),
+            patch_of(&ready, REFRESH).as_deref(),
+            (40, 41),
+            true,
+        );
+        let numbers: Vec<u32> = code.lines.iter().map(|l| l.number).collect();
+        assert_eq!(numbers, [40, 41, 42, 43], "two lines of context after");
+        let changed: Vec<u32> = code
+            .lines
+            .iter()
+            .filter(|l| l.changed)
+            .map(|l| l.number)
+            .collect();
+        assert_eq!(changed, [40, 41], "the added line 44 is context only");
+        assert_eq!(code.start_line, 40);
+    }
+
+    #[test]
     fn the_demo_code_is_the_new_side_of_the_patch() {
         let code = code_at("9be1d07c3a2f4e5d6c7b8a9f0e1d2c3b4a5f6e7d", true);
         assert_eq!((code.path.as_str(), code.start_line), (REFRESH, 38));
@@ -1227,6 +1284,38 @@ mod tests {
             "refresh",
         );
         (app, pr)
+    }
+
+    #[test]
+    fn long_code_scrolls_inside_a_capped_block_so_the_footer_stays_in_an_800_px_window() {
+        let (mut app, pr) = app_with_box();
+        let long = DiagramCode {
+            path: REFRESH.into(),
+            commit: head(),
+            start_line: 1,
+            lines: (1..=200)
+                .map(|number| CodeLine {
+                    number,
+                    text: format!("let line_{number} = {number};"),
+                    changed: false,
+                })
+                .collect(),
+            unavailable: None,
+        };
+        put_code(&mut app, &pr, "refresh", long);
+        testing::settle(&mut app);
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Node, (With<NodeCode>, With<ScrollArea>)>();
+        let frames: Vec<Node> = q.iter(app.world()).cloned().collect();
+        assert_eq!(frames.len(), 1, "one scrolling code block");
+        assert_eq!(frames[0].max_height, px(CODE_MAX_HEIGHT));
+        assert_eq!(frames[0].overflow, Overflow::scroll_y());
+        // The parts around the code at their tallest (title, comment field with its error and
+        // hint, footer) plus the capped code fit the card's 90 % of an 800 px window.
+        let around = 64.0 + 32.0 + 196.0 + 62.0;
+        assert!(around + CODE_MAX_HEIGHT <= 800.0 * 0.9);
+        assert!(testing::shows(&mut app, "Add to draft"));
     }
 
     #[test]
@@ -1535,6 +1624,91 @@ mod tests {
             reads(&mut app).len(),
             1,
             "asked as soon as there is a connection"
+        );
+    }
+
+    #[test]
+    fn the_code_is_asked_for_again_once_a_redraw_has_cleared_it() {
+        let (mut app, pr) = app_with_box();
+        assert_eq!(reads(&mut app).len(), 1);
+        put_code(&mut app, &pr, "refresh", code_at(&head(), true));
+        testing::settle(&mut app);
+        assert!(reads(&mut app).is_empty());
+        app.world_mut()
+            .resource_mut::<Diagrams>()
+            .0
+            .get_mut(&pr)
+            .expect("a model")
+            .code
+            .clear();
+        testing::settle(&mut app);
+        assert_eq!(reads(&mut app).len(), 1, "the dialog does not wait forever");
+    }
+
+    #[test]
+    fn the_dialog_closes_when_a_redraw_takes_its_box_away() {
+        let (mut app, pr) = app_with_box();
+        assert_eq!(testing::count::<NodeModal>(&mut app), 1);
+        {
+            let mut diagrams = app.world_mut().resource_mut::<Diagrams>();
+            let model = diagrams.0.get_mut(&pr).expect("a model");
+            let entry = model.loaded.get_mut(&2).unwrap().entries.iter_mut();
+            for e in entry {
+                if let EntryState::Ready { spec, .. } = &mut e.state {
+                    spec.nodes.retain(|n| n.id != "refresh");
+                }
+            }
+        }
+        testing::settle(&mut app);
+        let tab = testing::tab(&app, &pr);
+        assert_eq!((tab.ui.modal, tab.ui.diagram_node), (None, None));
+        assert_eq!(testing::count::<NodeModal>(&mut app), 0);
+    }
+
+    #[test]
+    fn escape_without_the_dialog_leaves_the_tabs_unchanged() {
+        let pr = fixture::demo_pr();
+        let mut tabs = ReviewTabs::default();
+        tabs.0.insert(pr.clone(), ready_tab());
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::Escape);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(Nav {
+                screen: Screen::Review(pr.clone()),
+                reviews: vec![pr],
+                section: crate::nav::Section::Appearance,
+            })
+            .insert_resource(tabs)
+            .insert_resource(keys)
+            .init_resource::<TabsChanged>()
+            .add_systems(
+                Update,
+                (
+                    escape_closes,
+                    |tabs: Res<ReviewTabs>, mut seen: ResMut<TabsChanged>| {
+                        seen.0 = tabs.is_changed();
+                    },
+                )
+                    .chain(),
+            );
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::Escape);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+        assert!(
+            !app.world().resource::<TabsChanged>().0,
+            "Esc with no dialog open must not mark the tabs changed"
         );
     }
 

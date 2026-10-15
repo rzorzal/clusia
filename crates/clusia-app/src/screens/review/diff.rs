@@ -260,9 +260,14 @@ pub fn show_line(tab: &mut Tab, path: &str, lines: Option<(u32, u32)>) -> bool {
         return false;
     }
     let mode = tab.ui.mode;
+    // The range comes from an agent and may span billions of numbers: look at the patch's rows.
     let found = lines.and_then(|(first, last)| {
-        (first..=last.max(first))
-            .find_map(|n| display_index(&rows, mode, Side::Right, n).map(|index| (n, index)))
+        let n = rows
+            .iter()
+            .filter_map(|r| line_on(r, Side::Right))
+            .filter(|n| (first..=last.max(first)).contains(n))
+            .min()?;
+        display_index(&rows, mode, Side::Right, n).map(|index| (n, index))
     });
     super::agent::suggestion::show_file(&mut tab.ui, path);
     tab.ui.focus_line = found.map(|(n, _)| (Side::Right, n));
@@ -2554,6 +2559,22 @@ mod tests {
         assert_eq!(tab.ui.section, ReviewSection::Diff);
         assert_eq!(tab.ui.file.as_deref(), Some(REFRESH));
         assert_eq!(tab.ui.focus_line, Some((Side::Right, 38)));
+    }
+
+    #[test]
+    fn show_line_on_a_huge_range_looks_at_the_rows_not_at_every_number() {
+        let mut tab = tab_of(ready());
+        tab.ui.mode = DiffMode::Split;
+        let started = std::time::Instant::now();
+        assert!(show_line(&mut tab, REFRESH, Some((1, 4_000_000_000))));
+        assert_eq!(tab.ui.focus_line, Some((Side::Right, 38)));
+        assert!(show_line(&mut tab, REFRESH, Some((5_000, u32::MAX))));
+        assert_eq!(tab.ui.focus_line, None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

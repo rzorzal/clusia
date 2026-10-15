@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 use bevy::ui_widgets::ScrollArea;
 use clusia_core::checks::{AuditArea, default_areas};
-use clusia_core::diagram::{DiagramKind, DiagramVersion, EntryState, VersionPhase};
+use clusia_core::diagram::{Change, DiagramKind, DiagramVersion, EntryState, VersionPhase};
 use clusia_core::draft::{DraftKind, ThreadRef};
 use clusia_core::{Anchor, Origin, ReviewState, Side, Verdict};
 use clusia_protocol::{
@@ -13,7 +13,7 @@ use clusia_protocol::{
 };
 
 use crate::args::Scene;
-use crate::bridge::{Model, Outbox, ProbeState, RevalidationTell, Tell};
+use crate::bridge::{DiagramsTell, Model, Outbox, ProbeState, RevalidationTell, Tell};
 use crate::clock::Clock;
 use crate::fixture;
 use crate::nav::{Nav, Section};
@@ -247,14 +247,17 @@ fn key_of(version: &DiagramVersion, kind: DiagramKind) -> Option<String> {
         .map(|e| e.plan.key.clone())
 }
 
-/// The id of the first box of the drawing `key` that stands for code.
+/// The box of the drawing `key` the dialog opens on: the first changed one that stands for code,
+/// as in the mockup, else the first that stands for code.
 fn anchored_node(version: &DiagramVersion, key: &str) -> Option<String> {
     match &version.entry(key)?.state {
-        EntryState::Ready { spec, .. } => spec
-            .nodes
-            .iter()
-            .find(|n| n.anchor.is_some())
-            .map(|n| n.id.clone()),
+        EntryState::Ready { spec, .. } => {
+            let anchored = || spec.nodes.iter().filter(|n| n.anchor.is_some());
+            anchored()
+                .find(|n| n.change == Change::Changed)
+                .or_else(|| anchored().next())
+                .map(|n| n.id.clone())
+        }
         _ => None,
     }
 }
@@ -310,27 +313,41 @@ fn stage_diagrams(ui: &mut TabUi, scene: Scene, now: i64) -> (Vec<DiagramVersion
     (versions, DiagramsState::Idle)
 }
 
-/// Fills the Diagrams model of `pr` as the daemon's answer to `GetDiagrams` would, so the tab
-/// does not ask (and the demo daemon does not replace a drawing that is under way).
+/// Fills the Diagrams model of `pr` with the daemon's answer to `GetDiagrams`, and the older
+/// versions as answers to `GetDiagramVersion`, so the tab does not ask (and the demo daemon
+/// does not replace a drawing that is under way).
 fn put_diagrams(
     world: &mut World,
     pr: &clusia_core::PrRef,
-    versions: Vec<DiagramVersion>,
+    mut versions: Vec<DiagramVersion>,
     state: DiagramsState,
 ) {
-    let head = versions
-        .last()
-        .map(|v| v.commit.clone())
-        .unwrap_or_default();
+    let latest = versions.pop();
+    let loaded = DiagramsTell::Loaded {
+        pr: pr.clone(),
+        versions: versions
+            .iter()
+            .chain(latest.iter())
+            .map(DiagramVersion::info)
+            .collect(),
+        head: latest
+            .as_ref()
+            .map(|v| v.commit.clone())
+            .unwrap_or_default(),
+        latest: latest.map(Box::new),
+        state,
+        stale: false,
+        stale_reason: None,
+    };
     let mut diagrams = world.resource_mut::<Diagrams>();
     let model = diagrams.0.entry(pr.clone()).or_default();
-    model.asked = true;
-    model.versions = versions.iter().map(DiagramVersion::info).collect();
-    model.loaded = versions.into_iter().map(|v| (v.number, v)).collect();
-    model.head = head;
-    model.state = state;
-    model.stale = false;
-    model.stale_reason = None;
+    model.apply(&loaded);
+    for version in versions {
+        model.apply(&DiagramsTell::Version {
+            pr: pr.clone(),
+            version: Box::new(version),
+        });
+    }
 }
 
 /// Puts the demo review `rzorzal/clusia#123` in the state `scene` shows (Config pages and
@@ -1459,6 +1476,37 @@ mod tests {
     }
 
     #[test]
+    fn every_diagram_scene_shows_its_list_and_canvas_instead_of_loading() {
+        let pr = fixture::demo_pr();
+        for scene in DIAGRAM_SCENES {
+            let mut app = staged(scene);
+            assert!(
+                !testing::shows(&mut app, "Loading diagrams…"),
+                "{scene:?} is still loading"
+            );
+            let key = testing::tab(&app, &pr)
+                .ui
+                .diagram
+                .clone()
+                .expect("a drawing");
+            let versions = versions_of(&app, &pr);
+            let title = versions
+                .last()
+                .and_then(|v| v.entry(&key))
+                .map(|e| e.plan.title.clone())
+                .expect("the selected drawing");
+            assert!(testing::shows(&mut app, &title), "{scene:?}: {title}");
+            let mut canvases = app
+                .world_mut()
+                .query::<&crate::screens::review::diagrams::DiagramCanvas>();
+            let drawn = canvases.iter(app.world()).count();
+            assert_eq!(drawn, 1, "{scene:?}: one canvas");
+        }
+        let mut app = staged(Scene::Diagrams);
+        assert!(testing::shows(&mut app, "Token refresh flow"));
+    }
+
+    #[test]
     fn the_diagram_scenes_hide_the_right_panel_like_the_mockups() {
         let pr = fixture::demo_pr();
         for scene in DIAGRAM_SCENES {
@@ -1495,6 +1543,14 @@ mod tests {
             a,
             Ask::ReadDiagramCode { number: n, .. } if *n == number
         )));
+    }
+
+    #[test]
+    fn the_node_scene_opens_the_changed_box_like_the_mockup() {
+        let pr = fixture::demo_pr();
+        let app = staged(Scene::DiagramNode);
+        let (_, key, node) = testing::tab(&app, &pr).ui.diagram_node.expect("a box");
+        assert_eq!((key.as_str(), node.as_str()), ("flow", "refresh"));
     }
 
     #[test]
