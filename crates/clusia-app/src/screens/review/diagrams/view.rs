@@ -86,17 +86,24 @@ impl CanvasView {
     }
 
     /// Moves the content the least that brings `rect` (in content pixels) into the canvas, with a
-    /// margin. A box taller or wider than the canvas shows its top-left corner.
+    /// margin, clear of the header and legend bands `fit` keeps free. A box taller or wider than
+    /// the canvas shows its top-left corner.
     pub fn reveal(&mut self, rect: Rect) {
         for axis in 0..2 {
-            let end = self.viewport[axis] - REVEAL_MARGIN;
+            let (top, bottom) = if axis == 1 {
+                (TOP_INSET, BOTTOM_INSET)
+            } else {
+                (0.0, 0.0)
+            };
+            let start = REVEAL_MARGIN.max(top);
+            let end = self.viewport[axis] - REVEAL_MARGIN.max(bottom);
             let far = self.pan[axis] + rect.max[axis] * self.zoom;
             if far > end {
                 self.pan[axis] -= far - end;
             }
             let near = self.pan[axis] + rect.min[axis] * self.zoom;
-            if near < REVEAL_MARGIN {
-                self.pan[axis] += REVEAL_MARGIN - near;
+            if near < start {
+                self.pan[axis] += start - near;
             }
         }
         self.clamp_pan();
@@ -267,17 +274,25 @@ mod tests {
         let mut w = view((2000.0, 1000.0), (800.0, 500.0));
         w.pan = Vec2::new(-1000.0, -500.0);
         w.reveal(Rect::new(40.0, 40.0, 240.0, 128.0));
-        assert_eq!(w.pan, Vec2::new(REVEAL_MARGIN - 40.0, REVEAL_MARGIN - 40.0));
+        assert_eq!(w.pan, Vec2::new(REVEAL_MARGIN - 40.0, TOP_INSET - 40.0));
+    }
+
+    #[test]
+    fn reveal_keeps_a_box_clear_of_the_header_and_the_legend() {
+        let mut v = view((2000.0, 1000.0), (800.0, 500.0));
+        v.pan = Vec2::ZERO;
+        v.reveal(Rect::new(100.0, 430.0, 300.0, 480.0));
+        assert_eq!(v.pan.y, 500.0 - BOTTOM_INSET - 480.0, "above the legend");
+        v.pan = Vec2::new(0.0, -300.0);
+        v.reveal(Rect::new(100.0, 300.0, 300.0, 340.0));
+        assert_eq!(v.pan.y, TOP_INSET - 300.0, "under the header");
     }
 
     #[test]
     fn a_box_bigger_than_the_canvas_shows_its_corner() {
         let mut v = view((3000.0, 3000.0), (800.0, 500.0));
         v.reveal(Rect::new(100.0, 100.0, 2000.0, 2000.0));
-        assert_eq!(
-            v.pan,
-            Vec2::new(REVEAL_MARGIN - 100.0, REVEAL_MARGIN - 100.0)
-        );
+        assert_eq!(v.pan, Vec2::new(REVEAL_MARGIN - 100.0, TOP_INSET - 100.0));
     }
 
     #[test]

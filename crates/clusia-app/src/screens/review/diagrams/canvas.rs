@@ -1,5 +1,5 @@
 //! The canvas of the Diagrams tab: one diagram, laid out by `clusia-diagram` and drawn with plain
-//! `bevy_ui` nodes (mockups `Diagrams.png`, `Diagram-*.png`).
+//! `bevy_ui` nodes.
 //!
 //! `DiagramCanvas` (spawned by the tab while the selected entry is ready) holds, in order: the
 //! dotted ground, a clipped `Viewport` that takes the drag, scroll and pinch, the header, the zoom
@@ -33,9 +33,7 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
 use bevy::window::PrimaryWindow;
 
 use clusia_core::PrRef;
-use clusia_core::diagram::{
-    Change, DiagramSpec, EntryState, GroupKind, History, LineStyle, RowKey, Shape,
-};
+use clusia_core::diagram::{Change, DiagramSpec, EntryState, History, LineStyle, RowKey, Shape};
 use clusia_diagram::{
     Align, Arrow, BoxGeo, EdgeGeo, Fonts, Geometry, Measure, Point, Rect as GRect, TextLines,
     TextStyle, layout, style_size,
@@ -57,7 +55,7 @@ pub const DRAG_GRACE: f64 = 0.25;
 const DOT_PITCH: u32 = 20;
 /// The border of a box that changed, is new or is at risk; a plain box has 1 px.
 const RING: f32 = 1.5;
-/// How far outside a box its dashed ring sits: the mockup's 3 px outline offset and its border.
+/// How far outside a box its dashed ring sits: a 3 px gap and the ring's own thickness.
 const RING_GAP: f32 = 4.5;
 const DASH_ON: f32 = 5.0;
 const DASH_OFF: f32 = 3.0;
@@ -134,7 +132,7 @@ pub fn direction(from: Point, to: Point) -> Dir {
 }
 
 /// The glyph of an arrowhead whose tip is at `tip`, and the square it is centred in. Inter has
-/// all four triangles; they are filled like the mockup's heads and need no rotation.
+/// all four triangles, filled, so a head needs no rotation.
 pub fn arrow_head(tip: Point, dir: Dir) -> (GRect, &'static str) {
     let h = HEAD;
     match dir {
@@ -530,12 +528,16 @@ pub(super) fn fill_canvas(
         };
         let key = p.entry.plan.key.clone();
         let compare = tab.ui.diagram_compare && model.compare_with(p.number, &key).is_some();
-        let spec = shown_spec(spec, compare);
-        let built: Built = (p.number, key.clone(), compare, spec);
-        if state.is_some_and(|s| s.built.as_ref() == Some(&built)) {
+        if state.is_some_and(|s| {
+            s.built
+                .as_ref()
+                .is_some_and(|b| (b.0, b.2) == (p.number, compare) && b.1 == key && b.3 == *spec)
+        }) {
             continue;
         }
-        let geometry = layout(&built.3, &Fonts);
+        let built: Built = (p.number, key.clone(), compare, spec.clone());
+        let shown = shown_spec(spec, compare);
+        let geometry = layout(&shown, &Fonts);
         let mut view = CanvasView::new(Vec2::new(geometry.size.0, geometry.size.1));
         if let Some(old) = state {
             view.viewport = old.view.viewport;
@@ -550,15 +552,7 @@ pub(super) fn fill_canvas(
         };
         commands.entity(entity).despawn_related::<Children>();
         commands.entity(entity).with_children(|c| {
-            spawn_canvas(
-                c,
-                &fonts,
-                &theme,
-                dots.as_deref(),
-                &ctx,
-                &built.3,
-                &geometry,
-            );
+            spawn_canvas(c, &fonts, &theme, dots.as_deref(), &ctx, &shown, &geometry);
         });
         commands.entity(entity).insert(CanvasState {
             view,
@@ -682,30 +676,57 @@ fn dashed_strip(
     ));
 }
 
+/// The rectangle of the straight piece from `a` to `b`, `LINE` thick. A piece that ends at an
+/// inner bend grows by half a line there, so the outer corner of the elbow is filled.
+pub fn strip_rect(a: Point, b: Point, grow_a: bool, grow_b: bool) -> (GRect, bool) {
+    let horizontal = (a.y - b.y).abs() <= (a.x - b.x).abs();
+    let (lo, hi, at) = if horizontal {
+        (a.x.min(b.x), a.x.max(b.x), a.y)
+    } else {
+        (a.y.min(b.y), a.y.max(b.y), a.x)
+    };
+    let forward = if horizontal { a.x <= b.x } else { a.y <= b.y };
+    let (grow_lo, grow_hi) = if forward {
+        (grow_a, grow_b)
+    } else {
+        (grow_b, grow_a)
+    };
+    let (lo, hi) = (
+        lo - if grow_lo { LINE / 2.0 } else { 0.0 },
+        hi + if grow_hi { LINE / 2.0 } else { 0.0 },
+    );
+    let rect = if horizontal {
+        GRect {
+            x: lo,
+            y: at - LINE / 2.0,
+            w: hi - lo,
+            h: LINE,
+        }
+    } else {
+        GRect {
+            x: at - LINE / 2.0,
+            y: lo,
+            w: LINE,
+            h: hi - lo,
+        }
+    };
+    (rect, horizontal)
+}
+
 /// A straight piece of an edge, solid or dashed (one node either way).
 fn segment(
     p: &mut ChildSpawnerCommands,
     tiles: Option<&Dots>,
-    a: Point,
-    b: Point,
+    (a, b): (Point, Point),
+    grow: (bool, bool),
     ink: Swatch,
     dashed: bool,
 ) {
-    let horizontal = (a.y - b.y).abs() <= (a.x - b.x).abs();
-    let len = if horizontal {
-        (b.x - a.x).abs()
-    } else {
-        (b.y - a.y).abs()
-    };
-    let (x, y) = if horizontal {
-        (a.x.min(b.x), a.y - LINE / 2.0)
-    } else {
-        (a.x - LINE / 2.0, a.y.min(b.y))
-    };
+    let (r, horizontal) = strip_rect(a, b, grow.0, grow.1);
+    let len = if horizontal { r.w } else { r.h };
     match tiles {
-        Some(tiles) if dashed => dashed_strip(p, tiles, horizontal, (x, y), len, LINE, ink),
-        _ if horizontal => strip(p, x, y, len, LINE, ink),
-        _ => strip(p, x, y, LINE, len, ink),
+        Some(tiles) if dashed => dashed_strip(p, tiles, horizontal, (r.x, r.y), len, LINE, ink),
+        _ => strip(p, r.x, r.y, r.w, r.h, ink),
     }
 }
 
@@ -897,9 +918,7 @@ fn spawn_content(
 ) {
     let compare = ctx.compare;
     for group in &g.groups {
-        let (border, fill) = match group.kind {
-            GroupKind::Boundary | GroupKind::Lane => (Swatch::Line, Swatch::Clear),
-        };
+        let (border, fill) = (Swatch::Line, Swatch::Clear);
         p.spawn((
             Node {
                 position_type: PositionType::Absolute,
@@ -979,7 +998,14 @@ fn spawn_content(
                 y: message.y,
             },
         );
-        segment(p, ctx.tiles.as_ref(), from, to, look.ink, look.dashed);
+        segment(
+            p,
+            ctx.tiles.as_ref(),
+            (from, to),
+            (false, false),
+            look.ink,
+            look.dashed,
+        );
         if (message.to_x - message.from_x).abs() > 0.5 {
             head(p, fonts, to, direction(from, to), look.ink);
         }
@@ -1018,8 +1044,10 @@ fn draw_edge(
         e.style == LineStyle::Dashed,
         false,
     );
-    for pair in e.points.windows(2) {
-        segment(p, tiles, pair[0], pair[1], look.ink, look.dashed);
+    let pieces = e.points.len().saturating_sub(1);
+    for (i, pair) in e.points.windows(2).enumerate() {
+        let grow = (i > 0, i + 1 < pieces);
+        segment(p, tiles, (pair[0], pair[1]), grow, look.ink, look.dashed);
     }
     if let [.., before, last] = e.points[..]
         && matches!(e.arrow, Arrow::End | Arrow::Both)
@@ -1123,7 +1151,6 @@ fn draw_box(
             let ink = match row.change {
                 Some(Change::New | Change::Changed) => Swatch::Green,
                 Some(Change::Risk) => Swatch::Orange,
-                _ if ctx.compare => Swatch::Muted,
                 _ => Swatch::Muted,
             };
             text_block(bx, fonts, &row.text, ink, false, origin);
@@ -1732,6 +1759,28 @@ mod tests {
             let alpha: Vec<u8> = data.chunks(4).map(|px| px[3]).collect();
             assert_eq!(alpha, [255, 255, 255, 255, 255, 0, 0, 0]);
         }
+    }
+
+    #[test]
+    fn an_elbow_fills_its_outer_corner() {
+        let p = |x, y| Point { x, y };
+        let (corner, down) = (p(100.0, 50.0), p(100.0, 120.0));
+        let (r, h) = strip_rect(p(0.0, 50.0), corner, false, true);
+        assert!(h);
+        assert_eq!((r.x, r.right(), r.y, r.bottom()), (0.0, 101.0, 49.0, 51.0));
+        let (r, h) = strip_rect(corner, down, true, false);
+        assert!(!h);
+        assert_eq!(
+            (r.y, r.bottom(), r.x, r.right()),
+            (49.0, 120.0, 99.0, 101.0)
+        );
+        // The same piece drawn the other way round is the same rectangle.
+        assert_eq!(
+            strip_rect(down, corner, false, true).0,
+            strip_rect(corner, down, true, false).0
+        );
+        let (r, _) = strip_rect(corner, p(0.0, 50.0), true, false);
+        assert_eq!((r.x, r.right()), (0.0, 101.0), "growing at the bend only");
     }
 
     #[test]
