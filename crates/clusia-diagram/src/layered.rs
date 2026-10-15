@@ -56,6 +56,8 @@ const LANE_GAP: f32 = 16.0;
 const END_PAD: f32 = 16.0;
 /// Space between a box and the box that hangs below it.
 const STACK_GAP: f32 = 72.0;
+/// The widest label a gap between two ranks grows to hold on one line.
+const LABEL_LINE: f32 = 160.0;
 /// Space between two ports on one side of a box.
 const PORT_PITCH: f32 = 8.0;
 /// How far a self-loop leaves its box.
@@ -395,15 +397,17 @@ pub(crate) fn place(
     // Room each gap needs for the cardinalities and the label of an edge that has both.
     let card_w =
         |text: Option<&str>| text.map_or(0.0, |t| measure.width(t, TextStyle::Card).min(64.0));
+    // A label of up to `LABEL_LINE` px keeps to one line: its gap grows to hold it.
     let mut label_room = vec![0.0f32; layer_count];
     if dir == Direction::LeftToRight {
         for chain in &chains {
             let edge = &spec.edges[chain.edge];
             let wide = card_w(edge.ends[0].as_deref()).max(card_w(edge.ends[1].as_deref()));
-            if let (Some(text), true) = (edge.label.as_deref(), wide > 0.0) {
-                let natural = measure.width(text, opts.label_style).min(120.0);
+            if let Some(text) = edge.label.as_deref() {
+                let natural = measure.width(text, opts.label_style).min(LABEL_LINE);
+                let cards = if wide > 0.0 { 2.0 * (wide + 4.0) } else { 0.0 };
                 let first = layer_of[chain.verts[0]];
-                label_room[first] = label_room[first].max(natural + 8.0 + 2.0 * (wide + 4.0));
+                label_room[first] = label_room[first].max(natural + 12.0 + cards);
             }
         }
     }
@@ -790,7 +794,7 @@ struct BackRoutes {
 
 /// A shorter way back for an edge that points against the flow, from box `from` to box `to`
 /// on its left, when it is clear of every other box: over the top of the boxes between them
-/// when the two share a row, from the top of one to the top of the other; or, when `from`
+/// when the two share a row with a box between them, from the top of one to the top of the other; or, when `from`
 /// hangs below the row of `to`, sideways from `from`'s port at `port_y` and up into the
 /// middle of `to`'s bottom. Later routes of either kind keep `STEP` from the earlier ones.
 fn back_route(
@@ -805,7 +809,10 @@ fn back_route(
         return None;
     }
     let p = |x: f32, y: f32| Point { x, y };
-    let route = if (f.centre().y - t.centre().y).abs() < 0.5 {
+    let between = rects
+        .iter()
+        .any(|r| r.x >= t.right() && r.right() <= f.x && r.y < f.bottom() && r.bottom() > f.y);
+    let route = if (f.centre().y - t.centre().y).abs() < 0.5 && between {
         let top = rects
             .iter()
             .filter(|r| r.right() >= t.x && r.x <= f.right())

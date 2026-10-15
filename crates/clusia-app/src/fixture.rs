@@ -1256,7 +1256,7 @@ fn dg_dataflow() -> DiagramSpec {
         ),
         dg_node(
             "file",
-            "Token file",
+            "D1  |  Token file",
             Some("written atomically"),
             Shape::Store,
             Change::Unchanged,

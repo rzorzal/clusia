@@ -353,6 +353,21 @@ mod tests {
     }
 
     #[test]
+    fn a_label_stays_on_one_line_when_its_gap_can_grow_for_it() {
+        let g = run(&data_flow_mockup());
+        for e in &g.edges {
+            let label = e.label.as_ref().expect("label");
+            assert_eq!(label.lines.len(), 1, "{:?}", label.lines);
+        }
+        let back = g.edges.iter().find(|e| e.index == 3).expect("edge");
+        assert_eq!(
+            back.points.len(),
+            2,
+            "a way back to the next box runs straight beside the way there"
+        );
+    }
+
+    #[test]
     fn the_states_mockup_keeps_failed_under_refreshing() {
         let s = states_mockup();
         let g = run(&s);
@@ -574,7 +589,7 @@ mod tests {
             label
                 .lines
                 .iter()
-                .all(|l| Fonts.width(l, TextStyle::EdgeLabelMono) <= 88.5)
+                .all(|l| Fonts.width(l, TextStyle::EdgeLabelMono) <= 164.5)
         );
     }
 
