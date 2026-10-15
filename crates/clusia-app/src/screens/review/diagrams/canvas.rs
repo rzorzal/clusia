@@ -35,8 +35,8 @@ use bevy::window::PrimaryWindow;
 use clusia_core::PrRef;
 use clusia_core::diagram::{Change, DiagramSpec, EntryState, History, LineStyle, RowKey, Shape};
 use clusia_diagram::{
-    Align, Arrow, BoxGeo, EdgeGeo, Fonts, Geometry, Measure, Point, Rect as GRect, TextLines,
-    TextStyle, layout, style_size,
+    Align, Arrow, BoxGeo, EdgeGeo, Fonts, Geometry, Measure, MessageGeo, Point, Rect as GRect,
+    TextLines, TextStyle, layout, style_size,
 };
 
 use super::DiagramCanvas;
@@ -265,17 +265,20 @@ pub struct LineLook {
     pub strike: bool,
 }
 
-/// The look of a line. `soft` draws an unmarked line in `EdgeSoft` (the reply of a sequence).
+/// The look of a message of a sequence: a reply is drawn solid, like the call it answers.
+pub fn message_look(message: &MessageGeo, compare: bool) -> LineLook {
+    line_look(message.change, message.history, compare, false)
+}
+
+/// The look of a line.
 pub fn line_look(
     change: Change,
     history: Option<History>,
     compare: bool,
     dashed: bool,
-    soft: bool,
 ) -> LineLook {
-    let quiet = if soft { Swatch::EdgeSoft } else { Swatch::Edge };
     let plain = LineLook {
-        ink: quiet,
+        ink: Swatch::Edge,
         dashed,
         label: Swatch::Faint,
         strike: false,
@@ -1126,13 +1129,7 @@ fn spawn_content(
         draw_edge(p, fonts, ctx.tiles.as_ref(), edge, compare);
     }
     for message in &g.messages {
-        let look = line_look(
-            message.change,
-            message.history,
-            compare,
-            message.reply,
-            message.reply,
-        );
+        let look = message_look(message, compare);
         let (from, to) = (
             Point {
                 x: message.from_x,
@@ -1187,13 +1184,7 @@ fn draw_edge(
     e: &EdgeGeo,
     compare: bool,
 ) {
-    let look = line_look(
-        e.change,
-        e.history,
-        compare,
-        e.style == LineStyle::Dashed,
-        false,
-    );
+    let look = line_look(e.change, e.history, compare, e.style == LineStyle::Dashed);
     let pieces = e.points.len().saturating_sub(1);
     for (i, pair) in e.points.windows(2).enumerate() {
         let grow = (i > 0, i + 1 < pieces);
@@ -2107,45 +2098,46 @@ mod tests {
 
     #[test]
     fn a_line_looks_by_what_changed_or_by_history_when_comparing() {
-        let plain = line_look(Change::Unchanged, None, false, false, false);
+        let plain = line_look(Change::Unchanged, None, false, false);
         assert_eq!(
             (plain.ink, plain.dashed, plain.label),
             (Swatch::Edge, false, Swatch::Faint)
         );
         assert_eq!(
-            line_look(Change::New, None, false, false, false).ink,
+            line_look(Change::New, None, false, false).ink,
             Swatch::Green
         );
         assert_eq!(
-            line_look(Change::Risk, None, false, false, false).label,
+            line_look(Change::Risk, None, false, false).label,
             Swatch::Orange
         );
-        assert!(line_look(Change::Unchanged, None, false, true, false).dashed);
-        let reply = line_look(Change::Unchanged, None, false, true, true);
-        assert_eq!((reply.ink, reply.dashed), (Swatch::EdgeSoft, true));
-        let added = line_look(Change::Unchanged, Some(History::Added), true, false, false);
+        assert!(line_look(Change::Unchanged, None, false, true).dashed);
+        let reply = MessageGeo {
+            index: 0,
+            y: 0.0,
+            from_x: 100.0,
+            to_x: 0.0,
+            label: block(0.0, 0.0),
+            reply: true,
+            change: Change::Unchanged,
+            history: None,
+        };
+        assert_eq!(
+            message_look(&reply, false),
+            line_look(Change::Unchanged, None, false, false),
+            "a reply is drawn solid, like the call it answers"
+        );
+        let added = line_look(Change::Unchanged, Some(History::Added), true, false);
         assert_eq!((added.ink, added.dashed), (Swatch::Green, true));
-        let changed = line_look(
-            Change::Unchanged,
-            Some(History::Changed),
-            true,
-            false,
-            false,
-        );
+        let changed = line_look(Change::Unchanged, Some(History::Changed), true, false);
         assert_eq!(changed.ink, Swatch::Amber);
-        let removed = line_look(
-            Change::Unchanged,
-            Some(History::Removed),
-            true,
-            false,
-            false,
-        );
+        let removed = line_look(Change::Unchanged, Some(History::Removed), true, false);
         assert_eq!(
             (removed.ink, removed.dashed, removed.strike),
             (Swatch::EdgeSoft, true, true)
         );
         assert_eq!(
-            line_look(Change::Risk, Some(History::Same), true, false, false).ink,
+            line_look(Change::Risk, Some(History::Same), true, false).ink,
             Swatch::Edge,
             "a comparison shows only what changed since"
         );

@@ -126,9 +126,13 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
                     .map(|w| measure.width(w, style))
                     .fold(0.0, f32::max)
             };
-            let wanted = longest_word(&node.label, title_style)
-                .max(longest_word(sub_text, sub_style))
-                + 2.0 * pad;
+            // A participant's name keeps to one line while the widest box allows it.
+            let title_w = if kind == DiagramKind::Sequence {
+                measure.width(&node.label, title_style)
+            } else {
+                longest_word(&node.label, title_style)
+            };
+            let wanted = title_w.max(longest_word(sub_text, sub_style)) + 2.0 * pad;
             card.w = base.max(wanted).clamp(min_w, max_w);
             let inner = card.w - 2.0 * pad;
             card.title = text::wrap(measure, &node.label, title_style, inner, TITLE_LINES);
