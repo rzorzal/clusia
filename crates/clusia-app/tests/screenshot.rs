@@ -58,6 +58,17 @@ fn demo_screenshots() {
         "agent-chat-custom",
         "permission-other",
         "first-run-custom",
+        "diagrams",
+        "diagrams-deps",
+        "diagrams-sequence",
+        "diagrams-er",
+        "diagrams-usecase",
+        "diagrams-dataflow",
+        "diagrams-states",
+        "diagrams-classes",
+        "diagram-node",
+        "diagrams-drawing",
+        "diagrams-compare",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((
