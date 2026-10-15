@@ -19,11 +19,13 @@ use clusia_core::{
     ReviewInfo, ReviewState, ReviewThread, Role, Side, ThreadPost,
 };
 use clusia_protocol::{
-    AgentLogEntry, AuthInfo, CheckState, CheckStatus, DiagramsState, FileSummary, FirstRun,
-    GifItem, GifPage, GithubLogin, Harness, HarnessKind, NewsItem, NewsKind, PermissionOutcome,
-    PermissionRequest, PermissionStatus, ProbeResult, RepoFolder, ReviewSummary, ReviewView,
-    Suggestion, SyncState, SyncStatus, TokenSource,
+    AgentLogEntry, AuthInfo, CheckState, CheckStatus, CodeLine, DiagramCode, DiagramsState,
+    FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness, HarnessKind, NewsItem, NewsKind,
+    PermissionOutcome, PermissionRequest, PermissionStatus, ProbeResult, RepoFolder, ReviewSummary,
+    ReviewView, Suggestion, SyncState, SyncStatus, TokenSource,
 };
+
+use clusia_view::diff::{RowKind, parse_patch};
 
 use crate::bridge::{ChecksTell, DiagramsTell, Tell};
 use crate::snapshot::{GiphyKey, Snapshot};
@@ -254,6 +256,46 @@ pub fn demo_media(url: &str) -> Option<(MediaKind, Vec<u8>)> {
 /// The review every demo scene shows (mockup `Review.png`).
 pub fn demo_pr() -> PrRef {
     PrRef::new("rzorzal", "clusia", 123).expect("valid demo ref")
+}
+
+/// The code a demo diagram box shows: the lines of `patch`'s new side from three above `lines`
+/// to three below, the ones the patch adds marked changed when the drawing is of the head. A
+/// file the patch does not cover is "no longer available", as the daemon says it.
+pub fn demo_diagram_code(
+    path: &str,
+    commit: &str,
+    patch: Option<&str>,
+    lines: (u32, u32),
+    at_head: bool,
+) -> DiagramCode {
+    let from = lines.0.saturating_sub(3).max(1);
+    let to = lines.1.saturating_add(3);
+    let shown: Vec<CodeLine> = patch
+        .map(parse_patch)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            let number = row.new?;
+            (row.kind != RowKind::Removed && (from..=to).contains(&number)).then(|| CodeLine {
+                number,
+                text: row.text,
+                changed: at_head && row.kind == RowKind::Added,
+            })
+        })
+        .take(200)
+        .collect();
+    DiagramCode {
+        path: path.into(),
+        commit: commit.into(),
+        start_line: shown.first().map_or(lines.0, |l| l.number),
+        unavailable: shown.is_empty().then(|| {
+            format!(
+                "The code at {} is no longer available.",
+                commit.get(..7).unwrap_or(commit)
+            )
+        }),
+        lines: shown,
+    }
 }
 
 const BASE_SHA: &str = "4f2a9c1e8d7b6a5f4e3d2c1b0a9f8e7d6c5b4a39";

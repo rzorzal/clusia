@@ -39,7 +39,7 @@ use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
 use crate::screens::review::agent::{Chats, PermissionQueue};
 use crate::screens::review::checks::{self, Checks, proposed_comment};
-use crate::screens::review::diagrams::Diagrams;
+use crate::screens::review::diagrams::{Diagrams, modal};
 use crate::screens::review::revalidation::Revalidations;
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::ui::media::MediaCache;
@@ -2503,6 +2503,7 @@ pub(crate) fn demo_answers(
     mut toasts: ResMut<Toasts>,
     tabs: Res<ReviewTabs>,
     revalidations: Res<Revalidations>,
+    diagrams: Option<Res<Diagrams>>,
     outbox: Res<Outbox>,
     queue: Res<PermissionQueue>,
     clock: Res<Clock>,
@@ -2723,6 +2724,51 @@ pub(crate) fn demo_answers(
                     .update_body(&id, &body)
                     .map_err(|e| e.to_string())
             })),
+            Ask::ReadDiagramCode {
+                pr,
+                number,
+                key,
+                node,
+            } => {
+                let ready = tabs.0.get(&pr).and_then(|t| t.ready());
+                let model = diagrams.as_ref().and_then(|d| d.0.get(&pr));
+                let code = modal::demo_code_for(model, ready, number, &key, &node);
+                tells.push(Tell::Diagrams(DiagramsTell::Code {
+                    pr,
+                    number,
+                    key,
+                    node,
+                    code,
+                }));
+            }
+            Ask::AddDiagramComment {
+                pr,
+                number,
+                key,
+                node,
+                body,
+                ticket,
+            } => {
+                let anchor = diagrams
+                    .as_ref()
+                    .and_then(|d| d.0.get(&pr))
+                    .and_then(|m| m.loaded.get(&number))
+                    .and_then(|v| modal::node_anchor(v, &key, &node))
+                    .cloned();
+                let patch = anchor.as_ref().and_then(|a| {
+                    let ready = tabs.0.get(&pr)?.ready()?;
+                    ready
+                        .view
+                        .diff
+                        .iter()
+                        .find(|f| f.path == a.path)?
+                        .patch
+                        .clone()
+                });
+                tells.extend(demo_edit(&tabs, &pr, ticket, |review| {
+                    modal::diagram_comment(review, anchor.as_ref(), patch.as_deref(), &body, now)
+                }));
+            }
             Ask::RemoveItem { pr, id } => {
                 let review = tabs.0.get(&pr).and_then(|t| t.ready()).map(|r| {
                     let mut review = r.view.review.clone();
@@ -3433,6 +3479,81 @@ mod tests {
             .add_systems(Update, demo_answers);
         app.update();
         inbox.0.try_iter().collect()
+    }
+
+    #[test]
+    fn demo_mode_reads_a_boxs_code_and_files_its_comment() {
+        use crate::review_state::{Phase, Ready, Tab, TabUi};
+        use crate::screens::review::diagrams::{Diagrams, DiagramsModel, modal};
+        let pr = fixture::demo_pr();
+        let (view, _) = fixture::demo_review(1_790_000_000);
+        let version =
+            modal::test_version(&view.review.head_sha, Some(("src/auth/refresh.rs", 38, 48)));
+        let mut model = DiagramsModel::default();
+        model.loaded.insert(2, version);
+        let mut diagrams = Diagrams::default();
+        diagrams.0.insert(pr.clone(), model);
+        let mut tabs = ReviewTabs::default();
+        tabs.0.insert(
+            pr.clone(),
+            Tab {
+                phase: Phase::Ready(Box::new(Ready {
+                    view,
+                    news: Vec::new(),
+                    cached_at: None,
+                })),
+                ui: TabUi::default(),
+            },
+        );
+        let (inbox, outbox) = local_link();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .insert_resource(Asks {
+                recorded: vec![
+                    Ask::ReadDiagramCode {
+                        pr: pr.clone(),
+                        number: 2,
+                        key: "flow".into(),
+                        node: "refresh".into(),
+                    },
+                    Ask::AddDiagramComment {
+                        pr: pr.clone(),
+                        number: 2,
+                        key: "flow".into(),
+                        node: "refresh".into(),
+                        body: "Can the lock end sooner?".into(),
+                        ticket: 4,
+                    },
+                ],
+                ..Asks::default()
+            })
+            .insert_resource(Model::default())
+            .insert_resource(Toasts::default())
+            .insert_resource(tabs)
+            .insert_resource(diagrams)
+            .init_resource::<Revalidations>()
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .insert_resource(PermissionQueue::default())
+            .insert_resource(outbox)
+            .add_systems(Update, demo_answers);
+        app.update();
+        let tells: Vec<Tell> = inbox.0.try_iter().collect();
+        assert_eq!(tells.len(), 3, "{tells:?}");
+        let Tell::Diagrams(DiagramsTell::Code { number, code, .. }) = &tells[0] else {
+            panic!("the code first: {:?}", tells[0])
+        };
+        assert_eq!(*number, 2);
+        assert_eq!(code.lines.len(), 11);
+        assert!(code.lines.iter().any(|l| l.number == 44 && l.changed));
+        let Tell::ReviewFile(review) = &tells[1] else {
+            panic!("the review next: {:?}", tells[1])
+        };
+        let item = review.draft.items.last().expect("an item");
+        assert_eq!(item.origin, Origin::Diagram);
+        assert_eq!(item.kind, DraftKind::LineComment);
+        assert_eq!(item.body, "Can the lock end sooner?");
+        assert_eq!(tells[2], Tell::Saved { pr, ticket: 4 });
     }
 
     #[test]

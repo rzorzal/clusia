@@ -56,6 +56,12 @@ pub fn ask_prompt(path: &str, start: Option<u32>, line: u32) -> String {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AreaTarget(EditTarget);
 
+impl AreaTarget {
+    pub(crate) fn new(target: EditTarget) -> Self {
+        Self(target)
+    }
+}
+
 /// Draws `editor` for `pr`: the composer, the daemon's refusal (orange) and the buttons, in one
 /// green frame.
 pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor, pr: &PrRef) {
@@ -235,6 +241,14 @@ pub fn submit_editor(
                 body: Some(body),
             }
         }
+        EditTarget::DiagramNode { number, key, node } => Ask::AddDiagramComment {
+            pr,
+            number: *number,
+            key: key.clone(),
+            node: node.clone(),
+            body,
+            ticket,
+        },
     };
     asks.send(ask);
     true
@@ -325,7 +339,7 @@ fn submit_on_cmd_enter(
     }
 }
 
-fn on_submit_button(
+pub(crate) fn on_submit_button(
     activate: On<Activate>,
     buttons: Query<&EditorSubmit>,
     areas: Query<(&EditorArea, &EditableText)>,
@@ -550,6 +564,37 @@ mod tests {
             );
             assert_eq!(asks.recorded.len(), 1);
         }
+    }
+
+    #[test]
+    fn a_diagram_box_comment_asks_the_daemon_to_anchor_it() {
+        let mut tab = tab_with(EditTarget::DiagramNode {
+            number: 2,
+            key: "flow".into(),
+            node: "refresh".into(),
+        });
+        let mut tickets = Tickets::default();
+        let mut asks = Asks::default();
+        assert!(submit_editor(
+            &mut tab,
+            &pr(),
+            " Can the lock end sooner?\n",
+            true,
+            &mut tickets,
+            &mut asks
+        ));
+        assert_eq!(
+            asks.recorded,
+            [Ask::AddDiagramComment {
+                pr: pr(),
+                number: 2,
+                key: "flow".into(),
+                node: "refresh".into(),
+                body: "Can the lock end sooner?".into(),
+                ticket: 1,
+            }]
+        );
+        assert_eq!(tab.ui.editor.as_ref().unwrap().ticket, Some(1));
     }
 
     #[test]

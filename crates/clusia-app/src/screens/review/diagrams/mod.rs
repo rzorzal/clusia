@@ -12,6 +12,7 @@ use crate::screens::review::ReviewSystems;
 
 pub mod canvas;
 pub mod list;
+pub mod modal;
 pub mod model;
 pub mod view;
 

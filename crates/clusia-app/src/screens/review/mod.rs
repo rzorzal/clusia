@@ -46,6 +46,7 @@ impl Plugin for ReviewPlugin {
                 agent::AgentPanel,
                 agent::PermissionPlugin,
                 checks::ChecksPlugin,
+                diagrams::modal::NodeModalPlugin,
                 diagrams::DiagramsPlugin,
                 revalidation::RevalidationPlugin,
                 crate::ui::composer::ComposerPlugin,

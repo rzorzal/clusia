@@ -128,6 +128,13 @@ pub enum EditTarget {
     /// A waiting finding of a check, being edited before it joins the draft. It is drawn under
     /// its card in Security or Audits, not in the diff.
     Finding(String),
+    /// A comment on a diagram box: the drawing's version number, its key and the box's id. It
+    /// is written in the box dialog, not in the diff or a panel.
+    DiagramNode {
+        number: u32,
+        key: String,
+        node: String,
+    },
 }
 
 impl EditTarget {
