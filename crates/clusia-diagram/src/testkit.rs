@@ -3,6 +3,7 @@
 use clusia_core::diagram::DiagramSpec;
 use serde_json::{Value, json};
 
+use crate::geometry::touches;
 use crate::{EdgeGeo, Geometry, MARGIN, Point, Rect, TextLines};
 
 /// A node as JSON with every field spelled out.
@@ -204,8 +205,8 @@ pub(crate) fn random_graph(kind: &str, n: usize, m: usize, seed: u64) -> Diagram
     spec(kind, nodes, edges)
 }
 
-/// A tree of `n` nodes hung from earlier ones, with a few extra edges, from a fixed
-/// pseudo-random sequence.
+/// A chain of `n - leaves` nodes with `leaves` more joined to nodes of it, from a fixed
+/// pseudo-random sequence: the shape that has a spine with branches.
 pub(crate) fn sparse_graph(kind: &str, n: usize, seed: u64) -> DiagramSpec {
     let mut state = seed;
     let mut next = move |bound: usize| {
@@ -217,37 +218,31 @@ pub(crate) fn sparse_graph(kind: &str, n: usize, seed: u64) -> DiagramSpec {
     let nodes: Vec<Value> = (0..n)
         .map(|i| node(&format!("n{i}"), &format!("Module number {i}"), "box"))
         .collect();
-    let mut edges: Vec<Value> = Vec::new();
-    for i in 1..n {
-        let parent = next(i);
-        let (a, b) = if next(4) == 0 {
-            (i, parent)
+    let leaves = 1 + next(3);
+    let chain = n.saturating_sub(leaves).max(2);
+    let mut edges: Vec<Value> = (1..chain)
+        .map(|i| {
+            edge(
+                &format!("n{}", i - 1),
+                &format!("n{i}"),
+                Some("calls the other module"),
+            )
+        })
+        .collect();
+    for leaf in chain..n {
+        let parent = next(chain);
+        let (a, b) = if next(3) == 0 {
+            (leaf, parent)
         } else {
-            (parent, i)
+            (parent, leaf)
         };
-        edges.push(edge(
-            &format!("n{a}"),
-            &format!("n{b}"),
-            Some("calls the other module"),
-        ));
-    }
-    for _ in 0..next(3) {
-        let (a, b) = (next(n), next(n));
-        edges.push(edge(&format!("n{a}"), &format!("n{b}"), Some("extra")));
+        edges.push(edge(&format!("n{a}"), &format!("n{b}"), Some("leaf")));
     }
     spec(kind, nodes, edges)
 }
 
 fn is_axis_aligned(a: Point, b: Point) -> bool {
     (a.x - b.x).abs() < 1e-3 || (a.y - b.y).abs() < 1e-3
-}
-
-/// Whether the axis-aligned segment `a`–`b` touches the closed rectangle `r`.
-fn touches(a: Point, b: Point, r: Rect) -> bool {
-    a.x.max(b.x) >= r.x
-        && a.x.min(b.x) <= r.right()
-        && a.y.max(b.y) >= r.y
-        && a.y.min(b.y) <= r.bottom()
 }
 
 /// How far two collinear runs overlap, or 0 when they are not on one line.

@@ -816,7 +816,11 @@ mod tests {
                 edge("auth", "config", Some("reads refresh margin")),
             ],
         );
-        run(&down);
+        let g = run(&down);
+        assert!(
+            g.edges.iter().filter(|e| e.label.is_some()).count() >= 1,
+            "at least one of the two labels survives"
+        );
         let across = spec(
             "flow",
             vec![
@@ -833,7 +837,34 @@ mod tests {
                 edge("d", "a", Some("back")),
             ],
         );
-        run(&across);
+        let g = run(&across);
+        assert!(g.edges.iter().any(|e| e.index == 0 && e.label.is_some()));
+    }
+
+    /// The edges of `s` that have a label in the spec but none in the geometry.
+    fn dropped(s: &DiagramSpec, g: &Geometry) -> Vec<usize> {
+        (0..s.edges.len())
+            .filter(|&i| {
+                s.edges[i].label.is_some()
+                    && g.edges
+                        .iter()
+                        .find(|e| e.index == i)
+                        .is_some_and(|e| e.label.is_none())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_mockup_fixtures_keep_every_edge_label() {
+        for (name, s) in [
+            ("flow", flow_mockup()),
+            ("data flow", data_flow_mockup()),
+            ("states", states_mockup()),
+            ("graph", deps_mockup()),
+        ] {
+            let g = run(&s);
+            assert_eq!(dropped(&s, &g), Vec::<usize>::new(), "{name}");
+        }
     }
 
     #[test]
@@ -841,21 +872,20 @@ mod tests {
         let mut stacked = 0;
         for seed in 0..60u64 {
             for kind in ["flow", "data_flow", "states"] {
-                let n = 5 + (seed as usize % 8);
+                let n = 4 + (seed as usize % 4);
                 let s = sparse_graph(kind, n, seed);
                 let g = layout(&s, &Fonts);
                 check(&s, &g);
-                let hangs = g.boxes.iter().any(|a| {
-                    g.boxes
-                        .iter()
-                        .any(|b| a.rect.x == b.rect.x && a.rect.y < b.rect.y)
-                });
+                let hangs = g
+                    .boxes
+                    .iter()
+                    .any(|a| g.boxes.iter().any(|b| hangs_under(&b.rect, &a.rect)));
                 stacked += usize::from(hangs);
             }
         }
         assert!(
-            stacked >= 20,
-            "only {stacked} of 180 diagrams have a column"
+            stacked >= 60,
+            "only {stacked} of 180 diagrams hang a box 72 px under another"
         );
     }
 }

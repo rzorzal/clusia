@@ -175,6 +175,14 @@ pub struct Geometry {
     pub start_dot: Option<Point>,
 }
 
+/// Whether the axis-aligned segment `a`–`b` touches the closed rectangle `r`.
+pub(crate) fn touches(a: Point, b: Point, r: Rect) -> bool {
+    a.x.max(b.x) >= r.x
+        && a.x.min(b.x) <= r.right()
+        && a.y.max(b.y) >= r.y
+        && a.y.min(b.y) <= r.bottom()
+}
+
 /// Half of the 18 px start dot.
 const DOT_RADIUS: f32 = 9.0;
 

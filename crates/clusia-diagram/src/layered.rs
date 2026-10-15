@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 
 use clusia_core::diagram::DiagramSpec;
 
-use crate::geometry::{Align, Arrow, EdgeGeo, Point, Rect, TextLines};
+use crate::geometry::{Align, Arrow, EdgeGeo, Point, Rect, TextLines, touches};
 use crate::measure::{Measure, TextStyle};
 use crate::spine;
 use crate::text;
@@ -542,6 +542,18 @@ pub(crate) fn place(
                     }
                     dx += 8.0;
                 }
+            } else {
+                let room = gap.get(first_layer).copied().unwrap_or(0.0);
+                let to = band_end(first_layer) + room;
+                let mut dy = 8.0;
+                while label.at.y + dy + label.height <= to - 4.0 {
+                    for base in [&label, &other_side] {
+                        let mut shifted = base.clone();
+                        shifted.at.y += dy;
+                        places.push(shifted);
+                    }
+                    dy += 8.0;
+                }
             }
             texts.offer(chain.edge, (first_layer, start_at), places);
         }
@@ -675,9 +687,9 @@ pub(crate) fn place(
     }
 }
 
-/// The labels of edges that ask for a place, and the texts already down. A label goes in when
-/// it overlaps nothing placed before it, so a crowded port leaves a label out instead of
-/// printing it over another.
+/// The labels of edges that ask for a place, and the texts already down. A label takes the
+/// first of its places that overlaps no text already down and touches no route of another
+/// edge, so a crowded port leaves a label out instead of printing it over something.
 #[derive(Default)]
 struct Texts {
     taken: Vec<Rect>,
@@ -725,14 +737,6 @@ impl Texts {
         }
         placed
     }
-}
-
-/// Whether the axis-aligned segment `a`–`b` touches the closed rectangle `r`.
-fn touches(a: Point, b: Point, r: Rect) -> bool {
-    a.x.max(b.x) >= r.x
-        && a.x.min(b.x) <= r.right()
-        && a.y.max(b.y) >= r.y
-        && a.y.min(b.y) <= r.bottom()
 }
 
 /// Moves a lane or a port by a few pixels where two edges would otherwise run along one line
