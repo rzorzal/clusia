@@ -64,11 +64,11 @@ pub(crate) fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
             let label = text::wrap(
                 measure,
                 &m.label,
-                TextStyle::EdgeLabel,
+                TextStyle::EdgeLabelMono,
                 LABEL_WIDTH,
                 LABEL_LINES,
             );
-            let label_w = text::widest(measure, &label, TextStyle::EdgeLabel);
+            let label_w = text::widest(measure, &label, TextStyle::EdgeLabelMono);
             Some(Item {
                 index: i,
                 from,
@@ -122,7 +122,7 @@ pub(crate) fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
     let tallest = rects.iter().map(Rect::bottom).fold(0.0, f32::max);
 
     // Arrow heights: each row is its label's lines plus a fixed lead.
-    let line = measure.line_height(TextStyle::EdgeLabel);
+    let line = measure.line_height(TextStyle::EdgeLabelMono);
     let mut ys: Vec<f32> = Vec::with_capacity(items.len());
     let mut y = tallest;
     for (k, m) in items.iter().enumerate() {
@@ -173,7 +173,7 @@ pub(crate) fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
             to_x,
             label: TextLines {
                 lines: m.label.clone(),
-                style: TextStyle::EdgeLabel,
+                style: TextStyle::EdgeLabelMono,
                 at: Point {
                     x: label_x,
                     y: y - 4.0 - height,

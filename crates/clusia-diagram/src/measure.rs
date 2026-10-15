@@ -11,7 +11,10 @@ pub enum TextStyle {
     SubStrong,
     Row,
     RowMono,
+    /// The label of an edge, in the UI face.
     EdgeLabel,
+    /// The label of an edge that names code (a call), in the monospace face.
+    EdgeLabelMono,
     GroupLabel,
     /// Entity–relationship cardinalities such as `1` and `0..N`.
     Card,
@@ -25,13 +28,14 @@ pub trait Measure {
 /// Size in px, weight and whether the face is the monospace one.
 pub fn style_size(style: TextStyle) -> (f32, u16, bool) {
     match style {
-        TextStyle::Title => (13.0, 600, false),
+        TextStyle::Title => (14.0, 600, false),
         TextStyle::TitleMono => (13.0, 600, true),
         TextStyle::Sub => (11.0, 400, false),
         TextStyle::SubStrong => (11.0, 600, false),
         TextStyle::Row => (11.0, 400, false),
         TextStyle::RowMono => (11.0, 400, true),
-        TextStyle::EdgeLabel => (11.0, 400, true),
+        TextStyle::EdgeLabel => (11.0, 400, false),
+        TextStyle::EdgeLabelMono => (11.0, 400, true),
         TextStyle::GroupLabel => (12.0, 600, false),
         TextStyle::Card => (11.0, 600, false),
     }
@@ -170,24 +174,27 @@ mod tests {
     fn measure_adds_slack_and_knows_the_styles() {
         let f = Fonts;
         let raw = raw_width("exchange()", 11.0, 400, true);
-        assert!((f.width("exchange()", TextStyle::EdgeLabel) - raw * SLACK).abs() < 1e-4);
+        assert!((f.width("exchange()", TextStyle::EdgeLabelMono) - raw * SLACK).abs() < 1e-4);
         assert_eq!(f.line_height(TextStyle::Title), 16.0);
         assert_eq!(f.line_height(TextStyle::Row), 14.0);
         assert_eq!(style_size(TextStyle::TitleMono), (13.0, 600, true));
+        assert_eq!(style_size(TextStyle::Title), (14.0, 600, false));
+        assert_eq!(style_size(TextStyle::EdgeLabel), (11.0, 400, false));
+        assert_eq!(style_size(TextStyle::EdgeLabelMono), (11.0, 400, true));
         assert_eq!(f.width("", TextStyle::Title), 0.0);
     }
 
     #[test]
     fn unknown_wide_and_control_characters_have_rules() {
         let f = Fonts;
-        let unit = |c: &str| f.width(c, TextStyle::EdgeLabel) / 11.0;
+        let unit = |c: &str| f.width(c, TextStyle::EdgeLabelMono) / 11.0;
         assert!((unit("日") - SLACK).abs() < 1e-4, "wide is one em");
         assert!(
             (unit("é") - MONO_EM * SLACK).abs() < 1e-4,
             "mono is 0.6 em for any glyph"
         );
         assert_eq!(f.width("\u{1b}", TextStyle::Title), 0.0);
-        let sans = f.width("é", TextStyle::Title) / 13.0;
+        let sans = f.width("é", TextStyle::Title) / 14.0;
         assert!(
             (sans - FALLBACK_EM * SLACK).abs() < 1e-4,
             "unknown sans glyph"

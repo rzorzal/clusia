@@ -11,7 +11,9 @@ use crate::{sequence, tables, usecase};
 /// Space around the drawing; it starts at `(MARGIN, MARGIN)`.
 pub const MARGIN: f32 = 24.0;
 
-const PAD: f32 = 12.0;
+const PAD: f32 = 14.0;
+/// The tighter padding of a sequence participant.
+const SEQUENCE_PAD: f32 = 12.0;
 const TITLE_SUB_GAP: f32 = 2.0;
 const MIN_WIDTH: f32 = 160.0;
 const MAX_WIDTH: f32 = 240.0;
@@ -80,12 +82,17 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
         Shape::External => kind == DiagramKind::DataFlow,
         _ => matches!(kind, DiagramKind::Sequence | DiagramKind::UseCases),
     };
+    let pad = if kind == DiagramKind::Sequence {
+        SEQUENCE_PAD
+    } else {
+        PAD
+    };
     let mut card = Card {
         w: 0.0,
         h: 0.0,
         fixed: false,
         centred,
-        inset: PAD,
+        inset: pad,
         title: Vec::new(),
         sub: Vec::new(),
         title_style,
@@ -121,9 +128,9 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
             };
             let wanted = longest_word(&node.label, title_style)
                 .max(longest_word(sub_text, sub_style))
-                + 2.0 * PAD;
+                + 2.0 * pad;
             card.w = base.max(wanted).clamp(min_w, max_w);
-            let inner = card.w - 2.0 * PAD;
+            let inner = card.w - 2.0 * pad;
             card.title = text::wrap(measure, &node.label, title_style, inner, TITLE_LINES);
             card.sub = text::wrap(measure, sub_text, sub_style, inner, SUB_LINES);
             let min_h = match (kind, node.shape) {
@@ -132,7 +139,7 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
                 }
                 _ => 0.0,
             };
-            card.h = (2.0 * PAD + card.text_height(measure)).max(min_h);
+            card.h = (2.0 * pad + card.text_height(measure)).max(min_h);
         }
     }
     card
@@ -177,10 +184,16 @@ fn layered_geometry(
             },
         })
         .collect();
+    let label_style = if spec.kind == DiagramKind::Flow {
+        TextStyle::EdgeLabelMono
+    } else {
+        TextStyle::EdgeLabel
+    };
     let options = Options {
         direction,
         arrow,
         top_aligned: tables,
+        label_style,
     };
     let placed = layered::place(spec, &sizes, measure, &options);
 
@@ -232,7 +245,7 @@ pub(crate) fn box_text(
     let top = if card.centred {
         rect.y + (rect.h - content) / 2.0
     } else {
-        rect.y + PAD
+        rect.y + card.inset
     };
     let x = rect.x + card.inset;
     let title = text::block(
@@ -464,6 +477,34 @@ mod tests {
     }
 
     #[test]
+    fn code_kinds_label_their_edges_in_mono_and_the_others_in_the_ui_face() {
+        let flow = run(&flow_mockup());
+        assert_eq!(
+            flow.edges[0].label.as_ref().expect("label").style,
+            TextStyle::EdgeLabelMono
+        );
+        for s in [deps_mockup(), data_flow_mockup(), states_mockup()] {
+            let g = run(&s);
+            for e in &g.edges {
+                if let Some(label) = &e.label {
+                    assert_eq!(label.style, TextStyle::EdgeLabel, "{:?}", s.kind);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_box_keeps_14_px_around_its_text() {
+        let g = run(&flow_mockup());
+        let refresh = g.boxes.iter().find(|b| b.node == "refresh").expect("box");
+        assert_eq!(refresh.title.at.x - refresh.rect.x, 14.0);
+        assert_eq!(refresh.title.at.y - refresh.rect.y, 14.0);
+        let sub = refresh.sub.as_ref().expect("sub");
+        assert_eq!(refresh.rect.bottom() - sub.rect().bottom(), 14.0);
+        assert_eq!(refresh.rect.h, 60.0, "title, sub and padding");
+    }
+
+    #[test]
     fn box_text_wraps_inside_the_box_and_sub_text_follows_the_title() {
         let s = spec(
             "flow",
@@ -479,7 +520,7 @@ mod tests {
         let g = run(&s);
         let b = &g.boxes[0];
         assert!(b.title.lines.len() >= 2 && b.title.lines.len() <= 3);
-        assert!(b.title.at.x >= b.rect.x + 11.99);
+        assert!(b.title.at.x >= b.rect.x + 13.99);
         assert!(b.title.rect().right() <= b.rect.right());
         let sub = b.sub.as_ref().expect("sub");
         assert!(sub.at.y >= b.title.rect().bottom());
@@ -506,7 +547,7 @@ mod tests {
             label
                 .lines
                 .iter()
-                .all(|l| Fonts.width(l, TextStyle::EdgeLabel) <= 88.5)
+                .all(|l| Fonts.width(l, TextStyle::EdgeLabelMono) <= 88.5)
         );
     }
 

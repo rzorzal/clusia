@@ -37,6 +37,8 @@ pub(crate) struct Options {
     pub arrow: Arrow,
     /// Whether the boxes of a row share their top edge rather than their middle line.
     pub top_aligned: bool,
+    /// The face of the edge labels.
+    pub label_style: TextStyle,
 }
 
 pub(crate) struct Placed {
@@ -399,7 +401,7 @@ pub(crate) fn place(
             let edge = &spec.edges[chain.edge];
             let wide = card_w(edge.ends[0].as_deref()).max(card_w(edge.ends[1].as_deref()));
             if let (Some(text), true) = (edge.label.as_deref(), wide > 0.0) {
-                let natural = measure.width(text, TextStyle::EdgeLabel).min(120.0);
+                let natural = measure.width(text, opts.label_style).min(120.0);
                 let first = layer_of[chain.verts[0]];
                 label_room[first] = label_room[first].max(natural + 8.0 + 2.0 * (wide + 4.0));
             }
@@ -542,6 +544,7 @@ pub(crate) fn place(
             let label = edge_label(
                 measure,
                 dir,
+                opts.label_style,
                 text,
                 band_end(first_layer),
                 gap.get(first_layer).copied(),
@@ -662,7 +665,7 @@ pub(crate) fn place(
             }
             texts.hold(ends.iter().flatten());
             if let Some(text) = edge.label.as_deref() {
-                let label = column_label(measure, text, x + 6.0, room, span);
+                let label = column_label(measure, opts.label_style, text, x + 6.0, room, span);
                 texts.offer(i, (layer, y_top), vec![label], None);
             }
             geos[i] = Some(EdgeGeo {
@@ -694,7 +697,16 @@ pub(crate) fn place(
             dir.to_xy(far, y2),
         ];
         if let Some(text) = edge.label.as_deref() {
-            let label = loop_label(measure, dir, text, far, out, (y1, y2), nth);
+            let label = loop_label(
+                measure,
+                dir,
+                opts.label_style,
+                text,
+                far,
+                out,
+                (y1, y2),
+                nth,
+            );
             texts.offer(i, (layer_of[node], y1), vec![label], None);
         }
         geos[i] = Some(EdgeGeo {
@@ -1327,16 +1339,17 @@ fn simplify(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
 
 /// The label of an edge, in the free space at the start of the first gap after the source; when
 /// the edge has cardinalities (`ends_w` is the widest) it sits under the route, between them.
+#[allow(clippy::too_many_arguments)]
 fn edge_label(
     measure: &dyn Measure,
     dir: Direction,
+    style: TextStyle,
     text_in: &str,
     gap_start: f32,
     gap: Option<f32>,
     port: f32,
     ends_w: Option<f32>,
 ) -> TextLines {
-    let style = TextStyle::EdgeLabel;
     match dir {
         Direction::LeftToRight => {
             let width = gap.unwrap_or_else(|| dir.base_gap());
@@ -1391,12 +1404,12 @@ fn card_text(measure: &dyn Measure, text_in: Option<&str>) -> Option<TextLines> 
 /// the free span `(top, bottom)` between the two boxes and not reaching past `right`.
 fn column_label(
     measure: &dyn Measure,
+    style: TextStyle,
     text_in: &str,
     x: f32,
     right: f32,
     (top, bottom): (f32, f32),
 ) -> TextLines {
-    let style = TextStyle::EdgeLabel;
     let lines_fit = ((bottom - top) / measure.line_height(style))
         .floor()
         .max(0.0) as usize;
@@ -1443,16 +1456,17 @@ fn end_label(
 }
 
 /// The label of a self-loop, beside its far side.
+#[allow(clippy::too_many_arguments)]
 fn loop_label(
     measure: &dyn Measure,
     dir: Direction,
+    style: TextStyle,
     text_in: &str,
     far: f32,
     out: f32,
     (y1, y2): (f32, f32),
     nth: usize,
 ) -> TextLines {
-    let style = TextStyle::EdgeLabel;
     match dir {
         Direction::LeftToRight => {
             let cap = (68.0 - 6.0 * nth.min(4) as f32).max(20.0);

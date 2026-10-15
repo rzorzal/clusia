@@ -606,6 +606,15 @@ fn type_of(style: TextStyle, ink: Swatch) -> Type {
     }
 }
 
+/// Where `line` of `block` starts. A centred line is placed by its measured width: `Justify`
+/// only centres a line against the widest line of its own text, not against the node.
+pub fn line_left(block: &TextLines, line: &str) -> f32 {
+    match block.align {
+        Align::Left => block.at.x,
+        Align::Center => block.at.x + (block.width - Fonts.width(line, block.style)) / 2.0,
+    }
+}
+
 /// One node per line of `block`, positioned from `origin` (the top-left corner of the node the
 /// lines are children of).
 fn text_block(
@@ -617,21 +626,16 @@ fn text_block(
     origin: Vec2,
 ) {
     let line_height = Fonts.line_height(block.style);
-    let justify = match block.align {
-        Align::Left => Justify::Left,
-        Align::Center => Justify::Center,
-    };
     for (i, line) in block.lines.iter().enumerate() {
         let mut e = p.spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: px(block.at.x - origin.x),
+                left: px(line_left(block, line) - origin.x),
                 top: px(block.at.y + i as f32 * line_height - origin.y),
-                width: px(block.width),
                 ..default()
             },
             text(fonts, line.clone(), type_of(block.style, ink)),
-            TextLayout::new(justify, LineBreak::NoWrap),
+            TextLayout::new(Justify::Left, LineBreak::NoWrap),
             ignore(),
         ));
         if strike {
@@ -1950,6 +1954,27 @@ mod tests {
             pill.sides.iter().all(|(horizontal, _, _)| *horizontal),
             "a pill's ends are all corner"
         );
+    }
+
+    #[test]
+    fn a_centred_line_starts_half_its_spare_width_in() {
+        let block = TextLines {
+            lines: vec!["Fresh".into(), "a longer line".into()],
+            style: TextStyle::Title,
+            at: Point { x: 10.0, y: 0.0 },
+            width: 200.0,
+            height: 32.0,
+            align: Align::Center,
+        };
+        for line in &block.lines {
+            let spare = 200.0 - Fonts.width(line, TextStyle::Title);
+            assert!((line_left(&block, line) - (10.0 + spare / 2.0)).abs() < 1e-3);
+        }
+        let left = TextLines {
+            align: Align::Left,
+            ..block.clone()
+        };
+        assert_eq!(line_left(&left, "Fresh"), 10.0);
     }
 
     #[test]
