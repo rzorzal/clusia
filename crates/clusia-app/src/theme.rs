@@ -217,8 +217,9 @@ pub const LIGHT: Tokens = Tokens {
     canvas_dot: Color::srgb_u8(0xDD, 0xE2, 0xDD),
     edge: Color::srgb_u8(0xA4, 0xAC, 0xA6),
     edge_soft: Color::srgb_u8(0xC8, 0xCD, 0xCA),
-    changed_bg: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x1A),
-    risk_bg: Color::srgba_u8(0xD9, 0x57, 0x2B, 0x1A),
+    // Opaque: the UI blends in linear light, so a 10 % tint over white came out almost white.
+    changed_bg: Color::srgb_u8(0xEA, 0xF5, 0xEC),
+    risk_bg: Color::srgb_u8(0xFB, 0xEE, 0xE9),
     ghost_ink: Color::srgb_u8(0xA9, 0xB0, 0xAB),
     ghost_fill: Color::srgba_u8(0x8A, 0x93, 0x8C, 0x1A),
     amber: Color::srgb_u8(0xB7, 0x79, 0x1F),
@@ -421,7 +422,7 @@ mod tests {
         assert_eq!(get(&DARK, Swatch::Edge), Color::srgb_u8(0x59, 0x62, 0x5B));
         assert_eq!(
             get(&LIGHT, Swatch::ChangedBg),
-            Color::srgba_u8(0x2F, 0x9E, 0x44, 0x1A)
+            Color::srgb_u8(0xEA, 0xF5, 0xEC)
         );
         assert_eq!(
             get(&DARK, Swatch::ChangedBg),
@@ -429,7 +430,7 @@ mod tests {
         );
         assert_eq!(
             get(&LIGHT, Swatch::RiskBg),
-            Color::srgba_u8(0xD9, 0x57, 0x2B, 0x1A)
+            Color::srgb_u8(0xFB, 0xEE, 0xE9)
         );
         assert_eq!(
             get(&DARK, Swatch::RiskBg),
