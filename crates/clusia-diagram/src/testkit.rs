@@ -3,7 +3,7 @@
 use clusia_core::diagram::DiagramSpec;
 use serde_json::{Value, json};
 
-use crate::geometry::touches;
+use crate::geometry::{overlap, touches};
 use crate::{EdgeGeo, Geometry, MARGIN, Point, Rect, TextLines};
 
 /// A node as JSON with every field spelled out.
@@ -243,20 +243,6 @@ pub(crate) fn sparse_graph(kind: &str, n: usize, seed: u64) -> DiagramSpec {
 
 fn is_axis_aligned(a: Point, b: Point) -> bool {
     (a.x - b.x).abs() < 1e-3 || (a.y - b.y).abs() < 1e-3
-}
-
-/// How far two collinear runs overlap, or 0 when they are not on one line.
-fn overlap(a: (Point, Point), b: (Point, Point)) -> f32 {
-    let (ax, bx) = ((a.0.x - a.1.x).abs() < 1e-3, (b.0.x - b.1.x).abs() < 1e-3);
-    let (ay, by) = ((a.0.y - a.1.y).abs() < 1e-3, (b.0.y - b.1.y).abs() < 1e-3);
-    let span = |p: f32, q: f32, r: f32, s: f32| p.max(q).min(r.max(s)) - p.min(q).max(r.min(s));
-    if ax && bx && (a.0.x - b.0.x).abs() < 1.0 {
-        span(a.0.y, a.1.y, b.0.y, b.1.y)
-    } else if ay && by && (a.0.y - b.0.y).abs() < 1.0 {
-        span(a.0.x, a.1.x, b.0.x, b.1.x)
-    } else {
-        0.0
-    }
 }
 
 /// Whether two edges have runs on one line that overlap by more than 2 px.

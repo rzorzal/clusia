@@ -909,7 +909,7 @@ fn spawn_canvas(
         ))
         .with_children(|content| spawn_content(content, fonts, ctx, spec, g));
     });
-    header(c, fonts, spec);
+    header(c, fonts, spec, g.dropped_texts);
     zoom_control(c, fonts, canvas);
     legend(c, fonts, ctx.tiles.as_ref(), ctx.compare);
 }
@@ -1181,7 +1181,16 @@ fn draw_box(
     });
 }
 
-fn header(c: &mut ChildSpawnerCommands, fonts: &UiFonts, spec: &DiagramSpec) {
+/// `3 labels not shown`: the edge texts the layout found no free place for.
+fn hidden_note(dropped: u32) -> Option<String> {
+    match dropped {
+        0 => None,
+        1 => Some("1 label not shown".into()),
+        n => Some(format!("{n} labels not shown")),
+    }
+}
+
+fn header(c: &mut ChildSpawnerCommands, fonts: &UiFonts, spec: &DiagramSpec, dropped: u32) {
     c.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -1217,6 +1226,12 @@ fn header(c: &mut ChildSpawnerCommands, fonts: &UiFonts, spec: &DiagramSpec) {
             text(fonts, spec.caption.clone(), Type::MUTED.ink(Swatch::Faint)),
             ignore(),
         ));
+        if let Some(note) = hidden_note(dropped) {
+            h.spawn((
+                text(fonts, format!("· {note}"), Type::MUTED.ink(Swatch::Faint)),
+                ignore(),
+            ));
+        }
     });
 }
 
@@ -2581,6 +2596,55 @@ mod tests {
         app.world_mut().resource_mut::<Diagrams>().set_changed();
         testing::settle(&mut app);
         assert_eq!(testing::count::<DiagramBox>(&mut app), 4);
+    }
+
+    #[test]
+    fn the_header_says_how_many_labels_had_no_room() {
+        assert_eq!(hidden_note(0), None);
+        assert_eq!(hidden_note(1).as_deref(), Some("1 label not shown"));
+        assert_eq!(hidden_note(3).as_deref(), Some("3 labels not shown"));
+        for version in fixture::demo_diagrams(NOW, &fixture::demo_pr()) {
+            for entry in &version.entries {
+                if let EntryState::Ready { spec, .. } = &entry.state {
+                    let g = clusia_diagram::layout(spec, &Fonts);
+                    assert_eq!(
+                        g.dropped_texts, 0,
+                        "the demo keeps every label: {}",
+                        spec.key
+                    );
+                }
+            }
+        }
+        let mut app = testing::app(fixture::demo(NOW));
+        let (pr, _) = open(&mut app);
+        assert!(!texts(&mut app).iter().any(|t| t.contains("not shown")));
+        let mut crowded = spec("flow");
+        crowded.nodes = vec![node("hub", None)];
+        crowded.edges.clear();
+        for i in 0..20 {
+            let id = format!("s{i}");
+            crowded.nodes.push(node(&id, None));
+            let mut e = edge("hub", &id, None);
+            e.label = Some("calls".into());
+            crowded.edges.push(e);
+        }
+        let hidden = clusia_diagram::layout(&crowded, &Fonts).dropped_texts;
+        assert!(hidden > 0);
+        testing::tell(
+            &mut app,
+            Tell::Diagrams(DiagramsTell::Entry {
+                pr,
+                number: 2,
+                key: "flow".into(),
+                state: EntryState::Ready {
+                    spec: crowded,
+                    notes: Vec::new(),
+                },
+            }),
+        );
+        testing::settle(&mut app);
+        let want = hidden_note(hidden).expect("a note");
+        assert!(texts(&mut app).iter().any(|t| t.contains(&want)), "{want}");
     }
 
     #[test]

@@ -173,6 +173,41 @@ pub struct Geometry {
     pub activations: Vec<Activation>,
     pub messages: Vec<MessageGeo>,
     pub start_dot: Option<Point>,
+    /// Edge labels and cardinalities left out because no place was free of boxes, texts and
+    /// other routes.
+    pub dropped_texts: u32,
+}
+
+/// Space between the parallel runs of two routes in one gap.
+pub(crate) const STEP: f32 = 8.0;
+
+/// How far two collinear runs overlap, or 0 when they are not on one line.
+pub(crate) fn overlap(a: (Point, Point), b: (Point, Point)) -> f32 {
+    let span = |p: f32, q: f32, r: f32, s: f32| p.max(q).min(r.max(s)) - p.min(q).max(r.min(s));
+    let vertical = |s: (Point, Point)| (s.0.x - s.1.x).abs() < 1e-3;
+    let horizontal = |s: (Point, Point)| (s.0.y - s.1.y).abs() < 1e-3;
+    if vertical(a) && vertical(b) && (a.0.x - b.0.x).abs() < 1.0 {
+        span(a.0.y, a.1.y, b.0.y, b.1.y)
+    } else if horizontal(a) && horizontal(b) && (a.0.y - b.0.y).abs() < 1.0 {
+        span(a.0.x, a.1.x, b.0.x, b.1.x)
+    } else {
+        0.0
+    }
+}
+
+/// Whether `zone` touches the route of any edge but `own`; `routes` are (edge index, points).
+pub(crate) fn crossed_by_other_route<P: AsRef<[Point]>>(
+    routes: &[(usize, P)],
+    own: usize,
+    zone: Rect,
+) -> bool {
+    routes.iter().any(|(other, points)| {
+        *other != own
+            && points
+                .as_ref()
+                .windows(2)
+                .any(|w| touches(w[0], w[1], zone))
+    })
 }
 
 /// Whether the axis-aligned segment `a`–`b` touches the closed rectangle `r`.
@@ -197,6 +232,7 @@ impl Geometry {
             activations: Vec::new(),
             messages: Vec::new(),
             start_dot: None,
+            dropped_texts: 0,
         }
     }
 

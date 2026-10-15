@@ -185,6 +185,7 @@ fn layered_geometry(
     let placed = layered::place(spec, &sizes, measure, &options);
 
     let mut geometry = Geometry::empty();
+    geometry.dropped_texts = placed.dropped_texts;
     for (i, (node, card)) in spec.nodes.iter().zip(&cards).enumerate() {
         let rect = placed.rects[i];
         let (title, sub, rows) = match &tabular[i] {
@@ -450,6 +451,11 @@ mod tests {
         let g = run(&s);
         let labels: Vec<_> = g.edges.iter().filter_map(|e| e.label.as_ref()).collect();
         assert!(!labels.is_empty() && labels.len() < 20);
+        assert_eq!(
+            g.dropped_texts as usize,
+            20 - labels.len(),
+            "the left-out labels are counted"
+        );
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {
                 assert!(!a.rect().intersects(&b.rect()));
@@ -806,6 +812,67 @@ mod tests {
     }
 
     #[test]
+    fn a_hub_with_every_edge_and_eighty_edges_between_two_boxes_stay_inside_the_budget() {
+        let budget = if cfg!(debug_assertions) { 200 } else { 20 };
+        let hub = |kind: &str, shape: &str| {
+            let nodes: Vec<_> = (0..40)
+                .map(|i| node(&format!("n{i}"), &format!("Part {i}"), shape))
+                .collect();
+            let edges: Vec<_> = (1..40)
+                .flat_map(|i| {
+                    let other = format!("n{i}");
+                    [
+                        edge("n0", &other, Some("reads")),
+                        edge(&other, "n0", Some("writes")),
+                    ]
+                })
+                .collect();
+            spec(kind, nodes, edges)
+        };
+        let pair = spec(
+            "flow",
+            vec![node("a", "Client", "box"), node("b", "Server", "box")],
+            (0..80)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        edge("a", "b", Some("call"))
+                    } else {
+                        edge("b", "a", None)
+                    }
+                })
+                .collect(),
+        );
+        let one_way = |kind: &str, shape: &str| {
+            let mut s = hub(kind, shape);
+            s.edges.retain(|e| e.from == "n0");
+            s
+        };
+        // A circle or a table keeps its size, so a hub of either with a route each way to every
+        // other node crowds its ports until two routes share a line: those two are held to the
+        // time only.
+        for (name, s, valid) in [
+            ("box hub", hub("flow", "box"), true),
+            ("circle hub one way", one_way("data_flow", "circle"), true),
+            (
+                "table hub one way",
+                one_way("entity_relationship", "table"),
+                true,
+            ),
+            ("one pair", pair, true),
+            ("circle hub", hub("data_flow", "circle"), false),
+            ("table hub", hub("entity_relationship", "table"), false),
+        ] {
+            let started = Instant::now();
+            let g = layout(&s, &Fonts);
+            let took = started.elapsed();
+            assert!(took.as_millis() <= budget, "{name}: {took:?}");
+            if valid {
+                check(&s, &g);
+            }
+        }
+    }
+
+    #[test]
     fn a_chain_of_forty_nodes_and_its_returns_stay_valid() {
         let nodes: Vec<_> = (0..40)
             .map(|i| node(&format!("n{i}"), &format!("Step {i}"), "box"))
@@ -905,6 +972,7 @@ mod tests {
         ] {
             let g = run(&s);
             assert_eq!(dropped(&s, &g), Vec::<usize>::new(), "{name}");
+            assert_eq!(g.dropped_texts, 0, "{name}");
         }
     }
 

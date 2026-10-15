@@ -10,7 +10,9 @@ use std::collections::{HashMap, VecDeque};
 
 use clusia_core::diagram::DiagramSpec;
 
-use crate::geometry::{Align, Arrow, EdgeGeo, Point, Rect, TextLines, touches};
+use crate::geometry::{
+    Align, Arrow, EdgeGeo, Point, Rect, STEP, TextLines, crossed_by_other_route,
+};
 use crate::measure::{Measure, TextStyle};
 use crate::spine;
 use crate::text;
@@ -40,14 +42,14 @@ pub(crate) struct Options {
 pub(crate) struct Placed {
     pub rects: Vec<Rect>,
     pub edges: Vec<EdgeGeo>,
+    /// Labels and cardinalities left out for want of a free place.
+    pub dropped_texts: u32,
 }
 
 /// Space between two boxes of one rank.
 const NODE_GAP: f32 = 48.0;
 /// Space between a lane and its neighbours in one rank.
 const LANE_GAP: f32 = 16.0;
-/// Space between the vertical runs of two routes in one gap.
-const STEP: f32 = 8.0;
 /// Space kept free after the last run of a gap.
 const END_PAD: f32 = 16.0;
 /// Space between a box and the box that hangs below it.
@@ -150,6 +152,7 @@ pub(crate) fn place(
         return Placed {
             rects: Vec::new(),
             edges: Vec::new(),
+            dropped_texts: 0,
         };
     }
     let dir = opts.direction;
@@ -674,7 +677,7 @@ pub(crate) fn place(
         .flatten()
         .map(|g| (g.index, g.points.as_slice()))
         .collect();
-    let placed_labels = texts.place(&routes);
+    let (placed_labels, mut dropped_texts) = texts.place(&routes);
     for (edge, label) in placed_labels {
         if let Some(Some(geo)) = geos.get_mut(edge) {
             geo.label = Some(label);
@@ -682,22 +685,26 @@ pub(crate) fn place(
     }
 
     let mut edges: Vec<EdgeGeo> = geos.into_iter().flatten().collect();
-    settle_cardinalities(&mut edges, &rects);
-    Placed { rects, edges }
+    dropped_texts += settle_cardinalities(&mut edges, &rects);
+    Placed {
+        rects,
+        edges,
+        dropped_texts,
+    }
 }
 
 /// Keeps every cardinality clear of other routes: one that touches the route of another edge
 /// is nudged along its own end, in 4 px steps, and flipped to the other side of the route, to
 /// the first place that overlaps no box and no text and touches no other route. A cardinality
-/// is data (`1` or `0..N`), so it is left out only when no such place exists.
-fn settle_cardinalities(edges: &mut [EdgeGeo], boxes: &[Rect]) {
+/// is data (`1` or `0..N`), so it is left out only when no such place exists; returns how many
+/// were left out.
+fn settle_cardinalities(edges: &mut [EdgeGeo], boxes: &[Rect]) -> u32 {
+    let mut dropped = 0;
     let routes: Vec<(usize, Vec<Point>)> =
         edges.iter().map(|e| (e.index, e.points.clone())).collect();
     let crossed = |text: &TextLines, own: usize| {
         let zone = text.rect().inflate(1.0);
-        routes.iter().any(|(other, points)| {
-            *other != own && points.windows(2).any(|w| touches(w[0], w[1], zone))
-        })
+        crossed_by_other_route(&routes, own, zone)
     };
     for k in 0..edges.len() {
         for slot in 0..2 {
@@ -762,9 +769,11 @@ fn settle_cardinalities(edges: &mut [EdgeGeo], boxes: &[Rect]) {
                     }
                 }
             }
+            dropped += u32::from(found.is_none());
             edges[k].ends[slot] = found;
         }
     }
+    dropped
 }
 
 /// The labels of edges that ask for a place, and the texts already down. A label takes the
@@ -792,8 +801,9 @@ impl Texts {
     }
 
     /// Takes the first place of each label that overlaps no text already down and touches no
-    /// route of another edge; a label with no such place is left out.
-    fn place(mut self, routes: &[(usize, &[Point])]) -> Vec<(usize, TextLines)> {
+    /// route of another edge; a label with no such place is left out, and counted.
+    fn place(mut self, routes: &[(usize, &[Point])]) -> (Vec<(usize, TextLines)>, u32) {
+        let asked = self.offers.len();
         self.offers.sort_by(|a, b| {
             a.1.0
                 .cmp(&b.1.0)
@@ -806,16 +816,15 @@ impl Texts {
                 let rect = label.rect();
                 let zone = rect.inflate(1.0);
                 !self.taken.iter().any(|t| t.intersects(&rect))
-                    && !routes.iter().any(|&(other, points)| {
-                        other != edge && points.windows(2).any(|w| touches(w[0], w[1], zone))
-                    })
+                    && !crossed_by_other_route(routes, edge, zone)
             });
             if let Some(label) = free {
                 self.taken.push(label.rect());
                 placed.push((edge, label));
             }
         }
-        placed
+        let dropped = (asked - placed.len()) as u32;
+        (placed, dropped)
     }
 }
 
@@ -1341,6 +1350,7 @@ fn loop_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::touches;
 
     fn card(text: &str, at: (f32, f32)) -> TextLines {
         text::block(
@@ -1405,7 +1415,7 @@ mod tests {
             w: 600.0,
             h: 600.0,
         };
-        settle_cardinalities(&mut edges, &[wall]);
+        assert_eq!(settle_cardinalities(&mut edges, &[wall]), 1, "counted");
         assert!(edges[0].ends[0].is_none());
     }
 }

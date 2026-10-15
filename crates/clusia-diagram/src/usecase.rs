@@ -7,15 +7,14 @@ use std::collections::HashMap;
 use clusia_core::diagram::{DiagramSpec, GroupKind, Shape};
 
 use crate::geometry::{
-    Align, Arrow, BoxGeo, EdgeGeo, Geometry, GroupGeo, Point, Rect, TextLines, touches,
+    Align, Arrow, BoxGeo, EdgeGeo, Geometry, GroupGeo, Point, Rect, STEP, TextLines,
+    crossed_by_other_route, overlap,
 };
 use crate::layered::{loop_reach, loop_rows, loop_zone};
 use crate::layout::{box_text, card};
 use crate::measure::{Measure, TextStyle};
 use crate::text;
 
-/// Space between the vertical runs of two routes in one channel.
-const STEP: f32 = 8.0;
 const COL_GAP: f32 = 32.0;
 const ROW_GAP: f32 = 40.0;
 const ACTOR_GAP: f32 = 36.0;
@@ -644,14 +643,16 @@ pub(crate) fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
     });
     let mut keep_clear: Vec<Rect> = rects.clone();
     keep_clear.extend(geometry.groups.iter().map(|g| g.label.rect()));
-    settle_labels(&mut edges, keep_clear);
+    geometry.dropped_texts = settle_labels(&mut edges, keep_clear);
     geometry.edges = edges;
     geometry
 }
 
 /// Gives each label the first place, near where it was asked for, that overlaps no box, no
 /// text already down and no route of another edge; a label with no such place is left out.
-fn settle_labels(edges: &mut [EdgeGeo], mut taken: Vec<Rect>) {
+/// Returns how many were left out.
+fn settle_labels(edges: &mut [EdgeGeo], mut taken: Vec<Rect>) -> u32 {
+    let mut dropped = 0;
     let routes: Vec<(usize, Vec<Point>)> =
         edges.iter().map(|e| (e.index, e.points.clone())).collect();
     for edge in edges.iter_mut() {
@@ -676,29 +677,17 @@ fn settle_labels(edges: &mut [EdgeGeo], mut taken: Vec<Rect>) {
                 let rect = l.rect();
                 let zone = rect.inflate(1.0);
                 !taken.iter().any(|t| t.intersects(&rect))
-                    && !routes.iter().any(|(other, points)| {
-                        *other != own && points.windows(2).any(|w| touches(w[0], w[1], zone))
-                    })
+                    && !crossed_by_other_route(&routes, own, zone)
             });
-        if let Some(l) = free {
-            taken.push(l.rect());
-            edge.label = Some(l);
+        match free {
+            Some(l) => {
+                taken.push(l.rect());
+                edge.label = Some(l);
+            }
+            None => dropped += 1,
         }
     }
-}
-
-/// How far two collinear runs overlap, or 0 when they are not on one line.
-fn overlap(a: (Point, Point), b: (Point, Point)) -> f32 {
-    let span = |p: f32, q: f32, r: f32, s: f32| p.max(q).min(r.max(s)) - p.min(q).max(r.min(s));
-    let vertical = |s: (Point, Point)| (s.0.x - s.1.x).abs() < 1e-3;
-    let horizontal = |s: (Point, Point)| (s.0.y - s.1.y).abs() < 1e-3;
-    if vertical(a) && vertical(b) && (a.0.x - b.0.x).abs() < 1.0 {
-        span(a.0.y, a.1.y, b.0.y, b.1.y)
-    } else if horizontal(a) && horizontal(b) && (a.0.y - b.0.y).abs() < 1.0 {
-        span(a.0.x, a.1.x, b.0.x, b.1.x)
-    } else {
-        0.0
-    }
+    dropped
 }
 
 /// How many other edges run along one line with `edges[k]` for more than 2 px.
@@ -745,6 +734,8 @@ fn separate_ports(edges: &mut [EdgeGeo], ends: &dyn Fn(&EdgeGeo) -> [Rect; 2]) {
                     (rect.x + 3.0, rect.right() - 3.0)
                 };
                 let home = if sideways { a.y } else { a.x };
+                // `moved` covers the whole round; this end keeps a slide only when its own try helped.
+                let mut improved = false;
                 'tries: for step in 1..=6 {
                     for sign in [1.0, -1.0] {
                         let to = home + sign * 4.0 * step as f32;
@@ -761,12 +752,13 @@ fn separate_ports(edges: &mut [EdgeGeo], ends: &dyn Fn(&EdgeGeo) -> [Rect; 2]) {
                         }
                         edges[k].points = points;
                         if shared_runs(edges, k) < before {
-                            moved = true;
+                            improved = true;
                             break 'tries;
                         }
                     }
                 }
-                if moved {
+                if improved {
+                    moved = true;
                     break;
                 }
                 edges[k].points = original;
@@ -781,6 +773,7 @@ fn separate_ports(edges: &mut [EdgeGeo], ends: &dyn Fn(&EdgeGeo) -> [Rect; 2]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::touches;
     use crate::measure::Fonts;
     use crate::testkit::{assert_no_text_clash, check, edge, node, node_sub, spec};
     use crate::{MARGIN, layout};
@@ -1025,6 +1018,37 @@ mod tests {
     }
 
     #[test]
+    fn one_actor_tied_to_every_use_case_twice_stays_inside_the_budget() {
+        let mut nodes = vec![node("a", "Reviewer", "actor")];
+        nodes.extend((0..39).map(|i| node(&format!("u{i}"), &format!("Use case {i}"), "pill")));
+        let edges = (0..39)
+            .flat_map(|i| {
+                let case = format!("u{i}");
+                [edge("a", &case, Some("uses")), edge(&case, "a", None)]
+            })
+            .collect();
+        let s = with_boundary(
+            &spec("use_cases", nodes, edges),
+            &(0..39)
+                .map(|i| format!("u{i}"))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        let started = std::time::Instant::now();
+        let g = layout(&s, &Fonts);
+        let took = started.elapsed();
+        assert!(
+            took.as_millis() <= if cfg!(debug_assertions) { 200 } else { 20 },
+            "{took:?}"
+        );
+        // At 78 routes on one actor two of them still share a line, so only the time and the
+        // routes' count are held here.
+        assert_eq!(g.edges.len(), 78);
+    }
+
+    #[test]
     fn random_use_case_diagrams_keep_every_invariant_inside_the_budget() {
         for seed in 0..60u64 {
             let actors = 1 + seed as usize % 4;
@@ -1148,7 +1172,55 @@ mod tests {
             w: 600.0,
             h: 600.0,
         };
-        settle_labels(&mut edges, vec![wall]);
+        assert_eq!(settle_labels(&mut edges, vec![wall]), 1, "counted");
         assert!(edges[0].label.is_none());
+    }
+
+    fn route(index: usize, points: &[(f32, f32)]) -> EdgeGeo {
+        EdgeGeo {
+            index,
+            points: points.iter().map(|&(x, y)| Point { x, y }).collect(),
+            arrow: Arrow::End,
+            label: None,
+            ends: [None, None],
+            style: Default::default(),
+            change: Default::default(),
+            history: None,
+        }
+    }
+
+    #[test]
+    fn a_route_whose_every_try_fails_goes_back_even_after_another_moved_in_the_round() {
+        let rect = |x: f32, y: f32, w: f32, h: f32| Rect { x, y, w, h };
+        let mut edges = vec![
+            // Shares its first run with the next route and frees it by sliding 4 px.
+            route(0, &[(200.0, 0.0), (200.0, 50.0), (300.0, 50.0)]),
+            route(1, &[(200.0, 10.0), (200.0, 40.0), (260.0, 40.0)]),
+            // Lies on the last route along its middle run, which no end slide can free.
+            route(
+                2,
+                &[(0.0, 200.0), (50.0, 200.0), (50.0, 300.0), (100.0, 300.0)],
+            ),
+            route(3, &[(50.0, 150.0), (50.0, 350.0)]),
+        ];
+        let boxes = [
+            [
+                rect(180.0, -20.0, 60.0, 20.0),
+                rect(300.0, 30.0, 20.0, 40.0),
+            ],
+            [
+                rect(180.0, -10.0, 60.0, 20.0),
+                rect(260.0, 20.0, 20.0, 40.0),
+            ],
+            [
+                rect(-20.0, 150.0, 20.0, 100.0),
+                rect(100.0, 250.0, 20.0, 100.0),
+            ],
+            [rect(0.0, 100.0, 100.0, 50.0), rect(0.0, 350.0, 100.0, 50.0)],
+        ];
+        let stuck = edges[2].points.clone();
+        separate_ports(&mut edges, &|e| boxes[e.index]);
+        assert_ne!(edges[0].points[0].x, 200.0, "the first route slid");
+        assert_eq!(edges[2].points, stuck, "a rejected slide is undone");
     }
 }
