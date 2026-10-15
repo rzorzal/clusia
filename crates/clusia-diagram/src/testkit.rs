@@ -3,7 +3,7 @@
 use clusia_core::diagram::{DiagramKind, DiagramSpec, Shape};
 use serde_json::{Value, json};
 
-use crate::geometry::{overlap, touches};
+use crate::geometry::{ActorEnd, share_past_trunk, touches};
 use crate::{Arrow, EdgeGeo, Geometry, MARGIN, Point, Rect, TextLines};
 
 /// A node as JSON with every field spelled out.
@@ -245,30 +245,22 @@ fn is_axis_aligned(a: Point, b: Point) -> bool {
     (a.x - b.x).abs() < 1e-3 || (a.y - b.y).abs() < 1e-3
 }
 
-/// Whether two edges have runs on one line that overlap by more than 2 px.
-fn share_a_run(a: &EdgeGeo, b: &EdgeGeo) -> bool {
-    a.points.windows(2).any(|s| {
-        b.points
-            .windows(2)
-            .any(|t| overlap((s[0], s[1]), (t[0], t[1])) > 2.0)
-    })
-}
-
-/// Whether `a` and `b` are links of a use case diagram that meet at one actor: those share
-/// the actor's trunk on purpose, and with no arrowheads a fan reads as one.
-fn fan_of_one_actor(spec: &DiagramSpec, a: &EdgeGeo, b: &EdgeGeo) -> bool {
-    if spec.kind != DiagramKind::UseCases || a.arrow != Arrow::None || b.arrow != Arrow::None {
-        return false;
+/// The actor end of edge `e` in a use case diagram, as `share_past_trunk` takes it.
+fn actor_end(spec: &DiagramSpec, e: &EdgeGeo) -> ActorEnd {
+    if spec.kind != DiagramKind::UseCases || e.arrow != Arrow::None {
+        return None;
     }
     let actor = |id: &str| {
         spec.nodes
             .iter()
-            .any(|n| n.id == id && matches!(n.shape, Shape::Actor | Shape::External))
+            .position(|n| n.id == id && matches!(n.shape, Shape::Actor | Shape::External))
     };
-    let (ea, eb) = (&spec.edges[a.index], &spec.edges[b.index]);
-    [&ea.from, &ea.to]
-        .into_iter()
-        .any(|end| actor(end) && (*end == eb.from || *end == eb.to))
+    let edge = &spec.edges[e.index];
+    match (actor(&edge.from), actor(&edge.to)) {
+        (Some(a), None) => Some((a, true)),
+        (None, Some(a)) => Some((a, false)),
+        _ => None,
+    }
 }
 
 /// Panics when two texts that belong to edges or messages overlap: labels and cardinalities of
@@ -296,8 +288,8 @@ pub(crate) fn assert_no_text_clash(geometry: &Geometry) {
 /// Panics when `geometry` breaks an invariant every kind keeps: finite numbers, boxes apart,
 /// routes sideways or up and down only and clear of other boxes, labels off boxes, off the
 /// other texts of their edge and off every route (their own may only run beside them), no two
-/// edges along one line (but the links of one actor, which share its trunk), and everything inside `size` and starting at the
-/// margin.
+/// edges along one line (but two links of one actor on its trunk), and everything inside
+/// `size` and starting at the margin.
 pub(crate) fn check(spec: &DiagramSpec, geometry: &Geometry) {
     let finite = |v: f32| assert!(v.is_finite(), "not finite: {v}");
     for b in &geometry.boxes {
@@ -401,11 +393,9 @@ pub(crate) fn check(spec: &DiagramSpec, geometry: &Geometry) {
     }
     for (i, a) in geometry.edges.iter().enumerate() {
         for b in &geometry.edges[i + 1..] {
-            if fan_of_one_actor(spec, a, b) {
-                continue;
-            }
+            let ends = (actor_end(spec, a), actor_end(spec, b));
             assert!(
-                !share_a_run(a, b),
+                !share_past_trunk(&a.points, &b.points, ends),
                 "edges {} and {} run along one line: {:?} and {:?}",
                 a.index,
                 b.index,

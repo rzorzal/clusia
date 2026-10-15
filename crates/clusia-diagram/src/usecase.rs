@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use clusia_core::diagram::{DiagramSpec, GroupKind, Shape};
 
 use crate::geometry::{
-    Align, Arrow, BoxGeo, EdgeGeo, Geometry, GroupGeo, Point, Rect, STEP, TextLines,
-    crossed_by_other_route, overlap, touches,
+    ActorEnd, Align, Arrow, BoxGeo, EdgeGeo, Geometry, GroupGeo, Point, Rect, STEP, TextLines,
+    crossed_by_other_route, share_past_trunk, touches,
 };
 use crate::layered::{loop_reach, loop_rows, loop_zone};
 use crate::layout::{box_text, card};
@@ -667,20 +667,22 @@ pub(crate) fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
         });
     }
     let mut edges: Vec<EdgeGeo> = geos.into_iter().flatten().collect();
-    let mut actor_of: Vec<Option<usize>> = vec![None; spec.edges.len()];
+    let mut actor_of: Vec<ActorEnd> = vec![None; spec.edges.len()];
     for r in &routed {
-        if let Plan::ActorPill { actor, .. } = r.plan {
-            actor_of[r.edge] = Some(actor);
+        if let Plan::ActorPill {
+            actor, actor_end, ..
+        } = r.plan
+        {
+            actor_of[r.edge] = Some((actor, actor_end == 0));
         }
     }
-    let fan = |a: usize, b: usize| actor_of[a].is_some() && actor_of[a] == actor_of[b];
     separate_ports(
         &mut edges,
         &|e| {
             let (a, b) = ends_of[e.index];
             [rects[a], rects[b]]
         },
-        &fan,
+        &actor_of,
     );
     let mut keep_clear: Vec<Rect> = rects.clone();
     keep_clear.extend(geometry.groups.iter().map(|g| g.label.rect()));
@@ -708,8 +710,8 @@ fn simplify(points: Vec<Point>) -> Vec<Point> {
 }
 
 /// Gives each label the first place, near where it was asked for, that overlaps no box, no
-/// text already down and no route of another edge, and is not cut by its own; a label with no such place is left out.
-/// Returns how many were left out.
+/// text already down and no route of another edge, and is not cut by its own; a label with no
+/// such place is left out. Returns how many were left out.
 fn settle_labels(edges: &mut [EdgeGeo], mut taken: Vec<Rect>) -> u32 {
     let mut dropped = 0;
     let routes: Vec<(usize, Vec<Point>)> =
@@ -751,25 +753,20 @@ fn settle_labels(edges: &mut [EdgeGeo], mut taken: Vec<Rect>) -> u32 {
     dropped
 }
 
-/// How many other edges run along one line with `edges[k]` for more than 2 px; the links of
-/// one trunk (`fan` of their edge indices) do on purpose and are not counted.
-fn shared_runs(edges: &[EdgeGeo], k: usize, fan: &dyn Fn(usize, usize) -> bool) -> usize {
-    let runs = |e: &EdgeGeo| {
-        e.points
-            .windows(2)
-            .map(|w| (w[0], w[1]))
-            .collect::<Vec<_>>()
-    };
-    let mine = runs(&edges[k]);
+/// How many other edges run along one line with `edges[k]` for more than 2 px, but for the
+/// trunk two links of one actor share (see `share_past_trunk`); `actor_of` is indexed by edge.
+fn shared_runs(edges: &[EdgeGeo], k: usize, actor_of: &[ActorEnd]) -> usize {
+    let end = |e: &EdgeGeo| actor_of.get(e.index).copied().flatten();
     edges
         .iter()
         .enumerate()
         .filter(|&(j, other)| {
             j != k
-                && !fan(edges[k].index, other.index)
-                && runs(other)
-                    .iter()
-                    .any(|&s| mine.iter().any(|&m| overlap(m, s) > 2.0))
+                && share_past_trunk(
+                    &edges[k].points,
+                    &other.points,
+                    (end(&edges[k]), end(other)),
+                )
         })
         .count()
 }
@@ -779,12 +776,12 @@ fn shared_runs(edges: &[EdgeGeo], k: usize, fan: &dyn Fn(usize, usize) -> bool) 
 fn separate_ports(
     edges: &mut [EdgeGeo],
     ends: &dyn Fn(&EdgeGeo) -> [Rect; 2],
-    fan: &dyn Fn(usize, usize) -> bool,
+    actor_of: &[ActorEnd],
 ) {
     for _ in 0..32 {
         let mut moved = false;
         for k in 0..edges.len() {
-            let before = shared_runs(edges, k, fan);
+            let before = shared_runs(edges, k, actor_of);
             if before == 0 || edges[k].points.len() < 3 {
                 continue;
             }
@@ -818,7 +815,7 @@ fn separate_ports(
                             }
                         }
                         edges[k].points = points;
-                        if shared_runs(edges, k, fan) < before {
+                        if shared_runs(edges, k, actor_of) < before {
                             improved = true;
                             break 'tries;
                         }
@@ -976,6 +973,86 @@ mod tests {
         for b in g.boxes.iter().filter(|b| b.shape != Shape::Pill) {
             assert_eq!(b.title.lines.len(), 1, "{:?}", b.title.lines);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "run along one line")]
+    fn two_links_of_one_actor_that_share_a_run_past_its_trunk_fail_the_check() {
+        let s = with_boundary(
+            &spec(
+                "use_cases",
+                vec![
+                    node("who", "Reviewer", "actor"),
+                    node("a", "First", "pill"),
+                    node("b", "Second", "pill"),
+                    node("c", "Third", "pill"),
+                ],
+                vec![edge("who", "a", None), edge("who", "c", None)],
+            ),
+            &["a", "b", "c"],
+        );
+        let mut g = layout(&s, &Fonts);
+        check(&s, &g);
+        let to_a = g.edges.iter().find(|e| e.index == 0).expect("edge").clone();
+        let a = *rect_of(&g, "a");
+        let c = *rect_of(&g, "c");
+        // The link to c leaves the trunk along the branch into a, then drops to c.
+        let (port, bus, turn) = (to_a.points[0], to_a.points[1], to_a.points[2]);
+        let x = a.x - 10.0;
+        let to_c = g.edges.iter_mut().find(|e| e.index == 1).expect("edge");
+        to_c.points = vec![
+            port,
+            bus,
+            turn,
+            Point { x, y: turn.y },
+            Point { x, y: c.centre().y },
+            Point {
+                x: c.x,
+                y: c.centre().y,
+            },
+        ];
+        check(&s, &g);
+    }
+
+    #[test]
+    fn the_port_slide_counts_a_run_two_links_share_past_their_trunk() {
+        let p = |x, y| Point { x, y };
+        let link = |index, points: Vec<Point>| EdgeGeo {
+            index,
+            points,
+            arrow: Arrow::None,
+            label: None,
+            ends: [None, None],
+            style: Default::default(),
+            change: Default::default(),
+            history: None,
+        };
+        let to_a = link(
+            0,
+            vec![p(0.0, 50.0), p(40.0, 50.0), p(40.0, 0.0), p(100.0, 0.0)],
+        );
+        let on_trunk = link(
+            1,
+            vec![p(0.0, 50.0), p(40.0, 50.0), p(40.0, 100.0), p(100.0, 100.0)],
+        );
+        let actor = [Some((9, true)), Some((9, true))];
+        assert_eq!(
+            shared_runs(&[to_a.clone(), on_trunk], 0, &actor),
+            0,
+            "the trunk is shared on purpose"
+        );
+        let past = link(
+            1,
+            vec![
+                p(0.0, 50.0),
+                p(40.0, 50.0),
+                p(40.0, 0.0),
+                p(80.0, 0.0),
+                p(80.0, 100.0),
+                p(100.0, 100.0),
+            ],
+        );
+        assert_eq!(shared_runs(&[to_a, past], 0, &actor), 1);
     }
 
     #[test]
@@ -1326,7 +1403,7 @@ mod tests {
             [rect(0.0, 100.0, 100.0, 50.0), rect(0.0, 350.0, 100.0, 50.0)],
         ];
         let stuck = edges[2].points.clone();
-        separate_ports(&mut edges, &|e| boxes[e.index], &|_, _| false);
+        separate_ports(&mut edges, &|e| boxes[e.index], &[]);
         assert_ne!(edges[0].points[0].x, 200.0, "the first route slid");
         assert_eq!(edges[2].points, stuck, "a rejected slide is undone");
     }

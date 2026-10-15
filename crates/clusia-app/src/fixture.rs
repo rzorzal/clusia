@@ -1212,7 +1212,7 @@ fn dg_usecase() -> DiagramSpec {
         .to_vec(),
         kind: GroupKind::Boundary,
     }];
-    // Links are plain lines; each points at the actor on the right so that actor sits there.
+    // A link is a plain line; its direction only picks the side its actor stands on.
     s.edges = vec![
         dg_edge("reviewer", "open", None, Change::Unchanged),
         dg_edge("reviewer", "comment", None, Change::Unchanged),
@@ -1262,7 +1262,7 @@ fn dg_dataflow() -> DiagramSpec {
         ),
         dg_node(
             "file",
-            "D1  |  Token file",
+            "D1 | Token file",
             Some("written atomically"),
             Shape::Store,
             Change::Unchanged,

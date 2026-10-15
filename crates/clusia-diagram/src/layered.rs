@@ -793,10 +793,11 @@ struct BackRoutes {
 }
 
 /// A shorter way back for an edge that points against the flow, from box `from` to box `to`
-/// on its left, when it is clear of every other box: over the top of the boxes between them
-/// when the two share a row with a box between them, from the top of one to the top of the other; or, when `from`
-/// hangs below the row of `to`, sideways from `from`'s port at `port_y` and up into the
-/// middle of `to`'s bottom. Later routes of either kind keep `STEP` from the earlier ones.
+/// on its left, when it is clear of every other box. When the two share a row with a box
+/// between them, it runs over the top of the boxes between, from the top of one to the top of
+/// the other; when `from` hangs below the row of `to`, it leaves `from`'s port at `port_y`
+/// sideways and goes up into the middle of `to`'s bottom. Later routes of either kind keep
+/// `STEP` from the earlier ones.
 fn back_route(
     rects: &[Rect],
     from: usize,
@@ -854,10 +855,10 @@ fn back_route(
 }
 
 /// Keeps every cardinality clear of other routes and off its own: one that touches the route
-/// of another edge, or is cut by its own, is nudged along its own end, in 4 px steps, and flipped to the other side of the route, to
-/// the first place that overlaps no box and no text and touches no other route. A cardinality
-/// is data (`1` or `0..N`), so it is left out only when no such place exists; returns how many
-/// were left out.
+/// of another edge, or is cut by its own, is nudged along its own end, in 4 px steps, and
+/// flipped to the other side of the route, to the first place that overlaps no box and no
+/// text and touches no other route. A cardinality is data (`1` or `0..N`), so it is left out
+/// only when no such place exists; returns how many were left out.
 fn settle_cardinalities(edges: &mut [EdgeGeo], boxes: &[Rect]) -> u32 {
     let mut dropped = 0;
     let routes: Vec<(usize, Vec<Point>)> =

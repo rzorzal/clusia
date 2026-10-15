@@ -195,6 +195,31 @@ pub(crate) fn overlap(a: (Point, Point), b: (Point, Point)) -> f32 {
     }
 }
 
+/// The actor end of a link of a use case diagram: the actor's node index, and whether the
+/// route starts there.
+pub(crate) type ActorEnd = Option<(usize, bool)>;
+
+/// Whether two routes run along one line for more than 2 px anywhere but on a shared trunk.
+/// Two links of one actor (`ends`) may share its trunk: the run from the actor's port to the
+/// bus beside it, and the bus run to where each link turns off. Past those two runs, counted
+/// from the actor's end, any shared run counts.
+pub(crate) fn share_past_trunk(a: &[Point], b: &[Point], ends: (ActorEnd, ActorEnd)) -> bool {
+    let on_trunk = |points: &[Point], i: usize, end: ActorEnd| match end {
+        Some((_, at_start)) => {
+            let from_actor = if at_start { i } else { points.len() - 2 - i };
+            from_actor < 2
+        }
+        None => false,
+    };
+    let fan = matches!(ends, (Some((x, _)), Some((y, _))) if x == y);
+    a.windows(2).enumerate().any(|(i, s)| {
+        b.windows(2).enumerate().any(|(j, t)| {
+            overlap((s[0], s[1]), (t[0], t[1])) > 2.0
+                && !(fan && on_trunk(a, i, ends.0) && on_trunk(b, j, ends.1))
+        })
+    })
+}
+
 /// Whether `zone` touches the route of any edge but `own`; `routes` are (edge index, points).
 pub(crate) fn crossed_by_other_route<P: AsRef<[Point]>>(
     routes: &[(usize, P)],
