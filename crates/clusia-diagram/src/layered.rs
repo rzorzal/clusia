@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use clusia_core::diagram::DiagramSpec;
 
 use crate::geometry::{
-    Align, Arrow, EdgeGeo, Point, Rect, STEP, TextLines, crossed_by_other_route, touches,
+    Align, Arrow, EdgeGeo, Point, Rect, STEP, TextLines, crossed_by_other_route, overlap, touches,
 };
 use crate::measure::{Measure, TextStyle};
 use crate::spine;
@@ -489,6 +489,9 @@ pub(crate) fn place(
 
     // Routes.
     let mut geos: Vec<Option<EdgeGeo>> = vec![None; spec.edges.len()];
+    let mut back_routes = BackRoutes::default();
+    // Shorter ways back for edges against the flow, taken once every route is known.
+    let mut backs: Vec<(usize, Vec<Point>)> = Vec::new();
     // Labels wait until every cardinality is down, then each takes the first free place.
     let mut texts = Texts::default();
     for (k, chain) in chains.iter().enumerate() {
@@ -517,6 +520,13 @@ pub(crate) fn place(
             .collect();
         if chain.reversed {
             points.reverse();
+        }
+        if dir == Direction::LeftToRight && chain.reversed && edge.ends.iter().all(Option::is_none)
+        {
+            let (from, to) = (chain.verts[chain.verts.len() - 1], chain.verts[0]);
+            if let Some(route) = back_route(&rects, from, to, points[0].y, &mut back_routes) {
+                backs.push((chain.edge, route));
+            }
         }
 
         // Labels: the edge's own in the first gap, the cardinalities at the two ends.
@@ -721,6 +731,35 @@ pub(crate) fn place(
         });
     }
 
+    // A way back is taken only where it runs along no other route; its label then sits
+    // beside one of its runs.
+    for (edge, route) in backs {
+        let alone = geos.iter().flatten().filter(|g| g.index != edge).all(|g| {
+            g.points.windows(2).all(|a| {
+                route
+                    .windows(2)
+                    .all(|b| overlap((a[0], a[1]), (b[0], b[1])) <= 2.0)
+            })
+        });
+        if !alone {
+            continue;
+        }
+        if let Some(text) = spec.edges[edge].label.as_deref() {
+            let line = text::block(
+                measure,
+                vec![text.to_string()],
+                opts.label_style,
+                Point::default(),
+                None,
+                Align::Left,
+            );
+            texts.replace(edge, beside_runs(&route, &line));
+        }
+        if let Some(Some(geo)) = geos.get_mut(edge) {
+            geo.points = route;
+        }
+    }
+
     let routes: Vec<(usize, &[Point])> = geos
         .iter()
         .flatten()
@@ -740,6 +779,71 @@ pub(crate) fn place(
         edges,
         dropped_texts,
     }
+}
+
+/// How many back edges already run over the top of the drawing, and up into each box.
+#[derive(Default)]
+struct BackRoutes {
+    over: usize,
+    up_into: HashMap<usize, usize>,
+}
+
+/// A shorter way back for an edge that points against the flow, from box `from` to box `to`
+/// on its left, when it is clear of every other box: over the top of the boxes between them
+/// when the two share a row, from the top of one to the top of the other; or, when `from`
+/// hangs below the row of `to`, sideways from `from`'s port at `port_y` and up into the
+/// middle of `to`'s bottom. Later routes of either kind keep `STEP` from the earlier ones.
+fn back_route(
+    rects: &[Rect],
+    from: usize,
+    to: usize,
+    port_y: f32,
+    taken: &mut BackRoutes,
+) -> Option<Vec<Point>> {
+    let (f, t) = (rects[from], rects[to]);
+    if f.x <= t.right() {
+        return None;
+    }
+    let p = |x: f32, y: f32| Point { x, y };
+    let route = if (f.centre().y - t.centre().y).abs() < 0.5 {
+        let top = rects
+            .iter()
+            .filter(|r| r.right() >= t.x && r.x <= f.right())
+            .map(|r| r.y)
+            .fold(f32::INFINITY, f32::min)
+            - 24.0
+            - taken.over as f32 * STEP;
+        vec![
+            p(f.centre().x, f.y),
+            p(f.centre().x, top),
+            p(t.centre().x, top),
+            p(t.centre().x, t.y),
+        ]
+    } else if port_y > t.bottom() + 8.0 {
+        let x = t.centre().x + taken.up_into.get(&to).copied().unwrap_or(0) as f32 * STEP;
+        vec![p(f.x, port_y), p(x, port_y), p(x, t.bottom())]
+    } else {
+        return None;
+    };
+    let clear = route.windows(2).all(|w| {
+        rects.iter().enumerate().all(|(i, r)| {
+            let zone = if i == from || i == to {
+                r.inflate(-0.5)
+            } else {
+                r.inflate(1.0)
+            };
+            !touches(w[0], w[1], zone)
+        })
+    });
+    if !clear {
+        return None;
+    }
+    if route.len() == 4 {
+        taken.over += 1;
+    } else {
+        *taken.up_into.entry(to).or_insert(0) += 1;
+    }
+    Some(route)
 }
 
 /// Keeps every cardinality clear of other routes and off its own: one that touches the route
@@ -872,6 +976,14 @@ impl Texts {
                 places,
                 line,
             });
+        }
+    }
+
+    /// Gives the label of `edge` new places to try, and nothing else to fall back on.
+    fn replace(&mut self, edge: usize, places: Vec<TextLines>) {
+        if let Some(offer) = self.offers.iter_mut().find(|o| o.edge == edge) {
+            offer.places = places;
+            offer.line = None;
         }
     }
 

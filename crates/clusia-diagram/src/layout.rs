@@ -365,13 +365,40 @@ mod tests {
         assert_eq!(fresh.centre().y, refreshing.centre().y);
         assert!(rect_of(&g, "start").right() < fresh.x);
         let back = g.edges.iter().find(|e| e.index == 3).expect("edge");
-        let lane = back.points.iter().map(|p| p.y).fold(f32::MIN, f32::max);
-        assert!(
-            lane > fresh.bottom(),
-            "the way back to Fresh runs in a lane beside the row"
+        let lane = back.points.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        assert!(lane < fresh.y, "the way back to Fresh runs above the row");
+        assert_eq!(
+            back.points[0],
+            Point {
+                x: refreshing.centre().x,
+                y: refreshing.y
+            },
+            "it leaves the top of Refreshing"
         );
-        assert_eq!(back.points[0].x, refreshing.x, "it leaves Refreshing");
-        assert_eq!(back.points[back.points.len() - 1].x, fresh.right());
+        assert_eq!(
+            back.points[back.points.len() - 1],
+            Point {
+                x: fresh.centre().x,
+                y: fresh.y
+            },
+            "and comes down into the top of Fresh"
+        );
+        let label = back.label.as_ref().expect("label");
+        assert!(
+            label.rect().bottom() <= lane,
+            "its label sits on the top run"
+        );
+        let expiring = rect_of(&g, "expiring");
+        let retry = g.edges.iter().find(|e| e.index == 5).expect("edge");
+        assert_eq!(retry.points[0].x, failed.x, "retry leaves Failed sideways");
+        assert_eq!(
+            retry.points[retry.points.len() - 1],
+            Point {
+                x: expiring.centre().x,
+                y: expiring.bottom()
+            },
+            "and goes up into Expiring"
+        );
         assert_no_text_clash(&g);
     }
 
@@ -605,14 +632,22 @@ mod tests {
             .find(|e| e.index == 2)
             .expect("the back edge");
         let end = back.points.last().expect("points");
-        assert!(
-            (end.x - a.right()).abs() < 1e-3,
-            "the arrow ends on the right side of a: {end:?}"
+        assert_eq!(
+            *end,
+            Point {
+                x: a.centre().x,
+                y: a.y
+            },
+            "the arrow comes down into the top of a"
         );
-        let start = back.points[0];
-        assert!(
-            (start.x - rect_of(&g, "c").x).abs() < 1e-3,
-            "and starts at the left side of c"
+        let c = rect_of(&g, "c");
+        assert_eq!(
+            back.points[0],
+            Point {
+                x: c.centre().x,
+                y: c.y
+            },
+            "over the row from the top of c"
         );
     }
 
