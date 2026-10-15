@@ -11,7 +11,9 @@ use crate::{sequence, tables, usecase};
 /// Space around the drawing; it starts at `(MARGIN, MARGIN)`.
 pub const MARGIN: f32 = 24.0;
 
-const PAD: f32 = 12.0;
+const PAD: f32 = 14.0;
+/// The tighter padding of a sequence participant.
+const SEQUENCE_PAD: f32 = 12.0;
 const TITLE_SUB_GAP: f32 = 2.0;
 const MIN_WIDTH: f32 = 160.0;
 const MAX_WIDTH: f32 = 240.0;
@@ -80,12 +82,17 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
         Shape::External => kind == DiagramKind::DataFlow,
         _ => matches!(kind, DiagramKind::Sequence | DiagramKind::UseCases),
     };
+    let pad = if kind == DiagramKind::Sequence {
+        SEQUENCE_PAD
+    } else {
+        PAD
+    };
     let mut card = Card {
         w: 0.0,
         h: 0.0,
         fixed: false,
         centred,
-        inset: PAD,
+        inset: pad,
         title: Vec::new(),
         sub: Vec::new(),
         title_style,
@@ -119,11 +126,19 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
                     .map(|w| measure.width(w, style))
                     .fold(0.0, f32::max)
             };
-            let wanted = longest_word(&node.label, title_style)
-                .max(longest_word(sub_text, sub_style))
-                + 2.0 * PAD;
+            // A participant's or an actor's name keeps to one line while the widest box allows
+            // it.
+            let one_line = kind == DiagramKind::Sequence
+                || (kind == DiagramKind::UseCases && node.shape != Shape::Pill);
+            let title_w = if one_line {
+                measure.width(&node.label, title_style)
+            } else {
+                longest_word(&node.label, title_style)
+            };
+            let wanted = title_w.max(longest_word(sub_text, sub_style)) + 2.0 * pad;
             card.w = base.max(wanted).clamp(min_w, max_w);
-            let inner = card.w - 2.0 * PAD;
+            // A hair of room, so a name that set the width is not wrapped by a rounding error.
+            let inner = card.w - 2.0 * pad + 0.01;
             card.title = text::wrap(measure, &node.label, title_style, inner, TITLE_LINES);
             card.sub = text::wrap(measure, sub_text, sub_style, inner, SUB_LINES);
             let min_h = match (kind, node.shape) {
@@ -132,7 +147,7 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
                 }
                 _ => 0.0,
             };
-            card.h = (2.0 * PAD + card.text_height(measure)).max(min_h);
+            card.h = (2.0 * pad + card.text_height(measure)).max(min_h);
         }
     }
     card
@@ -177,10 +192,16 @@ fn layered_geometry(
             },
         })
         .collect();
+    let label_style = if spec.kind == DiagramKind::Flow {
+        TextStyle::EdgeLabelMono
+    } else {
+        TextStyle::EdgeLabel
+    };
     let options = Options {
         direction,
         arrow,
         top_aligned: tables,
+        label_style,
     };
     let placed = layered::place(spec, &sizes, measure, &options);
 
@@ -232,7 +253,7 @@ pub(crate) fn box_text(
     let top = if card.centred {
         rect.y + (rect.h - content) / 2.0
     } else {
-        rect.y + PAD
+        rect.y + card.inset
     };
     let x = rect.x + card.inset;
     let title = text::block(
@@ -340,6 +361,21 @@ mod tests {
     }
 
     #[test]
+    fn a_label_stays_on_one_line_when_its_gap_can_grow_for_it() {
+        let g = run(&data_flow_mockup());
+        for e in &g.edges {
+            let label = e.label.as_ref().expect("label");
+            assert_eq!(label.lines.len(), 1, "{:?}", label.lines);
+        }
+        let back = g.edges.iter().find(|e| e.index == 3).expect("edge");
+        assert_eq!(
+            back.points.len(),
+            2,
+            "a way back to the next box runs straight beside the way there"
+        );
+    }
+
+    #[test]
     fn the_states_mockup_keeps_failed_under_refreshing() {
         let s = states_mockup();
         let g = run(&s);
@@ -352,13 +388,40 @@ mod tests {
         assert_eq!(fresh.centre().y, refreshing.centre().y);
         assert!(rect_of(&g, "start").right() < fresh.x);
         let back = g.edges.iter().find(|e| e.index == 3).expect("edge");
-        let lane = back.points.iter().map(|p| p.y).fold(f32::MIN, f32::max);
-        assert!(
-            lane > fresh.bottom(),
-            "the way back to Fresh runs in a lane beside the row"
+        let lane = back.points.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        assert!(lane < fresh.y, "the way back to Fresh runs above the row");
+        assert_eq!(
+            back.points[0],
+            Point {
+                x: refreshing.centre().x,
+                y: refreshing.y
+            },
+            "it leaves the top of Refreshing"
         );
-        assert_eq!(back.points[0].x, refreshing.x, "it leaves Refreshing");
-        assert_eq!(back.points[back.points.len() - 1].x, fresh.right());
+        assert_eq!(
+            back.points[back.points.len() - 1],
+            Point {
+                x: fresh.centre().x,
+                y: fresh.y
+            },
+            "and comes down into the top of Fresh"
+        );
+        let label = back.label.as_ref().expect("label");
+        assert!(
+            label.rect().bottom() <= lane,
+            "its label sits on the top run"
+        );
+        let expiring = rect_of(&g, "expiring");
+        let retry = g.edges.iter().find(|e| e.index == 5).expect("edge");
+        assert_eq!(retry.points[0].x, failed.x, "retry leaves Failed sideways");
+        assert_eq!(
+            retry.points[retry.points.len() - 1],
+            Point {
+                x: expiring.centre().x,
+                y: expiring.bottom()
+            },
+            "and goes up into Expiring"
+        );
         assert_no_text_clash(&g);
     }
 
@@ -464,6 +527,45 @@ mod tests {
     }
 
     #[test]
+    fn code_kinds_label_their_edges_in_mono_and_the_others_in_the_ui_face() {
+        let flow = run(&flow_mockup());
+        assert_eq!(
+            flow.edges[0].label.as_ref().expect("label").style,
+            TextStyle::EdgeLabelMono
+        );
+        for s in [deps_mockup(), data_flow_mockup(), states_mockup()] {
+            let g = run(&s);
+            for e in &g.edges {
+                if let Some(label) = &e.label {
+                    assert_eq!(label.style, TextStyle::EdgeLabel, "{:?}", s.kind);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_box_keeps_14_px_around_its_text() {
+        let g = run(&flow_mockup());
+        let refresh = g.boxes.iter().find(|b| b.node == "refresh").expect("box");
+        assert_eq!(refresh.title.at.x - refresh.rect.x, 14.0);
+        assert_eq!(refresh.title.at.y - refresh.rect.y, 14.0);
+        let sub = refresh.sub.as_ref().expect("sub");
+        assert_eq!(refresh.rect.bottom() - sub.rect().bottom(), 14.0);
+        assert_eq!(refresh.rect.h, 60.0, "title, sub and padding");
+    }
+
+    #[test]
+    fn a_name_that_sets_its_box_width_is_not_wrapped() {
+        let s = spec(
+            "use_cases",
+            vec![node("r", "«actor» Reviewer", "actor")],
+            vec![],
+        );
+        let c = card(s.kind, &s.nodes[0], &Fonts);
+        assert_eq!(c.title, vec!["«actor» Reviewer".to_string()]);
+    }
+
+    #[test]
     fn box_text_wraps_inside_the_box_and_sub_text_follows_the_title() {
         let s = spec(
             "flow",
@@ -479,7 +581,7 @@ mod tests {
         let g = run(&s);
         let b = &g.boxes[0];
         assert!(b.title.lines.len() >= 2 && b.title.lines.len() <= 3);
-        assert!(b.title.at.x >= b.rect.x + 11.99);
+        assert!(b.title.at.x >= b.rect.x + 13.99);
         assert!(b.title.rect().right() <= b.rect.right());
         let sub = b.sub.as_ref().expect("sub");
         assert!(sub.at.y >= b.title.rect().bottom());
@@ -506,7 +608,7 @@ mod tests {
             label
                 .lines
                 .iter()
-                .all(|l| Fonts.width(l, TextStyle::EdgeLabel) <= 88.5)
+                .all(|l| Fonts.width(l, TextStyle::EdgeLabelMono) <= 164.5)
         );
     }
 
@@ -564,14 +666,22 @@ mod tests {
             .find(|e| e.index == 2)
             .expect("the back edge");
         let end = back.points.last().expect("points");
-        assert!(
-            (end.x - a.right()).abs() < 1e-3,
-            "the arrow ends on the right side of a: {end:?}"
+        assert_eq!(
+            *end,
+            Point {
+                x: a.centre().x,
+                y: a.y
+            },
+            "the arrow comes down into the top of a"
         );
-        let start = back.points[0];
-        assert!(
-            (start.x - rect_of(&g, "c").x).abs() < 1e-3,
-            "and starts at the left side of c"
+        let c = rect_of(&g, "c");
+        assert_eq!(
+            back.points[0],
+            Point {
+                x: c.centre().x,
+                y: c.y
+            },
+            "over the row from the top of c"
         );
     }
 

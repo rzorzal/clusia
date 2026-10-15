@@ -1165,19 +1165,25 @@ fn dg_usecase() -> DiagramSpec {
     s.nodes = vec![
         dg_node(
             "reviewer",
-            "Reviewer",
+            "«actor» Reviewer",
             None,
             Shape::Actor,
             Change::Unchanged,
         ),
         dg_node(
             "agent",
-            "Agent",
+            "«actor» Agent",
             Some("Claude Code"),
             Shape::Actor,
             Change::Unchanged,
         ),
-        dg_node("github", "GitHub", None, Shape::External, Change::Unchanged),
+        dg_node(
+            "github",
+            "«system» GitHub",
+            None,
+            Shape::External,
+            Change::Unchanged,
+        ),
         pill("open", "Open a review", None, Change::Unchanged),
         pill("news", "See what's new", None, Change::Unchanged),
         pill("comment", "Comment on code", None, Change::Unchanged),
@@ -1206,14 +1212,14 @@ fn dg_usecase() -> DiagramSpec {
         .to_vec(),
         kind: GroupKind::Boundary,
     }];
+    // A link is a plain line; its direction only picks the side its actor stands on.
     s.edges = vec![
         dg_edge("reviewer", "open", None, Change::Unchanged),
-        dg_edge("reviewer", "news", None, Change::Unchanged),
         dg_edge("reviewer", "comment", None, Change::Unchanged),
         dg_edge("reviewer", "publish", None, Change::Unchanged),
-        dg_edge("agent", "ask", None, Change::Unchanged),
-        dg_edge("github", "token", None, Change::Unchanged),
-        dg_edge("github", "recheck", None, Change::Unchanged),
+        dg_edge("ask", "agent", None, Change::Unchanged),
+        dg_edge("token", "github", None, Change::Unchanged),
+        dg_edge("recheck", "github", None, Change::Unchanged),
     ];
     s
 }
@@ -1256,7 +1262,7 @@ fn dg_dataflow() -> DiagramSpec {
         ),
         dg_node(
             "file",
-            "Token file",
+            "D1 | Token file",
             Some("written atomically"),
             Shape::Store,
             Change::Unchanged,

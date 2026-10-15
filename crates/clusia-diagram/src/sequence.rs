@@ -18,7 +18,7 @@ const MIN_PITCH: f32 = 160.0;
 const BOX_GAP: f32 = 40.0;
 /// Space kept each side of a message label along its arrow.
 const LABEL_PAD: f32 = 16.0;
-const LABEL_WIDTH: f32 = 220.0;
+const LABEL_WIDTH: f32 = 300.0;
 const LABEL_LINES: usize = 2;
 /// Space under the participants before the first label, and above each later arrow.
 const ARROW_LEAD: f32 = 21.0;
@@ -64,11 +64,11 @@ pub(crate) fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
             let label = text::wrap(
                 measure,
                 &m.label,
-                TextStyle::EdgeLabel,
+                TextStyle::EdgeLabelMono,
                 LABEL_WIDTH,
                 LABEL_LINES,
             );
-            let label_w = text::widest(measure, &label, TextStyle::EdgeLabel);
+            let label_w = text::widest(measure, &label, TextStyle::EdgeLabelMono);
             Some(Item {
                 index: i,
                 from,
@@ -122,7 +122,7 @@ pub(crate) fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
     let tallest = rects.iter().map(Rect::bottom).fold(0.0, f32::max);
 
     // Arrow heights: each row is its label's lines plus a fixed lead.
-    let line = measure.line_height(TextStyle::EdgeLabel);
+    let line = measure.line_height(TextStyle::EdgeLabelMono);
     let mut ys: Vec<f32> = Vec::with_capacity(items.len());
     let mut y = tallest;
     for (k, m) in items.iter().enumerate() {
@@ -173,7 +173,7 @@ pub(crate) fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
             to_x,
             label: TextLines {
                 lines: m.label.clone(),
-                style: TextStyle::EdgeLabel,
+                style: TextStyle::EdgeLabelMono,
                 at: Point {
                     x: label_x,
                     y: y - 4.0 - height,
@@ -336,6 +336,28 @@ mod tests {
         assert_eq!(first_gap, 35.0, "one-line labels are 35 px apart");
         assert_eq!(g.boxes[0].title.align, Align::Center);
         assert_no_text_clash(&g);
+    }
+
+    #[test]
+    fn a_reply_label_and_a_two_word_participant_keep_to_one_line() {
+        let s = with_messages(
+            vec![
+                node("b", "Request B", "box"),
+                node("store", "TokenStore", "box"),
+                node("oauth", "OAuth endpoint", "box"),
+            ],
+            vec![message(
+                "store",
+                "b",
+                "Ok(same token) · no second exchange",
+                true,
+            )],
+        );
+        let g = layout(&s, &Fonts);
+        assert_sequence(&s, &g);
+        assert_eq!(g.messages[0].label.lines.len(), 1);
+        let oauth = g.boxes.iter().find(|b| b.node == "oauth").expect("box");
+        assert_eq!(oauth.title.lines, vec!["OAuth endpoint".to_string()]);
     }
 
     #[test]

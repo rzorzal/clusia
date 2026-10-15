@@ -35,8 +35,8 @@ use bevy::window::PrimaryWindow;
 use clusia_core::PrRef;
 use clusia_core::diagram::{Change, DiagramSpec, EntryState, History, LineStyle, RowKey, Shape};
 use clusia_diagram::{
-    Align, Arrow, BoxGeo, EdgeGeo, Fonts, Geometry, Measure, Point, Rect as GRect, TextLines,
-    TextStyle, layout, style_size,
+    Align, Arrow, BoxGeo, EdgeGeo, Fonts, Geometry, Measure, MessageGeo, Point, Rect as GRect,
+    TextLines, TextStyle, layout, style_size,
 };
 
 use super::DiagramCanvas;
@@ -55,14 +55,23 @@ pub const DRAG_GRACE: f64 = 0.25;
 const DOT_PITCH: u32 = 20;
 /// The border of a box that changed, is new or is at risk; a plain box has 1 px.
 const RING: f32 = 1.5;
-/// How far outside a box its dashed ring sits: a 3 px gap and the ring's own thickness.
-const RING_GAP: f32 = 4.5;
+/// How far outside a box the outer edge of its dashed ring is: a 2 px gap and the ring.
+const RING_GAP: f32 = 3.0;
+/// The thickness of the dashed ring of a new box.
+const RING_LINE: f32 = 1.0;
+/// The corner radius of a box that is not round.
+const BOX_RADIUS: f32 = 8.0;
 const DASH_ON: f32 = 5.0;
 const DASH_OFF: f32 = 3.0;
+/// The finer dash of a ring.
+const RING_ON: f32 = 3.0;
+const RING_OFF: f32 = 2.0;
 /// The thickness of a line of an edge.
 const LINE: f32 = 2.0;
 /// The side of the square an arrowhead glyph is centred in.
 const HEAD: f32 = 10.0;
+/// Space between a row's name and its `PK` or `FK` tag.
+const KEY_GAP: f32 = 6.0;
 /// Boxes whose tops are this close are read as one row.
 const ROW_BAND: f32 = 24.0;
 
@@ -188,6 +197,15 @@ pub struct Look {
     pub strike: bool,
 }
 
+/// Whether a box is drawn with fully round ends: a pill (a state, a use case, an actor), a
+/// circle or the start dot.
+pub fn is_round(shape: Shape) -> bool {
+    matches!(
+        shape,
+        Shape::Pill | Shape::Circle | Shape::Start | Shape::Actor
+    )
+}
+
 /// The look of a box. Outside a comparison its `change` decides (changed, new and at-risk boxes
 /// stand out); in one only `history` does (added, changed since, removed), and the rest is plain.
 pub fn look(shape: Shape, change: Change, history: Option<History>, compare: bool) -> Look {
@@ -256,17 +274,20 @@ pub struct LineLook {
     pub strike: bool,
 }
 
-/// The look of a line. `soft` draws an unmarked line in `EdgeSoft` (the reply of a sequence).
+/// The look of a message of a sequence: a reply is drawn solid, like the call it answers.
+pub fn message_look(message: &MessageGeo, compare: bool) -> LineLook {
+    line_look(message.change, message.history, compare, false)
+}
+
+/// The look of a line.
 pub fn line_look(
     change: Change,
     history: Option<History>,
     compare: bool,
     dashed: bool,
-    soft: bool,
 ) -> LineLook {
-    let quiet = if soft { Swatch::EdgeSoft } else { Swatch::Edge };
     let plain = LineLook {
-        ink: quiet,
+        ink: Swatch::Edge,
         dashed,
         label: Swatch::Faint,
         strike: false,
@@ -309,12 +330,15 @@ pub fn line_look(
     }
 }
 
-/// The tile of the dotted ground: one white dot, tinted with `CanvasDot` by the node.
+/// The tile of the dotted ground: one white dot of 2 × 2 pixels, tinted with `CanvasDot` by the
+/// node.
 pub fn dot_tile() -> Image {
     let side = DOT_PITCH;
     let mut data = vec![0_u8; (side * side * 4) as usize];
-    let at = (((side / 2) * side + side / 2) * 4) as usize;
-    data[at..at + 4].copy_from_slice(&[255, 255, 255, 255]);
+    for (row, col) in [(9, 9), (9, 10), (10, 9), (10, 10)] {
+        let at = ((row * side + col) * 4) as usize;
+        data[at..at + 4].copy_from_slice(&[255, 255, 255, 255]);
+    }
     Image::new(
         Extent3d {
             width: side,
@@ -331,10 +355,19 @@ pub fn dot_tile() -> Image {
 /// The tile of a dashed line: five opaque pixels and three clear ones along its length, one
 /// pixel across (the node stretches it to the line's thickness). `horizontal` runs along x.
 pub fn dash_tile(horizontal: bool) -> Image {
-    let pitch = (DASH_ON + DASH_OFF) as u32;
+    tile(horizontal, DASH_ON, DASH_OFF)
+}
+
+/// The tile of the dashed ring of a new box: three on, two off.
+pub fn ring_dash_tile(horizontal: bool) -> Image {
+    tile(horizontal, RING_ON, RING_OFF)
+}
+
+fn tile(horizontal: bool, on: f32, off: f32) -> Image {
+    let pitch = (on + off) as u32;
     let mut data = Vec::with_capacity(pitch as usize * 4);
     for i in 0..pitch {
-        let alpha = if (i as f32) < DASH_ON { 255 } else { 0 };
+        let alpha = if (i as f32) < on { 255 } else { 0 };
         data.extend_from_slice(&[255, 255, 255, alpha]);
     }
     let (width, height) = if horizontal { (pitch, 1) } else { (1, pitch) };
@@ -360,6 +393,8 @@ pub struct Dots {
     pub dot: Handle<Image>,
     pub dash_x: Handle<Image>,
     pub dash_y: Handle<Image>,
+    pub ring_x: Handle<Image>,
+    pub ring_y: Handle<Image>,
 }
 
 /// A tiled image node whose tint is a swatch, so a theme switch recolours it.
@@ -585,6 +620,21 @@ fn type_of(style: TextStyle, ink: Swatch) -> Type {
     }
 }
 
+/// Where `line` of `block` starts. A centred line is placed by its measured width: `Justify`
+/// only centres a line against the widest line of its own text, not against the node.
+pub fn line_left(block: &TextLines, line: &str) -> f32 {
+    match block.align {
+        Align::Left => block.at.x,
+        Align::Center => block.at.x + (block.width - Fonts.width(line, block.style)) / 2.0,
+    }
+}
+
+/// Where the `PK` or `FK` tag of a row starts: just after the row's name, in the same face.
+pub fn key_left(name: &TextLines) -> f32 {
+    let line = name.lines.first().map_or("", String::as_str);
+    line_left(name, line) + Fonts.width(line, name.style) + KEY_GAP
+}
+
 /// One node per line of `block`, positioned from `origin` (the top-left corner of the node the
 /// lines are children of).
 fn text_block(
@@ -596,21 +646,16 @@ fn text_block(
     origin: Vec2,
 ) {
     let line_height = Fonts.line_height(block.style);
-    let justify = match block.align {
-        Align::Left => Justify::Left,
-        Align::Center => Justify::Center,
-    };
     for (i, line) in block.lines.iter().enumerate() {
         let mut e = p.spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: px(block.at.x - origin.x),
+                left: px(line_left(block, line) - origin.x),
                 top: px(block.at.y + i as f32 * line_height - origin.y),
-                width: px(block.width),
                 ..default()
             },
             text(fonts, line.clone(), type_of(block.style, ink)),
-            TextLayout::new(justify, LineBreak::NoWrap),
+            TextLayout::new(Justify::Left, LineBreak::NoWrap),
             ignore(),
         ));
         if strike {
@@ -639,7 +684,7 @@ fn strip(p: &mut ChildSpawnerCommands, x: f32, y: f32, w: f32, h: f32, ink: Swat
 /// One node that draws a dashed line: a tiled dash image `len` long, `thickness` thick.
 fn dashed_strip(
     p: &mut ChildSpawnerCommands,
-    tiles: &Dots,
+    tile: &Handle<Image>,
     horizontal: bool,
     (x, y): (f32, f32),
     len: f32,
@@ -661,11 +706,7 @@ fn dashed_strip(
             ..default()
         },
         ImageNode {
-            image: if horizontal {
-                tiles.dash_x.clone()
-            } else {
-                tiles.dash_y.clone()
-            },
+            image: tile.clone(),
             color: Color::NONE,
             image_mode: NodeImageMode::Tiled {
                 tile_x: horizontal,
@@ -730,7 +771,14 @@ fn segment(
     let (r, horizontal) = strip_rect(a, b, grow.0, grow.1);
     let len = if horizontal { r.w } else { r.h };
     match tiles {
-        Some(tiles) if dashed => dashed_strip(p, tiles, horizontal, (r.x, r.y), len, LINE, ink),
+        Some(tiles) if dashed => {
+            let tile = if horizontal {
+                &tiles.dash_x
+            } else {
+                &tiles.dash_y
+            };
+            dashed_strip(p, tile, horizontal, (r.x, r.y), len, LINE, ink);
+        }
         _ => strip(p, r.x, r.y, r.w, r.h, ink),
     }
 }
@@ -760,29 +808,133 @@ fn head(p: &mut ChildSpawnerCommands, fonts: &UiFonts, tip: Point, dir: Dir, ink
     });
 }
 
-/// A dashed rectangle `gap` px outside `rect`: four nodes, solid strips when there are no tiles.
+/// Where the pieces of a dashed ring go: straight dashed sides (along x or not, top left, length)
+/// and four quarter circles, `radius` across, at the top left, top right, bottom left and
+/// bottom right.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RingParts {
+    pub radius: f32,
+    pub sides: Vec<(bool, (f32, f32), f32)>,
+    pub corners: [GRect; 4],
+}
+
+/// The ring whose outer edge is `gap` px outside `rect`, with the box's corner `radius` grown by
+/// the gap so it stays parallel to the border. Sides of no length (the ends of a pill) are left
+/// out.
+pub fn ring_parts(rect: GRect, radius: f32, gap: f32) -> RingParts {
+    let (x, y) = (rect.x - gap, rect.y - gap);
+    let (w, h) = (rect.w + 2.0 * gap, rect.h + 2.0 * gap);
+    let r = (radius + gap).min(w / 2.0).min(h / 2.0);
+    let t = RING_LINE;
+    let sides = [
+        (true, (x + r, y), w - 2.0 * r),
+        (true, (x + r, y + h - t), w - 2.0 * r),
+        (false, (x, y + r), h - 2.0 * r),
+        (false, (x + w - t, y + r), h - 2.0 * r),
+    ]
+    .into_iter()
+    .filter(|s| s.2 > 0.5)
+    .collect();
+    let corner = |cx, cy| GRect {
+        x: cx,
+        y: cy,
+        w: r,
+        h: r,
+    };
+    RingParts {
+        radius: r,
+        sides,
+        corners: [
+            corner(x, y),
+            corner(x + w - r, y),
+            corner(x, y + h - r),
+            corner(x + w - r, y + h - r),
+        ],
+    }
+}
+
+/// A dashed ring `gap` px outside `rect` (see `ring_parts`): a tiled node per side, solid when
+/// there are no tiles, and a bordered node per corner whose one round corner draws the arc.
 fn dashed_ring(
     p: &mut ChildSpawnerCommands,
     tiles: Option<&Dots>,
     rect: GRect,
+    radius: f32,
     gap: f32,
-    thickness: f32,
     ink: Swatch,
 ) {
-    let (x, y) = (rect.x - gap, rect.y - gap);
-    let (w, h) = (rect.w + 2.0 * gap, rect.h + 2.0 * gap);
-    let sides = [
-        (true, (x, y), w),
-        (true, (x, y + h - thickness), w),
-        (false, (x, y), h),
-        (false, (x + w - thickness, y), h),
-    ];
-    for (horizontal, at, len) in sides {
+    let ring = ring_parts(rect, radius, gap);
+    let t = RING_LINE;
+    for (horizontal, at, len) in ring.sides {
         match tiles {
-            Some(tiles) => dashed_strip(p, tiles, horizontal, at, len, thickness, ink),
-            None if horizontal => strip(p, at.0, at.1, len, thickness, ink),
-            None => strip(p, at.0, at.1, thickness, len, ink),
+            Some(tiles) => {
+                let tile = if horizontal {
+                    &tiles.ring_x
+                } else {
+                    &tiles.ring_y
+                };
+                dashed_strip(p, tile, horizontal, at, len, t, ink);
+            }
+            None if horizontal => strip(p, at.0, at.1, len, t, ink),
+            None => strip(p, at.0, at.1, t, len, ink),
         }
+    }
+    // Bevy caps a corner's radius at half the node's shorter side, so each arc is the round
+    // corner of a node twice the radius across, clipped to the quarter that holds the arc.
+    let (r, d) = (ring.radius, 2.0 * ring.radius);
+    let arcs = [
+        (
+            (0.0, 0.0),
+            UiRect::new(px(t), px(0), px(t), px(0)),
+            BorderRadius::top_left(px(r)),
+        ),
+        (
+            (-r, 0.0),
+            UiRect::new(px(0), px(t), px(t), px(0)),
+            BorderRadius::top_right(px(r)),
+        ),
+        (
+            (0.0, -r),
+            UiRect::new(px(t), px(0), px(0), px(t)),
+            BorderRadius::bottom_left(px(r)),
+        ),
+        (
+            (-r, -r),
+            UiRect::new(px(0), px(t), px(0), px(t)),
+            BorderRadius::bottom_right(px(r)),
+        ),
+    ];
+    for (c, ((dx, dy), border, border_radius)) in ring.corners.iter().zip(arcs) {
+        p.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(c.x),
+                top: px(c.y),
+                width: px(c.w),
+                height: px(c.h),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            ignore(),
+            LinePiece,
+        ))
+        .with_children(|q| {
+            q.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(dx),
+                    top: px(dy),
+                    width: px(d),
+                    height: px(d),
+                    border,
+                    border_radius,
+                    ..default()
+                },
+                BorderColor::default(),
+                Stroke(ink),
+                ignore(),
+            ));
+        });
     }
 }
 
@@ -986,13 +1138,7 @@ fn spawn_content(
         draw_edge(p, fonts, ctx.tiles.as_ref(), edge, compare);
     }
     for message in &g.messages {
-        let look = line_look(
-            message.change,
-            message.history,
-            compare,
-            message.reply,
-            message.reply,
-        );
+        let look = message_look(message, compare);
         let (from, to) = (
             Point {
                 x: message.from_x,
@@ -1027,7 +1173,12 @@ fn spawn_content(
     for b in &g.boxes {
         let look = look(b.shape, b.change, b.history, compare);
         if look.dashed {
-            dashed_ring(p, ctx.tiles.as_ref(), b.rect, RING_GAP, RING, look.ring);
+            let radius = if is_round(b.shape) {
+                b.rect.w.min(b.rect.h) / 2.0
+            } else {
+                BOX_RADIUS
+            };
+            dashed_ring(p, ctx.tiles.as_ref(), b.rect, radius, RING_GAP, look.ring);
         }
     }
     for i in reading_order(&g.boxes) {
@@ -1042,13 +1193,7 @@ fn draw_edge(
     e: &EdgeGeo,
     compare: bool,
 ) {
-    let look = line_look(
-        e.change,
-        e.history,
-        compare,
-        e.style == LineStyle::Dashed,
-        false,
-    );
+    let look = line_look(e.change, e.history, compare, e.style == LineStyle::Dashed);
     let pieces = e.points.len().saturating_sub(1);
     for (i, pair) in e.points.windows(2).enumerate() {
         let grow = (i > 0, i + 1 < pieces);
@@ -1085,7 +1230,7 @@ fn draw_box(
         .nodes
         .get(b.index)
         .map_or(b.node.clone(), |n| n.id.clone());
-    let round = matches!(b.shape, Shape::Pill | Shape::Circle | Shape::Start);
+    let round = is_round(b.shape);
     p.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -1097,7 +1242,7 @@ fn draw_box(
             border_radius: if round {
                 BorderRadius::MAX
             } else {
-                BorderRadius::all(px(8))
+                BorderRadius::all(px(BOX_RADIUS))
             },
             ..default()
         },
@@ -1167,13 +1312,12 @@ fn draw_box(
                 bx.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(row.rect.x - origin.x),
+                        left: px(key_left(&row.text) - origin.x),
                         top: px(row.text.at.y - origin.y),
-                        width: px(row.rect.w - 12.0),
                         ..default()
                     },
-                    text(fonts, tag, type_of(TextStyle::Card, Swatch::Faint)),
-                    TextLayout::new(Justify::Right, LineBreak::NoWrap),
+                    text(fonts, tag, type_of(row.text.style, ink)),
+                    TextLayout::new(Justify::Left, LineBreak::NoWrap),
                     ignore(),
                 ));
             }
@@ -1329,8 +1473,8 @@ fn legend_item(
                         w: 12.0,
                         h: 12.0,
                     },
+                    3.0,
                     0.0,
-                    1.5,
                     ring,
                 );
             }
@@ -1607,6 +1751,8 @@ fn make_dots(mut commands: Commands, images: Option<ResMut<Assets<Image>>>) {
             dot: images.add(dot_tile()),
             dash_x: images.add(dash_tile(true)),
             dash_y: images.add(dash_tile(false)),
+            ring_x: images.add(ring_dash_tile(true)),
+            ring_y: images.add(ring_dash_tile(false)),
         });
     }
 }
@@ -1783,6 +1929,104 @@ mod tests {
     }
 
     #[test]
+    fn the_ring_dash_tile_is_three_on_and_two_off() {
+        for horizontal in [true, false] {
+            let tile = ring_dash_tile(horizontal);
+            let (w, h) = (tile.width(), tile.height());
+            assert_eq!(if horizontal { (w, h) } else { (h, w) }, (5, 1));
+            let data = tile.data.as_ref().expect("pixels");
+            let alpha: Vec<u8> = data.chunks(4).map(|px| px[3]).collect();
+            assert_eq!(alpha, [255, 255, 255, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn a_ring_hugs_its_box_with_dashed_sides_and_round_corners() {
+        let rect = GRect {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 40.0,
+        };
+        let ring = ring_parts(rect, 8.0, 3.0);
+        assert_eq!(ring.radius, 11.0, "the box's radius plus the gap");
+        assert_eq!(
+            ring.sides,
+            vec![
+                (true, (18.0, 17.0), 84.0),
+                (true, (18.0, 62.0), 84.0),
+                (false, (7.0, 28.0), 24.0),
+                (false, (112.0, 28.0), 24.0),
+            ],
+            "each side stops where its corners start"
+        );
+        let corner = |x, y| GRect {
+            x,
+            y,
+            w: 11.0,
+            h: 11.0,
+        };
+        assert_eq!(
+            ring.corners,
+            [
+                corner(7.0, 17.0),
+                corner(102.0, 17.0),
+                corner(7.0, 52.0),
+                corner(102.0, 52.0)
+            ]
+        );
+        let pill = ring_parts(rect, 20.0, 3.0);
+        assert_eq!(pill.radius, 23.0);
+        assert!(
+            pill.sides.iter().all(|(horizontal, _, _)| *horizontal),
+            "a pill's ends are all corner"
+        );
+    }
+
+    #[test]
+    fn a_centred_line_starts_half_its_spare_width_in() {
+        let block = TextLines {
+            lines: vec!["Fresh".into(), "a longer line".into()],
+            style: TextStyle::Title,
+            at: Point { x: 10.0, y: 0.0 },
+            width: 200.0,
+            height: 32.0,
+            align: Align::Center,
+        };
+        for line in &block.lines {
+            let spare = 200.0 - Fonts.width(line, TextStyle::Title);
+            assert!((line_left(&block, line) - (10.0 + spare / 2.0)).abs() < 1e-3);
+        }
+        let left = TextLines {
+            align: Align::Left,
+            ..block.clone()
+        };
+        assert_eq!(line_left(&left, "Fresh"), 10.0);
+    }
+
+    #[test]
+    fn a_key_tag_follows_its_row_name() {
+        let name = TextLines {
+            lines: vec!["token_id".into()],
+            style: TextStyle::RowMono,
+            at: Point { x: 10.0, y: 0.0 },
+            width: 206.0,
+            height: 14.0,
+            align: Align::Left,
+        };
+        let after = 10.0 + Fonts.width("token_id", TextStyle::RowMono) + KEY_GAP;
+        assert!((key_left(&name) - after).abs() < 1e-3);
+    }
+
+    #[test]
+    fn pills_actors_circles_and_the_start_are_round() {
+        for shape in [Shape::Pill, Shape::Actor, Shape::Circle, Shape::Start] {
+            assert!(is_round(shape), "{shape:?}");
+        }
+        assert!(!is_round(Shape::Box) && !is_round(Shape::External));
+    }
+
+    #[test]
     fn an_elbow_fills_its_outer_corner() {
         let p = |x, y| Point { x, y };
         let (corner, down) = (p(100.0, 50.0), p(100.0, 120.0));
@@ -1871,52 +2115,53 @@ mod tests {
 
     #[test]
     fn a_line_looks_by_what_changed_or_by_history_when_comparing() {
-        let plain = line_look(Change::Unchanged, None, false, false, false);
+        let plain = line_look(Change::Unchanged, None, false, false);
         assert_eq!(
             (plain.ink, plain.dashed, plain.label),
             (Swatch::Edge, false, Swatch::Faint)
         );
         assert_eq!(
-            line_look(Change::New, None, false, false, false).ink,
+            line_look(Change::New, None, false, false).ink,
             Swatch::Green
         );
         assert_eq!(
-            line_look(Change::Risk, None, false, false, false).label,
+            line_look(Change::Risk, None, false, false).label,
             Swatch::Orange
         );
-        assert!(line_look(Change::Unchanged, None, false, true, false).dashed);
-        let reply = line_look(Change::Unchanged, None, false, true, true);
-        assert_eq!((reply.ink, reply.dashed), (Swatch::EdgeSoft, true));
-        let added = line_look(Change::Unchanged, Some(History::Added), true, false, false);
+        assert!(line_look(Change::Unchanged, None, false, true).dashed);
+        let reply = MessageGeo {
+            index: 0,
+            y: 0.0,
+            from_x: 100.0,
+            to_x: 0.0,
+            label: block(0.0, 0.0),
+            reply: true,
+            change: Change::Unchanged,
+            history: None,
+        };
+        assert_eq!(
+            message_look(&reply, false),
+            line_look(Change::Unchanged, None, false, false),
+            "a reply is drawn solid, like the call it answers"
+        );
+        let added = line_look(Change::Unchanged, Some(History::Added), true, false);
         assert_eq!((added.ink, added.dashed), (Swatch::Green, true));
-        let changed = line_look(
-            Change::Unchanged,
-            Some(History::Changed),
-            true,
-            false,
-            false,
-        );
+        let changed = line_look(Change::Unchanged, Some(History::Changed), true, false);
         assert_eq!(changed.ink, Swatch::Amber);
-        let removed = line_look(
-            Change::Unchanged,
-            Some(History::Removed),
-            true,
-            false,
-            false,
-        );
+        let removed = line_look(Change::Unchanged, Some(History::Removed), true, false);
         assert_eq!(
             (removed.ink, removed.dashed, removed.strike),
             (Swatch::EdgeSoft, true, true)
         );
         assert_eq!(
-            line_look(Change::Risk, Some(History::Same), true, false, false).ink,
+            line_look(Change::Risk, Some(History::Same), true, false).ink,
             Swatch::Edge,
             "a comparison shows only what changed since"
         );
     }
 
     #[test]
-    fn the_dot_tile_is_one_centred_dot() {
+    fn the_dot_tile_is_one_centred_two_pixel_dot() {
         let tile = dot_tile();
         assert_eq!((tile.width(), tile.height()), (20, 20));
         let data = tile.data.as_ref().expect("pixels");
@@ -1926,7 +2171,7 @@ mod tests {
             .filter(|(_, px)| px[3] != 0)
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(lit, [10 * 20 + 10]);
+        assert_eq!(lit, [9 * 20 + 9, 9 * 20 + 10, 10 * 20 + 9, 10 * 20 + 10]);
     }
 
     #[test]
@@ -2596,6 +2841,39 @@ mod tests {
         app.world_mut().resource_mut::<Diagrams>().set_changed();
         testing::settle(&mut app);
         assert_eq!(testing::count::<DiagramBox>(&mut app), 4);
+    }
+
+    #[test]
+    fn no_demo_label_is_cut_by_a_route() {
+        // Whether the axis-aligned run `a`–`b` passes through the inside of `r`.
+        let cuts = |a: Point, b: Point, r: GRect| {
+            a.x.max(b.x) > r.x
+                && a.x.min(b.x) < r.right()
+                && a.y.max(b.y) > r.y
+                && a.y.min(b.y) < r.bottom()
+        };
+        for version in fixture::demo_diagrams(NOW, &fixture::demo_pr()) {
+            for entry in &version.entries {
+                let EntryState::Ready { spec, .. } = &entry.state else {
+                    continue;
+                };
+                let g = clusia_diagram::layout(spec, &Fonts);
+                for e in &g.edges {
+                    for label in e.label.iter().chain(e.ends.iter().flatten()) {
+                        let r = label.rect().inflate(-0.5);
+                        for route in &g.edges {
+                            assert!(
+                                !route.points.windows(2).any(|w| cuts(w[0], w[1], r)),
+                                "{}: {:?} is cut by the route of edge {}",
+                                spec.key,
+                                label.lines,
+                                route.index
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! Helpers for the layout tests: specs from JSON and the invariants every kind must keep.
 
-use clusia_core::diagram::DiagramSpec;
+use clusia_core::diagram::{DiagramKind, DiagramSpec, Shape};
 use serde_json::{Value, json};
 
-use crate::geometry::{overlap, touches};
-use crate::{EdgeGeo, Geometry, MARGIN, Point, Rect, TextLines};
+use crate::geometry::{ActorEnd, share_past_trunk, touches};
+use crate::{Arrow, EdgeGeo, Geometry, MARGIN, Point, Rect, TextLines};
 
 /// A node as JSON with every field spelled out.
 pub(crate) fn node(id: &str, label: &str, shape: &str) -> Value {
@@ -245,13 +245,22 @@ fn is_axis_aligned(a: Point, b: Point) -> bool {
     (a.x - b.x).abs() < 1e-3 || (a.y - b.y).abs() < 1e-3
 }
 
-/// Whether two edges have runs on one line that overlap by more than 2 px.
-fn share_a_run(a: &EdgeGeo, b: &EdgeGeo) -> bool {
-    a.points.windows(2).any(|s| {
-        b.points
-            .windows(2)
-            .any(|t| overlap((s[0], s[1]), (t[0], t[1])) > 2.0)
-    })
+/// The actor end of edge `e` in a use case diagram, as `share_past_trunk` takes it.
+fn actor_end(spec: &DiagramSpec, e: &EdgeGeo) -> ActorEnd {
+    if spec.kind != DiagramKind::UseCases || e.arrow != Arrow::None {
+        return None;
+    }
+    let actor = |id: &str| {
+        spec.nodes
+            .iter()
+            .position(|n| n.id == id && matches!(n.shape, Shape::Actor | Shape::External))
+    };
+    let edge = &spec.edges[e.index];
+    match (actor(&edge.from), actor(&edge.to)) {
+        (Some(a), None) => Some((a, true)),
+        (None, Some(a)) => Some((a, false)),
+        _ => None,
+    }
 }
 
 /// Panics when two texts that belong to edges or messages overlap: labels and cardinalities of
@@ -277,9 +286,10 @@ pub(crate) fn assert_no_text_clash(geometry: &Geometry) {
 }
 
 /// Panics when `geometry` breaks an invariant every kind keeps: finite numbers, boxes apart,
-/// routes sideways or up and down only and clear of other boxes, labels off boxes and off the
-/// other texts of their edge, no two edges along one line, and everything inside `size` and starting at the
-/// margin.
+/// routes sideways or up and down only and clear of other boxes, labels off boxes, off the
+/// other texts of their edge and off every route (their own may only run beside them), no two
+/// edges along one line (but two links of one actor on its trunk), and everything inside
+/// `size` and starting at the margin.
 pub(crate) fn check(spec: &DiagramSpec, geometry: &Geometry) {
     let finite = |v: f32| assert!(v.is_finite(), "not finite: {v}");
     for b in &geometry.boxes {
@@ -355,6 +365,17 @@ pub(crate) fn check(spec: &DiagramSpec, geometry: &Geometry) {
     }
     for e in &geometry.edges {
         for l in e.label.iter().chain(e.ends.iter().flatten()) {
+            // Beside its own run a label may touch it, but no run of its own route may cut it.
+            let inside = l.rect().inflate(-0.5);
+            for w in e.points.windows(2) {
+                assert!(
+                    !touches(w[0], w[1], inside),
+                    "a label of edge {} ({:?}) is crossed by its own route: {:?}",
+                    e.index,
+                    l.lines,
+                    e.points
+                );
+            }
             let zone = l.rect().inflate(1.0);
             for other in geometry.edges.iter().filter(|o| o.index != e.index) {
                 for w in other.points.windows(2) {
@@ -372,8 +393,9 @@ pub(crate) fn check(spec: &DiagramSpec, geometry: &Geometry) {
     }
     for (i, a) in geometry.edges.iter().enumerate() {
         for b in &geometry.edges[i + 1..] {
+            let ends = (actor_end(spec, a), actor_end(spec, b));
             assert!(
-                !share_a_run(a, b),
+                !share_past_trunk(&a.points, &b.points, ends),
                 "edges {} and {} run along one line: {:?} and {:?}",
                 a.index,
                 b.index,

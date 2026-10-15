@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use clusia_core::diagram::DiagramSpec;
 
 use crate::geometry::{
-    Align, Arrow, EdgeGeo, Point, Rect, STEP, TextLines, crossed_by_other_route,
+    Align, Arrow, EdgeGeo, Point, Rect, STEP, TextLines, crossed_by_other_route, overlap, touches,
 };
 use crate::measure::{Measure, TextStyle};
 use crate::spine;
@@ -37,6 +37,8 @@ pub(crate) struct Options {
     pub arrow: Arrow,
     /// Whether the boxes of a row share their top edge rather than their middle line.
     pub top_aligned: bool,
+    /// The face of the edge labels.
+    pub label_style: TextStyle,
 }
 
 pub(crate) struct Placed {
@@ -54,6 +56,8 @@ const LANE_GAP: f32 = 16.0;
 const END_PAD: f32 = 16.0;
 /// Space between a box and the box that hangs below it.
 const STACK_GAP: f32 = 72.0;
+/// The widest label a gap between two ranks grows to hold on one line.
+const LABEL_LINE: f32 = 160.0;
 /// Space between two ports on one side of a box.
 const PORT_PITCH: f32 = 8.0;
 /// How far a self-loop leaves its box.
@@ -321,6 +325,35 @@ pub(crate) fn place(
             end_port[k] = top + ext * (slot + 1) as f32 / (ends[v].len() + 1) as f32;
         }
     }
+    // A route between neighbouring ranks runs straight when one end's port can move level with
+    // the other's: inside its box and a port pitch from the other ports on that side.
+    for (k, chain) in chains.iter().enumerate() {
+        if chain.verts.len() != 2 {
+            continue;
+        }
+        let (u, v) = (chain.verts[0], chain.verts[1]);
+        let fits = |node: usize, at: f32, others: &[usize], ports: &[f32], from: f32| {
+            at >= c_top[node] + from.max(3.0)
+                && at <= c_top[node] + verts[node].ext_c - 3.0
+                && others
+                    .iter()
+                    .all(|&j| j == k || (ports[j] - at).abs() >= PORT_PITCH)
+        };
+        if (start_port[k] - end_port[k]).abs() < 0.5 {
+            continue;
+        }
+        if fits(v, start_port[k], &ends[v], &end_port, 0.0) {
+            end_port[k] = start_port[k];
+        } else if fits(
+            u,
+            end_port[k],
+            &starts[u],
+            &start_port,
+            ports_from(loops_at[u], verts[u].ext_c),
+        ) {
+            start_port[k] = end_port[k];
+        }
+    }
     // The cross coordinate each chain has at each of its vertices.
     let mut cross_of: Vec<Vec<f32>> = chains
         .iter()
@@ -364,15 +397,17 @@ pub(crate) fn place(
     // Room each gap needs for the cardinalities and the label of an edge that has both.
     let card_w =
         |text: Option<&str>| text.map_or(0.0, |t| measure.width(t, TextStyle::Card).min(64.0));
+    // A label of up to `LABEL_LINE` px keeps to one line: its gap grows to hold it.
     let mut label_room = vec![0.0f32; layer_count];
     if dir == Direction::LeftToRight {
         for chain in &chains {
             let edge = &spec.edges[chain.edge];
             let wide = card_w(edge.ends[0].as_deref()).max(card_w(edge.ends[1].as_deref()));
-            if let (Some(text), true) = (edge.label.as_deref(), wide > 0.0) {
-                let natural = measure.width(text, TextStyle::EdgeLabel).min(120.0);
+            if let Some(text) = edge.label.as_deref() {
+                let natural = measure.width(text, opts.label_style).min(LABEL_LINE);
+                let cards = if wide > 0.0 { 2.0 * (wide + 4.0) } else { 0.0 };
                 let first = layer_of[chain.verts[0]];
-                label_room[first] = label_room[first].max(natural + 8.0 + 2.0 * (wide + 4.0));
+                label_room[first] = label_room[first].max(natural + 12.0 + cards);
             }
         }
     }
@@ -458,6 +493,9 @@ pub(crate) fn place(
 
     // Routes.
     let mut geos: Vec<Option<EdgeGeo>> = vec![None; spec.edges.len()];
+    let mut back_routes = BackRoutes::default();
+    // Shorter ways back for edges against the flow, taken once every route is known.
+    let mut backs: Vec<(usize, Vec<Point>)> = Vec::new();
     // Labels wait until every cardinality is down, then each takes the first free place.
     let mut texts = Texts::default();
     for (k, chain) in chains.iter().enumerate() {
@@ -487,6 +525,13 @@ pub(crate) fn place(
         if chain.reversed {
             points.reverse();
         }
+        if dir == Direction::LeftToRight && chain.reversed && edge.ends.iter().all(Option::is_none)
+        {
+            let (from, to) = (chain.verts[chain.verts.len() - 1], chain.verts[0]);
+            if let Some(route) = back_route(&rects, from, to, points[0].y, &mut back_routes) {
+                backs.push((chain.edge, route));
+            }
+        }
 
         // Labels: the edge's own in the first gap, the cardinalities at the two ends.
         let first_layer = layer_of[chain.verts[0]];
@@ -513,6 +558,7 @@ pub(crate) fn place(
             let label = edge_label(
                 measure,
                 dir,
+                opts.label_style,
                 text,
                 band_end(first_layer),
                 gap.get(first_layer).copied(),
@@ -558,7 +604,15 @@ pub(crate) fn place(
                     dy += 8.0;
                 }
             }
-            texts.offer(chain.edge, (first_layer, start_at), places);
+            let line = text::block(
+                measure,
+                vec![text.to_string()],
+                label.style,
+                Point::default(),
+                None,
+                Align::Left,
+            );
+            texts.offer(chain.edge, (first_layer, start_at), places, Some(line));
         }
         let mut tags = [None, None];
         tags[usize::from(chain.reversed)] = near_start;
@@ -625,8 +679,8 @@ pub(crate) fn place(
             }
             texts.hold(ends.iter().flatten());
             if let Some(text) = edge.label.as_deref() {
-                let label = column_label(measure, text, x + 6.0, room, span);
-                texts.offer(i, (layer, y_top), vec![label]);
+                let label = column_label(measure, opts.label_style, text, x + 6.0, room, span);
+                texts.offer(i, (layer, y_top), vec![label], None);
             }
             geos[i] = Some(EdgeGeo {
                 index: i,
@@ -657,8 +711,17 @@ pub(crate) fn place(
             dir.to_xy(far, y2),
         ];
         if let Some(text) = edge.label.as_deref() {
-            let label = loop_label(measure, dir, text, far, out, (y1, y2), nth);
-            texts.offer(i, (layer_of[node], y1), vec![label]);
+            let label = loop_label(
+                measure,
+                dir,
+                opts.label_style,
+                text,
+                far,
+                out,
+                (y1, y2),
+                nth,
+            );
+            texts.offer(i, (layer_of[node], y1), vec![label], None);
         }
         geos[i] = Some(EdgeGeo {
             index: i,
@@ -672,12 +735,41 @@ pub(crate) fn place(
         });
     }
 
+    // A way back is taken only where it runs along no other route; its label then sits
+    // beside one of its runs.
+    for (edge, route) in backs {
+        let alone = geos.iter().flatten().filter(|g| g.index != edge).all(|g| {
+            g.points.windows(2).all(|a| {
+                route
+                    .windows(2)
+                    .all(|b| overlap((a[0], a[1]), (b[0], b[1])) <= 2.0)
+            })
+        });
+        if !alone {
+            continue;
+        }
+        if let Some(text) = spec.edges[edge].label.as_deref() {
+            let line = text::block(
+                measure,
+                vec![text.to_string()],
+                opts.label_style,
+                Point::default(),
+                None,
+                Align::Left,
+            );
+            texts.replace(edge, beside_runs(&route, &line));
+        }
+        if let Some(Some(geo)) = geos.get_mut(edge) {
+            geo.points = route;
+        }
+    }
+
     let routes: Vec<(usize, &[Point])> = geos
         .iter()
         .flatten()
         .map(|g| (g.index, g.points.as_slice()))
         .collect();
-    let (placed_labels, mut dropped_texts) = texts.place(&routes);
+    let (placed_labels, mut dropped_texts) = texts.place(&routes, &rects);
     for (edge, label) in placed_labels {
         if let Some(Some(geo)) = geos.get_mut(edge) {
             geo.label = Some(label);
@@ -693,18 +785,92 @@ pub(crate) fn place(
     }
 }
 
-/// Keeps every cardinality clear of other routes: one that touches the route of another edge
-/// is nudged along its own end, in 4 px steps, and flipped to the other side of the route, to
-/// the first place that overlaps no box and no text and touches no other route. A cardinality
-/// is data (`1` or `0..N`), so it is left out only when no such place exists; returns how many
-/// were left out.
+/// How many back edges already run over the top of the drawing, and up into each box.
+#[derive(Default)]
+struct BackRoutes {
+    over: usize,
+    up_into: HashMap<usize, usize>,
+}
+
+/// A shorter way back for an edge that points against the flow, from box `from` to box `to`
+/// on its left, when it is clear of every other box. When the two share a row with a box
+/// between them, it runs over the top of the boxes between, from the top of one to the top of
+/// the other; when `from` hangs below the row of `to`, it leaves `from`'s port at `port_y`
+/// sideways and goes up into the middle of `to`'s bottom. Later routes of either kind keep
+/// `STEP` from the earlier ones.
+fn back_route(
+    rects: &[Rect],
+    from: usize,
+    to: usize,
+    port_y: f32,
+    taken: &mut BackRoutes,
+) -> Option<Vec<Point>> {
+    let (f, t) = (rects[from], rects[to]);
+    if f.x <= t.right() {
+        return None;
+    }
+    let p = |x: f32, y: f32| Point { x, y };
+    let between = rects
+        .iter()
+        .any(|r| r.x >= t.right() && r.right() <= f.x && r.y < f.bottom() && r.bottom() > f.y);
+    let route = if (f.centre().y - t.centre().y).abs() < 0.5 && between {
+        let top = rects
+            .iter()
+            .filter(|r| r.right() >= t.x && r.x <= f.right())
+            .map(|r| r.y)
+            .fold(f32::INFINITY, f32::min)
+            - 24.0
+            - taken.over as f32 * STEP;
+        vec![
+            p(f.centre().x, f.y),
+            p(f.centre().x, top),
+            p(t.centre().x, top),
+            p(t.centre().x, t.y),
+        ]
+    } else if port_y > t.bottom() + 8.0 {
+        let x = t.centre().x + taken.up_into.get(&to).copied().unwrap_or(0) as f32 * STEP;
+        vec![p(f.x, port_y), p(x, port_y), p(x, t.bottom())]
+    } else {
+        return None;
+    };
+    let clear = route.windows(2).all(|w| {
+        rects.iter().enumerate().all(|(i, r)| {
+            let zone = if i == from || i == to {
+                r.inflate(-0.5)
+            } else {
+                r.inflate(1.0)
+            };
+            !touches(w[0], w[1], zone)
+        })
+    });
+    if !clear {
+        return None;
+    }
+    if route.len() == 4 {
+        taken.over += 1;
+    } else {
+        *taken.up_into.entry(to).or_insert(0) += 1;
+    }
+    Some(route)
+}
+
+/// Keeps every cardinality clear of other routes and off its own: one that touches the route
+/// of another edge, or is cut by its own, is nudged along its own end, in 4 px steps, and
+/// flipped to the other side of the route, to the first place that overlaps no box and no
+/// text and touches no other route. A cardinality is data (`1` or `0..N`), so it is left out
+/// only when no such place exists; returns how many were left out.
 fn settle_cardinalities(edges: &mut [EdgeGeo], boxes: &[Rect]) -> u32 {
     let mut dropped = 0;
     let routes: Vec<(usize, Vec<Point>)> =
         edges.iter().map(|e| (e.index, e.points.clone())).collect();
     let crossed = |text: &TextLines, own: usize| {
         let zone = text.rect().inflate(1.0);
+        let inside = text.rect().inflate(-0.5);
         crossed_by_other_route(&routes, own, zone)
+            || routes
+                .iter()
+                .filter(|(e, _)| *e == own)
+                .any(|(_, points)| points.windows(2).any(|w| touches(w[0], w[1], inside)))
     };
     for k in 0..edges.len() {
         for slot in 0..2 {
@@ -777,12 +943,22 @@ fn settle_cardinalities(edges: &mut [EdgeGeo], boxes: &[Rect]) -> u32 {
 }
 
 /// The labels of edges that ask for a place, and the texts already down. A label takes the
-/// first of its places that overlaps no text already down and touches no route of another
-/// edge, so a crowded port leaves a label out instead of printing it over something.
+/// first of its places that overlaps no box and no text already down, touches no route of
+/// another edge and is not cut by its own; when none is free it tries the runs of its own
+/// route, beside each, longest first, on one line and then wrapped. A crowded port leaves a
+/// label out instead of printing it over something.
 #[derive(Default)]
 struct Texts {
     taken: Vec<Rect>,
-    offers: Vec<(usize, (usize, f32), Vec<TextLines>)>,
+    offers: Vec<Offer>,
+}
+
+struct Offer {
+    edge: usize,
+    at: (usize, f32),
+    places: Vec<TextLines>,
+    /// The label on one line, for the runs of the route.
+    line: Option<TextLines>,
 }
 
 impl Texts {
@@ -793,39 +969,124 @@ impl Texts {
 
     /// Asks for a place for the label of `edge`, with the places to try in order; `at` orders
     /// the asks: the rank, then where the edge leaves its box.
-    fn offer(&mut self, edge: usize, at: (usize, f32), places: Vec<TextLines>) {
+    fn offer(
+        &mut self,
+        edge: usize,
+        at: (usize, f32),
+        places: Vec<TextLines>,
+        line: Option<TextLines>,
+    ) {
         let places: Vec<TextLines> = places.into_iter().filter(|l| !l.lines.is_empty()).collect();
         if !places.is_empty() {
-            self.offers.push((edge, at, places));
+            self.offers.push(Offer {
+                edge,
+                at,
+                places,
+                line,
+            });
         }
     }
 
-    /// Takes the first place of each label that overlaps no text already down and touches no
-    /// route of another edge; a label with no such place is left out, and counted.
-    fn place(mut self, routes: &[(usize, &[Point])]) -> (Vec<(usize, TextLines)>, u32) {
+    /// Gives the label of `edge` new places to try, and nothing else to fall back on.
+    fn replace(&mut self, edge: usize, places: Vec<TextLines>) {
+        if let Some(offer) = self.offers.iter_mut().find(|o| o.edge == edge) {
+            offer.places = places;
+            offer.line = None;
+        }
+    }
+
+    /// Takes the first free place of each label (see `Texts`); a label with no free place is
+    /// left out, and counted.
+    fn place(
+        mut self,
+        routes: &[(usize, &[Point])],
+        boxes: &[Rect],
+    ) -> (Vec<(usize, TextLines)>, u32) {
         let asked = self.offers.len();
         self.offers.sort_by(|a, b| {
-            a.1.0
-                .cmp(&b.1.0)
-                .then(a.1.1.total_cmp(&b.1.1))
-                .then(a.0.cmp(&b.0))
+            a.at.0
+                .cmp(&b.at.0)
+                .then(a.at.1.total_cmp(&b.at.1))
+                .then(a.edge.cmp(&b.edge))
         });
         let mut placed = Vec::new();
-        for (edge, _, places) in self.offers {
-            let free = places.into_iter().find(|label| {
+        for offer in self.offers {
+            let own: &[Point] = routes
+                .iter()
+                .find(|(e, _)| *e == offer.edge)
+                .map_or(&[], |(_, points)| points);
+            let free = |label: &TextLines| {
                 let rect = label.rect();
-                let zone = rect.inflate(1.0);
+                let inside = rect.inflate(-0.5);
                 !self.taken.iter().any(|t| t.intersects(&rect))
-                    && !crossed_by_other_route(routes, edge, zone)
+                    // Half a pixel of room, so a label that sits on a box's edge stays off it
+                    // once the drawing is moved to the margin.
+                    && !boxes.iter().any(|b| b.intersects(&rect.inflate(0.5)))
+                    && !crossed_by_other_route(routes, offer.edge, rect.inflate(1.0))
+                    && !own.windows(2).any(|w| touches(w[0], w[1], inside))
+            };
+            let wrapped = offer.places[0].clone();
+            let found = offer.places.iter().find(|l| free(l)).cloned().or_else(|| {
+                offer
+                    .line
+                    .iter()
+                    .chain(std::iter::once(&wrapped))
+                    .flat_map(|block| beside_runs(own, block))
+                    .find(|l| free(l))
             });
-            if let Some(label) = free {
+            if let Some(label) = found {
                 self.taken.push(label.rect());
-                placed.push((edge, label));
+                placed.push((offer.edge, label));
             }
         }
         let dropped = (asked - placed.len()) as u32;
         (placed, dropped)
     }
+}
+
+/// `block` moved beside each run of `route`, the longest run first: above and below the middle
+/// of a run that goes sideways, right and left of the middle of one that goes up or down.
+fn beside_runs(route: &[Point], block: &TextLines) -> Vec<TextLines> {
+    let mut runs: Vec<(Point, Point)> = route.windows(2).map(|w| (w[0], w[1])).collect();
+    let length = |r: &(Point, Point)| (r.0.x - r.1.x).abs() + (r.0.y - r.1.y).abs();
+    runs.sort_by(|a, b| length(b).total_cmp(&length(a)));
+    let (w, h) = (block.width, block.height);
+    let mut out = Vec::new();
+    for (a, b) in runs {
+        let mid = Point {
+            x: (a.x + b.x) / 2.0,
+            y: (a.y + b.y) / 2.0,
+        };
+        let spots = if (a.y - b.y).abs() < 1e-3 {
+            [
+                Point {
+                    x: mid.x - w / 2.0,
+                    y: mid.y - 2.0 - h,
+                },
+                Point {
+                    x: mid.x - w / 2.0,
+                    y: mid.y + 2.0,
+                },
+            ]
+        } else {
+            [
+                Point {
+                    x: mid.x + 6.0,
+                    y: mid.y - h / 2.0,
+                },
+                Point {
+                    x: mid.x - 6.0 - w,
+                    y: mid.y - h / 2.0,
+                },
+            ]
+        };
+        for at in spots {
+            let mut moved = block.clone();
+            moved.at = at;
+            out.push(moved);
+        }
+    }
+    out
 }
 
 /// Moves a lane or a port by a few pixels where two edges would otherwise run along one line
@@ -1198,16 +1459,17 @@ fn simplify(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
 
 /// The label of an edge, in the free space at the start of the first gap after the source; when
 /// the edge has cardinalities (`ends_w` is the widest) it sits under the route, between them.
+#[allow(clippy::too_many_arguments)]
 fn edge_label(
     measure: &dyn Measure,
     dir: Direction,
+    style: TextStyle,
     text_in: &str,
     gap_start: f32,
     gap: Option<f32>,
     port: f32,
     ends_w: Option<f32>,
 ) -> TextLines {
-    let style = TextStyle::EdgeLabel;
     match dir {
         Direction::LeftToRight => {
             let width = gap.unwrap_or_else(|| dir.base_gap());
@@ -1262,12 +1524,12 @@ fn card_text(measure: &dyn Measure, text_in: Option<&str>) -> Option<TextLines> 
 /// the free span `(top, bottom)` between the two boxes and not reaching past `right`.
 fn column_label(
     measure: &dyn Measure,
+    style: TextStyle,
     text_in: &str,
     x: f32,
     right: f32,
     (top, bottom): (f32, f32),
 ) -> TextLines {
-    let style = TextStyle::EdgeLabel;
     let lines_fit = ((bottom - top) / measure.line_height(style))
         .floor()
         .max(0.0) as usize;
@@ -1314,16 +1576,17 @@ fn end_label(
 }
 
 /// The label of a self-loop, beside its far side.
+#[allow(clippy::too_many_arguments)]
 fn loop_label(
     measure: &dyn Measure,
     dir: Direction,
+    style: TextStyle,
     text_in: &str,
     far: f32,
     out: f32,
     (y1, y2): (f32, f32),
     nth: usize,
 ) -> TextLines {
-    let style = TextStyle::EdgeLabel;
     match dir {
         Direction::LeftToRight => {
             let cap = (68.0 - 6.0 * nth.min(4) as f32).max(20.0);
