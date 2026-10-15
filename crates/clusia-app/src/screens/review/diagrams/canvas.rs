@@ -70,6 +70,8 @@ const RING_OFF: f32 = 2.0;
 const LINE: f32 = 2.0;
 /// The side of the square an arrowhead glyph is centred in.
 const HEAD: f32 = 10.0;
+/// Space between a row's name and its `PK` or `FK` tag.
+const KEY_GAP: f32 = 6.0;
 /// Boxes whose tops are this close are read as one row.
 const ROW_BAND: f32 = 24.0;
 
@@ -613,6 +615,12 @@ pub fn line_left(block: &TextLines, line: &str) -> f32 {
         Align::Left => block.at.x,
         Align::Center => block.at.x + (block.width - Fonts.width(line, block.style)) / 2.0,
     }
+}
+
+/// Where the `PK` or `FK` tag of a row starts: just after the row's name, in the same face.
+pub fn key_left(name: &TextLines) -> f32 {
+    let line = name.lines.first().map_or("", String::as_str);
+    line_left(name, line) + Fonts.width(line, name.style) + KEY_GAP
 }
 
 /// One node per line of `block`, positioned from `origin` (the top-left corner of the node the
@@ -1304,13 +1312,12 @@ fn draw_box(
                 bx.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(row.rect.x - origin.x),
+                        left: px(key_left(&row.text) - origin.x),
                         top: px(row.text.at.y - origin.y),
-                        width: px(row.rect.w - 12.0),
                         ..default()
                     },
-                    text(fonts, tag, type_of(TextStyle::Card, Swatch::Faint)),
-                    TextLayout::new(Justify::Right, LineBreak::NoWrap),
+                    text(fonts, tag, type_of(row.text.style, ink)),
+                    TextLayout::new(Justify::Left, LineBreak::NoWrap),
                     ignore(),
                 ));
             }
@@ -1995,6 +2002,20 @@ mod tests {
             ..block.clone()
         };
         assert_eq!(line_left(&left, "Fresh"), 10.0);
+    }
+
+    #[test]
+    fn a_key_tag_follows_its_row_name() {
+        let name = TextLines {
+            lines: vec!["token_id".into()],
+            style: TextStyle::RowMono,
+            at: Point { x: 10.0, y: 0.0 },
+            width: 206.0,
+            height: 14.0,
+            align: Align::Left,
+        };
+        let after = 10.0 + Fonts.width("token_id", TextStyle::RowMono) + KEY_GAP;
+        assert!((key_left(&name) - after).abs() < 1e-3);
     }
 
     #[test]

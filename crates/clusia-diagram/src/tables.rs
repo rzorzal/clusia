@@ -1,6 +1,7 @@
 //! Boxes with rows: the entity tables of an entity–relationship diagram and the classes of a
-//! class diagram. A header of 34 px holds the name and, at its right, the sub text; every row
-//! is 23 px, and a hairline separates the header and the rows it divides.
+//! class diagram. A header of 34 px holds the name, and 16 px more the sub text under it; every
+//! row is 23 px. A hairline separates the header from the rows, and every row of an entity from
+//! the one before; a class has one only where its spec divides the rows.
 
 use clusia_core::diagram::{DiagramKind, Node};
 
@@ -10,12 +11,14 @@ use crate::text;
 
 pub(crate) const WIDTH: f32 = 230.0;
 const HEADER: f32 = 34.0;
+/// The header of a box with a sub text: the name, the sub text under it and the same padding.
+const HEADER_SUB: f32 = 50.0;
+/// Space between the name and the sub text under it.
+const SUB_GAP: f32 = 2.0;
 const ROW: f32 = 23.0;
 const PAD: f32 = 12.0;
 /// Room kept at the right of a row for its `PK` or `FK` tag.
 const TAG: f32 = 24.0;
-/// The most a sub text may take of the header.
-const SUB_MAX: f32 = 96.0;
 const MIN_HEIGHT: f32 = 40.0;
 
 /// The size and the fitted text of one table or class.
@@ -28,6 +31,8 @@ pub(crate) struct Table {
     sub_style: TextStyle,
     row_style: TextStyle,
     rows: Vec<Vec<String>>,
+    /// A hairline above every row, not only where the spec divides them.
+    ruled: bool,
 }
 
 pub(crate) fn table(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Table {
@@ -42,26 +47,17 @@ pub(crate) fn table(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Ta
     } else {
         TextStyle::SubStrong
     };
-    let row_style = if classes {
-        TextStyle::RowMono
-    } else {
-        TextStyle::Row
-    };
+    let row_style = TextStyle::RowMono;
     let inner = WIDTH - 2.0 * PAD;
     let sub = text::wrap(
         measure,
         node.sub.as_deref().unwrap_or(""),
         sub_style,
-        SUB_MAX,
+        inner,
         1,
     );
-    let sub_w = text::widest(measure, &sub, sub_style);
-    let title_room = if sub.is_empty() {
-        inner
-    } else {
-        inner - sub_w - 8.0
-    };
-    let title = text::wrap(measure, &node.label, title_style, title_room, 1);
+    let title = text::wrap(measure, &node.label, title_style, inner, 1);
+    let header = if sub.is_empty() { HEADER } else { HEADER_SUB };
     let rows = node
         .rows
         .iter()
@@ -72,13 +68,14 @@ pub(crate) fn table(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Ta
         .collect();
     Table {
         w: WIDTH,
-        h: (HEADER + ROW * node.rows.len() as f32).max(MIN_HEIGHT),
+        h: (header + ROW * node.rows.len() as f32).max(MIN_HEIGHT),
         title,
         title_style,
         sub,
         sub_style,
         row_style,
         rows,
+        ruled: !classes,
     }
 }
 
@@ -92,34 +89,43 @@ impl Table {
     ) -> (TextLines, Option<TextLines>, Vec<RowGeo>) {
         let inner = rect.w - 2.0 * PAD;
         let title_h = measure.line_height(self.title_style);
+        let sub_h = measure.line_height(self.sub_style);
+        let header = if self.sub.is_empty() {
+            HEADER
+        } else {
+            HEADER_SUB
+        };
+        // The name, and the sub text under it, are centred in the header as one block.
+        let block_h = if self.sub.is_empty() {
+            title_h
+        } else {
+            title_h + SUB_GAP + sub_h
+        };
+        let top = rect.y + (header - block_h) / 2.0;
         let title = text::block(
             measure,
             self.title.clone(),
             self.title_style,
             Point {
                 x: rect.x + PAD,
-                y: rect.y + (HEADER - title_h) / 2.0,
+                y: top,
             },
             Some(inner),
             Align::Left,
         );
-        let sub = if self.sub.is_empty() {
-            None
-        } else {
-            let sub_h = measure.line_height(self.sub_style);
-            let sub_w = text::widest(measure, &self.sub, self.sub_style);
-            Some(text::block(
+        let sub = (!self.sub.is_empty()).then(|| {
+            text::block(
                 measure,
                 self.sub.clone(),
                 self.sub_style,
                 Point {
-                    x: rect.right() - PAD - sub_w,
-                    y: rect.y + (HEADER - sub_h) / 2.0,
+                    x: rect.x + PAD,
+                    y: top + title_h + SUB_GAP,
                 },
-                Some(sub_w),
+                Some(inner),
                 Align::Left,
-            ))
-        };
+            )
+        });
         let row_h = measure.line_height(self.row_style);
         let rows = node
             .rows
@@ -129,7 +135,7 @@ impl Table {
             .map(|(i, (row, lines))| {
                 let cell = Rect {
                     x: rect.x,
-                    y: rect.y + HEADER + ROW * i as f32,
+                    y: rect.y + header + ROW * i as f32,
                     w: rect.w,
                     h: ROW,
                 };
@@ -148,7 +154,7 @@ impl Table {
                     key: row.key,
                     change: row.change,
                     rect: cell,
-                    divider_above: i == 0 || node.divider_after == Some(i as u32),
+                    divider_above: i == 0 || self.ruled || node.divider_after == Some(i as u32),
                 }
             })
             .collect();
@@ -251,21 +257,35 @@ mod tests {
         let s = er();
         let g = layout(&s, &Fonts);
         check(&s, &g);
+        let account = g.boxes.iter().find(|b| b.node == "account").expect("box");
+        assert_eq!(
+            account.rect.h,
+            34.0 + 2.0 * 23.0,
+            "no sub text: a 34 px header"
+        );
         let token = g.boxes.iter().find(|b| b.node == "token").expect("token");
         assert_eq!(token.rect.w, 230.0);
-        assert_eq!(token.rect.h, 34.0 + 3.0 * 23.0);
+        assert_eq!(
+            token.rect.h,
+            50.0 + 3.0 * 23.0,
+            "the sub text takes a line under the name"
+        );
         assert_eq!(token.rows.len(), 3);
-        assert_eq!(token.rows[1].rect.y, token.rect.y + 34.0 + 23.0);
+        assert_eq!(token.rows[1].rect.y, token.rect.y + 50.0 + 23.0);
         assert_eq!(token.rows[0].key, Some(RowKey::Pk));
         assert_eq!(token.rows[2].key, Some(RowKey::Fk));
-        assert!(token.rows[0].divider_above);
-        assert!(!token.rows[1].divider_above);
+        assert!(
+            token.rows.iter().all(|r| r.divider_above),
+            "a hairline above every row of an entity"
+        );
         assert_eq!(token.title.lines, vec!["Token".to_string()]);
         let sub = token.sub.as_ref().expect("sub text");
-        assert!((sub.rect().right() - (token.rect.right() - 12.0)).abs() < 1e-3);
+        assert_eq!(sub.at.x, token.title.at.x, "under the name");
+        assert!(sub.at.y >= token.title.rect().bottom());
+        assert!(sub.rect().bottom() <= token.rows[0].rect.y);
         assert_eq!(token.change, Change::Changed);
         assert_eq!(token.title.style, TextStyle::Title);
-        assert_eq!(token.rows[0].text.style, TextStyle::Row);
+        assert_eq!(token.rows[0].text.style, TextStyle::RowMono);
     }
 
     #[test]
