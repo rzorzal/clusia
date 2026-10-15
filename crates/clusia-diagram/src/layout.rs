@@ -225,7 +225,7 @@ mod tests {
     use crate::measure::Fonts;
     use crate::testkit::{
         assert_no_text_clash, check, data_flow_mockup, deps_mockup, edge, flow_mockup, node,
-        node_sub, random_graph, spec, states_mockup,
+        node_sub, random_graph, sparse_graph, spec, states_mockup,
     };
     use std::time::Instant;
 
@@ -798,5 +798,64 @@ mod tests {
                 check(&s, &g);
             }
         }
+    }
+
+    #[test]
+    fn labels_stay_off_the_routes_of_other_edges() {
+        let down = spec(
+            "graph",
+            vec![
+                node("cli", "cli", "box"),
+                node("auth", "auth", "box"),
+                node("client", "client", "box"),
+                node("config", "config", "box"),
+            ],
+            vec![
+                edge("cli", "auth", None),
+                edge("auth", "client", Some("new dependency")),
+                edge("auth", "config", Some("reads refresh margin")),
+            ],
+        );
+        run(&down);
+        let across = spec(
+            "flow",
+            vec![
+                node("a", "A", "box"),
+                node("b", "B", "box"),
+                node("c", "C", "box"),
+                node("d", "D", "box"),
+            ],
+            vec![
+                edge("a", "b", Some("first")),
+                edge("a", "c", Some("second")),
+                edge("a", "d", Some("third")),
+                edge("b", "d", Some("fourth")),
+                edge("d", "a", Some("back")),
+            ],
+        );
+        run(&across);
+    }
+
+    #[test]
+    fn sparse_tree_like_graphs_use_the_spine_and_keep_every_invariant() {
+        let mut stacked = 0;
+        for seed in 0..60u64 {
+            for kind in ["flow", "data_flow", "states"] {
+                let n = 5 + (seed as usize % 8);
+                let s = sparse_graph(kind, n, seed);
+                let g = layout(&s, &Fonts);
+                check(&s, &g);
+                let hangs = g.boxes.iter().any(|a| {
+                    g.boxes
+                        .iter()
+                        .any(|b| a.rect.x == b.rect.x && a.rect.y < b.rect.y)
+                });
+                stacked += usize::from(hangs);
+            }
+        }
+        assert!(
+            stacked >= 20,
+            "only {stacked} of 180 diagrams have a column"
+        );
     }
 }

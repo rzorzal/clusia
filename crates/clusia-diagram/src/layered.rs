@@ -516,7 +516,34 @@ pub(crate) fn place(
                 start_at,
                 (wide > 0.0).then_some(wide),
             );
-            texts.offer(chain.edge, (first_layer, start_at), label);
+            let mut other_side = label.clone();
+            match dir {
+                Direction::LeftToRight => {
+                    other_side.at.y = if wide > 0.0 {
+                        start_at - 2.0 - label.height
+                    } else {
+                        start_at + 2.0
+                    };
+                }
+                Direction::TopToBottom => other_side.at.x = start_at - 6.0 - label.width,
+            }
+            let mut places = vec![label.clone(), other_side.clone()];
+            if dir == Direction::LeftToRight {
+                let room = gap.get(first_layer).copied().unwrap_or(0.0);
+                let mut dx = 8.0;
+                let (from, to) = (band_end(first_layer), band_end(first_layer) + room);
+                while label.at.x + dx + label.width <= to - 4.0 {
+                    for base in [&label, &other_side] {
+                        let mut shifted = base.clone();
+                        shifted.at.x += dx;
+                        if shifted.at.x >= from {
+                            places.push(shifted);
+                        }
+                    }
+                    dx += 8.0;
+                }
+            }
+            texts.offer(chain.edge, (first_layer, start_at), places);
         }
         let mut tags = [None, None];
         tags[usize::from(chain.reversed)] = near_start;
@@ -584,7 +611,7 @@ pub(crate) fn place(
             texts.hold(ends.iter().flatten());
             if let Some(text) = edge.label.as_deref() {
                 let label = column_label(measure, text, x + 6.0, room, span);
-                texts.offer(i, (layer, y_top), label);
+                texts.offer(i, (layer, y_top), vec![label]);
             }
             geos[i] = Some(EdgeGeo {
                 index: i,
@@ -616,7 +643,7 @@ pub(crate) fn place(
         ];
         if let Some(text) = edge.label.as_deref() {
             let label = loop_label(measure, dir, text, far, out, (y1, y2), nth);
-            texts.offer(i, (layer_of[node], y1), label);
+            texts.offer(i, (layer_of[node], y1), vec![label]);
         }
         geos[i] = Some(EdgeGeo {
             index: i,
@@ -630,7 +657,13 @@ pub(crate) fn place(
         });
     }
 
-    for (edge, label) in texts.place() {
+    let routes: Vec<(usize, &[Point])> = geos
+        .iter()
+        .flatten()
+        .map(|g| (g.index, g.points.as_slice()))
+        .collect();
+    let placed_labels = texts.place(&routes);
+    for (edge, label) in placed_labels {
         if let Some(Some(geo)) = geos.get_mut(edge) {
             geo.label = Some(label);
         }
@@ -648,7 +681,7 @@ pub(crate) fn place(
 #[derive(Default)]
 struct Texts {
     taken: Vec<Rect>,
-    offers: Vec<(usize, (usize, f32), TextLines)>,
+    offers: Vec<(usize, (usize, f32), Vec<TextLines>)>,
 }
 
 impl Texts {
@@ -657,15 +690,18 @@ impl Texts {
         self.taken.extend(texts.map(TextLines::rect));
     }
 
-    /// Asks for a place for the label of `edge`; `at` orders the asks: the rank, then where the
-    /// edge leaves its box.
-    fn offer(&mut self, edge: usize, at: (usize, f32), label: TextLines) {
-        if !label.lines.is_empty() {
-            self.offers.push((edge, at, label));
+    /// Asks for a place for the label of `edge`, with the places to try in order; `at` orders
+    /// the asks: the rank, then where the edge leaves its box.
+    fn offer(&mut self, edge: usize, at: (usize, f32), places: Vec<TextLines>) {
+        let places: Vec<TextLines> = places.into_iter().filter(|l| !l.lines.is_empty()).collect();
+        if !places.is_empty() {
+            self.offers.push((edge, at, places));
         }
     }
 
-    fn place(mut self) -> Vec<(usize, TextLines)> {
+    /// Takes the first place of each label that overlaps no text already down and touches no
+    /// route of another edge; a label with no such place is left out.
+    fn place(mut self, routes: &[(usize, &[Point])]) -> Vec<(usize, TextLines)> {
         self.offers.sort_by(|a, b| {
             a.1.0
                 .cmp(&b.1.0)
@@ -673,16 +709,30 @@ impl Texts {
                 .then(a.0.cmp(&b.0))
         });
         let mut placed = Vec::new();
-        for (edge, _, label) in self.offers {
-            let rect = label.rect();
-            if self.taken.iter().any(|t| t.intersects(&rect)) {
-                continue;
+        for (edge, _, places) in self.offers {
+            let free = places.into_iter().find(|label| {
+                let rect = label.rect();
+                let zone = rect.inflate(1.0);
+                !self.taken.iter().any(|t| t.intersects(&rect))
+                    && !routes.iter().any(|&(other, points)| {
+                        other != edge && points.windows(2).any(|w| touches(w[0], w[1], zone))
+                    })
+            });
+            if let Some(label) = free {
+                self.taken.push(label.rect());
+                placed.push((edge, label));
             }
-            self.taken.push(rect);
-            placed.push((edge, label));
         }
         placed
     }
+}
+
+/// Whether the axis-aligned segment `a`–`b` touches the closed rectangle `r`.
+fn touches(a: Point, b: Point, r: Rect) -> bool {
+    a.x.max(b.x) >= r.x
+        && a.x.min(b.x) <= r.right()
+        && a.y.max(b.y) >= r.y
+        && a.y.min(b.y) <= r.bottom()
 }
 
 /// Moves a lane or a port by a few pixels where two edges would otherwise run along one line
@@ -999,9 +1049,10 @@ fn gather_columns(layers: &mut [Vec<usize>], verts: &[Vertex], depth: &[usize]) 
     }
 }
 
-/// Where each vertex starts on the cross axis when columns hold stacks: the spine nodes are
-/// centred on one line (or all starting at the same one), the nodes that hang below them follow `STACK_GAP` apart, and the lanes
-/// of the long edges keep `LANE_GAP` from the stack, above or below.
+/// Where each vertex starts on the cross axis when columns hold stacks. The spine nodes are
+/// centred on one line, or all start at the same one when `top_aligned`. The nodes that hang
+/// below them follow `STACK_GAP` apart, and the lanes of the long edges keep `LANE_GAP` from
+/// the stack, above or below.
 fn column_positions(layers: &[Vec<usize>], verts: &[Vertex], top_aligned: bool) -> Vec<f32> {
     let mut c = vec![0.0f32; verts.len()];
     for layer in layers {

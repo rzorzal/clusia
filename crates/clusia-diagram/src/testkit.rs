@@ -204,6 +204,40 @@ pub(crate) fn random_graph(kind: &str, n: usize, m: usize, seed: u64) -> Diagram
     spec(kind, nodes, edges)
 }
 
+/// A tree of `n` nodes hung from earlier ones, with a few extra edges, from a fixed
+/// pseudo-random sequence.
+pub(crate) fn sparse_graph(kind: &str, n: usize, seed: u64) -> DiagramSpec {
+    let mut state = seed;
+    let mut next = move |bound: usize| {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 33) as usize) % bound
+    };
+    let nodes: Vec<Value> = (0..n)
+        .map(|i| node(&format!("n{i}"), &format!("Module number {i}"), "box"))
+        .collect();
+    let mut edges: Vec<Value> = Vec::new();
+    for i in 1..n {
+        let parent = next(i);
+        let (a, b) = if next(4) == 0 {
+            (i, parent)
+        } else {
+            (parent, i)
+        };
+        edges.push(edge(
+            &format!("n{a}"),
+            &format!("n{b}"),
+            Some("calls the other module"),
+        ));
+    }
+    for _ in 0..next(3) {
+        let (a, b) = (next(n), next(n));
+        edges.push(edge(&format!("n{a}"), &format!("n{b}"), Some("extra")));
+    }
+    spec(kind, nodes, edges)
+}
+
 fn is_axis_aligned(a: Point, b: Point) -> bool {
     (a.x - b.x).abs() < 1e-3 || (a.y - b.y).abs() < 1e-3
 }
@@ -335,6 +369,23 @@ pub(crate) fn check(spec: &DiagramSpec, geometry: &Geometry) {
                     a.lines,
                     b.lines
                 );
+            }
+        }
+    }
+    for e in &geometry.edges {
+        for l in e.label.iter().chain(e.ends.iter().flatten()) {
+            let zone = l.rect().inflate(1.0);
+            for other in geometry.edges.iter().filter(|o| o.index != e.index) {
+                for w in other.points.windows(2) {
+                    assert!(
+                        !touches(w[0], w[1], zone),
+                        "a label of edge {} ({:?}) touches the route of edge {}: {:?}",
+                        e.index,
+                        l.lines,
+                        other.index,
+                        other.points
+                    );
+                }
             }
         }
     }

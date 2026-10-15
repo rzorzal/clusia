@@ -20,9 +20,11 @@ pub(crate) struct Plan {
     pub(crate) depth: Vec<usize>,
 }
 
-/// A plan for the nodes `sizes` joined by the acyclic edges `dag`, whose ranks are `rank`;
-/// `None` when the diagram has no branch (and is no hub with spokes), or some node is not part of the spine or a branch, or
-/// two nodes of one column are joined without being neighbours in it.
+/// A plan for the nodes `sizes` joined by the acyclic edges `dag`, whose ranks are `rank`.
+///
+/// `None` when the diagram has no branch and is no hub with spokes, when some node is neither
+/// on the spine nor a branch, or when two nodes of one column are joined without being
+/// neighbours in it.
 pub(crate) fn plan(sizes: &[NodeSize], dag: &[(usize, usize)], rank: &[usize]) -> Option<Plan> {
     let n = sizes.len();
     if dag.is_empty() {
