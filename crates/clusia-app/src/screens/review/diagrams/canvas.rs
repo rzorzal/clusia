@@ -197,6 +197,15 @@ pub struct Look {
     pub strike: bool,
 }
 
+/// Whether a box is drawn with fully round ends: a pill (a state, a use case, an actor), a
+/// circle or the start dot.
+pub fn is_round(shape: Shape) -> bool {
+    matches!(
+        shape,
+        Shape::Pill | Shape::Circle | Shape::Start | Shape::Actor
+    )
+}
+
 /// The look of a box. Outside a comparison its `change` decides (changed, new and at-risk boxes
 /// stand out); in one only `history` does (added, changed since, removed), and the rest is plain.
 pub fn look(shape: Shape, change: Change, history: Option<History>, compare: bool) -> Look {
@@ -1164,7 +1173,7 @@ fn spawn_content(
     for b in &g.boxes {
         let look = look(b.shape, b.change, b.history, compare);
         if look.dashed {
-            let radius = if matches!(b.shape, Shape::Pill | Shape::Circle | Shape::Start) {
+            let radius = if is_round(b.shape) {
                 b.rect.w.min(b.rect.h) / 2.0
             } else {
                 BOX_RADIUS
@@ -1221,7 +1230,7 @@ fn draw_box(
         .nodes
         .get(b.index)
         .map_or(b.node.clone(), |n| n.id.clone());
-    let round = matches!(b.shape, Shape::Pill | Shape::Circle | Shape::Start);
+    let round = is_round(b.shape);
     p.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -2007,6 +2016,14 @@ mod tests {
         };
         let after = 10.0 + Fonts.width("token_id", TextStyle::RowMono) + KEY_GAP;
         assert!((key_left(&name) - after).abs() < 1e-3);
+    }
+
+    #[test]
+    fn pills_actors_circles_and_the_start_are_round() {
+        for shape in [Shape::Pill, Shape::Actor, Shape::Circle, Shape::Start] {
+            assert!(is_round(shape), "{shape:?}");
+        }
+        assert!(!is_round(Shape::Box) && !is_round(Shape::External));
     }
 
     #[test]

@@ -126,15 +126,19 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
                     .map(|w| measure.width(w, style))
                     .fold(0.0, f32::max)
             };
-            // A participant's name keeps to one line while the widest box allows it.
-            let title_w = if kind == DiagramKind::Sequence {
+            // A participant's or an actor's name keeps to one line while the widest box allows
+            // it.
+            let one_line = kind == DiagramKind::Sequence
+                || (kind == DiagramKind::UseCases && node.shape != Shape::Pill);
+            let title_w = if one_line {
                 measure.width(&node.label, title_style)
             } else {
                 longest_word(&node.label, title_style)
             };
             let wanted = title_w.max(longest_word(sub_text, sub_style)) + 2.0 * pad;
             card.w = base.max(wanted).clamp(min_w, max_w);
-            let inner = card.w - 2.0 * pad;
+            // A hair of room, so a name that set the width is not wrapped by a rounding error.
+            let inner = card.w - 2.0 * pad + 0.01;
             card.title = text::wrap(measure, &node.label, title_style, inner, TITLE_LINES);
             card.sub = text::wrap(measure, sub_text, sub_style, inner, SUB_LINES);
             let min_h = match (kind, node.shape) {
@@ -548,6 +552,17 @@ mod tests {
         let sub = refresh.sub.as_ref().expect("sub");
         assert_eq!(refresh.rect.bottom() - sub.rect().bottom(), 14.0);
         assert_eq!(refresh.rect.h, 60.0, "title, sub and padding");
+    }
+
+    #[test]
+    fn a_name_that_sets_its_box_width_is_not_wrapped() {
+        let s = spec(
+            "use_cases",
+            vec![node("r", "«actor» Reviewer", "actor")],
+            vec![],
+        );
+        let c = card(s.kind, &s.nodes[0], &Fonts);
+        assert_eq!(c.title, vec!["«actor» Reviewer".to_string()]);
     }
 
     #[test]
