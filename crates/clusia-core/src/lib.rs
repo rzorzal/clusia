@@ -5,6 +5,7 @@ pub mod activity;
 pub mod agent;
 pub mod checks;
 pub mod config;
+pub mod diagram;
 pub mod diffmap;
 pub mod draft;
 pub mod editor;
@@ -33,8 +34,8 @@ pub use config::{
     Media, Notifications, Route, SoundId, Weekday,
 };
 pub use diffmap::{
-    DiffMap, FileChange, Hunk, LineMap, Relocation, can_comment, commentable_lines, fits_diff,
-    relocate,
+    DiffMap, FileChange, Hunk, LineMap, Relocation, added_lines, can_comment, commentable_lines,
+    fits_diff, relocate,
 };
 pub use draft::{
     Anchor, Draft, DraftError, DraftItem, DraftKind, ItemStatus, Origin, Side, ThreadRef,
@@ -53,8 +54,9 @@ pub use publish::{
     plan_publish,
 };
 pub use revalidation::{
-    AskedItem, CommitLine, DecideError, Decision, MAX_BLOCKS, Proposal, QUIET_DEFAULT_SECS,
-    QUIET_RANGE, Revalidation, RevalidationContext, RoundState, RowKind, accept_all, decide,
-    fingerprint, open_round, revalidation_prompt, row_kind,
+    AskedItem, CommitLine, DecideError, Decision, DiagramDigest, DiagramsStale, MAX_BLOCKS,
+    Proposal, QUIET_DEFAULT_SECS, QUIET_RANGE, Revalidation, RevalidationContext, RoundState,
+    RowKind, accept_all, decide, diagrams_stale_section, fingerprint, open_round,
+    revalidation_prompt, row_kind,
 };
 pub use review::{InvalidTransition, PrState, Review, ReviewEvent, ReviewState, Role, Verdict};

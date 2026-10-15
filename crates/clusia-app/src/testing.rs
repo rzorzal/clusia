@@ -315,6 +315,12 @@ pub fn open_checks(app: &mut App, pr: &PrRef) {
     settle(app);
 }
 
+/// Tells the demo's two drawings (`fixture::demo_diagrams_tell`) for `pr` and settles.
+pub fn open_diagrams(app: &mut App, pr: &PrRef) {
+    tell(app, fixture::demo_diagrams_tell(pr, NOW));
+    settle(app);
+}
+
 /// Selects `section` in the tab of `pr` and settles.
 pub fn set_section(app: &mut App, pr: &PrRef, section: ReviewSection) {
     app.world_mut()
@@ -427,6 +433,7 @@ pub fn demo_round(review: &mut Review, state: RoundState) -> Revalidation {
         asked: 5,
         finished_at: Some(NOW),
         notified: false,
+        diagrams_stale: None,
     }
 }
 

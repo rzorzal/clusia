@@ -99,6 +99,8 @@ pub enum Modal {
     Leave {
         window: bool,
     },
+    /// The dialog of a diagram box, for `TabUi.diagram_node`.
+    DiagramNode,
 }
 
 /// What the comment editor writes.
@@ -126,6 +128,13 @@ pub enum EditTarget {
     /// A waiting finding of a check, being edited before it joins the draft. It is drawn under
     /// its card in Security or Audits, not in the diff.
     Finding(String),
+    /// A comment on a diagram box: the drawing's version number, its key and the box's id. It
+    /// is written in the box dialog, not in the diff or a panel.
+    DiagramNode {
+        number: u32,
+        key: String,
+        node: String,
+    },
 }
 
 impl EditTarget {
@@ -197,6 +206,21 @@ pub struct TabUi {
     /// The configured program when the tab was opened (a custom command's pin), so a session
     /// that belongs to another program does not name the review.
     pub opened_program: Option<String>,
+    /// The diagram selected in Diagrams (its key); `None`: the first one that is ready.
+    pub diagram: Option<String>,
+    /// The version of the drawings shown; `None`: the latest.
+    pub diagram_version: Option<u32>,
+    /// *Show changes since version n* is on.
+    pub diagram_compare: bool,
+    /// The box whose modal is open: the version's number, the diagram's key and the node's id.
+    pub diagram_node: Option<(u32, String, String)>,
+    /// The line of the file shown in Diff that was asked for (*Open in diff* from a diagram
+    /// box): its row is lit and scrolled into view. Choosing another file clears it.
+    pub focus_line: Option<(Side, u32)>,
+    /// Counts the requests for a line, so asking again scrolls again.
+    pub focus_seq: u32,
+    /// The key of the row whose ⋯ menu is open.
+    pub diagram_menu: Option<String>,
 }
 
 impl Default for TabUi {
@@ -218,6 +242,13 @@ impl Default for TabUi {
             reanchor: None,
             opened_with: None,
             opened_program: None,
+            diagram: None,
+            diagram_version: None,
+            diagram_compare: false,
+            diagram_node: None,
+            focus_line: None,
+            focus_seq: 0,
+            diagram_menu: None,
         }
     }
 }
@@ -337,6 +368,7 @@ impl Plugin for ReviewStatePlugin {
             .init_resource::<Tickets>()
             .init_resource::<crate::screens::review::agent::Chats>()
             .init_resource::<crate::screens::review::checks::Checks>()
+            .init_resource::<crate::screens::review::diagrams::Diagrams>()
             .init_resource::<crate::screens::review::revalidation::Revalidations>()
             .add_message::<ReviewEvent>()
             .add_systems(Update, open_new_tabs.after(NavSystems));

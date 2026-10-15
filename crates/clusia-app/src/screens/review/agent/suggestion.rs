@@ -218,6 +218,7 @@ pub(crate) fn show_file(ui: &mut TabUi, file: &str) {
     if ui.file.as_deref() != Some(file) {
         ui.file = Some(file.to_string());
         ui.shown = SHOW_STEP;
+        ui.focus_line = None;
     }
 }
 

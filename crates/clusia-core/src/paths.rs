@@ -122,6 +122,16 @@ impl Paths {
         self.checks_dir().join(format!("{}.json", pr.file_key()))
     }
 
+    /// The drawn diagrams of every review, one folder per pull request.
+    pub fn diagrams_dir(&self) -> PathBuf {
+        self.root.join("diagrams")
+    }
+
+    /// The versions of the diagrams of `pr`, as `v<n>.json` files, for as long as the review lasts.
+    pub fn diagrams_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.diagrams_dir().join(pr.file_key())
+    }
+
     pub fn activity_file(&self) -> PathBuf {
         self.root.join("activity.jsonl")
     }
@@ -206,6 +216,17 @@ mod tests {
         assert_eq!(
             p.checks_file(&pr),
             PathBuf::from("/tmp/c/checks/acme~widgets~7.json")
+        );
+    }
+
+    #[test]
+    fn diagrams_are_keyed_by_pull_request() {
+        let p = Paths::new("/tmp/c");
+        let pr = crate::PrRef::new("acme", "widgets", 7).unwrap();
+        assert_eq!(p.diagrams_dir(), PathBuf::from("/tmp/c/diagrams"));
+        assert_eq!(
+            p.diagrams_for(&pr),
+            PathBuf::from("/tmp/c/diagrams/acme~widgets~7")
         );
     }
 

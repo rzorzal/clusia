@@ -3,6 +3,11 @@
 use std::collections::BTreeMap;
 
 use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass, Severity, finding_id};
+use clusia_core::diagram::{
+    Change, CodeAnchor, DiagramEntry, DiagramKind, DiagramSpec, DiagramVersion, Edge, EntryState,
+    Group, GroupKind, History, LineStyle, Message, Node, PlanEntry, Row, RowKey, Shape,
+    VersionPhase,
+};
 use clusia_core::media::MediaKind;
 use clusia_core::revalidation::{
     CommitLine, Decision, Proposal, Revalidation, RoundState, Verdict, fingerprint,
@@ -14,13 +19,15 @@ use clusia_core::{
     ReviewInfo, ReviewState, ReviewThread, Role, Side, ThreadPost,
 };
 use clusia_protocol::{
-    AgentLogEntry, AuthInfo, CheckState, CheckStatus, FileSummary, FirstRun, GifItem, GifPage,
-    GithubLogin, Harness, HarnessKind, NewsItem, NewsKind, PermissionOutcome, PermissionRequest,
-    PermissionStatus, ProbeResult, RepoFolder, ReviewSummary, ReviewView, Suggestion, SyncState,
-    SyncStatus, TokenSource,
+    AgentLogEntry, AuthInfo, CheckState, CheckStatus, CodeLine, DiagramCode, DiagramsState,
+    FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness, HarnessKind, NewsItem, NewsKind,
+    PermissionOutcome, PermissionRequest, PermissionStatus, ProbeResult, RepoFolder, ReviewSummary,
+    ReviewView, Suggestion, SyncState, SyncStatus, TokenSource,
 };
 
-use crate::bridge::{ChecksTell, Tell};
+use clusia_view::diff::{RowKind, parse_patch};
+
+use crate::bridge::{ChecksTell, DiagramsTell, Tell};
 use crate::snapshot::{GiphyKey, Snapshot};
 
 pub fn demo(now: i64) -> Snapshot {
@@ -249,6 +256,48 @@ pub fn demo_media(url: &str) -> Option<(MediaKind, Vec<u8>)> {
 /// The review every demo scene shows (mockup `Review.png`).
 pub fn demo_pr() -> PrRef {
     PrRef::new("rzorzal", "clusia", 123).expect("valid demo ref")
+}
+
+/// The code a demo diagram box shows: the lines of `patch`'s new side from three above `lines`
+/// to three below, the ones the patch adds marked changed when the drawing is of the head. A
+/// file the patch does not cover is "no longer available", as the daemon says it.
+pub fn demo_diagram_code(
+    path: &str,
+    commit: &str,
+    patch: Option<&str>,
+    lines: (u32, u32),
+    at_head: bool,
+) -> DiagramCode {
+    // As the daemon reads it: from the box's first line to two lines past its last, with only
+    // the box's own added lines tinted.
+    let from = lines.0.max(1);
+    let to = lines.1.saturating_add(2);
+    let shown: Vec<CodeLine> = patch
+        .map(parse_patch)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            let number = row.new?;
+            (row.kind != RowKind::Removed && (from..=to).contains(&number)).then(|| CodeLine {
+                number,
+                text: row.text,
+                changed: at_head && row.kind == RowKind::Added && number <= lines.1,
+            })
+        })
+        .take(200)
+        .collect();
+    DiagramCode {
+        path: path.into(),
+        commit: commit.into(),
+        start_line: shown.first().map_or(lines.0, |l| l.number),
+        unavailable: shown.is_empty().then(|| {
+            format!(
+                "The code at {} is no longer available.",
+                commit.get(..7).unwrap_or(commit)
+            )
+        }),
+        lines: shown,
+    }
 }
 
 const BASE_SHA: &str = "4f2a9c1e8d7b6a5f4e3d2c1b0a9f8e7d6c5b4a39";
@@ -700,6 +749,764 @@ pub fn demo_checks_tell(pr: &PrRef, now: i64, draft: &Draft) -> Tell {
     })
 }
 
+const DIAGRAMS_V1_COMMIT: &str = "3f2a1c0e8d7b6a5f4e3d2c1b0a9f8e7d6c5b4a39";
+
+fn dg_node(id: &str, label: &str, sub: Option<&str>, shape: Shape, change: Change) -> Node {
+    Node {
+        id: id.into(),
+        label: label.into(),
+        sub: sub.map(Into::into),
+        shape,
+        rows: Vec::new(),
+        divider_after: None,
+        anchor: None,
+        change,
+        note: None,
+        history: None,
+    }
+}
+
+fn dg_at(mut node: Node, path: &str, start_line: u32, end_line: u32) -> Node {
+    node.anchor = Some(CodeAnchor {
+        path: path.into(),
+        start_line,
+        end_line,
+    });
+    node
+}
+
+fn dg_rows(mut node: Node, rows: &[(&str, Option<RowKey>, Option<Change>)]) -> Node {
+    node.rows = rows
+        .iter()
+        .map(|(text, key, change)| Row {
+            text: (*text).into(),
+            key: *key,
+            change: *change,
+        })
+        .collect();
+    node
+}
+
+fn dg_edge(from: &str, to: &str, label: Option<&str>, change: Change) -> Edge {
+    Edge {
+        from: from.into(),
+        to: to.into(),
+        label: label.map(Into::into),
+        style: LineStyle::Solid,
+        ends: [None, None],
+        change,
+        history: None,
+    }
+}
+
+fn dg_ends(mut edge: Edge, from: &str, to: &str) -> Edge {
+    edge.ends = [Some(from.into()), Some(to.into())];
+    edge
+}
+
+fn dg_message(from: &str, to: &str, label: &str, reply: bool, change: Change) -> Message {
+    Message {
+        from: from.into(),
+        to: to.into(),
+        label: label.into(),
+        reply,
+        change,
+        history: None,
+    }
+}
+
+fn dg_spec(key: &str, kind: DiagramKind, title: &str, caption: &str) -> DiagramSpec {
+    DiagramSpec {
+        key: key.into(),
+        kind,
+        title: title.into(),
+        caption: caption.into(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        groups: Vec::new(),
+        messages: Vec::new(),
+    }
+}
+
+/// Marks every node, edge and message of `spec` as `Same`, then applies `marks`: the ids of
+/// nodes (`"id"`), edges (`"from>to"`) or messages (`"#n"`, one-based) and what changed.
+fn dg_history(mut spec: DiagramSpec, marks: &[(&str, History)]) -> DiagramSpec {
+    let mark = |name: &str| {
+        marks
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(History::Same, |m| m.1)
+    };
+    for node in &mut spec.nodes {
+        node.history = Some(mark(&node.id));
+    }
+    for edge in &mut spec.edges {
+        edge.history = Some(mark(&format!("{}>{}", edge.from, edge.to)));
+    }
+    for (i, message) in spec.messages.iter_mut().enumerate() {
+        message.history = Some(mark(&format!("#{}", i + 1)));
+    }
+    spec
+}
+
+fn dg_flow() -> DiagramSpec {
+    let mut s = dg_spec(
+        "flow",
+        DiagramKind::Flow,
+        "Token refresh flow",
+        "Click a box to comment on its code",
+    );
+    s.nodes = vec![
+        dg_at(
+            dg_node(
+                "http",
+                "HTTP client",
+                Some("client/http.rs"),
+                Shape::Box,
+                Change::Unchanged,
+            ),
+            "src/client/http.rs",
+            12,
+            36,
+        ),
+        dg_at(
+            dg_node(
+                "refresh",
+                "TokenStore::refresh",
+                Some("+9 −2 · 1 draft comment"),
+                Shape::Box,
+                Change::Changed,
+            ),
+            "src/auth/refresh.rs",
+            38,
+            48,
+        ),
+        dg_node(
+            "oauth",
+            "OAuth token endpoint",
+            Some("github.com · external"),
+            Shape::External,
+            Change::Unchanged,
+        ),
+        dg_at(
+            dg_node(
+                "lock",
+                "refresh_lock",
+                Some("Mutex<()> · new"),
+                Shape::Box,
+                Change::New,
+            ),
+            "src/auth/store.rs",
+            12,
+            14,
+        ),
+        dg_at(
+            dg_node(
+                "save",
+                "TokenStore::save",
+                Some("Risk: not atomic"),
+                Shape::Box,
+                Change::Risk,
+            ),
+            "src/auth/store.rs",
+            40,
+            44,
+        ),
+    ];
+    s.edges = vec![
+        dg_edge("http", "refresh", Some("token()"), Change::Unchanged),
+        dg_edge("refresh", "oauth", Some("exchange()"), Change::Unchanged),
+        dg_edge("refresh", "lock", Some("new"), Change::New),
+        dg_edge("oauth", "save", None, Change::Unchanged),
+        dg_edge("http", "save", Some("save()"), Change::Unchanged),
+    ];
+    dg_history(
+        s,
+        &[
+            ("refresh", History::Changed),
+            ("lock", History::Added),
+            ("refresh>lock", History::Added),
+            ("http>save", History::Removed),
+        ],
+    )
+}
+
+fn dg_deps() -> DiagramSpec {
+    let mut s = dg_spec(
+        "deps",
+        DiagramKind::Graph,
+        "Module dependencies",
+        "Arrows point to the module being used",
+    );
+    s.nodes = vec![
+        dg_node(
+            "cli",
+            "cli",
+            Some("unchanged"),
+            Shape::Box,
+            Change::Unchanged,
+        ),
+        dg_node(
+            "handlers",
+            "clusiad::handlers",
+            Some("unchanged"),
+            Shape::Box,
+            Change::Unchanged,
+        ),
+        dg_node(
+            "auth",
+            "auth",
+            Some("+53 −13 · 3 files"),
+            Shape::Box,
+            Change::Changed,
+        ),
+        dg_node(
+            "client",
+            "client",
+            Some("+28 −9 · retries"),
+            Shape::Box,
+            Change::Changed,
+        ),
+        dg_node(
+            "config",
+            "config",
+            Some("+6 · token margin"),
+            Shape::Box,
+            Change::Changed,
+        ),
+        dg_node(
+            "tracing",
+            "tracing",
+            Some("external crate"),
+            Shape::External,
+            Change::Unchanged,
+        ),
+    ];
+    s.edges = vec![
+        dg_edge("cli", "auth", None, Change::Unchanged),
+        dg_edge("handlers", "auth", None, Change::Unchanged),
+        dg_edge("handlers", "client", None, Change::Unchanged),
+        dg_edge("auth", "client", Some("new dependency"), Change::New),
+        dg_edge(
+            "auth",
+            "config",
+            Some("reads refresh margin"),
+            Change::Unchanged,
+        ),
+        dg_edge(
+            "client",
+            "tracing",
+            Some("logs requests"),
+            Change::Unchanged,
+        ),
+    ];
+    s
+}
+
+fn dg_sequence() -> DiagramSpec {
+    let mut s = dg_spec(
+        "sequence",
+        DiagramKind::Sequence,
+        "Refresh call, step by step",
+        "Two requests arrive while the token is about to expire",
+    );
+    s.nodes = vec![
+        dg_node("a", "Request A", None, Shape::Actor, Change::Unchanged),
+        dg_node("b", "Request B", None, Shape::Actor, Change::Unchanged),
+        dg_at(
+            dg_node("store", "TokenStore", None, Shape::Box, Change::Changed),
+            "src/auth/refresh.rs",
+            38,
+            48,
+        ),
+        dg_at(
+            dg_node("lock", "refresh_lock", None, Shape::Box, Change::New),
+            "src/auth/store.rs",
+            12,
+            14,
+        ),
+        dg_node(
+            "oauth",
+            "OAuth endpoint",
+            None,
+            Shape::Box,
+            Change::Unchanged,
+        ),
+    ];
+    s.messages = vec![
+        dg_message("a", "store", "token()", false, Change::Unchanged),
+        dg_message("store", "lock", "lock()", false, Change::New),
+        dg_message("b", "store", "token()", false, Change::Unchanged),
+        dg_message("store", "lock", "lock() · waits for A", false, Change::Risk),
+        dg_message(
+            "store",
+            "oauth",
+            "exchange(refresh)",
+            false,
+            Change::Unchanged,
+        ),
+        dg_message("oauth", "store", "new token", true, Change::Unchanged),
+        dg_message("store", "a", "Ok(token)", true, Change::Unchanged),
+        dg_message(
+            "store",
+            "b",
+            "Ok(same token) · no second exchange",
+            true,
+            Change::New,
+        ),
+    ];
+    dg_history(
+        s,
+        &[
+            ("store", History::Changed),
+            ("lock", History::Added),
+            ("#2", History::Added),
+            ("#4", History::Added),
+            ("#8", History::Changed),
+        ],
+    )
+}
+
+fn dg_er() -> DiagramSpec {
+    let pk = Some(RowKey::Pk);
+    let fk = Some(RowKey::Fk);
+    let mut s = dg_spec(
+        "er",
+        DiagramKind::EntityRelationship,
+        "Token data model",
+        "What is stored and how it relates",
+    );
+    s.nodes = vec![
+        dg_rows(
+            dg_node("account", "Account", None, Shape::Table, Change::Unchanged),
+            &[
+                ("id", pk, None),
+                ("login", None, None),
+                ("host", None, None),
+            ],
+        ),
+        dg_rows(
+            dg_node(
+                "token",
+                "Token",
+                Some("changed"),
+                Shape::Table,
+                Change::Changed,
+            ),
+            &[
+                ("id", pk, None),
+                ("access_token", None, None),
+                ("refresh_token", None, None),
+                ("expires_at", None, None),
+                ("account_id", fk, None),
+                ("refreshed_at · new", None, Some(Change::New)),
+            ],
+        ),
+        dg_rows(
+            dg_node(
+                "attempt",
+                "RefreshAttempt",
+                Some("new table"),
+                Shape::Table,
+                Change::New,
+            ),
+            &[
+                ("id", pk, None),
+                ("token_id", fk, None),
+                ("started_at", None, None),
+                ("outcome", None, None),
+            ],
+        ),
+        dg_rows(
+            dg_node(
+                "file",
+                "TokenFile",
+                Some("risk: permissions"),
+                Shape::Table,
+                Change::Risk,
+            ),
+            &[
+                ("path", None, None),
+                ("mode  0644 → 0600", None, Some(Change::Risk)),
+                ("written_at", None, None),
+            ],
+        ),
+    ];
+    s.edges = vec![
+        dg_ends(
+            dg_edge("account", "token", Some("has"), Change::Unchanged),
+            "1",
+            "0..N",
+        ),
+        dg_ends(
+            dg_edge("token", "attempt", Some("records"), Change::New),
+            "1",
+            "0..N",
+        ),
+        dg_ends(
+            dg_edge("token", "file", Some("saved as"), Change::Unchanged),
+            "1",
+            "1",
+        ),
+    ];
+    s
+}
+
+fn dg_usecase() -> DiagramSpec {
+    let pill = |id: &str, label: &str, sub: Option<&str>, change| {
+        dg_node(id, label, sub, Shape::Pill, change)
+    };
+    let mut s = dg_spec(
+        "usecase",
+        DiagramKind::UseCases,
+        "What people can do",
+        "Actors on the sides, Clúsia in the middle",
+    );
+    s.nodes = vec![
+        dg_node(
+            "reviewer",
+            "Reviewer",
+            None,
+            Shape::Actor,
+            Change::Unchanged,
+        ),
+        dg_node(
+            "agent",
+            "Agent",
+            Some("Claude Code"),
+            Shape::Actor,
+            Change::Unchanged,
+        ),
+        dg_node("github", "GitHub", None, Shape::External, Change::Unchanged),
+        pill("open", "Open a review", None, Change::Unchanged),
+        pill("news", "See what's new", None, Change::Unchanged),
+        pill("comment", "Comment on code", None, Change::Unchanged),
+        pill("ask", "Ask the agent", None, Change::Unchanged),
+        pill("publish", "Publish the review", None, Change::Unchanged),
+        pill(
+            "token",
+            "Keep the GitHub token fresh",
+            Some("this PR"),
+            Change::Changed,
+        ),
+        pill(
+            "recheck",
+            "Re-check after new commits",
+            None,
+            Change::Unchanged,
+        ),
+    ];
+    s.groups = vec![Group {
+        id: "clusia".into(),
+        label: "Clúsia".into(),
+        members: [
+            "open", "news", "comment", "ask", "publish", "token", "recheck",
+        ]
+        .map(String::from)
+        .to_vec(),
+        kind: GroupKind::Boundary,
+    }];
+    s.edges = vec![
+        dg_edge("reviewer", "open", None, Change::Unchanged),
+        dg_edge("reviewer", "news", None, Change::Unchanged),
+        dg_edge("reviewer", "comment", None, Change::Unchanged),
+        dg_edge("reviewer", "publish", None, Change::Unchanged),
+        dg_edge("agent", "ask", None, Change::Unchanged),
+        dg_edge("github", "token", None, Change::Unchanged),
+        dg_edge("github", "recheck", None, Change::Unchanged),
+    ];
+    s
+}
+
+fn dg_dataflow() -> DiagramSpec {
+    let mut s = dg_spec(
+        "dataflow",
+        DiagramKind::DataFlow,
+        "Where the token goes",
+        "Circles transform data, open boxes store it",
+    );
+    s.nodes = vec![
+        dg_node(
+            "client",
+            "API client",
+            Some("external"),
+            Shape::External,
+            Change::Unchanged,
+        ),
+        dg_node(
+            "refresh",
+            "1 Refresh",
+            Some("margin 60 s"),
+            Shape::Circle,
+            Change::Changed,
+        ),
+        dg_node(
+            "exchange",
+            "2 Exchange",
+            Some("retries"),
+            Shape::Circle,
+            Change::Changed,
+        ),
+        dg_node(
+            "oauth",
+            "GitHub OAuth",
+            Some("external"),
+            Shape::External,
+            Change::Unchanged,
+        ),
+        dg_node(
+            "file",
+            "Token file",
+            Some("written atomically"),
+            Shape::Store,
+            Change::Unchanged,
+        ),
+    ];
+    s.edges = vec![
+        dg_edge(
+            "client",
+            "refresh",
+            Some("token request"),
+            Change::Unchanged,
+        ),
+        dg_edge(
+            "refresh",
+            "exchange",
+            Some("refresh token"),
+            Change::Unchanged,
+        ),
+        dg_edge(
+            "exchange",
+            "oauth",
+            Some("grant request"),
+            Change::Unchanged,
+        ),
+        dg_edge(
+            "oauth",
+            "exchange",
+            Some("access + refresh token"),
+            Change::Unchanged,
+        ),
+        dg_edge(
+            "exchange",
+            "file",
+            Some("write (temp file + rename)"),
+            Change::New,
+        ),
+        dg_edge("file", "refresh", Some("read"), Change::Unchanged),
+    ];
+    s
+}
+
+fn dg_states() -> DiagramSpec {
+    let mut s = dg_spec(
+        "states",
+        DiagramKind::States,
+        "Token life cycle",
+        "Each arrow is the event that moves the token on",
+    );
+    s.nodes = vec![
+        dg_node("start", "Start", None, Shape::Start, Change::Unchanged),
+        dg_node("fresh", "Fresh", None, Shape::Pill, Change::Unchanged),
+        dg_node(
+            "expiring",
+            "Expiring",
+            Some("within 60 s · new"),
+            Shape::Pill,
+            Change::New,
+        ),
+        dg_node(
+            "refreshing",
+            "Refreshing",
+            Some("one caller, others wait"),
+            Shape::Pill,
+            Change::Changed,
+        ),
+        dg_node(
+            "failed",
+            "Failed",
+            Some("retries: max 3"),
+            Shape::Pill,
+            Change::Risk,
+        ),
+    ];
+    s.edges = vec![
+        dg_edge("start", "fresh", None, Change::Unchanged),
+        dg_edge("fresh", "expiring", Some("time passes"), Change::Unchanged),
+        dg_edge(
+            "expiring",
+            "refreshing",
+            Some("first caller locks"),
+            Change::Unchanged,
+        ),
+        dg_edge(
+            "refreshing",
+            "fresh",
+            Some("new token saved"),
+            Change::Unchanged,
+        ),
+        dg_edge(
+            "refreshing",
+            "failed",
+            Some("exchange failed"),
+            Change::Risk,
+        ),
+        dg_edge("failed", "expiring", Some("retry"), Change::Risk),
+    ];
+    s
+}
+
+fn dg_classes() -> DiagramSpec {
+    let new = Some(Change::New);
+    let changed = Some(Change::Changed);
+    let mut s = dg_spec(
+        "classes",
+        DiagramKind::Classes,
+        "Types involved",
+        "Fields on top, methods below",
+    );
+    let mut token = dg_rows(
+        dg_node("token", "Token", None, Shape::Class, Change::Unchanged),
+        &[
+            ("access: String", None, None),
+            ("refresh: String", None, None),
+            ("expires_at: Instant", None, None),
+            ("is_fresh(margin) · new", None, new),
+        ],
+    );
+    token.divider_after = Some(3);
+    let mut store = dg_rows(
+        dg_node("store", "TokenStore", None, Shape::Class, Change::Changed),
+        &[
+            ("path: PathBuf", None, None),
+            ("client: HttpClient · new", None, new),
+            ("refresh_lock: Mutex<()> · new", None, new),
+            ("token() -> Token", None, None),
+            ("refresh() · changed", None, changed),
+            ("save(&Token) · changed", None, changed),
+            ("load() -> Token", None, None),
+        ],
+    );
+    store.divider_after = Some(3);
+    let mut client = dg_rows(
+        dg_node("client", "HttpClient", None, Shape::Class, Change::Changed),
+        &[
+            ("base: Url", None, None),
+            ("retries: u8 · new", None, new),
+            ("exchange(&str) · changed", None, changed),
+            ("send(&Request)", None, None),
+        ],
+    );
+    client.divider_after = Some(2);
+    s.nodes = vec![
+        dg_at(token, "src/auth/mod.rs", 8, 24),
+        dg_at(store, "src/auth/store.rs", 10, 60),
+        dg_at(client, "src/client/http.rs", 8, 40),
+    ];
+    s.edges = vec![
+        dg_edge("store", "token", Some("returns"), Change::Unchanged),
+        dg_edge("store", "client", Some("owns 1"), Change::Unchanged),
+    ];
+    dg_history(
+        s,
+        &[
+            ("store", History::Changed),
+            ("client", History::Changed),
+            ("store>client", History::Added),
+        ],
+    )
+}
+
+/// What the first drawing (version 1, at an older commit) showed of `spec`: nothing that the
+/// second drawing marks as added, and no marks.
+fn dg_before(spec: &DiagramSpec) -> DiagramSpec {
+    let gone = |h: Option<History>| h == Some(History::Added);
+    let mut before = spec.clone();
+    before.nodes.retain(|n| !gone(n.history));
+    before.edges.retain(|e| !gone(e.history));
+    before.messages.retain(|m| !gone(m.history));
+    for node in &mut before.nodes {
+        node.history = None;
+    }
+    for edge in &mut before.edges {
+        edge.history = None;
+    }
+    for message in &mut before.messages {
+        message.history = None;
+    }
+    before
+}
+
+fn dg_entry(spec: DiagramSpec) -> DiagramEntry {
+    DiagramEntry {
+        plan: PlanEntry {
+            key: spec.key.clone(),
+            kind: spec.kind,
+            title: spec.title.clone(),
+            purpose: spec.caption.clone(),
+        },
+        state: EntryState::Ready {
+            spec,
+            notes: Vec::new(),
+        },
+    }
+}
+
+/// The review's drawings, oldest first: version 1 at an older commit with the flow, the
+/// sequence and the classes, and version 2 at the demo head with the eight diagrams of
+/// the demo review (the three of version 1 carry their history).
+/// They do not depend on the review; `_pr` names the demo review they belong to.
+pub fn demo_diagrams(now: i64, _pr: &PrRef) -> Vec<DiagramVersion> {
+    let specs = vec![
+        dg_flow(),
+        dg_deps(),
+        dg_sequence(),
+        dg_er(),
+        dg_usecase(),
+        dg_dataflow(),
+        dg_states(),
+        dg_classes(),
+    ];
+    let first = specs
+        .iter()
+        .filter(|s| ["flow", "sequence", "classes"].contains(&s.key.as_str()))
+        .map(|s| dg_entry(dg_before(s)))
+        .collect();
+    vec![
+        DiagramVersion {
+            number: 1,
+            commit: DIAGRAMS_V1_COMMIT.into(),
+            harness: "Claude Code".into(),
+            drawn_at: now - 86_400,
+            phase: VersionPhase::Done,
+            entries: first,
+        },
+        DiagramVersion {
+            number: 2,
+            commit: HEAD_SHA.into(),
+            harness: "Claude Code".into(),
+            drawn_at: now - 3_600,
+            phase: VersionPhase::Done,
+            entries: specs.into_iter().map(dg_entry).collect(),
+        },
+    ]
+}
+
+/// `demo_diagrams` as the tell a scene sends through the outbox: both versions listed, the
+/// second one whole, nothing running, and no new commit.
+pub fn demo_diagrams_tell(pr: &PrRef, now: i64) -> Tell {
+    let versions = demo_diagrams(now, pr);
+    Tell::Diagrams(DiagramsTell::Loaded {
+        pr: pr.clone(),
+        versions: versions.iter().map(DiagramVersion::info).collect(),
+        latest: versions.last().cloned().map(Box::new),
+        state: DiagramsState::Idle,
+        head: HEAD_SHA.into(),
+        stale: false,
+        stale_reason: None,
+    })
+}
+
 /// The mockups' two results (`Security.png`, `Audits.png`): three security findings, and an
 /// audit with one finding in Correctness, Concurrency and Tests, the other areas ok. Every
 /// finding sits on a new-side line of the demo diff.
@@ -984,6 +1791,7 @@ pub fn demo_revalidation(now: i64) -> (Draft, Revalidation) {
         asked: 5,
         finished_at: Some(now - 120),
         notified: false,
+        diagrams_stale: None,
     };
     (draft, round)
 }
@@ -1783,6 +2591,132 @@ mod tests {
             demo_checks_tell(&demo_pr(), NOW, &demo_review(NOW).0.review.draft),
             Tell::Checks(ChecksTell::Loaded { .. })
         ));
+    }
+
+    #[test]
+    fn the_demo_drawings_are_two_versions_of_the_mockup_diagrams() {
+        let versions = demo_diagrams(NOW, &demo_pr());
+        assert_eq!(
+            versions.iter().map(|v| v.number).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(versions[1].commit, HEAD_SHA);
+        assert_ne!(versions[0].commit, HEAD_SHA);
+        let keys = |v: &DiagramVersion| -> Vec<String> {
+            v.entries.iter().map(|e| e.plan.key.clone()).collect()
+        };
+        assert_eq!(
+            keys(&versions[1]),
+            [
+                "flow", "deps", "sequence", "er", "usecase", "dataflow", "states", "classes"
+            ]
+        );
+        assert_eq!(keys(&versions[0]), ["flow", "sequence", "classes"]);
+        let kinds: Vec<DiagramKind> = versions[1].entries.iter().map(|e| e.plan.kind).collect();
+        assert_eq!(kinds, DiagramKind::ALL);
+        assert!(versions.iter().all(|v| v.harness == "Claude Code"));
+    }
+
+    #[test]
+    fn the_demo_drawings_hold_together() {
+        let files: Vec<String> = demo_diff().into_iter().map(|f| f.path).collect();
+        for version in demo_diagrams(NOW, &demo_pr()) {
+            for entry in &version.entries {
+                let EntryState::Ready { spec, .. } = &entry.state else {
+                    panic!("every demo entry is ready");
+                };
+                let ids: Vec<&str> = spec.nodes.iter().map(|n| n.id.as_str()).collect();
+                let mut unique = ids.clone();
+                unique.sort_unstable();
+                unique.dedup();
+                assert_eq!(unique.len(), ids.len(), "{}: unique node ids", spec.key);
+                for e in &spec.edges {
+                    assert!(
+                        ids.contains(&e.from.as_str()) && ids.contains(&e.to.as_str()),
+                        "{}: edge {}>{}",
+                        spec.key,
+                        e.from,
+                        e.to
+                    );
+                }
+                for m in &spec.messages {
+                    assert!(ids.contains(&m.from.as_str()) && ids.contains(&m.to.as_str()));
+                }
+                for g in &spec.groups {
+                    assert!(g.members.iter().all(|m| ids.contains(&m.as_str())));
+                }
+                for a in spec.nodes.iter().filter_map(|n| n.anchor.as_ref()) {
+                    assert!(
+                        files.contains(&a.path),
+                        "{} is a file of the demo diff",
+                        a.path
+                    );
+                    assert!(0 < a.start_line && a.start_line <= a.end_line);
+                }
+                assert_eq!(
+                    spec.messages.is_empty(),
+                    spec.kind != DiagramKind::Sequence,
+                    "{}: only a sequence has messages",
+                    spec.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn version_two_marks_what_changed_against_version_one() {
+        let versions = demo_diagrams(NOW, &demo_pr());
+        let spec = |v: usize, key: &str| match &versions[v].entry(key).unwrap().state {
+            EntryState::Ready { spec, .. } => spec.clone(),
+            _ => panic!("ready"),
+        };
+        let flow = spec(1, "flow");
+        let history = |id: &str| flow.nodes.iter().find(|n| n.id == id).unwrap().history;
+        assert_eq!(history("lock"), Some(History::Added));
+        assert_eq!(history("refresh"), Some(History::Changed));
+        assert_eq!(history("http"), Some(History::Same));
+        assert!(
+            flow.edges
+                .iter()
+                .any(|e| e.history == Some(History::Removed)),
+            "a removed arrow stays in the spec"
+        );
+        let before = spec(0, "flow");
+        assert!(
+            before
+                .nodes
+                .iter()
+                .all(|n| n.id != "lock" && n.history.is_none())
+        );
+        assert_eq!(before.nodes.len(), flow.nodes.len() - 1);
+        assert_eq!(spec(1, "sequence").messages.len(), 8);
+        assert_eq!(spec(0, "sequence").messages.len(), 6);
+        let deps = spec(1, "deps");
+        assert!(
+            deps.nodes.iter().all(|n| n.history.is_none()),
+            "new in version 2"
+        );
+    }
+
+    #[test]
+    fn the_diagrams_tell_lists_both_versions_and_holds_the_latest() {
+        let Tell::Diagrams(DiagramsTell::Loaded {
+            versions,
+            latest,
+            state,
+            head,
+            stale,
+            ..
+        }) = demo_diagrams_tell(&demo_pr(), NOW)
+        else {
+            panic!("a loaded tell");
+        };
+        assert_eq!(versions.len(), 2);
+        assert_eq!(latest.map(|v| v.number), Some(2));
+        assert_eq!(
+            (state, head.as_str(), stale),
+            (DiagramsState::Idle, HEAD_SHA, false)
+        );
     }
 
     #[test]

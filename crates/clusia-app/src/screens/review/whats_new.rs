@@ -598,7 +598,10 @@ mod tests {
             .filter(|a| {
                 !matches!(
                     a,
-                    Ask::AgentLog { .. } | Ask::GetChecks(_) | Ask::GetRevalidation(_)
+                    Ask::AgentLog { .. }
+                        | Ask::GetChecks(_)
+                        | Ask::GetDiagrams(_)
+                        | Ask::GetRevalidation(_)
                 )
             })
             .collect();

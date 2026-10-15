@@ -12,11 +12,11 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::revalidation::{
-    DecideError, Decision, Revalidation, RoundState, RowKind, Verdict, decidable, decide,
-    fingerprint, pending, row_kind,
+    DecideError, Decision, DiagramsStale, Revalidation, RoundState, RowKind, Verdict, decidable,
+    decide, fingerprint, pending, row_kind,
 };
 use clusia_core::{Anchor, DraftItem, FileDiff, ItemStatus, PrRef, Review};
-use clusia_protocol::AnchorInput;
+use clusia_protocol::{AnchorInput, DiagramsState};
 
 use crate::bridge::{Ask, Asks, Connection, Model, RevalidationTell, Toasts};
 use crate::fonts::UiFonts;
@@ -24,6 +24,7 @@ use crate::review_state::{RevalView, ReviewTabs, Tab};
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::agent::harness_ready;
 use crate::screens::review::agent::suggestion::show_file;
+use crate::screens::review::diagrams::{Diagrams, DiagramsModel};
 use crate::screens::review::editor::{not_sent, read_only_reason};
 use crate::screens::review::shell::{draft_card, file_name};
 use crate::theme::Swatch;
@@ -264,6 +265,43 @@ pub struct BannerView {
 /// Commits listed under the banner before `+ n more`.
 pub const COMMITS_SHOWN: usize = 5;
 
+/// The offer to redraw the diagrams when the pull request moved on from them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagramsRow {
+    pub title: &'static str,
+    /// Why they are out of date.
+    pub line: String,
+    /// A drawing is running: the button is off.
+    pub drawing: bool,
+}
+
+/// What the agent said about the diagrams beats the daemon's own reason, and a `stale: false`
+/// from the agent withdraws the offer. Nothing is offered without a drawing, without a
+/// harness to draw it, or while the drawings match the review's head.
+pub fn diagrams_row(
+    model: Option<&DiagramsModel>,
+    said: Option<&DiagramsStale>,
+    harness: bool,
+) -> Option<DiagramsRow> {
+    let model = model?;
+    if !harness || !model.stale || model.versions.is_empty() || said.is_some_and(|s| !s.stale) {
+        return None;
+    }
+    let shown = |reason: &str| Some(printable(reason)).filter(|r| !r.trim().is_empty());
+    let line = said
+        .and_then(|s| shown(&s.reason))
+        .or_else(|| model.stale_reason.as_deref().and_then(shown))
+        .unwrap_or_else(|| "They were drawn from an earlier commit of the pull request.".into());
+    Some(DiagramsRow {
+        title: "The diagrams are out of date",
+        line,
+        drawing: matches!(
+            model.state,
+            DiagramsState::Planning | DiagramsState::Drawing { .. }
+        ),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenView {
     pub repo: String,
@@ -271,6 +309,7 @@ pub struct ScreenView {
     pub title: String,
     pub chip: (&'static str, Tone),
     pub banner: BannerView,
+    pub diagrams: Option<DiagramsRow>,
     pub rows: Vec<RowView>,
 }
 
@@ -606,6 +645,7 @@ fn banner_view(
 pub fn screen_view(
     tab: &Tab,
     model: Option<&RevalidationModel>,
+    diagrams: Option<&DiagramsModel>,
     harness: bool,
     agent: &str,
 ) -> Option<ScreenView> {
@@ -631,6 +671,7 @@ pub fn screen_view(
             ("outdated", Tone::Orange)
         },
         banner: banner_view(round, &rows, harness, agent, pending_rows, accepting),
+        diagrams: diagrams_row(diagrams, round.diagrams_stale.as_ref(), harness),
         rows,
     })
 }
@@ -661,6 +702,14 @@ pub struct RevalidationButton {
     pub pr: PrRef,
     pub action: TopAction,
 }
+
+/// **Redraw diagrams**.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct RedrawDiagrams(pub PrRef);
+
+/// The card that offers it.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DiagramsCard;
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ProposalButton {
@@ -734,6 +783,7 @@ fn fill_revalidation(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
     rounds: Res<Revalidations>,
+    diagrams: Option<Res<Diagrams>>,
     model: Res<Model>,
     fonts: Res<UiFonts>,
     mut roots: Query<(Entity, &mut RevalidationRoot)>,
@@ -745,6 +795,7 @@ fn fill_revalidation(
         let Some(view) = screen_view(
             tab,
             rounds.0.get(&root.pr),
+            diagrams.as_ref().and_then(|d| d.0.get(&root.pr)),
             harness_ready(
                 &model.snapshot,
                 crate::agent_name::kind_of_tab(&model.snapshot, tab),
@@ -780,6 +831,9 @@ fn draw(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &ScreenVie
         h.spawn(badge(fonts, v.chip.0, v.chip.1));
     });
     banner_card(p, fonts, pr, &v.banner);
+    if let Some(d) = &v.diagrams {
+        diagrams_card(p, fonts, pr, d);
+    }
     for row in &v.rows {
         row_card(p, fonts, pr, row);
     }
@@ -877,6 +931,42 @@ fn banner_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, b: &Ba
                 ));
             }
         });
+    });
+}
+
+fn diagrams_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, d: &DiagramsRow) {
+    p.spawn((
+        card(Node {
+            flex_shrink: 0.0,
+            column_gap: px(14),
+            align_items: AlignItems::Center,
+            padding: px(16).all(),
+            ..default()
+        }),
+        DiagramsCard,
+    ))
+    .with_children(|c| {
+        c.spawn(Node {
+            flex_grow: 1.0,
+            flex_basis: px(0),
+            min_width: px(0),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(3),
+            ..default()
+        })
+        .with_children(|t| {
+            t.spawn(text(fonts, d.title, Type::STRONG));
+            t.spawn(text(fonts, d.line.clone(), Type::META));
+        });
+        if d.drawing {
+            c.spawn(disabled_button(fonts, "Drawing…"));
+        } else {
+            c.spawn((
+                button(fonts, "Redraw diagrams", Variant::Primary),
+                RedrawDiagrams(pr.clone()),
+                observe(on_redraw),
+            ));
+        }
     });
 }
 
@@ -1022,6 +1112,25 @@ fn on_top(
         TopAction::RevalidateNow | TopAction::TryAgain => asks.send(Ask::Revalidate(pr.clone())),
         TopAction::SetUp => nav.open_section(crate::nav::Section::Harness),
     }
+}
+
+/// Asks for a new drawing of the review's diagrams, on the reviewer's click only.
+fn on_redraw(
+    activate: On<Activate>,
+    buttons: Query<&RedrawDiagrams>,
+    tabs: Res<ReviewTabs>,
+    model: Res<Model>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
+) {
+    let Ok(RedrawDiagrams(pr)) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Some(reason) = read_only_reason(&tabs, &model, pr) {
+        return not_sent(&mut toasts, &time, reason);
+    }
+    asks.send(Ask::DrawDiagrams(pr.clone()));
 }
 
 fn on_proposal(
@@ -1282,6 +1391,10 @@ fn end_reanchor(
     nav: Res<crate::nav::Nav>,
     mut tabs: ResMut<ReviewTabs>,
 ) {
+    // Reading through `values()` leaves the resource unmarked when there is nothing to end.
+    if !tabs.0.values().any(|t| t.ui.reanchor.is_some()) {
+        return;
+    }
     let esc = escape_pressed(&keys);
     let shown = match &nav.screen {
         crate::nav::Screen::Review(pr) => Some(pr.clone()),
@@ -2669,6 +2782,165 @@ mod tests {
         assert_eq!(
             (item.kind, item.anchor.clone(), item.status.clone()),
             (clusia_core::DraftKind::General, None, ItemStatus::Ok)
+        );
+    }
+
+    fn stale_diagrams(reason: Option<&str>) -> DiagramsModel {
+        let version = crate::screens::review::diagrams::modal::test_version(
+            "0123456789abcdef0123456789abcdef01234567",
+            None,
+        );
+        let mut model = DiagramsModel::default();
+        model.asked = true;
+        model.versions = vec![version.info()];
+        model.stale = true;
+        model.stale_reason = reason.map(String::from);
+        model
+    }
+
+    fn said(stale: bool, reason: &str) -> DiagramsStale {
+        DiagramsStale {
+            stale,
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn the_diagrams_row_is_offered_when_the_commit_moved_on() {
+        let model = stale_diagrams(Some("The pull request has 2 new commits."));
+        assert_eq!(
+            diagrams_row(Some(&model), None, true),
+            Some(DiagramsRow {
+                title: "The diagrams are out of date",
+                line: "The pull request has 2 new commits.".into(),
+                drawing: false,
+            })
+        );
+        let default = diagrams_row(Some(&stale_diagrams(None)), None, true).expect("a row");
+        assert_eq!(
+            default.line,
+            "They were drawn from an earlier commit of the pull request."
+        );
+    }
+
+    #[test]
+    fn what_the_agent_said_wins_and_a_no_withdraws_the_offer() {
+        let model = stale_diagrams(Some("The pull request has 2 new commits."));
+        let row = diagrams_row(
+            Some(&model),
+            Some(&said(true, "The retry path was rewritten")),
+            true,
+        )
+        .expect("a row");
+        assert_eq!(row.line, "The retry path was rewritten");
+        let blank = diagrams_row(Some(&model), Some(&said(true, "  ")), true).expect("a row");
+        assert_eq!(blank.line, "The pull request has 2 new commits.");
+        assert_eq!(
+            diagrams_row(Some(&model), Some(&said(false, "Only docs changed")), true),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_is_offered_without_a_reason_a_drawing_or_a_harness() {
+        let model = stale_diagrams(None);
+        assert_eq!(diagrams_row(None, None, true), None);
+        assert_eq!(diagrams_row(Some(&model), None, false), None);
+        let mut fresh = stale_diagrams(None);
+        fresh.stale = false;
+        assert_eq!(diagrams_row(Some(&fresh), None, true), None);
+        let mut none = stale_diagrams(None);
+        none.versions = Vec::new();
+        assert_eq!(diagrams_row(Some(&none), None, true), None);
+    }
+
+    #[test]
+    fn a_running_drawing_turns_the_button_off_and_the_reason_is_printable() {
+        let mut model = stale_diagrams(Some("new\u{1b}[31m commits"));
+        model.state = DiagramsState::Drawing {
+            done: 1,
+            total: 5,
+            key: "flow".into(),
+        };
+        let row = diagrams_row(Some(&model), None, true).expect("a row");
+        assert!(row.drawing);
+        assert_eq!(row.line, "new\\u{1b}[31m commits");
+        model.state = DiagramsState::Planning;
+        assert!(
+            diagrams_row(Some(&model), None, true)
+                .expect("a row")
+                .drawing
+        );
+        model.state = DiagramsState::Failed {
+            message: "boom".into(),
+        };
+        assert!(
+            !diagrams_row(Some(&model), None, true)
+                .expect("a row")
+                .drawing
+        );
+    }
+
+    fn with_stale_diagrams(app: &mut App, pr: &PrRef, model: DiagramsModel) {
+        testing::set_config_locally(app, "harness.program", "/opt/homebrew/bin/claude");
+        app.world_mut()
+            .resource_mut::<Diagrams>()
+            .0
+            .insert(pr.clone(), model);
+        testing::settle(app);
+    }
+
+    #[test]
+    fn the_screen_offers_a_redraw_and_a_click_asks_for_it() {
+        let (mut app, pr) = done_app();
+        assert!(
+            !testing::shows(&mut app, "Redraw diagrams"),
+            "nothing is stale yet"
+        );
+        with_stale_diagrams(
+            &mut app,
+            &pr,
+            stale_diagrams(Some("The pull request has 2 new commits.")),
+        );
+        assert_eq!(testing::count::<DiagramsCard>(&mut app), 1);
+        for needle in [
+            "The diagrams are out of date",
+            "The pull request has 2 new commits.",
+            "Redraw diagrams",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        testing::recorded(&mut app);
+        let redraw = testing::find::<RedrawDiagrams>(&mut app, |r| r.0 == pr);
+        testing::activate(&mut app, redraw);
+        assert_eq!(testing::recorded(&mut app), [Ask::DrawDiagrams(pr.clone())]);
+    }
+
+    #[test]
+    fn while_drawing_the_row_says_so_and_has_no_button() {
+        let (mut app, pr) = done_app();
+        let mut model = stale_diagrams(None);
+        model.state = DiagramsState::Planning;
+        with_stale_diagrams(&mut app, &pr, model);
+        assert!(testing::shows(&mut app, "Drawing…"));
+        assert_eq!(testing::count::<RedrawDiagrams>(&mut app), 0);
+    }
+
+    #[test]
+    fn a_review_that_cannot_be_changed_sends_nothing() {
+        let (mut app, pr) = done_app();
+        with_stale_diagrams(&mut app, &pr, stale_diagrams(None));
+        app.world_mut().resource_mut::<Model>().connection = Connection::Lost("gone".into());
+        testing::recorded(&mut app);
+        let redraw = testing::find::<RedrawDiagrams>(&mut app, |r| r.0 == pr);
+        testing::activate(&mut app, redraw);
+        assert!(testing::recorded(&mut app).is_empty());
+        assert!(
+            app.world()
+                .resource::<Toasts>()
+                .0
+                .iter()
+                .any(|t| t.text.contains("Not connected to clusiad"))
         );
     }
 }

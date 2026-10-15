@@ -34,7 +34,7 @@ permission request can be answered, until the program ends its turn or Clúsia s
 
 | Field | Meaning |
 |---|---|
-| `prompt` | What to answer. For a Security check, an Audit or a revalidation it is the full request, which names the blocks the answer must contain. |
+| `prompt` | What to answer. For a Security check, an Audit, a revalidation, or the plan or a drawing of the diagrams it is the full request, which names the blocks the answer must contain. |
 | `role` | Instructions for how to behave: help the reviewer, never change files, never call GitHub. |
 | `session_id` | The session to resume, or `null` for a new one. See Sessions. |
 | `worktree` | The pull request's checkout. It is also the program's working directory. |
@@ -143,7 +143,7 @@ Harness, the next chat turn of a review opened after the change sends `null`; an
 the program it opened with. The same happens when the last turn failed with `error` kind
 `session`.
 
-**Checks, audits and revalidation never get a session**: they always send `session_id: null` with
+**Checks, audits, revalidation and the diagrams never get a session**: they always send `session_id: null` with
 a prompt that carries the pull request's context and tells the program to read
 `.clusia/review.md`. The `session` line such a turn writes is dropped, so a check never becomes
 the chat's history.

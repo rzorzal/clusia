@@ -1,6 +1,7 @@
 //! Every message that crosses the socket.
 
 pub use clusia_core::OpenTarget;
+use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::revalidation::Revalidation;
 use clusia_core::{
     ActivitySummary, CheckKind, CheckResult, ChecksSummary, Config, DraftItem, DraftKind,
@@ -304,6 +305,48 @@ pub enum Command {
     GetRevalidation {
         pr: PrRef,
     },
+    /// Plan the diagrams of this review and draw them, one agent turn each. It answers
+    /// `InvalidState` while the review's diagrams are being drawn.
+    DrawDiagrams {
+        pr: PrRef,
+    },
+    /// Draw one diagram of the latest version again: a retry of one that failed or was not drawn,
+    /// or a redraw of one that is ready.
+    DrawDiagram {
+        pr: PrRef,
+        key: String,
+    },
+    /// Stop planning or drawing; what was not drawn yet is marked as such.
+    StopDiagrams {
+        pr: PrRef,
+    },
+    /// Every version of the review's diagrams, without their drawings, and the latest in full.
+    GetDiagrams {
+        pr: PrRef,
+    },
+    /// One version of the review's diagrams in full.
+    GetDiagramVersion {
+        pr: PrRef,
+        number: u32,
+    },
+    /// The code box `node` of diagram `key` in version `number` points at, a few lines around it.
+    ReadDiagramCode {
+        pr: PrRef,
+        number: u32,
+        key: String,
+        node: String,
+    },
+    /// Comment on box `node` of diagram `key` in version `number`: the comment joins the draft,
+    /// on the box's lines when GitHub can take them there, as a general comment naming them
+    /// otherwise. The lines come from the stored drawing, never from the client. Answers like
+    /// `AddDraftItem`.
+    AddDiagramComment {
+        pr: PrRef,
+        number: u32,
+        key: String,
+        node: String,
+        body: String,
+    },
     /// Accept or reject what the revalidation proposed for one draft item.
     DecideProposal {
         pr: PrRef,
@@ -385,6 +428,22 @@ pub enum Reply {
     },
     /// What `GetRevalidation` knows.
     Revalidation(Option<Revalidation>),
+    /// What `GetDiagrams` knows: the versions in order, the latest one in full, what the daemon
+    /// is doing now, and the commit the review is at. `stale` is true when the latest version
+    /// was drawn from another commit; `stale_reason` is what the agent said about it, if it did.
+    Diagrams {
+        versions: Vec<DiagramVersionInfo>,
+        latest: Option<Box<DiagramVersion>>,
+        state: DiagramsState,
+        head: String,
+        stale: bool,
+        #[serde(default)]
+        stale_reason: Option<String>,
+    },
+    /// One version, for `GetDiagramVersion`.
+    DiagramVersion(Box<DiagramVersion>),
+    /// The code of a box, for `ReadDiagramCode`.
+    DiagramCode(DiagramCode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -715,6 +774,23 @@ pub enum Event {
     RevalidationChanged {
         pr: PrRef,
         revalidation: Option<Revalidation>,
+    },
+    /// What the daemon does for the review's diagrams changed (topic `agent`).
+    DiagramsChanged {
+        pr: PrRef,
+        state: DiagramsState,
+    },
+    /// A plan was made: a new version exists, with every entry waiting (topic `agent`).
+    DiagramsPlanned {
+        pr: PrRef,
+        version: Box<DiagramVersion>,
+    },
+    /// One entry of a version changed state (topic `agent`).
+    DiagramEntryChanged {
+        pr: PrRef,
+        number: u32,
+        key: String,
+        state: EntryState,
     },
 }
 
@@ -1068,6 +1144,16 @@ pub enum AgentLogEntry {
         turn: u64,
         state: String,
     },
+    /// A turn of the diagrams run (the plan, or the drawing of `key`) changed state: `waiting`,
+    /// `running`, `done`, `failed` or `stopped`. Not part of the chat: `GetAgentLog` leaves
+    /// these out.
+    Diagrams {
+        at: i64,
+        turn: u64,
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+    },
 }
 
 /// A permission request waiting for the reviewer: the fields of `Event::PermissionRequested`.
@@ -1088,7 +1174,8 @@ pub struct PermissionRequest {
     pub origin: TurnOrigin,
 }
 
-/// Who runs a turn of the agent: the review chat, one of the two checks, or the revalidation.
+/// Who runs a turn of the agent: the review chat, one of the two checks, the revalidation, or
+/// the drawing of diagrams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOrigin {
@@ -1097,6 +1184,7 @@ pub enum TurnOrigin {
     Security,
     Audit,
     Revalidation,
+    Diagrams,
 }
 
 impl TurnOrigin {
@@ -1132,6 +1220,41 @@ pub enum CheckState {
     },
     /// Its result is for an older commit than the review's head.
     Stale,
+}
+
+/// What the daemon does for a review's diagrams.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DiagramsState {
+    /// Nothing runs.
+    Idle,
+    /// The plan turn runs or waits (also while the summary turn that comes first runs).
+    Planning,
+    /// Entry `key` is being drawn; `done` entries are over, out of `total`.
+    Drawing { done: u32, total: u32, key: String },
+    /// The run could not go on: the plan could not be made, or the run broke.
+    Failed { message: String },
+}
+
+/// The code a diagram box points at, at the commit the diagram was drawn from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagramCode {
+    pub path: String,
+    pub commit: String,
+    /// The number of the first line in `lines`.
+    pub start_line: u32,
+    pub lines: Vec<CodeLine>,
+    /// Why there are no lines, when the code cannot be shown.
+    #[serde(default)]
+    pub unavailable: Option<String>,
+}
+
+/// One line of code; `changed` when the pull request adds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeLine {
+    pub number: u32,
+    pub text: String,
+    pub changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3302,6 +3425,7 @@ mod tests {
             asked: 1,
             finished_at: None,
             notified: false,
+            diagrams_stale: None,
         }
     }
 
@@ -3436,5 +3560,215 @@ mod tests {
         }
         assert_eq!(HarnessKind::try_from(Config::Custom), Err(()));
         assert_eq!(wire(&HarnessKind::Codex), r#""codex""#);
+    }
+
+    fn drawing() -> clusia_core::diagram::DiagramSpec {
+        serde_json::from_value(serde_json::json!({
+            "key": "flow",
+            "kind": "flow",
+            "title": "Token refresh",
+            "caption": "How a token is refreshed",
+            "nodes": [{"id": "a", "label": "refresh()", "shape": "box"}]
+        }))
+        .expect("a minimal drawing")
+    }
+
+    fn drawn_version() -> clusia_core::diagram::DiagramVersion {
+        use clusia_core::diagram::{
+            DiagramEntry, DiagramKind, DiagramVersion, EntryState, PlanEntry, VersionPhase,
+        };
+        let plan = |key: &str| PlanEntry {
+            key: key.into(),
+            kind: DiagramKind::Flow,
+            title: "Token refresh".into(),
+            purpose: "Shows the new path".into(),
+        };
+        DiagramVersion {
+            number: 2,
+            commit: "a".repeat(40),
+            harness: "Claude Code".into(),
+            drawn_at: 1_700_000_000,
+            phase: VersionPhase::Done,
+            entries: vec![
+                DiagramEntry {
+                    plan: plan("flow"),
+                    state: EntryState::Ready {
+                        spec: drawing(),
+                        notes: vec!["1 arrow dropped".into()],
+                    },
+                },
+                DiagramEntry {
+                    plan: plan("graph"),
+                    state: EntryState::Failed {
+                        reason: "no boxes".into(),
+                    },
+                },
+                DiagramEntry {
+                    plan: plan("states"),
+                    state: EntryState::NotDrawn,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn diagram_commands_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        assert_eq!(
+            request(Command::DrawDiagrams { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"draw_diagrams":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::DrawDiagram {
+                pr: acme(),
+                key: "flow".into(),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"draw_diagram":{"pr":"acme/widgets#7","key":"flow"}}}"#
+        );
+        assert_eq!(
+            request(Command::StopDiagrams { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"stop_diagrams":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetDiagrams { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"get_diagrams":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetDiagramVersion {
+                pr: acme(),
+                number: 2,
+            }),
+            r#"{"type":"request","id":5,"cmd":{"get_diagram_version":{"pr":"acme/widgets#7","number":2}}}"#
+        );
+    }
+
+    #[test]
+    fn diagram_code_commands_and_replies_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        assert_eq!(
+            request(Command::ReadDiagramCode {
+                pr: acme(),
+                number: 2,
+                key: "flow".into(),
+                node: "a".into(),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"read_diagram_code":{"pr":"acme/widgets#7","number":2,"key":"flow","node":"a"}}}"#
+        );
+        assert_eq!(
+            request(Command::AddDiagramComment {
+                pr: acme(),
+                number: 2,
+                key: "flow".into(),
+                node: "a".into(),
+                body: "Why?".into(),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"add_diagram_comment":{"pr":"acme/widgets#7","number":2,"key":"flow","node":"a","body":"Why?"}}}"#
+        );
+        round_trip(Reply::DiagramCode(DiagramCode {
+            path: "src/a.rs".into(),
+            commit: "a".repeat(40),
+            start_line: 8,
+            lines: vec![CodeLine {
+                number: 8,
+                text: "fn refresh() {".into(),
+                changed: true,
+            }],
+            unavailable: None,
+        }));
+        round_trip(Reply::DiagramCode(DiagramCode {
+            path: "src/a.rs".into(),
+            commit: "a".repeat(40),
+            start_line: 1,
+            lines: Vec::new(),
+            unavailable: Some("The code at aaaaaaa is no longer available.".into()),
+        }));
+    }
+
+    #[test]
+    fn diagrams_state_wire_format() {
+        assert_eq!(wire(&DiagramsState::Idle), r#"{"state":"idle"}"#);
+        assert_eq!(wire(&DiagramsState::Planning), r#"{"state":"planning"}"#);
+        assert_eq!(
+            wire(&DiagramsState::Drawing {
+                done: 1,
+                total: 5,
+                key: "flow".into(),
+            }),
+            r#"{"state":"drawing","done":1,"total":5,"key":"flow"}"#
+        );
+        assert_eq!(
+            wire(&DiagramsState::Failed {
+                message: "no plan".into(),
+            }),
+            r#"{"state":"failed","message":"no plan"}"#
+        );
+    }
+
+    #[test]
+    fn diagram_events_and_replies_round_trip() {
+        let version = drawn_version();
+        round_trip(Event::DiagramsChanged {
+            pr: acme(),
+            state: DiagramsState::Planning,
+        });
+        round_trip(Event::DiagramsPlanned {
+            pr: acme(),
+            version: Box::new(version.clone()),
+        });
+        round_trip(Event::DiagramEntryChanged {
+            pr: acme(),
+            number: 2,
+            key: "flow".into(),
+            state: EntryState::Failed {
+                reason: "no boxes".into(),
+            },
+        });
+        round_trip(Reply::DiagramVersion(Box::new(version.clone())));
+        round_trip(Reply::Diagrams {
+            versions: vec![version.info()],
+            latest: Some(Box::new(version)),
+            state: DiagramsState::Idle,
+            head: "b".repeat(40),
+            stale: true,
+            stale_reason: Some("The new commits touch the same files".into()),
+        });
+        round_trip(Reply::Diagrams {
+            versions: Vec::new(),
+            latest: None,
+            state: DiagramsState::Failed {
+                message: "no plan".into(),
+            },
+            head: String::new(),
+            stale: false,
+            stale_reason: None,
+        });
+    }
+
+    #[test]
+    fn a_diagrams_turn_is_not_a_chat_turn() {
+        assert_eq!(wire(&TurnOrigin::Diagrams), r#""diagrams""#);
+        assert!(!TurnOrigin::Diagrams.is_chat());
+        let entry = AgentLogEntry::Diagrams {
+            at: 9,
+            turn: 3,
+            state: "running".into(),
+            key: Some("flow".into()),
+        };
+        assert_eq!(
+            wire(&entry),
+            r#"{"type":"diagrams","at":9,"turn":3,"state":"running","key":"flow"}"#
+        );
+        round_trip(entry);
+        let plan = AgentLogEntry::Diagrams {
+            at: 9,
+            turn: 2,
+            state: "done".into(),
+            key: None,
+        };
+        assert_eq!(
+            wire(&plan),
+            r#"{"type":"diagrams","at":9,"turn":2,"state":"done"}"#
+        );
+        round_trip(plan);
     }
 }

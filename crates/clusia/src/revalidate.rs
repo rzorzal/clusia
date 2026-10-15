@@ -425,6 +425,7 @@ mod tests {
             asked: 5,
             finished_at: Some(1),
             notified: false,
+            diagrams_stale: None,
         };
         (round, review)
     }

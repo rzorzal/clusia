@@ -10,6 +10,7 @@ use crate::review_state::open_new_tabs;
 pub mod agent;
 pub mod checks;
 pub mod comments;
+pub mod diagrams;
 pub mod diff;
 pub mod editor;
 pub mod finalize;
@@ -45,6 +46,8 @@ impl Plugin for ReviewPlugin {
                 agent::AgentPanel,
                 agent::PermissionPlugin,
                 checks::ChecksPlugin,
+                diagrams::modal::NodeModalPlugin,
+                diagrams::DiagramsPlugin,
                 revalidation::RevalidationPlugin,
                 crate::ui::composer::ComposerPlugin,
             ));

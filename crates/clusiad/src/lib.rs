@@ -9,6 +9,8 @@ mod checks;
 mod codex;
 mod connection;
 mod custom;
+mod diagram_code;
+mod diagrams;
 mod first_run;
 mod giphy;
 mod handlers;

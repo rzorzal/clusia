@@ -76,6 +76,14 @@ pub enum Command {
         #[arg(long)]
         audit: bool,
     },
+    /// List the latest version of a review's diagrams, or draw them with `--draw`.
+    Diagrams {
+        /// `owner/repo#number` or a pull request URL.
+        pr: String,
+        /// Plan and draw the diagrams now (one turn of the agent each), and follow the drawing.
+        #[arg(long)]
+        draw: bool,
+    },
     /// Have the agent re-read the draft of a saved review against the new commits of its pull
     /// request, now, and print what it found for each comment.
     Revalidate {

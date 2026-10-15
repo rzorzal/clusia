@@ -12,10 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
 use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass};
+use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::draft::Origin;
 use clusia_core::revalidation::{self, Revalidation};
 use clusia_core::{
@@ -23,9 +25,10 @@ use clusia_core::{
 };
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, AnchorInput, CheckState, CheckStatus, Client, ClientError,
-    Command, ErrorCode, Event, GifPage, LoadStep, LoadStepKind, MediaFile, NewsItem,
-    PermissionAnswerKind, PermissionOutcome, ProbeResult, ProtocolError, PublishResult, Reply,
-    ReviewView, Secret, SessionStateKind, StepStatus, Suggestion, WindowTarget, topics,
+    Command, DiagramCode, DiagramsState, ErrorCode, Event, GifPage, LoadStep, LoadStepKind,
+    MediaFile, NewsItem, PermissionAnswerKind, PermissionOutcome, ProbeResult, ProtocolError,
+    PublishResult, Reply, ReviewView, Secret, SessionStateKind, StepStatus, Suggestion,
+    WindowTarget, topics,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -36,6 +39,7 @@ use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
 use crate::screens::review::agent::{Chats, PermissionQueue};
 use crate::screens::review::checks::{self, Checks, proposed_comment};
+use crate::screens::review::diagrams::{Diagrams, modal};
 use crate::screens::review::revalidation::Revalidations;
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::ui::media::MediaCache;
@@ -197,6 +201,39 @@ pub enum Ask {
         pr: PrRef,
         id: String,
         anchor: Option<AnchorInput>,
+    },
+    /// Plans and draws the review's diagrams; the progress comes back as `DiagramsTell`s. A
+    /// second draw while one runs is refused with a warning.
+    DrawDiagrams(PrRef),
+    /// Draws one entry of the latest version again (a retry or a redraw).
+    DrawDiagram {
+        pr: PrRef,
+        key: String,
+    },
+    StopDiagrams(PrRef),
+    /// The versions and the latest drawing: `DiagramsTell::Loaded`.
+    GetDiagrams(PrRef),
+    /// One older version, whole: `DiagramsTell::Version`.
+    GetDiagramVersion {
+        pr: PrRef,
+        number: u32,
+    },
+    /// The code behind a box at its version's commit: `DiagramsTell::Code`.
+    ReadDiagramCode {
+        pr: PrRef,
+        number: u32,
+        key: String,
+        node: String,
+    },
+    /// A comment on a box, into the draft. Answered by `Saved` or `Refused` with the same
+    /// ticket, like `AddItem`.
+    AddDiagramComment {
+        pr: PrRef,
+        number: u32,
+        key: String,
+        node: String,
+        body: String,
+        ticket: u64,
     },
 }
 
@@ -468,6 +505,88 @@ impl ChecksTell {
     }
 }
 
+/// What the diagrams of a review did, from the daemon's events and from `GetDiagrams`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiagramsTell {
+    /// Everything the daemon holds: the light list of versions and the latest one whole.
+    Loaded {
+        pr: PrRef,
+        versions: Vec<DiagramVersionInfo>,
+        latest: Option<Box<DiagramVersion>>,
+        state: DiagramsState,
+        head: String,
+        stale: bool,
+        stale_reason: Option<String>,
+    },
+    /// An older version, whole.
+    Version {
+        pr: PrRef,
+        version: Box<DiagramVersion>,
+    },
+    /// The daemon could not send an older version.
+    Unreadable {
+        pr: PrRef,
+        number: u32,
+    },
+    State {
+        pr: PrRef,
+        state: DiagramsState,
+    },
+    /// A new version, its entries waiting.
+    Planned {
+        pr: PrRef,
+        version: Box<DiagramVersion>,
+    },
+    Entry {
+        pr: PrRef,
+        number: u32,
+        key: String,
+        state: EntryState,
+    },
+    /// The code behind a box, or why there is none (`DiagramCode.unavailable`).
+    Code {
+        pr: PrRef,
+        number: u32,
+        key: String,
+        node: String,
+        code: DiagramCode,
+    },
+}
+
+impl DiagramsTell {
+    pub fn pr(&self) -> &PrRef {
+        match self {
+            DiagramsTell::Loaded { pr, .. }
+            | DiagramsTell::Version { pr, .. }
+            | DiagramsTell::Unreadable { pr, .. }
+            | DiagramsTell::State { pr, .. }
+            | DiagramsTell::Planned { pr, .. }
+            | DiagramsTell::Entry { pr, .. }
+            | DiagramsTell::Code { pr, .. } => pr,
+        }
+    }
+
+    /// The tell for a diagrams event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<DiagramsTell> {
+        Some(match event.clone() {
+            Event::DiagramsChanged { pr, state } => DiagramsTell::State { pr, state },
+            Event::DiagramsPlanned { pr, version } => DiagramsTell::Planned { pr, version },
+            Event::DiagramEntryChanged {
+                pr,
+                number,
+                key,
+                state,
+            } => DiagramsTell::Entry {
+                pr,
+                number,
+                key,
+                state,
+            },
+            _ => return None,
+        })
+    }
+}
+
 /// What the revalidation of a review did, from the daemon's events and from
 /// `GetRevalidation`.
 #[derive(Debug, Clone, PartialEq)]
@@ -641,6 +760,8 @@ pub enum Tell {
     Permission(PermissionTell),
     /// What the review's security and audit checks did.
     Checks(ChecksTell),
+    /// What the review's diagrams did.
+    Diagrams(DiagramsTell),
     /// What the revalidation of the review's draft did.
     Revalidation(RevalidationTell),
     /// The review's chat log, in answer to `Ask::AgentLog`.
@@ -825,8 +946,41 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
                 id: id.clone(),
             }));
         }
-        // The checks are read again after a reconnect: no toast for a read.
-        Ask::GetChecks(_) | Ask::GetRevalidation(_) => {}
+        // The checks and the diagrams are read again after a reconnect: no toast for a read.
+        Ask::GetChecks(_)
+        | Ask::GetRevalidation(_)
+        | Ask::GetDiagrams(_)
+        | Ask::GetDiagramVersion { .. } => {}
+        Ask::DrawDiagrams(_) | Ask::DrawDiagram { .. } | Ask::StopDiagrams(_) => {
+            teller.send(Tell::Notice {
+                text: "Not connected to clusiad — not sent".into(),
+                warning: true,
+            });
+        }
+        // The modal waits for its code: tell it there is none.
+        Ask::ReadDiagramCode {
+            pr,
+            number,
+            key,
+            node,
+        } => teller.send(Tell::Diagrams(DiagramsTell::Code {
+            pr: pr.clone(),
+            number: *number,
+            key: key.clone(),
+            node: node.clone(),
+            code: DiagramCode {
+                path: String::new(),
+                commit: String::new(),
+                start_line: 0,
+                lines: Vec::new(),
+                unavailable: Some("Not connected to clusiad.".into()),
+            },
+        })),
+        Ask::AddDiagramComment { pr, ticket, .. } => teller.send(Tell::Refused {
+            pr: pr.clone(),
+            ticket: *ticket,
+            message: NOT_CONNECTED.into(),
+        }),
         // The row waits for its decision: free it, and say why nothing happened.
         Ask::DecideProposal { pr, item, .. } => {
             teller.send(Tell::Notice {
@@ -1019,6 +1173,8 @@ async fn follow(
                 teller.send(Tell::Permission(tell));
             } else if let Some(tell) = ChecksTell::from_event(other) {
                 teller.send(Tell::Checks(tell));
+            } else if let Some(tell) = DiagramsTell::from_event(other) {
+                teller.send(Tell::Diagrams(tell));
             } else if let Some(tell) = RevalidationTell::from_event(other) {
                 teller.send(Tell::Revalidation(tell));
             }
@@ -1404,6 +1560,50 @@ async fn answer(
             notify(client, teller, Command::StopCheck { pr, kind }, "").await?;
         }
         Ask::GetChecks(pr) => send_checks(client, teller, pr).await?,
+        Ask::DrawDiagrams(pr) => notify(client, teller, Command::DrawDiagrams { pr }, "").await?,
+        Ask::DrawDiagram { pr, key } => {
+            notify(client, teller, Command::DrawDiagram { pr, key }, "").await?;
+        }
+        Ask::StopDiagrams(pr) => notify(client, teller, Command::StopDiagrams { pr }, "").await?,
+        Ask::GetDiagrams(pr) => send_diagrams(client, teller, pr).await?,
+        Ask::GetDiagramVersion { pr, number } => {
+            let tell = match request(
+                client,
+                Command::GetDiagramVersion {
+                    pr: pr.clone(),
+                    number,
+                },
+            )
+            .await?
+            {
+                Some(Reply::DiagramVersion(version)) => DiagramsTell::Version { pr, version },
+                _ => DiagramsTell::Unreadable { pr, number },
+            };
+            teller.send(Tell::Diagrams(tell));
+        }
+        Ask::ReadDiagramCode {
+            pr,
+            number,
+            key,
+            node,
+        } => send_diagram_code(client, teller, pr, number, key, node).await?,
+        Ask::AddDiagramComment {
+            pr,
+            number,
+            key,
+            node,
+            body,
+            ticket,
+        } => {
+            let cmd = Command::AddDiagramComment {
+                pr: pr.clone(),
+                number,
+                key,
+                node,
+                body,
+            };
+            draft_write(client, teller, cmd, pr, ticket).await?;
+        }
         Ask::Revalidate(pr) => notify(client, teller, Command::Revalidate { pr }, "").await?,
         Ask::StopRevalidation(pr) => {
             notify(client, teller, Command::StopRevalidation { pr }, "").await?;
@@ -1619,6 +1819,68 @@ async fn send_checks(client: &mut Client, teller: &Teller, pr: PrRef) -> Result<
             dismissed,
         }));
     }
+    Ok(())
+}
+
+/// `GetDiagrams` → `DiagramsTell::Loaded` (a refusal is only logged).
+async fn send_diagrams(client: &mut Client, teller: &Teller, pr: PrRef) -> Result<(), String> {
+    if let Some(Reply::Diagrams {
+        versions,
+        latest,
+        state,
+        head,
+        stale,
+        stale_reason,
+    }) = request(client, Command::GetDiagrams { pr: pr.clone() }).await?
+    {
+        teller.send(Tell::Diagrams(DiagramsTell::Loaded {
+            pr,
+            versions,
+            latest,
+            state,
+            head,
+            stale,
+            stale_reason,
+        }));
+    }
+    Ok(())
+}
+
+/// `ReadDiagramCode` → `DiagramsTell::Code`. A refusal is told as code that is not available,
+/// so the modal that waits for it says so.
+async fn send_diagram_code(
+    client: &mut Client,
+    teller: &Teller,
+    pr: PrRef,
+    number: u32,
+    key: String,
+    node: String,
+) -> Result<(), String> {
+    let cmd = Command::ReadDiagramCode {
+        pr: pr.clone(),
+        number,
+        key: key.clone(),
+        node: node.clone(),
+    };
+    let code = match client.request(cmd).await {
+        Ok(Reply::DiagramCode(code)) => code,
+        Ok(_) => return Ok(()),
+        Err(ClientError::Server(e)) => DiagramCode {
+            path: String::new(),
+            commit: String::new(),
+            start_line: 0,
+            lines: Vec::new(),
+            unavailable: Some(e.message),
+        },
+        Err(e) => return Err(lost(e)),
+    };
+    teller.send(Tell::Diagrams(DiagramsTell::Code {
+        pr,
+        number,
+        key,
+        node,
+        code,
+    }));
     Ok(())
 }
 
@@ -2064,6 +2326,14 @@ fn connect(world: &mut World, paths: Paths, home: Option<PathBuf>, slot: &Bridge
     slot.put(link.thread);
 }
 
+/// What the daemon says about a review besides its draft, as one parameter of `pump`.
+#[derive(SystemParam)]
+pub(crate) struct ReviewModels<'w> {
+    checks: ResMut<'w, Checks>,
+    diagrams: ResMut<'w, Diagrams>,
+    revalidations: ResMut<'w, Revalidations>,
+}
+
 pub(crate) fn pump(
     inbox: Option<Res<Inbox>>,
     mut model: ResMut<Model>,
@@ -2077,12 +2347,16 @@ pub(crate) fn pump(
     mut gifs: MessageWriter<GifsArrived>,
     mut chats: ResMut<Chats>,
     mut permissions: ResMut<PermissionQueue>,
-    mut checks: ResMut<Checks>,
-    mut revalidations: ResMut<Revalidations>,
+    models: ReviewModels,
     clock: Res<Clock>,
     time: Res<Time>,
 ) {
     let Some(inbox) = inbox else { return };
+    let ReviewModels {
+        mut checks,
+        mut diagrams,
+        mut revalidations,
+    } = models;
     for tell in inbox.0.try_iter() {
         let mut events = Vec::new();
         let rest = review_state::apply(&mut tabs, &mut asks, tell, &mut events);
@@ -2139,6 +2413,11 @@ pub(crate) fn pump(
                 for model in checks.0.values_mut() {
                     model.asked = false;
                 }
+                for model in diagrams.0.values_mut() {
+                    model.asked = false;
+                    model.requested.clear();
+                    model.failed.clear();
+                }
                 // So are the rounds, and a decision in flight is never answered.
                 for model in revalidations.0.values_mut() {
                     model.asked = false;
@@ -2172,6 +2451,7 @@ pub(crate) fn pump(
                 checks.apply(&tell);
                 checks::reconcile_editors(&mut tabs, &checks, &mut toasts, time.elapsed_secs_f64());
             }
+            Tell::Diagrams(tell) => diagrams.apply(&tell),
             Tell::Revalidation(tell) => {
                 // A round that starts again shows its screen again, even after *Back to review*.
                 if let RevalidationTell::Round {
@@ -2223,6 +2503,7 @@ pub(crate) fn demo_answers(
     mut toasts: ResMut<Toasts>,
     tabs: Res<ReviewTabs>,
     revalidations: Res<Revalidations>,
+    diagrams: Option<Res<Diagrams>>,
     outbox: Res<Outbox>,
     queue: Res<PermissionQueue>,
     clock: Res<Clock>,
@@ -2362,6 +2643,51 @@ pub(crate) fn demo_answers(
             Ask::ReanchorDraftItem { pr, id, anchor } => {
                 tells.extend(demo_reanchor(&tabs, &pr, &id, anchor));
             }
+            Ask::GetDiagrams(pr) if pr == fixture::demo_pr() => {
+                tells.push(fixture::demo_diagrams_tell(&pr, now));
+            }
+            // Any other review has none: its tab offers to draw them instead of loading.
+            Ask::GetDiagrams(pr) => tells.push(Tell::Diagrams(DiagramsTell::Loaded {
+                pr,
+                versions: Vec::new(),
+                latest: None,
+                state: DiagramsState::Idle,
+                head: String::new(),
+                stale: false,
+                stale_reason: None,
+            })),
+            Ask::GetDiagramVersion { pr, number } => {
+                if let Some(version) = fixture::demo_diagrams(now, &pr)
+                    .into_iter()
+                    .find(|v| v.number == number)
+                {
+                    tells.push(Tell::Diagrams(DiagramsTell::Version {
+                        pr,
+                        version: Box::new(version),
+                    }));
+                }
+            }
+            // The demo draws at once: every version arrives whole.
+            Ask::DrawDiagrams(pr) if pr == fixture::demo_pr() => {
+                tells.push(fixture::demo_diagrams_tell(&pr, now));
+            }
+            Ask::DrawDiagram { pr, key } if pr == fixture::demo_pr() => {
+                let state = fixture::demo_diagrams(now, &pr)
+                    .pop()
+                    .and_then(|v| v.entry(&key).map(|e| (v.number, e.state.clone())));
+                if let Some((number, state)) = state {
+                    tells.push(Tell::Diagrams(DiagramsTell::Entry {
+                        pr,
+                        number,
+                        key,
+                        state,
+                    }));
+                }
+            }
+            Ask::StopDiagrams(pr) => tells.push(Tell::Diagrams(DiagramsTell::State {
+                pr,
+                state: DiagramsState::Idle,
+            })),
             Ask::Probe => tells.push(Tell::Probe(fixture::demo_probe())),
             Ask::AddItem {
                 pr,
@@ -2398,6 +2724,51 @@ pub(crate) fn demo_answers(
                     .update_body(&id, &body)
                     .map_err(|e| e.to_string())
             })),
+            Ask::ReadDiagramCode {
+                pr,
+                number,
+                key,
+                node,
+            } => {
+                let ready = tabs.0.get(&pr).and_then(|t| t.ready());
+                let model = diagrams.as_ref().and_then(|d| d.0.get(&pr));
+                let code = modal::demo_code_for(model, ready, number, &key, &node);
+                tells.push(Tell::Diagrams(DiagramsTell::Code {
+                    pr,
+                    number,
+                    key,
+                    node,
+                    code,
+                }));
+            }
+            Ask::AddDiagramComment {
+                pr,
+                number,
+                key,
+                node,
+                body,
+                ticket,
+            } => {
+                let anchor = diagrams
+                    .as_ref()
+                    .and_then(|d| d.0.get(&pr))
+                    .and_then(|m| m.loaded.get(&number))
+                    .and_then(|v| modal::node_anchor(v, &key, &node))
+                    .cloned();
+                let patch = anchor.as_ref().and_then(|a| {
+                    let ready = tabs.0.get(&pr)?.ready()?;
+                    ready
+                        .view
+                        .diff
+                        .iter()
+                        .find(|f| f.path == a.path)?
+                        .patch
+                        .clone()
+                });
+                tells.extend(demo_edit(&tabs, &pr, ticket, |review| {
+                    modal::diagram_comment(review, anchor.as_ref(), patch.as_deref(), &body, now)
+                }));
+            }
             Ask::RemoveItem { pr, id } => {
                 let review = tabs.0.get(&pr).and_then(|t| t.ready()).map(|r| {
                     let mut review = r.view.review.clone();
@@ -3111,6 +3482,81 @@ mod tests {
     }
 
     #[test]
+    fn demo_mode_reads_a_boxs_code_and_files_its_comment() {
+        use crate::review_state::{Phase, Ready, Tab, TabUi};
+        use crate::screens::review::diagrams::{Diagrams, DiagramsModel, modal};
+        let pr = fixture::demo_pr();
+        let (view, _) = fixture::demo_review(1_790_000_000);
+        let version =
+            modal::test_version(&view.review.head_sha, Some(("src/auth/refresh.rs", 38, 48)));
+        let mut model = DiagramsModel::default();
+        model.loaded.insert(2, version);
+        let mut diagrams = Diagrams::default();
+        diagrams.0.insert(pr.clone(), model);
+        let mut tabs = ReviewTabs::default();
+        tabs.0.insert(
+            pr.clone(),
+            Tab {
+                phase: Phase::Ready(Box::new(Ready {
+                    view,
+                    news: Vec::new(),
+                    cached_at: None,
+                })),
+                ui: TabUi::default(),
+            },
+        );
+        let (inbox, outbox) = local_link();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .insert_resource(Asks {
+                recorded: vec![
+                    Ask::ReadDiagramCode {
+                        pr: pr.clone(),
+                        number: 2,
+                        key: "flow".into(),
+                        node: "refresh".into(),
+                    },
+                    Ask::AddDiagramComment {
+                        pr: pr.clone(),
+                        number: 2,
+                        key: "flow".into(),
+                        node: "refresh".into(),
+                        body: "Can the lock end sooner?".into(),
+                        ticket: 4,
+                    },
+                ],
+                ..Asks::default()
+            })
+            .insert_resource(Model::default())
+            .insert_resource(Toasts::default())
+            .insert_resource(tabs)
+            .insert_resource(diagrams)
+            .init_resource::<Revalidations>()
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .insert_resource(PermissionQueue::default())
+            .insert_resource(outbox)
+            .add_systems(Update, demo_answers);
+        app.update();
+        let tells: Vec<Tell> = inbox.0.try_iter().collect();
+        assert_eq!(tells.len(), 3, "{tells:?}");
+        let Tell::Diagrams(DiagramsTell::Code { number, code, .. }) = &tells[0] else {
+            panic!("the code first: {:?}", tells[0])
+        };
+        assert_eq!(*number, 2);
+        assert_eq!(code.lines.len(), 11);
+        assert!(code.lines.iter().any(|l| l.number == 44 && l.changed));
+        let Tell::ReviewFile(review) = &tells[1] else {
+            panic!("the review next: {:?}", tells[1])
+        };
+        let item = review.draft.items.last().expect("an item");
+        assert_eq!(item.origin, Origin::Diagram);
+        assert_eq!(item.kind, DraftKind::LineComment);
+        assert_eq!(item.body, "Can the lock end sooner?");
+        assert_eq!(tells[2], Tell::Saved { pr, ticket: 4 });
+    }
+
+    #[test]
     fn demo_mode_replays_the_agent_log_and_the_probe() {
         let pr = fixture::demo_pr();
         let tells = demo_agent_tells(vec![Ask::AgentLog { pr: pr.clone() }, Ask::Probe]);
@@ -3601,6 +4047,7 @@ mod tests {
                 .insert_resource(ReviewTabs::default())
                 .init_resource::<Chats>()
                 .init_resource::<Checks>()
+                .init_resource::<Diagrams>()
                 .init_resource::<Revalidations>()
                 .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
@@ -3950,6 +4397,200 @@ mod tests {
             rx.try_iter().next().is_none(),
             "a read is not worth a toast"
         );
+    }
+
+    #[test]
+    fn diagram_events_become_diagrams_tells() {
+        let pr = fixture::demo_pr();
+        let versions = fixture::demo_diagrams(1_790_000_000, &pr);
+        let planned = versions[1].clone();
+        let cases = [
+            (
+                Event::DiagramsChanged {
+                    pr: pr.clone(),
+                    state: DiagramsState::Planning,
+                },
+                DiagramsTell::State {
+                    pr: pr.clone(),
+                    state: DiagramsState::Planning,
+                },
+            ),
+            (
+                Event::DiagramsPlanned {
+                    pr: pr.clone(),
+                    version: Box::new(planned.clone()),
+                },
+                DiagramsTell::Planned {
+                    pr: pr.clone(),
+                    version: Box::new(planned),
+                },
+            ),
+            (
+                Event::DiagramEntryChanged {
+                    pr: pr.clone(),
+                    number: 2,
+                    key: "flow".into(),
+                    state: EntryState::Drawing,
+                },
+                DiagramsTell::Entry {
+                    pr: pr.clone(),
+                    number: 2,
+                    key: "flow".into(),
+                    state: EntryState::Drawing,
+                },
+            ),
+        ];
+        for (event, want) in cases {
+            assert_eq!(DiagramsTell::from_event(&event), Some(want));
+        }
+        assert_eq!(DiagramsTell::from_event(&Event::Stopping), None);
+    }
+
+    #[test]
+    fn offline_diagram_asks_are_answered_not_dropped() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let pr = fixture::demo_pr();
+        assert!(offline(&Ask::GetDiagrams(pr.clone()), &teller));
+        assert!(offline(
+            &Ask::GetDiagramVersion {
+                pr: pr.clone(),
+                number: 1
+            },
+            &teller
+        ));
+        assert!(
+            rx.try_iter().next().is_none(),
+            "a read is not worth a toast"
+        );
+        assert!(offline(&Ask::DrawDiagrams(pr.clone()), &teller));
+        assert!(offline(&Ask::StopDiagrams(pr.clone()), &teller));
+        assert!(offline(
+            &Ask::DrawDiagram {
+                pr: pr.clone(),
+                key: "flow".into()
+            },
+            &teller
+        ));
+        assert_eq!(
+            rx.try_iter()
+                .filter(|t| matches!(t, Tell::Notice { warning: true, .. }))
+                .count(),
+            3
+        );
+        assert!(offline(
+            &Ask::AddDiagramComment {
+                pr: pr.clone(),
+                number: 2,
+                key: "flow".into(),
+                node: "refresh".into(),
+                body: "Why?".into(),
+                ticket: 4
+            },
+            &teller
+        ));
+        assert!(offline(
+            &Ask::ReadDiagramCode {
+                pr: pr.clone(),
+                number: 2,
+                key: "flow".into(),
+                node: "refresh".into()
+            },
+            &teller
+        ));
+        let told: Vec<Tell> = rx.try_iter().collect();
+        assert!(
+            told.iter()
+                .any(|t| matches!(t, Tell::Refused { ticket: 4, .. }))
+        );
+        assert!(told.iter().any(|t| matches!(
+            t,
+            Tell::Diagrams(DiagramsTell::Code { code, .. }) if code.unavailable.is_some()
+        )));
+    }
+
+    #[test]
+    fn the_demo_answers_the_diagram_asks() {
+        let pr = fixture::demo_pr();
+        let tells = demo_tells(vec![Ask::GetDiagrams(pr.clone())]);
+        let [
+            Tell::Diagrams(DiagramsTell::Loaded {
+                versions,
+                latest,
+                state,
+                ..
+            }),
+        ] = tells.as_slice()
+        else {
+            panic!("loaded: {tells:?}");
+        };
+        assert_eq!(
+            versions.iter().map(|v| v.number).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(latest.as_ref().map(|v| v.number), Some(2));
+        assert_eq!(*state, DiagramsState::Idle);
+        assert!(matches!(
+            demo_tells(vec![Ask::GetDiagrams("acme/widgets#9".parse().unwrap())]).as_slice(),
+            [Tell::Diagrams(DiagramsTell::Loaded { versions, .. })] if versions.is_empty()
+        ));
+        assert!(matches!(
+            demo_tells(vec![Ask::GetDiagramVersion { pr: pr.clone(), number: 1 }]).as_slice(),
+            [Tell::Diagrams(DiagramsTell::Version { version, .. })] if version.number == 1
+        ));
+        assert!(matches!(
+            demo_tells(vec![Ask::DrawDiagrams(pr.clone())]).as_slice(),
+            [Tell::Diagrams(DiagramsTell::Loaded { .. })]
+        ));
+        assert!(matches!(
+            demo_tells(vec![Ask::DrawDiagram { pr: pr.clone(), key: "er".into() }]).as_slice(),
+            [Tell::Diagrams(DiagramsTell::Entry { number: 2, key, state: EntryState::Ready { .. }, .. })]
+                if key == "er"
+        ));
+        assert!(matches!(
+            demo_tells(vec![Ask::StopDiagrams(pr.clone())]).as_slice(),
+            [Tell::Diagrams(DiagramsTell::State {
+                state: DiagramsState::Idle,
+                ..
+            })]
+        ));
+    }
+
+    #[test]
+    fn diagram_tells_reach_the_resource_through_pump() {
+        let pr = fixture::demo_pr();
+        let (inbox, outbox) = local_link();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<ReviewEvent>()
+            .add_message::<ShowRequested>()
+            .add_message::<AppExit>()
+            .add_message::<GifsArrived>()
+            .insert_resource(inbox)
+            .init_resource::<Asks>()
+            .init_resource::<Model>()
+            .init_resource::<Toasts>()
+            .init_resource::<ReviewTabs>()
+            .init_resource::<MediaCache>()
+            .init_resource::<Chats>()
+            .init_resource::<PermissionQueue>()
+            .init_resource::<Checks>()
+            .init_resource::<Diagrams>()
+            .init_resource::<Revalidations>()
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .add_systems(Update, pump);
+        let _ = outbox
+            .0
+            .send(fixture::demo_diagrams_tell(&pr, 1_790_000_000));
+        app.update();
+        let model = &app.world().resource::<Diagrams>().0[&pr];
+        assert!(model.received && model.latest_number() == Some(2));
+        let _ = outbox.0.send(Tell::Lost("gone".into()));
+        app.update();
+        assert!(!app.world().resource::<Diagrams>().0[&pr].asked);
     }
 
     #[test]

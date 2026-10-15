@@ -1,6 +1,7 @@
 mod agent;
 mod check;
 mod cli;
+mod diagrams;
 mod harness;
 mod harness_test;
 mod install;

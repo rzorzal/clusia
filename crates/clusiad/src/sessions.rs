@@ -391,7 +391,10 @@ impl Sessions {
     pub(crate) fn cancel(&self, shared: &Arc<Shared>, pr: &PrRef) {
         if self.stop_with(shared, pr, Why::User) {
             let (shared, pr) = (shared.clone(), pr.clone());
-            tokio::spawn(async move { crate::checks::on_summary_over(&shared, &pr).await });
+            tokio::spawn(async move {
+                crate::checks::on_summary_over(&shared, &pr).await;
+                crate::diagrams::on_summary_over(&shared, &pr).await;
+            });
         }
     }
 
@@ -1081,6 +1084,7 @@ async fn run_turn(shared: Arc<Shared>, pr: PrRef, turn: u64, prompt: Prompt, sto
     shared.sessions.summary_ended(&pr, turn);
     if is_summary && !matches!(end, TurnEnd::Stopped(Why::Ended | Why::Shutdown)) {
         crate::checks::on_summary_over(&shared, &pr).await;
+        crate::diagrams::on_summary_over(&shared, &pr).await;
     }
 }
 
@@ -1104,6 +1108,10 @@ pub(crate) fn close_unfinished(shared: &Shared) {
             let revalidation = entries.iter().any(
                 |entry| matches!(entry, AgentLogEntry::Revalidation { turn: t, .. } if *t == turn),
             );
+            let drawing = entries.iter().find_map(|entry| match entry {
+                AgentLogEntry::Diagrams { turn: t, key, .. } if *t == turn => Some(key.clone()),
+                _ => None,
+            });
             let entry = match check {
                 Some(kind) => AgentLogEntry::Check {
                     at: now_unix(),
@@ -1115,6 +1123,12 @@ pub(crate) fn close_unfinished(shared: &Shared) {
                     at: now_unix(),
                     turn,
                     state: "stopped".into(),
+                },
+                None if drawing.is_some() => AgentLogEntry::Diagrams {
+                    at: now_unix(),
+                    turn,
+                    state: "stopped".into(),
+                    key: drawing.flatten(),
                 },
                 None => AgentLogEntry::Error {
                     at: now_unix(),
@@ -2747,6 +2761,45 @@ mod tests {
         assert!(
             !log.iter().any(|e| matches!(e, AgentLogEntry::Error { .. })),
             "the chat never gets an error line for a check"
+        );
+        let count = log.len();
+        close_unfinished(&shared);
+        assert_eq!(agent_log::read(&path).len(), count, "closed only once");
+    }
+
+    #[tokio::test]
+    async fn a_drawing_turn_a_stopped_daemon_left_unfinished_ends_as_a_drawing() {
+        let home = tempfile::tempdir().unwrap();
+        let shared = shared_for(Paths::new(home.path()), Config::default());
+        let pr = pr(7);
+        let path = shared.paths.agent_log(&pr);
+        for (turn, key) in [(2, None), (3, Some("flow".to_string()))] {
+            agent_log::append(
+                &path,
+                &AgentLogEntry::Diagrams {
+                    at: 1,
+                    turn,
+                    state: "running".into(),
+                    key,
+                },
+            )
+            .unwrap();
+        }
+        close_unfinished(&shared);
+        let log = agent_log::read(&path);
+        let stopped: Vec<(u64, Option<String>)> = log
+            .iter()
+            .filter_map(|entry| match entry {
+                AgentLogEntry::Diagrams {
+                    turn, state, key, ..
+                } if state == "stopped" => Some((*turn, key.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stopped, [(2, None), (3, Some("flow".to_string()))]);
+        assert!(
+            !log.iter().any(|e| matches!(e, AgentLogEntry::Error { .. })),
+            "the chat never gets an error line for a drawing"
         );
         let count = log.len();
         close_unfinished(&shared);

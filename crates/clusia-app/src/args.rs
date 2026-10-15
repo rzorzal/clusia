@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use clusia_core::diagram::DiagramKind;
 use clusia_core::{PrRef, PrRefError};
 use clusia_protocol::WindowTarget;
 
@@ -46,6 +47,41 @@ pub enum Scene {
     AgentChatCustom,
     PermissionOther,
     FirstRunCustom,
+    Diagrams,
+    DiagramsDeps,
+    DiagramsSequence,
+    DiagramsEr,
+    DiagramsUsecase,
+    DiagramsDataflow,
+    DiagramsStates,
+    DiagramsClasses,
+    DiagramNode,
+    DiagramsDrawing,
+    DiagramsCompare,
+}
+
+impl Scene {
+    /// The kind of diagram a scene selects (the Diagrams tab shows the drawing of that kind).
+    pub fn diagram_kind(self) -> Option<DiagramKind> {
+        match self {
+            Scene::Diagrams | Scene::DiagramNode | Scene::DiagramsCompare => {
+                Some(DiagramKind::Flow)
+            }
+            Scene::DiagramsDeps => Some(DiagramKind::Graph),
+            Scene::DiagramsSequence => Some(DiagramKind::Sequence),
+            Scene::DiagramsEr => Some(DiagramKind::EntityRelationship),
+            Scene::DiagramsUsecase => Some(DiagramKind::UseCases),
+            Scene::DiagramsDataflow => Some(DiagramKind::DataFlow),
+            Scene::DiagramsStates => Some(DiagramKind::States),
+            Scene::DiagramsClasses => Some(DiagramKind::Classes),
+            _ => None,
+        }
+    }
+
+    /// The scenes of the Diagrams tab; each one hides the right panel, as the mockups have none.
+    pub fn is_diagram(self) -> bool {
+        self.diagram_kind().is_some() || self == Scene::DiagramsDrawing
+    }
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -213,6 +249,64 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn diagram_scenes_parse_and_know_their_kind() {
+        for (name, scene, kind) in [
+            ("diagrams", Scene::Diagrams, Some(DiagramKind::Flow)),
+            (
+                "diagrams-deps",
+                Scene::DiagramsDeps,
+                Some(DiagramKind::Graph),
+            ),
+            (
+                "diagrams-sequence",
+                Scene::DiagramsSequence,
+                Some(DiagramKind::Sequence),
+            ),
+            (
+                "diagrams-er",
+                Scene::DiagramsEr,
+                Some(DiagramKind::EntityRelationship),
+            ),
+            (
+                "diagrams-usecase",
+                Scene::DiagramsUsecase,
+                Some(DiagramKind::UseCases),
+            ),
+            (
+                "diagrams-dataflow",
+                Scene::DiagramsDataflow,
+                Some(DiagramKind::DataFlow),
+            ),
+            (
+                "diagrams-states",
+                Scene::DiagramsStates,
+                Some(DiagramKind::States),
+            ),
+            (
+                "diagrams-classes",
+                Scene::DiagramsClasses,
+                Some(DiagramKind::Classes),
+            ),
+            ("diagram-node", Scene::DiagramNode, Some(DiagramKind::Flow)),
+            ("diagrams-drawing", Scene::DiagramsDrawing, None),
+            (
+                "diagrams-compare",
+                Scene::DiagramsCompare,
+                Some(DiagramKind::Flow),
+            ),
+        ] {
+            assert_eq!(
+                parse(&["--demo", "--scene", name]).unwrap().scene,
+                Some(scene),
+                "{name}"
+            );
+            assert_eq!(scene.diagram_kind(), kind, "{name}");
+            assert!(scene.is_diagram(), "{name}");
+        }
+        assert!(!Scene::Diff.is_diagram() && !Scene::Audits.is_diagram());
     }
 
     #[test]

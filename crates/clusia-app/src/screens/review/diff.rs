@@ -27,7 +27,7 @@ use clusia_view::diff::{
 use crate::bridge::{Ask, Asks, Model, Toasts, set_config};
 use crate::fonts::UiFonts;
 use crate::review_state::{
-    DiffMode, EditTarget, Editor, Phase, Ready, ReviewSection, ReviewTabs, SHOW_STEP, TabUi,
+    DiffMode, EditTarget, Editor, Phase, Ready, ReviewSection, ReviewTabs, SHOW_STEP, Tab, TabUi,
 };
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
@@ -154,6 +154,10 @@ pub struct DiffView {
     pub more: usize,
     /// The editor's refusal, re-rendered under the editor.
     pub editor_error: Option<String>,
+    /// The index (among the listed lines) of the line `TabUi::focus_line` asks for.
+    pub focus_row: Option<usize>,
+    /// `TabUi::focus_seq`: a new request scrolls even to the row that was shown.
+    pub focus_seq: u32,
 }
 
 /// One file's rows highlighted per side, indexed by row.
@@ -216,8 +220,76 @@ fn short(sha: &str) -> &str {
 
 /// Rows under the line editor's range: side and first/last line.
 fn selection(ui: &TabUi, path: &str) -> Option<(Side, u32, u32)> {
-    let (p, side, start, line) = ui.editor.as_ref()?.target.line_place()?;
-    (p == path).then(|| (side, start.unwrap_or(line), line))
+    if let Some((p, side, start, line)) = ui.editor.as_ref().and_then(|e| e.target.line_place()) {
+        return (p == path).then(|| (side, start.unwrap_or(line), line));
+    }
+    let (side, line) = ui.focus_line?;
+    Some((side, line, line))
+}
+
+/// The index of the line `side`/`line` among the lines the view lists (`rows` in Unified, the
+/// paired lines in Split).
+fn display_index(rows: &[Row], mode: DiffMode, side: Side, line: u32) -> Option<usize> {
+    let row = row_of(rows, side, line)?;
+    match mode {
+        DiffMode::Unified => Some(row),
+        DiffMode::Split => split_rows(rows)
+            .iter()
+            .position(|p| p.left == Some(row) || p.right == Some(row)),
+    }
+}
+
+/// Whether `path` is a file of the diff with a patch to show.
+pub fn in_diff(ready: &Ready, path: &str) -> bool {
+    patch_of(ready, path).is_some_and(|p| !parse_patch(p).is_empty())
+}
+
+/// Shows `path` in Diff. With `lines` (first and last line of a range on the head side) the
+/// first of them that is in the patch is lit and scrolled to, and enough lines are shown to
+/// reach it. A file or range that is not in the diff leaves the file shown without a line.
+/// Returns `false`, changing nothing, when `path` is not in the diff.
+pub fn show_line(tab: &mut Tab, path: &str, lines: Option<(u32, u32)>) -> bool {
+    let Some(ready) = tab.ready() else {
+        return false;
+    };
+    let Some(patch) = patch_of(ready, path) else {
+        return false;
+    };
+    let rows = parse_patch(patch);
+    if rows.is_empty() {
+        return false;
+    }
+    let mode = tab.ui.mode;
+    // The range comes from an agent and may span billions of numbers: look at the patch's rows.
+    let found = lines.and_then(|(first, last)| {
+        let n = rows
+            .iter()
+            .filter_map(|r| line_on(r, Side::Right))
+            .filter(|n| (first..=last.max(first)).contains(n))
+            .min()?;
+        display_index(&rows, mode, Side::Right, n).map(|index| (n, index))
+    });
+    super::agent::suggestion::show_file(&mut tab.ui, path);
+    tab.ui.focus_line = found.map(|(n, _)| (Side::Right, n));
+    if found.is_some() {
+        tab.ui.focus_seq = tab.ui.focus_seq.wrapping_add(1);
+    }
+    if let Some((_, index)) = found {
+        tab.ui.shown = tab.ui.shown.max((index / SHOW_STEP + 1) * SHOW_STEP);
+    }
+    true
+}
+
+/// What a diff row costs in height at least (`line_node`'s `min_height`).
+const ROW_HEIGHT: f32 = 22.0;
+
+/// Lines of context kept above a line that is scrolled to.
+const FOCUS_CONTEXT: usize = 3;
+
+/// The scroll offset that brings the line at `index` into view with a few lines above it. A
+/// thread or draft comment above it makes rows taller, so the estimate lands short, never past.
+fn focus_scroll(index: usize) -> f32 {
+    index.saturating_sub(FOCUS_CONTEXT) as f32 * ROW_HEIGHT
 }
 
 fn is_selected(sel: Option<(Side, u32, u32)>, anchor: Option<(Side, u32)>) -> bool {
@@ -405,6 +477,8 @@ pub fn diff_view(
         body: DiffBody::Empty(NO_DIFF),
         more: 0,
         editor_error: ui.editor.as_ref().and_then(|e| e.error.clone()),
+        focus_row: None,
+        focus_seq: ui.focus_seq,
     };
     let Some(path) = selected else {
         out.body = DiffBody::Empty("This pull request changes no files");
@@ -424,6 +498,9 @@ pub fn diff_view(
         None => false,
     };
     let sel = selection(ui, &path);
+    out.focus_row = ui
+        .focus_line
+        .and_then(|(side, line)| display_index(&rows, ui.mode, side, line));
     let mut below = placements(ready, ui, &path, &rows);
     let lit = cache.get(&view.pr.head_sha, &path, &rows);
     let limit = ui.shown.max(SHOW_STEP);
@@ -610,6 +687,8 @@ struct BodyKey {
     error: Option<String>,
     /// The editor waits for the daemon (**Saving…**).
     saving: bool,
+    /// The line to scroll to.
+    focus: Option<(usize, u32)>,
     opts: RenderOpts,
 }
 
@@ -809,6 +888,7 @@ fn rebuild_diff(
             code_size: v.code_size,
             error: v.editor_error.clone(),
             saving: editor.as_ref().is_some_and(|e| e.ticket.is_some()),
+            focus: v.focus_row.map(|row| (row, v.focus_seq)),
             opts: opts.clone(),
         };
         if part.built.as_ref() == Some(&key) {
@@ -816,6 +896,11 @@ fn rebuild_diff(
         }
         if part.built.as_ref().map(|b| &b.path) != Some(&key.path) {
             scroll.0 = Vec2::ZERO; // another file starts at its top
+        }
+        if let Some((index, _)) = key.focus
+            && part.built.as_ref().map(|b| b.focus) != Some(key.focus)
+        {
+            scroll.0.y = focus_scroll(index);
         }
         let pr = part.pr.clone();
         let path = v.path.clone().unwrap_or_default();
@@ -1417,6 +1502,7 @@ fn on_file(activate: On<Activate>, buttons: Query<&FileButton>, mut tabs: ResMut
     if let Some(ui) = ui_of(&mut tabs, &b.pr) {
         ui.file = Some(b.path.clone());
         ui.shown = SHOW_STEP;
+        ui.focus_line = None;
     }
 }
 
@@ -2377,5 +2463,233 @@ mod tests {
         let copy = testing::find::<CopyMarkdown>(&mut app, |c| c.0 == body);
         testing::activate(&mut app, copy);
         assert_eq!(app.world().resource::<CopiedText>().0, [body]);
+    }
+
+    fn tab_of(ready: Ready) -> Tab {
+        Tab {
+            phase: Phase::Ready(Box::new(ready)),
+            ui: TabUi::default(),
+        }
+    }
+
+    fn big_file(ready: &mut Ready) {
+        let body: String = (1..=1200).map(|n| format!("+line {n}\n")).collect();
+        ready.view.diff.push(FileDiff {
+            path: "big.txt".into(),
+            previous_path: None,
+            status: "added".into(),
+            additions: 1200,
+            deletions: 0,
+            patch: Some(format!("@@ -0,0 +1,1200 @@\n{body}")),
+        });
+    }
+
+    #[test]
+    fn the_focus_line_is_lit_and_its_row_is_named() {
+        let r = ready();
+        let ui = TabUi {
+            focus_line: Some((Side::Right, 44)),
+            ..TabUi::default()
+        };
+        let v = view_of(&r, &ui);
+        let lit: Vec<u32> = unified(&v)
+            .iter()
+            .filter(|(l, _)| l.selected)
+            .filter_map(|(l, _)| l.new)
+            .collect();
+        assert_eq!(lit, [44]);
+        let at = unified(&v).iter().position(|(l, _)| l.new == Some(44));
+        assert!(at.is_some());
+        assert_eq!(v.focus_row, at);
+        let none = view_of(&r, &TabUi::default());
+        assert_eq!(none.focus_row, None);
+        assert!(unified(&none).iter().all(|(l, _)| !l.selected));
+    }
+
+    #[test]
+    fn the_focus_row_counts_split_lines_in_split() {
+        let r = ready();
+        let ui = TabUi {
+            mode: DiffMode::Split,
+            focus_line: Some((Side::Right, 44)),
+            ..TabUi::default()
+        };
+        let v = view_of(&r, &ui);
+        let DiffBody::Split { lines, .. } = &v.body else {
+            panic!("expected Split")
+        };
+        let at = lines
+            .iter()
+            .position(|l| l.right.as_ref().is_some_and(|c| c.number == Some(44)));
+        assert!(at.is_some());
+        assert_eq!(v.focus_row, at);
+    }
+
+    #[test]
+    fn an_open_editor_wins_over_the_focus_line() {
+        let r = ready();
+        let ui = TabUi {
+            focus_line: Some((Side::Right, 44)),
+            editor: Some(Editor {
+                target: EditTarget::Line {
+                    path: REFRESH.into(),
+                    side: Side::Right,
+                    start: None,
+                    line: 39,
+                },
+                text: String::new(),
+                error: None,
+                ticket: None,
+                mode: ComposerMode::Write,
+            }),
+            ..TabUi::default()
+        };
+        let lit: Vec<u32> = unified(&view_of(&r, &ui))
+            .iter()
+            .filter(|(l, _)| l.selected)
+            .filter_map(|(l, _)| l.new)
+            .collect();
+        assert_eq!(lit, [39]);
+    }
+
+    #[test]
+    fn show_line_lights_the_first_line_of_the_range_that_is_in_the_diff() {
+        let mut tab = tab_of(ready());
+        assert!(show_line(&mut tab, REFRESH, Some((30, 44))));
+        assert_eq!(tab.ui.section, ReviewSection::Diff);
+        assert_eq!(tab.ui.file.as_deref(), Some(REFRESH));
+        assert_eq!(tab.ui.focus_line, Some((Side::Right, 38)));
+    }
+
+    #[test]
+    fn show_line_on_a_huge_range_looks_at_the_rows_not_at_every_number() {
+        let mut tab = tab_of(ready());
+        tab.ui.mode = DiffMode::Split;
+        let started = std::time::Instant::now();
+        assert!(show_line(&mut tab, REFRESH, Some((1, 4_000_000_000))));
+        assert_eq!(tab.ui.focus_line, Some((Side::Right, 38)));
+        assert!(show_line(&mut tab, REFRESH, Some((5_000, u32::MAX))));
+        assert_eq!(tab.ui.focus_line, None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn show_line_without_lines_or_with_lines_outside_the_diff_shows_the_file_only() {
+        let mut tab = tab_of(ready());
+        tab.ui.focus_line = Some((Side::Right, 44));
+        assert!(show_line(&mut tab, REFRESH, None));
+        assert_eq!(tab.ui.file.as_deref(), Some(REFRESH));
+        assert_eq!(tab.ui.focus_line, None);
+        assert!(show_line(&mut tab, REFRESH, Some((1, 5))));
+        assert_eq!(tab.ui.focus_line, None);
+    }
+
+    #[test]
+    fn show_line_leaves_the_tab_alone_when_the_file_is_not_in_the_diff() {
+        let mut tab = tab_of(ready());
+        let before = tab.ui.clone();
+        assert!(!show_line(&mut tab, "src/missing.rs", Some((1, 2))));
+        assert_eq!(tab.ui, before);
+        assert!(in_diff(tab.ready().unwrap(), REFRESH));
+        assert!(!in_diff(tab.ready().unwrap(), "src/missing.rs"));
+    }
+
+    #[test]
+    fn a_far_line_widens_the_window_of_shown_lines() {
+        let mut r = ready();
+        big_file(&mut r);
+        let mut tab = tab_of(r);
+        assert!(show_line(&mut tab, "big.txt", Some((1100, 1100))));
+        assert_eq!(tab.ui.focus_line, Some((Side::Right, 1100)));
+        assert_eq!(tab.ui.shown, 3 * SHOW_STEP);
+        let v = view_of(tab.ready().unwrap(), &tab.ui);
+        assert_eq!(v.focus_row, Some(1100));
+        assert!(v.more < 1201);
+    }
+
+    #[test]
+    fn the_scroll_keeps_a_few_lines_above_the_line() {
+        assert_eq!(focus_scroll(0), 0.0);
+        assert_eq!(focus_scroll(3), 0.0);
+        assert_eq!(focus_scroll(10), 7.0 * ROW_HEIGHT);
+    }
+
+    #[test]
+    fn choosing_another_file_clears_the_focus_and_the_same_file_keeps_it() {
+        let mut ui = TabUi {
+            file: Some(REFRESH.into()),
+            focus_line: Some((Side::Right, 44)),
+            ..TabUi::default()
+        };
+        crate::screens::review::agent::suggestion::show_file(&mut ui, REFRESH);
+        assert_eq!(ui.focus_line, Some((Side::Right, 44)));
+        crate::screens::review::agent::suggestion::show_file(&mut ui, "CHANGELOG.md");
+        assert_eq!(ui.focus_line, None);
+    }
+
+    fn body_scroll(app: &mut App) -> f32 {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&ScrollPosition, With<BodyPart>>();
+        q.iter(app.world()).map(|p| p.y).fold(0.0, f32::max)
+    }
+
+    fn reset_body_scroll(app: &mut App) {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut ScrollPosition, With<BodyPart>>();
+        for mut p in q.iter_mut(app.world_mut()) {
+            p.y = 0.0;
+        }
+    }
+
+    fn show_in(app: &mut App, pr: &PrRef, path: &str, lines: Option<(u32, u32)>) {
+        let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+        let tab = tabs.0.get_mut(pr).expect("a tab");
+        assert!(show_line(tab, path, lines));
+        testing::settle(app);
+    }
+
+    #[test]
+    fn asking_for_the_same_line_again_scrolls_to_it_again() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        show_in(&mut app, &pr, REFRESH, Some((44, 44)));
+        assert!(body_scroll(&mut app) > 0.0, "the first request scrolls");
+        reset_body_scroll(&mut app);
+        show_in(&mut app, &pr, REFRESH, Some((44, 44)));
+        assert!(body_scroll(&mut app) > 0.0, "a repeat scrolls again");
+    }
+
+    #[test]
+    fn the_same_row_of_another_file_scrolls_too() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).expect("a tab").phase else {
+                panic!("ready")
+            };
+            let mut twin = ready
+                .view
+                .diff
+                .iter()
+                .find(|f| f.path == REFRESH)
+                .expect("the demo file")
+                .clone();
+            twin.path = "src/auth/refresh_copy.rs".into();
+            ready.view.diff.push(twin);
+        }
+        show_in(&mut app, &pr, REFRESH, Some((44, 44)));
+        assert!(body_scroll(&mut app) > 0.0);
+        show_in(&mut app, &pr, "src/auth/refresh_copy.rs", Some((44, 44)));
+        assert!(
+            body_scroll(&mut app) > 0.0,
+            "another file starts at its top, then scrolls to the line"
+        );
     }
 }

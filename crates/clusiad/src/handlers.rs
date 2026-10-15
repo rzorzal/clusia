@@ -187,6 +187,24 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::RunCheck { pr, kind } => checks::run(shared, &pr, kind).await,
         Command::StopCheck { pr, kind } => checks::stop(shared, &pr, kind),
         Command::GetChecks { pr } => checks::get(shared, &pr),
+        Command::DrawDiagrams { pr } => crate::diagrams::run(shared, &pr).await,
+        Command::DrawDiagram { pr, key } => crate::diagrams::run_one(shared, &pr, &key).await,
+        Command::StopDiagrams { pr } => crate::diagrams::stop(shared, &pr),
+        Command::GetDiagrams { pr } => crate::diagrams::get(shared, &pr),
+        Command::GetDiagramVersion { pr, number } => crate::diagrams::version(shared, &pr, number),
+        Command::ReadDiagramCode {
+            pr,
+            number,
+            key,
+            node,
+        } => crate::diagram_code::read(shared, &pr, number, &key, &node).await,
+        Command::AddDiagramComment {
+            pr,
+            number,
+            key,
+            node,
+            body,
+        } => crate::diagrams::add_comment(shared, client, &pr, number, &key, &node, &body).await,
         Command::AcceptFinding { pr, id, body } => {
             checks::accept(shared, client, &pr, &id, body).await
         }

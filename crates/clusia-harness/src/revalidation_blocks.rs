@@ -1,13 +1,15 @@
 //! Finds the verdicts in the answer of a revalidation run.
 
 use clusia_core::printable::printable_lines;
-use clusia_core::revalidation::{MAX_BLOCKS, REASON_MAX, TEXT_MAX, Verdict};
+use clusia_core::revalidation::{DiagramsStale, MAX_BLOCKS, REASON_MAX, TEXT_MAX, Verdict};
 use clusia_core::{Anchor, Side};
 use serde_json::Value;
 
 use crate::check_blocks::{FILE_MAX, optional, plain_relative, text};
 
-const FENCE: &str = "```";
+#[cfg(test)]
+use crate::fenced::FENCE;
+use crate::fenced::fenced_blocks;
 const INFO: &str = "clusia-revalidation";
 
 /// What the agent said about one comment. A moved anchor has no `commit` yet: only the daemon
@@ -30,38 +32,47 @@ pub struct RawVerdict {
 /// escapes; the length caps apply to what the agent wrote, before those escapes, so a stored
 /// `text` or `reason` can run past them.
 pub fn extract_revalidation_blocks(text: &str, asked: &[String]) -> (String, Vec<RawVerdict>, u32) {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut kept: Vec<&str> = Vec::new();
+    let (kept, blocks) = fenced_blocks(text, &[INFO]);
     let mut verdicts: Vec<RawVerdict> = Vec::new();
-    let (mut blocks, mut unreadable) = (0usize, 0u32);
-    let mut i = 0;
-    while i < lines.len() {
-        if lines[i].trim() == format!("{FENCE}{INFO}")
-            && let Some(close) = lines[i + 1..].iter().position(|l| l.trim() == FENCE)
-        {
-            let json = lines[i + 1..i + 1 + close].join("\n");
-            blocks += 1;
-            match parse(&json, asked) {
-                Some(_) if blocks > MAX_BLOCKS => unreadable += 1,
-                Some(v) => {
-                    verdicts.retain(|old| old.item != v.item);
-                    verdicts.push(v);
-                }
-                None => unreadable += 1,
+    let mut unreadable = 0u32;
+    for (n, (_, json)) in blocks.iter().enumerate() {
+        match parse(json, asked) {
+            Some(_) if n >= MAX_BLOCKS => unreadable += 1,
+            Some(v) => {
+                verdicts.retain(|old| old.item != v.item);
+                verdicts.push(v);
             }
-            i += close + 2;
-            // The blank line that set the block apart goes with it.
-            if lines.get(i).is_some_and(|l| l.trim().is_empty())
-                && kept.last().is_none_or(|l| l.trim().is_empty())
-            {
-                i += 1;
-            }
-            continue;
+            None => unreadable += 1,
         }
-        kept.push(lines[i]);
-        i += 1;
     }
-    (kept.join("\n").trim_end().to_string(), verdicts, unreadable)
+    (kept, verdicts, unreadable)
+}
+
+const STALE_INFO: &str = "clusia-diagrams-stale";
+/// How many `clusia-diagrams-stale` blocks are read, counted from the last; the last usable one
+/// wins.
+const STALE_BLOCKS: usize = 8;
+
+/// What the agent said about the diagrams: the last `clusia-diagrams-stale` block of the answer
+/// that holds `{"stale": bool}` and, optionally, a `reason` of at most `REASON_MAX` characters
+/// (shown with its invisible and control characters as escapes). `None` when there is no usable
+/// block.
+pub fn extract_diagrams_stale(text: &str) -> Option<DiagramsStale> {
+    let (_prose, blocks) = fenced_blocks(text, &[STALE_INFO]);
+    blocks
+        .iter()
+        .rev()
+        .take(STALE_BLOCKS)
+        .filter_map(|(_, json)| {
+            let value: Value = serde_json::from_str(json).ok()?;
+            let stale = value.get("stale")?.as_bool()?;
+            let reason = optional(&value, "reason", REASON_MAX)?.unwrap_or_default();
+            Some(DiagramsStale {
+                stale,
+                reason: printable_lines(&reason),
+            })
+        })
+        .next()
 }
 
 fn number(value: &Value, key: &str) -> Option<Option<u32>> {
@@ -141,6 +152,68 @@ mod tests {
 
     fn asked() -> Vec<String> {
         vec!["i1".into(), "i2".into(), "i3".into()]
+    }
+
+    fn stale_block(body: &str) -> String {
+        format!("{FENCE}{STALE_INFO}\n{body}\n{FENCE}")
+    }
+
+    #[test]
+    fn the_diagrams_stale_block_is_read_and_the_last_usable_one_wins() {
+        let answer = format!(
+            "Checked.\n\n{}\n\n{}\n\n{}\n\n{}",
+            stale_block(r#"{"stale": true, "reason": "first"}"#),
+            stale_block("not json"),
+            stale_block(r#"{"stale": "yes"}"#),
+            stale_block(r#"{"stale": false, "reason": "Only docs changed.\u001b[2J"}"#),
+        );
+        assert_eq!(
+            extract_diagrams_stale(&answer),
+            Some(DiagramsStale {
+                stale: false,
+                reason: "Only docs changed.\\u{1b}[2J".into()
+            })
+        );
+        assert_eq!(
+            extract_diagrams_stale(&stale_block(r#"{"stale": true}"#)),
+            Some(DiagramsStale {
+                stale: true,
+                reason: String::new()
+            })
+        );
+    }
+
+    #[test]
+    fn only_the_last_eight_diagrams_stale_blocks_are_read() {
+        let bad = stale_block("not json");
+        let good =
+            |reason: &str| stale_block(&format!(r#"{{"stale": true, "reason": "{reason}"}}"#));
+        let mut blocks = vec![good("first")];
+        blocks.extend(std::iter::repeat_n(bad.clone(), 8));
+        assert_eq!(extract_diagrams_stale(&blocks.join("\n\n")), None);
+        let mut blocks = vec![good("first")];
+        blocks.extend(std::iter::repeat_n(bad, 7));
+        blocks.push(good("last"));
+        assert_eq!(
+            extract_diagrams_stale(&blocks.join("\n\n")).map(|s| s.reason),
+            Some("last".to_string())
+        );
+    }
+
+    #[test]
+    fn a_diagrams_stale_block_that_cannot_be_used_says_nothing() {
+        assert_eq!(extract_diagrams_stale("No block."), None);
+        assert_eq!(extract_diagrams_stale(&stale_block("{}")), None);
+        let long = format!(r#"{{"stale": true, "reason": "{}"}}"#, "x".repeat(501));
+        assert_eq!(extract_diagrams_stale(&stale_block(&long)), None);
+        // Unclosed, or for another kind of block: not read.
+        assert_eq!(
+            extract_diagrams_stale("```clusia-diagrams-stale\n{\"stale\": true}"),
+            None
+        );
+        let (verdicts, unreadable) = read(&stale_block(r#"{"stale": true}"#));
+        assert!(verdicts.is_empty(), "it is not a verdict");
+        assert_eq!(unreadable, 0);
     }
 
     fn read(text: &str) -> (Vec<RawVerdict>, u32) {

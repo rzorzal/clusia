@@ -552,6 +552,8 @@ pub struct Harness {
     pub check_security: bool,
     /// Audit the change by area when a review opens.
     pub audit: bool,
+    /// Draw diagrams of the change when a review opens.
+    pub diagrams: bool,
     /// What the audit looks at: the six built-in areas and the user's own.
     pub audit_areas: Vec<AuditArea>,
     /// How long one security check or audit may run before it is stopped.
@@ -605,6 +607,7 @@ impl Default for Harness {
             permission_timeout_secs: Self::DEFAULT_PERMISSION_TIMEOUT_SECS,
             check_security: true,
             audit: true,
+            diagrams: false,
             audit_areas: default_areas(),
             check_timeout_secs: DEFAULT_CHECK_TIMEOUT_SECS,
             revalidate: true,
@@ -1436,6 +1439,16 @@ mod tests {
         assert_eq!(CHECK_TIMEOUT_RANGE, 60..=1800);
         assert_eq!(h.audit_areas, default_areas());
         assert_eq!(h.audit_areas.len(), 6);
+    }
+
+    #[test]
+    fn diagrams_are_off_by_default_and_a_config_without_the_key_gets_that() {
+        assert!(!Config::default().harness.diagrams);
+        let c: Config = serde_json::from_str(r#"{"harness":{"check_security":false}}"#).unwrap();
+        assert!(!c.harness.diagrams);
+        let on: Config = serde_json::from_str(r#"{"harness":{"diagrams":true}}"#).unwrap();
+        assert!(on.harness.diagrams);
+        assert_eq!(on.validate(), Ok(()));
     }
 
     #[test]

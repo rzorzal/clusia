@@ -1785,6 +1785,7 @@ dependencies = [
  "bevy",
  "clap",
  "clusia-core",
+ "clusia-diagram",
  "clusia-harness",
  "clusia-highlight",
  "clusia-platform",
@@ -1818,6 +1819,14 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "clusia-diagram"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "serde_json",
 ]
 
 [[package]]

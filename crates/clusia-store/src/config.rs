@@ -325,6 +325,19 @@ mod tests {
     }
 
     #[test]
+    fn the_diagrams_setting_round_trips_and_is_read_and_set_by_name() {
+        let (_d, p) = paths();
+        let c = Config::default();
+        assert_eq!(get_value(&c, "harness.diagrams").unwrap(), "false");
+        let c = set_value(&c, "harness.diagrams", "true").unwrap();
+        assert!(c.harness.diagrams);
+        save_config(&p, &c).unwrap();
+        let text = fs::read_to_string(p.config_file()).unwrap();
+        assert!(text.contains("diagrams = true"), "{text}");
+        assert_eq!(load_config(&p).unwrap(), Loaded::Read(c));
+    }
+
+    #[test]
     fn the_check_keys_are_read_and_set_by_name() {
         let c = Config::default();
         assert_eq!(get_value(&c, "harness.check_security").unwrap(), "true");

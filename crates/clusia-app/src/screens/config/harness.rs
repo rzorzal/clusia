@@ -97,12 +97,13 @@ pub struct HarnessView {
     pub form: Option<areas::AreaForm>,
 }
 
-/// What the three *When I open a review* checkboxes show.
+/// What the four *When I open a review* checkboxes show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenChecks {
     pub summarize: bool,
     pub security: bool,
     pub audit: bool,
+    pub diagrams: bool,
 }
 
 pub fn open_checks(h: &Harness) -> OpenChecks {
@@ -110,12 +111,13 @@ pub fn open_checks(h: &Harness) -> OpenChecks {
         summarize: h.on_open == OnOpen::Summarize,
         security: h.check_security,
         audit: h.audit,
+        diagrams: h.diagrams,
     }
 }
 
 /// The note under the checks.
 pub fn cost_note(name: &str) -> String {
-    format!("Each check is one {name} turn on your account.")
+    format!("Each check or diagram is one {name} turn on your account.")
 }
 
 /// The note under *Revalidate my draft*.
@@ -221,13 +223,14 @@ fn on_open_toggle(
         "harness.on_open" => "summarize".to_string(),
         "harness.check_security" => (!h.check_security).to_string(),
         "harness.audit" => (!h.audit).to_string(),
+        "harness.diagrams" => (!h.diagrams).to_string(),
         "harness.revalidate" => (!h.revalidate).to_string(),
         _ => return,
     };
     set_config(&mut asks, &mut model, key, value);
 }
 
-/// The three checkboxes of *When I open a review*, in a column. Config and the first run
+/// The four checkboxes of *When I open a review*, in a column. Config and the first run
 /// show the same ones.
 pub fn open_checkboxes(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &OpenChecks) {
     p.spawn(Node {
@@ -240,6 +243,7 @@ pub fn open_checkboxes(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &OpenCh
             ("Summarize it", "harness.on_open", v.summarize),
             ("Check security", "harness.check_security", v.security),
             ("Audit the change", "harness.audit", v.audit),
+            ("Draw diagrams", "harness.diagrams", v.diagrams),
         ];
         for (label, key, on) in choices {
             c.spawn(Node {
@@ -997,7 +1001,8 @@ mod tests {
             OpenChecks {
                 summarize: true,
                 security: true,
-                audit: true
+                audit: true,
+                diagrams: false
             }
         );
         assert_eq!(v.check_timeout, "600");
@@ -1008,6 +1013,7 @@ mod tests {
         snap.config.harness.on_open = OnOpen::Wait;
         snap.config.harness.check_security = false;
         snap.config.harness.audit = false;
+        snap.config.harness.diagrams = true;
         snap.config.harness.check_timeout_secs = 900;
         let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
         assert_eq!(
@@ -1015,7 +1021,8 @@ mod tests {
             OpenChecks {
                 summarize: false,
                 security: false,
-                audit: false
+                audit: false,
+                diagrams: true
             }
         );
         assert_eq!(v.check_timeout, "900");
@@ -1068,6 +1075,36 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn draw_diagrams_is_a_fourth_checkbox_that_starts_off() {
+        let mut app = harness_app();
+        assert!(crate::testing::shows(&mut app, "Draw diagrams"));
+        assert!(crate::testing::shows(
+            &mut app,
+            "Each check or diagram is one Claude Code turn on your account."
+        ));
+        let toggle = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.diagrams");
+        crate::testing::activate(&mut app, toggle);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.diagrams".into(),
+                value: "true".into()
+            }]
+        );
+        crate::testing::set_config_locally(&mut app, "harness.diagrams", "true");
+        crate::testing::settle(&mut app);
+        let toggle = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.diagrams");
+        crate::testing::activate(&mut app, toggle);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.diagrams".into(),
+                value: "false".into()
+            }]
+        );
     }
 
     #[test]
@@ -1209,7 +1246,7 @@ mod tests {
     fn the_notes_take_the_agent_name() {
         assert_eq!(
             cost_note("Codex"),
-            "Each check is one Codex turn on your account."
+            "Each check or diagram is one Codex turn on your account."
         );
         assert!(revalidate_note("Codex").starts_with("Codex reads each draft comment"));
         assert!(revalidate_note("Codex").contains("one Codex turn per round"));
@@ -1331,7 +1368,7 @@ mod tests {
         ));
         assert!(crate::testing::shows(
             &mut app,
-            "Each check is one Codex turn on your account."
+            "Each check or diagram is one Codex turn on your account."
         ));
         assert!(crate::testing::shows(
             &mut app,
@@ -1478,7 +1515,7 @@ mod tests {
             "Shown on the pages. Filled in by Test",
             SANDBOX_NOTICE,
             "How to write one",
-            "Each check is one Echo turn on your account.",
+            "Each check or diagram is one Echo turn on your account.",
             "Echo reads each draft comment",
             "Press Test to check that Clúsia can find Echo",
         ] {

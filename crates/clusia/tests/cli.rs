@@ -523,7 +523,8 @@ fn too_long_home_fails_before_running() {
 mod review_flow {
     use super::*;
     use clusia_harness::testkit::{
-        FakeClaude, Script, Turn, finding_block, pass_block, revalidation_block,
+        FakeClaude, Script, Turn, diagram_block, diagram_plan_block, finding_block, pass_block,
+        revalidation_block,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -1111,6 +1112,161 @@ mod review_flow {
                 .all(|c| c.argv.iter().any(|a| a == "--session-id")),
             "a review with no chat has no session to fork"
         );
+    }
+
+    /// A plan of two diagrams, the first with a control character in its title, then a good
+    /// drawing of the first and two answers that are no drawing for the second.
+    fn diagrams_script() -> Script {
+        Script::turns(vec![
+            Turn::answer_blocks(
+                "Two diagrams.",
+                &[diagram_plan_block(json!([
+                    {"key": "flow", "kind": "flow", "title": "Token\u{1b}[2K refresh", "purpose": "The path"},
+                    {"key": "graph", "kind": "graph", "title": "Modules", "purpose": "Who calls whom"}
+                ]))],
+            ),
+            Turn::answer_blocks(
+                "Drawn.",
+                &[diagram_block(json!({
+                    "key": "flow", "kind": "flow", "title": "Token refresh", "caption": "c",
+                    "nodes": [{"id": "a", "label": "refresh()", "shape": "box"}]
+                }))],
+            ),
+            Turn::answer("No block."),
+            Turn::answer("Still no block."),
+        ])
+    }
+
+    #[test]
+    fn diagrams_with_no_flag_says_there_are_none() {
+        let w = AgentWorld::new(Script::one(Turn::answer("unused")));
+        let o = w.run(&["diagrams", "acme/widgets#7"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert_eq!(
+            stdout(&o),
+            "No diagrams yet. Draw them with: clusia diagrams <pr> --draw"
+        );
+        let o = w.run(&["--json", "diagrams", "acme/widgets#7"]);
+        let printed: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+        assert_eq!(printed, json!({"version": null, "stale": false}));
+        assert!(FakeClaude::calls(&w.fake_dir()).is_empty());
+    }
+
+    #[test]
+    fn diagrams_draw_follows_the_run_lists_the_entries_and_fails_when_one_failed() {
+        let w = AgentWorld::new(diagrams_script());
+        let o = w.run(&["diagrams", "acme/widgets#7", "--draw"]);
+        assert_eq!(o.status.code(), Some(1), "an entry failed: {}", stderr(&o));
+        let out = stdout(&o);
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(
+            has_line(&out, "flow  Flow  Token\\u{1b}[2K refresh  ready"),
+            "{out}"
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("graph  Graph  Modules  failed")),
+            "{out}"
+        );
+        assert!(
+            out.contains("Version 1 · drawn by Claude Code from "),
+            "{out}"
+        );
+        let progress = stderr(&o);
+        assert!(progress.contains("planning the diagrams"), "{progress}");
+        assert!(progress.contains("drawing 1 of 2: Token"), "{progress}");
+        assert!(progress.contains("drawing 2 of 2: Modules"), "{progress}");
+        assert!(
+            progress.contains("1 diagram could not be drawn"),
+            "{progress}"
+        );
+        assert_eq!(
+            FakeClaude::calls(&w.fake_dir()).len(),
+            4,
+            "one repair for the second"
+        );
+
+        // The listing later says the same, and --json holds the specs.
+        let again = w.run(&["diagrams", "acme/widgets#7"]);
+        assert_eq!(again.status.code(), Some(1));
+        assert_eq!(stdout(&again), out);
+        let json = w.run(&["--json", "diagrams", "acme/widgets#7"]);
+        assert_eq!(json.status.code(), Some(1));
+        let printed: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+        assert_eq!(printed["stale"], json!(false));
+        assert_eq!(printed["version"]["number"], json!(1));
+        assert_eq!(
+            printed["version"]["entries"][0]["state"]["state"],
+            json!("ready")
+        );
+        assert_eq!(
+            printed["version"]["entries"][0]["state"]["spec"]["nodes"][0]["label"],
+            json!("refresh()")
+        );
+    }
+
+    #[test]
+    fn diagrams_draw_joins_a_run_that_already_exists_and_lists_when_it_ends() {
+        let w = AgentWorld::new(Script::one(Turn::hanging()));
+        let mut first = w.spawn(&["diagrams", "acme/widgets#7", "--draw"]);
+        let start = std::time::Instant::now();
+        while FakeClaude::calls(&w.fake_dir()).is_empty() {
+            assert!(
+                start.elapsed().as_secs() < 30,
+                "the fake claude never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut second = w.spawn(&["diagrams", "acme/widgets#7", "--draw"]);
+        let (said, heard) = std::sync::mpsc::channel();
+        let stderr = second.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+            {
+                let _ = said.send(line);
+            }
+        });
+        let joined = loop {
+            match heard.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(line) if line.contains("following that drawing") => break line,
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = second.kill();
+                    let _ = first.kill();
+                    panic!("the second command never joined the run: {e}");
+                }
+            }
+        };
+        assert_eq!(
+            joined,
+            "Diagrams are already being drawn; following that drawing."
+        );
+        // SAFETY: signals a child this test spawned and still owns.
+        assert_eq!(unsafe { libc::kill(first.id() as i32, libc::SIGINT) }, 0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = second.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = second.kill();
+                let _ = first.kill();
+                panic!("the command that joined the run never ended");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(status.success(), "{status:?}");
+        let mut listed = String::new();
+        std::io::Read::read_to_string(&mut second.stdout.take().unwrap(), &mut listed).unwrap();
+        assert_eq!(
+            listed.trim_end(),
+            stdout(&w.run(&["diagrams", "acme/widgets#7"])),
+            "it prints the listing the run ended with"
+        );
+        assert_eq!(first.wait().unwrap().code(), Some(130), "Ctrl-C exits 130");
     }
 
     /// The id a `review comment` or `review note` prints: `<id> added`.
