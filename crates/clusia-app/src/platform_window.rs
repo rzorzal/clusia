@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 
 use bevy::ecs::system::NonSendMarker;
 use bevy::prelude::*;
-use bevy::window::WindowFocused;
+use bevy::window::{PrimaryWindow, WindowFocused, WindowPosition};
 use objc2::{AnyThread, MainThreadMarker};
-use objc2_app_kit::{NSApplication, NSImage, NSWorkspace};
-use objc2_foundation::NSString;
+use objc2_app_kit::{NSApplication, NSImage, NSScreen, NSWorkspace};
+use objc2_foundation::{NSNumber, NSString};
+
+use crate::window_frame::{Display, Rect, Remembered};
 
 /// When present, requests to come to the front are counted here instead of made (tests).
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
@@ -97,14 +99,138 @@ fn follow_reduce_motion(
     }
 }
 
-/// Registers the icon and the Reduce Motion follower at startup.
+/// The connected displays, the primary one first. Empty off the main thread.
+pub fn displays() -> Vec<Display> {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return Vec::new();
+    };
+    let screens = NSScreen::screens(mtm);
+    // Cocoa measures from the bottom-left of the primary display; the frames here from its top-left.
+    let Some(primary) = screens.iter().next() else {
+        return Vec::new();
+    };
+    let desktop_height = primary.frame().size.height;
+    screens
+        .iter()
+        .map(|screen| {
+            let visible = screen.visibleFrame();
+            let frame = screen.frame();
+            let id = screen
+                .deviceDescription()
+                .objectForKey(&NSString::from_str("NSScreenNumber"))
+                .and_then(|n| n.downcast::<NSNumber>().ok())
+                .map(|n| n.unsignedIntValue().to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}x{}@{},{}",
+                        frame.size.width, frame.size.height, frame.origin.x, frame.origin.y
+                    )
+                });
+            Display {
+                id,
+                visible: Rect::new(
+                    visible.origin.x,
+                    desktop_height - (visible.origin.y + visible.size.height),
+                    visible.size.width,
+                    visible.size.height,
+                ),
+                scale: screen.backingScaleFactor(),
+            }
+        })
+        .collect()
+}
+
+/// Where the displays are read from.
+#[derive(Resource, Clone, Copy)]
+pub struct DisplaySource(pub fn() -> Vec<Display>);
+
+impl Default for DisplaySource {
+    fn default() -> Self {
+        Self(displays)
+    }
+}
+
+/// How long the window must hold still before its frame is written down.
+const FRAME_SETTLE_SECS: f32 = 0.5;
+
+/// Remembers where the user leaves the window. Without this resource (demos, screenshots,
+/// tests) nothing is written.
+#[derive(Resource)]
+pub struct FrameMemory {
+    file: std::path::PathBuf,
+    remembered: Remembered,
+    /// A frame not yet written, and the time it was first seen.
+    pending: Option<(Rect, f32)>,
+}
+
+impl FrameMemory {
+    pub fn new(file: std::path::PathBuf) -> Self {
+        Self {
+            remembered: Remembered::load(&file),
+            file,
+            pending: None,
+        }
+    }
+
+    /// The remembered frames this window starts from.
+    pub fn remembered(&self) -> &Remembered {
+        &self.remembered
+    }
+}
+
+/// The frame of a window at physical `position` with logical `size`, in points.
+pub fn frame_of(position: IVec2, size: Vec2, scale: f32) -> Rect {
+    let scale = f64::from(scale);
+    Rect::new(
+        f64::from(position.x) / scale,
+        f64::from(position.y) / scale,
+        f64::from(size.x),
+        f64::from(size.y),
+    )
+}
+
+/// Writes the window's frame down once it has stopped moving or resizing.
+fn remember_frame(
+    _main_thread: NonSendMarker,
+    time: Res<Time>,
+    source: Res<DisplaySource>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    memory: Option<ResMut<FrameMemory>>,
+) {
+    let (Some(mut memory), Ok(window)) = (memory, windows.single()) else {
+        return;
+    };
+    let now = time.elapsed_secs();
+    if let WindowPosition::At(at) = window.position {
+        let size = Vec2::new(window.resolution.width(), window.resolution.height());
+        let frame = frame_of(at, size, window.resolution.scale_factor());
+        if memory.pending.map(|(f, _)| f) != Some(frame) {
+            memory.pending = Some((frame, now));
+        }
+    }
+    let Some((frame, since)) = memory.pending else {
+        return;
+    };
+    if now - since < FRAME_SETTLE_SECS {
+        return;
+    }
+    memory.pending = None;
+    let connected = (source.0)();
+    memory.remembered.record(frame, &connected);
+    if let Err(e) = memory.remembered.save(&memory.file) {
+        tracing::warn!(file = %memory.file.display(), "cannot save the window frame: {e}");
+    }
+}
+
+/// Registers the icon, the Reduce Motion follower and the window frame memory.
 pub struct PlatformPlugin;
 
 impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ReduceMotionSource>()
+            .init_resource::<DisplaySource>()
             .add_systems(Startup, set_icon)
-            .add_systems(Update, follow_reduce_motion);
+            .add_systems(Update, (follow_reduce_motion, remember_frame));
     }
 }
 
@@ -185,5 +311,75 @@ mod tests {
     fn the_source_tree_icon_exists() {
         let exe = Path::new("/work/target/debug/clusia-app");
         assert!(icon_file(exe, |p| p.is_file()).is_some());
+    }
+
+    fn laptop() -> Vec<Display> {
+        vec![Display {
+            id: "laptop".into(),
+            visible: Rect::new(0.0, 25.0, 1512.0, 920.0),
+            scale: 2.0,
+        }]
+    }
+
+    fn frame_app(file: &Path, window: Window) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_millis(300),
+            ))
+            .insert_resource(DisplaySource(laptop))
+            .insert_resource(FrameMemory::new(file.to_path_buf()))
+            .add_systems(Update, remember_frame);
+        let e = app.world_mut().spawn((window, PrimaryWindow)).id();
+        (app, e)
+    }
+
+    fn window_at(x: i32, y: i32, w: u32, h: u32) -> Window {
+        Window {
+            position: WindowPosition::At(IVec2::new(x, y)),
+            resolution: (w, h).into(),
+            ..default()
+        }
+    }
+
+    #[test]
+    fn a_frame_is_in_points_from_a_physical_position() {
+        assert_eq!(
+            frame_of(IVec2::new(200, 100), Vec2::new(1280.0, 800.0), 2.0),
+            Rect::new(100.0, 50.0, 1280.0, 800.0)
+        );
+    }
+
+    #[test]
+    fn the_frame_is_written_once_the_window_holds_still() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("window.json");
+        let (mut app, window) = frame_app(&file, window_at(80, 100, 1400, 900));
+        app.update();
+        app.update();
+        assert!(!file.exists(), "still moving, nothing written");
+        app.world_mut().get_mut::<Window>(window).unwrap().position =
+            WindowPosition::At(IVec2::new(90, 30));
+        for _ in 0..4 {
+            app.update();
+        }
+        let saved = Remembered::load(&file);
+        assert_eq!(
+            saved.placement(&laptop()),
+            Some(Rect::new(90.0, 30.0, 1400.0, 900.0)),
+            "the last position, not the first"
+        );
+    }
+
+    #[test]
+    fn without_a_frame_memory_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("window.json");
+        let (mut app, _) = frame_app(&file, window_at(80, 100, 1400, 900));
+        app.world_mut().remove_resource::<FrameMemory>();
+        for _ in 0..6 {
+            app.update();
+        }
+        assert!(!file.exists());
     }
 }

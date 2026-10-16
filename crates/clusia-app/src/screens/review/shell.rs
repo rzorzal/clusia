@@ -36,8 +36,8 @@ use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Icon, IconBar, Stroke, Tone, Type, Variant, badge, button,
-    disabled_button, icon_button, panel, text,
+    Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, disabled_button,
+    icon_button, panel, text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown_line};
@@ -2293,7 +2293,11 @@ mod tests {
         let glyph = app.world().get::<Children>(remove).unwrap()[0];
         let strokes = app.world().get::<Children>(glyph).unwrap();
         assert_eq!(strokes.len(), 2, "drawn, not a glyph");
-        assert!(app.world().get::<IconBar>(strokes[0]).is_some());
+        assert!(
+            app.world()
+                .get::<crate::ui::kit::IconBar>(strokes[0])
+                .is_some()
+        );
         let place = testing::find::<DraftCardPlace>(&mut app, |_| true);
         let n = node(&app, place);
         assert_eq!(n.min_width, px(0), "the place may shrink below its text");
