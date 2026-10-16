@@ -10,7 +10,7 @@ use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::EditableText;
-use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
+use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::revalidation::{blocking_obsolete, pending};
 use clusia_core::{DraftKind, ItemStatus, PrRef, Verdict};
 use clusia_protocol::{ErrorCode, WindowTarget};
@@ -32,13 +32,15 @@ use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, card, disabled_button,
     panel, text,
 };
-use crate::ui::modal::{escape_pressed, modal_card, modal_root};
+use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FinalizeItem {
     pub id: String,
     /// "refresh.rs:44", "General note", "Reply to @mona · refresh.rs:41", "Resolve thread by @mona".
     pub label: String,
+    /// The full `path:line` of a cut label, for the hover title.
+    pub title: Option<String>,
     pub body: String,
     /// Resolves have no text.
     pub editable: bool,
@@ -98,11 +100,48 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// The width a place label gets, in characters: the label column holds this many at the largest
+/// text size.
+const PLACE_CHARS: usize = 17;
+
+/// The label column's width in pixels: `PLACE_CHARS` monospace characters at the largest text size.
+const PLACE_WIDTH: f32 = 160.0;
+
+/// The popup that names the whole path of a cut label while the pointer is on it.
+#[derive(Component)]
+struct PlaceTitle;
+
+fn show_place_titles(
+    labels: Query<(&Hovered, &Children), Changed<Hovered>>,
+    mut titles: Query<&mut Node, With<PlaceTitle>>,
+) {
+    for (hovered, children) in &labels {
+        for child in children {
+            if let Ok(mut node) = titles.get_mut(*child) {
+                node.display = if hovered.get() {
+                    Display::Flex
+                } else {
+                    Display::None
+                };
+            }
+        }
+    }
+}
+
 fn place(path: Option<&str>, line: Option<u32>) -> String {
     match (path, line) {
-        (Some(p), Some(l)) => format!("{}:{l}", file_name(p)),
-        (Some(p), None) => file_name(p).to_string(),
+        (Some(p), Some(l)) => fit_place(p, Some(l), PLACE_CHARS),
+        (Some(p), None) => fit_place(p, None, PLACE_CHARS),
         _ => String::new(),
+    }
+}
+
+/// The whole `path:line`, for the hover title of a cut label.
+fn full_place(path: Option<&str>, line: Option<u32>) -> Option<String> {
+    match (path, line) {
+        (Some(p), Some(l)) => Some(format!("{p}:{l}")),
+        (Some(p), None) => Some(p.to_string()),
+        _ => None,
     }
 }
 
@@ -116,6 +155,14 @@ pub fn finalize_view(ready: &Ready, form: &FinalizeForm) -> FinalizeView {
         .filter(|i| i.accepted)
         .map(|i| {
             let thread = i.thread.as_ref();
+            let title = match i.kind {
+                DraftKind::LineComment => i
+                    .anchor
+                    .as_ref()
+                    .and_then(|a| full_place(Some(&a.path), Some(a.line))),
+                DraftKind::Reply => thread.and_then(|t| full_place(t.path.as_deref(), t.line)),
+                _ => None,
+            };
             let label = match i.kind {
                 DraftKind::LineComment => i
                     .anchor
@@ -142,6 +189,7 @@ pub fn finalize_view(ready: &Ready, form: &FinalizeForm) -> FinalizeView {
             FinalizeItem {
                 id: i.id.clone(),
                 label,
+                title,
                 body: i.body.clone(),
                 editable: i.kind != DraftKind::Resolve,
                 obsolete: matches!(i.status, ItemStatus::Obsolete { .. })
@@ -223,6 +271,14 @@ pub fn finalize_view(ready: &Ready, form: &FinalizeForm) -> FinalizeView {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeModal(pub PrRef);
 
+/// The part of the dialog between the title block and the footer that scrolls.
+#[derive(Component)]
+pub struct FinalizeBody;
+
+/// The verdict-and-publish row at the dialog's foot; it never scrolls away.
+#[derive(Component)]
+pub struct FinalizeFooter;
+
 /// An item's text area; `index` is its position in the list.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeItemArea {
@@ -280,6 +336,7 @@ impl Plugin for FinalizePlugin {
                     rebuild_modal,
                     mirror_texts,
                     escape_closes,
+                    show_place_titles,
                 )
                     .chain()
                     .after(ReviewSystems),
@@ -380,12 +437,21 @@ fn card_content(
     edits: &FinalizeEdits,
     mode: &dyn Fn(&ComposerKey) -> ComposerMode,
 ) {
-    p.spawn(Node {
-        flex_direction: FlexDirection::Column,
-        row_gap: px(12),
-        padding: UiRect::axes(px(24), px(20)),
-        ..default()
-    })
+    p.spawn((
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(12),
+            padding: UiRect::axes(px(24), px(20)),
+            // The footer takes its height first; the body gives way and scrolls.
+            flex_shrink: 1.0,
+            min_height: px(0),
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+        ScrollArea,
+        ScrollPosition::default(),
+        FinalizeBody,
+    ))
     .with_children(|c| {
         c.spawn(Node {
             column_gap: px(10),
@@ -418,14 +484,40 @@ fn card_content(
                 }),
             ))
             .with_children(|row| {
-                row.spawn((
+                let mut label = row.spawn((
                     Node {
-                        width: px(112),
+                        width: px(PLACE_WIDTH),
                         flex_shrink: 0.0,
                         ..default()
                     },
+                    // Above the editor beside it, which the full path would otherwise sit under.
+                    ZIndex(1),
                     children![text(fonts, item.label.clone(), Type::MONO.ink(Swatch::Fg))],
                 ));
+                if let Some(title) = &item.title {
+                    label.insert(Hovered::default());
+                    label.with_children(|l| {
+                        l.spawn((
+                            PlaceTitle,
+                            panel(
+                                Node {
+                                    display: Display::None,
+                                    position_type: PositionType::Absolute,
+                                    top: percent(100),
+                                    left: px(0),
+                                    padding: UiRect::axes(px(8), px(4)),
+                                    border: px(1).all(),
+                                    border_radius: BorderRadius::all(px(4)),
+                                    ..default()
+                                },
+                                Swatch::Surface,
+                            ),
+                            BorderColor::default(),
+                            Stroke(Swatch::Line),
+                            children![text(fonts, title.clone(), Type::MONO.ink(Swatch::Fg))],
+                        ));
+                    });
+                }
                 if item.editable {
                     let value = edits
                         .0
@@ -547,6 +639,7 @@ fn card_content(
                 padding: UiRect::axes(px(24), px(14)),
                 column_gap: px(10),
                 align_items: AlignItems::Center,
+                flex_shrink: 0.0,
                 border: UiRect::top(px(1)),
                 ..default()
             },
@@ -554,6 +647,7 @@ fn card_content(
         ),
         BorderColor::default(),
         Stroke(Swatch::Line),
+        FinalizeFooter,
     ))
     .with_children(|f| {
         if v.cached {
@@ -869,8 +963,17 @@ fn on_discard(
     close_tab(pr, &mut tabs, &mut nav, &mut modes);
 }
 
-fn escape_closes(keys: Res<ButtonInput<KeyCode>>, nav: Res<Nav>, mut tabs: ResMut<ReviewTabs>) {
-    if !escape_pressed(&keys) {
+fn escape_closes(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut clicks: MessageReader<BackdropClicked>,
+    roots: Query<&ModalFor>,
+    nav: Res<Nav>,
+    mut tabs: ResMut<ReviewTabs>,
+) {
+    let outside = clicks
+        .read()
+        .any(|c| roots.get(c.0).is_ok_and(|m| m.modal == Modal::Finalize));
+    if !(escape_pressed(&keys) || outside) {
         return;
     }
     let crate::nav::Screen::Review(pr) = &nav.screen else {
@@ -963,6 +1066,19 @@ fn outcomes(
             }
         }
     }
+}
+
+/// `place` cut from the left to `max` characters so the line number stays: `…ures.service.ts:142`.
+pub fn fit_place(path: &str, line: Option<u32>, max: usize) -> String {
+    let name = file_name(path);
+    let suffix = line.map(|l| format!(":{l}")).unwrap_or_default();
+    if name.chars().count() + suffix.chars().count() <= max {
+        return format!("{name}{suffix}");
+    }
+    // The line number is the part that locates the comment, so it is never the part that goes.
+    let room = max.saturating_sub(suffix.chars().count() + 1);
+    let tail: Vec<char> = name.chars().rev().take(room).collect();
+    format!("…{}{suffix}", tail.into_iter().rev().collect::<String>())
 }
 
 #[cfg(test)]
@@ -1787,5 +1903,190 @@ mod tests {
         assert_eq!(testing::recorded(&mut app), [Ask::CloseReview(pr.clone())]);
         testing::settle(&mut app);
         assert!(!app.world().resource::<Nav>().reviews.contains(&pr));
+    }
+
+    #[test]
+    fn a_long_place_is_cut_from_the_left_and_keeps_its_line() {
+        let long = "src/app/fixtures/live-fixtures.service.ts";
+        let cut = fit_place(long, Some(142), 17);
+        assert!(cut.starts_with('…'), "{cut}");
+        assert!(cut.ends_with(".ts:142"), "{cut}");
+        assert_eq!(cut.chars().count(), 17);
+        assert_eq!(
+            fit_place("src/auth/refresh.rs", Some(44), 17),
+            "refresh.rs:44"
+        );
+        assert_eq!(fit_place("src/auth/refresh.rs", None, 17), "refresh.rs");
+        let no_line = fit_place(long, None, 17);
+        assert_eq!(no_line.chars().count(), 17);
+        assert!(no_line.ends_with("service.ts"), "{no_line}");
+        let huge_line = fit_place("a-long-name.ts", Some(1_234_567), 6);
+        assert!(
+            huge_line.ends_with(":1234567"),
+            "the line is never cut: {huge_line}"
+        );
+    }
+
+    #[test]
+    fn a_cut_place_has_the_full_path_as_its_hover_title() {
+        let mut r = ready();
+        let long = "src/app/fixtures/live-fixtures.service.ts";
+        r.view.review.draft.items[0].anchor.as_mut().unwrap().path = long.into();
+        r.view.review.draft.items[0].anchor.as_mut().unwrap().line = 142;
+        let v = finalize_view(&r, &FinalizeForm::default());
+        assert!(v.items[0].label.ends_with(":142"));
+        assert!(v.items[0].label.starts_with('…'));
+        assert_eq!(v.items[0].title.as_deref(), Some(&*format!("{long}:142")));
+        assert_eq!(v.items[1].title.as_deref(), Some("src/auth/store.rs:88"));
+        assert_eq!(v.items[1].label, "store.rs:88");
+    }
+
+    #[test]
+    fn a_click_outside_closes_finalize_and_nothing_else_does() {
+        let mut app = finalize_app(false);
+        let pr = fixture::demo_pr();
+        let backdrop = testing::find::<FinalizeModal>(&mut app, |_| true);
+        let inside = testing::find::<SaveButton>(&mut app, |_| true);
+        testing::click(&mut app, inside);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.modal,
+            Some(Modal::Finalize),
+            "a click inside the dialog keeps it"
+        );
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            tabs.0.get_mut(&pr).unwrap().ui.finalize.busy = true;
+        }
+        testing::click(&mut app, backdrop);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.modal,
+            Some(Modal::Finalize),
+            "a publish in flight keeps it, as Esc does"
+        );
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            tabs.0.get_mut(&pr).unwrap().ui.finalize.busy = false;
+        }
+        testing::click(&mut app, backdrop);
+        assert_eq!(testing::tab(&app, &pr).ui.modal, None);
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "the draft is untouched"
+        );
+    }
+
+    /// The demo review at `size` with Finalize open over `items` draft comments, the first of
+    /// them a long path with a fenced code block as long as `code_lines`.
+    fn crowded_finalize(size: UVec2, items: usize, code_lines: usize) -> App {
+        let mut app = testing::layout_app(fixture::demo(NOW), size);
+        let pr = testing::open_ready(&mut app, false);
+        with_fonts(&mut app);
+        let code: String = (1..=code_lines)
+            .map(|n| format!("let step_{n} = {n};\n"))
+            .collect();
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let tab = tabs.0.get_mut(&pr).unwrap();
+            if let Phase::Ready(r) = &mut tab.phase {
+                let draft = &mut r.view.review.draft;
+                draft
+                    .items
+                    .retain(|i| !matches!(i.status, ItemStatus::Obsolete { .. }));
+                let template = draft.items[0].clone();
+                draft.items.clear();
+                for n in 0..items {
+                    let mut item = template.clone();
+                    item.id = format!("c{n}");
+                    let anchor = item.anchor.as_mut().unwrap();
+                    anchor.line = 100 + n as u32;
+                    if n == 0 {
+                        anchor.path = "src/app/fixtures/live-fixtures.service.ts".into();
+                        item.body = format!("Why not this?\n\n```rust\n{code}```");
+                    }
+                    draft.items.push(item);
+                }
+            }
+            tab.ui.modal = Some(Modal::Finalize);
+            tab.ui.finalize.verdict = Some(Verdict::Comment);
+        }
+        testing::settle(&mut app);
+        testing::settle(&mut app);
+        app
+    }
+
+    fn bottom(app: &App, e: Entity) -> f32 {
+        let (_, y, _, h) = testing::frame(app, e);
+        y + h
+    }
+
+    #[test]
+    fn many_comments_scroll_in_the_body_and_the_footer_stays_in_view() {
+        for (size, large) in [
+            (UVec2::new(1280, 800), false),
+            (UVec2::new(1280, 800), true),
+            (UVec2::new(1000, 420), false),
+            (UVec2::new(1000, 420), true),
+        ] {
+            let mut app = crowded_finalize(size, 14, 20);
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+                testing::settle(&mut app);
+            }
+            let what = format!("{size} large={large}");
+            let height = size.y as f32;
+            let body = testing::find::<FinalizeBody>(&mut app, |_| true);
+            let footer = testing::find::<FinalizeFooter>(&mut app, |_| true);
+            let publish = testing::find::<PublishButton>(&mut app, |_| true);
+            assert!(
+                bottom(&app, footer) <= height,
+                "{what}: the footer is on screen"
+            );
+            assert!(
+                bottom(&app, publish) <= height,
+                "{what}: Publish is on screen"
+            );
+            let modal = testing::find::<FinalizeModal>(&mut app, |_| true);
+            let (_, top, _, _) = testing::frame(&app, modal);
+            assert!(top >= 0.0, "{what}: the dialog starts on screen");
+            let node = app.world().get::<Node>(body).unwrap();
+            assert_eq!(node.overflow, Overflow::scroll_y(), "{what}");
+            let laid = app.world().get::<bevy::ui::ComputedNode>(body).unwrap();
+            assert!(
+                laid.content_size.y > laid.size.y + 1.0,
+                "{what}: the content ({}) is taller than the body ({}) and scrolls",
+                laid.content_size.y,
+                laid.size.y
+            );
+        }
+    }
+
+    #[test]
+    fn a_comment_editor_grows_to_a_cap_then_scrolls_inside() {
+        let mut app = crowded_finalize(UVec2::new(1280, 800), 3, 40);
+        let areas = |app: &mut App| -> Vec<(String, f32)> {
+            let mut q = app
+                .world_mut()
+                .query::<(Entity, &crate::ui::composer::ComposerArea)>();
+            let found: Vec<(Entity, ComposerKey)> =
+                q.iter(app.world()).map(|(e, a)| (e, a.0.clone())).collect();
+            found
+                .into_iter()
+                .filter_map(|(e, key)| match key.1 {
+                    Slot::FinalizeItem(id) => Some((id, testing::frame(app, e).3)),
+                    _ => None,
+                })
+                .collect()
+        };
+        testing::settle(&mut app);
+        let heights = areas(&mut app);
+        let tall = heights.iter().find(|(id, _)| id == "c0").unwrap().1;
+        let short = heights.iter().find(|(id, _)| id == "c1").unwrap().1;
+        assert!(
+            tall > short,
+            "a longer text has a taller editor ({tall} vs {short})"
+        );
+        // 6 lines of 13 px text at the editor's line height, plus its padding and border: far
+        // less than the 46 lines of the text.
+        assert!(tall < 200.0, "the editor stops at its cap: {tall}");
     }
 }

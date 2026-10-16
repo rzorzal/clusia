@@ -27,7 +27,7 @@ use crate::ui::kit::{
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown_line};
-use crate::ui::modal::{escape_pressed, modal_card, modal_root};
+use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewsRow {
@@ -399,11 +399,15 @@ fn on_row(
 
 fn escape_closes(
     keys: Res<ButtonInput<KeyCode>>,
+    mut clicks: MessageReader<BackdropClicked>,
     open: Query<&ModalFor>,
     mut tabs: ResMut<ReviewTabs>,
     mut asks: ResMut<Asks>,
 ) {
-    if !escape_pressed(&keys) {
+    let outside = clicks
+        .read()
+        .any(|c| open.get(c.0).is_ok_and(|m| m.modal == Modal::WhatsNew));
+    if !(escape_pressed(&keys) || outside) {
         return;
     }
     let shown: Vec<PrRef> = open
@@ -620,6 +624,24 @@ mod tests {
         );
         testing::settle(&mut app);
         assert!(testing::recorded(&mut app).is_empty());
+    }
+
+    #[test]
+    fn a_click_outside_marks_it_seen_and_closes() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, true);
+        let _ = testing::recorded(&mut app);
+        let inside = testing::find::<GotIt>(&mut app, |_| true);
+        testing::click(&mut app, inside);
+        assert_eq!(
+            modal(&app, &pr),
+            Some(Modal::WhatsNew),
+            "inside is not outside"
+        );
+        let backdrop = testing::find::<ModalFor>(&mut app, |m| m.modal == Modal::WhatsNew);
+        testing::click(&mut app, backdrop);
+        assert_eq!(modal(&app, &pr), None);
+        assert_eq!(testing::recorded(&mut app), [Ask::MarkSeen(pr)]);
     }
 
     #[test]

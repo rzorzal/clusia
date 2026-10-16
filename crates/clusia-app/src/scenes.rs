@@ -510,6 +510,52 @@ pub fn stage(world: &mut World, scene: Scene) {
             ui.finalize.verdict = Some(Verdict::RequestChanges);
             ui.finalize.summary =
                 "Nice change overall. Two things on the token store before this goes in.".into();
+            // Enough comments to run past the window, one on a long path with a code block.
+            let template = ready
+                .view
+                .review
+                .draft
+                .items
+                .first()
+                .and_then(|i| i.anchor.clone());
+            if let Some(template) = template {
+                let notes = [
+                    (
+                        "src/app/fixtures/live-fixtures.service.ts",
+                        142,
+                        "Could this be a plain function?\n\n```ts\nexport function load(id: string) {\n  const cached = cache.get(id);\n  if (cached) {\n    return cached;\n  }\n  const fresh = fetchFixture(id);\n  cache.set(id, fresh);\n  return fresh;\n}\n```",
+                    ),
+                    ("src/auth/session.rs", 12, "Name the timeout as a constant."),
+                    (
+                        "src/auth/session.rs",
+                        57,
+                        "This clones the whole token; a reference is enough.",
+                    ),
+                    (
+                        "src/client/retry.rs",
+                        9,
+                        "Add jitter, or every client retries at the same second.",
+                    ),
+                    (
+                        "src/client/retry.rs",
+                        31,
+                        "A test for the last attempt would help.",
+                    ),
+                    ("docs/auth.md", 4, "Mention the 30 second window here too."),
+                ];
+                for (path, line, body) in notes {
+                    let mut anchor = template.clone();
+                    anchor.path = path.into();
+                    anchor.line = line;
+                    let _ = ready.view.review.draft.add(
+                        DraftKind::LineComment,
+                        Some(anchor),
+                        None,
+                        body,
+                        now,
+                    );
+                }
+            }
         }
         Scene::WhatsNew => ui.modal = Some(Modal::WhatsNew),
         Scene::Leave => ui.modal = Some(Modal::Leave),

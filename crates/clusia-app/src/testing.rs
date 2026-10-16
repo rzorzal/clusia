@@ -171,6 +171,34 @@ pub fn activate(app: &mut App, entity: Entity) {
     app.update();
 }
 
+/// A primary-button click on `entity` that bubbles as a real one does, and a frame.
+pub fn click(app: &mut App, entity: Entity) {
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::{Click, Pointer};
+    use bevy::picking::pointer::{Location, PointerButton, PointerId};
+
+    let location = Location {
+        target: NormalizedRenderTarget::None {
+            width: 1,
+            height: 1,
+        },
+        position: Vec2::ZERO,
+    };
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location,
+        Click {
+            button: PointerButton::Primary,
+            hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            duration: std::time::Duration::ZERO,
+            count: 1,
+        },
+        entity,
+    ));
+    app.update();
+}
+
 /// Changes the config as the daemon would and runs a frame.
 pub fn set_config_locally(app: &mut App, key: &str, value: &str) {
     let mut model = app.world_mut().resource_mut::<Model>();

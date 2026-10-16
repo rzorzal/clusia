@@ -7,10 +7,32 @@
 use bevy::input::ButtonInput;
 use bevy::input_focus::tab_navigation::TabGroup;
 use bevy::picking::Pickable;
+use bevy::picking::events::{Click, Pointer};
 use bevy::prelude::*;
+use bevy::ui_widgets::observe;
 
 use crate::theme::Swatch;
 use crate::ui::kit::{Fill, Stroke};
+
+/// A click landed on the dimmed layer itself, not on the card or anything in it. Each dialog
+/// that may be dismissed that way reads this next to its Esc key and applies the same rule.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackdropClicked(pub Entity);
+
+pub struct ModalPlugin;
+
+impl Plugin for ModalPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_message::<BackdropClicked>();
+    }
+}
+
+/// Clicks inside the card bubble up to the layer; only the ones that began on the layer count.
+fn on_backdrop_click(click: On<Pointer<Click>>, mut out: MessageWriter<BackdropClicked>) {
+    if click.original_event_target() == click.event_target() {
+        out.write(BackdropClicked(click.event_target()));
+    }
+}
 
 /// The full-window layer. Spawn the card (`modal_card`) as its child.
 pub fn modal_root() -> impl Bundle {
@@ -33,6 +55,7 @@ pub fn modal_root() -> impl Bundle {
             is_hoverable: true,
         },
         TabGroup::modal(),
+        observe(on_backdrop_click),
     )
 }
 
@@ -89,6 +112,27 @@ mod tests {
             app.world().get::<BackgroundColor>(root).unwrap().0,
             DARK.scrim
         );
+    }
+
+    #[test]
+    fn only_a_click_on_the_layer_itself_is_a_backdrop_click() {
+        let mut app = testing::app(Snapshot::default());
+        let root = app.world_mut().spawn(modal_root()).id();
+        let card = app
+            .world_mut()
+            .spawn((modal_card(560.0), ChildOf(root)))
+            .id();
+        let inner = app.world_mut().spawn((Node::default(), ChildOf(card))).id();
+        app.update();
+        let clicks = |app: &mut App| -> Vec<BackdropClicked> {
+            let mut messages = app.world_mut().resource_mut::<Messages<BackdropClicked>>();
+            messages.drain().collect()
+        };
+        testing::click(&mut app, inner);
+        testing::click(&mut app, card);
+        assert!(clicks(&mut app).is_empty(), "the card is not the backdrop");
+        testing::click(&mut app, root);
+        assert_eq!(clicks(&mut app), [BackdropClicked(root)]);
     }
 
     #[test]

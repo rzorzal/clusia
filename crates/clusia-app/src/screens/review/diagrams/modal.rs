@@ -34,7 +34,7 @@ use crate::theme::Swatch;
 use crate::ui::code::{CodeSpan, code_line, spans_for};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{Fill, Stroke, Type, Variant, button, disabled_button, panel, text};
-use crate::ui::modal::{escape_pressed, modal_card, modal_root};
+use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
 use crate::ui::text_area::text_area;
 
 /// Said in place of the code when a box is not tied to any.
@@ -841,8 +841,18 @@ fn close_when_done(modals: Query<&NodeModal>, mut tabs: ResMut<ReviewTabs>) {
     }
 }
 
-fn escape_closes(keys: Res<ButtonInput<KeyCode>>, nav: Res<Nav>, mut tabs: ResMut<ReviewTabs>) {
-    if !escape_pressed(&keys) {
+/// Esc and a click outside close it alike, unless the comment holds typed text or is being saved.
+fn escape_closes(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut clicks: MessageReader<BackdropClicked>,
+    roots: Query<&ModalFor>,
+    nav: Res<Nav>,
+    mut tabs: ResMut<ReviewTabs>,
+) {
+    let outside = clicks
+        .read()
+        .any(|c| roots.get(c.0).is_ok_and(|m| m.modal == Modal::DiagramNode));
+    if !(escape_pressed(&keys) || outside) {
         return;
     }
     let Screen::Review(pr) = &nav.screen else {
@@ -1467,6 +1477,41 @@ mod tests {
     }
 
     #[test]
+    fn a_click_outside_closes_the_dialog_and_drops_the_comment() {
+        let (mut app, pr) = app_with_box();
+        let inside = testing::find::<NodeCancel>(&mut app, |c| c.0 == pr);
+        testing::click(&mut app, inside);
+        assert_eq!(testing::tab(&app, &pr).ui.modal, Some(Modal::DiagramNode));
+        let backdrop = testing::find::<ModalFor>(&mut app, |m| m.modal == Modal::DiagramNode);
+        testing::click(&mut app, backdrop);
+        let tab = testing::tab(&app, &pr);
+        assert_eq!(
+            (tab.ui.modal, tab.ui.diagram_node, tab.ui.editor),
+            (None, None, None)
+        );
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<NodeModal>(&mut app), 0);
+    }
+
+    #[test]
+    fn a_click_outside_keeps_the_dialog_while_there_is_text_in_the_comment() {
+        let (mut app, pr) = app_with_box();
+        put_code(&mut app, &pr, "refresh", code_at(&head(), true));
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |a| a.0 == pr);
+        testing::type_into(&mut app, area, "Half a thought");
+        testing::settle(&mut app);
+        let backdrop = testing::find::<ModalFor>(&mut app, |m| m.modal == Modal::DiagramNode);
+        testing::click(&mut app, backdrop);
+        let tab = testing::tab(&app, &pr);
+        assert_eq!(tab.ui.modal, Some(Modal::DiagramNode));
+        assert_eq!(
+            tab.ui.editor.map(|e| e.text),
+            Some("Half a thought".to_string())
+        );
+    }
+
+    #[test]
     fn escape_keeps_the_dialog_while_there_is_text_in_the_comment() {
         let (mut app, pr) = app_with_box();
         put_code(&mut app, &pr, "refresh", code_at(&head(), true));
@@ -1684,6 +1729,7 @@ mod tests {
             .insert_resource(tabs)
             .insert_resource(keys)
             .init_resource::<TabsChanged>()
+            .add_message::<BackdropClicked>()
             .add_systems(
                 Update,
                 (
