@@ -2,7 +2,8 @@
 
 use clusia_core::{ActivitySummary, Config, PrSummary, ReviewState};
 use clusia_protocol::{
-    AuthInfo, Event, FirstRun, PermissionStatus, ReviewSummary, SyncState, SyncStatus, WindowTarget,
+    AuthInfo, Event, FirstRun, Harness, PermissionStatus, ReviewSummary, SyncState, SyncStatus,
+    WindowTarget,
 };
 
 /// What the window knows about the Giphy key. The daemon's status gives `Missing` or `Set`;
@@ -32,6 +33,9 @@ pub struct Snapshot {
     /// The first-run screen may still be on screen (the login was missing and **Continue** has
     /// not been pressed), so its status keeps being asked for.
     pub first_run_open: bool,
+    /// The agents the daemon found, asked for on connect and when a `harness.*` setting changes,
+    /// whether or not the first-run screen is open. `None` until the daemon has answered.
+    pub harnesses: Option<Vec<Harness>>,
     /// `assigned` and `mine` hold real lists, not the empty defaults before the first sync.
     pub lists_loaded: bool,
     pub daemon_version: String,
@@ -40,6 +44,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// The agents the daemon last reported: the scan fetched on connect and on `harness.*`
+    /// changes, or, until it arrives, the first-run answer.
+    pub fn scanned(&self) -> Option<&[Harness]> {
+        self.harnesses
+            .as_deref()
+            .or_else(|| self.first_run.as_ref().map(|f| f.harnesses.as_slice()))
+    }
+
     /// GitHub refused the token or there is none. Unknown (nothing fetched yet) is not signed out.
     pub fn signed_out(&self) -> bool {
         self.sync
@@ -69,6 +81,7 @@ pub struct Refresh {
     pub auth: bool,
     pub giphy: bool,
     pub first_run: bool,
+    pub harnesses: bool,
     pub status: bool,
 }
 
@@ -82,6 +95,7 @@ impl Refresh {
         auth: true,
         giphy: false,
         first_run: false,
+        harnesses: false,
         status: true,
     };
 
@@ -93,6 +107,7 @@ impl Refresh {
         self.auth |= other.auth;
         self.giphy |= other.giphy;
         self.first_run |= other.first_run;
+        self.harnesses |= other.harnesses;
         self.status |= other.status;
     }
 
@@ -104,6 +119,7 @@ impl Refresh {
             || self.auth
             || self.giphy
             || self.first_run
+            || self.harnesses
             || self.status
     }
 }
@@ -116,6 +132,7 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
             r.config = true;
             r.auth = key.starts_with("github.");
             r.first_run = r.auth || key == "repositories.roots";
+            r.harnesses = key.starts_with("harness.");
         }
         Event::GiphyKeyChanged => r.giphy = true,
         Event::PrsUpdated { .. } => r.lists = true,
@@ -270,6 +287,29 @@ mod tests {
         assert!(r.first_run && r.auth, "the login state changed");
         let (r, _) = apply(&mut s, Event::SyncChanged(sync(SyncState::Unauthorized)));
         assert!(!r.first_run, "the same state again asks nothing");
+    }
+
+    #[test]
+    fn a_harness_setting_scans_the_agents_again() {
+        let mut s = Snapshot::default();
+        for key in ["harness.program", "harness.kind"] {
+            let (r, _) = apply(
+                &mut s,
+                Event::ConfigChanged {
+                    key: key.into(),
+                    value: "x".into(),
+                },
+            );
+            assert!(r.harnesses, "{key}");
+        }
+        let (r, _) = apply(
+            &mut s,
+            Event::ConfigChanged {
+                key: "general.theme".into(),
+                value: "dark".into(),
+            },
+        );
+        assert!(!r.harnesses);
     }
 
     #[test]

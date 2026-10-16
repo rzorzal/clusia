@@ -38,6 +38,12 @@ pub struct CustomNotice;
 pub enum ProbeCard {
     Idle,
     Testing,
+    /// Not tested in this window, but the daemon's scan has already found the agent.
+    Found {
+        name: String,
+        version: String,
+        program: String,
+    },
     Ok {
         name: String,
         version: String,
@@ -313,7 +319,10 @@ pub fn view(
         permission_timeout: h.permission_timeout_secs.to_string(),
         sandbox_error: refusal("harness.sandbox"),
         permission_timeout_error: refusal("harness.permission_timeout_secs"),
-        probe: probe_card(probe, &h.display_name(), h.kind == HarnessKind::Custom),
+        probe: scanned_card(
+            snap,
+            probe_card(probe, &h.display_name(), h.kind == HarnessKind::Custom),
+        ),
         open: open_checks(h),
         check_timeout: h.check_timeout_secs.to_string(),
         check_timeout_error: refusal("harness.check_timeout_secs"),
@@ -325,6 +334,26 @@ pub fn view(
         areas_error: refusal(areas::AREAS_KEY),
         form: None,
     }
+}
+
+/// An untested card becomes `Found` when the daemon's scan has the configured agent, so a fresh
+/// window reads the agent as found without a **Test**. A custom command is never in the scan.
+fn scanned_card(snap: &Snapshot, card: ProbeCard) -> ProbeCard {
+    let h = &snap.config.harness;
+    if card != ProbeCard::Idle || h.kind == HarnessKind::Custom {
+        return card;
+    }
+    let found = snap.scanned().into_iter().flatten();
+    found
+        .filter(|f| HarnessKind::from(f.kind) == h.kind)
+        .find_map(|f| {
+            f.path.as_ref().map(|path| ProbeCard::Found {
+                name: h.display_name(),
+                version: f.version.clone().unwrap_or_default(),
+                program: path.clone(),
+            })
+        })
+        .unwrap_or(card)
 }
 
 pub fn probe_card(state: &ProbeState, active: &str, custom: bool) -> ProbeCard {
@@ -378,7 +407,9 @@ pub fn program_hint(v: &HarnessView) -> String {
         return "Required. Runs once per turn".into();
     }
     match &v.probe {
-        ProbeCard::Ok { program, .. } if !program.is_empty() => format!("Found at {program}"),
+        ProbeCard::Ok { program, .. } | ProbeCard::Found { program, .. } if !program.is_empty() => {
+            format!("Found at {program}")
+        }
         _ if v.program.is_empty() => format!("Looks for {} on your PATH", v.program_name),
         _ => "Using this path".into(),
     }
@@ -724,7 +755,7 @@ const SANDBOX_OFF: &str = "With the sandbox off, an allowed command can reach th
 
 fn probe_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, state: &ProbeCard, active: &str) {
     let (fill, stroke) = match state {
-        ProbeCard::Ok { .. } => (Swatch::GreenSoft, Swatch::Green),
+        ProbeCard::Ok { .. } | ProbeCard::Found { .. } => (Swatch::GreenSoft, Swatch::Green),
         ProbeCard::Failed { .. } => (Swatch::OrangeSoft, Swatch::Orange),
         _ => (Swatch::Surface, Swatch::Line),
     };
@@ -738,6 +769,18 @@ fn probe_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, state: &ProbeCard, a
         ProbeCard::Testing => (
             format!("Testing {active}…"),
             "Waiting for an answer".to_string(),
+        ),
+        ProbeCard::Found {
+            name,
+            version,
+            program,
+        } => (
+            if version.is_empty() {
+                format!("{name} found")
+            } else {
+                format!("{name} {version} found")
+            },
+            format!("Found at {program}. Press Test to see how fast it answers."),
         ),
         ProbeCard::Ok {
             name,
@@ -782,7 +825,7 @@ fn probe_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, state: &ProbeCard, a
             ProbeCard::Testing => {
                 c.spawn(disabled_button(fonts, "Testing…"));
             }
-            ProbeCard::Idle => {
+            ProbeCard::Idle | ProbeCard::Found { .. } => {
                 c.spawn((
                     button(fonts, "Test", Variant::Secondary),
                     TestHarness,
@@ -991,6 +1034,44 @@ mod tests {
             .open_section(crate::nav::Section::Harness);
         crate::testing::settle(&mut app);
         app
+    }
+
+    #[test]
+    fn a_fresh_start_reads_the_scanned_agent_as_found_without_a_test() {
+        let mut snap = crate::fixture::demo(crate::testing::NOW);
+        assert!(snap.config.harness.program.is_none() && snap.first_run.is_none());
+        let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
+        assert_eq!(v.probe, ProbeCard::Idle, "nothing scanned yet");
+        snap.harnesses = Some(Vec::new());
+        snap.first_run = Some(crate::fixture::demo_first_run());
+        let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
+        assert_eq!(v.probe, ProbeCard::Idle, "the newer scan found nothing");
+        snap.first_run = None;
+        snap.harnesses = Some(crate::fixture::demo_first_run().harnesses);
+        let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
+        let ProbeCard::Found { name, program, .. } = &v.probe else {
+            panic!("expected Found, got {:?}", v.probe);
+        };
+        assert_eq!(name, "Claude Code");
+        assert_eq!(program_hint(&v), format!("Found at {program}"));
+        assert!(matches!(
+            view(&snap, &HashMap::new(), &ProbeState::Testing).probe,
+            ProbeCard::Testing
+        ));
+
+        let mut app = crate::testing::app(snap);
+        app.world_mut()
+            .resource_mut::<crate::nav::Nav>()
+            .go(&clusia_protocol::WindowTarget::Config);
+        app.world_mut()
+            .resource_mut::<crate::nav::Nav>()
+            .open_section(crate::nav::Section::Harness);
+        crate::testing::settle(&mut app);
+        assert!(crate::testing::shows(
+            &mut app,
+            "Found at /opt/homebrew/bin/claude"
+        ));
+        assert!(!crate::testing::shows(&mut app, "Not tested yet"));
     }
 
     #[test]

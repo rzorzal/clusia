@@ -1081,6 +1081,7 @@ async fn session(
         lists: true,
         giphy: true,
         first_run: true,
+        harnesses: true,
         ..Refresh::default()
     };
     fetch(&mut client, &mut snap, lists).await?;
@@ -1266,11 +1267,15 @@ async fn fetch(client: &mut Client, snap: &mut Snapshot, what: Refresh) -> Resul
     {
         snap.auth = Some(a);
     }
-    if what.first_run
-        && snap.first_run_wanted()
+    // One scan answers both: the first-run screen and the agents every other screen reads.
+    let first_run = what.first_run && snap.first_run_wanted();
+    if (first_run || what.harnesses)
         && let Some(Reply::FirstRun(f)) = request(client, Command::FirstRunStatus).await?
     {
-        snap.first_run = Some(f);
+        snap.harnesses = Some(f.harnesses.clone());
+        if first_run {
+            snap.first_run = Some(f);
+        }
     }
     if what.status
         && let Some(Reply::Status(s)) = request(client, Command::DaemonStatus).await?
