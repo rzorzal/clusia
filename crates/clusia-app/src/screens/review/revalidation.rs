@@ -26,7 +26,7 @@ use crate::screens::review::agent::harness_ready;
 use crate::screens::review::agent::suggestion::show_file;
 use crate::screens::review::diagrams::{Diagrams, DiagramsModel};
 use crate::screens::review::editor::{not_sent, read_only_reason};
-use crate::screens::review::shell::{draft_card, file_name};
+use crate::screens::review::shell::{draft_card, file_name, setting_link};
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Stroke, Tone, Type, Variant, badge, button, card, disabled_button, panel, text,
@@ -254,6 +254,8 @@ pub struct BannerView {
     pub title: String,
     pub line: String,
     pub actions: Vec<TopAction>,
+    /// Offer the link to the setting that checks a draft on every push.
+    pub every_commit: bool,
     /// *Accept all* waits for the daemon.
     pub accepting: bool,
     /// The new commits of a done round: (short sha, title), at most `COMMITS_SHOWN`.
@@ -561,6 +563,7 @@ fn banner_view(
         title,
         line,
         actions,
+        every_commit: false,
         accepting,
         commits: Vec::new(),
         more: 0,
@@ -792,18 +795,20 @@ fn fill_revalidation(
         let Some(tab) = tabs.0.get(&root.pr) else {
             continue;
         };
-        let Some(view) = screen_view(
+        let harness = harness_ready(
+            &model.snapshot,
+            crate::agent_name::kind_of_tab(&model.snapshot, tab),
+        );
+        let Some(mut view) = screen_view(
             tab,
             rounds.0.get(&root.pr),
             diagrams.as_ref().and_then(|d| d.0.get(&root.pr)),
-            harness_ready(
-                &model.snapshot,
-                crate::agent_name::kind_of_tab(&model.snapshot, tab),
-            ),
+            harness,
             &crate::agent_name::of_tab(&model.snapshot, tab),
         ) else {
             continue;
         };
+        view.banner.every_commit = harness && !model.snapshot.config.harness.revalidate;
         if root.built.as_ref() == Some(&view) {
             continue;
         }
@@ -877,6 +882,9 @@ fn banner_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, b: &Ba
         .with_children(|t| {
             t.spawn(text(fonts, b.title.clone(), Type::STRONG));
             t.spawn(text(fonts, b.line.clone(), Type::META));
+            if b.every_commit {
+                setting_link(t, fonts, "Revalidate on new commits…", "harness.revalidate");
+            }
             if !b.commits.is_empty() {
                 t.spawn((
                     Node {
@@ -1914,6 +1922,26 @@ mod tests {
         assert!(testing::shows(&mut app, "The harness timed out"));
         top(&mut app, TopAction::TryAgain);
         assert_eq!(testing::recorded(&mut app), [Ask::Revalidate(pr)]);
+    }
+
+    #[test]
+    fn the_banner_links_to_the_setting_when_revalidating_is_off() {
+        let (mut app, _) = done_app();
+        testing::set_config_locally(&mut app, "harness.program", "/opt/homebrew/bin/claude");
+        testing::set_config_locally(&mut app, "harness.revalidate", "true");
+        testing::settle(&mut app);
+        assert!(!testing::shows(&mut app, "Revalidate on new commits…"));
+        testing::set_config_locally(&mut app, "harness.revalidate", "false");
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Revalidate on new commits…"));
+        testing::open_setting(&mut app, "harness.revalidate");
+        assert_eq!(
+            testing::config_focus(&app),
+            (
+                crate::nav::Screen::Config(crate::nav::Section::Harness),
+                Some("harness.revalidate")
+            )
+        );
     }
 
     #[test]

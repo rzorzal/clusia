@@ -14,33 +14,66 @@ use crate::ui::kit::Fill;
 /// How long the row stays tinted, in seconds.
 pub const SPOTLIGHT_SECS: f64 = 2.0;
 
-/// The request being shown: the key asked for, when its row was first seen on the page (on the
+/// The request being shown: the key asked for, which ask it was, when its row was first seen on the page (on the
 /// `Time` clock), and whether the page has been scrolled to it.
 #[derive(Resource, Debug, Default, PartialEq)]
 pub struct Spotlight {
     pub key: Option<&'static str>,
+    /// `Nav::requests` when the request was taken: asking again restarts the tint.
+    pub request: u32,
     pub started: Option<f64>,
     pub scrolled: bool,
 }
 
+/// What a tinted row looked like before, to put back when the tint ends.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct Spotlit {
+    padding: UiRect,
+    margin: UiRect,
+    border_radius: BorderRadius,
+}
+
 /// The padding that gives the tint room around a row, undone by an equal negative margin so the
-/// page does not move.
+/// page does not move. A row with padding or a margin of its own is tinted as it is.
 const BREATHING: f32 = 6.0;
 
-fn tint(commands: &mut Commands, row: Entity, on: bool) {
-    let room = if on { BREATHING } else { 0.0 };
+fn tint(commands: &mut Commands, row: Entity, node: &Node) {
+    commands.entity(row).insert((
+        Spotlit {
+            padding: node.padding,
+            margin: node.margin,
+            border_radius: node.border_radius,
+        },
+        BackgroundColor::default(),
+        Fill(Swatch::GreenSoft),
+    ));
+    let bare = node.padding == UiRect::DEFAULT && node.margin == UiRect::DEFAULT;
     commands
         .entity(row)
         .entry::<Node>()
         .and_modify(move |mut n| {
-            n.padding = UiRect::all(px(room));
-            n.margin = UiRect::all(px(-room));
-            n.border_radius = BorderRadius::all(px(if on { 6.0 } else { 0.0 }));
+            if bare {
+                n.padding = UiRect::all(px(BREATHING));
+                n.margin = UiRect::all(px(-BREATHING));
+            }
+            n.border_radius = BorderRadius::all(px(6));
         });
-    commands.entity(row).insert((
-        BackgroundColor::default(),
-        Fill(if on { Swatch::GreenSoft } else { Swatch::Clear }),
-    ));
+}
+
+fn untint(commands: &mut Commands, row: Entity, was: &Spotlit) {
+    let was = was.clone();
+    commands
+        .entity(row)
+        .entry::<Node>()
+        .and_modify(move |mut n| {
+            n.padding = was.padding;
+            n.margin = was.margin;
+            n.border_radius = was.border_radius;
+        });
+    commands
+        .entity(row)
+        .remove::<Spotlit>()
+        .insert(Fill(Swatch::Clear));
 }
 
 /// Tints the row of the setting Config was opened at and scrolls it into view, then lets go
@@ -53,7 +86,7 @@ pub fn spotlight(
     mut commands: Commands,
     fields: Query<(Entity, &ConfigField)>,
     toggles: Query<(Entity, &OpenToggle)>,
-    fills: Query<&Fill>,
+    spotlit: Query<&Spotlit>,
     parents: Query<&ChildOf>,
     nodes: Query<(&Node, &ComputedNode, &UiGlobalTransform)>,
     mut scrolls: Query<&mut ScrollPosition>,
@@ -68,9 +101,10 @@ pub fn spotlight(
         nav.focus = None;
         return;
     }
-    if state.key != Some(key) {
+    if state.key != Some(key) || state.request != nav.requests {
         *state = Spotlight {
             key: Some(key),
+            request: nav.requests,
             ..default()
         };
     }
@@ -88,13 +122,17 @@ pub fn spotlight(
     let now = time.elapsed_secs_f64();
     let started = *state.started.get_or_insert(now);
     if now - started >= SPOTLIGHT_SECS {
-        tint(&mut commands, row, false);
+        if let Ok(was) = spotlit.get(row) {
+            untint(&mut commands, row, was);
+        }
         nav.focus = None;
         *state = Spotlight::default();
         return;
     }
-    if fills.get(row).map(|f| f.0) != Ok(Swatch::GreenSoft) {
-        tint(&mut commands, row, true);
+    if spotlit.get(row).is_err()
+        && let Ok((node, _, _)) = nodes.get(row)
+    {
+        tint(&mut commands, row, node);
     }
     if state.scrolled {
         return;
@@ -263,5 +301,68 @@ mod tests {
         let (mut app, view, _) = scrolled_scene(200.0);
         app.update();
         assert_eq!(app.world().get::<ScrollPosition>(view).unwrap().y, 0.0);
+    }
+
+    #[test]
+    fn the_row_is_as_it_was_once_the_tint_ends() {
+        for padded in [false, true] {
+            let mut app = testing::app(fixture::demo(NOW));
+            app.world_mut()
+                .resource_mut::<Nav>()
+                .open_section(Section::Harness);
+            testing::settle(&mut app);
+            let row = row_of::<ConfigField>(&mut app, |f| f.0 == "harness.program");
+            if padded {
+                let mut node = app.world_mut().get_mut::<Node>(row).unwrap();
+                node.padding = UiRect::axes(px(3), px(5));
+                node.margin = UiRect::top(px(7));
+                node.border_radius = BorderRadius::all(px(2));
+            }
+            let before = app.world().get::<Node>(row).unwrap().clone();
+            app.world_mut()
+                .resource_mut::<Nav>()
+                .open_setting(Section::Harness, "harness.program");
+            testing::settle(&mut app);
+            assert_eq!(fill_of(&app, row), Some(Swatch::GreenSoft));
+            app.world_mut().resource_mut::<Spotlight>().started = Some(-SPOTLIGHT_SECS - 1.0);
+            testing::settle(&mut app);
+            assert_eq!(fill_of(&app, row), Some(Swatch::Clear));
+            assert_eq!(
+                *app.world().get::<Node>(row).unwrap(),
+                before,
+                "padded: {padded}"
+            );
+        }
+    }
+
+    #[test]
+    fn asking_again_for_the_same_setting_restarts_the_tint() {
+        let mut app = config_at("harness.program");
+        app.world_mut().resource_mut::<Spotlight>().started = Some(-SPOTLIGHT_SECS + 0.5);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_setting(Section::Harness, "harness.program");
+        testing::settle(&mut app);
+        let started = app.world().resource::<Spotlight>().started.unwrap();
+        assert!(started > 0.0 - f64::EPSILON, "restarted at {started}");
+        assert_eq!(app.world().resource::<Nav>().focus, Some("harness.program"));
+    }
+
+    #[test]
+    fn the_scroll_waits_until_the_row_has_a_size() {
+        let (mut app, view, row) = scrolled_scene(900.0);
+        app.world_mut()
+            .entity_mut(row)
+            .insert(ComputedNode::DEFAULT);
+        app.update();
+        assert_eq!(app.world().get::<ScrollPosition>(view).unwrap().y, 0.0);
+        assert!(!app.world().resource::<Spotlight>().scrolled);
+        app.world_mut().entity_mut(row).insert(ComputedNode {
+            size: Vec2::new(400.0, 30.0),
+            ..ComputedNode::DEFAULT
+        });
+        app.update();
+        assert!(app.world().get::<ScrollPosition>(view).unwrap().y > 0.0);
+        assert!(app.world().resource::<Spotlight>().scrolled);
     }
 }

@@ -19,7 +19,7 @@ use crate::review_state::{Editor, Phase, ReviewSection, ReviewTabs};
 use crate::screens::home::long_age;
 use crate::screens::review::agent::harness_ready;
 use crate::screens::review::editor::editor_box;
-use crate::screens::review::shell::SectionBody;
+use crate::screens::review::shell::{SectionBody, setting_link};
 use crate::theme::Swatch;
 use crate::ui::kit::{Stroke, Tone, Type, Variant, badge, card, panel, text};
 
@@ -60,6 +60,8 @@ pub struct SecurityView {
     pub action: Option<CheckAction>,
     /// Offer **Set up a harness**.
     pub setup: bool,
+    /// Offer the link to the setting that runs the check on every review.
+    pub every_review: bool,
     pub cards: Vec<CardView>,
 }
 
@@ -101,6 +103,7 @@ pub fn security_view(
             chips: Vec::new(),
             action: n.action,
             setup: n.setup,
+            every_review: false,
             cards: Vec::new(),
         };
     }
@@ -111,6 +114,7 @@ pub fn security_view(
             chips: Vec::new(),
             action: Some(CheckAction::Run),
             setup: false,
+            every_review: false,
             cards: Vec::new(),
         };
     };
@@ -205,6 +209,7 @@ pub fn security_view(
         chips,
         action: Some(CheckAction::CheckAgain),
         setup: false,
+        every_review: false,
         cards,
     }
 }
@@ -240,12 +245,13 @@ pub(super) fn fill_security(
         }
         let editor = finding_editor(tab);
         let files: Vec<&str> = ready.view.files.iter().map(|f| f.path.as_str()).collect();
-        let view = security_view(
+        let harness = harness_ready(
+            &model.snapshot,
+            crate::agent_name::kind_of_tab(&model.snapshot, tab),
+        );
+        let mut view = security_view(
             checks.0.get(&body.pr),
-            harness_ready(
-                &model.snapshot,
-                crate::agent_name::kind_of_tab(&model.snapshot, tab),
-            ),
+            harness,
             &crate::agent_name::of_tab(&model.snapshot, tab),
             &files,
             clock.now(),
@@ -255,6 +261,9 @@ pub(super) fn fill_security(
             }),
             ready.cached_at.is_some(),
         );
+        view.every_review = harness
+            && view.action == Some(CheckAction::Run)
+            && !model.snapshot.config.harness.check_security;
         let key = (
             view,
             editor.and_then(|e| e.error.clone()),
@@ -330,6 +339,9 @@ fn draw(
             t.spawn(text(fonts, v.title.clone(), Type::HEADING));
             if !v.line.is_empty() {
                 t.spawn(text(fonts, v.line.clone(), Type::MUTED));
+            }
+            if v.every_review {
+                setting_link(t, fonts, "Check every review…", "harness.check_security");
             }
         });
         for (label, tone) in &v.chips {

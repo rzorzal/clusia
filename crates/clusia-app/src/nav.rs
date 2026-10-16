@@ -115,6 +115,8 @@ pub struct Nav {
     pub section: Section,
     /// The setting (its config key) the page scrolls to and tints when Config opens at it.
     pub focus: Option<&'static str>,
+    /// How many times a setting was asked for: the same one twice is a new request.
+    pub requests: u32,
 }
 
 impl Nav {
@@ -124,6 +126,7 @@ impl Nav {
             reviews: Vec::new(),
             section: Section::Appearance,
             focus: None,
+            requests: 0,
         };
         nav.go(target);
         nav
@@ -157,6 +160,7 @@ impl Nav {
     pub fn open_setting(&mut self, section: Section, key: &'static str) {
         self.open_section(section);
         self.focus = Some(key);
+        self.requests = self.requests.wrapping_add(1);
     }
 
     /// Brings back the tabs the window had: theirs first, in their order, then any opened since
@@ -771,6 +775,15 @@ mod tests {
         nav.open_setting(Section::Harness, "harness.diagrams");
         nav.go(&WindowTarget::Home);
         assert_eq!(nav.focus, None);
+    }
+
+    #[test]
+    fn asking_for_the_same_setting_again_is_a_new_request() {
+        let mut nav = Nav::new(&WindowTarget::Home);
+        nav.open_setting(Section::Harness, "harness.program");
+        let first = nav.requests;
+        nav.open_setting(Section::Harness, "harness.program");
+        assert_ne!(nav.requests, first);
     }
 
     #[test]

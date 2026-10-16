@@ -1454,6 +1454,20 @@ pub(crate) fn on_harness(_activate: On<Activate>, mut nav: ResMut<Nav>) {
     nav.open_section(Section::Harness);
 }
 
+/// A small link that opens Config › Harness at the setting `key`.
+pub(crate) fn setting_link(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    label: &str,
+    key: &'static str,
+) {
+    p.spawn((
+        button(fonts, label, Variant::Link),
+        OpenSetting(key),
+        observe(on_open_setting),
+    ));
+}
+
 pub(crate) fn on_open_setting(
     activate: On<Activate>,
     buttons: Query<&OpenSetting>,

@@ -150,7 +150,7 @@ pub fn apply_edits(app: &mut App, entity: Entity) {
     }
 }
 
-/// Whether the window shows Config › Harness asking for the setting `key` to be in view.
+/// The screen the window shows and the setting (config key) it was asked to bring into view.
 pub fn config_focus(app: &App) -> (crate::nav::Screen, Option<&'static str>) {
     let nav = app.world().resource::<crate::nav::Nav>();
     (nav.screen.clone(), nav.focus)

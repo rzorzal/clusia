@@ -388,6 +388,8 @@ pub struct Notice {
     pub action: Option<CheckAction>,
     /// Offer **Set up a harness**.
     pub setup: bool,
+    /// Offer the link to the setting that runs the check on every review.
+    pub every_review: bool,
 }
 
 /// The tab's state when there is nothing to list: the checks not read yet (or not readable
@@ -422,6 +424,7 @@ pub fn notice_of(
             line,
             action,
             setup,
+            every_review: false,
         })
     };
     if !loaded {
@@ -1779,5 +1782,76 @@ mod tests {
                 "{section:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_tab_whose_check_is_off_links_to_the_setting() {
+        for (section, label, key) in [
+            (
+                ReviewSection::Security,
+                "Check every review…",
+                "harness.check_security",
+            ),
+            (
+                ReviewSection::Audits,
+                "Audit every review…",
+                "harness.audit",
+            ),
+        ] {
+            let tab = |auto: &str| {
+                let mut app = testing::app(fixture::demo(NOW));
+                testing::set_config_locally(
+                    &mut app,
+                    "harness.program",
+                    "/opt/homebrew/bin/claude",
+                );
+                testing::set_config_locally(&mut app, key, auto);
+                let pr = testing::open_ready(&mut app, false);
+                testing::tell(
+                    &mut app,
+                    Tell::Checks(ChecksTell::Loaded {
+                        pr: pr.clone(),
+                        results: vec![],
+                        states: vec![],
+                        accepted: vec![],
+                        dismissed: vec![],
+                    }),
+                );
+                testing::set_section(&mut app, &pr, section);
+                app
+            };
+            let mut on = tab("true");
+            assert!(!testing::shows(&mut on, label), "{key} on");
+            let mut off = tab("false");
+            assert!(testing::shows(&mut off, label), "{key} off");
+            testing::open_setting(&mut off, key);
+            assert_eq!(
+                testing::config_focus(&off),
+                (
+                    crate::nav::Screen::Config(crate::nav::Section::Harness),
+                    Some(key)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_without_a_harness_offers_only_the_set_up_button() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::set_config_locally(&mut app, "harness.check_security", "false");
+        let pr = testing::open_ready(&mut app, false);
+        testing::tell(
+            &mut app,
+            Tell::Checks(ChecksTell::Loaded {
+                pr: pr.clone(),
+                results: vec![],
+                states: vec![],
+                accepted: vec![],
+                dismissed: vec![],
+            }),
+        );
+        testing::set_section(&mut app, &pr, ReviewSection::Security);
+        assert!(testing::shows(&mut app, "Set up a harness"));
+        assert!(!testing::shows(&mut app, "Check every review…"));
     }
 }

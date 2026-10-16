@@ -28,7 +28,7 @@ use crate::nav::{Nav, Screen};
 use crate::review_state::{Phase, ReviewSection, ReviewTabs};
 use crate::screens::review::agent::harness_ready;
 use crate::screens::review::editor::{not_sent, read_only_reason};
-use crate::screens::review::shell::{OpenSetting, SectionBody, on_open_setting};
+use crate::screens::review::shell::{OpenSetting, SectionBody, on_open_setting, setting_link};
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Type, Variant, button, checkbox, disabled_button, panel,
@@ -956,11 +956,7 @@ fn message(
             t.spawn(text(fonts, title.to_string(), Type::HEADING));
             t.spawn(text(fonts, line.to_string(), Type::MUTED));
             if every_review {
-                t.spawn((
-                    button(fonts, "Draw on every review…", Variant::Ghost),
-                    OpenSetting("harness.diagrams"),
-                    observe(on_open_setting),
-                ));
+                setting_link(t, fonts, "Draw on every review…", "harness.diagrams");
             }
         });
         if let Some(action) = action {
@@ -2239,5 +2235,39 @@ mod tests {
         testing::set_config_locally(&mut app, "harness.diagrams", "true");
         idle(&mut app);
         assert!(!testing::shows(&mut app, "Draw on every review…"));
+    }
+
+    #[test]
+    fn a_setting_link_is_a_small_keyboard_reachable_button() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::set_config_locally(&mut app, "harness.program", "/opt/homebrew/bin/claude");
+        let pr = testing::open_ready(&mut app, false);
+        testing::set_section(&mut app, &pr, ReviewSection::Diagrams);
+        testing::tell(
+            &mut app,
+            Tell::Diagrams(DiagramsTell::Loaded {
+                pr,
+                versions: Vec::new(),
+                latest: None,
+                state: DiagramsState::Idle,
+                head: String::new(),
+                stale: false,
+                stale_reason: None,
+            }),
+        );
+        testing::settle(&mut app);
+        let link = testing::find::<crate::screens::review::shell::OpenSetting>(&mut app, |s| {
+            s.0 == "harness.diagrams"
+        });
+        let node = app.world().get::<Node>(link).unwrap();
+        assert_eq!(node.align_self, AlignSelf::Start);
+        assert!(
+            app.world()
+                .get::<bevy::input_focus::tab_navigation::TabIndex>(link)
+                .is_some()
+        );
+        let label = app.world().get::<Children>(link).unwrap()[0];
+        let ink = app.world().get::<crate::ui::kit::Ink>(label).map(|i| i.0);
+        assert_eq!(ink, Some(crate::theme::Swatch::Green));
     }
 }
