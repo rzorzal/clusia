@@ -362,7 +362,6 @@ fn fill_region(
                         flex_direction: FlexDirection::Column,
                         row_gap: px(12),
                         padding: UiRect::axes(px(28), px(20)),
-                        max_width: px(920),
                         ..default()
                     },
                     ListPart { pr, built: None },
@@ -1272,6 +1271,14 @@ mod tests {
         testing::settle(&mut app);
         assert_eq!(testing::count::<EditorArea>(&mut app), 1);
         assert_eq!(testing::count::<DraftEdit>(&mut app), 0, "edited in place");
+    }
+
+    #[test]
+    fn the_comment_cards_fill_the_width_of_the_window() {
+        let mut app = comments_app();
+        let part = testing::find::<ListPart>(&mut app, |_| true);
+        let node = app.world().get::<Node>(part).unwrap();
+        assert_eq!(node.max_width, Val::Auto, "no cap on the card column");
     }
 
     #[test]
