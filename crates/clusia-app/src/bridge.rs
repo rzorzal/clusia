@@ -2378,7 +2378,11 @@ impl Plugin for BridgePlugin {
                     connect(world, paths.clone(), home.clone(), &slot);
                 });
             }
-            Mode::Demo { theme } => {
+            Mode::Demo {
+                theme,
+                ref settings,
+            } => {
+                let settings = settings.clone();
                 let (inbox, outbox) = local_link();
                 app.init_resource::<Asks>()
                     .insert_resource(inbox)
@@ -2389,6 +2393,14 @@ impl Plugin for BridgePlugin {
                             model.snapshot = fixture::demo(clock.now());
                             if let Some(theme) = theme {
                                 model.snapshot.config.appearance.theme = theme;
+                            }
+                            let config = &mut model.snapshot.config;
+                            for (key, value) in &settings {
+                                if let Err(e) =
+                                    crate::snapshot::apply_config_locally(config, key, value)
+                                {
+                                    tracing::warn!(%key, error = %e, "a demo setting was refused");
+                                }
                             }
                             model.connection = Connection::Live;
                         },
@@ -4188,7 +4200,10 @@ mod tests {
                 .init_resource::<Revalidations>()
                 .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
-                    mode: Mode::Demo { theme: forced },
+                    mode: Mode::Demo {
+                        theme: forced,
+                        settings: vec![("appearance.text_size".into(), "large".into())],
+                    },
                     paths: Paths::new(home.path()),
                     home: None,
                     thread: BridgeSlot::default(),
@@ -4203,6 +4218,8 @@ mod tests {
                     .theme,
                 want
             );
+            let appearance = &app.world().resource::<Model>().snapshot.config.appearance;
+            assert_eq!(appearance.text_size, clusia_core::TextSize::Large);
         }
     }
 

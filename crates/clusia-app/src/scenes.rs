@@ -378,6 +378,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         }
         Scene::ConfigMedia => Some(Section::Media),
         Scene::ConfigAbout => Some(Section::About),
+        Scene::ConfigAppearance => Some(Section::Appearance),
         Scene::ConfigHarness
         | Scene::ConfigHarnessCodex
         | Scene::ConfigHarnessCustom
@@ -433,6 +434,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::ConfigNotificationsBottom
         | Scene::ConfigMedia
         | Scene::ConfigAbout
+        | Scene::ConfigAppearance
         | Scene::ConfigHarness
         | Scene::ConfigHarnessCodex
         | Scene::ConfigHarnessCustom
@@ -713,6 +715,7 @@ mod tests {
                     | Scene::ConfigNotificationsBottom
                     | Scene::ConfigMedia
                     | Scene::ConfigAbout
+                    | Scene::ConfigAppearance
                     | Scene::ConfigHarness
                     | Scene::ConfigHarnessCodex
                     | Scene::HomeFooter
@@ -778,6 +781,7 @@ mod tests {
                 | Scene::ConfigNotificationsBottom
                 | Scene::ConfigMedia
                 | Scene::ConfigAbout
+                | Scene::ConfigAppearance
                 | Scene::ConfigHarness
                 | Scene::ConfigHarnessCodex
                 | Scene::HomeFooter
@@ -1123,6 +1127,7 @@ mod tests {
             (Scene::ConfigNotificationsBottom, Section::Notifications),
             (Scene::ConfigMedia, Section::Media),
             (Scene::ConfigAbout, Section::About),
+            (Scene::ConfigAppearance, Section::Appearance),
             (Scene::ConfigHarness, Section::Harness),
             (Scene::ConfigHarnessCodex, Section::Harness),
             (Scene::ConfigHarnessCustom, Section::Harness),
@@ -1475,6 +1480,7 @@ mod tests {
         let default = serde_json::to_value(clusia_core::Config::default()).unwrap();
         assert_eq!(demo_config(Scene::ConfigMedia), default);
         assert_eq!(demo_config(Scene::ConfigAbout), default);
+        assert_eq!(demo_config(Scene::ConfigAppearance), default);
     }
 
     #[test]

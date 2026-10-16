@@ -2,13 +2,15 @@
 //! Builders return bundles. Colors are `Swatch` markers that `restyle` resolves against the
 //! current `Theme`, so a theme switch recolors everything without rebuilding a screen.
 
+use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::spawn::SpawnIter;
+use bevy::ecs::world::DeferredWorld;
 use bevy::input::ButtonInput;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::input_focus::{FocusLost, InputFocus};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::text::{EditableText, FontSource, TextBackgroundColor, TextCursorStyle};
+use bevy::text::{EditableText, TextBackgroundColor, TextCursorStyle};
 use bevy::ui::Pressed;
 use bevy::ui_widgets::Button as WidgetButton;
 use bevy::window::{CursorIcon, PrimaryWindow, SystemCursorIcon};
@@ -41,7 +43,8 @@ pub struct HoverFill(pub Swatch);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PressFill(pub Swatch);
 
-/// A text style: size in points, weight 100–900, color role, font family.
+/// A text style: size in points at the medium text size, weight 100–900, color role, font
+/// family.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Type {
     pub size: f32,
@@ -110,13 +113,16 @@ impl Type {
 }
 
 pub fn font(fonts: &UiFonts, t: Type) -> TextFont {
+    let face = if t.mono {
+        crate::fonts::Face::handle(&fonts.mono)
+    } else {
+        fonts.sans.clone()
+    };
     TextFont {
-        font: FontSource::Handle(if t.mono {
-            fonts.mono.clone()
-        } else {
-            fonts.sans.clone()
-        }),
-        font_size: FontSize::Px(t.size),
+        font: face.source,
+        style: face.style,
+        // Relative to `RemSize`, the text scale: one write to it resizes every text.
+        font_size: FontSize::Rem(t.size),
         weight: FontWeight(t.weight),
         ..default()
     }
@@ -204,6 +210,110 @@ pub fn label_padding(side: f32, size: f32) -> UiRect {
     }
 }
 
+/// Keeps the padding of a one-line label's box (`label_padding`) right for the face and the
+/// text size in use: set when the box is spawned, and again only when either changes.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[component(on_insert = place_label)]
+pub struct LabelLift {
+    pub side: f32,
+    /// The label's size in points at the medium text size.
+    pub size: f32,
+}
+
+impl LabelLift {
+    /// The 12 px sides and size of a button's or a segment's label.
+    const BUTTON: LabelLift = LabelLift {
+        side: 12.0,
+        size: Type::STRONG.size,
+    };
+
+    fn padding(self, fonts: &UiFonts, scale: f32) -> UiRect {
+        let lift = crate::fonts::lift(fonts.metrics.as_ref(), self.size * scale);
+        UiRect {
+            bottom: px(2.0 * lift),
+            ..label_padding(self.side, 0.0)
+        }
+    }
+}
+
+fn place_label(mut world: DeferredWorld, ctx: HookContext) {
+    let Some(label) = world.get::<LabelLift>(ctx.entity).copied() else {
+        return;
+    };
+    let scale = world.get_resource::<Theme>().map_or(1.0, |t| t.text_scale);
+    let padding = match world.get_resource::<UiFonts>() {
+        Some(fonts) => label.padding(fonts, scale),
+        None => label_padding(label.side, label.size),
+    };
+    if let Some(mut node) = world.get_mut::<Node>(ctx.entity)
+        && node.padding != padding
+    {
+        node.padding = padding;
+    }
+}
+
+fn relift_labels(
+    fonts: Res<UiFonts>,
+    theme: Res<Theme>,
+    mut labels: Query<(&LabelLift, &mut Node)>,
+) {
+    if !(fonts.is_changed() || theme.is_changed()) {
+        return;
+    }
+    for (label, mut node) in &mut labels {
+        let padding = label.padding(&fonts, theme.text_scale);
+        if node.padding != padding {
+            node.padding = padding;
+        }
+    }
+}
+
+/// A length in points at the medium text size on a node that sits among text, kept times the
+/// text scale: set when the node is spawned, and again only when the scale changes.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[component(on_insert = size_with_text)]
+pub enum TextSized {
+    /// The space after a word: the node's right margin, in whole pixels.
+    Gap(f32),
+    /// A square box (an emoji).
+    Square(f32),
+}
+
+impl TextSized {
+    fn apply(self, node: &mut Node, scale: f32) {
+        match self {
+            TextSized::Gap(points) => node.margin.right = px((points * scale).round()),
+            TextSized::Square(points) => {
+                node.width = px(points * scale);
+                node.height = px(points * scale);
+            }
+        }
+    }
+}
+
+fn size_with_text(mut world: DeferredWorld, ctx: HookContext) {
+    let Some(sized) = world.get::<TextSized>(ctx.entity).copied() else {
+        return;
+    };
+    let scale = world.get_resource::<Theme>().map_or(1.0, |t| t.text_scale);
+    if let Some(mut node) = world.get_mut::<Node>(ctx.entity) {
+        sized.apply(&mut node, scale);
+    }
+}
+
+fn resize_with_text(theme: Res<Theme>, mut sized: Query<(&TextSized, &mut Node)>) {
+    if !theme.is_changed() {
+        return;
+    }
+    for (s, mut node) in &mut sized {
+        let mut next = node.clone();
+        s.apply(&mut next, theme.text_scale);
+        if *node != next {
+            *node = next;
+        }
+    }
+}
+
 /// A 30 px button. Attach `observe(|_: On<Activate>, …| …)` for the action.
 pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
     let (fill, hover, ink, stroke) = variant_swatches(v);
@@ -219,6 +329,7 @@ pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
             flex_shrink: 0.0,
             ..default()
         },
+        LabelLift::BUTTON,
         (WidgetButton, Clickable),
         Hovered::default(),
         TabIndex(0),
@@ -337,6 +448,7 @@ pub fn disabled_button(fonts: &UiFonts, label: &str) -> impl Bundle {
             flex_shrink: 0.0,
             ..default()
         },
+        LabelLift::BUTTON,
         BackgroundColor::default(),
         Fill(Swatch::Chrome),
         BorderColor::default(),
@@ -378,6 +490,7 @@ pub fn segment_node() -> Node {
 pub fn segment(fonts: &UiFonts, label: &str, on: bool) -> impl Bundle {
     (
         segment_node(),
+        LabelLift::BUTTON,
         (WidgetButton, Clickable),
         Hovered::default(),
         TabIndex(0),
@@ -682,7 +795,8 @@ impl Plugin for KitPlugin {
         .add_message::<FieldCommitted>()
         .add_observer(commit_on_blur)
         .add_systems(Update, (commit_on_enter, pointer_cursor))
-        .add_systems(PostUpdate, (restyle, hover).chain());
+        .add_systems(PostUpdate, (restyle, hover).chain())
+        .add_systems(PostUpdate, (relift_labels, resize_with_text));
     }
 }
 
@@ -805,6 +919,7 @@ mod tests {
     use crate::snapshot::Snapshot;
     use crate::testing;
     use crate::theme::{DARK, LIGHT};
+    use bevy::text::RemSize;
     use bevy::window::{WindowTheme, WindowThemeChanged};
 
     fn bg(app: &mut App, e: Entity) -> Color {
@@ -864,6 +979,108 @@ mod tests {
         );
         testing::set_config_locally(&mut app, "appearance.code_size", "16");
         assert_eq!(app.world().resource::<Theme>().code_size, 16.0);
+    }
+
+    /// Every text style of the kit, as a no-wrap label.
+    const STYLES: [Type; 8] = [
+        Type::TITLE,
+        Type::HEADING,
+        Type::BODY,
+        Type::STRONG,
+        Type::MUTED,
+        Type::META,
+        Type::MONO,
+        Type::NUMBER,
+    ];
+
+    #[test]
+    fn the_text_size_scales_every_text_style_at_once() {
+        let mut app = testing::layout_app(Snapshot::default(), UVec2::new(800, 600));
+        let fonts = crate::fonts::load(&mut app.world_mut().resource_mut::<Assets<Font>>());
+        app.insert_resource(fonts.clone());
+        let labels: Vec<Entity> = STYLES
+            .iter()
+            .map(|t| {
+                laid_out(
+                    &mut app,
+                    (text(&fonts, "Refresh token", *t), TextLayout::no_wrap()),
+                )
+            })
+            .collect();
+        let sizes = |app: &App| -> Vec<(f32, f32)> {
+            labels
+                .iter()
+                .map(|e| {
+                    let (_, _, w, h) = testing::frame(app, *e);
+                    (w, h)
+                })
+                .collect()
+        };
+        let medium = sizes(&app);
+        assert_eq!(app.world().resource::<RemSize>().0, 1.0);
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        app.update();
+        let scale = 15.0 / 13.0;
+        assert_eq!(app.world().resource::<Theme>().text_scale, scale);
+        assert_eq!(app.world().resource::<RemSize>().0, scale);
+        let large = sizes(&app);
+        for ((t, (w0, h0)), (w1, h1)) in STYLES.iter().zip(&medium).zip(&large) {
+            assert!(*w0 > 0.0, "{t:?} is laid out");
+            let grew = w1 / w0;
+            assert!(
+                (grew - scale).abs() < 0.04,
+                "{t:?}: {w0}x{h0} became {w1}x{h1}"
+            );
+            assert!(h1 > h0, "{t:?} is taller");
+        }
+        testing::set_config_locally(&mut app, "appearance.text_size", "small");
+        app.update();
+        let small = sizes(&app);
+        for ((w0, _), (w1, _)) in medium.iter().zip(&small) {
+            assert!((w1 / w0 - 12.0 / 13.0).abs() < 0.04, "{w0} became {w1}");
+        }
+    }
+
+    #[test]
+    fn text_sizes_are_relative_so_one_change_resizes_everything() {
+        let fonts = UiFonts::default();
+        for t in STYLES {
+            assert_eq!(font(&fonts, t).font_size, FontSize::Rem(t.size), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_label_lift_follows_the_face_and_the_text_size() {
+        use crate::fonts::{JETBRAINS_MONO, label_lift, lift, metrics};
+        let mut app = testing::app(Snapshot::default());
+        let fonts = UiFonts::default();
+        let old = app
+            .world_mut()
+            .spawn(button(&fonts, "Sync now", Variant::Secondary))
+            .id();
+        app.update();
+        let bottom = |app: &App, e: Entity| match app.world().get::<Node>(e).unwrap().padding.bottom
+        {
+            Val::Px(v) => v,
+            other => panic!("{other:?}"),
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(near(bottom(&app, old), 2.0 * label_lift(13.0)));
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        assert!(near(bottom(&app, old), 2.0 * label_lift(15.0)), "the size");
+        let mono = metrics(JETBRAINS_MONO);
+        app.world_mut().resource_mut::<UiFonts>().metrics = mono;
+        app.update();
+        let want = 2.0 * lift(mono.as_ref(), 15.0);
+        assert!(near(bottom(&app, old), want), "the face");
+        let new = app
+            .world_mut()
+            .spawn(disabled_button(&fonts, "Publish"))
+            .id();
+        assert!(
+            near(bottom(&app, new), want),
+            "a new label is placed when spawned"
+        );
     }
 
     #[test]

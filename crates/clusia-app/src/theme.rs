@@ -2,9 +2,10 @@
 //! colors: screens name a `Swatch` and the kit resolves it against the current `Tokens`.
 
 use bevy::prelude::*;
+use bevy::text::RemSize;
 use bevy::window::{PrimaryWindow, WindowTheme, WindowThemeChanged};
-use clusia_core::Density;
 use clusia_core::config::Theme as ThemeChoice;
+use clusia_core::{Density, TextSize};
 use clusia_highlight::Class;
 
 use crate::bridge::Model;
@@ -300,9 +301,12 @@ pub const DARK: Tokens = Tokens {
 pub struct Theme {
     pub dark: bool,
     pub tokens: Tokens,
-    /// Points, for code (diff, previews).
+    /// Points, for code (diff, previews), at the medium text size.
     pub code_size: f32,
     pub compact: bool,
+    /// The factor on every text size (`RemSize`): text sizes are in rem, so changing it resizes
+    /// all text without rebuilding a screen.
+    pub text_scale: f32,
 }
 
 impl Theme {
@@ -312,6 +316,14 @@ impl Theme {
             tokens: if dark { DARK } else { LIGHT },
             code_size: f32::from(code_size),
             compact: density == Density::Compact,
+            text_scale: 1.0,
+        }
+    }
+
+    pub fn with_text_size(self, size: TextSize) -> Self {
+        Self {
+            text_scale: size.scale(),
+            ..self
         }
     }
 }
@@ -332,8 +344,10 @@ pub struct ThemePlugin;
 
 impl Plugin for ThemePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SystemDark>()
-            .add_systems(PreUpdate, (follow_system, update_theme).chain());
+        app.init_resource::<SystemDark>().add_systems(
+            PreUpdate,
+            (follow_system, update_theme, follow_text_scale).chain(),
+        );
     }
 }
 
@@ -373,12 +387,21 @@ fn update_theme(
         return;
     }
     let a = &model.snapshot.config.appearance;
-    let next = Theme::new(is_dark(a.theme, system.0), a.code_size, a.density);
+    let next =
+        Theme::new(is_dark(a.theme, system.0), a.code_size, a.density).with_text_size(a.text_size);
     if *theme != next {
         *theme = next;
         if let Some(mut clear) = clear {
             clear.0 = next.tokens.bg;
         }
+    }
+}
+
+/// Keeps `RemSize` on the theme's text scale. Text relaid by the change is all there is to do.
+fn follow_text_scale(theme: Res<Theme>, rem: Option<ResMut<RemSize>>) {
+    let Some(mut rem) = rem else { return };
+    if (theme.is_changed() || rem.is_added()) && rem.0 != theme.text_scale {
+        rem.0 = theme.text_scale;
     }
 }
 
@@ -505,6 +528,13 @@ mod tests {
         assert!(t.dark && t.compact);
         assert_eq!(t.tokens, DARK);
         assert_eq!(t.code_size, 16.0);
+        assert_eq!(t.text_scale, 1.0, "medium until the config says otherwise");
+        let large = t.with_text_size(TextSize::Large);
+        assert_eq!(large.text_scale, TextSize::Large.scale());
+        assert_eq!(
+            large.code_size, 16.0,
+            "the code size is scaled by the text, not here"
+        );
         assert_eq!(Theme::new(false, 13, Density::Comfortable).tokens, LIGHT);
     }
 

@@ -62,10 +62,11 @@ pub fn page_view(
     probe: &ProbeState,
     form: &areas::AreaForm,
     switched: &harness::Switched,
+    missing_font: Option<&(String, crate::fonts::Unusable)>,
 ) -> PageView {
     match section {
         Section::General => PageView::General(general::view(snap, rejected)),
-        Section::Appearance => PageView::Appearance(appearance::view(snap)),
+        Section::Appearance => PageView::Appearance(appearance::view(snap, missing_font)),
         Section::GitServer => PageView::Git(git::view(snap, rejected)),
         Section::Repositories => PageView::Repos(repos::view(snap, rejected, paths)),
         Section::Editor => PageView::Editor(editor::view(snap, rejected, paths)),
@@ -124,6 +125,7 @@ impl Plugin for ConfigPlugin {
         app.init_resource::<areas::AreaForm>()
             .init_resource::<harness::Switched>()
             .init_resource::<spotlight::Spotlight>()
+            .init_resource::<appearance::FontQuery>()
             .add_systems(
                 Update,
                 (
@@ -135,6 +137,8 @@ impl Plugin for ConfigPlugin {
                     harness::forget_switch,
                     repos::commit_roots,
                     rebuild_config,
+                    appearance::live_font_query,
+                    appearance::rebuild_font_list,
                     spotlight::spotlight,
                     git::refresh_last_sync,
                     notifications::poll_permission,
@@ -299,6 +303,7 @@ fn rebuild_config(
     mut pages: Query<(Entity, &mut PagePart)>,
     focus: Res<InputFocus>,
     fields: Query<(&Field, &EditableText)>,
+    text_face: Res<crate::fonts::TextFace>,
 ) {
     let Screen::Config(section) = nav.screen else {
         return;
@@ -345,6 +350,7 @@ fn rebuild_config(
         &model.probe,
         &area_form,
         &switched,
+        text_face.missing.as_ref(),
     );
     // Half-typed input survives: a rebuild of the same page waits until the focused field is
     // committed (or reverted) so the field entity is not despawned under the cursor.
@@ -689,6 +695,126 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn the_text_controls_write_their_keys_and_the_search_narrows_the_list() {
+        let mut app = config_app(Section::Appearance);
+        app.world_mut()
+            .resource_mut::<crate::fonts::InstalledFonts>()
+            .families = Some(vec!["Avenir Next".into(), "Menlo".into()]);
+        testing::settle(&mut app);
+        let fonts = |app: &mut App| -> Vec<String> {
+            let mut q = app.world_mut().query::<&SetValue>();
+            q.iter(app.world())
+                .filter(|s| s.key == "appearance.text_font")
+                .map(|s| s.value.clone())
+                .collect()
+        };
+        assert_eq!(fonts(&mut app), ["Inter", "SF Pro", "Avenir Next", "Menlo"]);
+        let search = testing::find::<appearance::FontSearch>(&mut app, |_| true);
+        testing::type_into(&mut app, search, "men");
+        testing::settle(&mut app);
+        assert_eq!(fonts(&mut app), ["Menlo"]);
+        let menlo = testing::find::<SetValue>(&mut app, |s| s.value == "Menlo");
+        testing::activate(&mut app, menlo);
+        let large = testing::find::<SetValue>(&mut app, |s| {
+            s.key == "appearance.text_size" && s.value == "large"
+        });
+        testing::activate(&mut app, large);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [
+                Ask::SetConfig {
+                    key: "appearance.text_font".into(),
+                    value: "Menlo".into()
+                },
+                Ask::SetConfig {
+                    key: "appearance.text_size".into(),
+                    value: "large".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_text_font_that_cannot_be_used_is_named_on_the_page_with_why() {
+        use crate::fonts::{TextFace, Unusable};
+        let mut app = config_app(Section::Appearance);
+        assert_eq!(testing::count::<appearance::MissingFont>(&mut app), 0);
+        for (why, line) in [
+            (
+                Unusable::NotInstalled,
+                "“Nope Sans” is not installed on this Mac, so text shows in Inter.",
+            ),
+            (
+                Unusable::Unreadable,
+                "“Nope Sans” could not be read, so text shows in Inter.",
+            ),
+        ] {
+            app.world_mut().resource_mut::<TextFace>().missing = Some(("Nope Sans".into(), why));
+            testing::settle(&mut app);
+            let note = testing::find::<appearance::MissingFont>(&mut app, |_| true);
+            assert_eq!(app.world().get::<Text>(note).unwrap().0, line);
+        }
+    }
+
+    fn installed(app: &mut App, families: &[&str]) {
+        app.world_mut()
+            .resource_mut::<crate::fonts::InstalledFonts>()
+            .families = Some(families.iter().map(|f| f.to_string()).collect());
+        testing::settle(app);
+    }
+
+    #[test]
+    fn choosing_a_font_keeps_the_search_and_the_list() {
+        let mut app = config_app(Section::Appearance);
+        installed(&mut app, &["Avenir Next", "Menlo", "Monaco"]);
+        let search = testing::find::<appearance::FontSearch>(&mut app, |_| true);
+        testing::type_into(&mut app, search, "mon");
+        testing::settle(&mut app);
+        let list = testing::find::<appearance::FontListPart>(&mut app, |_| true);
+        let monaco = testing::find::<SetValue>(&mut app, |s| s.value == "Monaco");
+        testing::activate(&mut app, monaco);
+        // The daemon's answer, once the search field has lost the focus.
+        app.world_mut().resource_mut::<InputFocus>().clear();
+        testing::set_config_locally(&mut app, "appearance.text_font", "Monaco");
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::find::<appearance::FontSearch>(&mut app, |_| true),
+            search,
+            "the search field is the same one"
+        );
+        assert_eq!(app.world().resource::<appearance::FontQuery>().0, "mon");
+        assert_eq!(
+            testing::find::<appearance::FontListPart>(&mut app, |_| true),
+            list,
+            "the list keeps its place"
+        );
+    }
+
+    #[test]
+    fn the_font_list_is_not_rebuilt_while_nothing_it_shows_changes() {
+        let mut app = config_app(Section::Appearance);
+        installed(&mut app, &["Avenir Next", "Menlo"]);
+        let rows = |app: &mut App| -> Vec<Entity> {
+            let mut q = app.world_mut().query::<(Entity, &SetValue)>();
+            q.iter(app.world())
+                .filter(|(_, s)| s.key == "appearance.text_font")
+                .map(|(e, _)| e)
+                .collect()
+        };
+        let before = rows(&mut app);
+        assert_eq!(before.len(), 4);
+        app.world_mut()
+            .resource_mut::<Model>()
+            .snapshot
+            .sync
+            .as_mut()
+            .unwrap()
+            .last_sync_unix = Some(NOW - 5);
+        testing::settle(&mut app);
+        assert_eq!(rows(&mut app), before, "the same rows, not new ones");
     }
 
     #[test]

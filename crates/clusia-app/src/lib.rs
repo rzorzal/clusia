@@ -12,6 +12,7 @@ pub mod fonts;
 pub mod instance;
 pub mod logging;
 pub mod nav;
+pub mod platform_fonts;
 pub mod platform_open;
 pub mod platform_sound;
 pub mod platform_window;

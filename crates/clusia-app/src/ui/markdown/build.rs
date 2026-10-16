@@ -9,7 +9,7 @@ use bevy::clipboard::Clipboard;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::text::{FontSource, Strikethrough, Underline, UnderlineColor};
+use bevy::text::{Strikethrough, Underline, UnderlineColor};
 use bevy::ui_widgets::{Activate, Button as WidgetButton};
 use clusia_highlight::highlight;
 
@@ -18,7 +18,7 @@ use crate::platform_open::{OpenUrls, visit};
 use crate::theme::{Swatch, Theme};
 use crate::ui::code::{code_line, spans_for};
 use crate::ui::emoji::EmojiImages;
-use crate::ui::kit::{Clickable, Fill, Ink, Stroke, Type, Variant, button, font, text};
+use crate::ui::kit::{Clickable, Fill, Ink, Stroke, TextSized, Type, Variant, button, font, text};
 use crate::ui::markdown::parse::{Block, Inline, ListItem, Style};
 
 /// The width of a space, in ems.
@@ -307,10 +307,10 @@ pub fn link_chip(
             padding: UiRect::axes(px(8), px(4)),
             border: px(1).all(),
             border_radius: BorderRadius::all(px(6)),
-            margin: space_margin(Type::META.size, space_after),
             max_width: percent(100),
             ..default()
         },
+        word_gap(Type::META.size, space_after),
         BackgroundColor::default(),
         Fill(Swatch::Chrome),
         BorderColor::default(),
@@ -680,14 +680,15 @@ fn face(fonts: &UiFonts, base: Type, style: &Style) -> (Type, TextFont) {
     }
     let mut f = font(fonts, t);
     if style.em {
-        // The bundled upright face does not slant on its own.
-        f.font = FontSource::Handle(fonts.italic.clone());
+        // Inter's upright face does not slant on its own: emphasis has a face of its own.
+        fonts.italic.apply(&mut f);
     }
     (t, f)
 }
 
-fn space_margin(size: f32, space: bool) -> UiRect {
-    UiRect::right(px(if space { (size * SPACE).round() } else { 0.0 }))
+/// The space after a word of `size` points, which grows with the text size.
+fn word_gap(size: f32, space: bool) -> TextSized {
+    TextSized::Gap(if space { size * SPACE } else { 0.0 })
 }
 
 fn inlines(
@@ -735,10 +736,10 @@ fn inlines(
                         Ink(t.ink),
                         TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
                         Node {
-                            margin: space_margin(base.size, *space_after && !joined),
                             max_width: percent(100),
                             ..default()
                         },
+                        word_gap(base.size, *space_after && !joined),
                     ));
                     if style.strike {
                         e.insert(Strikethrough);
@@ -759,26 +760,24 @@ fn inlines(
                         Ink(t.ink),
                         TextLayout::new(Justify::Left, LineBreak::WordOrCharacter),
                         Node {
-                            margin: space_margin(base.size, *space_after),
                             max_width: percent(100),
                             padding: UiRect::axes(px(4), px(1)),
                             border_radius: BorderRadius::all(px(4)),
                             ..default()
                         },
+                        word_gap(base.size, *space_after),
                         BackgroundColor::default(),
                         Fill(Swatch::Line),
                     ));
                 }
                 Inline::Emoji { file, space_after } => {
-                    let size = base.size * EMOJI_SCALE;
                     row.spawn((
                         Node {
-                            width: px(size),
-                            height: px(size),
                             margin: UiRect::right(px(if *space_after { 4.0 } else { 1.0 })),
                             flex_shrink: 0.0,
                             ..default()
                         },
+                        TextSized::Square(base.size * EMOJI_SCALE),
                         MdEmoji(file.to_string()),
                     ));
                 }
@@ -894,6 +893,7 @@ fn fill_emoji(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fonts::Face;
     use bevy::asset::uuid_handle;
     use bevy::ecs::system::RunSystemOnce;
     use bevy::text::TextSpan;
@@ -906,9 +906,10 @@ mod tests {
 
     fn fonts() -> UiFonts {
         UiFonts {
-            sans: uuid_handle!("00000000-0000-4000-8000-000000000001"),
+            sans: Face::handle(&uuid_handle!("00000000-0000-4000-8000-000000000001")),
             mono: uuid_handle!("00000000-0000-4000-8000-000000000002"),
-            italic: uuid_handle!("00000000-0000-4000-8000-000000000003"),
+            italic: Face::handle(&uuid_handle!("00000000-0000-4000-8000-000000000003")),
+            ..UiFonts::default()
         }
     }
 
@@ -998,8 +999,8 @@ mod tests {
 
     fn size(app: &App, e: Entity) -> f32 {
         match app.world().get::<TextFont>(e).unwrap().font_size {
-            FontSize::Px(v) => v,
-            other => panic!("not px: {other:?}"),
+            FontSize::Rem(v) => v,
+            other => panic!("not rem: {other:?}"),
         }
     }
 
@@ -1086,7 +1087,7 @@ mod tests {
         let slanted = entity_with_text(&app, root, "slanted");
         assert_eq!(
             app.world().get::<TextFont>(slanted).unwrap().font,
-            FontSource::Handle(fonts().italic)
+            fonts().italic.source
         );
         let gone = entity_with_text(&app, root, "gone");
         assert!(app.world().get::<Strikethrough>(gone).is_some());
@@ -1190,6 +1191,25 @@ mod tests {
         assert_eq!(app.world().get::<TextColor>(one).unwrap().0, LIGHT.green);
         testing::set_config_locally(&mut app, "appearance.theme", "dark");
         assert_eq!(app.world().get::<TextColor>(one).unwrap().0, DARK.green);
+    }
+
+    #[test]
+    fn word_gaps_and_emoji_follow_the_text_size() {
+        let mut app = fresh();
+        let root = render(&mut app, parse("ship it :rocket:"));
+        let ship = entity_with_text(&app, root, "ship");
+        let gap = |app: &App| app.world().get::<Node>(ship).unwrap().margin.right;
+        let mut q = app.world_mut().query_filtered::<Entity, With<MdEmoji>>();
+        let rocket = q.single(app.world()).unwrap();
+        let side = |app: &App| app.world().get::<Node>(rocket).unwrap().width;
+        assert_eq!(gap(&app), px((13.0 * SPACE).round()));
+        assert_eq!(side(&app), px(13.0 * EMOJI_SCALE));
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        assert_eq!(gap(&app), px((15.0 * SPACE).round()));
+        let Val::Px(w) = side(&app) else { panic!() };
+        assert!((w - 15.0 * EMOJI_SCALE).abs() < 1e-3, "{w}");
+        let node = app.world().get::<Node>(rocket).unwrap();
+        assert_eq!(node.width, node.height, "still square");
     }
 
     #[test]

@@ -74,6 +74,7 @@ pub fn app(snapshot: Snapshot) -> App {
             ConfigPlugin,
         ))
         .add_plugins(FirstRunPlugin)
+        .add_plugins(crate::fonts::FaceFollowPlugin)
         .add_plugins(ReviewStatePlugin)
         .add_plugins(crate::tab_memory::TabMemoryPlugin)
         .add_plugins(ReviewPlugin)

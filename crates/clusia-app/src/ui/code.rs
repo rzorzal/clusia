@@ -230,7 +230,7 @@ mod tests {
         );
         assert_eq!(
             w.get::<TextFont>(kids[1]).unwrap().font_size,
-            FontSize::Px(13.0)
+            FontSize::Rem(13.0)
         );
         assert_eq!(
             w.get::<TextLayout>(line).unwrap().linebreak,
