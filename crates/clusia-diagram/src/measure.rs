@@ -1,7 +1,10 @@
-//! Text measurement for the layout, from built-in advance tables so the numbers are the same
-//! in tests, screenshots and the app. The tables are Inter's advances in 1/1000 em at weights
-//! 400 and 600 for printable ASCII and the symbols the diagrams use; JetBrains Mono is 0.6 em
-//! per character. Kerning is ignored, so every width gets `SLACK`.
+//! Text measurement for the layout, from advance tables so the numbers are the same in tests,
+//! screenshots and the app. A table holds a face's advances in 1/1000 em at weights 400 and
+//! 600 for printable ASCII and the symbols the diagrams use: `Fonts` uses Inter's, built in,
+//! and `FaceMeasure` any face's, read from its file, times the text scale. JetBrains Mono is
+//! 0.6 em per character. Kerning is ignored, so every width gets `SLACK`.
+
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextStyle {
@@ -99,35 +102,101 @@ fn is_wide(c: char) -> bool {
         | 0x1F300..=0x1FAFF | 0x20000..=0x3FFFD)
 }
 
-/// The advance of one character in em.
-fn advance(c: char, weight: u16, mono: bool) -> f32 {
-    if c.is_control() {
-        return 0.0;
+/// The advances of one face, in 1/1000 em, at weights 400 and 600; 0 is a character the face
+/// has no glyph for, measured as `FALLBACK_EM`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Advances {
+    regular: [u16; 95],
+    strong: [u16; 95],
+    /// (character, 400, 600) for the symbols of `INTER_SYMBOLS`, in that order.
+    symbols: Vec<(char, u16, u16)>,
+}
+
+impl Advances {
+    /// Inter's built-in tables.
+    pub fn inter() -> Self {
+        Self {
+            regular: INTER_400,
+            strong: INTER_600,
+            symbols: INTER_SYMBOLS.to_vec(),
+        }
     }
-    if is_wide(c) {
-        return WIDE_EM;
+
+    /// The characters a table holds: printable ASCII, then the symbols diagrams use.
+    pub fn sampled() -> impl Iterator<Item = char> {
+        (' '..='~').chain(INTER_SYMBOLS.iter().map(|&(c, _, _)| c))
     }
-    if mono {
-        return MONO_EM;
+
+    /// A table from `advance(character, strong)`: the advance in em at weight 600 when
+    /// `strong`, else 400; `None` when the face has no glyph for it.
+    pub fn from_face(advance: impl Fn(char, bool) -> Option<f32>) -> Self {
+        let milli = |c: char, strong: bool| {
+            advance(c, strong).map_or(0, |em| (em * 1000.0).round().clamp(1.0, 4000.0) as u16)
+        };
+        let row = |strong: bool| std::array::from_fn(|i| milli(char::from(b' ' + i as u8), strong));
+        Self {
+            regular: row(false),
+            strong: row(true),
+            symbols: INTER_SYMBOLS
+                .iter()
+                .map(|&(c, _, _)| (c, milli(c, false), milli(c, true)))
+                .collect(),
+        }
     }
-    let table = if weight >= 600 {
-        &INTER_600
-    } else {
-        &INTER_400
-    };
-    match c {
-        ' '..='~' => f32::from(table[usize::from(c as u8 - b' ')]) / 1000.0,
-        _ => INTER_SYMBOLS
-            .iter()
-            .find(|(s, _, _)| *s == c)
-            .map(|&(_, w4, w6)| f32::from(if weight >= 600 { w6 } else { w4 }) / 1000.0)
-            .unwrap_or(FALLBACK_EM),
+
+    /// The advance of one character in em.
+    fn advance(&self, c: char, weight: u16, mono: bool) -> f32 {
+        if c.is_control() {
+            return 0.0;
+        }
+        if is_wide(c) {
+            return WIDE_EM;
+        }
+        if mono {
+            return MONO_EM;
+        }
+        let strong = weight >= 600;
+        let milli = match c {
+            ' '..='~' => {
+                let table = if strong { &self.strong } else { &self.regular };
+                table[usize::from(c as u8 - b' ')]
+            }
+            _ => self
+                .symbols
+                .iter()
+                .find(|(s, _, _)| *s == c)
+                .map_or(0, |&(_, w4, w6)| if strong { w6 } else { w4 }),
+        };
+        if milli == 0 {
+            FALLBACK_EM
+        } else {
+            f32::from(milli) / 1000.0
+        }
+    }
+
+    /// The width of `text` in px at `px` size, before `SLACK`.
+    fn raw_width(&self, text: &str, px: f32, weight: u16, mono: bool) -> f32 {
+        text.chars()
+            .map(|c| self.advance(c, weight, mono))
+            .sum::<f32>()
+            * px
     }
 }
 
-/// The width of `text` in px at `px` size, before `SLACK`.
+/// The line height of `style` at the base sizes of `style_size`.
+fn base_line_height(style: TextStyle) -> f32 {
+    match style {
+        TextStyle::Title | TextStyle::TitleMono | TextStyle::GroupLabel => 16.0,
+        _ => 14.0,
+    }
+}
+
+/// Inter's tables at the base sizes.
 fn raw_width(text: &str, px: f32, weight: u16, mono: bool) -> f32 {
-    text.chars().map(|c| advance(c, weight, mono)).sum::<f32>() * px
+    static INTER: std::sync::OnceLock<Advances> = std::sync::OnceLock::new();
+    INTER
+        .get_or_init(Advances::inter)
+        .raw_width(text, px, weight, mono)
 }
 
 impl Measure for Fonts {
@@ -137,10 +206,42 @@ impl Measure for Fonts {
     }
 
     fn line_height(&self, style: TextStyle) -> f32 {
-        match style {
-            TextStyle::Title | TextStyle::TitleMono | TextStyle::GroupLabel => 16.0,
-            _ => 14.0,
-        }
+        base_line_height(style)
+    }
+}
+
+/// The measure of text drawn in one face at `scale` times the sizes of `style_size` (the
+/// window's text size). Code stays JetBrains Mono, so only the scale reaches it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FaceMeasure {
+    advances: Arc<Advances>,
+    scale: f32,
+}
+
+impl FaceMeasure {
+    pub fn new(advances: Arc<Advances>, scale: f32) -> Self {
+        Self { advances, scale }
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+}
+
+impl Default for FaceMeasure {
+    fn default() -> Self {
+        Self::new(Arc::new(Advances::inter()), 1.0)
+    }
+}
+
+impl Measure for FaceMeasure {
+    fn width(&self, text: &str, style: TextStyle) -> f32 {
+        let (px, weight, mono) = style_size(style);
+        self.advances.raw_width(text, px * self.scale, weight, mono) * SLACK
+    }
+
+    fn line_height(&self, style: TextStyle) -> f32 {
+        base_line_height(style) * self.scale
     }
 }
 
@@ -182,6 +283,46 @@ mod tests {
         assert_eq!(style_size(TextStyle::EdgeLabel), (11.0, 400, false));
         assert_eq!(style_size(TextStyle::EdgeLabelMono), (11.0, 400, true));
         assert_eq!(f.width("", TextStyle::Title), 0.0);
+    }
+
+    #[test]
+    fn a_face_measure_follows_its_advances_and_scale() {
+        let inter = FaceMeasure::new(Arc::new(Advances::inter()), 1.0);
+        for style in [TextStyle::Title, TextStyle::Row, TextStyle::RowMono] {
+            let text = "Refresh call → step · 3";
+            assert_eq!(inter.width(text, style), Fonts.width(text, style));
+            assert_eq!(inter.line_height(style), Fonts.line_height(style));
+        }
+        let large = FaceMeasure::new(Arc::new(Advances::inter()), 1.5);
+        let w = Fonts.width("TokenStore", TextStyle::Title);
+        assert!((large.width("TokenStore", TextStyle::Title) - w * 1.5).abs() < 1e-3);
+        assert!(
+            (large.width("exchange()", TextStyle::RowMono)
+                - Fonts.width("exchange()", TextStyle::RowMono) * 1.5)
+                .abs()
+                < 1e-3
+        );
+        assert_eq!(large.line_height(TextStyle::Title), 24.0);
+        assert_eq!(large.line_height(TextStyle::Row), 21.0);
+        assert_eq!(large.scale(), 1.5);
+    }
+
+    #[test]
+    fn advances_are_filled_from_a_face_and_unknown_glyphs_fall_back() {
+        // A face where every glyph is half an em, except that it has no `→` and a wide `W`.
+        let face = Advances::from_face(|c, strong| match c {
+            '→' => None,
+            'W' if strong => Some(0.9),
+            _ => Some(0.5),
+        });
+        let m = FaceMeasure::new(Arc::new(face), 1.0);
+        let unit = |t: &str, s| m.width(t, s) / style_size(s).0 / SLACK;
+        assert!((unit("ab", TextStyle::Row) - 1.0).abs() < 1e-4);
+        assert!((unit("W", TextStyle::Title) - 0.9).abs() < 1e-4);
+        assert!((unit("W", TextStyle::Row) - 0.5).abs() < 1e-4);
+        assert!((unit("→", TextStyle::Row) - FALLBACK_EM).abs() < 1e-4);
+        assert!(Advances::sampled().any(|c| c == '→'));
+        assert_eq!(Advances::sampled().count(), 95 + INTER_SYMBOLS.len());
     }
 
     #[test]

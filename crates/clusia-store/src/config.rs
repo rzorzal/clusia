@@ -247,6 +247,19 @@ mod tests {
     }
 
     #[test]
+    fn text_font_and_size_are_set_by_key() {
+        let c = Config::default();
+        assert_eq!(get_value(&c, "appearance.text_font").unwrap(), "Inter");
+        assert_eq!(get_value(&c, "appearance.text_size").unwrap(), "medium");
+        let c = set_value(&c, "appearance.text_font", "Helvetica Neue").unwrap();
+        assert_eq!(c.appearance.text_font, "Helvetica Neue");
+        let c = set_value(&c, "appearance.text_size", "large").unwrap();
+        assert_eq!(get_value(&c, "appearance.text_size").unwrap(), "large");
+        assert!(set_value(&c, "appearance.text_size", "huge").is_err());
+        assert!(set_value(&c, "appearance.text_font", " ").is_err());
+    }
+
+    #[test]
     fn new_appearance_and_list_keys_round_trip() {
         let c = Config::default();
         assert_eq!(get_value(&c, "appearance.code_size").unwrap(), "13");

@@ -19,4 +19,4 @@ pub use geometry::{
     Rect, RowGeo, TextLines,
 };
 pub use layout::{MARGIN, layout};
-pub use measure::{Fonts, Measure, TextStyle, style_size};
+pub use measure::{Advances, FaceMeasure, Fonts, Measure, TextStyle, style_size};

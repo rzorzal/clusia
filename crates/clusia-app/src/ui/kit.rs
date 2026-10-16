@@ -41,7 +41,8 @@ pub struct HoverFill(pub Swatch);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PressFill(pub Swatch);
 
-/// A text style: size in points, weight 100–900, color role, font family.
+/// A text style: size in points at the medium text size, weight 100–900, color role, font
+/// family.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Type {
     pub size: f32,
@@ -116,7 +117,8 @@ pub fn font(fonts: &UiFonts, t: Type) -> TextFont {
         } else {
             fonts.sans.clone()
         }),
-        font_size: FontSize::Px(t.size),
+        // Relative to `RemSize`, the text scale: one write to it resizes every text.
+        font_size: FontSize::Rem(t.size),
         weight: FontWeight(t.weight),
         ..default()
     }
@@ -805,6 +807,7 @@ mod tests {
     use crate::snapshot::Snapshot;
     use crate::testing;
     use crate::theme::{DARK, LIGHT};
+    use bevy::text::RemSize;
     use bevy::window::{WindowTheme, WindowThemeChanged};
 
     fn bg(app: &mut App, e: Entity) -> Color {
@@ -864,6 +867,74 @@ mod tests {
         );
         testing::set_config_locally(&mut app, "appearance.code_size", "16");
         assert_eq!(app.world().resource::<Theme>().code_size, 16.0);
+    }
+
+    /// Every text style of the kit, as a no-wrap label.
+    const STYLES: [Type; 8] = [
+        Type::TITLE,
+        Type::HEADING,
+        Type::BODY,
+        Type::STRONG,
+        Type::MUTED,
+        Type::META,
+        Type::MONO,
+        Type::NUMBER,
+    ];
+
+    #[test]
+    fn the_text_size_scales_every_text_style_at_once() {
+        let mut app = testing::layout_app(Snapshot::default(), UVec2::new(800, 600));
+        let fonts = crate::fonts::load(&mut app.world_mut().resource_mut::<Assets<Font>>());
+        app.insert_resource(fonts.clone());
+        let labels: Vec<Entity> = STYLES
+            .iter()
+            .map(|t| {
+                laid_out(
+                    &mut app,
+                    (text(&fonts, "Refresh token", *t), TextLayout::no_wrap()),
+                )
+            })
+            .collect();
+        let sizes = |app: &App| -> Vec<(f32, f32)> {
+            labels
+                .iter()
+                .map(|e| {
+                    let (_, _, w, h) = testing::frame(app, *e);
+                    (w, h)
+                })
+                .collect()
+        };
+        let medium = sizes(&app);
+        assert_eq!(app.world().resource::<RemSize>().0, 1.0);
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        app.update();
+        let scale = 15.0 / 13.0;
+        assert_eq!(app.world().resource::<Theme>().text_scale, scale);
+        assert_eq!(app.world().resource::<RemSize>().0, scale);
+        let large = sizes(&app);
+        for ((t, (w0, h0)), (w1, h1)) in STYLES.iter().zip(&medium).zip(&large) {
+            assert!(*w0 > 0.0, "{t:?} is laid out");
+            let grew = w1 / w0;
+            assert!(
+                (grew - scale).abs() < 0.04,
+                "{t:?}: {w0}x{h0} became {w1}x{h1}"
+            );
+            assert!(h1 > h0, "{t:?} is taller");
+        }
+        testing::set_config_locally(&mut app, "appearance.text_size", "small");
+        app.update();
+        let small = sizes(&app);
+        for ((w0, _), (w1, _)) in medium.iter().zip(&small) {
+            assert!((w1 / w0 - 12.0 / 13.0).abs() < 0.04, "{w0} became {w1}");
+        }
+    }
+
+    #[test]
+    fn text_sizes_are_relative_so_one_change_resizes_everything() {
+        let fonts = UiFonts::default();
+        for t in STYLES {
+            assert_eq!(font(&fonts, t).font_size, FontSize::Rem(t.size), "{t:?}");
+        }
     }
 
     #[test]

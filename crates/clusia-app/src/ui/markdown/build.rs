@@ -998,8 +998,8 @@ mod tests {
 
     fn size(app: &App, e: Entity) -> f32 {
         match app.world().get::<TextFont>(e).unwrap().font_size {
-            FontSize::Px(v) => v,
-            other => panic!("not px: {other:?}"),
+            FontSize::Rem(v) => v,
+            other => panic!("not rem: {other:?}"),
         }
     }
 

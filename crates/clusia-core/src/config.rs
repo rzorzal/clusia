@@ -35,6 +35,11 @@ pub struct Appearance {
     pub density: Density,
     /// How the Diff opens; each review can still switch.
     pub diff_view: DiffView,
+    /// The family of every text but code: `INTER` (bundled), `SYSTEM_FONT` or an installed
+    /// family by name. One that is not installed shows as Inter.
+    pub text_font: String,
+    /// Scales every text style, code included.
+    pub text_size: TextSize,
 }
 
 impl Default for Appearance {
@@ -44,6 +49,34 @@ impl Default for Appearance {
             code_size: 13,
             density: Density::Comfortable,
             diff_view: DiffView::Unified,
+            text_font: INTER.into(),
+            text_size: TextSize::Medium,
+        }
+    }
+}
+
+/// The bundled text font, and the default.
+pub const INTER: &str = "Inter";
+/// The macOS system font (whatever its file is called on this version of macOS).
+pub const SYSTEM_FONT: &str = "SF Pro";
+pub const MAX_FONT_NAME_CHARS: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TextSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl TextSize {
+    /// The factor on every text size: body text is 12, 13 or 15 points.
+    pub fn scale(self) -> f32 {
+        match self {
+            TextSize::Small => 12.0 / 13.0,
+            TextSize::Medium => 1.0,
+            TextSize::Large => 15.0 / 13.0,
         }
     }
 }
@@ -1021,6 +1054,16 @@ impl Config {
                 "appearance.code_size must be one of 12, 13, 14, 16, got {size}"
             ));
         }
+        let font = &self.appearance.text_font;
+        let chars = font.chars().count();
+        if font.trim().is_empty()
+            || chars > MAX_FONT_NAME_CHARS
+            || font.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "appearance.text_font must be a font name of 1 to {MAX_FONT_NAME_CHARS} characters"
+            ));
+        }
         let timeout = self.harness.turn_timeout_secs;
         if !(MIN_TURN_TIMEOUT_SECS..=MAX_TURN_TIMEOUT_SECS).contains(&timeout) {
             return Err(format!(
@@ -1143,6 +1186,56 @@ mod tests {
             bad.validate().unwrap_err(),
             "appearance.code_size must be one of 12, 13, 14, 16, got 15"
         );
+    }
+
+    #[test]
+    fn text_font_and_size_default_to_inter_at_medium() {
+        let a = Appearance::default();
+        assert_eq!(a.text_font, "Inter");
+        assert_eq!(a.text_font, INTER);
+        assert_eq!(a.text_size, TextSize::Medium);
+        let c: Config = serde_json::from_str(
+            r#"{"appearance":{"text_font":"Helvetica Neue","text_size":"large"}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.appearance.text_font, "Helvetica Neue");
+        assert_eq!(c.appearance.text_size, TextSize::Large);
+        assert_eq!(c.validate(), Ok(()));
+        assert_eq!(
+            serde_json::to_string(&TextSize::Small).unwrap(),
+            r#""small""#
+        );
+        assert!(serde_json::from_str::<Config>(r#"{"appearance":{"text_size":"huge"}}"#).is_err());
+    }
+
+    #[test]
+    fn text_sizes_scale_from_the_medium_body_size() {
+        assert_eq!(TextSize::Medium.scale(), 1.0);
+        assert_eq!(TextSize::Small.scale() * 13.0, 12.0);
+        assert_eq!(TextSize::Large.scale() * 13.0, 15.0);
+    }
+
+    #[test]
+    fn a_text_font_must_name_a_font() {
+        for bad in [
+            "",
+            "   ",
+            "Inter\nBold",
+            &"x".repeat(MAX_FONT_NAME_CHARS + 1),
+        ] {
+            let mut c = Config::default();
+            c.appearance.text_font = bad.to_string();
+            assert_eq!(
+                c.validate().unwrap_err(),
+                format!(
+                    "appearance.text_font must be a font name of 1 to {MAX_FONT_NAME_CHARS} characters"
+                ),
+                "{bad:?}"
+            );
+        }
+        let mut c = Config::default();
+        c.appearance.text_font = SYSTEM_FONT.into();
+        assert_eq!(c.validate(), Ok(()));
     }
 
     #[test]

@@ -33,7 +33,7 @@ pub use checks::{
 };
 pub use config::{
     CODE_SIZES, Config, Density, DiffView, Dnd, EventKind, General, HourMinute, ListSort, Lists,
-    Media, Notifications, Route, SoundId, Weekday,
+    Media, Notifications, Route, SoundId, TextSize, Weekday,
 };
 pub use diffmap::{
     DiffMap, FileChange, Hunk, LineMap, Relocation, added_lines, can_comment, commentable_lines,
