@@ -205,6 +205,7 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
         | Scene::Permission
         | Scene::Security
         | Scene::Audits
+        | Scene::AuditsAll
         | Scene::Revalidated
         | Scene::RevalidatedBanner => {
             set_demo_config(world, &[("harness.program", "/opt/homebrew/bin/claude")])
@@ -419,6 +420,7 @@ pub fn stage(world: &mut World, scene: Scene) {
             ui.audit_area = Some("concurrency".into());
             accept_demo_finding(&mut ready, now);
         }
+        Scene::AuditsAll => ui.section = ReviewSection::Audits,
         Scene::Revalidated | Scene::RevalidatedBanner => {
             let (draft, proposals) = fixture::demo_revalidation(now);
             ready.view.review.draft = draft;
@@ -482,7 +484,7 @@ pub fn stage(world: &mut World, scene: Scene) {
     let diagrams = scene
         .is_diagram()
         .then(|| stage_diagrams(&mut ui, scene, now));
-    let checks_tell = matches!(scene, Scene::Security | Scene::Audits)
+    let checks_tell = matches!(scene, Scene::Security | Scene::Audits | Scene::AuditsAll)
         .then(|| fixture::demo_checks_tell(&pr, now, &ready.view.review.draft));
     let phase = match scene {
         Scene::Loading => Phase::Loading { steps: steps(&pr) },
@@ -740,6 +742,14 @@ mod tests {
                 Scene::Audits => {
                     assert_eq!(tab.ui.section, ReviewSection::Audits);
                     assert_eq!(tab.ui.audit_area.as_deref(), Some("concurrency"));
+                }
+                Scene::AuditsAll => {
+                    assert_eq!(tab.ui.section, ReviewSection::Audits);
+                    assert_eq!(tab.ui.audit_area, None, "All is the default");
+                    assert!(testing::shows(
+                        &mut app,
+                        "Error handling, Performance, Docs and changelog: ok"
+                    ));
                 }
                 Scene::Revalidated => {
                     assert_eq!(tab.ui.revalidation, RevalView::Auto);
