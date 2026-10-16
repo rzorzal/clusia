@@ -286,8 +286,9 @@ const ROW_HEIGHT: f32 = 22.0;
 /// Lines of context kept above a line that is scrolled to.
 const FOCUS_CONTEXT: usize = 3;
 
-/// The scroll offset that brings the line at `index` into view with a few lines above it. A
-/// thread or draft comment above it makes rows taller, so the estimate lands short, never past.
+/// The scroll offset that brings the line at `index` into view with a few lines above it. Wrapped
+/// lines and comments above it make rows taller, so this is a first guess that `reach_focus`
+/// corrects once the rows are laid out.
 fn focus_scroll(index: usize) -> f32 {
     index.saturating_sub(FOCUS_CONTEXT) as f32 * ROW_HEIGHT
 }
@@ -698,14 +699,32 @@ struct BodyPart {
     built: Option<BodyKey>,
 }
 
-/// The row that `Open in diff` lit, in the body of `0`.
+/// The row that `Open in diff` lit, in the body of the `PrRef` it holds.
 #[derive(Component)]
 struct FocusRow(PrRef);
 
+/// Frames a body waits for its focused row to be laid out before it stops trying.
+const FOCUS_FRAMES: u8 = 4;
+
 /// On a body whose scroll is an estimate until its rows are laid out: wrapped rows are taller
-/// than the estimate counts, so the first laid-out frame moves the scroll to the real row.
+/// than the estimate counts, so the first laid-out frame moves the scroll to the real row. It
+/// is one-shot: it goes when the row is reached, when the scroll is no longer where the estimate
+/// put it (the user moved it), or after `FOCUS_FRAMES` frames without a laid-out row.
 #[derive(Component)]
-struct FocusPending;
+struct FocusPending {
+    /// The scroll offset the estimate set.
+    set: f32,
+    left: u8,
+}
+
+impl FocusPending {
+    fn at(set: f32) -> Self {
+        Self {
+            set,
+            left: FOCUS_FRAMES,
+        }
+    }
+}
 
 pub struct DiffPlugin;
 
@@ -910,7 +929,7 @@ fn rebuild_diff(
             && part.built.as_ref().map(|b| b.focus) != Some(key.focus)
         {
             scroll.0.y = focus_scroll(index);
-            commands.entity(entity).insert(FocusPending);
+            commands.entity(entity).insert(FocusPending::at(scroll.0.y));
         }
         let pr = part.pr.clone();
         let path = v.path.clone().unwrap_or_default();
@@ -925,23 +944,29 @@ fn rebuild_diff(
 /// context above it.
 fn reach_focus(
     mut commands: Commands,
-    mut bodies: Query<
-        (
-            Entity,
-            &BodyPart,
-            &ComputedNode,
-            &UiGlobalTransform,
-            &mut ScrollPosition,
-        ),
-        With<FocusPending>,
-    >,
+    mut bodies: Query<(
+        Entity,
+        &BodyPart,
+        &ComputedNode,
+        &UiGlobalTransform,
+        &mut ScrollPosition,
+        &mut FocusPending,
+    )>,
     rows: Query<(&FocusRow, &ComputedNode, &UiGlobalTransform)>,
 ) {
-    for (entity, part, body, body_at, mut scroll) in &mut bodies {
+    for (entity, part, body, body_at, mut scroll, mut pending) in &mut bodies {
+        if (scroll.0.y - pending.set).abs() > 0.5 {
+            commands.entity(entity).remove::<FocusPending>();
+            continue;
+        }
         let Some((_, row, row_at)) = rows
             .iter()
             .find(|(f, row, _)| f.0 == part.pr && row.size.y > 0.0)
         else {
+            pending.left -= 1;
+            if pending.left == 0 {
+                commands.entity(entity).remove::<FocusPending>();
+            }
             continue;
         };
         let scale = body.inverse_scale_factor;
@@ -2816,8 +2841,7 @@ mod tests {
             (at - axis).abs() <= 0.5,
             "switch at {at}, row axis at {axis}"
         );
-        let (_, _, _, th) = testing::frame(&app, track);
-        let (_, ty, _, _) = testing::frame(&app, track);
+        let (_, ty, _, th) = testing::frame(&app, track);
         assert!(
             (ty - ry) > 4.0 && (ry + rh - 1.0) - (ty + th) > 4.0,
             "room above and below"
@@ -2859,22 +2883,136 @@ mod tests {
         );
     }
 
+    /// A press and release on `target`, as the picking backend sends them; they bubble up to the
+    /// row's button the way a click on a continuation line does.
+    fn click_on(app: &mut App, target: Entity) {
+        use bevy::camera::NormalizedRenderTarget;
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::{Click, Pointer, Press};
+        use bevy::picking::pointer::{Location, PointerButton, PointerId};
+        use bevy::ui_widgets::ButtonPlugin;
+        if !app.is_plugin_added::<ButtonPlugin>() {
+            app.add_plugins(ButtonPlugin);
+        }
+        let location = Location {
+            target: NormalizedRenderTarget::None {
+                width: 1280,
+                height: 800,
+            },
+            position: Vec2::ZERO,
+        };
+        let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
+        app.world_mut().trigger(Pointer::new(
+            PointerId::Mouse,
+            location.clone(),
+            Press {
+                button: PointerButton::Primary,
+                hit: hit.clone(),
+                count: 1,
+            },
+            target,
+        ));
+        app.update();
+        app.world_mut().trigger(Pointer::new(
+            PointerId::Mouse,
+            location,
+            Click {
+                button: PointerButton::Primary,
+                hit,
+                duration: std::time::Duration::ZERO,
+                count: 1,
+            },
+            target,
+        ));
+        app.update();
+    }
+
     #[test]
-    fn a_continuation_line_belongs_to_its_line() {
+    fn a_click_on_a_wrapped_line_comments_on_its_line() {
         let mut app = wrap_app();
+        let pr = fixture::demo_pr();
         let (text, row) = code_of(&mut app, LONG);
         let button = app
             .world()
             .get::<LineButton>(row)
             .expect("a commentable row");
         assert_eq!((button.side, button.line), (Side::Right, 40));
-        let mut up = text;
-        let mut found = false;
-        while let Some(p) = app.world().get::<ChildOf>(up) {
-            up = p.parent();
-            found |= up == row;
+        click_on(&mut app, text);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.editor.map(|e| e.target),
+            Some(EditTarget::Line {
+                path: REFRESH.into(),
+                side: Side::Right,
+                start: None,
+                line: 40
+            })
+        );
+    }
+
+    #[test]
+    fn a_shift_click_on_a_wrapped_line_extends_the_range() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let first =
+            testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 39);
+        testing::activate(&mut app, first);
+        testing::settle(&mut app);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        let (text, _) = code_of(&mut app, LONG);
+        click_on(&mut app, text);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.editor.map(|e| e.target),
+            Some(EditTarget::Line {
+                path: REFRESH.into(),
+                side: Side::Right,
+                start: Some(39),
+                line: 40
+            })
+        );
+    }
+
+    #[test]
+    fn a_scroll_by_the_user_before_the_row_is_laid_out_is_left_alone() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            assert!(show_line(
+                tabs.0.get_mut(&pr).unwrap(),
+                REFRESH,
+                Some((44, 44))
+            ));
         }
-        assert!(found, "the wrapped code is inside the line's own button");
+        app.update();
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut ScrollPosition, With<BodyPart>>();
+        for mut p in q.iter_mut(app.world_mut()) {
+            p.y = 1.0;
+        }
+        testing::settle(&mut app);
+        assert_eq!(
+            body_scroll(&mut app),
+            1.0,
+            "the focus does not pull it back"
+        );
+    }
+
+    #[test]
+    fn a_focus_that_never_finds_its_row_gives_up_and_a_later_rebuild_does_not_scroll() {
+        let mut app = wrap_app();
+        let body = testing::find::<BodyPart>(&mut app, |_| true);
+        app.world_mut()
+            .entity_mut(body)
+            .insert(FocusPending::at(0.0));
+        for _ in 0..=FOCUS_FRAMES {
+            app.update();
+        }
+        assert!(app.world().get::<FocusPending>(body).is_none());
+        set_mode(&mut app, DiffMode::Split);
+        assert_eq!(body_scroll(&mut app), 0.0);
     }
 
     #[test]
@@ -2896,7 +3034,7 @@ mod tests {
         );
         let (_, _, cw, _) = testing::frame(&app, cell);
         let (_, _, tw, _) = testing::frame(&app, text);
-        assert!(tw < cw / 1.0, "inside its half: {tw} in {cw}");
+        assert!(tw < cw, "inside its half: {tw} in {cw}");
         let (_, _, pw, _) = testing::frame(&app, pair);
         assert!((cw - pw / 2.0).abs() <= 1.0, "a half each");
     }
@@ -2939,8 +3077,7 @@ mod tests {
         let mut app = wrap_app();
         let lines = |app: &mut App| {
             let (text, _) = code_of(app, LONG);
-            let (_, _, _, th) = testing::frame(app, text);
-            let (_, _, tw, _) = testing::frame(app, text);
+            let (_, _, tw, th) = testing::frame(app, text);
             (th, tw)
         };
         let (medium, _) = lines(&mut app);

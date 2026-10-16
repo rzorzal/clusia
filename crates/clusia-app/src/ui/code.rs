@@ -29,16 +29,16 @@ pub fn code_line(fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>) -> impl Bundl
     code_text(fonts, size, spans, TextLayout::no_wrap())
 }
 
-/// A line of code that breaks at the width of its box, between any two characters (code has no
-/// word boundaries worth keeping, and a long token must still fit). The runs keep their colors
-/// across the break; the text takes the width its parent gives it.
+/// A line of code that breaks at the width of its box: at whitespace and punctuation where it
+/// can, between characters for a token wider than the box (a long token must still fit). The
+/// runs keep their colors across the break; the text takes the width its parent gives it.
 pub fn wrapped_code_line(fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>) -> impl Bundle {
     (
         code_text(
             fonts,
             size,
             spans,
-            TextLayout::linebreak(LineBreak::AnyCharacter),
+            TextLayout::linebreak(LineBreak::WordOrCharacter),
         ),
         Node {
             width: percent(100),
