@@ -24,9 +24,11 @@ use crate::window_frame::{Display, Rect, Remembered};
 pub enum Mode {
     /// Connected to the daemon.
     Live,
-    /// Demo data; `theme` forces a theme (`None` follows the macOS appearance).
+    /// Demo data; `theme` forces a theme (`None` follows the macOS appearance), and `settings`
+    /// are config keys and values set on top of the demo's.
     Demo {
         theme: Option<clusia_core::config::Theme>,
+        settings: Vec<(String, String)>,
     },
 }
 

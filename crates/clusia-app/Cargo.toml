@@ -27,6 +27,9 @@ libc.workspace = true
 objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-text.workspace = true
+skrifa.workspace = true
 pulldown-cmark.workspace = true
 
 [dev-dependencies]

@@ -32,6 +32,7 @@ pub enum Scene {
     ConfigNotificationsBottom,
     ConfigMedia,
     ConfigAbout,
+    ConfigAppearance,
     AgentChat,
     ConfigHarness,
     Permission,
@@ -118,6 +119,12 @@ pub struct Args {
     /// With --demo: start in the light theme, whatever the macOS appearance is.
     #[arg(long, requires = "demo", conflicts_with = "dark")]
     pub light: bool,
+    /// With --demo: the text size (`small`, `medium` or `large`).
+    #[arg(long, value_name = "SIZE", requires = "demo", hide = true)]
+    pub text_size: Option<String>,
+    /// With --demo: the text font (`Inter`, `SF Pro` or an installed family).
+    #[arg(long, value_name = "FAMILY", requires = "demo", hide = true)]
+    pub text_font: Option<String>,
     /// With --demo: stage the demo review in one state (screenshots).
     #[arg(long, value_enum, requires = "demo", hide = true)]
     pub scene: Option<Scene>,

@@ -35,8 +35,8 @@ use bevy::window::PrimaryWindow;
 use clusia_core::PrRef;
 use clusia_core::diagram::{Change, DiagramSpec, EntryState, History, LineStyle, RowKey, Shape};
 use clusia_diagram::{
-    Align, Arrow, BoxGeo, EdgeGeo, Fonts, Geometry, Measure, MessageGeo, Point, Rect as GRect,
-    TextLines, TextStyle, layout, style_size,
+    Align, Arrow, BoxGeo, EdgeGeo, FaceMeasure, Geometry, Measure, MessageGeo, Point,
+    Rect as GRect, TextLines, TextStyle, layout, style_size,
 };
 
 use super::DiagramCanvas;
@@ -405,7 +405,23 @@ pub struct Tint(pub Swatch);
 #[derive(Component, Debug)]
 pub struct DashedPiece;
 
-type Built = (u32, String, bool, DiagramSpec);
+/// The drawing, version, comparison and spec a canvas shows, and the measure its text was
+/// laid out with (the face and the text size).
+type Built = (u32, String, bool, DiagramSpec, FaceMeasure);
+
+/// The faces a canvas draws its text in, and the measure that laid that text out.
+pub struct Pen<'a> {
+    fonts: &'a UiFonts,
+    measure: FaceMeasure,
+}
+
+impl std::ops::Deref for Pen<'_> {
+    type Target = UiFonts;
+
+    fn deref(&self) -> &UiFonts {
+        self.fonts
+    }
+}
 
 /// What a canvas shows and where: on the `DiagramCanvas` entity.
 #[derive(Component, Debug)]
@@ -540,8 +556,8 @@ struct Ctx {
 }
 
 /// Fills each `DiagramCanvas` with the diagram it stands for, and again when that changes (a
-/// redraw, a version, the comparison). While nothing changes it does nothing, so the zoom and
-/// the pan are kept.
+/// redraw, a version, the comparison, the text face or size). While nothing changes it does
+/// nothing, so the zoom and the pan are kept.
 pub(super) fn fill_canvas(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
@@ -552,7 +568,8 @@ pub(super) fn fill_canvas(
     canvases: Query<(Entity, &DiagramCanvas, Option<&CanvasState>)>,
 ) {
     let fresh = canvases.iter().any(|(_, _, state)| state.is_none());
-    if !(fresh || tabs.is_changed() || diagrams.is_changed() || theme.is_changed()) {
+    let changed = tabs.is_changed() || diagrams.is_changed() || theme.is_changed();
+    if !(fresh || changed || fonts.is_changed()) {
         return;
     }
     for (entity, canvas, state) in &canvases {
@@ -567,17 +584,28 @@ pub(super) fn fill_canvas(
         };
         let key = &p.entry.plan.key;
         let compare = tab.ui.diagram_compare && model.compare_with(p.number, key).is_some();
+        let measure = FaceMeasure::new(fonts.advances.clone(), theme.text_scale);
         if state.is_some_and(|s| {
-            s.built
-                .as_ref()
-                .is_some_and(|b| (b.0, b.2) == (p.number, compare) && b.1 == *key && b.3 == *spec)
+            s.built.as_ref().is_some_and(|b| {
+                (b.0, b.2) == (p.number, compare) && b.1 == *key && b.3 == *spec && b.4 == measure
+            })
         }) {
             continue;
         }
         let key = key.clone();
-        let built: Built = (p.number, key.clone(), compare, spec.clone());
+        let built: Built = (
+            p.number,
+            key.clone(),
+            compare,
+            spec.clone(),
+            measure.clone(),
+        );
         let shown = shown_spec(spec, compare);
-        let geometry = layout(&shown, &Fonts);
+        let geometry = layout(&shown, &measure);
+        let pen = Pen {
+            fonts: &fonts,
+            measure,
+        };
         let mut view = CanvasView::new(Vec2::new(geometry.size.0, geometry.size.1));
         if let Some(old) = state {
             view.viewport = old.view.viewport;
@@ -592,7 +620,7 @@ pub(super) fn fill_canvas(
         };
         commands.entity(entity).despawn_related::<Children>();
         commands.entity(entity).with_children(|c| {
-            spawn_canvas(c, &fonts, &theme, dots.as_deref(), &ctx, &shown, &geometry);
+            spawn_canvas(c, &pen, &theme, dots.as_deref(), &ctx, &shown, &geometry);
         });
         commands.entity(entity).insert(CanvasState {
             view,
@@ -622,35 +650,35 @@ fn type_of(style: TextStyle, ink: Swatch) -> Type {
 
 /// Where `line` of `block` starts. A centred line is placed by its measured width: `Justify`
 /// only centres a line against the widest line of its own text, not against the node.
-pub fn line_left(block: &TextLines, line: &str) -> f32 {
+pub fn line_left(measure: &dyn Measure, block: &TextLines, line: &str) -> f32 {
     match block.align {
         Align::Left => block.at.x,
-        Align::Center => block.at.x + (block.width - Fonts.width(line, block.style)) / 2.0,
+        Align::Center => block.at.x + (block.width - measure.width(line, block.style)) / 2.0,
     }
 }
 
 /// Where the `PK` or `FK` tag of a row starts: just after the row's name, in the same face.
-pub fn key_left(name: &TextLines) -> f32 {
+pub fn key_left(measure: &dyn Measure, name: &TextLines) -> f32 {
     let line = name.lines.first().map_or("", String::as_str);
-    line_left(name, line) + Fonts.width(line, name.style) + KEY_GAP
+    line_left(measure, name, line) + measure.width(line, name.style) + KEY_GAP
 }
 
 /// One node per line of `block`, positioned from `origin` (the top-left corner of the node the
 /// lines are children of).
 fn text_block(
     p: &mut ChildSpawnerCommands,
-    fonts: &UiFonts,
+    fonts: &Pen,
     block: &TextLines,
     ink: Swatch,
     strike: bool,
     origin: Vec2,
 ) {
-    let line_height = Fonts.line_height(block.style);
+    let line_height = fonts.measure.line_height(block.style);
     for (i, line) in block.lines.iter().enumerate() {
         let mut e = p.spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: px(line_left(block, line) - origin.x),
+                left: px(line_left(&fonts.measure, block, line) - origin.x),
                 top: px(block.at.y + i as f32 * line_height - origin.y),
                 ..default()
             },
@@ -783,7 +811,7 @@ fn segment(
     }
 }
 
-fn head(p: &mut ChildSpawnerCommands, fonts: &UiFonts, tip: Point, dir: Dir, ink: Swatch) {
+fn head(p: &mut ChildSpawnerCommands, fonts: &Pen, tip: Point, dir: Dir, ink: Swatch) {
     let (rect, glyph) = arrow_head(tip, dir);
     p.spawn((
         Node {
@@ -940,7 +968,7 @@ fn dashed_ring(
 
 fn spawn_canvas(
     c: &mut ChildSpawnerCommands,
-    fonts: &UiFonts,
+    fonts: &Pen,
     theme: &Theme,
     dots: Option<&Dots>,
     ctx: &Ctx,
@@ -1068,7 +1096,7 @@ fn spawn_canvas(
 
 fn spawn_content(
     p: &mut ChildSpawnerCommands,
-    fonts: &UiFonts,
+    fonts: &Pen,
     ctx: &Ctx,
     spec: &DiagramSpec,
     g: &Geometry,
@@ -1188,7 +1216,7 @@ fn spawn_content(
 
 fn draw_edge(
     p: &mut ChildSpawnerCommands,
-    fonts: &UiFonts,
+    fonts: &Pen,
     tiles: Option<&Dots>,
     e: &EdgeGeo,
     compare: bool,
@@ -1217,13 +1245,7 @@ fn draw_edge(
     }
 }
 
-fn draw_box(
-    p: &mut ChildSpawnerCommands,
-    fonts: &UiFonts,
-    ctx: &Ctx,
-    spec: &DiagramSpec,
-    b: &BoxGeo,
-) {
+fn draw_box(p: &mut ChildSpawnerCommands, fonts: &Pen, ctx: &Ctx, spec: &DiagramSpec, b: &BoxGeo) {
     let canvas = ctx.canvas;
     let look = look(b.shape, b.change, b.history, ctx.compare);
     let node = spec
@@ -1312,7 +1334,7 @@ fn draw_box(
                 bx.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(key_left(&row.text) - origin.x),
+                        left: px(key_left(&fonts.measure, &row.text) - origin.x),
                         top: px(row.text.at.y - origin.y),
                         ..default()
                     },
@@ -1334,7 +1356,7 @@ fn hidden_note(dropped: u32) -> Option<String> {
     }
 }
 
-fn header(c: &mut ChildSpawnerCommands, fonts: &UiFonts, spec: &DiagramSpec, dropped: u32) {
+fn header(c: &mut ChildSpawnerCommands, fonts: &Pen, spec: &DiagramSpec, dropped: u32) {
     c.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -1379,7 +1401,7 @@ fn header(c: &mut ChildSpawnerCommands, fonts: &UiFonts, spec: &DiagramSpec, dro
     });
 }
 
-fn zoom_control(c: &mut ChildSpawnerCommands, fonts: &UiFonts, canvas: Entity) {
+fn zoom_control(c: &mut ChildSpawnerCommands, fonts: &Pen, canvas: Entity) {
     let button = |label: &'static str, factor: f32| {
         (
             Node {
@@ -1432,7 +1454,7 @@ fn zoom_control(c: &mut ChildSpawnerCommands, fonts: &UiFonts, canvas: Entity) {
 /// One swatch of the legend: filled and ringed, or dashed.
 fn legend_item(
     row: &mut ChildSpawnerCommands,
-    fonts: &UiFonts,
+    fonts: &Pen,
     tiles: Option<&Dots>,
     label: &str,
     fill: Swatch,
@@ -1490,7 +1512,7 @@ fn legend_row() -> Node {
     }
 }
 
-fn legend(c: &mut ChildSpawnerCommands, fonts: &UiFonts, tiles: Option<&Dots>, compare: bool) {
+fn legend(c: &mut ChildSpawnerCommands, fonts: &Pen, tiles: Option<&Dots>, compare: bool) {
     c.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -1789,7 +1811,7 @@ mod tests {
     use crate::theme::{DARK, LIGHT};
     use bevy::input_focus::FocusCause;
     use clusia_core::diagram::{DiagramKind, Edge, Node};
-    use clusia_diagram::{Align, TextStyle};
+    use clusia_diagram::{Align, Fonts, TextStyle};
 
     fn spec(key: &str) -> DiagramSpec {
         let version = fixture::demo_diagrams(NOW, &fixture::demo_pr()).remove(1);
@@ -1995,13 +2017,13 @@ mod tests {
         };
         for line in &block.lines {
             let spare = 200.0 - Fonts.width(line, TextStyle::Title);
-            assert!((line_left(&block, line) - (10.0 + spare / 2.0)).abs() < 1e-3);
+            assert!((line_left(&Fonts, &block, line) - (10.0 + spare / 2.0)).abs() < 1e-3);
         }
         let left = TextLines {
             align: Align::Left,
             ..block.clone()
         };
-        assert_eq!(line_left(&left, "Fresh"), 10.0);
+        assert_eq!(line_left(&Fonts, &left, "Fresh"), 10.0);
     }
 
     #[test]
@@ -2015,7 +2037,7 @@ mod tests {
             align: Align::Left,
         };
         let after = 10.0 + Fonts.width("token_id", TextStyle::RowMono) + KEY_GAP;
-        assert!((key_left(&name) - after).abs() < 1e-3);
+        assert!((key_left(&Fonts, &name) - after).abs() < 1e-3);
     }
 
     #[test]
@@ -2732,6 +2754,40 @@ mod tests {
         assert!(
             shown.iter().any(|t| t == "save()"),
             "the label of the removed arrow"
+        );
+    }
+
+    #[test]
+    fn a_new_text_size_or_face_lays_the_diagram_out_again_with_its_measure() {
+        let mut app = testing::app(fixture::demo(NOW));
+        open(&mut app);
+        let measure = |app: &mut App| {
+            let mut q = app.world_mut().query::<&CanvasState>();
+            let state = q.single(app.world()).unwrap();
+            state.built.as_ref().unwrap().4.clone()
+        };
+        let height = |app: &mut App| {
+            let refresh = box_entity(app, "refresh");
+            match app.world().get::<bevy::ui::Node>(refresh).unwrap().height {
+                Val::Px(h) => h,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(measure(&mut app), FaceMeasure::default());
+        let medium = height(&mut app);
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        testing::settle(&mut app);
+        assert_eq!(measure(&mut app).scale(), 15.0 / 13.0);
+        assert!(height(&mut app) > medium, "taller lines make a taller box");
+        let mono = crate::fonts::LoadedFace::read((crate::fonts::JETBRAINS_MONO, ""), None)
+            .unwrap()
+            .advances;
+        app.world_mut().resource_mut::<UiFonts>().advances = std::sync::Arc::new(mono.clone());
+        testing::settle(&mut app);
+        assert_eq!(
+            measure(&mut app),
+            FaceMeasure::new(std::sync::Arc::new(mono), 15.0 / 13.0),
+            "the face's own advances"
         );
     }
 

@@ -33,6 +33,7 @@ fn main() -> ExitCode {
         mode: if args.demo {
             Mode::Demo {
                 theme: demo_theme(&args),
+                settings: demo_settings(&args),
             }
         } else {
             Mode::Live
@@ -123,6 +124,18 @@ fn demo_theme(args: &Args) -> Option<Theme> {
     }
 }
 
+/// Config a demo run sets on top of the demo's: the text font and size.
+fn demo_settings(args: &Args) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(size) = &args.text_size {
+        out.push(("appearance.text_size".into(), size.clone()));
+    }
+    if let Some(font) = &args.text_font {
+        out.push(("appearance.text_font".into(), font.clone()));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +150,27 @@ mod tests {
         assert_eq!(theme_of(&["--dark"]), Some(Theme::Dark));
         assert_eq!(theme_of(&["--light"]), Some(Theme::Light));
         assert_eq!(theme_of(&[]), None);
+    }
+
+    #[test]
+    fn demo_flags_set_the_text_font_and_size() {
+        let argv = [
+            "clusia-app",
+            "--demo",
+            "--text-size",
+            "large",
+            "--text-font",
+            "SF Pro",
+        ];
+        let args = Args::try_parse_from(argv).unwrap();
+        assert_eq!(
+            demo_settings(&args),
+            [
+                ("appearance.text_size".to_string(), "large".to_string()),
+                ("appearance.text_font".to_string(), "SF Pro".to_string()),
+            ]
+        );
+        assert!(Args::try_parse_from(["clusia-app", "--text-size", "large"]).is_err());
+        assert!(demo_settings(&Args::try_parse_from(["clusia-app", "--demo"]).unwrap()).is_empty());
     }
 }
