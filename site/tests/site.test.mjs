@@ -43,15 +43,17 @@ function fakeCopy({ clipboard, execCommand = () => true }) {
     setTimeout: (fn, ms) => timers.push([fn, ms]),
     clearTimeout() {},
   };
-  return { code, button, env, timers, selected };
+  const status = { textContent: '' };
+  return { code, button, env, timers, selected, status };
 }
 
 test('copy writes the code text to the clipboard and says Copied for 1.5 s', async () => {
   const written = [];
   const f = fakeCopy({ clipboard: { writeText: async (t) => written.push(t) } });
-  await copyFrom(f.button, f.env);
+  await copyFrom(f.button, f.env, f.status);
   assert.deepEqual(written, ['curl x | bash']);
   assert.equal(f.button.textContent, 'Copied');
+  assert.equal(f.status.textContent, 'Copied');
   assert.equal(f.timers.at(-1)[1], 1500);
   f.timers.at(-1)[0]();
   assert.equal(f.button.textContent, 'Copy');
@@ -64,7 +66,8 @@ test('without the clipboard API copy selects the code text and copies the select
   assert.equal(f.button.textContent, 'Copied');
 
   const g = fakeCopy({ execCommand: () => false });
-  await copyFrom(g.button, g.env);
+  await copyFrom(g.button, g.env, g.status);
   assert.deepEqual(g.selected, [g.code]);
   assert.equal(g.button.textContent, 'Press ⌘C');
+  assert.equal(g.status.textContent, 'Selected. Press ⌘C to copy.');
 });

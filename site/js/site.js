@@ -13,8 +13,9 @@ export const PARALLAX_RANGE = 500;
 // `|| 0` turns -0 into 0, so the transform never reads `-0px`.
 export const layerShift = (scrollY, depth) => Math.min(Math.max(scrollY, 0), PARALLAX_RANGE) * -depth || 0;
 
-// `env` stands in for the window so the copy path can run outside a browser.
-export async function copyFrom(button, env = globalThis) {
+// `env` stands in for the window so the copy path can run outside a browser. The button's
+// aria-label hides its changing text from screen readers, so `status` (a live region) says it.
+export async function copyFrom(button, env = globalThis, status = null) {
   const code = button.parentElement.querySelector('[data-copy]');
   let copied = false;
   try {
@@ -33,6 +34,7 @@ export async function copyFrom(button, env = globalThis) {
     } catch {}
   }
   button.textContent = copied ? 'Copied' : 'Press ⌘C';
+  if (status) status.textContent = copied ? 'Copied' : 'Selected. Press ⌘C to copy.';
   env.clearTimeout(button.resetTimer);
   button.resetTimer = env.setTimeout(() => {
     button.textContent = 'Copy';
@@ -83,8 +85,17 @@ function init() {
     parallax([...document.querySelectorAll('.restinga .layer')].map((layer) => [layer, Number(layer.dataset.depth) || 0]));
   }
 
+  const status = document.createElement('p');
+  status.className = 'visually-hidden';
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  document.body.append(status);
   for (const button of document.querySelectorAll('button.copy')) {
-    button.addEventListener('click', () => copyFrom(button));
+    button.addEventListener('click', () => {
+      // Emptied first so the same message twice in a row is announced again.
+      status.textContent = '';
+      copyFrom(button, globalThis, status);
+    });
   }
 }
 

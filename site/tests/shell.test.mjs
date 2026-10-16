@@ -109,6 +109,18 @@ test('site.css pins the scheme colors, the card glass and the screenshot pair', 
   assert.match(css, /\[data-scheme="dark"\] \.shot-light[^{]*\{\s*display: none;/);
   assert.match(css, /\.shot-dark[^{]*\{\s*display: none;/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+  // Accent text is darker than the accent fill in light, for 4.5:1 on the white card.
+  assert.ok(light.includes('--accent-text: #1F7A33;'));
+  assert.ok(light.includes('--on-accent: #0c0e0d;'));
+  assert.ok(dark.includes('--accent-text: #4CC35F;'));
+  for (const sel of ['a {', '.eyebrow {', '.links a[aria-current="page"] {', '.next span:last-child {']) {
+    const rule = between(css, `\n${sel}`, '}');
+    assert.match(rule, /\bcolor: var\(--accent-text\);/, sel);
+  }
+  // From 600 px up the whole command shows, wrapped if it must; below it scrolls in its box.
+  const wide = between(css, '@media (min-width: 600px) {', '\n}');
+  assert.match(wide, /\.install code \{[^}]*white-space: normal;[^}]*overflow-wrap: anywhere;/);
+  assert.match(between(css, '\n.install code {', '}'), /white-space: nowrap;/);
   // Without JavaScript the landscape still has its day colors.
   assert.ok(light.includes('--sky-top: #e9f5ec;'));
 });

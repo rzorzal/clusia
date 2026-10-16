@@ -22,7 +22,8 @@
   --ink: #1B1F1C;
   --muted: #5D665F;
   --accent: #2F9E44;
-  --on-accent: #ffffff;
+  --accent-text: #1F7A33;
+  --on-accent: #0c0e0d;
   --code-bg: #1B1F1C;
   --code-ink: #E9ECE9;
   --line: color-mix(in srgb, var(--ink) 11%, transparent);
@@ -39,6 +40,7 @@
   --ink: #E9ECE9;
   --muted: #9AA49C;
   --accent: #4CC35F;
+  --accent-text: #4CC35F;
   --on-accent: #0c0e0d;
   --code-bg: #131716;
   --code-ink: #E9ECE9;
@@ -71,7 +73,7 @@ body {
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-text);
   text-underline-offset: 3px;
   text-decoration-thickness: 1px;
 }
@@ -312,7 +314,7 @@ img {
 }
 
 .links a[aria-current="page"] {
-  color: var(--accent);
+  color: var(--accent-text);
   background: color-mix(in srgb, var(--accent) 13%, transparent);
   font-weight: 600;
 }
@@ -423,7 +425,7 @@ p {
   font-size: 13.5px;
   font-weight: 600;
   letter-spacing: 0.01em;
-  color: var(--accent);
+  color: var(--accent-text);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
@@ -539,6 +541,37 @@ strong {
   padding: 8px 13px;
   font-size: 13.5px;
   border-radius: 9px;
+}
+
+/* From 600 px up the whole command is in view, wrapping at a space or, if it must, inside the URL. */
+@media (min-width: 600px) {
+  .install code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    padding: 10px 0;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+
+  /* Level with the first line when the command wraps. */
+  .install::before {
+    align-self: flex-start;
+    padding-top: 10px;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ---------- Install page pieces ---------- */
@@ -657,7 +690,7 @@ tbody tr:last-child td {
 }
 
 .next span:last-child {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .next:hover {
