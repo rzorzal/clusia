@@ -6,13 +6,14 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
-use clusia_core::PrRef;
 use clusia_core::draft::{DraftKind, ThreadRef};
+use clusia_core::hidden::{issue_comment_key, review_key, thread_key};
 use clusia_core::prdata::ReviewThread;
 use clusia_core::time::parse_rfc3339;
+use clusia_core::{HiddenState, PrRef};
 use clusia_view::status::format_age;
 
-use crate::bridge::{Ask, Asks, Model, Toasts};
+use crate::bridge::{Ask, Asks, Connection, Model, Toasts};
 use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::review_state::{
@@ -48,6 +49,11 @@ pub struct PostView {
     /// Markdown source.
     pub body: String,
     pub badge: Option<(&'static str, Tone)>,
+    /// What *Hide* hides: this comment's key, or its thread's.
+    pub key: String,
+    /// How many posts hiding `key` covers now (a thread's, else 1).
+    pub posts: u32,
+    pub hidden: HiddenState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +88,7 @@ pub struct ThreadView {
     pub drafts: Vec<DraftReply>,
     /// The reply editor sits under this thread.
     pub editing: bool,
+    pub hidden: HiddenState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +98,8 @@ pub struct CommentsView {
     pub general: Vec<PostView>,
     pub threads: Vec<ThreadView>,
     pub empty: Option<&'static str>,
+    /// The keys of everything collapsed, in the whole review: what *Show all* shows.
+    pub collapsed: Vec<String>,
 }
 
 /// "3h ago" from an RFC 3339 time; "just now" under a minute; empty when unparsable.
@@ -152,6 +161,9 @@ pub fn comments_view(ready: &Ready, ui: &TabUi, now: i64) -> CommentsView {
                 age: age(now, at),
                 body: r.body.trim().to_string(),
                 badge: verdict_badge(&r.state),
+                key: review_key(r.id),
+                posts: 1,
+                hidden: ui.hidden.state(&review_key(r.id), 1),
             },
         ));
     }
@@ -164,6 +176,9 @@ pub fn comments_view(ready: &Ready, ui: &TabUi, now: i64) -> CommentsView {
                 age: age(now, &c.created_at),
                 body: c.body.trim().to_string(),
                 badge: None,
+                key: issue_comment_key(c.id),
+                posts: 1,
+                hidden: ui.hidden.state(&issue_comment_key(c.id), 1),
             },
         ));
     }
@@ -224,6 +239,7 @@ pub fn comments_view(ready: &Ready, ui: &TabUi, now: i64) -> CommentsView {
                     editing: matches!(target, Some(EditTarget::Item(id)) if *id == i.id),
                 })
                 .collect();
+            let hidden = ui.hidden.state(&thread_key(&t.id), t.comments.len() as u32);
             ThreadView {
                 thread: thread_ref(t),
                 heading: match t.line {
@@ -239,8 +255,12 @@ pub fn comments_view(ready: &Ready, ui: &TabUi, now: i64) -> CommentsView {
                         age: age(now, &c.created_at),
                         body: c.body.trim().to_string(),
                         badge: None,
+                        key: thread_key(&t.id),
+                        posts: t.comments.len() as u32,
+                        hidden,
                     })
                     .collect(),
+                hidden,
                 resolved: t.is_resolved,
                 outdated: t.is_outdated,
                 can_reply: t.viewer_can_reply,
@@ -260,11 +280,30 @@ pub fn comments_view(ready: &Ready, ui: &TabUi, now: i64) -> CommentsView {
         CommentsFilter::Resolved => "No resolved threads",
         CommentsFilter::All => "No comments yet",
     });
+    let mut collapsed: Vec<String> = Vec::new();
+    for r in &conversation.reviews {
+        collapsed.push(review_key(r.id));
+    }
+    for c in &conversation.comments {
+        collapsed.push(issue_comment_key(c.id));
+    }
+    for t in &conversation.review_threads {
+        collapsed.push(thread_key(&t.id));
+    }
+    let sizes: std::collections::HashMap<String, u32> = conversation
+        .review_threads
+        .iter()
+        .map(|t| (thread_key(&t.id), t.comments.len() as u32))
+        .collect();
+    collapsed.retain(|key| {
+        ui.hidden.state(key, sizes.get(key).copied().unwrap_or(1)) == HiddenState::Hidden
+    });
     CommentsView {
         chips,
         general,
         threads: shown,
         empty,
+        collapsed,
     }
 }
 
@@ -305,6 +344,25 @@ pub struct UndoResolve {
     pub id: String,
 }
 
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct HideButton {
+    pub pr: PrRef,
+    pub key: String,
+    pub posts: u32,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct ShowButton {
+    pub pr: PrRef,
+    pub key: String,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct ShowAll {
+    pub pr: PrRef,
+    pub keys: Vec<String>,
+}
+
 #[derive(Component)]
 struct ListPart {
     pr: PrRef,
@@ -319,8 +377,32 @@ impl Plugin for CommentsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (fill_region, rebuild_comments).chain().after(ReviewSystems),
+            (load_hidden, fill_region, rebuild_comments)
+                .chain()
+                .after(ReviewSystems),
         );
+    }
+}
+
+/// Asks for the hidden comments of each ready tab once the connection is live; a reconnect
+/// asks again (the bridge clears `hidden_asked`).
+fn load_hidden(mut tabs: ResMut<ReviewTabs>, model: Res<Model>, mut asks: ResMut<Asks>) {
+    if model.connection != Connection::Live {
+        return;
+    }
+    let due: Vec<PrRef> = tabs
+        .0
+        .iter()
+        .filter(|(_, tab)| {
+            !tab.ui.hidden_asked && tab.ready().is_some_and(|r| r.cached_at.is_none())
+        })
+        .map(|(pr, _)| pr.clone())
+        .collect();
+    for pr in due {
+        if let Some(tab) = tabs.0.get_mut(&pr) {
+            tab.ui.hidden_asked = true;
+        }
+        asks.send(Ask::GetHiddenComments(pr));
     }
 }
 
@@ -451,6 +533,28 @@ fn list(
             observe(on_new_thread),
         ));
     });
+    if !v.collapsed.is_empty() {
+        p.spawn(Node {
+            column_gap: px(4),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|n| {
+            n.spawn(text(
+                fonts,
+                format!("{} hidden ·", v.collapsed.len()),
+                Type::MUTED,
+            ));
+            n.spawn((
+                button(fonts, "Show all", Variant::Ghost),
+                ShowAll {
+                    pr: pr.clone(),
+                    keys: v.collapsed.clone(),
+                },
+                observe(on_show_all),
+            ));
+        });
+    }
     if let Some(empty) = v.empty {
         p.spawn(Node {
             padding: UiRect::vertical(px(24)),
@@ -467,12 +571,20 @@ fn list(
             Type::STRONG.size(12.0).ink(Swatch::Muted),
         ));
         for post in &v.general {
+            if post.hidden == HiddenState::Hidden {
+                p.spawn(card(Node {
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                }))
+                .with_children(|c| collapsed_row(c, fonts, pr, post));
+                continue;
+            }
             p.spawn(card(Node {
                 flex_direction: FlexDirection::Column,
                 ..default()
             }))
             .with_children(|c| {
-                post_row(c, fonts, post, opts);
+                post_row(c, fonts, pr, post, opts);
                 c.spawn(divider());
                 c.spawn(footer()).with_children(|f| {
                     f.spawn((
@@ -506,7 +618,20 @@ fn list(
             if t.resolved {
                 h.spawn(badge(fonts, "resolved", Tone::Neutral));
             }
+            if t.hidden == HiddenState::NewReply {
+                h.spawn(badge(fonts, "new reply", Tone::Orange));
+            }
         });
+        if t.hidden == HiddenState::Hidden
+            && let Some(first) = t.posts.first()
+        {
+            p.spawn(card(Node {
+                flex_direction: FlexDirection::Column,
+                ..default()
+            }))
+            .with_children(|c| collapsed_row(c, fonts, pr, first));
+            continue;
+        }
         p.spawn(card(Node {
             flex_direction: FlexDirection::Column,
             ..default()
@@ -516,7 +641,7 @@ fn list(
                 if i > 0 {
                     c.spawn(divider());
                 }
-                post_row(c, fonts, post, opts);
+                post_row(c, fonts, pr, post, opts);
             }
             for d in &t.drafts {
                 c.spawn(divider());
@@ -598,7 +723,43 @@ fn footer() -> impl Bundle {
     }
 }
 
-fn post_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, post: &PostView, opts: &RenderOpts) {
+/// A hidden comment as one line: who wrote it, when, and a way back.
+fn collapsed_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, post: &PostView) {
+    p.spawn(Node {
+        padding: UiRect::axes(px(14), px(6)),
+        column_gap: px(8),
+        align_items: AlignItems::Center,
+        ..default()
+    })
+    .with_children(|r| {
+        let when = if post.age.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", post.age)
+        };
+        r.spawn(text(
+            fonts,
+            format!("Hidden · @{}{when}", post.author),
+            Type::MUTED,
+        ));
+        r.spawn((
+            button(fonts, "Show", Variant::Ghost),
+            ShowButton {
+                pr: pr.clone(),
+                key: post.key.clone(),
+            },
+            observe(on_show),
+        ));
+    });
+}
+
+fn post_row(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    post: &PostView,
+    opts: &RenderOpts,
+) {
     p.spawn(Node {
         padding: UiRect::axes(px(14), px(12)),
         column_gap: px(12),
@@ -638,6 +799,15 @@ fn post_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, post: &PostView, opts
                     ..default()
                 });
                 h.spawn(copy_button(fonts, &post.body));
+                h.spawn((
+                    button(fonts, "Hide", Variant::Ghost),
+                    HideButton {
+                        pr: pr.clone(),
+                        key: post.key.clone(),
+                        posts: post.posts,
+                    },
+                    observe(on_hide),
+                ));
             });
             markdown(c, fonts, &parse(&post.body), opts);
         });
@@ -823,6 +993,109 @@ fn on_undo(
             pr: b.pr.clone(),
             id: b.id.clone(),
         });
+    }
+}
+
+/// Hides (`posts`) or shows (`None`) `key` in the tab and asks the daemon to keep it. The
+/// tab changes at once; the daemon's set replaces it when it answers. A cached copy has no
+/// daemon behind it, so it does neither.
+fn set_hidden(
+    tabs: &mut ReviewTabs,
+    model: &Model,
+    toasts: &mut Toasts,
+    time: &Time,
+    asks: &mut Asks,
+    pr: &PrRef,
+    changes: &[(String, Option<u32>)],
+) {
+    if let Some(reason) = read_only_reason(tabs, model, pr) {
+        return not_sent(toasts, time, reason);
+    }
+    let Some(tab) = tabs.0.get_mut(pr) else {
+        return;
+    };
+    for (key, posts) in changes {
+        match posts {
+            Some(posts) => tab.ui.hidden.hide(key, *posts),
+            None => {
+                tab.ui.hidden.show(key);
+            }
+        }
+        asks.send(Ask::SetCommentHidden {
+            pr: pr.clone(),
+            key: key.clone(),
+            posts: *posts,
+        });
+    }
+}
+
+fn on_hide(
+    activate: On<Activate>,
+    buttons: Query<&HideButton>,
+    mut tabs: ResMut<ReviewTabs>,
+    model: Res<Model>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
+) {
+    if let Ok(b) = buttons.get(activate.entity) {
+        let change = [(b.key.clone(), Some(b.posts))];
+        set_hidden(
+            &mut tabs,
+            &model,
+            &mut toasts,
+            &time,
+            &mut asks,
+            &b.pr,
+            &change,
+        );
+    }
+}
+
+fn on_show(
+    activate: On<Activate>,
+    buttons: Query<&ShowButton>,
+    mut tabs: ResMut<ReviewTabs>,
+    model: Res<Model>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
+) {
+    if let Ok(b) = buttons.get(activate.entity) {
+        let change = [(b.key.clone(), None)];
+        set_hidden(
+            &mut tabs,
+            &model,
+            &mut toasts,
+            &time,
+            &mut asks,
+            &b.pr,
+            &change,
+        );
+    }
+}
+
+fn on_show_all(
+    activate: On<Activate>,
+    buttons: Query<&ShowAll>,
+    mut tabs: ResMut<ReviewTabs>,
+    model: Res<Model>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+    mut asks: ResMut<Asks>,
+) {
+    if let Ok(b) = buttons.get(activate.entity) {
+        let changes: Vec<(String, Option<u32>)> =
+            b.keys.iter().map(|k| (k.clone(), None)).collect();
+        set_hidden(
+            &mut tabs,
+            &model,
+            &mut toasts,
+            &time,
+            &mut asks,
+            &b.pr,
+            &changes,
+        );
     }
 }
 
@@ -1560,5 +1833,159 @@ mod tests {
             signatures.iter().any(|s| s == bare),
             "the thread draws what the preview draws:\n{bare}\nnot among\n{signatures:#?}"
         );
+    }
+
+    fn hidden_ui(keys: &[(&str, u32)]) -> TabUi {
+        let mut ui = TabUi::default();
+        for (key, posts) in keys {
+            ui.hidden.hide(key, *posts);
+        }
+        ui
+    }
+
+    #[test]
+    fn hidden_comments_collapse_and_are_counted() {
+        let r = ready();
+        let ui = hidden_ui(&[("comment:2002", 1), ("thread:PRRT_demo_refresh_41", 3)]);
+        let v = comments_view(&r, &ui, NOW);
+        let states: Vec<(&str, HiddenState)> = v
+            .general
+            .iter()
+            .map(|p| (p.author.as_str(), p.hidden))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("joao", HiddenState::Visible),
+                ("octo", HiddenState::Hidden),
+                ("hubot", HiddenState::Visible)
+            ]
+        );
+        assert_eq!(v.threads[0].hidden, HiddenState::Hidden);
+        assert_eq!(v.collapsed, ["comment:2002", "thread:PRRT_demo_refresh_41"]);
+    }
+
+    #[test]
+    fn a_hidden_comment_that_is_edited_stays_hidden() {
+        let mut r = ready();
+        let ui = hidden_ui(&[("comment:2002", 1)]);
+        r.view.conversation.as_mut().unwrap().comments[1].body = "Edited on GitHub.".into();
+        let v = comments_view(&r, &ui, NOW);
+        assert_eq!(v.general[1].hidden, HiddenState::Hidden);
+        assert_eq!(v.general[1].body, "Edited on GitHub.");
+    }
+
+    #[test]
+    fn a_new_reply_shows_a_hidden_thread_again_with_a_mark() {
+        let r = ready();
+        let ui = hidden_ui(&[("thread:PRRT_demo_refresh_41", 2)]);
+        let v = comments_view(&r, &ui, NOW);
+        assert_eq!(v.threads[0].hidden, HiddenState::NewReply);
+        assert!(v.collapsed.is_empty(), "it is not collapsed any more");
+    }
+
+    #[test]
+    fn hiding_collapses_at_once_and_asks_the_daemon_to_keep_it() {
+        let mut app = comments_app();
+        let pr = fixture::demo_pr();
+        let hide = testing::find::<HideButton>(&mut app, |h| h.key == "comment:2002");
+        testing::activate(&mut app, hide);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetCommentHidden {
+                pr: pr.clone(),
+                key: "comment:2002".into(),
+                posts: Some(1)
+            }]
+        );
+        testing::settle(&mut app);
+        assert!(has_text(&mut app, "Hidden · @octo"));
+        assert!(has_text(&mut app, "1 hidden"));
+        let show = testing::find::<ShowButton>(&mut app, |s| s.key == "comment:2002");
+        testing::activate(&mut app, show);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::SetCommentHidden {
+                pr,
+                key: "comment:2002".into(),
+                posts: None
+            }]
+        );
+        testing::settle(&mut app);
+        assert!(!has_text(&mut app, "Hidden · @octo"));
+        assert!(!has_text(&mut app, "1 hidden"));
+    }
+
+    #[test]
+    fn hiding_a_thread_remembers_how_many_posts_it_had() {
+        let mut app = comments_app();
+        let hide = testing::find::<HideButton>(&mut app, |h| h.key.starts_with("thread:"));
+        testing::activate(&mut app, hide);
+        assert!(matches!(
+            testing::recorded(&mut app).as_slice(),
+            [Ask::SetCommentHidden { key, posts: Some(3), .. }] if key == "thread:PRRT_demo_refresh_41"
+        ));
+    }
+
+    #[test]
+    fn show_all_brings_every_collapsed_comment_back() {
+        let mut app = comments_app();
+        with_ready(&mut app, |_, ui| {
+            ui.hidden.hide("comment:2001", 1);
+            ui.hidden.hide("comment:2002", 1);
+        });
+        testing::settle(&mut app);
+        assert!(has_text(&mut app, "2 hidden"));
+        let all = testing::find::<ShowAll>(&mut app, |_| true);
+        testing::activate(&mut app, all);
+        let asks = testing::recorded(&mut app);
+        assert_eq!(asks.len(), 2);
+        assert!(asks.iter().all(|a| matches!(
+            a,
+            Ask::SetCommentHidden { posts: None, key, .. } if key.starts_with("comment:")
+        )));
+        testing::settle(&mut app);
+        assert!(!has_text(&mut app, "hidden ·"));
+    }
+
+    #[test]
+    fn the_daemons_set_replaces_the_tabs_and_is_asked_again_after_a_reconnect() {
+        let mut app = comments_app();
+        let pr = fixture::demo_pr();
+        assert!(
+            testing::tab(&app, &pr).ui.hidden_asked,
+            "asked while opening"
+        );
+        testing::settle(&mut app);
+        assert!(!testing::recorded(&mut app).contains(&Ask::GetHiddenComments(pr.clone())));
+        testing::tell(&mut app, crate::bridge::Tell::Lost("gone".into()));
+        assert!(!testing::tab(&app, &pr).ui.hidden_asked);
+        testing::recorded(&mut app);
+        app.world_mut().resource_mut::<Model>().connection = crate::bridge::Connection::Live;
+        testing::settle(&mut app);
+        assert!(testing::recorded(&mut app).contains(&Ask::GetHiddenComments(pr.clone())));
+        let mut set = clusia_core::HiddenComments::default();
+        set.hide("comment:2001", 1);
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::Hidden {
+                pr: pr.clone(),
+                set: set.clone(),
+            },
+        );
+        testing::settle(&mut app);
+        assert_eq!(testing::tab(&app, &pr).ui.hidden, set);
+        assert!(has_text(&mut app, "Hidden · @joao"));
+    }
+
+    #[test]
+    fn the_cached_copy_does_not_hide() {
+        let mut app = comments_app();
+        with_ready(&mut app, |r, _| r.cached_at = Some(NOW - 3600));
+        testing::settle(&mut app);
+        let hide = testing::find::<HideButton>(&mut app, |h| h.key == "comment:2002");
+        testing::activate(&mut app, hide);
+        assert!(testing::recorded(&mut app).is_empty());
+        assert!(!has_text(&mut app, "Hidden · @octo"));
     }
 }

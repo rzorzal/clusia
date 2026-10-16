@@ -235,6 +235,10 @@ pub struct TabUi {
     pub focus_seq: u32,
     /// The key of the row whose ⋯ menu is open.
     pub diagram_menu: Option<String>,
+    /// The comments hidden in this pull request, as the daemon keeps them.
+    pub hidden: clusia_core::HiddenComments,
+    /// `GetHiddenComments` was asked for.
+    pub hidden_asked: bool,
 }
 
 impl Default for TabUi {
@@ -263,6 +267,8 @@ impl Default for TabUi {
             focus_line: None,
             focus_seq: 0,
             diagram_menu: None,
+            hidden: clusia_core::HiddenComments::default(),
+            hidden_asked: false,
         }
     }
 }

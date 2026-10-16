@@ -184,6 +184,15 @@ pub enum Ask {
     /// Both checks' results and states, and which findings were accepted or dismissed:
     /// `ChecksTell::Loaded`.
     GetChecks(PrRef),
+    /// The comments hidden in the review: `Tell::Hidden`.
+    GetHiddenComments(PrRef),
+    /// Hides the comment or thread `key`, which holds `posts` posts now, or shows it again
+    /// (`None`). The daemon keeps it on this machine; the set comes back as `Tell::Hidden`.
+    SetCommentHidden {
+        pr: PrRef,
+        key: String,
+        posts: Option<u32>,
+    },
     /// Runs the revalidation of the review's draft now (a round starts when the head moved and
     /// none exists); the state comes back as `RevalidationTell::Round`.
     Revalidate(PrRef),
@@ -765,6 +774,11 @@ pub enum Tell {
     Permission(PermissionTell),
     /// What the review's security and audit checks did.
     Checks(ChecksTell),
+    /// The comments hidden in a review, as the daemon keeps them.
+    Hidden {
+        pr: PrRef,
+        set: clusia_core::HiddenComments,
+    },
     /// What the review's diagrams did.
     Diagrams(DiagramsTell),
     /// What the revalidation of the review's draft did.
@@ -963,6 +977,7 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
         }
         // The checks and the diagrams are read again after a reconnect: no toast for a read.
         Ask::GetChecks(_)
+        | Ask::GetHiddenComments(_)
         | Ask::GetRevalidation(_)
         | Ask::GetDiagrams(_)
         | Ask::GetDiagramVersion { .. } => {}
@@ -1029,6 +1044,9 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
         }
         // The window sends its tabs again once it is back.
         Ask::SetOpenTabs(_) => {}
+        // The window already shows the change; hiding is not a write to GitHub, so there is
+        // nothing to refuse.
+        Ask::SetCommentHidden { .. } => {}
         Ask::Revalidate(_) | Ask::StopRevalidation(_) => teller.send(Tell::Notice {
             text: "Not connected to clusiad — not sent".into(),
             warning: true,
@@ -1597,6 +1615,23 @@ async fn answer(
             notify(client, teller, Command::StopCheck { pr, kind }, "").await?;
         }
         Ask::GetChecks(pr) => send_checks(client, teller, pr).await?,
+        Ask::GetHiddenComments(pr) => {
+            if let Some(Reply::HiddenComments(set)) =
+                request(client, Command::GetHiddenComments { pr: pr.clone() }).await?
+            {
+                teller.send(Tell::Hidden { pr, set });
+            }
+        }
+        Ask::SetCommentHidden { pr, key, posts } => {
+            let command = Command::SetCommentHidden {
+                pr: pr.clone(),
+                key,
+                posts,
+            };
+            if let Some(Reply::HiddenComments(set)) = request(client, command).await? {
+                teller.send(Tell::Hidden { pr, set });
+            }
+        }
         Ask::DrawDiagrams(pr) => notify(client, teller, Command::DrawDiagrams { pr }, "").await?,
         Ask::DrawDiagram { pr, key } => {
             notify(client, teller, Command::DrawDiagram { pr, key }, "").await?;
@@ -2452,6 +2487,9 @@ pub(crate) fn pump(
                 for model in checks.0.values_mut() {
                     model.asked = false;
                 }
+                for tab in tabs.0.values_mut() {
+                    tab.ui.hidden_asked = false;
+                }
                 for model in diagrams.0.values_mut() {
                     model.asked = false;
                     model.requested.clear();
@@ -2492,6 +2530,12 @@ pub(crate) fn pump(
                 checks::close_edited(&mut tabs, &tell);
                 checks.apply(&tell);
                 checks::reconcile_editors(&mut tabs, &checks, &mut toasts, time.elapsed_secs_f64());
+            }
+            Tell::Hidden { pr, set } => {
+                if let Some(tab) = tabs.0.get_mut(&pr) {
+                    tab.ui.hidden = set;
+                    tab.ui.hidden_asked = true;
+                }
             }
             Tell::Diagrams(tell) => diagrams.apply(&tell),
             Tell::Revalidation(tell) => {

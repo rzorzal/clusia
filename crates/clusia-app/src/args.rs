@@ -14,6 +14,7 @@ pub enum Scene {
     Diff,
     Split,
     Comments,
+    CommentsHidden,
     Finalize,
     WhatsNew,
     Loading,

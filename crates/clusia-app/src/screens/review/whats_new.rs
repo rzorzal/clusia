@@ -600,6 +600,7 @@ mod tests {
                     a,
                     Ask::AgentLog { .. }
                         | Ask::GetChecks(_)
+                        | Ask::GetHiddenComments(_)
                         | Ask::GetDiagrams(_)
                         | Ask::GetRevalidation(_)
                 )
