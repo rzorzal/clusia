@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use crate::nav::NavSystems;
 use crate::review_state::open_new_tabs;
 
+pub mod activity;
 pub mod agent;
 pub mod checks;
 pub mod comments;

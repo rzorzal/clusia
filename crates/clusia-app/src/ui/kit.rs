@@ -553,6 +553,7 @@ impl Plugin for KitPlugin {
         app.add_plugins((
             crate::ui::text_area::TextAreaPlugin,
             crate::ui::leaf::LeafPlugin,
+            crate::ui::spinner::SpinnerPlugin,
             crate::ui::markdown::MarkdownPlugin,
             crate::ui::media::MediaPlugin,
         ))
