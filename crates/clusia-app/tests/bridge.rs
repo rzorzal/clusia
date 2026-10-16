@@ -517,6 +517,21 @@ async fn the_saved_tabs_come_back_once_and_the_last_ones_reach_the_daemon_before
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_restore_still_counts_as_restored_with_no_tabs() {
+    let dir = tempfile::tempdir().unwrap();
+    // The daemon cannot read its tabs: the file is a folder.
+    std::fs::create_dir_all(clusia_core::Paths::new(dir.path()).open_tabs_file()).unwrap();
+    let d = common::Daemon::start_in(dir).await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    assert_eq!(
+        next(&link, |t| matches!(t, Tell::Restored(_))),
+        Tell::Restored(clusia_core::OpenTabs::default()),
+        "so the window keeps its own tabs from now on"
+    );
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn giphy_key_status_follows_the_daemon() {
     let d = common::Daemon::start().await;
     let link = bridge::spawn(d.paths.clone(), None, || {});

@@ -132,7 +132,8 @@ impl Paths {
         self.diagrams_dir().join(pr.file_key())
     }
 
-    /// The review tabs the window had open (`OpenTabs`). Only the daemon writes here.
+    /// The review tabs the window had open (`OpenTabs`). The window decides the set; the daemon
+    /// writes the file.
     pub fn open_tabs_file(&self) -> PathBuf {
         self.root.join("tabs.json")
     }

@@ -5,9 +5,13 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use clusia_core::{DraftKind, OpenTab, OpenTabs, PrRef, Side};
+use clusia_core::{
+    Activity, ActivityKind, DraftKind, OpenTab, OpenTabs, PrRef, Review, ReviewState, Side,
+};
 use clusia_harness::testkit::{FakeClaude, Script, Turn};
-use clusia_protocol::{AnchorInput, Client, Command, Reply};
+use clusia_protocol::{
+    AnchorInput, Client, Command, Event, LoadStepKind, Reply, StepStatus, topics,
+};
 use common::TestDaemon;
 use common::agent::{calls, fake_program, ready, until, watching};
 use common::review_world::{open, pr7, world};
@@ -100,8 +104,35 @@ async fn a_window_that_comes_back_reads_the_cache_and_summarizes_nothing_again()
         Reply::Cached(cached) => assert_eq!(cached.view.review.pr, pr7()),
         other => panic!("expected the cached copy, got {other:?}"),
     }
+    let mut steps = w.daemon.client().await;
+    steps
+        .request(Command::Subscribe {
+            topics: vec![topics::REVIEWS.into()],
+        })
+        .await
+        .unwrap();
     open(&mut window).await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // The open has decided about the agent once its step is done or skipped.
+    let agent = loop {
+        let (_, event) = tokio::time::timeout(Duration::from_secs(10), steps.next_event())
+            .await
+            .expect("the agent step arrives")
+            .unwrap();
+        if let Event::LoadStep(step) = event
+            && step.step == LoadStepKind::Agent
+        {
+            break step;
+        }
+    };
+    assert_eq!(agent.status, StepStatus::Skipped, "{agent:?}");
+    assert!(
+        agent
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("already read"),
+        "{agent:?}"
+    );
     assert_eq!(
         FakeClaude::calls(&dir).len(),
         1,
@@ -193,5 +224,118 @@ async fn an_idle_tab_with_a_draft_or_seen_lately_stays() {
     assert!(
         w.daemon.paths.review_file(&pr7()).exists(),
         "the draft is kept"
+    );
+}
+
+/// An Active review of `n`, last touched `days` ago, with a general comment when `item`.
+fn left_review(daemon: &TestDaemon, n: u64, days: i64, item: bool) -> PrRef {
+    let pr = pr(&format!("acme/widgets#{n}"));
+    let at = now() - days * DAY;
+    let mut review = Review::new(pr.clone(), "Demo".into(), "b".into(), "h".into(), at);
+    if item {
+        review
+            .draft
+            .add(DraftKind::General, None, None, "Keep me", at)
+            .unwrap();
+    }
+    review.updated_at = at;
+    assert_eq!(review.state, ReviewState::Active);
+    clusia_store::save_review(&daemon.paths, &review).unwrap();
+    pr
+}
+
+#[tokio::test]
+async fn an_idle_empty_review_without_a_tab_is_closed_when_the_window_starts() {
+    let daemon = TestDaemon::start().await;
+    // A window that crashed, or never saved its tabs, left these open.
+    let orphan = left_review(&daemon, 8, 15, false);
+    let recent = left_review(&daemon, 9, 13, false);
+    let drafted = left_review(&daemon, 10, 30, true);
+    let tabbed = left_review(&daemon, 11, 30, false);
+    let held = left_review(&daemon, 12, 30, false);
+    left_tabs(&daemon, &[(tabbed.clone(), 1)]);
+    let mut cli = daemon.client().await;
+    cli.request(Command::HoldReview {
+        pr: held.clone(),
+        held: true,
+    })
+    .await
+    .unwrap();
+    let mut window = daemon.client().await;
+    let tabs = restore(&mut window).await;
+    assert_eq!(prs(&tabs), ["acme/widgets#11"]);
+    let exists = |pr: &PrRef| daemon.paths.review_file(pr).exists();
+    assert!(!exists(&orphan), "idle, empty, unheld, no tab: closed");
+    assert!(exists(&recent), "touched 13 days ago");
+    assert!(exists(&drafted), "the draft is kept");
+    assert!(exists(&tabbed), "its tab was seen yesterday");
+    assert!(exists(&held), "a client has it open");
+}
+
+fn closed(daemon: &TestDaemon, pr: &PrRef, kind: ActivityKind, days: i64) {
+    clusia_store::append_activity(
+        &daemon.paths,
+        &Activity {
+            ts: now() - days * DAY,
+            kind,
+            pr: pr.clone(),
+            client: "clusia".into(),
+            url: None,
+            note: None,
+        },
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_tab_whose_review_ended_after_it_was_last_seen_does_not_come_back() {
+    let daemon = TestDaemon::start().await;
+    let discarded = pr("acme/widgets#8");
+    let published = pr("acme/widgets#9");
+    let never_opened = pr("acme/widgets#10");
+    let reopened = pr("acme/widgets#11");
+    left_tabs(
+        &daemon,
+        &[
+            (discarded.clone(), 3),
+            (published.clone(), 3),
+            (never_opened.clone(), 3),
+            (reopened.clone(), 1),
+        ],
+    );
+    closed(&daemon, &discarded, ActivityKind::ReviewDiscarded, 2);
+    closed(&daemon, &published, ActivityKind::ReviewPublished, 2);
+    // Ended before the tab was seen again: the tab is the newer fact.
+    closed(&daemon, &reopened, ActivityKind::ReviewDiscarded, 2);
+    let mut window = daemon.client().await;
+    let tabs = restore(&mut window).await;
+    assert_eq!(
+        prs(&tabs),
+        ["acme/widgets#10", "acme/widgets#11"],
+        "a tab whose open never finished stays"
+    );
+    assert_eq!(
+        prs(&clusia_store::load_open_tabs(&daemon.paths).unwrap()),
+        ["acme/widgets#10", "acme/widgets#11"]
+    );
+}
+
+#[tokio::test]
+async fn the_tab_shown_is_never_idle() {
+    let daemon = TestDaemon::start().await;
+    let tabs = OpenTabs {
+        tabs: vec![OpenTab {
+            seen_at: now() - 30 * DAY,
+            ..OpenTabs::tab(pr("acme/widgets#8"), "diff")
+        }],
+        selected: Some(pr("acme/widgets#8")),
+    };
+    clusia_store::save_open_tabs(&daemon.paths, &tabs).unwrap();
+    let mut window = daemon.client().await;
+    let back = restore(&mut window).await;
+    assert_eq!(
+        prs(&back),
+        ["acme/widgets#8"],
+        "on screen when the window closed"
     );
 }

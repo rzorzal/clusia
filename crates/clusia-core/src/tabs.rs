@@ -58,12 +58,13 @@ impl OpenTabs {
         OpenTabs { tabs, selected }
     }
 
-    /// The tabs not seen for `TAB_IDLE_DAYS`, left to right.
+    /// The tabs not seen for `TAB_IDLE_DAYS`, left to right. The one shown never is: it was on
+    /// screen when the window closed, however long ago its set last changed.
     pub fn idle(&self, now: i64) -> Vec<PrRef> {
         let cutoff = now - TAB_IDLE_DAYS * 86_400;
         self.tabs
             .iter()
-            .filter(|t| t.seen_at < cutoff)
+            .filter(|t| t.seen_at < cutoff && self.selected.as_ref() != Some(&t.pr))
             .map(|t| t.pr.clone())
             .collect()
     }
@@ -154,7 +155,20 @@ mod tests {
             ],
             selected: Some(pr(1)),
         };
+        assert_eq!(
+            tabs.idle(now),
+            Vec::<PrRef>::new(),
+            "the shown one never is"
+        );
+        let tabs = OpenTabs {
+            selected: Some(pr(2)),
+            ..tabs
+        };
         assert_eq!(tabs.idle(now), [pr(1)]);
+        let tabs = OpenTabs {
+            selected: Some(pr(1)),
+            ..tabs
+        };
         let left = tabs.without(&[pr(1)]);
         assert_eq!(seen(&left).len(), 2);
         assert_eq!(left.selected, None, "the shown tab went");

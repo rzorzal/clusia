@@ -206,6 +206,24 @@ mod tests {
     }
 
     #[test]
+    fn after_a_refused_restore_the_window_still_saves_its_tabs() {
+        let mut app = testing::app(fixture::demo(NOW));
+        // What the bridge tells when the daemon refused or failed `RestoreTabs`.
+        testing::tell(&mut app, Tell::Restored(OpenTabs::default()));
+        testing::settle(&mut app);
+        testing::recorded(&mut app);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Review {
+                pr: pr("acme/widgets#5"),
+            });
+        testing::settle(&mut app);
+        let now = sent(&testing::recorded(&mut app));
+        assert_eq!(now.len(), 1, "its first change is saved");
+        assert_eq!(now[0].selected, Some(pr("acme/widgets#5")));
+    }
+
+    #[test]
     fn every_change_is_sent_once() {
         let mut app = testing::app(fixture::demo(NOW));
         testing::tell(&mut app, Tell::Restored(saved()));

@@ -1084,10 +1084,14 @@ async fn session(
         snap.sync = Some(s);
     }
     teller.send(Tell::Snapshot(Box::new(snap.clone())));
-    // Once per window: a reconnect must not close idle tabs the window still shows.
-    if !*restored
-        && let Some(Reply::OpenTabs(tabs)) = request(&mut client, Command::RestoreTabs).await?
-    {
+    // Once per window: a reconnect must not close idle tabs the window still shows. A refusal
+    // counts as no saved tabs, so the window keeps saving its own from now on: with nothing
+    // saved, a closed window would leave its reviews open with no tab to close them from.
+    if !*restored {
+        let tabs = match request(&mut client, Command::RestoreTabs).await? {
+            Some(Reply::OpenTabs(tabs)) => tabs,
+            _ => clusia_core::OpenTabs::default(),
+        };
         *restored = true;
         teller.send(Tell::Restored(tabs));
     }
