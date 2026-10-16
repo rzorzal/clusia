@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Keywords 3D · mockup v1</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f6f6f4; --panel:#ffffff; --side:#f2f2ef; --line:#e3e3df; --text:#1d1f1c; --muted:#7a7d77;
+  --green:#2f9e44; --greenbg:#e8f5ea; --risk:#d9480f; --chip:#ecece8; --dot:#d6d6d0;
+  --scene:#fbfbf9; --axis:#9a9d96; --grid:#e8e8e3;
+}
+:root[data-theme="dark"]{
+  --bg:#141614; --panel:#1b1d1b; --side:#181a18; --line:#2c2f2c; --text:#ececea; --muted:#8d918b;
+  --green:#4cc35e; --greenbg:#1f4a26; --risk:#f08c5a; --chip:#262926; --dot:#2a2d2a;
+  --scene:#121412; --axis:#6c706a; --grid:#232623;
+}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px Inter,system-ui,sans-serif}
+.top{display:flex;align-items:center;gap:16px;height:44px;padding:0 20px;border-bottom:1px solid var(--line)}
+.tab{padding:6px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.top .sp{flex:1}
+.hdr{padding:14px 20px 0;background:var(--bg)}
+.hdr .t{font-size:18px;font-weight:600} .hdr .m{color:var(--muted);font-size:12px;margin-top:6px}
+.tabs{display:flex;gap:28px;margin-top:14px;border-bottom:1px solid var(--line)}
+.tabs div{padding:8px 0;color:var(--muted)} .tabs .on{color:var(--text);border-bottom:2px solid var(--green)}
+.main{display:flex;height:calc(100vh - 44px - 112px - 44px)}
+.side{width:236px;background:var(--side);border-right:1px solid var(--line);padding:12px 10px;overflow:auto}
+.side .h{font-size:11px;color:var(--muted);letter-spacing:.04em;margin:0 8px 8px}
+.it{padding:7px 10px;border-radius:8px;margin-bottom:2px} .it b{font-weight:500;display:block} .it span{font-size:12px;color:var(--muted)}
+.it.on{background:var(--greenbg)}
+.it .new{font-size:10px;color:var(--green);border:1px solid var(--green);border-radius:4px;padding:0 4px;margin-left:6px}
+.canvas{flex:1;position:relative;background:var(--scene);overflow:hidden}
+#gl{position:absolute;inset:0}
+.ch{position:absolute;left:20px;top:14px;display:flex;gap:10px;align-items:center;z-index:2}
+.ch b{font-weight:600} .chip{background:var(--chip);border-radius:6px;padding:2px 8px;font-size:12px}
+.hint{color:var(--muted)}
+.views{position:absolute;right:16px;top:12px;display:flex;border:1px solid var(--line);border-radius:8px;background:var(--panel);z-index:2;overflow:hidden}
+.views div{padding:5px 10px;font-size:12px;cursor:pointer;color:var(--muted)} .views .on{background:var(--greenbg);color:var(--text)}
+.filters{position:absolute;right:16px;top:52px;width:212px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;z-index:2;font-size:12px}
+.filters h4{margin:6px 0 6px;font-size:11px;color:var(--muted);font-weight:500;letter-spacing:.04em}
+.filters label{display:flex;align-items:center;gap:7px;padding:3px 0;cursor:pointer}
+.sw{width:10px;height:10px;border-radius:50%} .cnt{margin-left:auto;color:var(--muted)}
+.legend{position:absolute;left:20px;bottom:14px;display:flex;gap:16px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 12px;font-size:12px;z-index:2;align-items:center}
+.lg{display:flex;gap:6px;align-items:center}
+.more{color:var(--muted)}
+.lbl{position:absolute;pointer-events:none;font-size:11px;white-space:nowrap;z-index:1;transform:translate(-50%,-50%)}
+.axl{color:var(--muted);font-weight:500;background:var(--scene);padding:1px 5px;border-radius:4px}
+.ucl{font-weight:600;font-size:12px;color:var(--text);opacity:.85;pointer-events:auto;cursor:pointer;padding:2px 6px;border-radius:6px}.ucl:hover{background:var(--chip)}.ucl.dim{opacity:.25}
+.ucbar{position:absolute;left:20px;top:44px;display:flex;gap:6px;z-index:2;flex-wrap:wrap;max-width:calc(100% - 260px)}
+.pill{border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:4px 11px;font-size:12px;cursor:pointer;color:var(--text)}.pill .n{color:var(--muted);margin-left:5px}.pill.on{background:var(--greenbg);border-color:var(--green)}
+.focus{position:absolute;left:20px;top:82px;width:250px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;z-index:2;font-size:12px;display:none}
+.focus h3{margin:0 0 4px;font-size:14px}.focus .w{display:flex;align-items:center;gap:6px;padding:3px 0;font-family:'JetBrains Mono',monospace}.focus .w .cnt{font-family:Inter}
+.lgt{color:var(--muted);font-size:11px;letter-spacing:.04em}.sep{width:1px;height:16px;background:var(--line)}
+#tip .row{display:flex;gap:6px;align-items:center;margin-top:4px}#tip .k{color:var(--muted);width:62px;flex:none}
+.bnl{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text)}
+#tip{position:absolute;display:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;z-index:3;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.12);max-width:300px}
+#tip code{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600}
+#tip .p{color:var(--muted);margin-top:2px}
+#card{position:absolute;right:16px;bottom:14px;width:360px;background:var(--panel);border:1px solid var(--line);border-radius:10px;z-index:3;display:none;box-shadow:0 6px 20px rgba(0,0,0,.14)}
+#card .ct{padding:10px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+#card pre{margin:0;padding:10px 12px;font:12px/1.55 'JetBrains Mono',monospace;background:var(--side);overflow:auto}
+#card .hl{background:var(--greenbg);display:block}
+#card .ca{padding:8px 12px;display:flex;gap:8px;justify-content:flex-end}
+.btn{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:7px;padding:5px 10px;font-size:12px;cursor:pointer}
+.btn.pr{background:var(--green);color:#fff;border-color:var(--green)}
+.foot{height:44px;display:flex;align-items:center;gap:14px;padding:0 20px;border-top:1px solid var(--line);font-size:13px}
+.foot .sp{flex:1}
+.theme{position:fixed;right:12px;bottom:56px;z-index:9}
+</style>
+</head>
+<body>
+<div class="top"><span>🍃 Home</span><span class="tab">#123 feat: auth refresh ×</span><span>+</span><span class="sp"></span><span>Config</span></div>
+<div class="hdr">
+  <div><span class="hint">rzorzal/clusia #123</span> <span class="t">&nbsp;feat: auth refresh</span></div>
+  <div class="m">@octo wants to merge octo:auth-refresh → main · <span style="color:var(--green)">+120</span> <span style="color:var(--risk)">−34</span> · 7 files</div>
+  <div class="tabs"><div class="on">Diagrams</div><div>Security 3</div><div>Diff 7</div><div>Audits 3</div><div>Comments 5</div><div>Tests</div></div>
+</div>
+<div class="main">
+  <div class="side">
+    <div class="h">DIAGRAMS · 9</div>
+    <div class="it on"><b>Where the words live<span class="new">3D</span></b><span>Keywords · 4 families · 64 places</span></div>
+    <div class="it"><b>Token refresh flow</b><span>Flow · 5 boxes</span></div>
+    <div class="it"><b>Module dependencies</b><span>Graph · 6 modules</span></div>
+    <div class="it"><b>Refresh call, step by step</b><span>Sequence · 8 messages</span></div>
+    <div class="it"><b>Token data model</b><span>Entity–relationship · 4</span></div>
+    <div class="it"><b>What people can do</b><span>Use cases · 7</span></div>
+    <div class="it"><b>Where the token goes</b><span>Data flow · 2 processes</span></div>
+    <div class="it"><b>Token life cycle</b><span>States · 4</span></div>
+  </div>
+  <div class="canvas" id="cv">
+    <div id="gl"></div>
+    <div class="ch"><b>Where the words live</b><span class="chip">Keywords 3D</span><span class="hint">Drag to turn · scroll to zoom · click a point to read its code</span></div>
+    <div class="views" id="views"><div class="on" data-v="3d">3D</div><div data-v="xy">Layer × Moment</div><div data-v="xz">Layer × Distance</div><div data-v="zy">Distance × Moment</div></div>
+    <div class="ucbar" id="ucbar"></div><div class="focus" id="focus"></div><div class="filters" id="filters"></div>
+    <div class="legend">
+      <span class="lgt">SHAPE</span><span class="lg"><svg width="12" height="12"><rect x="2" y="2" width="8" height="8" transform="rotate(45 6 6)" fill="var(--muted)"/></svg>Declared</span>
+      <span class="lg"><svg width="12" height="12"><circle cx="6" cy="6" r="4" fill="var(--muted)"/></svg>Used</span>
+      <span class="lg"><svg width="16" height="16"><circle cx="8" cy="8" r="7" fill="var(--muted)" opacity=".5"/></svg>Many uses in one file</span><span class="sep"></span>
+      <span class="lg"><svg width="14" height="14"><circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--green)" stroke-width="2"/></svg>Changed in this PR</span>
+      <span class="more">+212 more places</span>
+    </div>
+    <div id="tip"></div>
+    <div id="card"></div>
+  </div>
+</div>
+<div class="foot"><span style="color:var(--green)">●</span> Claude Code · ready <span class="hint">Draft saved · 3 items</span><span class="sp"></span><span>Show panel</span><button class="btn pr">Finalize review</button></div>
+<button class="btn theme" id="theme">Toggle dark</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+// ---------- demo data ----------
+let seed=7; const rnd=()=>{seed=(seed*16807)%2147483647;return (seed-1)/2147483646};
+const g=()=> (rnd()+rnd()+rnd()-1.5)*0.55;
+const FAM={
+  refresh:{name:'refresh · refresh_token · RefreshError', short:'refresh', c:'#2f9e44', root:'refresh', pr:'TokenStore::refresh'},
+  lock:{name:'refresh_lock · lock()', short:'lock', c:'#7048e8', root:'lock', pr:'refresh_lock'},
+  token:{name:'token() · TokenStore · access_token', short:'token', c:'#1c7ed6', root:'token', pr:'access_token'},
+  expiry:{name:'expires_at · is_expired · expiry', short:'expiry', c:'#e8590c', root:'expir', pr:'expires_at'},
+};
+const UC={
+  refresh:{name:'Token refresh', c:[0.55,0.45,-0.1]},
+  signing:{name:'Request signing', c:[-0.6,0.15,0.35]},
+  expiry:{name:'Session expiry', c:[0.25,-0.55,0.5]},
+  login:{name:'Login', c:[-0.5,-0.5,-0.55]},
+};
+const files={refresh:'src/token/store.rs',signing:'src/client/http.rs',expiry:'src/session.rs',login:'src/auth/login.rs'};
+const P=[];
+function add(fam,uc,word,kind,changed,n){
+  const c=UC[uc].c; P.push({fam,uc,word,kind,changed,n:n||1,file:files[uc],line:20+Math.floor(rnd()*300),
+    p:[c[0]+g(),c[1]+g(),c[2]+g()]});
+}
+add('refresh','refresh','TokenStore::refresh','decl',true);
+add('refresh','refresh','refresh_token','decl',true);
+add('refresh','refresh','RefreshError','decl',true);
+for(let i=0;i<5;i++) add('refresh','refresh','refresh()','use',i<2);
+for(let i=0;i<3;i++) add('refresh','signing','refresh()','use',i==0);
+for(let i=0;i<3;i++) add('refresh','expiry','refresh_token','use',false);
+add('lock','refresh','refresh_lock','decl',true);
+for(let i=0;i<4;i++) add('lock','refresh','lock()','use',i<3);
+add('lock','signing','lock()','use',false);
+add('token','signing','token()','decl',false);
+add('token','refresh','TokenStore','decl',false);
+add('token','signing','token()','bundle',false,37);
+add('token','login','access_token','bundle',false,18);
+for(let i=0;i<6;i++) add('token','signing','token()','use',i==0);
+for(let i=0;i<4;i++) add('token','login','access_token','use',false);
+for(let i=0;i<3;i++) add('token','refresh','access_token','use',i<1);
+add('expiry','expiry','expires_at','decl',true);
+add('expiry','expiry','is_expired','decl',false);
+for(let i=0;i<6;i++) add('expiry','expiry','is_expired()','use',i<1);
+for(let i=0;i<3;i++) add('expiry','refresh','expires_at','use',i<2);
+for(let i=0;i<3;i++) add('expiry','login','expires_at','use',false);
+add('expiry','expiry','expiry','bundle',false,14);
+
+// ---------- scene ----------
+const host=document.getElementById('gl'), cv=document.getElementById('cv');
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true}); host.appendChild(renderer.domElement);
+renderer.setPixelRatio(devicePixelRatio);
+const scene=new THREE.Scene();
+const cam=new THREE.PerspectiveCamera(40,1,0.1,100); cam.position.set(3.4,2.3,3.6);
+const ctl=new THREE.OrbitControls(cam,renderer.domElement); ctl.enableDamping=true; ctl.target.set(0,0,0);
+scene.add(new THREE.AmbientLight(0xffffff,0.75)); const dl=new THREE.DirectionalLight(0xffffff,0.55); dl.position.set(3,5,4); scene.add(dl);
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const S=1.25;
+const axisGroup=new THREE.Group(); scene.add(axisGroup);
+function buildAxes(){
+  axisGroup.clear();
+  const am=new THREE.LineBasicMaterial({color:css('--axis')});
+  const gm=new THREE.LineBasicMaterial({color:css('--grid')});
+  const o=-S;
+  [[S,o,o],[o,S,o],[o,o,S]].forEach(e=>axisGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(o,o,o),new THREE.Vector3(...e)]),am)));
+  for(let i=1;i<=4;i++){const t=o+i*(2*S/4);
+    axisGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(t,o,o),new THREE.Vector3(t,o,S)]),gm));
+    axisGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(o,o,t),new THREE.Vector3(S,o,t)]),gm));}
+}
+buildAxes();
+const meshes=[]; const sph=new THREE.SphereGeometry(1,20,14), oct=new THREE.OctahedronGeometry(1), ring=new THREE.TorusGeometry(1,0.12,8,32);
+P.forEach(pt=>{
+  const col=new THREE.Color(FAM[pt.fam].c);
+  const r=pt.kind=='bundle'?0.035+Math.sqrt(pt.n)*0.012:pt.kind=='decl'?0.055:0.035;
+  const m=new THREE.Mesh(pt.kind=='decl'?oct:sph,new THREE.MeshLambertMaterial({color:col,transparent:true,opacity:pt.kind=='bundle'?0.55:1}));
+  m.scale.setScalar(r); m.position.set(pt.p[0]*S,pt.p[1]*S,pt.p[2]*S); m.userData=pt; scene.add(m); meshes.push(m);
+  if(pt.changed){const rg=new THREE.Mesh(ring,new THREE.MeshBasicMaterial({color:css('--green')})); rg.scale.setScalar(1.6); m.add(rg); pt.ringMesh=rg;}
+  pt.mesh=m;
+});
+// family lines: declaration → each place
+const lines=[]; const ucLabels={};
+Object.keys(FAM).forEach(f=>{
+  const decl=P.filter(p=>p.fam==f&&p.kind=='decl'); const rest=P.filter(p=>p.fam==f&&p.kind!='decl');
+  rest.forEach(p=>{let best=decl[0],bd=1e9; decl.forEach(d=>{const dd=d.p.reduce((a,v,i)=>a+(v-p.p[i])**2,0); if(dd<bd){bd=dd;best=d}});
+    const l=new THREE.Line(new THREE.BufferGeometry().setFromPoints([best.mesh.position,p.mesh.position]),new THREE.LineBasicMaterial({color:FAM[f].c,transparent:true,opacity:0.22}));
+    l.userData={fam:f,a:best,b:p}; scene.add(l); lines.push(l);});
+});
+// use-case clouds
+const clouds=[];
+Object.entries(UC).forEach(([k,u])=>{
+  const m=new THREE.Mesh(new THREE.SphereGeometry(1,32,20),new THREE.MeshBasicMaterial({color:css('--axis'),transparent:true,opacity:0.07,depthWrite:false}));
+  m.scale.set(0.62,0.5,0.62); m.position.set(u.c[0]*S,u.c[1]*S,u.c[2]*S); m.userData={uc:k}; scene.add(m); clouds.push(m);
+});
+// labels
+const labels=[];
+function lbl(text,cls,pos){const d=document.createElement('div'); d.className='lbl '+cls; d.textContent=text; cv.appendChild(d); labels.push({d,pos}); return d;}
+const o=-S;
+lbl('Layer: client → storage','axl',new THREE.Vector3(S+0.15,o,o));
+lbl('Moment: before send → after reply','axl',new THREE.Vector3(o,S+0.12,o));
+lbl('Distance from the change','axl',new THREE.Vector3(o,o,S+0.15));
+Object.entries(UC).forEach(([k,u])=>{const d=lbl(u.name,'ucl',new THREE.Vector3(u.c[0]*S,u.c[1]*S+0.68,u.c[2]*S)); d.onclick=()=>select(sel==k?null:k); ucLabels[k]=d;});
+P.filter(p=>p.kind=='bundle').forEach(p=>{p.lab=lbl('×'+p.n,'bnl',p.mesh.position.clone().add(new THREE.Vector3(0,0.13,0)));});
+
+// filters
+const on={fam:Object.fromEntries(Object.keys(FAM).map(k=>[k,true])),uc:Object.fromEntries(Object.keys(UC).map(k=>[k,true]))};
+const fl=document.getElementById('filters');
+fl.innerHTML='<h4>WORD FAMILIES</h4>'+Object.entries(FAM).map(([k,f])=>`<label><input type=checkbox checked data-f="${k}"><span class=sw style="background:${f.c}"></span>${f.short}<span class=cnt>${P.filter(p=>p.fam==k).reduce((a,p)=>a+p.n,0)}</span></label>`).join('')
+ +'<h4 style="margin-top:10px">USE CASES</h4>'+Object.entries(UC).map(([k,u])=>`<label><input type=checkbox checked data-u="${k}">${u.name}<span class=cnt>${P.filter(p=>p.uc==k).length}</span></label>`).join('')
+ +'<h4 style="margin-top:10px">SHOW</h4><label><input type=checkbox id=onlych>Only what the PR changed</label>';
+fl.addEventListener('change',e=>{const t=e.target; if(t.dataset.f)on.fam[t.dataset.f]=t.checked; if(t.dataset.u)on.uc[t.dataset.u]=t.checked; apply();});
+function vis(p){return on.fam[p.fam]&&on.uc[p.uc]&&(!document.getElementById('onlych').checked||p.changed||p.kind=='decl')}
+function apply(){meshes.forEach(m=>m.visible=vis(m.userData)); lines.forEach(l=>l.visible=vis(l.userData.a)&&vis(l.userData.b)); clouds.forEach(c=>c.visible=on.uc[c.userData.uc]);}
+
+// use-case selection
+let sel=null; const ucbar=document.getElementById('ucbar'), focusEl=document.getElementById('focus');
+function drawBar(){ucbar.innerHTML=`<span class="pill ${sel?'':'on'}" data-u="">All use cases</span>`+Object.entries(UC).map(([k,u])=>`<span class="pill ${sel==k?'on':''}" data-u="${k}">${u.name}<span class=n>${P.filter(p=>p.uc==k).reduce((a,p)=>a+p.n,0)}</span></span>`).join('');}
+ucbar.onclick=e=>{const t=e.target.closest('.pill'); if(t)select(t.dataset.u||null)};
+function base(){
+  meshes.forEach(m=>{const d=m.userData; m.material.opacity=sel&&d.uc!=sel?0.1:(d.kind=='bundle'?0.55:1)});
+  lines.forEach(l=>{const a=l.userData.a,b=l.userData.b; l.material.opacity=!sel?0.22:(a.uc==sel||b.uc==sel?0.6:0.03)});
+  clouds.forEach(c=>c.material.opacity=!sel?0.07:(c.userData.uc==sel?0.13:0.025));
+  Object.entries(ucLabels).forEach(([k,d])=>d.classList.toggle('dim',!!sel&&k!=sel));
+}
+function select(k){sel=k; drawBar(); base();
+  if(!k){focusEl.style.display='none'; tweenTarget(new THREE.Vector3(0,0,0),new THREE.Vector3(3.4,2.3,3.6)); return;}
+  const u=UC[k], c=new THREE.Vector3(u.c[0]*S,u.c[1]*S,u.c[2]*S);
+  tweenTarget(c,c.clone().add(new THREE.Vector3(1.7,1.1,1.8)));
+  const pts=P.filter(p=>p.uc==k), words={};
+  pts.forEach(p=>{const w=words[p.word]||(words[p.word]={n:0,ch:0,fam:p.fam}); w.n+=p.n; w.ch+=p.changed?1:0;});
+  const out=P.filter(p=>p.uc!=k&&p.changed&&P.some(q=>q.uc==k&&q.fam==p.fam));
+  const reach=[...new Set(out.map(p=>UC[p.uc].name))];
+  focusEl.innerHTML=`<h3>${u.name}</h3><div class=hint>${pts.reduce((a,p)=>a+p.n,0)} places · ${pts.filter(p=>p.changed).length} changed in this PR</div>
+   <div style="margin:8px 0 4px" class=lgt>WORDS HERE</div>`+Object.entries(words).sort((a,b)=>b[1].n-a[1].n).map(([w,o])=>`<div class=w><span class=sw style="background:${FAM[o.fam].c}"></span>${w}<span class=cnt>${o.n}${o.ch?` · <span style="color:var(--green)">${o.ch} changed</span>`:''}</span></div>`).join('')
+   +(reach.length?`<div style="margin:8px 0 2px" class=lgt>THE SAME CHANGES ALSO REACH</div><div>${reach.join(' · ')}</div>`:'');
+  focusEl.style.display='block';}
+function tweenTarget(t,p){const t0=ctl.target.clone(),p0=cam.position.clone(); let x=0; const st=()=>{x+=0.05; const e=Math.min(1,x*(2-x)); ctl.target.lerpVectors(t0,t,e); cam.position.lerpVectors(p0,p,e); if(x<1)requestAnimationFrame(st)}; st();}
+drawBar();
+
+// views (2D projections)
+const views={'3d':[3.4,2.3,3.6],'xy':[0,0,5.2],'xz':[0,5.2,0.001],'zy':[5.2,0,0]};
+document.getElementById('views').onclick=e=>{const v=e.target.dataset.v; if(!v)return;
+  document.querySelectorAll('#views div').forEach(d=>d.classList.toggle('on',d.dataset.v==v));
+  const t=views[v]; tween(new THREE.Vector3(...t)); ctl.enableRotate=(v=='3d');};
+function tween(to){const from=cam.position.clone(); let t=0; const step=()=>{t+=0.06; cam.position.lerpVectors(from,to,Math.min(1,t*(2-t))); if(t<1)requestAnimationFrame(step)}; step();}
+
+// hover + click
+const ray=new THREE.Raycaster(), mouse=new THREE.Vector2(), tip=document.getElementById('tip'), card=document.getElementById('card');
+let hover=null;
+function pick(e){const r=renderer.domElement.getBoundingClientRect(); mouse.set(((e.clientX-r.left)/r.width)*2-1,-((e.clientY-r.top)/r.height)*2+1);
+  ray.setFromCamera(mouse,cam); const h=ray.intersectObjects(meshes.filter(m=>m.visible),false); return h.length?h[0].object.userData:null;}
+renderer.domElement.addEventListener('pointermove',e=>{
+  const p=pick(e); hover=p;
+  if(p){lines.forEach(l=>l.material.opacity=l.userData.fam==p.fam?0.75:0.05);
+    meshes.forEach(m=>m.material.opacity=m.userData.fam==p.fam?1:0.15);} else base();
+  if(!p){tip.style.display='none';renderer.domElement.style.cursor='';return;}
+  renderer.domElement.style.cursor='pointer';
+  const r=cv.getBoundingClientRect();
+  const F=FAM[p.fam], same=p.word.replace('()','').replace(/.*::/,'')==F.pr.replace(/.*::/,'');
+  const shape=p.kind=='decl'?'◆ Declared here':p.kind=='bundle'?'◉ '+p.n+' uses in this file':'● Used here';
+  tip.innerHTML=`<code>${p.word}</code>${p.changed?' · <span style="color:var(--green)">changed in this PR</span>':''}
+   <div class=row><span class=k>Matched</span><span><code style="color:${F.c}">${F.root}…</code> from the PR's <code>${F.pr}</code> · ${same?'same name':'similar name'}</span></div>
+   <div class=row><span class=k>What</span><span>${shape}</span></div>
+   <div class=row><span class=k>Where</span><span>${p.file}${p.kind=='bundle'?'':':'+p.line}</span></div>
+   <div class=row><span class=k>Use case</span><span>${UC[p.uc].name}</span></div>`;
+  tip.style.display='block'; tip.style.left=(e.clientX-r.left+14)+'px'; tip.style.top=(e.clientY-r.top+12)+'px';
+});
+let down=null; renderer.domElement.addEventListener('pointerdown',e=>down=[e.clientX,e.clientY]);
+renderer.domElement.addEventListener('click',e=>{if(down&&Math.hypot(e.clientX-down[0],e.clientY-down[1])>4)return; const p=pick(e); if(!p){card.style.display='none'; if(sel)select(null); return;}
+  const code=p.kind=='bundle'
+   ? `<div style="padding:8px 12px;font-size:12px">${p.n} places in <code>${p.file}</code>:<br>`+[41,88,102,130,171].map(l=>`<div style="padding:3px 0;font-family:JetBrains Mono,monospace">:${l}&nbsp;&nbsp;let t = self.${p.word.replace('()','')}();</div>`).join('')+`<div class=hint>… and ${p.n-5} more</div></div>`
+   : `<pre>  ${p.line-1}  impl TokenStore {\n<span class=hl>  ${p.line}      pub fn ${p.word.replace(/.*::/,'').replace('()','')}(&amp;self) -&gt; Result&lt;Token&gt; {</span>  ${p.line+1}          let _g = self.refresh_lock.lock();\n  ${p.line+2}          …</pre>`;
+  card.innerHTML=`<div class=ct><code style="font-family:JetBrains Mono,monospace;font-weight:600">${p.word}</code><span class=chip>${UC[p.uc].name}</span><span class=sp style="flex:1"></span><span class=hint>${p.file}</span></div>${code}<div class=ca><button class=btn onclick="card.style.display='none'">Close</button><button class="btn pr">Comment on this line</button></div>`;
+  card.style.display='block';
+});
+
+// render
+function size(){const w=cv.clientWidth,h=cv.clientHeight; renderer.setSize(w,h); cam.aspect=w/h; cam.updateProjectionMatrix();}
+addEventListener('resize',size); size();
+const v=new THREE.Vector3();
+(function loop(){ctl.update(); renderer.render(scene,cam);
+  const w=cv.clientWidth,h=cv.clientHeight;
+  labels.forEach(({d,pos})=>{v.copy(pos).project(cam); d.style.left=((v.x+1)/2*w)+'px'; d.style.top=((1-v.y)/2*h)+'px'; d.style.display=v.z<1?'block':'none';});
+  P.forEach(p=>{if(p.ringMesh)p.ringMesh.quaternion.copy(cam.quaternion);});
+  requestAnimationFrame(loop);})();
+
+document.getElementById('theme').onclick=()=>{const r=document.documentElement; r.dataset.theme=r.dataset.theme=='dark'?'light':'dark';
+  buildAxes(); clouds.forEach(c=>c.material.color.set(css('--axis'))); P.forEach(p=>p.ringMesh&&p.ringMesh.material.color.set(css('--green')));};
+
+const q=new URLSearchParams(location.search);
+if(q.get('theme')=='dark'){document.getElementById('theme').click();}
+if(q.get('uc')){setTimeout(()=>select(q.get('uc')),300);}
+document.getElementById('theme').style.display=q.get('theme')?'none':'';
+</script>
+</body>
+</html>
