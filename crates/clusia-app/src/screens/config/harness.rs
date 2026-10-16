@@ -343,11 +343,7 @@ fn scanned_card(snap: &Snapshot, card: ProbeCard) -> ProbeCard {
     if card != ProbeCard::Idle || h.kind == HarnessKind::Custom {
         return card;
     }
-    let found = snap
-        .harnesses
-        .iter()
-        .flatten()
-        .chain(snap.first_run.iter().flat_map(|f| f.harnesses.iter()));
+    let found = snap.scanned().into_iter().flatten();
     found
         .filter(|f| HarnessKind::from(f.kind) == h.kind)
         .find_map(|f| {
@@ -1047,8 +1043,10 @@ mod tests {
         let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
         assert_eq!(v.probe, ProbeCard::Idle, "nothing scanned yet");
         snap.harnesses = Some(Vec::new());
+        snap.first_run = Some(crate::fixture::demo_first_run());
         let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
-        assert_eq!(v.probe, ProbeCard::Idle, "the scan found nothing");
+        assert_eq!(v.probe, ProbeCard::Idle, "the newer scan found nothing");
+        snap.first_run = None;
         snap.harnesses = Some(crate::fixture::demo_first_run().harnesses);
         let v = view(&snap, &HashMap::new(), &ProbeState::Idle);
         let ProbeCard::Found { name, program, .. } = &v.probe else {

@@ -44,6 +44,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// The agents the daemon last reported: the scan fetched on connect and on `harness.*`
+    /// changes, or, until it arrives, the first-run answer.
+    pub fn scanned(&self) -> Option<&[Harness]> {
+        self.harnesses
+            .as_deref()
+            .or_else(|| self.first_run.as_ref().map(|f| f.harnesses.as_slice()))
+    }
+
     /// GitHub refused the token or there is none. Unknown (nothing fetched yet) is not signed out.
     pub fn signed_out(&self) -> bool {
         self.sync

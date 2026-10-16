@@ -488,13 +488,13 @@ async fn first_run_status_reaches_the_window() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_agent_scan_reaches_the_window_without_the_first_run() {
-    let d = common::Daemon::start().await;
+    let server = wiremock::MockServer::start().await;
+    let d = common::Daemon::start_with_github(server.uri()).await;
     let link = bridge::spawn(d.paths.clone(), None, || {});
-    let s = snapshot_where(&link, |s| s.harnesses.is_some());
-    assert!(
-        s.first_run.is_none() || s.first_run_open,
-        "the scan does not depend on the first-run screen"
-    );
+    let s = snapshot_where(&link, |s| s.harnesses.is_some() && s.lists_loaded);
+    assert!(!s.signed_out(), "the daemon has a token");
+    assert!(!s.first_run_open, "the first-run screen is closed");
+    assert!(s.first_run.is_none(), "its status was not asked for");
     d.stop().await;
 }
 

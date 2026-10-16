@@ -192,7 +192,7 @@ impl Plugin for AgentPanel {
 }
 
 /// Whether the agent `kind` (the one a review is pinned to) is set up: the configured program
-/// serves it (it is the configured kind's), or the daemon's scan found it on the PATH. The
+/// serves it (it is the configured kind's), or the daemon's scan found it on the PATH (the first-run answer stands in only until the scan has arrived). The
 /// configured program counts only for the configured kind: a review still pinned to the other
 /// agent reads "not set up" until the scan has found that agent. A configured custom program
 /// counts as the configured kind's.
@@ -203,8 +203,7 @@ pub fn harness_ready(snap: &Snapshot, kind: clusia_core::config::HarnessKind) ->
             .any(|h| clusia_core::config::HarnessKind::from(h.kind) == kind && h.path.is_some())
     };
     (snap.config.harness.program.is_some() && snap.config.harness.kind == kind)
-        || snap.harnesses.as_deref().is_some_and(found)
-        || snap.first_run.as_ref().is_some_and(|f| found(&f.harnesses))
+        || snap.scanned().is_some_and(found)
 }
 
 /// The text the denied line shows: a tool the user's own `deny` rules refuse.
@@ -1373,6 +1372,24 @@ mod tests {
         snap.harnesses = Some(fixture::demo_first_run().harnesses);
         assert!(harness_ready(&snap, Kind::ClaudeCode));
         assert!(!harness_ready(&snap, Kind::Codex));
+    }
+
+    #[test]
+    fn the_newer_scan_overrides_the_first_run_answer() {
+        use clusia_core::config::HarnessKind as Kind;
+        let mut snap = Snapshot {
+            first_run: Some(fixture::demo_first_run()),
+            ..Snapshot::default()
+        };
+        assert!(
+            harness_ready(&snap, Kind::ClaudeCode),
+            "only the first run so far"
+        );
+        snap.harnesses = Some(Vec::new());
+        assert!(
+            !harness_ready(&snap, Kind::ClaudeCode),
+            "the scan after the first run found nothing"
+        );
     }
 
     #[test]
