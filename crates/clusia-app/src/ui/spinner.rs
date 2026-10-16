@@ -106,7 +106,8 @@ pub fn beat() -> impl Bundle {
     )
 }
 
-/// The wake-up wait the marks asked the event loop for, if they did.
+/// The wait the marks last wrote into the event loop's settings, if they hold one: a wait is
+/// theirs to change or restore only while the settings still equal it.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Pace(pub Option<Duration>);
 
@@ -165,28 +166,37 @@ fn animate(
     }
     let want = (!motion.reduced && (!rings.is_empty() || !beats.is_empty()))
         .then(|| wait_of(!rings.is_empty()));
-    match (pace.0, want) {
-        (_, Some(wait)) => {
-            // Someone else waking sooner (a GIF) is left alone.
-            let sooner = matches!(
-                settings.focused_mode,
-                UpdateMode::Reactive { wait: w, .. } if w < wait
-            );
-            if !sooner && settings.focused_mode != UpdateMode::reactive(wait) {
-                settings.focused_mode = UpdateMode::reactive(wait);
-                settings.unfocused_mode = UpdateMode::reactive(wait);
-            }
-            if pace.0 != Some(wait) {
-                pace.0 = Some(wait);
+    let ours = pace
+        .0
+        .is_some_and(|written| settings.focused_mode == UpdateMode::reactive(written));
+    match want {
+        Some(wait) => {
+            let faster_than_us = !ours
+                && matches!(
+                    settings.focused_mode,
+                    UpdateMode::Reactive { wait: w, .. } if w < wait
+                );
+            if faster_than_us {
+                // Someone else (a GIF) wakes sooner: leave it, and hold nothing to restore.
+                pace.0 = None;
+            } else {
+                if settings.focused_mode != UpdateMode::reactive(wait) {
+                    settings.focused_mode = UpdateMode::reactive(wait);
+                    settings.unfocused_mode = UpdateMode::reactive(wait);
+                }
+                if pace.0 != Some(wait) {
+                    pace.0 = Some(wait);
+                }
             }
         }
-        (Some(held), None) => {
-            if settings.focused_mode == UpdateMode::reactive(held) {
+        None => {
+            if ours {
                 *settings = WinitSettings::desktop_app();
             }
-            pace.0 = None;
+            if pace.0.is_some() {
+                pace.0 = None;
+            }
         }
-        (None, None) => {}
     }
 }
 
@@ -349,5 +359,71 @@ mod tests {
         app.insert_resource(WinitSettings::continuous());
         app.update();
         assert_eq!(mode(&app), UpdateMode::Continuous);
+    }
+
+    #[test]
+    fn a_ring_then_a_beat_then_nothing_restores_the_default() {
+        let (mut app, ring) = app_with(spinner());
+        let dot = app.world_mut().spawn(beat()).id();
+        desktop(&mut app);
+        app.update();
+        assert_eq!(mode(&app), UpdateMode::reactive(Duration::from_millis(100)));
+        app.world_mut().despawn(ring);
+        app.update();
+        assert_eq!(
+            mode(&app),
+            UpdateMode::reactive(Duration::from_millis(600)),
+            "its own 100 ms is not someone else's"
+        );
+        app.world_mut().despawn(dot);
+        app.update();
+        assert_eq!(mode(&app), WinitSettings::desktop_app().focused_mode);
+        assert_eq!(
+            app.world().resource::<WinitSettings>().unfocused_mode,
+            WinitSettings::desktop_app().unfocused_mode
+        );
+        assert_eq!(app.world().resource::<Pace>().0, None);
+    }
+
+    #[test]
+    fn a_beat_then_a_ring_then_nothing_restores_the_default() {
+        let (mut app, dot) = app_with(beat());
+        desktop(&mut app);
+        app.update();
+        let ring = app.world_mut().spawn(spinner()).id();
+        app.update();
+        assert_eq!(mode(&app), UpdateMode::reactive(Duration::from_millis(100)));
+        app.world_mut().despawn(ring);
+        app.world_mut().despawn(dot);
+        app.update();
+        assert_eq!(mode(&app), WinitSettings::desktop_app().focused_mode);
+    }
+
+    #[test]
+    fn a_default_restored_by_someone_else_is_taken_back_on_the_next_frame() {
+        let (mut app, _ring) = app_with(spinner());
+        desktop(&mut app);
+        app.update();
+        assert_eq!(mode(&app), UpdateMode::reactive(Duration::from_millis(100)));
+        // The GIF clock goes back to the desktop settings while the ring is still shown.
+        desktop(&mut app);
+        app.update();
+        assert_eq!(mode(&app), UpdateMode::reactive(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn a_faster_wake_set_after_ours_is_kept_and_not_reset() {
+        let (mut app, ring) = app_with(spinner());
+        desktop(&mut app);
+        app.update();
+        app.insert_resource(WinitSettings {
+            focused_mode: UpdateMode::reactive(Duration::from_millis(30)),
+            unfocused_mode: UpdateMode::reactive(Duration::from_millis(30)),
+        });
+        app.update();
+        assert_eq!(mode(&app), UpdateMode::reactive(Duration::from_millis(30)));
+        app.world_mut().despawn(ring);
+        app.update();
+        assert_eq!(mode(&app), UpdateMode::reactive(Duration::from_millis(30)));
     }
 }
