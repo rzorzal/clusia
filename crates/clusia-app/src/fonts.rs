@@ -114,8 +114,16 @@ impl Plugin for FontsPlugin {
 pub struct FontSystem {
     /// The installed families, sorted.
     pub families: fn() -> Vec<String>,
-    /// One family read from its files, or `None` when it is not installed.
-    pub load: fn(&str) -> Option<LoadedFace>,
+    /// One family read from its files.
+    pub load: fn(&str) -> Result<LoadedFace, Unusable>,
+}
+
+/// Why a configured family is drawn as Inter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unusable {
+    NotInstalled,
+    /// Installed, but its files could not be read as fonts.
+    Unreadable,
 }
 
 impl FontSystem {
@@ -128,9 +136,10 @@ impl FontSystem {
 }
 
 /// `name` from its files: `SYSTEM_FONT` is the macOS system font.
-fn load_installed(name: &str) -> Option<LoadedFace> {
+fn load_installed(name: &str) -> Result<LoadedFace, Unusable> {
     use crate::platform_fonts::FaceFile;
-    let family = crate::platform_fonts::family_files(name, name == SYSTEM_FONT)?;
+    let family = crate::platform_fonts::family_files(name, name == SYSTEM_FONT)
+        .ok_or(Unusable::NotInstalled)?;
     let faces = [
         Some(&family.regular),
         family.bold.as_ref(),
@@ -159,9 +168,10 @@ fn load_installed(name: &str) -> Option<LoadedFace> {
             .map(|(_, b)| (b.as_slice(), face.postscript.as_str()))
     }
     let bold = family.bold.as_ref().and_then(|f| bytes(&files, f));
-    let mut loaded = LoadedFace::read(bytes(&files, &family.regular)?, bold)?;
+    let regular = bytes(&files, &family.regular).ok_or(Unusable::Unreadable)?;
+    let mut loaded = LoadedFace::read(regular, bold).ok_or(Unusable::Unreadable)?;
     loaded.files = files.into_iter().map(|(_, b)| b).collect();
-    Some(loaded)
+    Ok(loaded)
 }
 
 /// A family read from its files, ready to draw with.
@@ -178,7 +188,8 @@ pub struct LoadedFace {
 impl LoadedFace {
     /// The face in `regular` (a file and the PostScript name of the face in it), its advances
     /// at weight 600 taken from `bold` when the family has a bold file. `None` when the file
-    /// cannot be read as a font.
+    /// cannot be read as a font. `files` is left empty: the caller moves the files it read in,
+    /// rather than a copy of the regular one.
     pub fn read(regular: (&[u8], &str), bold: Option<(&[u8], &str)>) -> Option<Self> {
         let (index, font) = face_in(regular.0, regular.1)?;
         let family = family_name(&font)?;
@@ -189,25 +200,28 @@ impl LoadedFace {
             family,
             metrics: face_metrics(regular.0, index),
             advances: advances(&font, strong.as_ref()),
-            files: vec![regular.0.to_vec()],
+            files: Vec::new(),
         })
     }
 }
 
 /// The face called `postscript` in `file` (any face when none is), and its index.
+/// The index is the face's place in the file, kept past faces that cannot be read; with no
+/// name match, it is the first face that reads.
 fn face_in<'a>(file: &'a [u8], postscript: &str) -> Option<(u32, FontRef<'a>)> {
-    let faces: Vec<FontRef<'a>> = match FileRef::new(file).ok()? {
-        FileRef::Font(font) => vec![font],
-        FileRef::Collection(c) => c.iter().filter_map(Result::ok).collect(),
+    let faces: Vec<(u32, FontRef<'a>)> = match FileRef::new(file).ok()? {
+        FileRef::Font(font) => vec![(0, font)],
+        FileRef::Collection(c) => (0..)
+            .zip(c.iter())
+            .filter_map(|(i, face)| Some((i, face.ok()?)))
+            .collect(),
     };
-    let named = faces.iter().position(|f| {
+    let named = faces.iter().position(|(_, f)| {
         f.localized_strings(StringId::POSTSCRIPT_NAME)
             .english_or_first()
             .is_some_and(|n| n.to_string() == postscript)
     });
-    let index = named.unwrap_or(0);
-    let font = faces.into_iter().nth(index)?;
-    Some((index as u32, font))
+    faces.into_iter().nth(named.unwrap_or(0))
 }
 
 /// The family name the font collection files `font` under: its typographic family, else its
@@ -255,9 +269,9 @@ fn advances(regular: &FontRef, bold: Option<&FontRef>) -> Advances {
 pub struct TextFace {
     /// The configured name drawn now: `INTER` until another is read, and while one is missing.
     pub applied: String,
-    /// A family the config names that is not installed; text shows in Inter meanwhile.
-    pub missing: Option<String>,
-    pending: Option<(String, Task<Option<LoadedFace>>)>,
+    /// A family the config names that cannot be used, and why; text shows in Inter meanwhile.
+    pub missing: Option<(String, Unusable)>,
+    pending: Option<(String, Task<Result<LoadedFace, Unusable>>)>,
     /// The bundled faces, to go back to.
     bundled: (Face, Face),
     /// The fonts of the face in use, kept alive while it is.
@@ -339,15 +353,19 @@ fn follow_text_font(
     let Some(system) = system else { return };
     let wanted = model.snapshot.config.appearance.text_font.as_str();
     let mut finished = false;
-    if let Some((name, task)) = face.pending.as_mut()
-        && let Some(read) = check_ready(task)
+    // Polling needs the task mutably, which must not mark the face changed on every frame.
+    let read = face
+        .bypass_change_detection()
+        .pending
+        .as_mut()
+        .and_then(|(_, task)| check_ready(task));
+    if let Some(read) = read
+        && let Some((name, _)) = face.pending.take()
     {
-        let name = std::mem::take(name);
-        face.pending = None;
         finished = true;
         if name == wanted {
             let next = match read {
-                Some(read) => {
+                Ok(read) => {
                     face.missing = None;
                     face.applied = name;
                     let held: Vec<Handle<Font>> = match assets.as_mut() {
@@ -367,9 +385,9 @@ fn follow_text_font(
                         advances: Arc::new(read.advances),
                     }
                 }
-                None => {
-                    tracing::warn!(family = %name, "the text font is not installed; using Inter");
-                    face.missing = Some(name);
+                Err(why) => {
+                    tracing::warn!(family = %name, ?why, "the text font cannot be used; using Inter");
+                    face.missing = Some((name, why));
                     bundled(&mut face, &fonts)
                 }
             };
@@ -389,7 +407,10 @@ fn follow_text_font(
         return;
     }
     let settled = face.applied == wanted
-        || face.missing.as_deref() == Some(wanted)
+        || face
+            .missing
+            .as_ref()
+            .is_some_and(|(name, _)| name == wanted)
         || face.reading() == Some(wanted);
     if !settled {
         let (load, name) = (system.load, wanted.to_string());
@@ -618,7 +639,10 @@ mod tests {
         assert_eq!(inter.family, "Inter Variable");
         assert_eq!(inter.family, filed(INTER));
         assert_eq!(inter.metrics, metrics(INTER));
-        assert_eq!(inter.files.len(), 1);
+        assert!(
+            inter.files.is_empty(),
+            "the caller files its bytes, not a copy"
+        );
         let mono = LoadedFace::read((JETBRAINS_MONO, "JetBrainsMono-Regular"), None).unwrap();
         assert_eq!(mono.family, "JetBrains Mono");
         assert_eq!(mono.family, filed(JETBRAINS_MONO));
@@ -686,19 +710,136 @@ mod tests {
         let helvetica = (system.load)("Helvetica Neue").expect("Helvetica Neue");
         assert_eq!(helvetica.family, "Helvetica Neue");
         assert_ne!(helvetica.advances, Advances::inter());
-        assert!((system.load)("Nope Sans").is_none());
+        assert_eq!(
+            (system.load)("Nope Sans").err(),
+            Some(Unusable::NotInstalled)
+        );
         eprintln!("system font: {} in {} file(s)", sf.family, sf.files.len());
     }
 
-    /// A Mac with two families: Fira Code (the bundled mono stands in for it) and Inter.
+    /// `bytes` read as a family of one file.
+    fn one_file(bytes: &[u8]) -> Result<LoadedFace, Unusable> {
+        let mut face = LoadedFace::read((bytes, ""), None).ok_or(Unusable::Unreadable)?;
+        face.files.push(bytes.to_vec());
+        Ok(face)
+    }
+
+    /// A Mac with Fira Code (the bundled mono stands in for it), an Iosevka that takes a while
+    /// to read, a copy of Inter, and a Broken Sans whose file is not a font.
     fn fake_system() -> FontSystem {
         FontSystem {
             families: || vec!["Fira Code".into(), "Inter".into()],
             load: |name| match name {
-                "Fira Code" => LoadedFace::read((JETBRAINS_MONO, ""), None),
-                _ => None,
+                "Fira Code" => one_file(JETBRAINS_MONO),
+                "Iosevka" => {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    one_file(JETBRAINS_MONO)
+                }
+                "Inter Copy" => one_file(INTER),
+                "Broken Sans" => one_file(b"not a font"),
+                _ => Err(Unusable::NotInstalled),
             },
         }
+    }
+
+    #[test]
+    fn a_family_chosen_while_another_is_read_wins() {
+        let mut app = face_app(INTER_NAME);
+        testing::set_config_locally(&mut app, "appearance.text_font", "Iosevka");
+        assert_eq!(
+            app.world().resource::<TextFace>().reading(),
+            Some("Iosevka")
+        );
+        testing::set_config_locally(&mut app, "appearance.text_font", "Inter Copy");
+        settle(&mut app);
+        // Long enough for the first read to have finished, had it been kept.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<TextFace>().applied, "Inter Copy");
+        assert_eq!(
+            app.world().resource::<UiFonts>().sans,
+            Face::family("Inter Variable", FontStyle::Normal),
+            "the earlier read never lands"
+        );
+    }
+
+    #[test]
+    fn a_family_that_cannot_be_read_says_so() {
+        let mut app = face_app("Broken Sans");
+        settle(&mut app);
+        assert_eq!(
+            app.world().resource::<TextFace>().missing,
+            Some(("Broken Sans".into(), Unusable::Unreadable))
+        );
+    }
+
+    #[derive(Resource, Default)]
+    struct Marks(usize);
+
+    #[test]
+    fn the_face_is_marked_changed_only_when_it_changes() {
+        let mut app = face_app(INTER_NAME);
+        app.init_resource::<Marks>().add_systems(
+            Last,
+            |face: Res<TextFace>, mut marks: ResMut<Marks>| {
+                if face.is_changed() {
+                    marks.0 += 1;
+                }
+            },
+        );
+        for _ in 0..3 {
+            app.update();
+        }
+        app.world_mut().resource_mut::<Marks>().0 = 0;
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<Marks>().0,
+            0,
+            "idle frames mark nothing"
+        );
+        testing::set_config_locally(&mut app, "appearance.text_font", "Fira Code");
+        settle(&mut app);
+        assert!(app.world().resource::<Marks>().0 > 0, "a read does");
+    }
+
+    /// `font` (a single font file) as face 1 of a collection whose face 0 cannot be read.
+    fn second_of_a_collection(font: &[u8]) -> Vec<u8> {
+        let header: u32 = 12 + 4 * 2;
+        let mut ttc = b"ttcf\x00\x01\x00\x00".to_vec();
+        ttc.extend_from_slice(&2u32.to_be_bytes());
+        ttc.extend_from_slice(&u32::MAX.to_be_bytes());
+        ttc.extend_from_slice(&header.to_be_bytes());
+        let mut body = font.to_vec();
+        let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        for i in 0..tables {
+            let at = 12 + 16 * i + 8;
+            let offset = u32::from_be_bytes(font[at..at + 4].try_into().unwrap());
+            body[at..at + 4].copy_from_slice(&(offset + header).to_be_bytes());
+        }
+        ttc.extend_from_slice(&body);
+        ttc
+    }
+
+    #[test]
+    fn a_face_of_a_collection_keeps_its_index_when_another_face_is_broken() {
+        let ttc = second_of_a_collection(INTER);
+        let postscript = FontRef::new(INTER)
+            .unwrap()
+            .localized_strings(StringId::POSTSCRIPT_NAME)
+            .english_or_first()
+            .unwrap()
+            .to_string();
+        let (index, _) = face_in(&ttc, &postscript).unwrap();
+        assert_eq!(index, 1, "its place in the file");
+        assert_eq!(face_metrics(&ttc, index), metrics(INTER));
+        let face = LoadedFace::read((&ttc, &postscript), None).unwrap();
+        assert_eq!(face.metrics, metrics(INTER));
+        let (index, _) = face_in(&ttc, "NoSuchFace").unwrap();
+        assert_eq!(index, 1, "no name match: the first face that reads");
     }
 
     fn face_app(text_font: &str) -> App {
@@ -774,7 +915,7 @@ mod tests {
         assert_ne!(*fonts.advances, Advances::inter());
         let face = app.world().resource::<TextFace>();
         assert_eq!(
-            (face.applied.as_str(), face.missing.as_deref()),
+            (face.applied.as_str(), face.missing.as_ref()),
             ("Fira Code", None)
         );
         assert_eq!(face.held.len(), 1, "its file is a font asset");
@@ -794,7 +935,10 @@ mod tests {
         let inter = app.world().resource::<UiFonts>().sans.clone();
         settle(&mut app);
         let face = app.world().resource::<TextFace>();
-        assert_eq!(face.missing.as_deref(), Some("Nope Sans"));
+        assert_eq!(
+            face.missing,
+            Some(("Nope Sans".into(), Unusable::NotInstalled))
+        );
         assert_eq!(face.applied, INTER_NAME);
         assert_eq!(app.world().resource::<UiFonts>().sans, inter);
         // Asked again, it is not read again; another choice clears it.

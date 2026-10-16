@@ -52,6 +52,7 @@ pub fn family_files(family: &str, system: bool) -> Option<FamilyFiles> {
         // SAFETY: no language; Core Text returns the system UI font or nothing.
         unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::System, 13.0, None) }?
     } else {
+        // SAFETY: an immutable CFString constant Core Text defines for the life of the process.
         let key: &CFString = unsafe { kCTFontFamilyNameAttribute };
         let name = CFString::from_str(family);
         let attributes = CFDictionary::from_slices(&[key], &[&*name]);
@@ -61,6 +62,7 @@ pub fn family_files(family: &str, system: bool) -> Option<FamilyFiles> {
             CTFont::with_font_descriptor(&descriptor, 13.0, ptr::null())
         };
         // Core Text answers with a substitute for a family it does not have.
+        // SAFETY: a valid font; the call returns a new CFString.
         let found = unsafe { font.family_name() }.to_string();
         if !found.eq_ignore_ascii_case(family) {
             return None;
@@ -86,11 +88,14 @@ pub fn family_files(family: &str, system: bool) -> Option<FamilyFiles> {
 }
 
 fn face_file(font: &CTFont) -> Option<FaceFile> {
+    // SAFETY: an immutable CFString constant Core Text defines for the life of the process.
     let key: &CFString = unsafe { kCTFontURLAttribute };
     // SAFETY: the URL attribute of a font is a CFURL, when the font has a file.
     let url = unsafe { font.attribute(key) }?.downcast::<CFURL>().ok()?;
+    // SAFETY: a valid font; the call returns a new CFString.
+    let postscript = unsafe { font.post_script_name() }.to_string();
     Some(FaceFile {
         path: url.to_file_path()?,
-        postscript: unsafe { font.post_script_name() }.to_string(),
+        postscript,
     })
 }

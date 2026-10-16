@@ -12,7 +12,7 @@ use clusia_core::{Density, DiffView, TextSize};
 
 use super::{heading, page_header, segment_row, setter};
 use crate::bridge::Model;
-use crate::fonts::{InstalledFonts, UiFonts};
+use crate::fonts::{InstalledFonts, UiFonts, Unusable};
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{Clickable, Fill, HoverFill, Stroke, Type, card, panel, text, text_field};
@@ -23,22 +23,22 @@ pub struct AppearanceView {
     pub code_size: u8,
     pub density: Density,
     pub diff_view: DiffView,
-    pub text_font: String,
+    // The configured family is not here: the font list shows it (`FontListPart`), so choosing
+    // one leaves the page, its search and the list's scroll in place.
     pub text_size: TextSize,
-    /// The configured family when this Mac does not have it.
-    pub missing_font: Option<String>,
+    /// The configured family when it cannot be used, and why.
+    pub missing_font: Option<(String, Unusable)>,
 }
 
-pub fn view(snap: &Snapshot, missing_font: Option<&str>) -> AppearanceView {
+pub fn view(snap: &Snapshot, missing_font: Option<&(String, Unusable)>) -> AppearanceView {
     let a = &snap.config.appearance;
     AppearanceView {
         theme: a.theme,
         code_size: a.code_size,
         density: a.density,
         diff_view: a.diff_view,
-        text_font: a.text_font.clone(),
         text_size: a.text_size,
-        missing_font: missing_font.map(str::to_string),
+        missing_font: missing_font.cloned(),
     }
 }
 
@@ -284,15 +284,17 @@ fn font_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &AppearanceView) {
                 ScrollArea,
                 FontListPart::default(),
             ));
-            if let Some(missing) = &v.missing_font {
+            if let Some((missing, why)) = &v.missing_font {
+                let line = match why {
+                    Unusable::NotInstalled => {
+                        format!("“{missing}” is not installed on this Mac, so text shows in Inter.")
+                    }
+                    Unusable::Unreadable => {
+                        format!("“{missing}” could not be read, so text shows in Inter.")
+                    }
+                };
                 c.spawn((
-                    text(
-                        fonts,
-                        format!(
-                            "“{missing}” is not installed on this Mac, so text shows in Inter."
-                        ),
-                        Type::BODY.ink(Swatch::Orange),
-                    ),
+                    text(fonts, line, Type::BODY.ink(Swatch::Orange)),
                     MissingFont,
                 ));
             }
@@ -534,10 +536,17 @@ mod tests {
         snap.config.appearance.code_size = 14;
         snap.config.appearance.density = Density::Compact;
         snap.config.appearance.text_size = TextSize::Large;
-        let v = view(&snap, Some("Nope Sans"));
+        let missing = ("Nope Sans".to_string(), Unusable::NotInstalled);
+        let v = view(&snap, Some(&missing));
         assert_eq!(v.text_size, TextSize::Large);
-        assert_eq!(v.text_font, "Inter");
-        assert_eq!(v.missing_font.as_deref(), Some("Nope Sans"));
+        assert_eq!(v.missing_font, Some(missing));
+        let mut other = snap.clone();
+        other.config.appearance.text_font = "Menlo".into();
+        assert_eq!(
+            view(&other, None),
+            view(&snap, None),
+            "the list shows the family; the page is the same"
+        );
         assert_eq!(v.theme, ThemeChoice::System);
         assert_eq!(v.code_size, 14);
         assert_eq!(v.density, Density::Compact);
