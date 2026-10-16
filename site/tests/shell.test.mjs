@@ -1,0 +1,114 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const SITE = fileURLToPath(new URL('..', import.meta.url));
+const DOCS = fileURLToPath(new URL('../../docs/', import.meta.url));
+const INSTALL = 'curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash';
+const INSTALL_BLOCK = `<div class="install"><code data-copy>${INSTALL}</code><button class="copy" aria-label="Copy install command">Copy</button></div>`;
+const SHELL_PAGES = ['index.html', 'install.html'];
+
+const read = (name) => readFileSync(SITE + name, 'utf8');
+const between = (html, open, close) => {
+  const start = html.indexOf(open);
+  if (start < 0) return '';
+  const end = html.indexOf(close, start);
+  return html.slice(start, end < 0 ? undefined : end + close.length);
+};
+const attr = (attrs, name) => (attrs.match(new RegExp(`\\s${name}="([^"]*)"`)) ?? [])[1] ?? null;
+
+// Pixel size of the file behind an `assets/…` src: PNG from its IHDR chunk, SVG from its root width/height.
+function intrinsicSize(src) {
+  const file = src.startsWith('assets/') ? DOCS + src : SITE + src;
+  const bytes = readFileSync(file);
+  if (src.endsWith('.png')) return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+  const root = bytes.toString('utf8').match(/<svg\b[^>]*>/)[0];
+  return [Number(attr(root, 'width')), Number(attr(root, 'height'))];
+}
+
+for (const page of SHELL_PAGES) {
+  test(`${page} uses the shared shell`, () => {
+    const html = read(page);
+    assert.match(html, /<html lang="en" data-scheme="light">/);
+    assert.match(html, /<link rel="stylesheet" href="https:\/\/fonts\.googleapis\.com\/css2\?family=Inter[^"]*">/);
+    assert.match(html, /<link rel="stylesheet" href="css\/site\.css">/);
+    assert.match(html, /<script type="module" src="js\/site\.js"><\/script>/);
+
+    const header = between(html, '<header class="nav">', '</header>');
+    assert.ok(header, 'has <header class="nav">');
+    assert.match(header, /<a class="brand" href="index\.html"[^>]*>/);
+    assert.match(header, /<img class="lockup-light" src="assets\/brand\/clusia-lockup\.svg"/);
+    assert.match(header, /<img class="lockup-dark" src="assets\/brand\/clusia-lockup-dark\.svg"/);
+    for (const [href, label] of [['features.html', 'Features'], ['screens.html', 'Screens'], ['install.html', 'Install'], ['quick-start.html', 'Quick start']]) {
+      assert.match(header, new RegExp(`<a href="${href}"[^>]*>${label}</a>`));
+    }
+    assert.match(header, /<a class="github" href="https:\/\/github\.com\/rzorzal\/clusia" aria-label="Clúsia on GitHub">\s*<svg/);
+
+    const restinga = between(html, '<div class="restinga" aria-hidden="true">', '</div>');
+    assert.ok(restinga, 'has the restinga backdrop');
+    const depths = [...restinga.matchAll(/<g class="layer" data-depth="([\d.]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(depths, ['0.1', '0.25', '0.45', '0.6']);
+
+    assert.match(html, /<main class="card">[\s\S]+<\/main>/);
+    const footer = between(html, '<footer', '</footer>');
+    assert.ok(footer.includes(INSTALL_BLOCK), 'footer carries the install block');
+    assert.match(footer, /href="https:\/\/github\.com\/rzorzal\/clusia"/);
+    assert.match(footer, /<a href="https:\/\/github\.com\/rzorzal\/clusia\/blob\/main\/LICENSE">Apache License 2\.0<\/a>/);
+    assert.match(footer, /href="https:\/\/github\.com\/users\/rzorzal\/projects\/1"/);
+  });
+
+  test(`${page} gives every image its intrinsic pixel size`, () => {
+    const imgs = [...read(page).matchAll(/<img\b([^>]*)>/g)].map((m) => m[1]);
+    assert.ok(imgs.length > 0);
+    for (const a of imgs) {
+      const src = attr(a, 'src');
+      assert.ok(existsSync(src.startsWith('assets/') ? DOCS + src : SITE + src), `${src} exists`);
+      assert.deepEqual([Number(attr(a, 'width')), Number(attr(a, 'height'))], intrinsicSize(src), src);
+    }
+  });
+}
+
+test('install.html walks through the README install facts', () => {
+  const html = read('install.html');
+  assert.match(html, /<title>Install Clúsia<\/title>/);
+  assert.match(html, /<h1[^>]*>Install Clúsia<\/h1>/);
+  const main = between(html, '<main class="card">', '</main>');
+  assert.ok(main.includes(INSTALL_BLOCK), 'the page body carries the install block');
+  for (const heading of ['What the script does', 'Requirements', 'Options', 'Homebrew by hand', 'Read the script first', 'From a clone', 'Updating', 'Uninstall']) {
+    assert.match(main, new RegExp(`<h2[^>]*>${heading}</h2>`), heading);
+  }
+  for (const [flag, env] of [['--dry-run', 'CLUSIA_DRY_RUN'], ['--no-brew', 'CLUSIA_NO_BREW'], ['--no-open', 'CLUSIA_NO_OPEN'], ['--ref REF', 'CLUSIA_REF']]) {
+    assert.match(main, new RegExp(`<td><code>${flag}</code></td>\\s*<td><code>${env}</code></td>`), flag);
+  }
+  for (const cmd of [
+    `${INSTALL} -s -- --no-brew`,
+    'brew install --HEAD rzorzal/clusia/clusia',
+    'clusia install --from &quot;$(brew --prefix clusia)/libexec/bin&quot;',
+    'curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh -o install.sh',
+    'cargo run --release -p clusia -- install',
+    'clusia uninstall',
+  ]) {
+    assert.ok(main.includes(cmd), cmd);
+  }
+  assert.match(main, /<a [^>]*href="quick-start\.html"[^>]*>/);
+});
+
+test('site.css pins the scheme colors, the card glass and the screenshot pair', () => {
+  const css = read('css/site.css');
+  const light = between(css, ':root {', '}');
+  const dark = between(css, '[data-scheme="dark"] {', '}');
+  for (const [name, value] of [['--card', '#ffffff'], ['--ink', '#1B1F1C'], ['--muted', '#5D665F'], ['--accent', '#2F9E44']]) {
+    assert.ok(light.includes(`${name}: ${value};`), `light ${name}`);
+  }
+  for (const [name, value] of [['--card', '#23282a'], ['--ink', '#E9ECE9'], ['--muted', '#9AA49C'], ['--accent', '#4CC35F']]) {
+    assert.ok(dark.includes(`${name}: ${value};`), `dark ${name}`);
+  }
+  assert.match(css, /color-mix\(in srgb, var\(--card\) 94%, transparent\)/);
+  assert.match(css, /backdrop-filter: blur\(6px\)/);
+  assert.match(css, /\[data-scheme="dark"\] \.shot-light[^{]*\{\s*display: none;/);
+  assert.match(css, /\.shot-dark[^{]*\{\s*display: none;/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+  // Without JavaScript the landscape still has its day colors.
+  assert.ok(light.includes('--sky-top: #e9f5ec;'));
+});
