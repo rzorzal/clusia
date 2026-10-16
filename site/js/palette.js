@@ -132,3 +132,27 @@ export function hourFrom(date, search) {
   }
   return date.getHours() + date.getMinutes() / 60;
 }
+
+// Relative luminance and contrast ratio as WCAG 2 defines them.
+const luminance = (hex) => {
+  const [r, g, b] = channels(hex.toLowerCase()).map((v) => {
+    const c = v / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+
+export function contrast(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+// Text set straight on the sky: dark ink on a bright sky, light ink on a dark one.
+export const SKY_INK = { light: '#1B1F1C', dark: '#FFF4E6' };
+
+// Judged a third of the way down the sky gradient, where the hero's text sits.
+export function skyAt(hour) {
+  const p = paletteAt(hour);
+  const sky = mixColor(p['--sky-top'], p['--sky-bottom'], 0.35);
+  return contrast(SKY_INK.light, sky) >= contrast(SKY_INK.dark, sky) ? 'light' : 'dark';
+}

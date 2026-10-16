@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { KEYFRAMES, paletteAt, momentAt, schemeAt, hourFrom } from '../js/palette.js';
+import { KEYFRAMES, paletteAt, momentAt, schemeAt, hourFrom, skyAt, SKY_INK, contrast } from '../js/palette.js';
 
 const channels = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
 const keyframe = (hour) => KEYFRAMES.find((k) => k.hour === hour);
@@ -75,4 +75,32 @@ test('hourFrom: ?hour overrides the clock, bad values fall back', () => {
   assert.equal(hourFrom(d, ''), 14.5);
   assert.equal(hourFrom(d, '?hour=18.25'), 18.25);
   for (const s of ['?hour=abc', '?hour=25', '?hour=-1', '?hour=']) assert.equal(hourFrom(d, s), 14.5, s);
+});
+
+test('contrast is the WCAG ratio', () => {
+  assert.equal(Math.round(contrast('#000000', '#ffffff') * 100) / 100, 21);
+  assert.equal(contrast('#2f9e44', '#2f9e44'), 1);
+  assert.equal(contrast('#1b1f1c', '#e9f5ec'), contrast('#e9f5ec', '#1b1f1c'));
+});
+
+test('skyAt: dark ink on a bright sky, light ink on a dark one', () => {
+  assert.equal(skyAt(12), 'light');
+  assert.equal(skyAt(17), 'light');
+  assert.equal(skyAt(18), 'dark');
+  assert.equal(skyAt(23), 'dark');
+  assert.equal(skyAt(5), 'dark');
+  assert.deepEqual(SKY_INK, { light: '#1B1F1C', dark: '#FFF4E6' });
+});
+
+test('the chosen sky ink keeps at least 4:1 on the upper sky at every quarter hour', () => {
+  for (let h = 0; h < 24; h += 0.25) {
+    const p = paletteAt(h);
+    const top = channels(p['--sky-top']);
+    const bottom = channels(p['--sky-bottom']);
+    const sky = '#' + top.map((v, i) => Math.round(v + (bottom[i] - v) * 0.35).toString(16).padStart(2, '0')).join('');
+    const ink = SKY_INK[skyAt(h)];
+    const other = SKY_INK[skyAt(h) === 'light' ? 'dark' : 'light'];
+    assert.ok(contrast(ink, sky) >= 4, `${h}h: ${contrast(ink, sky).toFixed(2)}`);
+    assert.ok(contrast(ink, sky) >= contrast(other, sky), `${h}h picks the stronger ink`);
+  }
 });

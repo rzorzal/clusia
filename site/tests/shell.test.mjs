@@ -8,6 +8,8 @@ const DOCS = fileURLToPath(new URL('../../docs/', import.meta.url));
 const INSTALL = 'curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash';
 const INSTALL_BLOCK = `<div class="install"><code data-copy>${INSTALL}</code><button class="copy" aria-label="Copy install command">Copy</button></div>`;
 const SHELL_PAGES = ['index.html', 'install.html'];
+// The home tells its story on the sky and the sand, so its main is not the floating card.
+const MAIN_CLASS = { 'index.html': 'story', 'install.html': 'card' };
 
 const read = (name) => readFileSync(SITE + name, 'utf8');
 const between = (html, open, close) => {
@@ -50,7 +52,7 @@ for (const page of SHELL_PAGES) {
     const depths = [...restinga.matchAll(/<g class="layer" data-depth="([\d.]+)"/g)].map((m) => m[1]);
     assert.deepEqual(depths, ['0.1', '0.25', '0.45', '0.6']);
 
-    assert.match(html, /<main class="card">[\s\S]+<\/main>/);
+    assert.match(html, new RegExp(`<main class="${MAIN_CLASS[page]}">[\\s\\S]+</main>`));
     const footer = between(html, '<footer', '</footer>');
     assert.ok(footer.includes(INSTALL_BLOCK), 'footer carries the install block');
     assert.match(footer, /href="https:\/\/github\.com\/rzorzal\/clusia"/);
@@ -68,6 +70,15 @@ for (const page of SHELL_PAGES) {
     }
   });
 }
+
+test('every page copies the restinga and the footer exactly', () => {
+  const [first, ...rest] = SHELL_PAGES.map(read);
+  for (const [open, close] of [['<div class="restinga" aria-hidden="true">', '</svg>\n</div>'], ['<footer class="footer">', '</footer>']]) {
+    const want = between(first, open, close);
+    assert.ok(want, open);
+    rest.forEach((html, i) => assert.equal(between(html, open, close), want, `${SHELL_PAGES[i + 1]}: ${open}`));
+  }
+});
 
 test('install.html walks through the README install facts', () => {
   const html = read('install.html');

@@ -708,7 +708,8 @@ tbody tr:last-child td {
   margin: 28px 0;
 }
 
-.shot img {
+/* :where keeps this at one class, so .shot-dark and .shot-light below decide which one shows. */
+.shot :where(img) {
   display: block;
   width: 100%;
   height: auto;
@@ -746,6 +747,415 @@ tbody tr:last-child td {
 .js .reveal.is-visible {
   opacity: 1;
   transform: none;
+}
+
+/* ---------- Home ---------- */
+
+/* The home walks down from the sky, through the vegetated dunes, to the sand and the sea.
+   Hero text sits straight on the sky, so its ink follows the sky's brightness, not the scheme. */
+.home {
+  --sky-ink: #1B1F1C;
+  --ground-top: color-mix(in srgb, var(--hill-front) 55%, var(--sand-back));
+  /* The last stretch of the page (footer and sea) stands on the sand; .ground covers the rest. */
+  background: linear-gradient(var(--sand-front), var(--sand-front)) left bottom / 100% 900px no-repeat;
+}
+
+/* In a window taller than the page, the ground stretches so the page still ends on sand and sea. */
+body.home {
+  display: flex;
+  flex-direction: column;
+}
+
+.home .story {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+
+.home .ground {
+  flex: 1 0 auto;
+}
+
+.home .footer {
+  flex: none;
+}
+
+[data-sky="dark"] .home {
+  --sky-ink: #FFF4E6;
+}
+
+/* The backdrop sinks a little so the hero has open sky; its sea shows only at the end of the page. */
+.home .restinga svg {
+  transform: translate(-50%, 22%);
+}
+
+.home .restinga .wave {
+  display: none;
+}
+
+.home .hero {
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+  /* An explicit width: with auto margins in the flex column the hero would size to its
+     content, and the one-line command on a phone is wider than the screen. */
+  width: 100%;
+  max-width: 1120px;
+  min-height: min(calc(100svh - 80px), 900px);
+  margin: 0 auto;
+  padding: clamp(40px, 9vh, 104px) var(--gutter) clamp(150px, 26vh, 260px);
+}
+
+/* A haze of the sky's own color behind the text keeps it readable over the sun and the hills. */
+.home .hero::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -4% 18% 8% -14%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--sky-top) 72%, transparent), transparent);
+  pointer-events: none;
+}
+
+.hero-text {
+  max-width: 720px;
+  margin-left: clamp(0px, 3vw, 40px);
+}
+
+.hero-lockup {
+  margin: 0 0 clamp(18px, 3vh, 30px);
+}
+
+.hero-lockup img {
+  display: block;
+  width: auto;
+  height: clamp(54px, 7vw, 80px);
+}
+
+.hero .on-dark-sky,
+[data-sky="dark"] .hero .on-light-sky {
+  display: none;
+}
+
+[data-sky="dark"] .hero .on-dark-sky {
+  display: block;
+}
+
+.home .hero h1,
+.home .hero .lead,
+.hero-hint {
+  color: var(--sky-ink);
+  text-shadow: 0 0 22px color-mix(in srgb, var(--sky-top) 80%, transparent);
+}
+
+.home .hero h1 {
+  font-size: clamp(40px, 6.6vw, 76px);
+  line-height: 1.04;
+  letter-spacing: -0.04em;
+  margin-bottom: 20px;
+}
+
+.home .hero .lead {
+  max-width: 30em;
+  font-weight: 450;
+  margin-bottom: 30px;
+}
+
+.hero-hint {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.home .hero .install {
+  max-width: 680px;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.06), 0 18px 40px -16px rgb(0 0 0 / 0.45);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin: 22px 0 0;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-radius: 12px;
+  font-weight: 650;
+  font-size: 16px;
+  text-decoration: none;
+  color: var(--on-accent);
+  background: var(--accent);
+  transition: filter 0.15s, background-color 0.15s;
+}
+
+.button:hover {
+  filter: brightness(1.08);
+}
+
+.button-quiet {
+  color: var(--sky-ink);
+  background: color-mix(in srgb, var(--sky-top) 55%, transparent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--sky-ink) 45%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.button-quiet:hover {
+  filter: none;
+  background: color-mix(in srgb, var(--sky-top) 80%, transparent);
+}
+
+/* The ground: vegetated dunes at the top, plain sand by the sea. */
+.ground {
+  position: relative;
+  padding: clamp(40px, 8vh, 96px) 0 clamp(64px, 10vh, 120px);
+  background: linear-gradient(180deg, var(--ground-top) 0, var(--sand-back) 48%, var(--sand-front) 88%);
+}
+
+.crest {
+  position: absolute;
+  bottom: calc(100% - 1px);
+  left: 0;
+  display: block;
+  width: 100%;
+  height: clamp(130px, 16vw, 230px);
+  overflow: visible;
+  pointer-events: none;
+}
+
+.crest-back {
+  fill: color-mix(in srgb, var(--hill-back) 60%, var(--hill-front));
+}
+
+.crest-front {
+  fill: var(--ground-top);
+}
+
+.scenery {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.scenery svg {
+  position: absolute;
+  display: block;
+  overflow: visible;
+  will-change: transform;
+}
+
+.clump {
+  width: clamp(220px, 30vw, 440px);
+  height: auto;
+  aspect-ratio: 400 / 240;
+}
+
+.mound {
+  fill: color-mix(in srgb, var(--shrub) 28%, var(--sand-back));
+}
+
+.clump-1 { top: 2%; left: -6%; }
+.clump-2 { top: 17%; right: -7%; }
+.clump-3 { top: 36%; left: -5%; }
+.clump-4 { top: 52%; right: -6%; }
+.clump-5 { top: 70%; left: -4%; }
+.clump-6 { top: 82%; right: -5%; }
+
+.dune {
+  left: 0;
+  width: 100%;
+  height: 200px;
+}
+
+.dune-1 { top: 28%; }
+.dune-2 { top: 62%; }
+
+.ripple {
+  fill: color-mix(in srgb, var(--sand-front) 72%, #ffffff);
+  opacity: 0.3;
+}
+
+/* Glass panels like the card, one per part of the story, with room between them for the dunes. */
+.panel {
+  position: relative;
+  width: min(1040px, 100% - 2 * var(--gutter));
+  margin: 0 auto clamp(72px, 14vh, 150px);
+  padding: clamp(26px, 5vw, 56px);
+  border-radius: 28px;
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+.panel h2 {
+  margin: 0 0 12px;
+  font-size: clamp(26px, 3.4vw, 38px);
+  letter-spacing: -0.03em;
+}
+
+.panel-text {
+  max-width: 40em;
+}
+
+.panel-text p:last-child {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: clamp(16.5px, 1.6vw, 18px);
+}
+
+.kicker {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+}
+
+.panel .shot {
+  margin: clamp(22px, 4vw, 36px) 0 0;
+}
+
+.panel .shot img {
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+}
+
+/* The popover is tall and narrow, so it stands beside its text from 760 px up. */
+.panel-side .shot-tall {
+  max-width: 340px;
+  margin-inline: auto;
+}
+
+@media (min-width: 760px) {
+  .panel-side {
+    display: grid;
+    grid-template-columns: 1fr minmax(260px, 340px);
+    align-items: center;
+    gap: clamp(32px, 5vw, 64px);
+  }
+
+  .panel-side .shot-tall {
+    margin: 0;
+  }
+}
+
+.paths {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.path {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding: 22px 56px 22px 22px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: var(--tint);
+  color: var(--muted);
+  text-decoration: none;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.path strong {
+  font-size: 19px;
+}
+
+.path .arrow {
+  position: absolute;
+  right: 22px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 22px;
+  color: var(--accent-text);
+}
+
+.path:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.beach {
+  max-width: 820px;
+  margin-bottom: 0;
+  text-align: center;
+}
+
+.beach > p:first-of-type {
+  color: var(--muted);
+  margin-bottom: 22px;
+}
+
+.beach .install {
+  text-align: left;
+}
+
+.beach-more {
+  margin: 18px 0 0;
+  font-weight: 600;
+}
+
+/* The beach section above already carries the install block. */
+.home .footer-lead,
+.home .footer .install {
+  display: none;
+}
+
+.home .footer-links {
+  margin-top: 0 !important;
+}
+
+.home .footer {
+  margin-top: 40px;
+  margin-bottom: 36px;
+}
+
+/* The sea at the foot of the page: wide repeating wave paths slide sideways, each band at its own pace. */
+.sea {
+  height: clamp(150px, 18vw, 240px);
+}
+
+.sea svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.wet-sand {
+  fill: color-mix(in srgb, var(--sand-front) 70%, var(--wave-1));
+}
+
+.sea .wave-1 {
+  fill: var(--wave-1);
+  animation: swell 8s linear infinite;
+}
+
+.sea .wave-2 {
+  fill: var(--wave-2);
+  animation: swell-2 11s linear infinite;
+}
+
+.sea .wave-3 {
+  fill: var(--wave-3);
+  animation: swell-3 14s linear infinite;
+}
+
+.sea .foam {
+  fill: none;
+  stroke: color-mix(in srgb, var(--wave-1) 40%, #ffffff);
+  stroke-width: 2.5;
+  opacity: 0.75;
 }
 
 /* ---------- Small screens ---------- */
@@ -828,7 +1238,8 @@ tbody tr:last-child td {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .restinga .wave {
+  .restinga .wave,
+  .sea .wave {
     animation: none;
   }
 
@@ -841,7 +1252,9 @@ tbody tr:last-child td {
   .links a,
   .github,
   .copy,
-  .next {
+  .next,
+  .button,
+  .path {
     transition: none;
   }
 }
