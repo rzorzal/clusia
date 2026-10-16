@@ -240,7 +240,7 @@ fn press_swatch(v: Variant) -> Swatch {
     match v {
         Variant::Primary => Swatch::GreenPress,
         Variant::Danger => Swatch::OrangePress,
-        Variant::Secondary | Variant::Ghost => Swatch::Line,
+        Variant::Secondary | Variant::Ghost | Variant::Link => Swatch::Line,
     }
 }
 
@@ -1090,6 +1090,23 @@ mod tests {
             app.update();
             assert_eq!(bg(&mut app, b), press, "{v:?}");
             assert_ne!(hover, press);
+        }
+    }
+
+    #[test]
+    fn quiet_buttons_show_a_press_past_their_hover() {
+        use bevy::ui::Pressed;
+        let mut app = testing::app(Snapshot::default());
+        let fonts = UiFonts::default();
+        for v in [Variant::Ghost, Variant::Link] {
+            let b = app.world_mut().spawn(button(&fonts, "Go", v)).id();
+            app.update();
+            app.world_mut().entity_mut(b).insert(Hovered(true));
+            app.update();
+            assert_eq!(bg(&mut app, b), LIGHT.hover, "{v:?}");
+            app.world_mut().entity_mut(b).insert(Pressed);
+            app.update();
+            assert_eq!(bg(&mut app, b), LIGHT.line, "{v:?}");
         }
     }
 
