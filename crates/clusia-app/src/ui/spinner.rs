@@ -1,12 +1,14 @@
 //! The marks that say the agent is working: a ring with a dot orbiting it (`spinner`) and a dot
 //! that beats (`beat`). Both are driven by a frame index taken from `Time`, so a rebuilt mark
 //! carries on where the old one was and nothing is allocated per frame: the ring changes one
-//! `UiTransform`, the dot one `Fill`, and only when the index moves. With `Motion::reduced` they
-//! stay still: the ring shows its dot at the top, the beat shows its lit colour.
+//! `UiTransform`, the dot one `Fill`, and only when the index moves. While one is on screen the
+//! event loop wakes once per step (`Pace`) instead of every frame. With `Motion::reduced` they
+//! stay still and need no wake: the ring shows its dot at the top, the beat its lit colour.
 
 use bevy::prelude::*;
 use bevy::ui::UiSystems;
-use bevy::window::RequestRedraw;
+use bevy::winit::{UpdateMode, WinitSettings};
+use std::time::Duration;
 
 use crate::theme::Swatch;
 use crate::ui::kit::{Fill, Stroke};
@@ -18,8 +20,8 @@ pub const TURN_SECS: f64 = 0.8;
 /// One on-off cycle of the beating dot.
 pub const BEAT_SECS: f64 = 1.2;
 
-/// Whether the marks hold still (the user asked the system for less motion, or a test wants a
-/// frame that does not depend on the clock).
+/// Whether the marks hold still: macOS's Reduce Motion is on (`platform_window` keeps this up to
+/// date), or a test wants a frame that does not depend on the clock.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Motion {
     pub reduced: bool,
@@ -104,27 +106,41 @@ pub fn beat() -> impl Bundle {
     )
 }
 
+/// The wake-up wait the marks asked the event loop for, if they did.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Pace(pub Option<Duration>);
+
+/// How long a mark that moves can sleep: until its next step.
+fn wait_of(rings: bool) -> Duration {
+    Duration::from_secs_f64(if rings {
+        TURN_SECS / f64::from(STEPS)
+    } else {
+        BEAT_SECS / 2.0
+    })
+}
+
 pub struct SpinnerPlugin;
 
 impl Plugin for SpinnerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Motion>()
+            .init_resource::<Pace>()
             .add_systems(PostUpdate, animate.before(UiSystems::Layout));
     }
 }
 
-/// Moves every ring and beat to the frame of the clock; asks for the next frame only while one
-/// moves, so the reactive loop idles once none is left.
+/// Moves every ring and beat to the frame of the clock, and asks the event loop to wake at the
+/// next step while one moves. The settings change only at the edges (a mark appears, the last
+/// one goes), never per frame, and a faster pace someone else asked for (a GIF) is left alone.
+/// Screenshot runs keep their continuous mode.
 fn animate(
     time: Res<Time>,
     motion: Res<Motion>,
+    mut pace: ResMut<Pace>,
     mut rings: Query<(&mut Spinner, &mut UiTransform)>,
     mut beats: Query<(&Beat, &mut Fill)>,
-    mut redraw: MessageWriter<RequestRedraw>,
+    settings: Option<ResMut<WinitSettings>>,
 ) {
-    if rings.is_empty() && beats.is_empty() {
-        return;
-    }
     let secs = time.elapsed_secs_f64();
     let (step, lit) = if motion.reduced {
         (0, true)
@@ -143,8 +159,34 @@ fn animate(
     for (beat, mut fill) in &mut beats {
         fill.set_if_neq(Fill(if lit { beat.lit } else { beat.dim }));
     }
-    if !motion.reduced {
-        redraw.write(RequestRedraw);
+    let Some(mut settings) = settings else { return };
+    if matches!(settings.focused_mode, UpdateMode::Continuous) {
+        return;
+    }
+    let want = (!motion.reduced && (!rings.is_empty() || !beats.is_empty()))
+        .then(|| wait_of(!rings.is_empty()));
+    match (pace.0, want) {
+        (_, Some(wait)) => {
+            // Someone else waking sooner (a GIF) is left alone.
+            let sooner = matches!(
+                settings.focused_mode,
+                UpdateMode::Reactive { wait: w, .. } if w < wait
+            );
+            if !sooner && settings.focused_mode != UpdateMode::reactive(wait) {
+                settings.focused_mode = UpdateMode::reactive(wait);
+                settings.unfocused_mode = UpdateMode::reactive(wait);
+            }
+            if pace.0 != Some(wait) {
+                pace.0 = Some(wait);
+            }
+        }
+        (Some(held), None) => {
+            if settings.focused_mode == UpdateMode::reactive(held) {
+                *settings = WinitSettings::desktop_app();
+            }
+            pace.0 = None;
+        }
+        (None, None) => {}
     }
 }
 
@@ -154,7 +196,6 @@ mod tests {
     use crate::snapshot::Snapshot;
     use crate::testing;
     use bevy::time::TimeUpdateStrategy;
-    use std::time::Duration;
 
     fn app_with(marks: impl Bundle) -> (App, Entity) {
         let mut app = testing::app(Snapshot::default());
@@ -164,13 +205,6 @@ mod tests {
         let mark = app.world_mut().spawn(marks).id();
         app.update();
         (app, mark)
-    }
-
-    fn redraws(app: &mut App) -> usize {
-        app.world_mut()
-            .resource_mut::<Messages<RequestRedraw>>()
-            .drain()
-            .count()
     }
 
     #[test]
@@ -189,18 +223,22 @@ mod tests {
     }
 
     #[test]
-    fn the_ring_turns_one_step_at_a_time() {
+    fn the_ring_shows_the_step_of_the_clock_in_its_transform() {
         let (mut app, ring) = app_with(spinner());
         let mut seen = Vec::new();
-        for _ in 0..STEPS {
+        for _ in 0..16 {
             app.update();
-            seen.push(app.world().get::<Spinner>(ring).unwrap().step);
-            let want = rotation_of(app.world().get::<Spinner>(ring).unwrap().step);
-            assert_eq!(app.world().get::<UiTransform>(ring).unwrap().rotation, want);
+            let step = app.world().get::<Spinner>(ring).unwrap().step;
+            let clock = app.world().resource::<Time>().elapsed_secs_f64();
+            assert_eq!(step, step_at(clock));
+            assert_eq!(
+                app.world().get::<UiTransform>(ring).unwrap().rotation,
+                rotation_of(step)
+            );
+            seen.push(step);
         }
-        seen.sort_unstable();
         seen.dedup();
-        assert!(seen.len() > 1, "it moved: {seen:?}");
+        assert!(seen.len() >= STEPS as usize, "it went round: {seen:?}");
     }
 
     #[test]
@@ -231,11 +269,10 @@ mod tests {
     }
 
     #[test]
-    fn reduced_motion_holds_the_marks_still_and_asks_for_no_frames() {
+    fn reduced_motion_holds_the_marks_still() {
         let (mut app, ring) = app_with(spinner());
         let dot = app.world_mut().spawn(beat()).id();
         app.insert_resource(Motion { reduced: true });
-        redraws(&mut app);
         for _ in 0..10 {
             app.update();
             assert_eq!(app.world().get::<Spinner>(ring).unwrap().step, 0);
@@ -245,19 +282,72 @@ mod tests {
             );
             assert_eq!(app.world().get::<Fill>(dot).unwrap().0, Swatch::Green);
         }
-        assert_eq!(redraws(&mut app), 0, "a still mark needs no frames");
+    }
+
+    fn mode(app: &App) -> UpdateMode {
+        app.world().resource::<WinitSettings>().focused_mode
+    }
+
+    fn desktop(app: &mut App) {
+        app.insert_resource(WinitSettings::desktop_app());
     }
 
     #[test]
-    fn a_moving_mark_asks_for_the_next_frame_and_none_means_idle() {
+    fn a_ring_wakes_the_loop_once_per_step_and_the_default_returns_with_it() {
         let (mut app, ring) = app_with(spinner());
-        redraws(&mut app);
+        desktop(&mut app);
         app.update();
-        assert!(redraws(&mut app) > 0);
+        assert_eq!(mode(&app), UpdateMode::reactive(Duration::from_millis(100)));
+        assert_eq!(
+            app.world().resource::<WinitSettings>().unfocused_mode,
+            UpdateMode::reactive(Duration::from_millis(100))
+        );
         app.world_mut().despawn(ring);
         app.update();
-        redraws(&mut app);
+        assert_eq!(mode(&app), WinitSettings::desktop_app().focused_mode);
+        assert_eq!(app.world().resource::<Pace>().0, None);
+    }
+
+    #[test]
+    fn a_beat_alone_wakes_the_loop_at_each_half_cycle() {
+        let (mut app, _) = app_with(beat());
+        desktop(&mut app);
         app.update();
-        assert_eq!(redraws(&mut app), 0);
+        assert_eq!(mode(&app), UpdateMode::reactive(Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn reduced_motion_asks_for_no_wake() {
+        let (mut app, _) = app_with(spinner());
+        app.insert_resource(Motion { reduced: true });
+        desktop(&mut app);
+        app.update();
+        assert_eq!(mode(&app), WinitSettings::desktop_app().focused_mode);
+    }
+
+    #[test]
+    fn a_faster_wake_someone_else_asked_for_is_kept() {
+        let (mut app, ring) = app_with(spinner());
+        app.insert_resource(WinitSettings {
+            focused_mode: UpdateMode::reactive(Duration::from_millis(30)),
+            unfocused_mode: UpdateMode::reactive(Duration::from_millis(30)),
+        });
+        app.update();
+        assert_eq!(mode(&app), UpdateMode::reactive(Duration::from_millis(30)));
+        app.world_mut().despawn(ring);
+        app.update();
+        assert_eq!(
+            mode(&app),
+            UpdateMode::reactive(Duration::from_millis(30)),
+            "not ours to reset"
+        );
+    }
+
+    #[test]
+    fn a_screenshot_run_stays_continuous() {
+        let (mut app, _) = app_with(spinner());
+        app.insert_resource(WinitSettings::continuous());
+        app.update();
+        assert_eq!(mode(&app), UpdateMode::Continuous);
     }
 }

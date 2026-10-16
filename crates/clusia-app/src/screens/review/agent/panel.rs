@@ -147,7 +147,9 @@ struct Transcript {
     built: Option<Vec<ChatLine>>,
     /// The transcript ends with the live row (a turn runs).
     live: bool,
-    /// `Time::elapsed_secs_f64` when the live row first appeared, for its elapsed time.
+    /// `Time::elapsed_secs_f64` when this window first drew the live row of the running turn, for
+    /// its elapsed time. The daemon does not tell when a turn began, so a turn already running
+    /// when the window opened counts from then.
     since: Option<f64>,
 }
 
@@ -436,6 +438,20 @@ fn rebuild_tabs(
                         t.spawn(beat());
                     }
                 });
+            }
+            // The live row is on the Agent tab only; a turn can be stopped from either.
+            if want.working {
+                row.spawn(Node {
+                    flex_grow: 1.0,
+                    ..default()
+                });
+                row.spawn((
+                    button(&fonts, "Stop", Variant::Ghost),
+                    ChatStop(pr.clone()),
+                    observe(on_stop),
+                ))
+                .entry::<Node>()
+                .and_modify(|mut node| node.align_self = AlignSelf::Center);
             }
         });
         header.built = Some(want);
@@ -2133,7 +2149,7 @@ mod tests {
     }
 
     #[test]
-    fn the_elapsed_time_counts_up_once_a_second() {
+    fn the_live_rows_elapsed_text_follows_the_clock_in_whole_seconds() {
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
         let mut app = open_chat();
@@ -2146,8 +2162,44 @@ mod tests {
         for _ in 0..24 {
             app.update();
         }
-        assert!(testing::shows(&mut app, "5s") || testing::shows(&mut app, "6s"));
+        let now = app.world().resource::<Time>().elapsed_secs_f64();
+        let e = testing::find::<LiveElapsed>(&mut app, |_| true);
+        let since = app.world().get::<LiveElapsed>(e).unwrap().since;
+        let want = (now - since) as u64;
+        assert!((5..=6).contains(&want), "about 6 s passed: {want}");
+        assert_eq!(app.world().get::<LiveElapsed>(e).unwrap().shown, Some(want));
+        assert_eq!(app.world().get::<Text>(e).unwrap().0, elapsed_label(want));
         assert_eq!(live_rows(&mut app), 1, "the row was not rebuilt to say it");
+    }
+
+    #[test]
+    fn stop_is_in_reach_on_the_draft_tab_too() {
+        let mut app = open_chat();
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .show(PanelTab::Draft);
+        run_state(&mut app, SessionStateKind::Running);
+        let tabs = testing::find::<PanelTabs>(&mut app, |_| true);
+        let stop = testing::find::<ChatStop>(&mut app, |s| s.0 == pr());
+        assert!(
+            is_under(&app, stop, tabs),
+            "the tab strip holds a Stop whatever tab is shown"
+        );
+        testing::activate(&mut app, stop);
+        assert_eq!(testing::recorded(&mut app), [Ask::AgentCancel { pr: pr() }]);
+        run_state(&mut app, SessionStateKind::Ready);
+        assert_eq!(testing::count::<ChatStop>(&mut app), 0);
+    }
+
+    fn is_under(app: &App, mut e: Entity, ancestor: Entity) -> bool {
+        while let Some(parent) = app.world().get::<ChildOf>(e) {
+            e = parent.parent();
+            if e == ancestor {
+                return true;
+            }
+        }
+        false
     }
 
     #[test]
