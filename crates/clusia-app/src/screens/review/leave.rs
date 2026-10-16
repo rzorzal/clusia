@@ -18,7 +18,7 @@ use crate::screens::review::diff::unsent;
 use crate::screens::review::shell::ModalFor;
 use crate::ui::composer::ExtraModes;
 use crate::ui::kit::{Type, Variant, button, divider, text};
-use crate::ui::modal::{escape_pressed, modal_card, modal_root};
+use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
 
 /// Why a tab or the window did not close: a comment is still being written.
 pub const FINISH_COMMENT: &str = "Finish or cancel the comment you're writing first";
@@ -292,8 +292,17 @@ fn on_finalize_now(
     }
 }
 
-fn escape_cancels(keys: Res<ButtonInput<KeyCode>>, nav: Res<Nav>, mut tabs: ResMut<ReviewTabs>) {
-    if !escape_pressed(&keys) {
+fn escape_cancels(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut clicks: MessageReader<BackdropClicked>,
+    roots: Query<&ModalFor>,
+    nav: Res<Nav>,
+    mut tabs: ResMut<ReviewTabs>,
+) {
+    let outside = clicks
+        .read()
+        .any(|c| roots.get(c.0).is_ok_and(|m| m.modal == Modal::Leave));
+    if !(escape_pressed(&keys) || outside) {
         return;
     }
     let Screen::Review(pr) = &nav.screen else {
@@ -553,6 +562,28 @@ mod tests {
         );
         assert_eq!(testing::tab(&app, &pr).ui.modal, Some(Modal::Finalize));
         assert_eq!(toasts(&app), [WAIT_PUBLISH]);
+    }
+
+    #[test]
+    fn a_click_outside_cancels_the_question_and_keeps_the_tab() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        set_active(&mut app, &pr);
+        let close = testing::find::<CloseTab>(&mut app, |c| c.0 == pr);
+        testing::activate(&mut app, close);
+        testing::settle(&mut app);
+        let card = testing::find::<LeaveKeep>(&mut app, |_| true);
+        testing::click(&mut app, card);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.modal,
+            Some(Modal::Leave),
+            "a click inside the dialog leaves it open"
+        );
+        let backdrop = testing::find::<LeaveModal>(&mut app, |_| true);
+        testing::click(&mut app, backdrop);
+        assert_eq!(testing::tab(&app, &pr).ui.modal, None);
+        assert!(testing::recorded(&mut app).is_empty(), "nothing is sent");
+        assert!(app.world().resource::<Nav>().reviews.contains(&pr));
     }
 
     /// A comment being written on the demo tab, not sent yet.

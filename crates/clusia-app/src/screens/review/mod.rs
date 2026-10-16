@@ -51,6 +51,7 @@ impl Plugin for ReviewPlugin {
                 diagrams::DiagramsPlugin,
                 revalidation::RevalidationPlugin,
                 crate::ui::composer::ComposerPlugin,
+                crate::ui::modal::ModalPlugin,
             ));
     }
 }
