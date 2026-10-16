@@ -316,7 +316,7 @@ pub fn cursor_after_removal(old: &str, new: &str, cursor: usize) -> usize {
 }
 
 /// One toolbar button (26 px).
-pub fn tool_button(fonts: &UiFonts, glyph: &str, mono: bool, bold: bool) -> impl Bundle {
+fn tool_button(fonts: &UiFonts, glyph: &str, mono: bool, bold: bool) -> impl Bundle {
     let style = Type {
         size: 13.0,
         weight: if bold { 700 } else { 500 },

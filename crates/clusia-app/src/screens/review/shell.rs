@@ -36,8 +36,8 @@ use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, disabled_button, panel,
-    text,
+    Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, disabled_button,
+    icon_button, panel, text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown_line};
@@ -1251,7 +1251,7 @@ fn draft_card_node(
                 // A button inside the card's button: its click stops here. A compact × so the
                 // location and the whole badge fit at the panel width.
                 h.spawn((
-                    button(fonts, "×", Variant::Ghost),
+                    icon_button(Icon::Close, Variant::Ghost, 24.0),
                     DraftCardRemove {
                         pr: pr.clone(),
                         id: card.id.clone(),
@@ -1259,12 +1259,7 @@ fn draft_card_node(
                     observe(on_card_remove),
                 ))
                 .entry::<Node>()
-                .and_modify(|mut node| {
-                    node.width = px(24);
-                    node.height = px(24);
-                    node.padding = UiRect::ZERO;
-                    node.align_self = AlignSelf::Center;
-                });
+                .and_modify(|mut node| node.align_self = AlignSelf::Center);
             }
         });
         if !card.body.is_empty() {
@@ -1341,38 +1336,32 @@ fn rebuild_status(
                 ..default()
             });
             p.spawn((
-                Node {
-                    padding: UiRect::horizontal(px(8)),
-                    align_items: AlignItems::Center,
-                    flex_shrink: 0.0,
-                    ..default()
-                },
-                (WidgetButton, Clickable),
-                Hovered::default(),
-                TabIndex(0),
+                button(
+                    &fonts,
+                    if status.panel_open {
+                        "Hide panel"
+                    } else {
+                        "Show panel"
+                    },
+                    Variant::Ghost,
+                ),
                 PanelToggle(pr.clone()),
                 observe(on_panel_toggle),
-                children![(
-                    text(
-                        &fonts,
-                        if status.panel_open {
-                            "Hide panel"
-                        } else {
-                            "Show panel"
-                        },
-                        Type::MUTED,
-                    ),
-                    TextLayout::no_wrap(),
-                )],
-            ));
+            ))
+            .entry::<Node>()
+            .and_modify(|mut node| node.align_self = AlignSelf::Center);
             if status.finalize {
                 p.spawn((
                     button(&fonts, "Finalize review", Variant::Primary),
                     FinalizeButton(pr.clone()),
                     observe(on_finalize),
-                ));
+                ))
+                .entry::<Node>()
+                .and_modify(|mut node| node.align_self = AlignSelf::Center);
             } else {
-                p.spawn(disabled_button(&fonts, "Finalize review"));
+                p.spawn(disabled_button(&fonts, "Finalize review"))
+                    .entry::<Node>()
+                    .and_modify(|mut node| node.align_self = AlignSelf::Center);
             }
         });
         bar.built = Some(built);
@@ -2294,6 +2283,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_status_bar_row_shares_one_axis() {
+        use crate::screens::review::agent::panel::PanelToggle;
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+        testing::open_ready(&mut app, false);
+        testing::settle(&mut app);
+        let bar = testing::find::<StatusBar>(&mut app, |_| true);
+        let toggle = testing::find::<PanelToggle>(&mut app, |_| true);
+        let finalize = testing::find::<FinalizeButton>(&mut app, |_| true);
+        let (_, by, _, bh) = testing::frame(&app, bar);
+        let axis = by + 1.0 + (bh - 1.0) / 2.0;
+        let toggle_at = testing::center(&app, toggle).y;
+        let finalize_at = testing::center(&app, finalize).y;
+        assert_eq!(toggle_at, finalize_at, "one axis for both buttons");
+        // Layout snaps boxes to whole pixels, so the axis may be half a pixel off.
+        assert!(
+            (toggle_at - axis).abs() <= 0.5,
+            "at {toggle_at}, the row at {axis}"
+        );
+    }
+
     fn node(app: &App, e: Entity) -> Node {
         app.world().get::<Node>(e).unwrap().clone()
     }
@@ -2307,12 +2317,14 @@ mod tests {
         assert_eq!(n.flex_shrink, 0.0, "Remove keeps its size");
         assert_eq!((n.width, n.height), (px(24), px(24)), "a compact ×");
         assert!(app.world().get::<Clickable>(remove).is_some());
-        let mut labels = app.world_mut().query::<(&Text, &ChildOf)>();
-        let label = labels
-            .iter(app.world())
-            .find(|(_, parent)| parent.parent() == remove)
-            .map(|(t, _)| t.0.clone());
-        assert_eq!(label.as_deref(), Some("×"));
+        let glyph = app.world().get::<Children>(remove).unwrap()[0];
+        let strokes = app.world().get::<Children>(glyph).unwrap();
+        assert_eq!(strokes.len(), 2, "drawn, not a glyph");
+        assert!(
+            app.world()
+                .get::<crate::ui::kit::IconBar>(strokes[0])
+                .is_some()
+        );
         let place = testing::find::<DraftCardPlace>(&mut app, |_| true);
         let n = node(&app, place);
         assert_eq!(n.min_width, px(0), "the place may shrink below its text");

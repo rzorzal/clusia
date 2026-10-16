@@ -22,6 +22,7 @@ pub mod snapshot;
 pub mod tab_memory;
 pub mod theme;
 pub mod ui;
+pub mod window_frame;
 
 #[cfg(test)]
 pub(crate) mod testing;

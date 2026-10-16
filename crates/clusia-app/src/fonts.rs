@@ -34,6 +34,54 @@ impl Plugin for FontsPlugin {
     }
 }
 
+/// Vertical metrics of a font, in its own units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Metrics {
+    pub units_per_em: f32,
+    pub ascent: f32,
+    /// Positive, below the baseline.
+    pub descent: f32,
+    pub x_height: f32,
+    pub cap_height: f32,
+}
+
+/// The `hhea` line metrics (what the text layout puts a line box on) and the `OS/2` x-height and
+/// cap height of `font`; `None` when a table is missing or too short.
+pub(crate) fn metrics(font: &[u8]) -> Option<Metrics> {
+    let u16_at = |at: usize| Some(u16::from_be_bytes(font.get(at..at + 2)?.try_into().ok()?));
+    let i16_at = |at: usize| u16_at(at).map(|v| f32::from(v as i16));
+    let table = |tag: &[u8; 4]| {
+        (0..u16_at(4)? as usize)
+            .map(|i| 12 + 16 * i)
+            .find(|&r| font.get(r..r + 4) == Some(&tag[..]))
+            .and_then(|r| {
+                Some(u32::from_be_bytes(font.get(r + 8..r + 12)?.try_into().ok()?) as usize)
+            })
+    };
+    let (head, hhea, os2) = (table(b"head")?, table(b"hhea")?, table(b"OS/2")?);
+    Some(Metrics {
+        units_per_em: f32::from(u16_at(head + 18)?),
+        ascent: i16_at(hhea + 4)?,
+        descent: -i16_at(hhea + 6)?,
+        x_height: i16_at(os2 + 86)?,
+        cap_height: i16_at(os2 + 88)?,
+    })
+}
+
+/// How far, in points, a one-line label of Inter at `size` has to be raised so the middle of its
+/// letters (half way between the x-height and the cap height) sits on the middle of its box. The
+/// line box is centred by layout, but Inter's ascent is larger than its descent, which leaves the
+/// letters low in it.
+pub fn label_lift(size: f32) -> f32 {
+    static INTER_METRICS: std::sync::OnceLock<Option<Metrics>> = std::sync::OnceLock::new();
+    let Some(m) = INTER_METRICS.get_or_init(|| metrics(INTER)) else {
+        return 0.0;
+    };
+    let letters_middle = m.ascent - (m.x_height + m.cap_height) / 4.0;
+    let box_middle = (m.ascent + m.descent) / 2.0;
+    (letters_middle - box_middle) / m.units_per_em * size
+}
+
 /// Whether `font` (TrueType bytes) has a glyph for `ch`, read from its Unicode `cmap`
 /// subtable (format 12, else format 4). Without one, the text shows a missing-glyph box.
 #[cfg(test)]
@@ -93,6 +141,33 @@ mod tests {
         }
         assert!(covers(JETBRAINS_MONO, '◎') && !covers(INTER, '◎'));
         assert!(!covers(INTER, '☺') && !covers(INTER, '▣'));
+    }
+
+    #[test]
+    fn inter_metrics_are_read_from_the_font_file() {
+        let m = metrics(INTER).unwrap();
+        assert_eq!(m.units_per_em, 2048.0);
+        assert!(m.ascent > 1900.0 && m.ascent < 2100.0, "{m:?}");
+        assert!(m.descent > 400.0 && m.descent < 600.0, "{m:?}");
+        assert!(m.x_height > 1000.0 && m.cap_height > m.x_height, "{m:?}");
+    }
+
+    #[test]
+    fn a_label_is_lifted_so_its_letters_sit_on_the_middle_of_the_line() {
+        let m = metrics(INTER).unwrap();
+        // The line box runs from the ascent to the descent; the letters' middle (half way up
+        // between the x-height and the cap height) must land on the box's middle.
+        let size = 13.0;
+        let lift = label_lift(size);
+        let box_middle = (m.ascent + m.descent) / 2.0;
+        let letters_middle = m.ascent - (m.x_height + m.cap_height) / 4.0;
+        let want = (letters_middle - box_middle) / m.units_per_em * size;
+        assert!((lift - want).abs() < 0.01, "lift {lift}, wanted {want}");
+        assert!(
+            lift > 0.2 && lift < 1.0,
+            "a sub-pixel to one pixel nudge: {lift}"
+        );
+        assert_eq!(label_lift(26.0), lift * 2.0, "scales with the size");
     }
 
     #[test]

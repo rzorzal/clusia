@@ -24,7 +24,9 @@ use crate::screens::review::diagrams::Diagrams;
 use crate::screens::review::revalidation::Revalidations;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
-use crate::ui::kit::{Fill, HoverFill, Stroke, Type, Variant, button, panel, text};
+use crate::ui::kit::{
+    Fill, HoverFill, Icon, Stroke, Type, Variant, button, icon_button, panel, text,
+};
 use crate::ui::spinner::spinner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -541,7 +543,7 @@ fn rebuild_top_bar(
                             }
                             t.spawn(text(&fonts, tab.label.clone(), label));
                             t.spawn((
-                                button(&fonts, "×", Variant::Ghost),
+                                icon_button(Icon::Close, Variant::Ghost, 22.0),
                                 CloseTab(pr.clone()),
                                 observe(on_close),
                             ));
@@ -552,7 +554,7 @@ fn rebuild_top_bar(
             }
             // Buttons sit at the top of their row; this one is centered like the tabs.
             p.spawn((
-                button(&fonts, "+", Variant::Ghost),
+                icon_button(Icon::Plus, Variant::Ghost, 30.0),
                 NewTabButton,
                 observe(on_new_tab),
             ))
@@ -562,15 +564,18 @@ fn rebuild_top_bar(
                 flex_grow: 1.0,
                 ..default()
             });
-            let label = if view.config_on {
-                Type::STRONG
-            } else {
-                Type::MUTED
-            };
-            p.spawn((tab_node(view.config_on), TabTarget::Config, observe(on_tab)))
-                .with_children(|t| {
-                    t.spawn(text(&fonts, "Config", label));
-                });
+            // A secondary button, not a tab: it is a place to go, and it must read as pressable.
+            let mut config = p.spawn((
+                button(&fonts, "Config", Variant::Secondary),
+                TabTarget::Config,
+                observe(on_tab),
+            ));
+            config
+                .entry::<Node>()
+                .and_modify(|mut node| node.align_self = AlignSelf::Center);
+            if view.config_on {
+                config.insert((Fill(Swatch::Raised), HoverFill(Swatch::Raised)));
+            }
         });
         bar.built = Some(view.clone());
     }
@@ -759,6 +764,48 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::testing::{self, NOW};
+
+    fn tab_frames(app: &mut App) -> (Entity, Entity, Entity) {
+        let pr = testing::open_ready(app, false);
+        testing::settle(app);
+        let close = testing::find::<CloseTab>(app, |c| c.0 == pr);
+        let tab = app.world().get::<ChildOf>(close).unwrap().parent();
+        (close, tab, testing::find::<NewTabButton>(app, |_| true))
+    }
+
+    #[test]
+    fn the_tab_icons_sit_on_the_middle_of_the_tab_row() {
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+        let (close, tab, new_tab) = tab_frames(&mut app);
+        let row = testing::center(&app, tab).y;
+        for (name, e) in [("×", close), ("+", new_tab)] {
+            let at = testing::center(&app, e);
+            assert!(
+                (at.y - row).abs() < 0.01,
+                "{name} at {}, tab at {row}",
+                at.y
+            );
+        }
+        let config = testing::find::<TabTarget>(&mut app, |t| *t == TabTarget::Config);
+        assert!((testing::center(&app, config).y - row).abs() < 0.01);
+    }
+
+    #[test]
+    fn config_is_a_button_with_a_border_and_states() {
+        use bevy::ui::Pressed;
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::settle(&mut app);
+        let config = testing::find::<TabTarget>(&mut app, |t| *t == TabTarget::Config);
+        let w = app.world();
+        assert!(w.get::<WidgetButton>(config).is_some());
+        assert_eq!(w.get::<Fill>(config), Some(&Fill(Swatch::Surface)));
+        assert_eq!(w.get::<Stroke>(config), Some(&Stroke(Swatch::Line)));
+        assert_eq!(w.get::<HoverFill>(config), Some(&HoverFill(Swatch::Hover)));
+        app.world_mut().entity_mut(config).insert(Pressed);
+        app.update();
+        let color = app.world().get::<BackgroundColor>(config).unwrap().0;
+        assert_eq!(color, crate::theme::LIGHT.line, "pressed");
+    }
 
     fn pr(s: &str) -> PrRef {
         s.parse().unwrap()

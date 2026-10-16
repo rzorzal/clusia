@@ -86,6 +86,66 @@ pub fn app(snapshot: Snapshot) -> App {
     app
 }
 
+/// `app` on an 800 × 600 target that lays UI out as the window does (no GPU), for tests that
+/// measure where nodes land. `size` is the target in logical pixels.
+pub fn layout_app(snapshot: Snapshot, size: UVec2) -> App {
+    use bevy::camera::{Camera, ComputedCameraValues, RenderTargetInfo, Viewport};
+
+    let mut app = app(snapshot);
+    app.add_plugins((
+        bevy::input::InputPlugin,
+        bevy::window::WindowPlugin {
+            primary_window: None,
+            exit_condition: bevy::window::ExitCondition::DontExit,
+            ..default()
+        },
+        bevy::transform::TransformPlugin,
+        bevy::image::ImagePlugin::default(),
+        bevy::text::TextPlugin,
+        bevy::picking::DefaultPickingPlugins,
+        bevy::ui::UiPlugin,
+    ))
+    .init_asset::<bevy::image::TextureAtlasLayout>();
+    app.world_mut().spawn((
+        Camera2d,
+        Camera {
+            computed: ComputedCameraValues {
+                target_info: Some(RenderTargetInfo {
+                    physical_size: size,
+                    scale_factor: 1.0,
+                }),
+                ..default()
+            },
+            viewport: Some(Viewport {
+                physical_size: size,
+                ..default()
+            }),
+            ..default()
+        },
+    ));
+    app
+}
+
+/// The laid-out box of `entity`: (left, top, width, height) in logical pixels.
+pub fn frame(app: &App, entity: Entity) -> (f32, f32, f32, f32) {
+    use bevy::ui::{ComputedNode, UiGlobalTransform};
+    let node = app.world().get::<ComputedNode>(entity).expect("laid out");
+    let at = app
+        .world()
+        .get::<UiGlobalTransform>(entity)
+        .expect("positioned")
+        .translation;
+    let scale = node.inverse_scale_factor;
+    let (w, h) = (node.size.x * scale, node.size.y * scale);
+    (at.x * scale - w / 2.0, at.y * scale - h / 2.0, w, h)
+}
+
+/// The centre of `entity`'s laid-out box.
+pub fn center(app: &App, entity: Entity) -> Vec2 {
+    let (x, y, w, h) = frame(app, entity);
+    Vec2::new(x + w / 2.0, y + h / 2.0)
+}
+
 /// Takes the asks recorded since the last call.
 pub fn recorded(app: &mut App) -> Vec<Ask> {
     std::mem::take(&mut app.world_mut().resource_mut::<Asks>().recorded)

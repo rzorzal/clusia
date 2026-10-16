@@ -16,7 +16,9 @@ use crate::args::Scene;
 use crate::bridge::BridgeSlot;
 use crate::clock::Clock;
 use crate::fonts::FontsPlugin;
+use crate::platform_window::{self, FrameMemory};
 use crate::theme::{LIGHT, Theme};
+use crate::window_frame::{Display, Rect, Remembered};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -75,13 +77,19 @@ const BRIDGE_EXIT_WAIT: Duration = Duration::from_secs(3);
 
 pub fn run(launch: Launch) {
     let bridge = BridgeSlot::default();
+    // Demos and screenshots keep one fixed window, so renders do not depend on the display.
+    let memory = (launch.mode == Mode::Live && launch.screenshot.is_none())
+        .then(|| FrameMemory::new(launch.paths.window_frames_file()));
+    let placed = memory
+        .as_ref()
+        .and_then(|m| opening_frame(m.remembered(), &platform_window::displays()));
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .build()
             .disable::<LogPlugin>()
             .set(WindowPlugin {
-                primary_window: Some(window()),
+                primary_window: Some(window(placed)),
                 // A comment being written or a publish running holds the window (`screens::review::leave`).
                 close_when_requested: false,
                 ..default()
@@ -122,6 +130,10 @@ pub fn run(launch: Launch) {
     .add_systems(Startup, |mut commands: Commands| {
         commands.spawn(Camera2d);
     });
+    if let Some(memory) = memory {
+        app.insert_resource(platform_window::PlaceWindow(placed))
+            .insert_resource(memory);
+    }
     if let Some(scene) = launch.scene {
         app.add_plugins(crate::scenes::ScenePlugin(scene));
     }
@@ -147,10 +159,22 @@ pub fn run(launch: Launch) {
     }
 }
 
-fn window() -> Window {
+/// Where the window opens: filling the visible area of the display the first time, then where
+/// it was left. `None` when no display is known.
+fn opening_frame(remembered: &Remembered, displays: &[Display]) -> Option<Rect> {
+    remembered.placement(displays)
+}
+
+/// The window at its opening size. Its position is set once it exists (`place_window`): a
+/// position given at creation is in device pixels of a display the window is not on yet.
+fn window(placed: Option<Rect>) -> Window {
+    let resolution = match placed {
+        Some(frame) => (frame.w.round() as u32, frame.h.round() as u32).into(),
+        None => (1280, 800).into(),
+    };
     Window {
         title: "Clúsia".into(),
-        resolution: (1280, 800).into(),
+        resolution,
         resize_constraints: WindowResizeConstraints {
             min_width: 960.0,
             min_height: 640.0,
@@ -180,5 +204,55 @@ fn take_screenshot(
     }
     if *frame == plan.after_frames + plan.frames + 30 {
         exit.write(AppExit::Success);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn desk() -> Vec<Display> {
+        vec![
+            Display {
+                id: "laptop".into(),
+                visible: Rect::new(0.0, 25.0, 1512.0, 920.0),
+            },
+            Display {
+                id: "monitor".into(),
+                visible: Rect::new(1512.0, 0.0, 2560.0, 1415.0),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_first_window_fills_the_main_display_under_the_menu_bar() {
+        let placed = opening_frame(&Remembered::default(), &desk()).unwrap();
+        let w = window(Some(placed));
+        assert_eq!(
+            (w.resolution.width(), w.resolution.height()),
+            (1512.0, 920.0)
+        );
+    }
+
+    #[test]
+    fn a_remembered_window_opens_at_its_size() {
+        let mut saved = Remembered::default();
+        saved.record(Rect::new(1700.0, 100.0, 1400.0, 900.0), &desk());
+        let placed = opening_frame(&saved, &desk()).unwrap();
+        let w = window(Some(placed));
+        assert_eq!(
+            (w.resolution.width(), w.resolution.height()),
+            (1400.0, 900.0)
+        );
+    }
+
+    #[test]
+    fn without_displays_the_window_keeps_its_default_size() {
+        assert_eq!(opening_frame(&Remembered::default(), &[]), None);
+        let w = window(None);
+        assert_eq!(
+            (w.resolution.width(), w.resolution.height()),
+            (1280.0, 800.0)
+        );
     }
 }

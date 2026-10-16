@@ -138,6 +138,11 @@ impl Paths {
         self.root.join("tabs.json")
     }
 
+    /// Where the window last sat on each display (the window's own file; the daemon never reads it).
+    pub fn window_frames_file(&self) -> PathBuf {
+        self.root.join("window.json")
+    }
+
     pub fn activity_file(&self) -> PathBuf {
         self.root.join("activity.jsonl")
     }
