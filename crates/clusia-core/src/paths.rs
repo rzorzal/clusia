@@ -132,6 +132,11 @@ impl Paths {
         self.diagrams_dir().join(pr.file_key())
     }
 
+    /// The review tabs the window had open (`OpenTabs`). Only the daemon writes here.
+    pub fn open_tabs_file(&self) -> PathBuf {
+        self.root.join("tabs.json")
+    }
+
     pub fn activity_file(&self) -> PathBuf {
         self.root.join("activity.jsonl")
     }

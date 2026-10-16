@@ -105,6 +105,8 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::RemoveDraftItem { pr, id } => reviews::remove_item(shared, &pr, &id).await,
         Command::CloseReview { pr } => reviews::close(shared, client, &pr).await,
         Command::DiscardReview { pr } => reviews::discard(shared, client, &pr).await,
+        Command::RestoreTabs => crate::tabs::restore(shared, client).await,
+        Command::SetOpenTabs { tabs } => crate::tabs::set(shared, tabs).await,
         Command::ListReviews => reviews::list(shared).await,
         Command::GetDiff { pr } => reviews::diff(shared, &pr).await,
         Command::GetConversation { pr } => reviews::conversation(shared, &pr).await,

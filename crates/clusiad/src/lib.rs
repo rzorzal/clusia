@@ -34,6 +34,7 @@ mod sessions;
 mod spawner;
 mod state;
 mod sync;
+mod tabs;
 mod tray;
 mod turns;
 mod worktrees;

@@ -21,6 +21,7 @@ pub mod printable;
 pub mod publish;
 pub mod revalidation;
 pub mod review;
+pub mod tabs;
 pub mod time;
 
 pub use activity::{Activity, ActivityKind, ActivitySummary, DayCount};
@@ -60,3 +61,4 @@ pub use revalidation::{
     revalidation_prompt, row_kind,
 };
 pub use review::{InvalidTransition, PrState, Review, ReviewEvent, ReviewState, Role, Verdict};
+pub use tabs::{OpenTab, OpenTabs, TAB_IDLE_DAYS};

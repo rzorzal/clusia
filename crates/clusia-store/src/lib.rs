@@ -8,6 +8,7 @@ pub mod checks;
 pub mod config;
 pub mod diagrams;
 pub mod reviews;
+pub mod tabs;
 
 pub use activity::{append_activity, read_activity};
 pub use agent::{load_agent_state, save_agent_state};
@@ -19,6 +20,7 @@ pub use diagrams::{
     next_diagram_number, save_diagram_version,
 };
 pub use reviews::{ReviewLoad, delete_review, list_reviews, load_review, save_review};
+pub use tabs::{load_open_tabs, save_open_tabs};
 
 /// Seconds since the Unix epoch, for quarantine suffixes.
 pub fn now_unix() -> i64 {

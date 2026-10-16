@@ -5,8 +5,8 @@ use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::revalidation::Revalidation;
 use clusia_core::{
     ActivitySummary, CheckKind, CheckResult, ChecksSummary, Config, DraftItem, DraftKind,
-    EventKind, FileDiff, Finding, MediaKind, Pass, PrConversation, PrDetail, PrFilter, PrRef,
-    PrSummary, Review, ReviewState, Role, Side, ThreadRef, Verdict,
+    EventKind, FileDiff, Finding, MediaKind, OpenTabs, Pass, PrConversation, PrDetail, PrFilter,
+    PrRef, PrSummary, Review, ReviewState, Role, Side, ThreadRef, Verdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +120,13 @@ pub enum Command {
     },
     DiscardReview {
         pr: PrRef,
+    },
+    /// The window starts: its saved tabs (`Reply::OpenTabs`). A tab not looked at for
+    /// `TAB_IDLE_DAYS`, with nothing in its draft, is closed first like `CloseReview`.
+    RestoreTabs,
+    /// The window's tabs now, so they come back with it. The daemon keeps when each was seen.
+    SetOpenTabs {
+        tabs: OpenTabs,
     },
     GetDiff {
         pr: PrRef,
@@ -389,6 +396,7 @@ pub enum Reply {
     Review(Box<ReviewView>),
     ReviewFile(Box<Review>),
     Cached(Box<CachedReview>),
+    OpenTabs(OpenTabs),
     Diff(Vec<FileDiff>),
     Conversation(PrConversation),
     DraftItem(DraftItem),
@@ -1958,6 +1966,13 @@ mod tests {
             Command::GetReview { pr: acme7() },
             Command::CloseReview { pr: acme7() },
             Command::DiscardReview { pr: acme7() },
+            Command::RestoreTabs,
+            Command::SetOpenTabs {
+                tabs: OpenTabs {
+                    tabs: vec![OpenTabs::tab(acme7(), "comments")],
+                    selected: Some(acme7()),
+                },
+            },
             Command::GetDiff { pr: acme7() },
             Command::GetConversation { pr: acme7() },
             Command::UpdateDraftItem {
@@ -1987,6 +2002,7 @@ mod tests {
         assert_eq!(FileSummary::from(&file).path, "a.rs");
         for reply in [
             Reply::ReviewFile(Box::new(review.clone())),
+            Reply::OpenTabs(OpenTabs::default()),
             Reply::Diff(vec![file]),
             Reply::Conversation(clusia_core::PrConversation::default()),
             Reply::Published(PublishResult {
