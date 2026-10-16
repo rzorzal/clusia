@@ -1908,6 +1908,31 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_the_scan_found_on_the_path_offers_to_draw_after_the_first_run() {
+        let mut snap = fixture::demo(NOW);
+        assert!(snap.config.harness.program.is_none() && snap.first_run.is_none());
+        snap.harnesses = Some(fixture::demo_first_run().harnesses);
+        let mut app = testing::app(snap);
+        let pr = testing::open_ready(&mut app, false);
+        testing::set_section(&mut app, &pr, ReviewSection::Diagrams);
+        testing::tell(
+            &mut app,
+            Tell::Diagrams(DiagramsTell::Loaded {
+                pr: pr.clone(),
+                versions: Vec::new(),
+                latest: None,
+                state: DiagramsState::Idle,
+                head: String::new(),
+                stale: false,
+                stale_reason: None,
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "No diagrams yet"));
+        testing::find::<DiagramButton>(&mut app, |b| b.action == Action::Draw);
+    }
+
+    #[test]
     fn the_buttons_send_their_asks() {
         let mut app = testing::app(fixture::demo(NOW));
         // The demo has no harness program; the tab offers a draw only once Claude Code is set up.

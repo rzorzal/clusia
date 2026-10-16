@@ -192,17 +192,19 @@ impl Plugin for AgentPanel {
 }
 
 /// Whether the agent `kind` (the one a review is pinned to) is set up: the configured program
-/// serves it (it is the configured kind's), or the first-run scan found it. The configured
-/// program counts only for the configured kind: a review still pinned to the other agent reads
-/// "not set up" until the scan has found that agent on the PATH. A configured custom program
+/// serves it (it is the configured kind's), or the daemon's scan found it on the PATH. The
+/// configured program counts only for the configured kind: a review still pinned to the other
+/// agent reads "not set up" until the scan has found that agent. A configured custom program
 /// counts as the configured kind's.
 pub fn harness_ready(snap: &Snapshot, kind: clusia_core::config::HarnessKind) -> bool {
+    let found = |harnesses: &[clusia_protocol::Harness]| {
+        harnesses
+            .iter()
+            .any(|h| clusia_core::config::HarnessKind::from(h.kind) == kind && h.path.is_some())
+    };
     (snap.config.harness.program.is_some() && snap.config.harness.kind == kind)
-        || snap.first_run.as_ref().is_some_and(|f| {
-            f.harnesses
-                .iter()
-                .any(|h| clusia_core::config::HarnessKind::from(h.kind) == kind && h.path.is_some())
-        })
+        || snap.harnesses.as_deref().is_some_and(found)
+        || snap.first_run.as_ref().is_some_and(|f| found(&f.harnesses))
 }
 
 /// The text the denied line shows: a tool the user's own `deny` rules refuse.
@@ -1355,6 +1357,22 @@ mod tests {
         snap.first_run = Some(found(HarnessKind::ClaudeCode));
         assert!(!harness_ready(&snap, Kind::Codex));
         assert!(harness_ready(&snap, Kind::ClaudeCode));
+    }
+
+    #[test]
+    fn the_scan_after_the_first_run_makes_a_path_agent_ready() {
+        use clusia_core::config::HarnessKind as Kind;
+        let mut snap = Snapshot::default();
+        assert!(snap.config.harness.program.is_none() && snap.first_run.is_none());
+        assert!(!harness_ready(&snap, Kind::ClaudeCode), "nothing scanned");
+        snap.harnesses = Some(Vec::new());
+        assert!(
+            !harness_ready(&snap, Kind::ClaudeCode),
+            "the scan found nothing"
+        );
+        snap.harnesses = Some(fixture::demo_first_run().harnesses);
+        assert!(harness_ready(&snap, Kind::ClaudeCode));
+        assert!(!harness_ready(&snap, Kind::Codex));
     }
 
     #[test]

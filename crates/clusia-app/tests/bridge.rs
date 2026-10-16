@@ -487,6 +487,18 @@ async fn first_run_status_reaches_the_window() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_agent_scan_reaches_the_window_without_the_first_run() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    let s = snapshot_where(&link, |s| s.harnesses.is_some());
+    assert!(
+        s.first_run.is_none() || s.first_run_open,
+        "the scan does not depend on the first-run screen"
+    );
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_at_login_goes_through_the_daemon() {
     let d = common::Daemon::start().await;
     let link = bridge::spawn(d.paths.clone(), None, || {});
