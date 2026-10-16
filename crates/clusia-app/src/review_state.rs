@@ -53,6 +53,22 @@ impl ReviewSection {
             ReviewSection::Tests => "Tests",
         }
     }
+
+    /// The id the daemon keeps for a tab's section.
+    pub fn id(self) -> &'static str {
+        match self {
+            ReviewSection::Diagrams => "diagrams",
+            ReviewSection::Security => "security",
+            ReviewSection::Diff => "diff",
+            ReviewSection::Audits => "audits",
+            ReviewSection::Comments => "comments",
+            ReviewSection::Tests => "tests",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<ReviewSection> {
+        ReviewSection::ALL.into_iter().find(|s| s.id() == id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -95,10 +111,8 @@ pub enum RevalView {
 pub enum Modal {
     WhatsNew,
     Finalize,
-    /// `window`: asked while the window closes.
-    Leave {
-        window: bool,
-    },
+    /// Closing a tab whose draft has items.
+    Leave,
     /// The dialog of a diagram box, for `TabUi.diagram_node`.
     DiagramNode,
 }
@@ -382,6 +396,7 @@ pub fn open_new_tabs(
     model: Res<Model>,
     mut tabs: ResMut<ReviewTabs>,
     mut asks: ResMut<Asks>,
+    mut memory: ResMut<crate::tab_memory::TabMemory>,
 ) {
     if tabs.0.keys().any(|pr| !nav.reviews.contains(pr)) {
         tabs.0.retain(|pr, _| nav.reviews.contains(pr));
@@ -398,6 +413,10 @@ pub fn open_new_tabs(
         let harness = &model.snapshot.config.harness;
         tab.ui.opened_with = Some((harness.kind, harness.display_name()));
         tab.ui.opened_program = harness.program.clone();
+        // A restored tab comes back in the section it showed.
+        if let Some(section) = memory.sections.remove(&pr) {
+            tab.ui.section = section;
+        }
         tabs.0.insert(pr.clone(), tab);
         asks.send(Ask::OpenReview(pr));
     }

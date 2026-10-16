@@ -19,6 +19,7 @@ pub mod review_state;
 pub mod scenes;
 pub mod screens;
 pub mod snapshot;
+pub mod tab_memory;
 pub mod theme;
 pub mod ui;
 

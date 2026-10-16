@@ -142,6 +142,26 @@ impl Nav {
         self.screen = Screen::Config(section);
     }
 
+    /// Brings back the tabs the window had: theirs first, in their order, then any opened since
+    /// it started (`--review`, another launch). The one they showed is shown again, unless the
+    /// window was asked for something else.
+    pub fn restore(&mut self, saved: &clusia_core::OpenTabs) {
+        let opened = std::mem::take(&mut self.reviews);
+        for pr in saved.tabs.iter().map(|t| &t.pr).chain(&opened) {
+            if !self.reviews.contains(pr) {
+                self.reviews.push(pr.clone());
+            }
+        }
+        if self.screen == Screen::Home
+            && let Some(pr) = saved
+                .selected
+                .as_ref()
+                .filter(|pr| self.reviews.contains(pr))
+        {
+            self.screen = Screen::Review(pr.clone());
+        }
+    }
+
     /// Closes a review tab. When it was showing, the tab on its left takes over (else the
     /// first tab, else Home).
     pub fn close_review(&mut self, pr: &PrRef) {
@@ -736,6 +756,40 @@ mod tests {
             nav.screen,
             Screen::Config(Section::Editor),
             "Config reopens the last section"
+        );
+    }
+
+    #[test]
+    fn restoring_keeps_the_saved_order_and_a_review_asked_for_at_start() {
+        use clusia_core::OpenTabs;
+        let saved = OpenTabs {
+            tabs: vec![
+                OpenTabs::tab(pr("rzorzal/clusia#1"), "diff"),
+                OpenTabs::tab(pr("rzorzal/clusia#2"), "diff"),
+                OpenTabs::tab(pr("rzorzal/clusia#3"), "diff"),
+            ],
+            selected: Some(pr("rzorzal/clusia#3")),
+        };
+        // `--review #2` (one of them) and `--review #9` (a new one): selected, the others back.
+        for (asked, order) in [
+            ("rzorzal/clusia#2", vec![1, 2, 3]),
+            ("rzorzal/clusia#9", vec![1, 2, 3, 9]),
+        ] {
+            let mut nav = Nav::new(&WindowTarget::Review { pr: pr(asked) });
+            nav.restore(&saved);
+            let numbers: Vec<u64> = nav.reviews.iter().map(|p| p.number).collect();
+            assert_eq!(numbers, order, "{asked}");
+            assert_eq!(nav.screen, Screen::Review(pr(asked)), "{asked}");
+        }
+        let mut nav = Nav::new(&WindowTarget::Home);
+        nav.restore(&saved);
+        assert_eq!(nav.screen, Screen::Review(pr("rzorzal/clusia#3")));
+        let mut nav = Nav::new(&WindowTarget::Config);
+        nav.restore(&saved);
+        assert_eq!(
+            nav.screen,
+            Screen::Config(Section::Appearance),
+            "Config was asked for"
         );
     }
 

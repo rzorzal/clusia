@@ -456,6 +456,67 @@ async fn leave_choices_reach_the_daemon_before_the_window_exits() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_saved_tabs_come_back_once_and_the_last_ones_reach_the_daemon_before_exit() {
+    use clusia_core::OpenTabs;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = clusia_core::Paths::new(dir.path());
+    let a: PrRef = "rzorzal/clusia#123".parse().unwrap();
+    let b: PrRef = "acme/widgets#5".parse().unwrap();
+    let saved = OpenTabs {
+        tabs: vec![
+            OpenTabs::tab(a.clone(), "comments"),
+            OpenTabs::tab(b.clone(), "diff"),
+        ],
+        selected: Some(b.clone()),
+    };
+    // Shown a moment ago: no tab is idle.
+    let mut saved = saved;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for tab in &mut saved.tabs {
+        tab.seen_at = now;
+    }
+    std::fs::write(paths.open_tabs_file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    let d = common::Daemon::start_in(dir).await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    let Tell::Restored(back) = next(&link, |t| matches!(t, Tell::Restored(_))) else {
+        unreachable!()
+    };
+    assert_eq!(back.tabs.len(), 2);
+    assert_eq!(back.selected, Some(b.clone()));
+    // A reconnect does not restore again.
+    let dir = d.stop().await;
+    next(&link, |t| matches!(t, Tell::Lost(_)));
+    let d = common::Daemon::start_in(dir).await;
+    link.ask.send(Ask::Reconnect).unwrap();
+    snapshot_where(&link, |s| s.lists_loaded);
+    let Link { tell, ask, thread } = link;
+    // The window closes right after its last change: the bridge delivers it first.
+    let last = OpenTabs {
+        tabs: vec![OpenTabs::tab(a.clone(), "tests")],
+        selected: Some(a.clone()),
+    };
+    ask.send(Ask::SetOpenTabs(last)).unwrap();
+    drop(ask);
+    let finished = tokio::task::spawn_blocking(move || thread.finish(Duration::from_secs(3)))
+        .await
+        .unwrap();
+    assert!(finished);
+    assert!(
+        !tell.try_iter().any(|t| matches!(t, Tell::Restored(_))),
+        "restored once per window"
+    );
+    let stored: OpenTabs =
+        serde_json::from_slice(&std::fs::read(d.paths.open_tabs_file()).unwrap()).unwrap();
+    assert_eq!(stored.tabs.len(), 1);
+    assert_eq!(stored.tabs[0].section, "tests");
+    assert_eq!(stored.selected, Some(a));
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn giphy_key_status_follows_the_daemon() {
     let d = common::Daemon::start().await;
     let link = bridge::spawn(d.paths.clone(), None, || {});

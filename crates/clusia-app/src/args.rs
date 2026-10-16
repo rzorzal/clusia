@@ -58,6 +58,8 @@ pub enum Scene {
     DiagramNode,
     DiagramsDrawing,
     DiagramsCompare,
+    /// The window after a restart, its tabs back.
+    Restored,
 }
 
 impl Scene {
