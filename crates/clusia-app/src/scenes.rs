@@ -6,6 +6,7 @@ use bevy::ui_widgets::ScrollArea;
 use clusia_core::checks::{AuditArea, default_areas};
 use clusia_core::diagram::{Change, DiagramKind, DiagramVersion, EntryState, VersionPhase};
 use clusia_core::draft::{DraftKind, ThreadRef};
+use clusia_core::hidden::{issue_comment_key, thread_key};
 use clusia_core::{Anchor, Origin, ReviewState, Side, Verdict};
 use clusia_protocol::{
     AuthInfo, DiagramsState, LoadStep, LoadStepKind, SessionStateKind, StepStatus, SyncState,
@@ -470,6 +471,15 @@ pub fn stage(world: &mut World, scene: Scene) {
         Scene::ComposerPreview => ui.editor = Some(composer_editor(ComposerMode::Preview)),
         Scene::Rendered => ui.section = ReviewSection::Comments,
         Scene::Split => ui.mode = DiffMode::Split,
+        Scene::CommentsHidden => {
+            ui.section = ReviewSection::Comments;
+            ui.filter = crate::review_state::CommentsFilter::All;
+            // One comment collapsed, and a thread that has grown since it was hidden.
+            ui.hidden.hide(&issue_comment_key(2002), 1);
+            ui.hidden.hide(&thread_key("PRRT_demo_refresh_41"), 2);
+            ui.hidden.hide(&thread_key("PRRT_demo_mod_3"), 2);
+            ui.hidden_asked = true;
+        }
         Scene::Comments => {
             ui.section = ReviewSection::Comments;
             let thread = ready.view.conversation.as_ref().and_then(|c| {
@@ -718,6 +728,12 @@ mod tests {
                 Scene::Split => {
                     assert_eq!(tab.ui.mode, DiffMode::Split);
                     assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
+                }
+                Scene::CommentsHidden => {
+                    assert_eq!(testing::count::<CommentsRegion>(&mut app), 1);
+                    assert!(testing::shows(&mut app, "Hidden · @octo"));
+                    assert!(testing::shows(&mut app, "2 hidden"));
+                    assert!(testing::shows(&mut app, "new reply"));
                 }
                 Scene::Comments => {
                     assert_eq!(testing::count::<CommentsRegion>(&mut app), 1);

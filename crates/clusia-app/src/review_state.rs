@@ -235,6 +235,10 @@ pub struct TabUi {
     pub focus_seq: u32,
     /// The key of the row whose ⋯ menu is open.
     pub diagram_menu: Option<String>,
+    /// The comments hidden in this pull request, as the daemon keeps them.
+    pub hidden: clusia_core::HiddenComments,
+    /// `GetHiddenComments` was asked for.
+    pub hidden_asked: bool,
 }
 
 impl Default for TabUi {
@@ -263,6 +267,8 @@ impl Default for TabUi {
             focus_line: None,
             focus_seq: 0,
             diagram_menu: None,
+            hidden: clusia_core::HiddenComments::default(),
+            hidden_asked: false,
         }
     }
 }
@@ -856,7 +862,15 @@ mod tests {
         );
         assert!(tab.ui.opening);
         assert_eq!(tab.ui.open_error, None);
-        assert_eq!(testing::recorded(&mut app), [Ask::OpenReview(pr())]);
+        assert_eq!(opens(&mut app), [Ask::OpenReview(pr())]);
+    }
+
+    /// The asks recorded since the last call, without the read of the hidden comments that a
+    /// cached tab makes once the connection is live.
+    fn opens(app: &mut App) -> Vec<Ask> {
+        let mut asks = testing::recorded(app);
+        asks.retain(|a| !matches!(a, Ask::GetHiddenComments(_)));
+        asks
     }
 
     #[test]
@@ -872,7 +886,7 @@ mod tests {
             },
         );
         retry(&mut app);
-        assert!(testing::recorded(&mut app).is_empty());
+        assert!(opens(&mut app).is_empty());
     }
 
     #[test]

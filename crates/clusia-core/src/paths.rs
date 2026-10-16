@@ -132,6 +132,16 @@ impl Paths {
         self.diagrams_dir().join(pr.file_key())
     }
 
+    /// The comments hidden in each pull request, one file per pull request. They outlive the
+    /// review: closing it, even with an empty draft, leaves them.
+    pub fn hidden_dir(&self) -> PathBuf {
+        self.root.join("hidden")
+    }
+
+    pub fn hidden_file(&self, pr: &crate::PrRef) -> PathBuf {
+        self.hidden_dir().join(format!("{}.json", pr.file_key()))
+    }
+
     /// The review tabs the window had open (`OpenTabs`). The window decides the set; the daemon
     /// writes the file.
     pub fn open_tabs_file(&self) -> PathBuf {
@@ -314,6 +324,16 @@ mod tests {
             PathBuf::from("/tmp/c/reviews/acme~widgets~7.json")
         );
         assert_eq!(p.activity_file(), PathBuf::from("/tmp/c/activity.jsonl"));
+    }
+
+    #[test]
+    fn hidden_comments_live_beside_the_reviews_not_in_them() {
+        let p = Paths::new("/tmp/c");
+        let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
+        assert_eq!(
+            p.hidden_file(&pr),
+            PathBuf::from("/tmp/c/hidden/acme~widgets~7.json")
+        );
     }
 
     #[test]

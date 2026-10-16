@@ -5,8 +5,8 @@ use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::revalidation::Revalidation;
 use clusia_core::{
     ActivitySummary, CheckKind, CheckResult, ChecksSummary, Config, DraftItem, DraftKind,
-    EventKind, FileDiff, Finding, MediaKind, OpenTabs, Pass, PrConversation, PrDetail, PrFilter,
-    PrRef, PrSummary, Review, ReviewState, Role, Side, ThreadRef, Verdict,
+    EventKind, FileDiff, Finding, HiddenComments, MediaKind, OpenTabs, Pass, PrConversation,
+    PrDetail, PrFilter, PrRef, PrSummary, Review, ReviewState, Role, Side, ThreadRef, Verdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -287,6 +287,24 @@ pub enum Command {
     GetChecks {
         pr: PrRef,
     },
+    /// The comments hidden in this pull request (`Reply::HiddenComments`).
+    GetHiddenComments {
+        pr: PrRef,
+    },
+    /// Hides the comment or thread `key` (see `clusia_core::hidden`), which holds `posts`
+    /// posts now, or shows it again when `posts` is `None`. Answers like `GetHiddenComments`.
+    /// The set stays on this machine; nothing goes to GitHub.
+    SetCommentHidden {
+        pr: PrRef,
+        key: String,
+        #[serde(default)]
+        posts: Option<u32>,
+    },
+    /// Shows every comment in `keys` again at once. Answers like `GetHiddenComments`.
+    ShowComments {
+        pr: PrRef,
+        keys: Vec<String>,
+    },
     /// Turn a finding into a draft item, with `body` instead of the proposed comment when set.
     AcceptFinding {
         pr: PrRef,
@@ -397,6 +415,8 @@ pub enum Reply {
     ReviewFile(Box<Review>),
     Cached(Box<CachedReview>),
     OpenTabs(OpenTabs),
+    /// The comments hidden in one pull request.
+    HiddenComments(HiddenComments),
     Diff(Vec<FileDiff>),
     Conversation(PrConversation),
     DraftItem(DraftItem),
@@ -1956,6 +1976,38 @@ mod tests {
             wire(&outdated),
             r#"{"type":"event","topic":"reviews","event":{"review_outdated":{"pr":"acme/widgets#7","moved":2,"obsolete":1}}}"#
         );
+    }
+
+    #[test]
+    fn hidden_comments_messages_round_trip() {
+        let mut set = clusia_core::HiddenComments::default();
+        set.hide("thread:PRRT_1", 2);
+        assert_eq!(
+            wire(&Command::GetHiddenComments { pr: acme7() }),
+            r#"{"get_hidden_comments":{"pr":"acme/widgets#7"}}"#
+        );
+        assert_eq!(
+            wire(&Command::SetCommentHidden {
+                pr: acme7(),
+                key: "thread:PRRT_1".into(),
+                posts: Some(2),
+            }),
+            r#"{"set_comment_hidden":{"pr":"acme/widgets#7","key":"thread:PRRT_1","posts":2}}"#
+        );
+        round_trip(Command::GetHiddenComments { pr: acme7() });
+        round_trip(Command::SetCommentHidden {
+            pr: acme7(),
+            key: "comment:9".into(),
+            posts: None,
+        });
+        assert_eq!(
+            wire(&Command::ShowComments {
+                pr: acme7(),
+                keys: vec!["comment:9".into(), "thread:PRRT_1".into()],
+            }),
+            r#"{"show_comments":{"pr":"acme/widgets#7","keys":["comment:9","thread:PRRT_1"]}}"#
+        );
+        round_trip(Reply::HiddenComments(set));
     }
 
     #[test]

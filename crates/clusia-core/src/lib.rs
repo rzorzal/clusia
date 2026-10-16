@@ -9,6 +9,7 @@ pub mod diagram;
 pub mod diffmap;
 pub mod draft;
 pub mod editor;
+pub mod hidden;
 pub mod launch_agent;
 pub mod logging;
 pub mod media;
@@ -42,6 +43,7 @@ pub use draft::{
     Anchor, Draft, DraftError, DraftItem, DraftKind, ItemStatus, Origin, Side, ThreadRef,
 };
 pub use editor::{EditorError, editor_argv};
+pub use hidden::{HiddenComments, HiddenState};
 pub use media::{MAX_MEDIA_BYTES, MediaKind};
 pub use notify::OpenTarget;
 pub use paths::{LAUNCH_AGENT_FILE, Paths, PathsError};

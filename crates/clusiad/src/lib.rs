@@ -14,6 +14,7 @@ mod diagrams;
 mod first_run;
 mod giphy;
 mod handlers;
+mod hidden;
 mod holds;
 mod inbox;
 mod lock;

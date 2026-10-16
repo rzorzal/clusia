@@ -7,6 +7,7 @@ pub mod cache;
 pub mod checks;
 pub mod config;
 pub mod diagrams;
+pub mod hidden;
 pub mod reviews;
 pub mod tabs;
 
@@ -19,6 +20,7 @@ pub use diagrams::{
     delete_diagrams, load_diagram_version, load_diagram_versions, load_latest_diagram_version,
     next_diagram_number, save_diagram_version,
 };
+pub use hidden::{delete_hidden, load_hidden, save_hidden};
 pub use reviews::{ReviewLoad, delete_review, list_reviews, load_review, save_review};
 pub use tabs::{load_open_tabs, save_open_tabs};
 
