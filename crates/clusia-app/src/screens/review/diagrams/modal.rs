@@ -1678,6 +1678,8 @@ mod tests {
                 screen: Screen::Review(pr.clone()),
                 reviews: vec![pr],
                 section: crate::nav::Section::Appearance,
+                focus: None,
+                requests: 0,
             })
             .insert_resource(tabs)
             .insert_resource(keys)
@@ -1726,6 +1728,8 @@ mod tests {
                 screen: Screen::Review(pr.clone()),
                 reviews: vec![pr],
                 section: crate::nav::Section::Appearance,
+                focus: None,
+                requests: 0,
             })
             .insert_resource(tabs)
             .insert_resource(Toasts::default())

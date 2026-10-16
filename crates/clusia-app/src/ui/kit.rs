@@ -162,6 +162,8 @@ pub enum Variant {
     Primary,
     Secondary,
     Ghost,
+    /// A quiet button that reads as a link: the accent ink on no fill.
+    Link,
     Danger,
 }
 
@@ -176,6 +178,7 @@ pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
         ),
         Variant::Secondary => (Swatch::Surface, Swatch::Hover, Swatch::Fg, Swatch::Line),
         Variant::Ghost => (Swatch::Clear, Swatch::Hover, Swatch::Muted, Swatch::Clear),
+        Variant::Link => (Swatch::Clear, Swatch::Hover, Swatch::Green, Swatch::Clear),
         Variant::Danger => (
             Swatch::Clear,
             Swatch::OrangeSoft,

@@ -28,7 +28,7 @@ use crate::nav::{Nav, Screen};
 use crate::review_state::{Phase, ReviewSection, ReviewTabs};
 use crate::screens::review::agent::harness_ready;
 use crate::screens::review::editor::{not_sent, read_only_reason};
-use crate::screens::review::shell::{SectionBody, on_harness};
+use crate::screens::review::shell::{OpenSetting, SectionBody, on_open_setting, setting_link};
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Type, Variant, button, checkbox, disabled_button, panel,
@@ -79,6 +79,8 @@ pub struct Notice {
     pub action: Option<Action>,
     /// Offer **Set up a harness**.
     pub setup: bool,
+    /// Offer the link to the setting that draws diagrams on every review.
+    pub every_review: bool,
 }
 
 /// An entry's state as the row shows it.
@@ -192,6 +194,8 @@ pub struct Inputs<'a> {
     pub menu: Option<&'a str>,
     /// The review's head as the tab knows it, which a push moves before the daemon is asked again.
     pub head: &'a str,
+    /// *Draw diagrams* of *When I open a review* is on.
+    pub auto_draw: bool,
 }
 
 fn plural(n: u32, one: &str, many: &str) -> String {
@@ -264,6 +268,7 @@ pub fn diagrams_view(i: &Inputs) -> DiagramsView {
         line,
         action,
         setup,
+        every_review: false,
     };
     if !m.received {
         let line = if i.offline {
@@ -293,12 +298,15 @@ pub fn diagrams_view(i: &Inputs) -> DiagramsView {
                 None,
                 true,
             ),
-            DiagramsState::Idle => notice(
-                "No diagrams yet",
-                format!("Each diagram is one turn on your {} account.", i.agent),
-                Some(Action::Draw),
-                false,
-            ),
+            DiagramsState::Idle => Notice {
+                every_review: !i.auto_draw,
+                ..notice(
+                    "No diagrams yet",
+                    format!("Each diagram is one turn on your {} account.", i.agent),
+                    Some(Action::Draw),
+                    false,
+                )
+            },
         });
     };
     let busy = m.busy();
@@ -610,6 +618,7 @@ pub(super) fn fill_diagrams(
             compare: tab.ui.diagram_compare,
             menu: tab.ui.diagram_menu.as_deref(),
             head: &ready.view.review.head_sha,
+            auto_draw: model.snapshot.config.harness.diagrams,
         });
         let pr = body.pr.clone();
         for child in root_children.into_iter().flatten().copied() {
@@ -889,9 +898,19 @@ fn draw_pane(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, pane: &P
                 "Loading this version…",
                 None,
                 false,
+                false,
             );
         }
-        Pane::Tab(n) => message(p, fonts, pr, &n.title, &n.line, n.action.clone(), n.setup),
+        Pane::Tab(n) => message(
+            p,
+            fonts,
+            pr,
+            &n.title,
+            &n.line,
+            n.action.clone(),
+            n.setup,
+            n.every_review,
+        ),
         Pane::Entry { title, line, retry } => {
             message(
                 p,
@@ -900,6 +919,7 @@ fn draw_pane(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, pane: &P
                 title,
                 line,
                 retry.clone().map(Action::Retry),
+                false,
                 false,
             );
         }
@@ -914,6 +934,7 @@ fn message(
     line: &str,
     action: Option<Action>,
     setup: bool,
+    every_review: bool,
 ) {
     p.spawn(Node {
         flex_grow: 1.0,
@@ -934,6 +955,9 @@ fn message(
         .with_children(|t| {
             t.spawn(text(fonts, title.to_string(), Type::HEADING));
             t.spawn(text(fonts, line.to_string(), Type::MUTED));
+            if every_review {
+                setting_link(t, fonts, "Draw on every review…", "harness.diagrams");
+            }
         });
         if let Some(action) = action {
             action_button(h, fonts, pr, action);
@@ -941,7 +965,8 @@ fn message(
         if setup {
             h.spawn((
                 button(fonts, "Set up a harness", Variant::Secondary),
-                observe(on_harness),
+                OpenSetting("harness.program"),
+                observe(on_open_setting),
             ));
         }
     });
@@ -1352,6 +1377,7 @@ mod tests {
             compare: false,
             menu: None,
             head: "",
+            auto_draw: true,
         }
     }
 
@@ -1398,6 +1424,14 @@ mod tests {
             "Each diagram is one turn on your Claude Code account."
         );
         assert_eq!((n.action.clone(), n.setup), (Some(Action::Draw), false));
+        assert!(!n.every_review, "drawing on open is on: nothing to switch");
+        let mut manual = inputs(Some(&m));
+        manual.auto_draw = false;
+        let n = tab_notice_of(&diagrams_view(&manual)).clone();
+        assert_eq!(
+            (n.action.clone(), n.every_review),
+            (Some(Action::Draw), true)
+        );
         let mut none = inputs(Some(&m));
         none.harness = false;
         let n = tab_notice_of(&diagrams_view(&none)).clone();
@@ -2153,5 +2187,87 @@ mod tests {
         testing::tell(&mut app, running(DiagramsState::Idle));
         testing::settle(&mut app);
         assert_eq!(testing::count::<MenuLayer>(&mut app), 0);
+    }
+
+    #[test]
+    fn the_tab_leads_to_the_setting_it_needs() {
+        let idle = |app: &mut App| {
+            let pr = testing::open_ready(app, false);
+            testing::set_section(app, &pr, ReviewSection::Diagrams);
+            testing::tell(
+                app,
+                Tell::Diagrams(DiagramsTell::Loaded {
+                    pr,
+                    versions: Vec::new(),
+                    latest: None,
+                    state: DiagramsState::Idle,
+                    head: String::new(),
+                    stale: false,
+                    stale_reason: None,
+                }),
+            );
+            testing::settle(app);
+        };
+        let harness = |key| {
+            (
+                crate::nav::Screen::Config(crate::nav::Section::Harness),
+                Some(key),
+            )
+        };
+
+        let mut app = testing::app(fixture::demo(NOW));
+        idle(&mut app);
+        assert!(testing::shows(&mut app, "Set up a harness"));
+        assert!(!testing::shows(&mut app, "Draw on every review…"));
+        testing::open_setting(&mut app, "harness.program");
+        assert_eq!(testing::config_focus(&app), harness("harness.program"));
+
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::set_config_locally(&mut app, "harness.program", "/opt/homebrew/bin/claude");
+        idle(&mut app);
+        testing::find::<DiagramButton>(&mut app, |b| b.action == Action::Draw);
+        assert!(testing::shows(&mut app, "Draw on every review…"));
+        testing::open_setting(&mut app, "harness.diagrams");
+        assert_eq!(testing::config_focus(&app), harness("harness.diagrams"));
+
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::set_config_locally(&mut app, "harness.program", "/opt/homebrew/bin/claude");
+        testing::set_config_locally(&mut app, "harness.diagrams", "true");
+        idle(&mut app);
+        assert!(!testing::shows(&mut app, "Draw on every review…"));
+    }
+
+    #[test]
+    fn a_setting_link_is_a_small_keyboard_reachable_button() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::set_config_locally(&mut app, "harness.program", "/opt/homebrew/bin/claude");
+        let pr = testing::open_ready(&mut app, false);
+        testing::set_section(&mut app, &pr, ReviewSection::Diagrams);
+        testing::tell(
+            &mut app,
+            Tell::Diagrams(DiagramsTell::Loaded {
+                pr,
+                versions: Vec::new(),
+                latest: None,
+                state: DiagramsState::Idle,
+                head: String::new(),
+                stale: false,
+                stale_reason: None,
+            }),
+        );
+        testing::settle(&mut app);
+        let link = testing::find::<crate::screens::review::shell::OpenSetting>(&mut app, |s| {
+            s.0 == "harness.diagrams"
+        });
+        let node = app.world().get::<Node>(link).unwrap();
+        assert_eq!(node.align_self, AlignSelf::Start);
+        assert!(
+            app.world()
+                .get::<bevy::input_focus::tab_navigation::TabIndex>(link)
+                .is_some()
+        );
+        let label = app.world().get::<Children>(link).unwrap()[0];
+        let ink = app.world().get::<crate::ui::kit::Ink>(label).map(|i| i.0);
+        assert_eq!(ink, Some(crate::theme::Swatch::Green));
     }
 }

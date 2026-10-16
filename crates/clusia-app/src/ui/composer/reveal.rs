@@ -96,7 +96,7 @@ fn queue_reveal(
 }
 
 /// The node's top and bottom on screen, in logical pixels.
-fn span(node: &ComputedNode, at: &UiGlobalTransform) -> (f32, f32) {
+pub(crate) fn span(node: &ComputedNode, at: &UiGlobalTransform) -> (f32, f32) {
     let scale = node.inverse_scale_factor;
     let center = at.translation.y * scale;
     let half = node.size.y * scale / 2.0;

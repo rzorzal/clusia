@@ -178,6 +178,10 @@ pub struct TryAgain(pub PrRef);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct HarnessButton;
 
+/// Opens Config › Harness with the setting `0` (a config key) scrolled into view and tinted.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenSetting(pub &'static str);
+
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct GeneralNoteButton(pub PrRef);
 
@@ -1450,6 +1454,30 @@ pub(crate) fn on_harness(_activate: On<Activate>, mut nav: ResMut<Nav>) {
     nav.open_section(Section::Harness);
 }
 
+/// A small link that opens Config › Harness at the setting `key`.
+pub(crate) fn setting_link(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    label: &str,
+    key: &'static str,
+) {
+    p.spawn((
+        button(fonts, label, Variant::Link),
+        OpenSetting(key),
+        observe(on_open_setting),
+    ));
+}
+
+pub(crate) fn on_open_setting(
+    activate: On<Activate>,
+    buttons: Query<&OpenSetting>,
+    mut nav: ResMut<Nav>,
+) {
+    if let Ok(OpenSetting(key)) = buttons.get(activate.entity) {
+        nav.open_setting(Section::Harness, key);
+    }
+}
+
 fn on_general_note(
     activate: On<Activate>,
     buttons: Query<&GeneralNoteButton>,
@@ -2007,11 +2035,10 @@ mod tests {
             .entry(&fixture::demo_pr())
             .show(crate::screens::review::agent::PanelTab::Agent);
         testing::settle(&mut app);
-        let harness = testing::find::<HarnessButton>(&mut app, |_| true);
-        testing::activate(&mut app, harness);
+        testing::open_setting(&mut app, "harness.program");
         assert_eq!(
-            app.world().resource::<Nav>().screen,
-            Screen::Config(Section::Harness)
+            testing::config_focus(&app),
+            (Screen::Config(Section::Harness), Some("harness.program"))
         );
     }
 

@@ -33,7 +33,7 @@ use crate::ui::text_area::{Caret, TextArea, TextSubmitted, growing_text_area, te
 mod emoji_picker;
 mod gif_picker;
 pub mod popover;
-mod reveal;
+pub(crate) mod reveal;
 pub mod toolbar;
 
 #[cfg(test)]
