@@ -22,7 +22,7 @@ use crate::screens::review::ReviewSystems;
 use crate::screens::review::agent::suggestion::show_file;
 use crate::screens::review::diff::unsent;
 use crate::screens::review::editor::{not_sent, read_only_reason};
-use crate::screens::review::shell::on_harness;
+use crate::screens::review::shell::{OpenSetting, on_open_setting};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{Variant, button};
 
@@ -584,7 +584,8 @@ pub(super) fn check_button(
 pub(super) fn setup_button(p: &mut ChildSpawnerCommands, fonts: &UiFonts) {
     p.spawn((
         button(fonts, "Set up a harness", Variant::Secondary),
-        observe(on_harness),
+        OpenSetting("harness.program"),
+        observe(on_open_setting),
     ));
 }
 
@@ -1749,5 +1750,34 @@ mod tests {
             .close_review(&pr);
         testing::settle(&mut app);
         assert!(app.world().resource::<Checks>().0.is_empty());
+    }
+
+    #[test]
+    fn the_set_up_button_of_each_tab_opens_the_program_field() {
+        for section in [ReviewSection::Security, ReviewSection::Audits] {
+            let mut app = testing::app(fixture::demo(NOW));
+            let pr = testing::open_ready(&mut app, false);
+            testing::tell(
+                &mut app,
+                Tell::Checks(ChecksTell::Loaded {
+                    pr: pr.clone(),
+                    results: vec![],
+                    states: vec![],
+                    accepted: vec![],
+                    dismissed: vec![],
+                }),
+            );
+            testing::set_section(&mut app, &pr, section);
+            assert!(testing::shows(&mut app, "Set up a harness"), "{section:?}");
+            testing::open_setting(&mut app, "harness.program");
+            assert_eq!(
+                testing::config_focus(&app),
+                (
+                    crate::nav::Screen::Config(crate::nav::Section::Harness),
+                    Some("harness.program")
+                ),
+                "{section:?}"
+            );
+        }
     }
 }

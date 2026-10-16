@@ -13,6 +13,7 @@ pub mod media;
 pub mod notifications;
 mod placeholders;
 pub mod repos;
+pub mod spotlight;
 
 use std::collections::HashMap;
 
@@ -122,6 +123,7 @@ impl Plugin for ConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<areas::AreaForm>()
             .init_resource::<harness::Switched>()
+            .init_resource::<spotlight::Spotlight>()
             .add_systems(
                 Update,
                 (
@@ -133,6 +135,7 @@ impl Plugin for ConfigPlugin {
                     harness::forget_switch,
                     repos::commit_roots,
                     rebuild_config,
+                    spotlight::spotlight,
                     git::refresh_last_sync,
                     notifications::poll_permission,
                 )

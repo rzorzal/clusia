@@ -184,7 +184,7 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
         Scene::ConfigNotifications | Scene::ConfigNotificationsBottom => {
             set_demo_config(world, &NOTIFICATION_SETTINGS);
         }
-        Scene::ConfigHarness => {
+        Scene::ConfigHarness | Scene::ConfigFocus => {
             let areas = demo_areas();
             set_demo_config(
                 world,
@@ -222,6 +222,9 @@ fn stage_snapshot(world: &mut World, scene: Scene) {
         | Scene::Revalidated
         | Scene::RevalidatedBanner => {
             set_demo_config(world, &[("harness.program", "/opt/homebrew/bin/claude")])
+        }
+        Scene::DiagramsNoAutoDraw => {
+            set_demo_config(world, &[("harness.program", "/opt/homebrew/bin/claude")]);
         }
         scene if scene.is_diagram() => {
             set_demo_config(world, &[("harness.program", "/opt/homebrew/bin/claude")]);
@@ -374,13 +377,19 @@ pub fn stage(world: &mut World, scene: Scene) {
         }
         Scene::ConfigMedia => Some(Section::Media),
         Scene::ConfigAbout => Some(Section::About),
-        Scene::ConfigHarness | Scene::ConfigHarnessCodex | Scene::ConfigHarnessCustom => {
-            Some(Section::Harness)
-        }
+        Scene::ConfigHarness
+        | Scene::ConfigHarnessCodex
+        | Scene::ConfigHarnessCustom
+        | Scene::ConfigFocus => Some(Section::Harness),
         _ => None,
     };
     if let Some(section) = section {
-        world.resource_mut::<Nav>().open_section(section);
+        let mut nav = world.resource_mut::<Nav>();
+        if scene == Scene::ConfigFocus {
+            nav.open_setting(section, "harness.diagrams");
+        } else {
+            nav.open_section(section);
+        }
         return;
     }
     if matches!(
@@ -426,6 +435,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::ConfigHarness
         | Scene::ConfigHarnessCodex
         | Scene::ConfigHarnessCustom
+        | Scene::ConfigFocus
         | Scene::Restored => {}
         Scene::AgentChat
         | Scene::AgentChatCodex
@@ -502,10 +512,16 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::DiagramNode
         | Scene::DiagramsDrawing
         | Scene::DiagramsCompare => {}
+        Scene::DiagramsNoHarness | Scene::DiagramsNoAutoDraw => {
+            ui.section = ReviewSection::Diagrams;
+        }
     }
+    let empty_diagrams = matches!(scene, Scene::DiagramsNoHarness | Scene::DiagramsNoAutoDraw)
+        .then(|| (Vec::new(), DiagramsState::Idle));
     let diagrams = scene
         .is_diagram()
-        .then(|| stage_diagrams(&mut ui, scene, now));
+        .then(|| stage_diagrams(&mut ui, scene, now))
+        .or(empty_diagrams);
     let checks_tell = matches!(scene, Scene::Security | Scene::Audits | Scene::AuditsAll)
         .then(|| fixture::demo_checks_tell(&pr, now, &ready.view.review.draft));
     let phase = match scene {
@@ -677,6 +693,7 @@ mod tests {
                     | Scene::HomeFooter
                     | Scene::FirstRunCustom
                     | Scene::ConfigHarnessCustom
+                    | Scene::ConfigFocus
                     | Scene::Restored
             ) {
                 continue;
@@ -735,6 +752,7 @@ mod tests {
                 | Scene::HomeFooter
                 | Scene::FirstRunCustom
                 | Scene::ConfigHarnessCustom
+                | Scene::ConfigFocus
                 | Scene::Restored => {
                     unreachable!("skipped above")
                 }
@@ -802,6 +820,9 @@ mod tests {
                 | Scene::DiagramsCompare => {
                     assert_eq!(tab.ui.section, ReviewSection::Diagrams, "{scene:?}");
                     assert!(tab.ui.diagram.is_some(), "{scene:?}");
+                }
+                Scene::DiagramsNoHarness | Scene::DiagramsNoAutoDraw => {
+                    assert_eq!(tab.ui.section, ReviewSection::Diagrams, "{scene:?}");
                 }
                 Scene::Loading => {
                     let Phase::Loading { steps } = &tab.phase else {
@@ -1045,6 +1066,25 @@ mod tests {
     }
 
     #[test]
+    fn the_focus_scene_opens_config_at_the_diagrams_checkbox() {
+        let app = staged_outside_review(Scene::ConfigFocus);
+        assert_eq!(
+            testing::config_focus(&app),
+            (Screen::Config(Section::Harness), Some("harness.diagrams"))
+        );
+    }
+
+    #[test]
+    fn the_empty_diagrams_scenes_offer_their_buttons() {
+        let mut app = staged(Scene::DiagramsNoHarness);
+        assert!(testing::shows(&mut app, "Set up a harness"));
+        assert!(!testing::shows(&mut app, "Draw on every review…"));
+        let mut app = staged(Scene::DiagramsNoAutoDraw);
+        assert!(testing::shows(&mut app, "Draw on every review…"));
+        assert!(!testing::shows(&mut app, "Set up a harness"));
+    }
+
+    #[test]
     fn config_scenes_open_their_sections() {
         for (scene, section) in [
             (Scene::ConfigGeneral, Section::General),
@@ -1055,6 +1095,7 @@ mod tests {
             (Scene::ConfigHarness, Section::Harness),
             (Scene::ConfigHarnessCodex, Section::Harness),
             (Scene::ConfigHarnessCustom, Section::Harness),
+            (Scene::ConfigFocus, Section::Harness),
         ] {
             let mut app = staged_outside_review(scene);
             assert_eq!(

@@ -59,6 +59,12 @@ pub enum Scene {
     DiagramNode,
     DiagramsDrawing,
     DiagramsCompare,
+    /// The Diagrams tab with nothing drawn and no harness set up.
+    DiagramsNoHarness,
+    /// The Diagrams tab with nothing drawn, a harness set up and drawing on open off.
+    DiagramsNoAutoDraw,
+    /// Config › Harness opened at the *Draw diagrams* checkbox, as the Diagrams tab's link does.
+    ConfigFocus,
     /// The window after a restart, its tabs back.
     Restored,
 }
@@ -246,6 +252,9 @@ mod tests {
             ("agent-chat-custom", Scene::AgentChatCustom),
             ("permission-other", Scene::PermissionOther),
             ("first-run-custom", Scene::FirstRunCustom),
+            ("diagrams-no-harness", Scene::DiagramsNoHarness),
+            ("diagrams-no-auto-draw", Scene::DiagramsNoAutoDraw),
+            ("config-focus", Scene::ConfigFocus),
         ] {
             assert_eq!(
                 parse(&["--demo", "--scene", name]).unwrap().scene,

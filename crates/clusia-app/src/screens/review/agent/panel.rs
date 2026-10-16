@@ -26,7 +26,9 @@ use crate::review_state::ReviewTabs;
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::activity::elapsed_label;
 use crate::screens::review::editor::read_only_reason;
-use crate::screens::review::shell::{HarnessButton, RightPanel, on_harness};
+use crate::screens::review::shell::{
+    HarnessButton, OpenSetting, RightPanel, on_harness, on_open_setting,
+};
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
@@ -715,8 +717,8 @@ fn not_set_up(h: &mut ChildSpawnerCommands, fonts: &UiFonts, name: &str) {
     });
     h.spawn((
         button(fonts, "Set up a harness", Variant::Secondary),
-        HarnessButton,
-        observe(on_harness),
+        OpenSetting("harness.program"),
+        observe(on_open_setting),
     ));
 }
 
@@ -1554,13 +1556,15 @@ mod tests {
         testing::settle(&mut app);
         assert!(testing::shows(&mut app, "not set up"));
         assert!(!testing::shows(&mut app, "knows this review"));
-        assert_eq!(testing::count::<HarnessButton>(&mut app), 1);
-        assert!(testing::shows(&mut app, "Set up a harness"));
-        let set_up = testing::find::<HarnessButton>(&mut app, |_| true);
-        testing::activate(&mut app, set_up);
         assert_eq!(
-            app.world().resource::<Nav>().screen,
-            Screen::Config(Section::Harness)
+            testing::count::<crate::screens::review::shell::OpenSetting>(&mut app),
+            1
+        );
+        assert!(testing::shows(&mut app, "Set up a harness"));
+        testing::open_setting(&mut app, "harness.program");
+        assert_eq!(
+            testing::config_focus(&app),
+            (Screen::Config(Section::Harness), Some("harness.program"))
         );
     }
 

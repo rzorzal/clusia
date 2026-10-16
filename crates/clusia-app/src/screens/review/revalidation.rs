@@ -1110,7 +1110,7 @@ fn on_top(
         }
         TopAction::Stop => asks.send(Ask::StopRevalidation(pr.clone())),
         TopAction::RevalidateNow | TopAction::TryAgain => asks.send(Ask::Revalidate(pr.clone())),
-        TopAction::SetUp => nav.open_section(crate::nav::Section::Harness),
+        TopAction::SetUp => nav.open_setting(crate::nav::Section::Harness, "harness.program"),
     }
 }
 
@@ -1956,6 +1956,14 @@ mod tests {
             &mut app,
             "Set up a harness in Config › Harness"
         ));
+        top(&mut app, TopAction::SetUp);
+        assert_eq!(
+            testing::config_focus(&app),
+            (
+                crate::nav::Screen::Config(crate::nav::Section::Harness),
+                Some("harness.program")
+            )
+        );
     }
 
     #[test]

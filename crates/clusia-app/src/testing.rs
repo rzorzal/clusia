@@ -150,6 +150,18 @@ pub fn apply_edits(app: &mut App, entity: Entity) {
     }
 }
 
+/// Whether the window shows Config › Harness asking for the setting `key` to be in view.
+pub fn config_focus(app: &App) -> (crate::nav::Screen, Option<&'static str>) {
+    let nav = app.world().resource::<crate::nav::Nav>();
+    (nav.screen.clone(), nav.focus)
+}
+
+/// Presses the button that opens Config at the setting `key`.
+pub fn open_setting(app: &mut App, key: &str) {
+    let button = find::<crate::screens::review::shell::OpenSetting>(app, |s| s.0 == key);
+    activate(app, button);
+}
+
 /// Runs frames until rebuilt screens have settled.
 pub fn settle(app: &mut App) {
     for _ in 0..3 {
