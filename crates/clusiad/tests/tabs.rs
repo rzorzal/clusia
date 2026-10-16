@@ -339,3 +339,28 @@ async fn the_tab_shown_is_never_idle() {
         "on screen when the window closed"
     );
 }
+
+#[tokio::test]
+async fn a_failed_save_after_tidying_still_hands_back_the_tabs() {
+    use std::os::unix::fs::PermissionsExt;
+    let daemon = TestDaemon::start().await;
+    let discarded = pr("acme/widgets#8");
+    let kept = pr("acme/widgets#9");
+    left_tabs(&daemon, &[(discarded.clone(), 3), (kept.clone(), 1)]);
+    closed(&daemon, &discarded, ActivityKind::ReviewDiscarded, 2);
+    // The tabs read fine, but no new file can be written next to them.
+    let root = daemon.paths.root().to_path_buf();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let mut window = daemon.client().await;
+    let reply = window.request(Command::RestoreTabs).await;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    match reply.unwrap() {
+        Reply::OpenTabs(tabs) => assert_eq!(prs(&tabs), ["acme/widgets#9"]),
+        other => panic!("expected the tabs, got {other:?}"),
+    }
+    assert_eq!(
+        prs(&clusia_store::load_open_tabs(&daemon.paths).unwrap()),
+        ["acme/widgets#8", "acme/widgets#9"],
+        "the file is as it was"
+    );
+}

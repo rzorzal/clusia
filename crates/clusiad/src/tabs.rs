@@ -79,10 +79,13 @@ pub(crate) async fn restore(shared: &Shared, client: &str) -> Outcome {
         Ok(tabs) => tabs.without(&dropped),
         Err(out) => return out,
     };
+    // The tabs were read fine: hand them back even if the tidied set could not be saved. An
+    // error here would make the window start from no tabs, and its first save would replace
+    // the saved set with that.
     if !dropped.is_empty()
-        && let Err(out) = save(shared, &tabs)
+        && let Err(Outcome::Err(e)) = save(shared, &tabs)
     {
-        return out;
+        tracing::warn!(error = %e.message, "the file keeps the old set of open tabs");
     }
     Outcome::Ok(Reply::OpenTabs(tabs))
 }
