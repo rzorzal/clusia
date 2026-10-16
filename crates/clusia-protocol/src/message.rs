@@ -300,6 +300,11 @@ pub enum Command {
         #[serde(default)]
         posts: Option<u32>,
     },
+    /// Shows every comment in `keys` again at once. Answers like `GetHiddenComments`.
+    ShowComments {
+        pr: PrRef,
+        keys: Vec<String>,
+    },
     /// Turn a finding into a draft item, with `body` instead of the proposed comment when set.
     AcceptFinding {
         pr: PrRef,
@@ -1995,6 +2000,13 @@ mod tests {
             key: "comment:9".into(),
             posts: None,
         });
+        assert_eq!(
+            wire(&Command::ShowComments {
+                pr: acme7(),
+                keys: vec!["comment:9".into(), "thread:PRRT_1".into()],
+            }),
+            r#"{"show_comments":{"pr":"acme/widgets#7","keys":["comment:9","thread:PRRT_1"]}}"#
+        );
         round_trip(Reply::HiddenComments(set));
     }
 

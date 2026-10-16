@@ -58,13 +58,6 @@ impl HiddenComments {
         }
     }
 
-    /// How many of `keys` (each with its post count) are collapsed now.
-    pub fn collapsed<'a>(&self, keys: impl IntoIterator<Item = (&'a str, u32)>) -> usize {
-        keys.into_iter()
-            .filter(|(key, posts)| self.state(key, *posts) == HiddenState::Hidden)
-            .count()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.hidden.is_empty()
     }
@@ -100,14 +93,6 @@ mod tests {
     #[test]
     fn keys_of_different_kinds_never_collide() {
         assert_ne!(issue_comment_key(5), review_key(5));
-    }
-
-    #[test]
-    fn collapsed_counts_only_the_ones_still_collapsed() {
-        let mut set = HiddenComments::default();
-        set.hide("a", 1);
-        set.hide("b", 1);
-        assert_eq!(set.collapsed([("a", 1), ("b", 2), ("c", 1)]), 1);
     }
 
     #[test]

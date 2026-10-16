@@ -190,6 +190,7 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::StopCheck { pr, kind } => checks::stop(shared, &pr, kind),
         Command::GetChecks { pr } => checks::get(shared, &pr),
         Command::GetHiddenComments { pr } => crate::hidden::get(shared, &pr).await,
+        Command::ShowComments { pr, keys } => crate::hidden::show_all(shared, &pr, &keys).await,
         Command::SetCommentHidden { pr, key, posts } => {
             crate::hidden::set(shared, &pr, &key, posts).await
         }

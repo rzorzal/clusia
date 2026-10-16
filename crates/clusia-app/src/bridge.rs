@@ -193,6 +193,11 @@ pub enum Ask {
         key: String,
         posts: Option<u32>,
     },
+    /// Shows every comment in `keys` again: one change, one `Tell::Hidden`.
+    ShowComments {
+        pr: PrRef,
+        keys: Vec<String>,
+    },
     /// Runs the revalidation of the review's draft now (a round starts when the head moved and
     /// none exists); the state comes back as `RevalidationTell::Round`.
     Revalidate(PrRef),
@@ -1046,7 +1051,7 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
         Ask::SetOpenTabs(_) => {}
         // The window already shows the change; hiding is not a write to GitHub, so there is
         // nothing to refuse.
-        Ask::SetCommentHidden { .. } => {}
+        Ask::SetCommentHidden { .. } | Ask::ShowComments { .. } => {}
         Ask::Revalidate(_) | Ask::StopRevalidation(_) => teller.send(Tell::Notice {
             text: "Not connected to clusiad — not sent".into(),
             warning: true,
@@ -1619,6 +1624,15 @@ async fn answer(
             if let Some(Reply::HiddenComments(set)) =
                 request(client, Command::GetHiddenComments { pr: pr.clone() }).await?
             {
+                teller.send(Tell::Hidden { pr, set });
+            }
+        }
+        Ask::ShowComments { pr, keys } => {
+            let command = Command::ShowComments {
+                pr: pr.clone(),
+                keys,
+            };
+            if let Some(Reply::HiddenComments(set)) = request(client, command).await? {
                 teller.send(Tell::Hidden { pr, set });
             }
         }

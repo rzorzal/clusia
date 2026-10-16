@@ -393,9 +393,7 @@ fn load_hidden(mut tabs: ResMut<ReviewTabs>, model: Res<Model>, mut asks: ResMut
     let due: Vec<PrRef> = tabs
         .0
         .iter()
-        .filter(|(_, tab)| {
-            !tab.ui.hidden_asked && tab.ready().is_some_and(|r| r.cached_at.is_none())
-        })
+        .filter(|(_, tab)| !tab.ui.hidden_asked && tab.ready().is_some())
         .map(|(pr, _)| pr.clone())
         .collect();
     for pr in due {
@@ -997,8 +995,9 @@ fn on_undo(
 }
 
 /// Hides (`posts`) or shows (`None`) `key` in the tab and asks the daemon to keep it. The
-/// tab changes at once; the daemon's set replaces it when it answers. A cached copy has no
-/// daemon behind it, so it does neither.
+/// tab changes at once; the daemon's set replaces it when it answers. Without a live daemon
+/// nothing would be kept, so it does neither and says why. The set is local data, so a cached
+/// copy still loads it (see `load_hidden`); it just cannot change it.
 fn set_hidden(
     tabs: &mut ReviewTabs,
     model: &Model,
@@ -1085,17 +1084,18 @@ fn on_show_all(
     mut asks: ResMut<Asks>,
 ) {
     if let Ok(b) = buttons.get(activate.entity) {
-        let changes: Vec<(String, Option<u32>)> =
-            b.keys.iter().map(|k| (k.clone(), None)).collect();
-        set_hidden(
-            &mut tabs,
-            &model,
-            &mut toasts,
-            &time,
-            &mut asks,
-            &b.pr,
-            &changes,
-        );
+        if let Some(reason) = read_only_reason(&tabs, &model, &b.pr) {
+            return not_sent(&mut toasts, &time, reason);
+        }
+        if let Some(tab) = tabs.0.get_mut(&b.pr) {
+            for key in &b.keys {
+                tab.ui.hidden.show(key);
+            }
+        }
+        asks.send(Ask::ShowComments {
+            pr: b.pr.clone(),
+            keys: b.keys.clone(),
+        });
     }
 }
 
@@ -1938,12 +1938,14 @@ mod tests {
         assert!(has_text(&mut app, "2 hidden"));
         let all = testing::find::<ShowAll>(&mut app, |_| true);
         testing::activate(&mut app, all);
-        let asks = testing::recorded(&mut app);
-        assert_eq!(asks.len(), 2);
-        assert!(asks.iter().all(|a| matches!(
-            a,
-            Ask::SetCommentHidden { posts: None, key, .. } if key.starts_with("comment:")
-        )));
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::ShowComments {
+                pr: fixture::demo_pr(),
+                keys: vec!["comment:2001".into(), "comment:2002".into()]
+            }],
+            "one ask, so one answer and no flicker"
+        );
         testing::settle(&mut app);
         assert!(!has_text(&mut app, "hidden ·"));
     }
@@ -1987,5 +1989,42 @@ mod tests {
         testing::activate(&mut app, hide);
         assert!(testing::recorded(&mut app).is_empty());
         assert!(!has_text(&mut app, "Hidden · @octo"));
+    }
+
+    #[test]
+    fn a_hide_without_a_daemon_says_so_and_changes_nothing() {
+        let mut app = comments_app();
+        let pr = fixture::demo_pr();
+        app.world_mut().resource_mut::<Model>().connection =
+            crate::bridge::Connection::Lost("gone".into());
+        testing::settle(&mut app);
+        testing::recorded(&mut app);
+        let hide = testing::find::<HideButton>(&mut app, |h| h.key == "comment:2002");
+        testing::activate(&mut app, hide);
+        assert!(testing::recorded(&mut app).is_empty());
+        assert!(testing::tab(&app, &pr).ui.hidden.is_empty());
+        let toasts = &app.world().resource::<crate::bridge::Toasts>().0;
+        assert!(
+            toasts
+                .iter()
+                .any(|t| t.warning && t.text.contains("Not connected"))
+        );
+    }
+
+    #[test]
+    fn the_cached_copy_loads_the_hidden_set() {
+        let mut app = comments_app();
+        let pr = fixture::demo_pr();
+        with_ready(&mut app, |r, ui| {
+            r.cached_at = Some(NOW - 3600);
+            ui.hidden_asked = false;
+        });
+        testing::settle(&mut app);
+        assert!(testing::recorded(&mut app).contains(&Ask::GetHiddenComments(pr.clone())));
+        let mut set = clusia_core::HiddenComments::default();
+        set.hide("comment:2002", 1);
+        testing::tell(&mut app, crate::bridge::Tell::Hidden { pr, set });
+        testing::settle(&mut app);
+        assert!(has_text(&mut app, "Hidden · @octo"));
     }
 }

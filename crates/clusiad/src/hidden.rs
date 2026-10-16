@@ -41,3 +41,19 @@ pub(crate) async fn set(shared: &Shared, pr: &PrRef, key: &str, posts: Option<u3
         Err(e) => internal("save", &e),
     }
 }
+
+/// Shows every comment in `keys` again, in one write.
+pub(crate) async fn show_all(shared: &Shared, pr: &PrRef, keys: &[String]) -> Outcome {
+    let _serialized = shared.hidden_lock.lock().await;
+    let mut set = match load_hidden(&shared.paths, pr) {
+        Ok(set) => set,
+        Err(e) => return internal("read", &e),
+    };
+    for key in keys {
+        set.show(key);
+    }
+    match save_hidden(&shared.paths, pr, &set) {
+        Ok(()) => Outcome::Ok(Reply::HiddenComments(set)),
+        Err(e) => internal("save", &e),
+    }
+}

@@ -80,3 +80,34 @@ async fn hiding_sends_nothing_to_github() {
     set_hidden(&mut c, "thread:PRRT_1", None).await;
     assert_eq!(w.server.received_requests().await.unwrap().len(), before);
 }
+
+#[tokio::test]
+async fn showing_several_comments_is_one_write_and_a_discard_keeps_the_set() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    set_hidden(&mut c, "comment:11", Some(1)).await;
+    set_hidden(&mut c, "comment:12", Some(1)).await;
+    set_hidden(&mut c, "thread:PRRT_1", Some(2)).await;
+    c.request(Command::DiscardReview { pr: pr7() })
+        .await
+        .unwrap();
+    assert_eq!(
+        hidden(&mut c).await.hidden.len(),
+        3,
+        "a discard keeps the set"
+    );
+    match c
+        .request(Command::ShowComments {
+            pr: pr7(),
+            keys: vec!["comment:11".into(), "comment:12".into()],
+        })
+        .await
+        .unwrap()
+    {
+        Reply::HiddenComments(set) => {
+            assert_eq!(set.hidden.keys().collect::<Vec<_>>(), ["thread:PRRT_1"]);
+        }
+        other => panic!("expected HiddenComments, got {other:?}"),
+    }
+}
