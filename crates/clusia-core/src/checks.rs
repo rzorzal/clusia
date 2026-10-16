@@ -522,6 +522,10 @@ mod tests {
         );
         assert!(err(area("API", "Look.", "Api!", false)).contains("lowercase letters"));
         assert!(err(area("API", "Look.", "", false)).contains("lowercase letters"));
+        assert!(
+            err(area("API", "Look.", "*", false)).contains("lowercase letters"),
+            "`*` is the id of the Audits tab's All entry"
+        );
         assert_eq!(
             err(area("API", "Look.", "api", true)),
             "api is not a built-in area"

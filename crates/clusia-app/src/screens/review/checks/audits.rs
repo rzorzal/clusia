@@ -234,8 +234,9 @@ pub fn audits_view(
             _ => 0,
         })
         .sum();
-    // The first row is **All**; it is the way in when there is something to read.
-    let default = if open > 0 {
+    // The first row is **All**; it is the way in while any card is listed, accepted ones too.
+    let listed = rows.iter().any(|r| !finding_views(&r.id).is_empty());
+    let default = if listed {
         Some(ALL.to_string())
     } else {
         rows.first().map(|r| r.id.clone())
@@ -1081,6 +1082,20 @@ mod tests {
     }
 
     #[test]
+    fn all_is_the_default_while_any_card_is_listed_even_when_all_are_accepted() {
+        let mut m = model();
+        for f in m.audit.result.as_ref().unwrap().findings.clone() {
+            m.accepted.insert(f.id);
+        }
+        let v = view(&m, None);
+        assert_eq!(v.rows[0].status, RowStatus::Ok, "nothing is open");
+        let d = v.detail.unwrap();
+        assert_eq!(d.id, ALL);
+        assert_eq!(d.groups.len(), 3);
+        assert_eq!(d.clean, None);
+    }
+
+    #[test]
     fn an_audit_without_findings_opens_on_the_first_area_and_all_says_ok() {
         let mut quiet = model();
         for f in quiet.audit.result.as_mut().unwrap().findings.clone() {
@@ -1134,16 +1149,6 @@ mod tests {
         ] {
             assert!(testing::shows(&mut app, needle), "shows {needle}");
         }
-    }
-
-    #[test]
-    fn the_selection_falls_back_to_the_first_area_without_findings() {
-        let mut quiet = model();
-        for f in quiet.audit.result.as_mut().unwrap().findings.clone() {
-            quiet.dismissed.insert(f.id);
-        }
-        let v = view(&quiet, None);
-        assert_eq!(v.detail.unwrap().id, "correctness", "else the first area");
     }
 
     #[test]
