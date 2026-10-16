@@ -195,7 +195,7 @@ pub struct TabUi {
     pub opening: bool,
     /// Why the last refresh of a tab that already shows a copy failed.
     pub open_error: Option<String>,
-    /// The area selected in Audits (its id); `None`: the first area with findings, else the first.
+    /// The area selected in Audits (its id); `None`: **All** when the audit has findings, else the first area.
     pub audit_area: Option<String>,
     pub revalidation: RevalView,
     /// The draft item the Diff asks a new place for (*Keep and re-anchor*).

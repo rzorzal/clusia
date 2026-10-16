@@ -32,6 +32,9 @@ use crate::ui::kit::{
     text,
 };
 
+/// The id of the **All** entry. It is not a valid area id, so no configured area can take it.
+pub const ALL: &str = "*";
+
 /// What the area's row says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowStatus {
@@ -77,10 +80,22 @@ pub struct PassView {
     pub place: Option<String>,
 }
 
+/// One area's findings under **All**. `count` is what is still open; accepted cards stay listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AreaGroup {
+    pub name: String,
+    pub count: usize,
+    pub findings: Vec<FindingView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Detail {
     pub id: String,
     pub name: String,
+    /// **All** only: the areas with findings, in the list's order.
+    pub groups: Vec<AreaGroup>,
+    /// **All** only: `Concurrency, Docs and changelog: ok`.
+    pub ok_line: Option<String>,
     /// The line for an area with nothing to list (`Not checked: …`).
     pub empty: Option<String>,
     /// `No findings in this area.`: the area was checked and nothing is open.
@@ -192,22 +207,8 @@ pub fn audits_view(
             selected: false,
         })
         .collect();
-    let chosen = selected
-        .filter(|s| rows.iter().any(|r| r.id == *s))
-        .map(String::from)
-        .or_else(|| {
-            rows.iter()
-                .find(|r| matches!(r.status, RowStatus::Findings(_)))
-                .or(rows.first())
-                .map(|r| r.id.clone())
-        });
-    for row in &mut rows {
-        row.selected = chosen.as_deref() == Some(row.id.as_str());
-    }
-    let detail = chosen.map(|id| {
-        let status = rows.iter().find(|r| r.id == id).map(|r| r.status.clone());
-        let findings = m
-            .findings(CheckKind::Audit)
+    let finding_views = |id: &str| -> Vec<FindingView> {
+        m.findings(CheckKind::Audit)
             .into_iter()
             .filter(|f| f.area == id)
             .map(|f| FindingView {
@@ -224,7 +225,76 @@ pub fn audits_view(
                 stale,
                 editing: editing == Some(f.id.as_str()),
             })
-            .collect::<Vec<FindingView>>();
+            .collect()
+    };
+    let open: usize = rows
+        .iter()
+        .map(|r| match r.status {
+            RowStatus::Findings(n) => n as usize,
+            _ => 0,
+        })
+        .sum();
+    // The first row is **All**; it is the way in while any card is listed, accepted ones too.
+    let listed = rows.iter().any(|r| !finding_views(&r.id).is_empty());
+    let default = if listed {
+        Some(ALL.to_string())
+    } else {
+        rows.first().map(|r| r.id.clone())
+    };
+    let areas_n = rows.len();
+    if areas_n > 0 {
+        rows.insert(
+            0,
+            AreaRow {
+                id: ALL.into(),
+                name: "All".into(),
+                status: if open > 0 {
+                    RowStatus::Findings(open as u32)
+                } else {
+                    RowStatus::Ok
+                },
+                selected: false,
+            },
+        );
+    }
+    let chosen = selected
+        .filter(|s| rows.iter().any(|r| r.id == *s))
+        .map(String::from)
+        .or(default);
+    for row in &mut rows {
+        row.selected = chosen.as_deref() == Some(row.id.as_str());
+    }
+    let detail = chosen.map(|id| {
+        if id == ALL {
+            let mut groups = Vec::new();
+            let mut ok = Vec::new();
+            for row in rows.iter().filter(|r| r.id != ALL) {
+                let findings = finding_views(&row.id);
+                if !findings.is_empty() {
+                    groups.push(AreaGroup {
+                        name: row.name.clone(),
+                        count: findings.iter().filter(|f| !f.accepted).count(),
+                        findings,
+                    });
+                } else if row.status == RowStatus::Ok {
+                    ok.push(row.name.clone());
+                }
+            }
+            return Detail {
+                clean: groups
+                    .is_empty()
+                    .then(|| "No findings in any area.".to_string()),
+                ok_line: (!ok.is_empty()).then(|| format!("{}: ok", ok.join(", "))),
+                groups,
+                name: "All".into(),
+                id,
+                empty: None,
+                findings: Vec::new(),
+                passes: Vec::new(),
+            };
+        }
+        let status = rows.iter().find(|r| r.id == id).map(|r| r.status.clone());
+        let findings = finding_views(&id);
         let passes = result
             .passes
             .iter()
@@ -243,6 +313,8 @@ pub fn audits_view(
             id,
             findings,
             passes,
+            groups: Vec::new(),
+            ok_line: None,
         }
     });
     let mut banner = Vec::new();
@@ -263,8 +335,8 @@ pub fn audits_view(
         agent: agent.to_string(),
         heading: format!(
             "AUDIT · {} {}",
-            rows.len(),
-            if rows.len() == 1 { "AREA" } else { "AREAS" }
+            areas_n,
+            if areas_n == 1 { "AREA" } else { "AREAS" }
         ),
         rows,
         action: Some(CheckAction::CheckAgain),
@@ -532,6 +604,25 @@ fn draw(
             }
             for f in &d.findings {
                 finding_card(right, fonts, pr, f, editor);
+            }
+            for g in &d.groups {
+                right
+                    .spawn(Node {
+                        column_gap: px(8),
+                        align_items: AlignItems::Baseline,
+                        flex_shrink: 0.0,
+                        ..default()
+                    })
+                    .with_children(|h| {
+                        h.spawn(text(fonts, g.name.clone(), Type::STRONG));
+                        h.spawn(text(fonts, g.count.to_string(), Type::META));
+                    });
+                for f in &g.findings {
+                    finding_card(right, fonts, pr, f, editor);
+                }
+            }
+            if let Some(line) = &d.ok_line {
+                right.spawn(text(fonts, line.clone(), Type::MUTED));
             }
             for pass in &d.passes {
                 pass_row(right, fonts, pass);
@@ -853,9 +944,11 @@ mod tests {
         assert!(!line.contains("Claude"), "{line}");
     }
 
+    /// The area rows, without the **All** entry above them.
     fn rows(v: &AuditsView) -> Vec<(&str, &RowStatus)> {
         v.rows
             .iter()
+            .filter(|r| r.id != ALL)
             .map(|r| (r.name.as_str(), &r.status))
             .collect()
     }
@@ -887,19 +980,175 @@ mod tests {
         assert!(v.notice.is_none());
     }
 
+    fn group_names(d: &Detail) -> Vec<(&str, usize)> {
+        d.groups
+            .iter()
+            .map(|g| (g.name.as_str(), g.count))
+            .collect()
+    }
+
     #[test]
-    fn the_selection_falls_back_to_the_first_area_with_findings() {
+    fn all_heads_the_list_with_the_total() {
+        let v = view(&model(), None);
+        assert_eq!(
+            (v.rows[0].name.as_str(), &v.rows[0].status),
+            ("All", &RowStatus::Findings(3))
+        );
+        assert_eq!(v.rows[0].id, ALL);
+        assert_eq!(v.rows.len(), 7);
+        assert_eq!(v.heading, "AUDIT · 6 AREAS", "All is not an area");
+    }
+
+    #[test]
+    fn all_is_selected_by_default_when_there_are_findings() {
         let m = model();
         for selected in [None, Some("gone")] {
             let v = view(&m, selected);
-            assert_eq!(v.detail.as_ref().unwrap().id, "correctness");
+            assert_eq!(v.detail.as_ref().unwrap().id, ALL);
+            assert_eq!(
+                v.rows
+                    .iter()
+                    .filter(|r| r.selected)
+                    .map(|r| r.id.as_str())
+                    .collect::<Vec<_>>(),
+                [ALL]
+            );
         }
+        let v = view(&m, Some("concurrency"));
+        assert_eq!(v.detail.unwrap().id, "concurrency", "a choice stands");
+    }
+
+    #[test]
+    fn all_lists_every_finding_once_grouped_in_area_order() {
+        let m = model();
+        let d = view(&m, None).detail.unwrap();
+        assert_eq!(d.name, "All");
+        assert_eq!(
+            group_names(&d),
+            [("Correctness", 1), ("Concurrency", 1), ("Tests", 1)]
+        );
+        let listed: Vec<&str> = d
+            .groups
+            .iter()
+            .flat_map(|g| g.findings.iter().map(|f| f.id.as_str()))
+            .collect();
+        let mut expected: Vec<&str> = m
+            .findings(CheckKind::Audit)
+            .into_iter()
+            .map(|f| f.id.as_str())
+            .collect();
+        let mut got = listed.clone();
+        got.sort();
+        expected.sort();
+        assert_eq!(got, expected, "each finding once");
+        assert!(d.findings.is_empty() && d.passes.is_empty());
+        assert_eq!(d.clean, None);
+    }
+
+    #[test]
+    fn all_sums_up_the_areas_without_a_finding_in_one_line() {
+        let d = view(&model(), None).detail.unwrap();
+        assert_eq!(
+            d.ok_line.as_deref(),
+            Some("Error handling, Performance, Docs and changelog: ok")
+        );
+        let mut one = model();
+        let id = one.findings(CheckKind::Audit)[1].id.clone();
+        one.dismissed.insert(id);
+        let d = view(&one, None).detail.unwrap();
+        assert_eq!(group_names(&d), [("Correctness", 1), ("Tests", 1)]);
+        assert_eq!(
+            d.ok_line.as_deref(),
+            Some("Concurrency, Error handling, Performance, Docs and changelog: ok")
+        );
+    }
+
+    #[test]
+    fn all_counts_what_is_open_and_keeps_accepted_cards() {
+        let mut m = model();
+        let id = m.findings(CheckKind::Audit)[1].id.clone();
+        m.accepted.insert(id);
+        let v = view(&m, None);
+        assert_eq!(
+            (v.rows[0].name.as_str(), &v.rows[0].status),
+            ("All", &RowStatus::Findings(2))
+        );
+        let d = v.detail.unwrap();
+        assert_eq!(
+            group_names(&d),
+            [("Correctness", 1), ("Concurrency", 0), ("Tests", 1)]
+        );
+        assert!(d.groups[1].findings[0].accepted);
+    }
+
+    #[test]
+    fn all_is_the_default_while_any_card_is_listed_even_when_all_are_accepted() {
+        let mut m = model();
+        for f in m.audit.result.as_ref().unwrap().findings.clone() {
+            m.accepted.insert(f.id);
+        }
+        let v = view(&m, None);
+        assert_eq!(v.rows[0].status, RowStatus::Ok, "nothing is open");
+        let d = v.detail.unwrap();
+        assert_eq!(d.id, ALL);
+        assert_eq!(d.groups.len(), 3);
+        assert_eq!(d.clean, None);
+    }
+
+    #[test]
+    fn an_audit_without_findings_opens_on_the_first_area_and_all_says_ok() {
         let mut quiet = model();
         for f in quiet.audit.result.as_mut().unwrap().findings.clone() {
             quiet.dismissed.insert(f.id);
         }
         let v = view(&quiet, None);
-        assert_eq!(v.detail.unwrap().id, "correctness", "else the first area");
+        assert_eq!(
+            (v.rows[0].name.as_str(), &v.rows[0].status),
+            ("All", &RowStatus::Ok)
+        );
+        assert_eq!(v.detail.as_ref().unwrap().id, "correctness");
+        let d = view(&quiet, Some(ALL)).detail.unwrap();
+        assert!(d.groups.is_empty());
+        assert_eq!(d.clean.as_deref(), Some("No findings in any area."));
+        assert_eq!(
+            d.ok_line.as_deref(),
+            Some(
+                "Correctness, Concurrency, Error handling, Performance, Tests, Docs and changelog: ok"
+            )
+        );
+    }
+
+    #[test]
+    fn an_area_without_a_block_is_not_in_the_ok_line() {
+        let mut m = model();
+        m.audit
+            .result
+            .as_mut()
+            .unwrap()
+            .passes
+            .retain(|p| p.area != "docs");
+        let d = view(&m, None).detail.unwrap();
+        assert_eq!(
+            d.ok_line.as_deref(),
+            Some("Error handling, Performance: ok")
+        );
+    }
+
+    #[test]
+    fn a_click_on_all_lists_every_finding_under_a_heading_per_area() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_audits(&mut app);
+        let all = testing::find::<AreaButton>(&mut app, |b| b.area == ALL);
+        testing::activate(&mut app, all);
+        testing::settle(&mut app);
+        assert_eq!(testing::tab(&app, &pr).ui.audit_area.as_deref(), Some(ALL));
+        for needle in [
+            "The refresh lock is held across a network call",
+            "The retry after a revoked token has no test",
+            "Error handling, Performance, Docs and changelog: ok",
+        ] {
+            assert!(testing::shows(&mut app, needle), "shows {needle}");
+        }
     }
 
     #[test]
@@ -1083,8 +1332,8 @@ mod tests {
             None,
             false,
         );
-        assert_eq!(v.rows[0].name, "Is it right?");
-        assert_eq!(v.rows[5].name, "docs");
+        assert_eq!(v.rows[1].name, "Is it right?");
+        assert_eq!(v.rows[6].name, "docs");
     }
 
     #[test]
@@ -1255,7 +1504,11 @@ mod tests {
             .unwrap()
             .areas = ids;
         testing::settle(&mut app);
-        assert_eq!(testing::count::<AreaButton>(&mut app), 10);
+        assert_eq!(
+            testing::count::<AreaButton>(&mut app),
+            11,
+            "All and ten areas"
+        );
         let mut lists = app
             .world_mut()
             .query_filtered::<(&Node, &ChildOf), (With<AreaList>, With<ScrollArea>)>();

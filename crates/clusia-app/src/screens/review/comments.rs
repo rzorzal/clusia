@@ -344,31 +344,37 @@ fn fill_region(
         let pr = body.pr.clone();
         commands.entity(entity).with_children(|p| {
             p.spawn((
-                Node {
-                    flex_grow: 1.0,
-                    width: percent(100),
-                    min_height: px(0),
-                    flex_direction: FlexDirection::Column,
-                    overflow: Overflow::scroll_y(),
-                    ..default()
-                },
+                region_node(),
                 ScrollArea,
                 ScrollPosition::default(),
                 CommentsRegion(pr.clone()),
             ))
             .with_children(|r| {
-                r.spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(12),
-                        padding: UiRect::axes(px(28), px(20)),
-                        max_width: px(920),
-                        ..default()
-                    },
-                    ListPart { pr, built: None },
-                ));
+                r.spawn((list_node(), ListPart { pr, built: None }));
             });
         });
+    }
+}
+
+/// The scrolling region that holds the list.
+fn region_node() -> Node {
+    Node {
+        flex_grow: 1.0,
+        width: percent(100),
+        min_height: px(0),
+        flex_direction: FlexDirection::Column,
+        overflow: Overflow::scroll_y(),
+        ..default()
+    }
+}
+
+/// The list's column. It has no width of its own: it stretches across the region.
+fn list_node() -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: px(12),
+        padding: UiRect::axes(px(28), px(20)),
+        ..default()
     }
 }
 
@@ -1272,6 +1278,81 @@ mod tests {
         testing::settle(&mut app);
         assert_eq!(testing::count::<EditorArea>(&mut app), 1);
         assert_eq!(testing::count::<DraftEdit>(&mut app), 0, "edited in place");
+    }
+
+    #[test]
+    fn the_comment_column_fills_the_region_on_a_wide_window() {
+        use bevy::camera::{Camera, ComputedCameraValues, RenderTargetInfo, Viewport};
+        use bevy::ui::ComputedNode;
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            bevy::input::InputPlugin,
+            bevy::window::WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            },
+            bevy::transform::TransformPlugin,
+            bevy::image::ImagePlugin::default(),
+            bevy::text::TextPlugin,
+            bevy::picking::DefaultPickingPlugins,
+            bevy::ui::UiPlugin,
+        ))
+        .init_asset::<bevy::image::TextureAtlasLayout>();
+        let size = UVec2::new(2400, 800);
+        app.world_mut().spawn((
+            Camera2d,
+            Camera {
+                computed: ComputedCameraValues {
+                    target_info: Some(RenderTargetInfo {
+                        physical_size: size,
+                        scale_factor: 1.0,
+                    }),
+                    ..default()
+                },
+                viewport: Some(Viewport {
+                    physical_size: size,
+                    ..default()
+                }),
+                ..default()
+            },
+        ));
+        let (region, list) = {
+            let world = app.world_mut();
+            let root = world
+                .spawn(Node {
+                    width: percent(100),
+                    height: percent(100),
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                })
+                .id();
+            let region = world.spawn((region_node(), ChildOf(root))).id();
+            let list = world.spawn((list_node(), ChildOf(region))).id();
+            // A card as wide as its text wants, so the column has something to stretch around.
+            world.spawn((
+                Node {
+                    width: px(300),
+                    height: px(40),
+                    ..default()
+                },
+                ChildOf(list),
+            ));
+            (region, list)
+        };
+        app.update();
+        app.update();
+        let region = app.world().get::<ComputedNode>(region).unwrap();
+        let list = app.world().get::<ComputedNode>(list).unwrap();
+        assert!(region.size.x >= 2000.0, "the region spans the window");
+        let inner = region.size.x - region.scrollbar_size.x;
+        assert_eq!(
+            list.size.x, inner,
+            "the column reaches the region's inner width"
+        );
     }
 
     #[test]
