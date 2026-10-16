@@ -2892,6 +2892,18 @@ pub(crate) fn demo_answers(
                 pr,
             }),
             Ask::CloseReview(pr) | Ask::Discard(pr) => tells.push(Tell::Left(pr)),
+            // The window already applied the change to its copy of the set; the demo has no
+            // other store, so the daemon's answer is that copy.
+            Ask::GetHiddenComments(pr)
+            | Ask::SetCommentHidden { pr, .. }
+            | Ask::ShowComments { pr, .. } => {
+                let set = tabs
+                    .0
+                    .get(&pr)
+                    .map(|t| t.ui.hidden.clone())
+                    .unwrap_or_default();
+                tells.push(Tell::Hidden { pr, set });
+            }
             // Nothing keeps the demo's tabs.
             Ask::SetOpenTabs(_) => {}
             Ask::SearchGifs { query, offset } => {
@@ -3512,6 +3524,29 @@ mod tests {
             .add_systems(Update, demo_answers);
         app.update();
         inbox.0.try_iter().collect()
+    }
+
+    #[test]
+    fn the_demo_answers_the_hidden_comment_asks() {
+        let pr = fixture::demo_pr();
+        let tells = demo_tells(vec![
+            Ask::GetHiddenComments(pr.clone()),
+            Ask::SetCommentHidden {
+                pr: pr.clone(),
+                key: "thread:T1".into(),
+                posts: Some(2),
+            },
+            Ask::ShowComments {
+                pr: pr.clone(),
+                keys: vec!["thread:T1".into()],
+            },
+        ]);
+        assert_eq!(tells.len(), 3);
+        assert!(
+            tells
+                .iter()
+                .all(|t| matches!(t, Tell::Hidden { pr: p, .. } if *p == pr))
+        );
     }
 
     #[test]

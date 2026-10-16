@@ -680,6 +680,21 @@ mod tests {
         app
     }
 
+    #[test]
+    fn no_demo_scene_starts_with_a_toast() {
+        for &scene in Scene::value_variants() {
+            let mut app = staged(scene);
+            app.add_systems(Update, crate::bridge::demo_answers);
+            testing::settle(&mut app);
+            let toasts = &app.world().resource::<crate::bridge::Toasts>().0;
+            assert!(
+                toasts.iter().all(|t| !t.text.starts_with("Demo mode")),
+                "{scene:?} shows {:?}",
+                toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+            );
+        }
+    }
+
     fn modal_shown(app: &mut App, modal: Modal) -> bool {
         let mut q = app.world_mut().query::<&ModalFor>();
         q.iter(app.world()).any(|m| m.modal == modal)
