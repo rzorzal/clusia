@@ -190,13 +190,24 @@ fn variant_swatches(v: Variant) -> (Swatch, Swatch, Swatch, Swatch) {
     }
 }
 
+/// The side padding of a one-line label, with the bottom padding that raises the label by
+/// `fonts::label_lift` (centring the padded box moves its content up by half the padding).
+pub fn label_padding(side: f32, size: f32) -> UiRect {
+    UiRect {
+        left: px(side),
+        right: px(side),
+        top: px(0),
+        bottom: px(2.0 * crate::fonts::label_lift(size)),
+    }
+}
+
 /// A 30 px button. Attach `observe(|_: On<Activate>, …| …)` for the action.
 pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
     let (fill, hover, ink, stroke) = variant_swatches(v);
     (
         Node {
             height: px(30),
-            padding: UiRect::horizontal(px(12)),
+            padding: label_padding(12.0, Type::STRONG.size),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             align_self: AlignSelf::Start,
@@ -221,11 +232,11 @@ pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
     )
 }
 
-/// The fill of a button of variant `v` while pressed: one step past its hover.
+/// The fill of a button of variant `v` while pressed: a step past its hover.
 fn press_swatch(v: Variant) -> Swatch {
     match v {
-        Variant::Primary => Swatch::GreenHover,
-        Variant::Danger => Swatch::OrangeSoft,
+        Variant::Primary => Swatch::GreenPress,
+        Variant::Danger => Swatch::OrangePress,
         Variant::Secondary | Variant::Ghost => Swatch::Line,
     }
 }
@@ -252,11 +263,8 @@ fn icon_bars(icon: Icon, ink: Swatch) -> [impl Bundle; 2] {
         Icon::Close => [45.0, -45.0],
         Icon::Plus => [0.0, 90.0],
     };
-    // The longer diagonal strokes reach the same corners as the straight ones reach the edges.
-    let length = match icon {
-        Icon::Close => ICON_SIDE * 1.05,
-        Icon::Plus => ICON_SIDE,
-    };
+    // Both icons use strokes of one length, so the turned × is narrower than the +, as is usual.
+    let length = ICON_SIDE;
     degrees.map(|d| {
         (
             IconBar,
@@ -317,7 +325,7 @@ pub fn disabled_button(fonts: &UiFonts, label: &str) -> impl Bundle {
     (
         Node {
             height: px(30),
-            padding: UiRect::horizontal(px(12)),
+            padding: label_padding(12.0, Type::STRONG.size),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             align_self: AlignSelf::Start,
@@ -356,7 +364,7 @@ pub fn segments() -> impl Bundle {
 pub fn segment_node() -> Node {
     Node {
         height: px(26),
-        padding: UiRect::horizontal(px(12)),
+        padding: label_padding(12.0, Type::STRONG.size),
         align_items: AlignItems::Center,
         justify_content: JustifyContent::Center,
         border_radius: BorderRadius::all(px(6)),
@@ -1052,10 +1060,33 @@ mod tests {
         for seg in segs {
             let label = app.world().get::<Children>(seg).unwrap()[0];
             let (l, s) = (testing::center(&app, label), testing::center(&app, seg));
+            assert_eq!(l.x, s.x, "centred across");
+            // Raised by what the font's line box puts below the letters' middle (a pixel at most).
             assert!(
-                (l - s).abs().max_element() < 0.01,
+                s.y - l.y >= 0.0 && s.y - l.y <= 1.0,
                 "label at {l}, segment at {s}"
             );
+        }
+    }
+
+    #[test]
+    fn primary_and_danger_buttons_show_a_press_too() {
+        use bevy::ui::Pressed;
+        let mut app = testing::app(Snapshot::default());
+        let fonts = UiFonts::default();
+        for (v, hover, press) in [
+            (Variant::Primary, LIGHT.green_hover, LIGHT.green_press),
+            (Variant::Danger, LIGHT.orange_soft, LIGHT.orange_press),
+        ] {
+            let b = app.world_mut().spawn(button(&fonts, "Go", v)).id();
+            app.update();
+            app.world_mut().entity_mut(b).insert(Hovered(true));
+            app.update();
+            assert_eq!(bg(&mut app, b), hover);
+            app.world_mut().entity_mut(b).insert(Pressed);
+            app.update();
+            assert_eq!(bg(&mut app, b), press, "{v:?}");
+            assert_ne!(hover, press);
         }
     }
 

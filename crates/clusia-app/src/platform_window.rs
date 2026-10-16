@@ -134,7 +134,6 @@ pub fn displays() -> Vec<Display> {
                     visible.size.width,
                     visible.size.height,
                 ),
-                scale: screen.backingScaleFactor(),
             }
         })
         .collect()
@@ -161,6 +160,8 @@ pub struct FrameMemory {
     remembered: Remembered,
     /// A frame not yet written, and the time it was first seen.
     pending: Option<(Rect, f32)>,
+    /// The frame in the file now: a window that stays put is not written again.
+    last_saved: Option<Rect>,
 }
 
 impl FrameMemory {
@@ -169,6 +170,7 @@ impl FrameMemory {
             remembered: Remembered::load(&file),
             file,
             pending: None,
+            last_saved: None,
         }
     }
 
@@ -204,7 +206,9 @@ fn remember_frame(
     if let WindowPosition::At(at) = window.position {
         let size = Vec2::new(window.resolution.width(), window.resolution.height());
         let frame = frame_of(at, size, window.resolution.scale_factor());
-        if memory.pending.map(|(f, _)| f) != Some(frame) {
+        if memory.last_saved == Some(frame) {
+            memory.pending = None;
+        } else if memory.pending.map(|(f, _)| f) != Some(frame) {
             memory.pending = Some((frame, now));
         }
     }
@@ -215,11 +219,34 @@ fn remember_frame(
         return;
     }
     memory.pending = None;
+    memory.last_saved = Some(frame);
     let connected = (source.0)();
     memory.remembered.record(frame, &connected);
     if let Err(e) = memory.remembered.save(&memory.file) {
         tracing::warn!(file = %memory.file.display(), "cannot save the window frame: {e}");
     }
+}
+
+/// The frame the window should take once it exists, set once (`None`: leave it where the system
+/// put it).
+#[derive(Resource, Debug)]
+pub struct PlaceWindow(pub Option<Rect>);
+
+/// Moves the window to its remembered frame. The position is in device pixels, so it is
+/// scaled by the window's own scale factor: that is the one the system reads it back with.
+fn place_window(
+    mut place: ResMut<PlaceWindow>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    let (Some(frame), Ok(mut window)) = (place.0, windows.single_mut()) else {
+        return;
+    };
+    place.0 = None;
+    let scale = f64::from(window.resolution.scale_factor());
+    window.position = WindowPosition::At(IVec2::new(
+        (frame.x * scale).round() as i32,
+        (frame.y * scale).round() as i32,
+    ));
 }
 
 /// Registers the icon, the Reduce Motion follower and the window frame memory.
@@ -230,7 +257,15 @@ impl Plugin for PlatformPlugin {
         app.init_resource::<ReduceMotionSource>()
             .init_resource::<DisplaySource>()
             .add_systems(Startup, set_icon)
-            .add_systems(Update, (follow_reduce_motion, remember_frame));
+            .add_systems(
+                Update,
+                (
+                    follow_reduce_motion,
+                    place_window.run_if(resource_exists::<PlaceWindow>),
+                    remember_frame,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -317,7 +352,6 @@ mod tests {
         vec![Display {
             id: "laptop".into(),
             visible: Rect::new(0.0, 25.0, 1512.0, 920.0),
-            scale: 2.0,
         }]
     }
 
@@ -369,6 +403,40 @@ mod tests {
             Some(Rect::new(90.0, 30.0, 1400.0, 900.0)),
             "the last position, not the first"
         );
+    }
+
+    #[test]
+    fn a_window_that_stays_put_is_written_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("window.json");
+        let (mut app, _) = frame_app(&file, window_at(80, 100, 1400, 900));
+        for _ in 0..4 {
+            app.update();
+        }
+        assert!(file.exists());
+        std::fs::remove_file(&file).unwrap();
+        for _ in 0..12 {
+            app.update();
+        }
+        assert!(!file.exists(), "the same frame is not written again");
+    }
+
+    #[test]
+    fn the_saved_window_is_placed_with_the_scale_of_the_window_itself() {
+        let (mut app, window) = frame_app(
+            Path::new("/nonexistent/window.json"),
+            Window {
+                resolution: bevy::window::WindowResolution::new(1400, 900)
+                    .with_scale_factor_override(2.0),
+                ..default()
+            },
+        );
+        app.insert_resource(PlaceWindow(Some(Rect::new(100.0, 50.0, 1400.0, 900.0))))
+            .add_systems(Update, place_window);
+        app.update();
+        let w = app.world().get::<Window>(window).unwrap();
+        assert_eq!(w.position, WindowPosition::At(IVec2::new(200, 100)));
+        assert!(app.world().resource::<PlaceWindow>().0.is_none(), "once");
     }
 
     #[test]

@@ -7,7 +7,7 @@ use bevy::input_focus::tab_navigation::TabNavigationPlugin;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy::window::{WindowPosition, WindowResizeConstraints};
+use bevy::window::WindowResizeConstraints;
 use bevy::winit::WinitSettings;
 use clusia_core::{Density, Paths};
 use clusia_protocol::WindowTarget;
@@ -131,7 +131,8 @@ pub fn run(launch: Launch) {
         commands.spawn(Camera2d);
     });
     if let Some(memory) = memory {
-        app.insert_resource(memory);
+        app.insert_resource(platform_window::PlaceWindow(placed))
+            .insert_resource(memory);
     }
     if let Some(scene) = launch.scene {
         app.add_plugins(crate::scenes::ScenePlugin(scene));
@@ -158,29 +159,21 @@ pub fn run(launch: Launch) {
     }
 }
 
-/// Where the window opens, and the scale of the display it opens on: filling the visible area of
-/// the display the first time, then where it was left. `None` when no display is known.
-fn opening_frame(remembered: &Remembered, displays: &[Display]) -> Option<(Rect, f64)> {
-    let frame = remembered.placement(displays)?;
-    let scale = Remembered::display_of(&frame, displays)?.scale;
-    Some((frame, scale))
+/// Where the window opens: filling the visible area of the display the first time, then where
+/// it was left. `None` when no display is known.
+fn opening_frame(remembered: &Remembered, displays: &[Display]) -> Option<Rect> {
+    remembered.placement(displays)
 }
 
-fn window(placed: Option<(Rect, f64)>) -> Window {
-    let (position, resolution) = match placed {
-        // The position is in device pixels, the size in points.
-        Some((frame, scale)) => (
-            WindowPosition::At(IVec2::new(
-                (frame.x * scale).round() as i32,
-                (frame.y * scale).round() as i32,
-            )),
-            (frame.w.round() as u32, frame.h.round() as u32).into(),
-        ),
-        None => (WindowPosition::Automatic, (1280, 800).into()),
+/// The window at its opening size. Its position is set once it exists (`place_window`): a
+/// position given at creation is in device pixels of a display the window is not on yet.
+fn window(placed: Option<Rect>) -> Window {
+    let resolution = match placed {
+        Some(frame) => (frame.w.round() as u32, frame.h.round() as u32).into(),
+        None => (1280, 800).into(),
     };
     Window {
         title: "Clúsia".into(),
-        position,
         resolution,
         resize_constraints: WindowResizeConstraints {
             min_width: 960.0,
@@ -223,12 +216,10 @@ mod tests {
             Display {
                 id: "laptop".into(),
                 visible: Rect::new(0.0, 25.0, 1512.0, 920.0),
-                scale: 2.0,
             },
             Display {
                 id: "monitor".into(),
                 visible: Rect::new(1512.0, 0.0, 2560.0, 1415.0),
-                scale: 1.0,
             },
         ]
     }
@@ -237,7 +228,6 @@ mod tests {
     fn the_first_window_fills_the_main_display_under_the_menu_bar() {
         let placed = opening_frame(&Remembered::default(), &desk()).unwrap();
         let w = window(Some(placed));
-        assert_eq!(w.position, WindowPosition::At(IVec2::new(0, 50)), "pixels");
         assert_eq!(
             (w.resolution.width(), w.resolution.height()),
             (1512.0, 920.0)
@@ -245,12 +235,11 @@ mod tests {
     }
 
     #[test]
-    fn a_remembered_window_opens_on_its_display_at_that_display_scale() {
+    fn a_remembered_window_opens_at_its_size() {
         let mut saved = Remembered::default();
         saved.record(Rect::new(1700.0, 100.0, 1400.0, 900.0), &desk());
         let placed = opening_frame(&saved, &desk()).unwrap();
         let w = window(Some(placed));
-        assert_eq!(w.position, WindowPosition::At(IVec2::new(1700, 100)));
         assert_eq!(
             (w.resolution.width(), w.resolution.height()),
             (1400.0, 900.0)
@@ -261,7 +250,6 @@ mod tests {
     fn without_displays_the_window_keeps_its_default_size() {
         assert_eq!(opening_frame(&Remembered::default(), &[]), None);
         let w = window(None);
-        assert_eq!(w.position, WindowPosition::Automatic);
         assert_eq!(
             (w.resolution.width(), w.resolution.height()),
             (1280.0, 800.0)

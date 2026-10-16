@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 /// The smallest window (`app::window`'s resize constraints).
 pub const MIN_WIDTH: f64 = 960.0;
 pub const MIN_HEIGHT: f64 = 640.0;
+/// No window or display is larger than this; anything beyond it in the file is corrupt.
+const MAX_SIDE: f64 = 100_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -48,8 +50,6 @@ impl Rect {
 pub struct Display {
     pub id: String,
     pub visible: Rect,
-    /// Device pixels per point.
-    pub scale: f64,
 }
 
 /// The last frame the window had on each display, and the display it was last on.
@@ -81,7 +81,11 @@ impl Remembered {
                             number(v, "w")?,
                             number(v, "h")?,
                         );
-                        (r.w >= MIN_WIDTH && r.h >= MIN_HEIGHT).then(|| (id.clone(), r))
+                        let sane = (MIN_WIDTH..=MAX_SIDE).contains(&r.w)
+                            && (MIN_HEIGHT..=MAX_SIDE).contains(&r.h)
+                            && r.x.abs() <= MAX_SIDE
+                            && r.y.abs() <= MAX_SIDE;
+                        sane.then(|| (id.clone(), r))
                     })
                     .collect()
             })
@@ -97,7 +101,13 @@ impl Remembered {
             .map(|(id, r)| (id.clone(), json!({"x": r.x, "y": r.y, "w": r.w, "h": r.h})))
             .collect();
         let text = json!({"frames": frames, "last": self.last});
-        std::fs::write(path, serde_json::to_string_pretty(&text)?)
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        // Written beside the file and renamed over it, so a crash never leaves half a file.
+        let partial = path.with_extension("json.tmp");
+        std::fs::write(&partial, serde_json::to_string_pretty(&text)?)?;
+        std::fs::rename(&partial, path)
     }
 
     /// The display `frame` overlaps most.
@@ -148,7 +158,6 @@ mod tests {
         Display {
             id: id.into(),
             visible: Rect::new(x, y, w, h),
-            scale: 2.0,
         }
     }
 
@@ -222,6 +231,33 @@ mod tests {
         saved.record(Rect::new(9000.0, 0.0, 1200.0, 800.0), &desk());
         saved.record(Rect::new(10.0, 40.0, 300.0, 200.0), &desk());
         assert_eq!(saved, Remembered::default());
+    }
+
+    #[test]
+    fn saving_creates_the_folder_and_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state/window.json");
+        let mut saved = Remembered::default();
+        saved.record(Rect::new(40.0, 60.0, 1100.0, 700.0), &desk());
+        saved.save(&file).unwrap();
+        assert_eq!(Remembered::load(&file), saved);
+        let names: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["window.json"], "the temporary file is gone");
+    }
+
+    #[test]
+    fn absurd_sizes_in_the_file_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("window.json");
+        std::fs::write(
+            &file,
+            r#"{"frames":{"laptop":{"x":0,"y":0,"w":1e9,"h":900}}}"#,
+        )
+        .unwrap();
+        assert_eq!(Remembered::load(&file), Remembered::default());
     }
 
     #[test]
