@@ -17,9 +17,15 @@ use crate::app::StartTarget;
 use crate::bridge::{Ask, Asks, Connection, Model, ShowRequested, Toast, Toasts};
 use crate::fonts::UiFonts;
 use crate::platform_window::{Foregrounds, bring_forward};
+use crate::screens::review::activity::Work;
+use crate::screens::review::agent::model::Chats;
+use crate::screens::review::checks::Checks;
+use crate::screens::review::diagrams::Diagrams;
+use crate::screens::review::revalidation::Revalidations;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{Fill, HoverFill, Stroke, Type, Variant, button, panel, text};
+use crate::ui::spinner::spinner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
@@ -197,6 +203,8 @@ pub struct TabView {
     pub target: TabTarget,
     pub label: String,
     pub on: bool,
+    /// Agent work runs for this review: the tab carries a spinner.
+    pub working: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -210,6 +218,7 @@ pub fn top_bar_view(nav: &Nav, snap: &Snapshot) -> TopBarView {
         target: TabTarget::Home,
         label: "Home".into(),
         on: matches!(nav.screen, Screen::Home | Screen::FirstRun),
+        working: false,
     }];
     for pr in &nav.reviews {
         let label = match pr_title(snap, pr) {
@@ -220,6 +229,7 @@ pub fn top_bar_view(nav: &Nav, snap: &Snapshot) -> TopBarView {
             target: TabTarget::Review(pr.clone()),
             label,
             on: nav.screen == Screen::Review(pr.clone()),
+            working: false,
         });
     }
     TopBarView {
@@ -454,9 +464,18 @@ fn rebuild_top_bar(
     model: Res<Model>,
     fonts: Res<UiFonts>,
     leaf: Res<Leaf>,
+    chats: Res<Chats>,
+    checks: Res<Checks>,
+    diagrams: Res<Diagrams>,
+    revalidations: Res<Revalidations>,
     mut bars: Query<(Entity, &mut TopBar)>,
 ) {
-    let view = top_bar_view(&nav, &model.snapshot);
+    let mut view = top_bar_view(&nav, &model.snapshot);
+    for tab in &mut view.tabs {
+        if let TabTarget::Review(pr) = &tab.target {
+            tab.working = Work::of(pr, &chats, &checks, &diagrams, &revalidations).any();
+        }
+    }
     for (entity, mut bar) in &mut bars {
         if bar.built.as_ref() == Some(&view) {
             continue;
@@ -482,6 +501,9 @@ fn rebuild_top_bar(
                     }
                     TabTarget::Review(pr) => {
                         e.with_children(|t| {
+                            if tab.working {
+                                t.spawn(spinner());
+                            }
                             t.spawn(text(&fonts, tab.label.clone(), label));
                             t.spawn((
                                 button(&fonts, "×", Variant::Ghost),
@@ -779,6 +801,79 @@ mod tests {
         let labels: Vec<&str> = v.tabs.iter().map(|t| t.label.as_str()).collect();
         assert_eq!(labels, ["Home", "#98 api pagination for long pull…", "#5"]);
         assert!(v.tabs[2].on && !v.tabs[0].on && !v.config_on);
+    }
+
+    fn review_tab_marks(app: &mut App, pr: &PrRef) -> usize {
+        let tab = testing::find::<TabTarget>(app, |t| *t == TabTarget::Review(pr.clone()));
+        testing::marks_in(app, tab)
+    }
+
+    #[test]
+    fn the_review_tab_spins_while_any_agent_work_runs_for_it() {
+        use crate::bridge::{AgentTell, ChecksTell, DiagramsTell, RevalidationTell, Tell};
+        use clusia_core::revalidation::RoundState;
+        use clusia_protocol::{CheckState, DiagramsState, SessionStateKind};
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        let review = testing::ready(&app, &pr).view.review.clone();
+        assert_eq!(review_tab_marks(&mut app, &pr), 0, "idle");
+        let home = testing::find::<TabTarget>(&mut app, |t| *t == TabTarget::Home);
+        let run = |app: &mut App, on: Tell, off: Tell| {
+            testing::tell(app, on);
+            testing::settle(app);
+            assert_eq!(review_tab_marks(app, &pr), 1, "while it runs");
+            testing::tell(app, off);
+            testing::settle(app);
+            assert_eq!(review_tab_marks(app, &pr), 0, "when it ends");
+        };
+        let state = |state| {
+            Tell::Agent(AgentTell::State {
+                pr: pr.clone(),
+                state,
+            })
+        };
+        run(
+            &mut app,
+            state(SessionStateKind::Running),
+            state(SessionStateKind::Ready),
+        );
+        let check = |state| {
+            Tell::Checks(ChecksTell::State {
+                pr: pr.clone(),
+                kind: clusia_core::checks::CheckKind::Audit,
+                state,
+            })
+        };
+        run(
+            &mut app,
+            check(CheckState::Running { activity: None }),
+            check(CheckState::Failed {
+                message: "It stopped".into(),
+            }),
+        );
+        let drawing = |state| {
+            Tell::Diagrams(DiagramsTell::State {
+                pr: pr.clone(),
+                state,
+            })
+        };
+        run(
+            &mut app,
+            drawing(DiagramsState::Planning),
+            drawing(DiagramsState::Idle),
+        );
+        let round = |state| {
+            Tell::Revalidation(RevalidationTell::Round {
+                pr: pr.clone(),
+                round: Some(testing::demo_round(&mut review.clone(), state)),
+            })
+        };
+        run(
+            &mut app,
+            round(RoundState::Running { activity: None }),
+            round(RoundState::Done),
+        );
+        assert_eq!(testing::marks_in(&app, home), 0, "the Home tab never spins");
     }
 
     #[test]

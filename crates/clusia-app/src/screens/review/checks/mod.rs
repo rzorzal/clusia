@@ -194,12 +194,17 @@ impl ChecksModel {
             .collect()
     }
 
+    /// The check waits for a place or runs.
+    pub fn running(&self, kind: CheckKind) -> bool {
+        active(&self.kind(kind).state)
+    }
+
     /// The tab label's mark: `●` while the check waits or runs, else the open findings of a
     /// result the tab lists (done, or stale). A failed or stopped check shows its notice.
     pub fn badge(&self, kind: CheckKind) -> Option<String> {
         let state = &self.kind(kind).state;
         if active(state) {
-            return Some("●".to_string());
+            return Some(crate::screens::review::activity::MARK.to_string());
         }
         if !matches!(state, CheckState::Done | CheckState::Stale) {
             return None;
@@ -1451,21 +1456,60 @@ mod tests {
         assert!(app.world().resource::<Checks>().0[&pr].pending.is_empty());
     }
 
-    #[test]
-    fn the_tab_labels_carry_the_badges() {
-        let mut app = testing::app(fixture::demo(NOW));
-        let pr = testing::open_ready(&mut app, false);
-        assert!(!testing::shows(&mut app, "●"), "nothing runs");
+    fn section_marks(app: &mut App, section: ReviewSection) -> usize {
+        let tab = testing::find::<crate::screens::review::shell::SectionTab>(app, |t| {
+            t.section == section
+        });
+        testing::marks_in(app, tab)
+    }
+
+    fn check_state(app: &mut App, pr: &PrRef, kind: CheckKind, state: CheckState) {
         testing::tell(
-            &mut app,
+            app,
             Tell::Checks(ChecksTell::State {
-                pr,
-                kind: CheckKind::Security,
-                state: CheckState::Running { activity: None },
+                pr: pr.clone(),
+                kind,
+                state,
             }),
         );
-        testing::settle(&mut app);
-        assert!(testing::shows(&mut app, "●"));
+        testing::settle(app);
+    }
+
+    #[test]
+    fn a_running_check_puts_a_spinner_on_its_tab_until_it_ends_fails_or_stops() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        for section in [ReviewSection::Security, ReviewSection::Audits] {
+            assert_eq!(section_marks(&mut app, section), 0, "nothing runs");
+        }
+        for (kind, section, other) in [
+            (
+                CheckKind::Security,
+                ReviewSection::Security,
+                ReviewSection::Audits,
+            ),
+            (
+                CheckKind::Audit,
+                ReviewSection::Audits,
+                ReviewSection::Security,
+            ),
+        ] {
+            for end in [
+                CheckState::Done,
+                CheckState::Failed {
+                    message: "It stopped".into(),
+                },
+                CheckState::NotRun,
+            ] {
+                check_state(&mut app, &pr, kind, CheckState::Waiting);
+                assert_eq!(section_marks(&mut app, section), 1, "waiting");
+                check_state(&mut app, &pr, kind, CheckState::Running { activity: None });
+                assert_eq!(section_marks(&mut app, section), 1, "running");
+                assert_eq!(section_marks(&mut app, other), 0, "only its own tab");
+                check_state(&mut app, &pr, kind, end.clone());
+                assert_eq!(section_marks(&mut app, section), 0, "{end:?}");
+            }
+        }
     }
 
     fn toasts(app: &App) -> Vec<String> {

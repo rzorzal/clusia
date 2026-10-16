@@ -24,6 +24,7 @@ use crate::fonts::UiFonts;
 use crate::nav::{Nav, Screen};
 use crate::review_state::ReviewTabs;
 use crate::screens::review::ReviewSystems;
+use crate::screens::review::activity::elapsed_label;
 use crate::screens::review::editor::read_only_reason;
 use crate::screens::review::shell::{HarnessButton, RightPanel, on_harness};
 use crate::snapshot::Snapshot;
@@ -33,6 +34,7 @@ use crate::ui::kit::{
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown};
+use crate::ui::spinner::{beat, spinner};
 use crate::ui::text_area::{Caret, growing_line_area, set_text};
 
 /// The `TextArea::id` of the chat input.
@@ -68,6 +70,8 @@ impl PanelTabs {
 struct TabsView {
     tab: PanelTab,
     drafts: usize,
+    /// A turn runs: the Agent tab carries a beating dot.
+    working: bool,
 }
 
 /// One of the two tabs.
@@ -141,6 +145,25 @@ struct ChatHeader {
 struct Transcript {
     pr: PrRef,
     built: Option<Vec<ChatLine>>,
+    /// The transcript ends with the live row (a turn runs).
+    live: bool,
+    /// `Time::elapsed_secs_f64` when this window first drew the live row of the running turn, for
+    /// its elapsed time. The daemon does not tell when a turn began, so a turn already running
+    /// when the window opened counts from then.
+    since: Option<f64>,
+}
+
+/// The last row of the transcript while a turn runs: a spinner, who works, for how long, and
+/// **Stop**.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct LiveRow(pub PrRef);
+
+/// The elapsed time of the live row; `shown` is the whole seconds it says, so the text is
+/// written once a second and not every frame.
+#[derive(Component, Debug)]
+struct LiveElapsed {
+    since: f64,
+    shown: Option<u64>,
 }
 
 #[derive(Component)]
@@ -180,6 +203,7 @@ impl Plugin for AgentPanel {
                 apply_prefill,
                 rebuild_header,
                 rebuild_transcript,
+                tick_elapsed,
                 rebuild_hints,
                 rebuild_rules,
                 send_on_enter,
@@ -361,6 +385,7 @@ fn rebuild_tabs(
         let want = TabsView {
             tab: chat.tab,
             drafts,
+            working: chat.busy(),
         };
         if header.built.as_ref() == Some(&want) {
             continue;
@@ -385,6 +410,7 @@ fn rebuild_tabs(
                         height: px(38),
                         padding: UiRect::horizontal(px(10)),
                         align_items: AlignItems::Center,
+                        column_gap: px(6),
                         border: UiRect::bottom(px(2)),
                         ..default()
                     },
@@ -401,12 +427,31 @@ fn rebuild_tabs(
                         tab,
                     },
                     observe(on_tab),
-                    children![text(
+                ))
+                .with_children(|t| {
+                    t.spawn(text(
                         &fonts,
                         label,
-                        if on { Type::STRONG } else { Type::MUTED }
-                    )],
-                ));
+                        if on { Type::STRONG } else { Type::MUTED },
+                    ));
+                    if want.working && tab == PanelTab::Agent {
+                        t.spawn(beat());
+                    }
+                });
+            }
+            // The live row is on the Agent tab only; a turn can be stopped from either.
+            if want.working {
+                row.spawn(Node {
+                    flex_grow: 1.0,
+                    ..default()
+                });
+                row.spawn((
+                    button(&fonts, "Stop", Variant::Ghost),
+                    ChatStop(pr.clone()),
+                    observe(on_stop),
+                ))
+                .entry::<Node>()
+                .and_modify(|mut node| node.align_self = AlignSelf::Center);
             }
         });
         header.built = Some(want);
@@ -457,6 +502,8 @@ fn fill_region(
                 Transcript {
                     pr: pr.clone(),
                     built: None,
+                    live: false,
+                    since: None,
                 },
             ));
             footer(p, &fonts, &pr);
@@ -600,7 +647,6 @@ fn rebuild_header(
         if header.built.as_ref() == Some(&want) {
             continue;
         }
-        let pr = header.pr.clone();
         commands.entity(entity).despawn_related::<Children>();
         if !want.ready {
             commands
@@ -649,16 +695,6 @@ fn rebuild_header(
                     Type::META,
                 ));
             });
-            if matches!(
-                want.state,
-                SessionStateKind::Running | SessionStateKind::Queued
-            ) {
-                h.spawn((
-                    button(&fonts, "Stop", Variant::Ghost),
-                    ChatStop(pr.clone()),
-                    observe(on_stop),
-                ));
-            }
             h.spawn((
                 button(&fonts, "Settings", Variant::Ghost),
                 HarnessButton,
@@ -690,6 +726,7 @@ fn rebuild_transcript(
     fonts: Res<UiFonts>,
     theme: Res<Theme>,
     model: Res<Model>,
+    time: Res<Time>,
     mut parts: Query<(
         Entity,
         &mut Transcript,
@@ -703,36 +740,96 @@ fn rebuild_transcript(
         let Some(chat) = chats.0.get(&part.pr).filter(|c| c.tab == PanelTab::Agent) else {
             continue;
         };
-        if part.built.as_ref() == Some(&chat.lines) {
+        let live = chat.busy();
+        if part.built.as_ref() == Some(&chat.lines) && part.live == live {
             continue;
         }
         let pr = part.pr.clone();
         let follow = part.built.is_none() || at_bottom(node);
-        let last = children.and_then(|c| c.last()).copied();
-        match (last, part.built.as_deref()) {
-            (Some(last), Some(built)) if only_the_answer_grew(built, &chat.lines) => {
-                // Each line is one child, so the answer's line is the last one.
-                commands.entity(last).despawn();
-                commands.entity(entity).with_children(|t| {
-                    if let Some(line) = chat.lines.last() {
-                        chat_line(t, &fonts, &pr, line, &opts);
-                    }
-                });
+        let now = time.elapsed_secs_f64();
+        let since = match (live, part.since) {
+            (true, since) => since.unwrap_or(now),
+            (false, _) => now,
+        };
+        // The live row is the last child, after the lines.
+        let tail = usize::from(part.live);
+        let grew = part.live == live
+            && part
+                .built
+                .as_deref()
+                .is_some_and(|built| only_the_answer_grew(built, &chat.lines));
+        let mut spawn_from = 0;
+        match children {
+            Some(children) if grew && children.len() > tail => {
+                // Each line is one child, so the answer's line is the last one before the row.
+                for child in &children[children.len() - 1 - tail..] {
+                    commands.entity(*child).despawn();
+                }
+                spawn_from = chat.lines.len() - 1;
             }
             _ => {
                 commands.entity(entity).despawn_related::<Children>();
-                commands.entity(entity).with_children(|t| {
-                    for line in &chat.lines {
-                        chat_line(t, &fonts, &pr, line, &opts);
-                    }
-                });
             }
         }
+        commands.entity(entity).with_children(|t| {
+            for (i, line) in chat.lines.iter().enumerate().skip(spawn_from) {
+                // Only the last line can be the call that is still running.
+                let running = live && i + 1 == chat.lines.len();
+                chat_line(t, &fonts, &pr, line, &opts, running);
+            }
+            if live {
+                live_row(t, &fonts, &pr, &chat.agent_name(), since);
+            }
+        });
         if follow {
             // The layout clamps this to the end of the content: the newest line stays in view.
             scroll.y = f32::MAX;
         }
+        part.since = live.then_some(since);
+        part.live = live;
         part.built = Some(chat.lines.clone());
+    }
+}
+
+/// The row that ends the transcript while a turn runs.
+fn live_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, name: &str, since: f64) {
+    p.spawn((
+        Node {
+            align_items: AlignItems::Center,
+            column_gap: px(8),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        LiveRow(pr.clone()),
+    ))
+    .with_children(|r| {
+        r.spawn(spinner());
+        r.spawn(text(fonts, format!("{name} is working…"), Type::MUTED));
+        r.spawn((
+            text(fonts, elapsed_label(0), Type::META),
+            LiveElapsed { since, shown: None },
+        ));
+        r.spawn(Node {
+            flex_grow: 1.0,
+            ..default()
+        });
+        r.spawn((
+            button(fonts, "Stop", Variant::Ghost),
+            ChatStop(pr.clone()),
+            observe(on_stop),
+        ));
+    });
+}
+
+/// Writes each live row's elapsed time when its whole seconds change.
+fn tick_elapsed(time: Res<Time>, mut rows: Query<(&mut Text, &mut LiveElapsed)>) {
+    let now = time.elapsed_secs_f64();
+    for (mut text, mut elapsed) in &mut rows {
+        let secs = (now - elapsed.since).max(0.0) as u64;
+        if elapsed.shown != Some(secs) {
+            elapsed.shown = Some(secs);
+            text.0 = elapsed_label(secs);
+        }
     }
 }
 
@@ -760,6 +857,7 @@ fn chat_line(
     pr: &PrRef,
     line: &ChatLine,
     opts: &RenderOpts,
+    running: bool,
 ) {
     match line {
         ChatLine::Me(body) => {
@@ -789,6 +887,8 @@ fn chat_line(
                 markdown(p, fonts, &parse(&shown), opts);
             }
         }
+        // A call is over once anything follows it; the last one of a running turn is not.
+        ChatLine::Tool(summary) if running => working_pill(p, fonts, summary),
         ChatLine::Tool(summary) => pill(
             p,
             fonts,
@@ -855,22 +955,31 @@ pub(super) fn pill(
     fill: Swatch,
     ink: Swatch,
 ) {
-    p.spawn(panel(
-        Node {
-            align_self: AlignSelf::FlexStart,
-            max_width: percent(100),
-            column_gap: px(6),
-            align_items: AlignItems::Center,
-            padding: UiRect::axes(px(10), px(5)),
-            border_radius: BorderRadius::all(px(14)),
-            ..default()
-        },
-        fill,
-    ))
-    .with_children(|r| {
+    p.spawn(panel(pill_node(), fill)).with_children(|r| {
         r.spawn(text(fonts, mark.to_string(), Type::META.ink(mark_ink)));
         r.spawn(text(fonts, body.to_string(), Type::META.ink(ink)));
     });
+}
+
+/// A tool call that has not ended: the chip of a finished one, with a spinner for its ✓.
+fn working_pill(p: &mut ChildSpawnerCommands, fonts: &UiFonts, body: &str) {
+    p.spawn(panel(pill_node(), Swatch::Chrome))
+        .with_children(|r| {
+            r.spawn(spinner());
+            r.spawn(text(fonts, body.to_string(), Type::META.ink(Swatch::Muted)));
+        });
+}
+
+fn pill_node() -> Node {
+    Node {
+        align_self: AlignSelf::FlexStart,
+        max_width: percent(100),
+        column_gap: px(6),
+        align_items: AlignItems::Center,
+        padding: UiRect::axes(px(10), px(5)),
+        border_radius: BorderRadius::all(px(14)),
+        ..default()
+    }
 }
 
 fn rebuild_hints(
@@ -1886,6 +1995,231 @@ mod tests {
         for mark in ['✓', '⊘', '↑', '·', '…', '—', '–', '×', '“', '”'] {
             assert!(crate::fonts::covers(crate::fonts::INTER, mark), "{mark}");
         }
+    }
+
+    fn run_state(app: &mut App, state: SessionStateKind) {
+        say(app, AgentTell::State { pr: pr(), state });
+        testing::settle(app);
+    }
+
+    /// Some line under `root` is a finished call's tick.
+    fn ticks_in(app: &mut App, root: Entity) -> bool {
+        let mut stack = vec![root];
+        while let Some(e) = stack.pop() {
+            if app.world().get::<Text>(e).is_some_and(|t| t.0 == "✓") {
+                return true;
+            }
+            if let Some(children) = app.world().get::<Children>(e) {
+                stack.extend(children.iter());
+            }
+        }
+        false
+    }
+
+    fn live_rows(app: &mut App) -> usize {
+        testing::count::<LiveRow>(app)
+    }
+
+    fn marks_of<C: Component>(app: &mut App, want: impl Fn(&C) -> bool) -> usize {
+        let e = testing::find::<C>(app, want);
+        testing::marks_in(app, e)
+    }
+
+    #[test]
+    fn a_running_turn_ends_the_transcript_with_a_live_row_that_goes_with_the_turn() {
+        let mut app = open_chat();
+        assert_eq!(live_rows(&mut app), 0);
+        run_state(&mut app, SessionStateKind::Running);
+        assert_eq!(live_rows(&mut app), 1);
+        assert!(testing::shows(&mut app, "Claude Code is working…"));
+        assert_eq!(marks_of::<LiveRow>(&mut app, |_| true), 1, "its spinner");
+        let row = testing::find::<LiveRow>(&mut app, |_| true);
+        let transcript = app.world().get::<ChildOf>(row).unwrap().parent();
+        assert_eq!(
+            app.world().get::<Children>(transcript).unwrap().last(),
+            Some(&row),
+            "the last row"
+        );
+        // A turn that waits for its turn is not over either.
+        run_state(&mut app, SessionStateKind::Queued);
+        assert_eq!(live_rows(&mut app), 1);
+        run_state(&mut app, SessionStateKind::Ready);
+        assert_eq!(live_rows(&mut app), 0, "the turn ended");
+    }
+
+    #[test]
+    fn a_failed_or_stopped_turn_takes_the_live_row_away() {
+        for end in ["failed", "stopped"] {
+            let mut app = open_chat();
+            run_state(&mut app, SessionStateKind::Running);
+            assert_eq!(live_rows(&mut app), 1);
+            if end == "failed" {
+                say(
+                    &mut app,
+                    AgentTell::Error {
+                        pr: pr(),
+                        turn: 1,
+                        kind: AgentErrorKind::Crashed,
+                        message: "It stopped".into(),
+                    },
+                );
+            } else {
+                let stop = testing::find::<ChatStop>(&mut app, |_| true);
+                testing::activate(&mut app, stop);
+                assert_eq!(testing::recorded(&mut app), [Ask::AgentCancel { pr: pr() }]);
+            }
+            run_state(&mut app, SessionStateKind::Ready);
+            assert_eq!(live_rows(&mut app), 0, "{end}");
+            assert_eq!(testing::count::<ChatStop>(&mut app), 0, "{end}");
+        }
+    }
+
+    #[test]
+    fn the_live_row_stays_last_while_the_answer_streams() {
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        for text in ["The ", "lock ", "is needed."] {
+            say(
+                &mut app,
+                AgentTell::Chunk {
+                    pr: pr(),
+                    turn: 1,
+                    text: text.into(),
+                },
+            );
+            testing::settle(&mut app);
+        }
+        assert_eq!(live_rows(&mut app), 1, "one row, not one per chunk");
+        assert!(testing::shows(&mut app, "The lock is needed."));
+        let row = testing::find::<LiveRow>(&mut app, |_| true);
+        let transcript = app.world().get::<ChildOf>(row).unwrap().parent();
+        let children = app.world().get::<Children>(transcript).unwrap();
+        assert_eq!(children.len(), 2, "the answer and the row");
+        assert_eq!(children.last(), Some(&row));
+    }
+
+    #[test]
+    fn the_call_that_runs_shows_a_spinner_in_place_of_its_tick() {
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        say(
+            &mut app,
+            AgentTell::ToolUse {
+                pr: pr(),
+                turn: 1,
+                summary: "Read src/auth/refresh.rs".into(),
+            },
+        );
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Read src/auth/refresh.rs"));
+        let transcript = testing::find::<Transcript>(&mut app, |_| true);
+        assert!(!ticks_in(&mut app, transcript), "still running");
+        assert_eq!(
+            testing::marks_in(&app, transcript),
+            2,
+            "the call and the row"
+        );
+        // The next thing the agent does ends the call.
+        say(
+            &mut app,
+            AgentTell::ToolUse {
+                pr: pr(),
+                turn: 1,
+                summary: "Read src/auth/store.rs".into(),
+            },
+        );
+        testing::settle(&mut app);
+        assert!(ticks_in(&mut app, transcript), "the first call is over");
+        assert_eq!(
+            testing::marks_in(&app, transcript),
+            2,
+            "the second call and the row"
+        );
+        // So does the end of the turn.
+        say(
+            &mut app,
+            AgentTell::Done {
+                pr: pr(),
+                turn: 1,
+                duration_ms: 900,
+            },
+        );
+        run_state(&mut app, SessionStateKind::Ready);
+        assert_eq!(testing::marks_in(&app, transcript), 0);
+    }
+
+    #[test]
+    fn the_live_rows_elapsed_text_follows_the_clock_in_whole_seconds() {
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        assert!(testing::shows(&mut app, "0s"));
+        // `Time` hands a frame at most 250 ms.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            250,
+        )));
+        for _ in 0..24 {
+            app.update();
+        }
+        let now = app.world().resource::<Time>().elapsed_secs_f64();
+        let e = testing::find::<LiveElapsed>(&mut app, |_| true);
+        let since = app.world().get::<LiveElapsed>(e).unwrap().since;
+        let want = (now - since) as u64;
+        assert!((5..=6).contains(&want), "about 6 s passed: {want}");
+        assert_eq!(app.world().get::<LiveElapsed>(e).unwrap().shown, Some(want));
+        assert_eq!(app.world().get::<Text>(e).unwrap().0, elapsed_label(want));
+        assert_eq!(live_rows(&mut app), 1, "the row was not rebuilt to say it");
+    }
+
+    #[test]
+    fn stop_is_in_reach_on_the_draft_tab_too() {
+        let mut app = open_chat();
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .show(PanelTab::Draft);
+        run_state(&mut app, SessionStateKind::Running);
+        let tabs = testing::find::<PanelTabs>(&mut app, |_| true);
+        let stop = testing::find::<ChatStop>(&mut app, |s| s.0 == pr());
+        assert!(
+            is_under(&app, stop, tabs),
+            "the tab strip holds a Stop whatever tab is shown"
+        );
+        testing::activate(&mut app, stop);
+        assert_eq!(testing::recorded(&mut app), [Ask::AgentCancel { pr: pr() }]);
+        run_state(&mut app, SessionStateKind::Ready);
+        assert_eq!(testing::count::<ChatStop>(&mut app), 0);
+    }
+
+    fn is_under(app: &App, mut e: Entity, ancestor: Entity) -> bool {
+        while let Some(parent) = app.world().get::<ChildOf>(e) {
+            e = parent.parent();
+            if e == ancestor {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn the_agent_tab_beats_while_a_turn_runs() {
+        let mut app = open_chat();
+        let agent = |t: &PanelTabButton| t.tab == PanelTab::Agent;
+        let draft = |t: &PanelTabButton| t.tab == PanelTab::Draft;
+        assert_eq!(marks_of(&mut app, agent), 0);
+        run_state(&mut app, SessionStateKind::Running);
+        assert_eq!(marks_of(&mut app, agent), 1);
+        assert_eq!(marks_of(&mut app, draft), 0, "only the Agent tab");
+        // The dot is there on the other tab as well: the turn goes on.
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .show(PanelTab::Draft);
+        testing::settle(&mut app);
+        assert_eq!(marks_of(&mut app, agent), 1);
+        run_state(&mut app, SessionStateKind::Ready);
+        assert_eq!(marks_of(&mut app, agent), 0);
     }
 
     #[test]

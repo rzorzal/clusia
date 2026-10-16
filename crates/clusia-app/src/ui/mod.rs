@@ -8,4 +8,5 @@ pub mod leaf;
 pub mod markdown;
 pub mod media;
 pub mod modal;
+pub mod spinner;
 pub mod text_area;

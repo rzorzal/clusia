@@ -22,6 +22,7 @@ use crate::review_state::{
 };
 use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
+use crate::screens::review::activity::{MARK, Work};
 use crate::screens::review::agent::{
     AgentRegion, Chats, DEFAULT_WIDTH, PanelColumn, PanelTabs, PanelToggle, harness_ready,
     on_panel_toggle, resize_edge,
@@ -40,6 +41,7 @@ use crate::ui::kit::{
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown_line};
+use crate::ui::spinner::{beat, spinner};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderView {
@@ -93,6 +95,8 @@ pub struct StatusView {
     pub agent: String,
     /// The agent's dot is lit.
     pub agent_live: bool,
+    /// Agent work runs for the review: the dot beats.
+    pub working: bool,
     /// `Draft saved · 3 items`
     pub draft: String,
     /// The right column is shown (the button says **Hide panel**, else **Show panel**).
@@ -490,6 +494,7 @@ pub fn shell_view(
             )
             .0,
             agent_live: false,
+            working: false,
             draft: if items.is_empty() {
                 "Draft empty".into()
             } else {
@@ -501,6 +506,20 @@ pub fn shell_view(
         read_only,
         closed: closed.map(String::from),
     })
+}
+
+/// `Diagrams ●` while the diagrams are planned or drawn.
+pub fn badge_diagrams(
+    sections: &mut [(ReviewSection, String, bool)],
+    model: Option<&crate::screens::review::diagrams::DiagramsModel>,
+) {
+    if model.is_some_and(|m| m.busy())
+        && let Some((section, label, _)) = sections
+            .iter_mut()
+            .find(|(s, ..)| *s == ReviewSection::Diagrams)
+    {
+        *label = format!("{} {MARK}", section.label());
+    }
 }
 
 pub struct ShellPlugin;
@@ -732,6 +751,7 @@ fn rebuild_top(
     fonts: Res<UiFonts>,
     checks: Res<crate::screens::review::checks::Checks>,
     revalidations: Res<Revalidations>,
+    diagrams: Res<crate::screens::review::diagrams::Diagrams>,
     mut tops: Query<(Entity, &mut ShellTop)>,
 ) {
     for (entity, mut top) in &mut tops {
@@ -740,6 +760,7 @@ fn rebuild_top(
         };
         let mut sections = v.sections;
         crate::screens::review::checks::badge_sections(&mut sections, checks.0.get(&top.pr));
+        badge_diagrams(&mut sections, diagrams.0.get(&top.pr));
         let tab = &tabs.0[&top.pr];
         let reanchor = tab.ui.reanchor.as_ref().and_then(|id| {
             let item = tab
@@ -957,7 +978,9 @@ pub fn section_tabs(
                     base,
                     if *on { Type::STRONG } else { Type::MUTED },
                 ));
-                if !count.is_empty() {
+                if count == MARK {
+                    t.spawn(spinner());
+                } else if !count.is_empty() {
                     t.spawn(text(fonts, count, Type::META));
                 }
             });
@@ -1255,6 +1278,7 @@ fn rebuild_status(
     chats: Res<Chats>,
     checks: Res<crate::screens::review::checks::Checks>,
     diagrams: Res<crate::screens::review::diagrams::Diagrams>,
+    revalidations: Res<Revalidations>,
     mut bars: Query<(Entity, &mut StatusBar)>,
 ) {
     for (entity, mut bar) in &mut bars {
@@ -1265,18 +1289,12 @@ fn rebuild_status(
             || crate::agent_name::active(&model.snapshot),
             |t| crate::agent_name::of_tab(&model.snapshot, t),
         );
-        let (agent, agent_live) = agent_status(chats.state(&bar.pr), &name);
+        let work = Work::of(&bar.pr, &chats, &checks, &diagrams, &revalidations);
+        let (agent, agent_live) = work.status(&name);
         let mut status = v.status.clone();
         status.agent = agent;
         status.agent_live = agent_live;
-        if let Some(drawing) = diagrams
-            .0
-            .get(&bar.pr)
-            .and_then(|m| drawing_status(&m.state, &name))
-        {
-            status.agent = drawing;
-            status.agent_live = true;
-        }
+        status.working = work.any();
         status.panel_open = chats.0.get(&bar.pr).is_none_or(|c| c.open);
         let waiting = checks.0.get(&bar.pr).map_or(0, |m| m.waiting_ok());
         if waiting > 0 {
@@ -1294,19 +1312,23 @@ fn rebuild_status(
                 ..default()
             })
             .with_children(|a| {
-                a.spawn(panel(
-                    Node {
-                        width: px(7),
-                        height: px(7),
-                        border_radius: BorderRadius::MAX,
-                        ..default()
-                    },
-                    if status.agent_live {
-                        Swatch::Green
-                    } else {
-                        Swatch::Faint
-                    },
-                ));
+                if status.working {
+                    a.spawn(beat());
+                } else {
+                    a.spawn(panel(
+                        Node {
+                            width: px(7),
+                            height: px(7),
+                            border_radius: BorderRadius::MAX,
+                            ..default()
+                        },
+                        if status.agent_live {
+                            Swatch::Green
+                        } else {
+                            Swatch::Faint
+                        },
+                    ));
+                }
                 a.spawn(text(&fonts, status.agent.clone(), Type::MUTED));
             });
             p.spawn(text(&fonts, status.draft.clone(), Type::META));
@@ -1559,6 +1581,110 @@ mod tests {
         }
     }
 
+    fn diagrams_state(app: &mut App, pr: &PrRef, state: clusia_protocol::DiagramsState) {
+        testing::tell(
+            app,
+            crate::bridge::Tell::Diagrams(crate::bridge::DiagramsTell::State {
+                pr: pr.clone(),
+                state,
+            }),
+        );
+        testing::settle(app);
+    }
+
+    fn marks_of_tab(app: &mut App, section: ReviewSection) -> usize {
+        let tab = testing::find::<SectionTab>(app, |t| t.section == section);
+        testing::marks_in(app, tab)
+    }
+
+    #[test]
+    fn the_diagrams_tab_spins_while_they_are_planned_or_drawn() {
+        use clusia_protocol::DiagramsState;
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        assert_eq!(marks_of_tab(&mut app, ReviewSection::Diagrams), 0);
+        for (state, spins) in [
+            (DiagramsState::Planning, 1),
+            (
+                DiagramsState::Drawing {
+                    done: 1,
+                    total: 4,
+                    key: "flow".into(),
+                },
+                1,
+            ),
+            (DiagramsState::Idle, 0),
+            (DiagramsState::Planning, 1),
+            (
+                DiagramsState::Failed {
+                    message: "The plan failed".into(),
+                },
+                0,
+            ),
+        ] {
+            diagrams_state(&mut app, &pr, state.clone());
+            assert_eq!(
+                marks_of_tab(&mut app, ReviewSection::Diagrams),
+                spins,
+                "{state:?}"
+            );
+            assert_eq!(marks_of_tab(&mut app, ReviewSection::Diff), 0);
+        }
+    }
+
+    #[test]
+    fn the_status_dot_beats_while_agent_work_runs_and_the_text_agrees() {
+        use clusia_protocol::DiagramsState;
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        let bar = |app: &mut App| testing::find::<StatusBar>(app, |_| true);
+        let marks = |app: &mut App| {
+            let e = bar(app);
+            testing::marks_in(app, e)
+        };
+        assert_eq!(marks(&mut app), 0, "nothing runs");
+        diagrams_state(
+            &mut app,
+            &pr,
+            DiagramsState::Drawing {
+                done: 2,
+                total: 5,
+                key: "flow".into(),
+            },
+        );
+        assert_eq!(marks(&mut app), 1);
+        assert!(testing::shows(
+            &mut app,
+            "Claude Code · drawing diagrams 3 of 5"
+        ));
+        diagrams_state(&mut app, &pr, DiagramsState::Idle);
+        assert_eq!(marks(&mut app), 0);
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::Checks(crate::bridge::ChecksTell::State {
+                pr: pr.clone(),
+                kind: clusia_core::checks::CheckKind::Security,
+                state: clusia_protocol::CheckState::Running { activity: None },
+            }),
+        );
+        testing::settle(&mut app);
+        assert_eq!(marks(&mut app), 1);
+        assert!(testing::shows(
+            &mut app,
+            "Claude Code · running the security check…"
+        ));
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::Checks(crate::bridge::ChecksTell::State {
+                pr,
+                kind: clusia_core::checks::CheckKind::Security,
+                state: clusia_protocol::CheckState::Done,
+            }),
+        );
+        testing::settle(&mut app);
+        assert_eq!(marks(&mut app), 0);
+    }
+
     #[test]
     fn the_status_pill_names_the_agent() {
         for (state, text, live) in [
@@ -1658,6 +1784,7 @@ mod tests {
             StatusView {
                 agent: "Claude Code · no session yet".into(),
                 agent_live: false,
+                working: false,
                 draft: "Draft saved · 3 items".into(),
                 panel_open: true,
                 finalize: true,

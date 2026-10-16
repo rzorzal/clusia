@@ -437,6 +437,23 @@ pub fn demo_round(review: &mut Review, state: RoundState) -> Revalidation {
     }
 }
 
+/// How many working marks (rings and beating dots) `root` holds, itself included.
+pub fn marks_in(app: &App, root: Entity) -> usize {
+    let world = app.world();
+    let mut count = 0;
+    let mut stack = vec![root];
+    while let Some(e) = stack.pop() {
+        count += usize::from(
+            world.get::<crate::ui::spinner::Spinner>(e).is_some()
+                || world.get::<crate::ui::spinner::Beat>(e).is_some(),
+        );
+        if let Some(children) = world.get::<Children>(e) {
+            stack.extend(children.iter());
+        }
+    }
+    count
+}
+
 /// Opens the demo review with `demo_round` in `state` told by the daemon, and settles.
 pub fn open_round(app: &mut App, state: RoundState) -> PrRef {
     let pr = open_ready(app, false);
