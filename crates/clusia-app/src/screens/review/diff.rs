@@ -34,7 +34,7 @@ use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
 use crate::screens::review::revalidation::{Revalidations, reanchor_click};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
-use crate::ui::code::{CodeSpan, code_line, spans_for};
+use crate::ui::code::{CodeSpan, spans_for, wrapped_code_line};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, avatar, badge, button, card, panel,
@@ -280,7 +280,7 @@ pub fn show_line(tab: &mut Tab, path: &str, lines: Option<(u32, u32)>) -> bool {
     true
 }
 
-/// What a diff row costs in height at least (`line_node`'s `min_height`).
+/// What a diff row costs in height at least; a wrapped line makes its row taller.
 const ROW_HEIGHT: f32 = 22.0;
 
 /// Lines of context kept above a line that is scrolled to.
@@ -698,13 +698,22 @@ struct BodyPart {
     built: Option<BodyKey>,
 }
 
+/// The row that `Open in diff` lit, in the body of `0`.
+#[derive(Component)]
+struct FocusRow(PrRef);
+
+/// On a body whose scroll is an estimate until its rows are laid out: wrapped rows are taller
+/// than the estimate counts, so the first laid-out frame moves the scroll to the real row.
+#[derive(Component)]
+struct FocusPending;
+
 pub struct DiffPlugin;
 
 impl Plugin for DiffPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HighlightCache>().add_systems(
             Update,
-            (fill_region, rebuild_diff, later_hints)
+            (fill_region, rebuild_diff, later_hints, reach_focus)
                 .chain()
                 .after(ReviewSystems),
         );
@@ -901,6 +910,7 @@ fn rebuild_diff(
             && part.built.as_ref().map(|b| b.focus) != Some(key.focus)
         {
             scroll.0.y = focus_scroll(index);
+            commands.entity(entity).insert(FocusPending);
         }
         let pr = part.pr.clone();
         let path = v.path.clone().unwrap_or_default();
@@ -908,6 +918,38 @@ fn rebuild_diff(
             body(p, fonts, &pr, &path, v, editor.as_ref(), &key.opts);
         });
         part.built = Some(key);
+    }
+}
+
+/// Scrolls a body to its focused row, once the row has a laid-out box, with a few rows of
+/// context above it.
+fn reach_focus(
+    mut commands: Commands,
+    mut bodies: Query<
+        (
+            Entity,
+            &BodyPart,
+            &ComputedNode,
+            &UiGlobalTransform,
+            &mut ScrollPosition,
+        ),
+        With<FocusPending>,
+    >,
+    rows: Query<(&FocusRow, &ComputedNode, &UiGlobalTransform)>,
+) {
+    for (entity, part, body, body_at, mut scroll) in &mut bodies {
+        let Some((_, row, row_at)) = rows
+            .iter()
+            .find(|(f, row, _)| f.0 == part.pr && row.size.y > 0.0)
+        else {
+            continue;
+        };
+        let scale = body.inverse_scale_factor;
+        let top =
+            |n: &ComputedNode, at: &UiGlobalTransform| (at.translation.y - n.size.y / 2.0) * scale;
+        let into = top(row, row_at) - top(body, body_at) + scroll.0.y;
+        scroll.0.y = (into - FOCUS_CONTEXT as f32 * ROW_HEIGHT).max(0.0);
+        commands.entity(entity).remove::<FocusPending>();
     }
 }
 
@@ -1003,7 +1045,12 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
         },
         LaterHint,
     ));
-    p.spawn(segments()).with_children(|s| {
+    let mut track = p.spawn(segments());
+    // The track sits at the start of a column elsewhere; in this row it shares the path's axis.
+    track.entry::<Node>().and_modify(|mut n| {
+        n.align_self = AlignSelf::Center;
+    });
+    track.with_children(|s| {
         for (label, mode) in [("Unified", DiffMode::Unified), ("Split", DiffMode::Split)] {
             s.spawn((
                 segment(fonts, label, v.mode == mode),
@@ -1065,7 +1112,9 @@ fn marker(kind: RowKind) -> (&'static str, Swatch) {
 fn number(p: &mut ChildSpawnerCommands, fonts: &UiFonts, n: Option<u32>, size: f32) {
     p.spawn(Node {
         width: px(NUMBER_WIDTH),
+        min_height: px(ROW_HEIGHT),
         flex_shrink: 0.0,
+        align_items: AlignItems::Center,
         justify_content: JustifyContent::FlexEnd,
         padding: UiRect::right(px(10)),
         ..default()
@@ -1083,11 +1132,30 @@ fn mark(p: &mut ChildSpawnerCommands, fonts: &UiFonts, kind: RowKind, size: f32)
     let (sign, ink) = marker(kind);
     p.spawn(Node {
         width: px(18),
+        min_height: px(ROW_HEIGHT),
         flex_shrink: 0.0,
+        align_items: AlignItems::Center,
         ..default()
     })
     .with_children(|c| {
         c.spawn(text(fonts, sign, Type::MONO.size(size).ink(ink)));
+    });
+}
+
+/// The code of a row. It takes the room the number and the sign leave and breaks at its edge, so
+/// a wrapped line continues under its own start, with no number of its own.
+fn code(p: &mut ChildSpawnerCommands, fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>) {
+    p.spawn(Node {
+        flex_grow: 1.0,
+        flex_basis: px(0),
+        min_width: px(0),
+        min_height: px(ROW_HEIGHT),
+        align_items: AlignItems::Center,
+        padding: UiRect::right(px(8)),
+        ..default()
+    })
+    .with_children(|c| {
+        c.spawn(wrapped_code_line(fonts, size, spans));
     });
 }
 
@@ -1098,21 +1166,24 @@ fn line_node(
     kind: RowKind,
     selected: bool,
     button: Option<LineButton>,
+    focus: Option<FocusRow>,
     build: impl FnOnce(&mut ChildSpawnerCommands),
 ) {
     let fill = fill_of(kind, selected);
     let mut e = p.spawn((
         Node {
             width,
-            min_height: px(22),
+            min_height: px(ROW_HEIGHT),
             flex_shrink: 0.0,
-            align_items: AlignItems::Center,
             overflow: Overflow::clip_x(),
             ..default()
         },
         BackgroundColor::default(),
         Fill(fill),
     ));
+    if let Some(focus) = focus {
+        e.insert(focus);
+    }
     if let Some(b) = button {
         e.insert((
             WidgetButton,
@@ -1146,6 +1217,7 @@ fn body(
             line,
         })
     };
+    let focus_of = |at: usize| (v.focus_row == Some(at)).then(|| FocusRow(pr.clone()));
     match &v.body {
         DiffBody::Empty(message) => {
             p.spawn(Node {
@@ -1157,18 +1229,19 @@ fn body(
             });
         }
         DiffBody::Unified(lines) => {
-            for (line, under) in lines {
+            for (at, (line, under)) in lines.iter().enumerate() {
                 line_node(
                     p,
                     percent(100),
                     line.kind,
                     line.selected,
                     line_button(line.row, line.anchor, line.commentable),
+                    focus_of(at),
                     |r| {
                         number(r, fonts, line.old, size);
                         number(r, fonts, line.new, size);
                         mark(r, fonts, line.kind, size);
-                        r.spawn(code_line(fonts, size, line.spans.clone()));
+                        code(r, fonts, size, line.spans.clone());
                     },
                 );
                 if !under.is_empty() {
@@ -1212,22 +1285,26 @@ fn body(
                     });
                 }
             });
-            for line in lines {
-                p.spawn(Node {
+            for (at, line) in lines.iter().enumerate() {
+                let mut pair = p.spawn(Node {
                     width: percent(100),
                     flex_shrink: 0.0,
                     ..default()
-                })
-                .with_children(|r| {
+                });
+                if let Some(focus) = focus_of(at) {
+                    pair.insert(focus);
+                }
+                pair.with_children(|r| {
                     if let Some(hunk) = &line.hunk {
                         for _ in 0..2 {
-                            line_node(r, percent(50), RowKind::Hunk, false, None, |c| {
+                            line_node(r, percent(50), RowKind::Hunk, false, None, None, |c| {
                                 c.spawn(Node {
                                     width: px(NUMBER_WIDTH + 18.0),
                                     flex_shrink: 0.0,
                                     ..default()
                                 });
-                                c.spawn(code_line(
+                                code(
+                                    c,
                                     fonts,
                                     size,
                                     vec![CodeSpan {
@@ -1235,7 +1312,7 @@ fn body(
                                         ink: Swatch::Muted,
                                         mark: None,
                                     }],
-                                ));
+                                );
                             });
                         }
                         return;
@@ -1244,17 +1321,17 @@ fn body(
                         match cell {
                             Some(c) => {
                                 let b = line_button(c.row, c.anchor, c.commentable);
-                                line_node(r, percent(50), c.kind, c.selected, b, |x| {
+                                line_node(r, percent(50), c.kind, c.selected, b, None, |x| {
                                     number(x, fonts, c.number, size);
                                     mark(x, fonts, c.kind, size);
-                                    x.spawn(code_line(fonts, size, c.spans.clone()));
+                                    code(x, fonts, size, c.spans.clone());
                                 });
                             }
                             None => {
                                 r.spawn(panel(
                                     Node {
                                         width: percent(50),
-                                        min_height: px(22),
+                                        min_height: px(ROW_HEIGHT),
                                         ..default()
                                     },
                                     Swatch::Bg,
@@ -2684,6 +2761,236 @@ mod tests {
         assert!(
             body_scroll(&mut app) > 0.0,
             "another file starts at its top, then scrolls to the line"
+        );
+    }
+
+    const LONG: &str = "Refresh one minute early";
+
+    fn wrap_app() -> App {
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+        testing::open_ready(&mut app, false);
+        testing::settle(&mut app);
+        app
+    }
+
+    /// The `Text` of the code line that holds `needle`, and the line's row.
+    fn code_of(app: &mut App, needle: &str) -> (Entity, Entity) {
+        let mut q = app.world_mut().query::<(&TextSpan, &ChildOf)>();
+        let text = q
+            .iter(app.world())
+            .find(|(s, _)| s.0.contains(needle))
+            .map(|(_, p)| p.parent())
+            .expect("the code line");
+        let cell = app.world().get::<ChildOf>(text).unwrap().parent();
+        let row = app.world().get::<ChildOf>(cell).unwrap().parent();
+        (text, row)
+    }
+
+    fn text_of_line(app: &App, text: Entity) -> String {
+        app.world()
+            .get::<Children>(text)
+            .unwrap()
+            .iter()
+            .filter_map(|c| app.world().get::<TextSpan>(c))
+            .map(|s| s.0.as_str())
+            .collect()
+    }
+
+    fn set_mode(app: &mut App, mode: DiffMode) {
+        let pr = fixture::demo_pr();
+        ui_mut(app, &pr).0.get_mut(&pr).unwrap().ui.mode = mode;
+        testing::settle(app);
+    }
+
+    #[test]
+    fn the_mode_switch_shares_the_axis_of_the_path_and_the_counts() {
+        let mut app = wrap_app();
+        let path = testing::find::<Text>(&mut app, |t| t.0 == REFRESH);
+        let split = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
+        let track = app.world().get::<ChildOf>(split).unwrap().parent();
+        let row = app.world().get::<ChildOf>(track).unwrap().parent();
+        let (_, ry, _, rh) = testing::frame(&app, row);
+        let axis = ry + (rh - 1.0) / 2.0;
+        let at = testing::center(&app, track).y;
+        assert!(
+            (at - axis).abs() <= 0.5,
+            "switch at {at}, row axis at {axis}"
+        );
+        let (_, _, _, th) = testing::frame(&app, track);
+        let (_, ty, _, _) = testing::frame(&app, track);
+        assert!(
+            (ty - ry) > 4.0 && (ry + rh - 1.0) - (ty + th) > 4.0,
+            "room above and below"
+        );
+        let path_at = testing::center(&app, path).y;
+        assert!(
+            (path_at - at).abs() <= 2.0,
+            "path at {path_at}, switch at {at}"
+        );
+    }
+
+    #[test]
+    fn a_long_line_wraps_at_the_column_and_loses_nothing() {
+        let mut app = wrap_app();
+        let (text, row) = code_of(&mut app, LONG);
+        let want = {
+            let r = ready();
+            let v = view_of(&r, &TabUi::default());
+            let line = unified(&v)
+                .iter()
+                .find(|(l, _)| text_of(&l.spans).contains(LONG))
+                .expect("the demo has the long line");
+            text_of(&line.0.spans)
+        };
+        assert!(want.len() > 150, "the demo line is long");
+        assert_eq!(text_of_line(&app, text), want, "no character is lost");
+        let layout = app.world().get::<TextLayout>(text).unwrap();
+        assert_ne!(layout.linebreak, LineBreak::NoWrap);
+        let (_, _, rw, rh) = testing::frame(&app, row);
+        let (_, _, tw, th) = testing::frame(&app, text);
+        assert!(tw < rw, "the code stays inside its row: {tw} in {rw}");
+        assert!(rh >= 2.0 * 22.0 - 1.0, "two lines make a taller row: {rh}");
+        assert!(th >= 2.0 * 13.0, "the text itself has two lines: {th}");
+        let kids = app.world().get::<Children>(row).unwrap();
+        assert_eq!(
+            kids.len(),
+            4,
+            "one number column per side, the sign, the code"
+        );
+    }
+
+    #[test]
+    fn a_continuation_line_belongs_to_its_line() {
+        let mut app = wrap_app();
+        let (text, row) = code_of(&mut app, LONG);
+        let button = app
+            .world()
+            .get::<LineButton>(row)
+            .expect("a commentable row");
+        assert_eq!((button.side, button.line), (Side::Right, 40));
+        let mut up = text;
+        let mut found = false;
+        while let Some(p) = app.world().get::<ChildOf>(up) {
+            up = p.parent();
+            found |= up == row;
+        }
+        assert!(found, "the wrapped code is inside the line's own button");
+    }
+
+    #[test]
+    fn split_sides_wrap_on_their_own_and_stay_the_same_height() {
+        let mut app = wrap_app();
+        set_mode(&mut app, DiffMode::Split);
+        let (text, cell) = code_of(&mut app, LONG);
+        let pair = app.world().get::<ChildOf>(cell).unwrap().parent();
+        let cells = app.world().get::<Children>(pair).unwrap().to_vec();
+        assert_eq!(cells.len(), 2);
+        let heights: Vec<f32> = cells.iter().map(|c| testing::frame(&app, *c).3).collect();
+        assert_eq!(
+            heights[0], heights[1],
+            "the two sides are as tall as the taller"
+        );
+        assert!(
+            heights[0] >= 2.0 * 22.0 - 1.0,
+            "and it wrapped: {heights:?}"
+        );
+        let (_, _, cw, _) = testing::frame(&app, cell);
+        let (_, _, tw, _) = testing::frame(&app, text);
+        assert!(tw < cw / 1.0, "inside its half: {tw} in {cw}");
+        let (_, _, pw, _) = testing::frame(&app, pair);
+        assert!((cw - pw / 2.0).abs() <= 1.0, "a half each");
+    }
+
+    #[test]
+    fn a_hunk_header_wraps_too() {
+        let mut app = wrap_app();
+        {
+            let pr = fixture::demo_pr();
+            let mut tabs = ui_mut(&mut app, &pr);
+            let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).unwrap().phase else {
+                panic!("ready")
+            };
+            let f = ready
+                .view
+                .diff
+                .iter_mut()
+                .find(|f| f.path == REFRESH)
+                .unwrap();
+            let patch = f.patch.take().unwrap();
+            let long = " impl TokenStore where Self: Send + Sync + 'static, Token: Clone + Send + Sync + 'static, AuthError: std::error::Error + Send + Sync + 'static, Duration: Copy {";
+            f.patch = Some(patch.replacen(
+                "@@ -38,9 +38,11 @@ impl TokenStore {",
+                &format!("@@ -38,9 +38,11 @@{long}"),
+                1,
+            ));
+        }
+        testing::settle(&mut app);
+        let (text, row) = code_of(&mut app, "Token: Clone");
+        let (_, _, _, rh) = testing::frame(&app, row);
+        assert!(rh >= 2.0 * 22.0 - 1.0, "the hunk header wrapped: {rh}");
+        assert!(
+            text_of_line(&app, text).contains("Duration: Copy {"),
+            "nothing lost"
+        );
+    }
+
+    #[test]
+    fn wrapping_follows_the_text_size() {
+        let mut app = wrap_app();
+        let lines = |app: &mut App| {
+            let (text, _) = code_of(app, LONG);
+            let (_, _, _, th) = testing::frame(app, text);
+            let (_, _, tw, _) = testing::frame(app, text);
+            (th, tw)
+        };
+        let (medium, _) = lines(&mut app);
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        testing::settle(&mut app);
+        let (large, _) = lines(&mut app);
+        assert!(
+            large > medium,
+            "a bigger size wraps into more or taller lines"
+        );
+        testing::set_config_locally(&mut app, "appearance.text_size", "small");
+        testing::settle(&mut app);
+        let (small, tw) = lines(&mut app);
+        assert!(small < large);
+        let (_, row) = code_of(&mut app, LONG);
+        let (_, _, rw, _) = testing::frame(&app, row);
+        assert!(tw < rw);
+    }
+
+    #[test]
+    fn a_focused_line_below_wrapped_rows_still_scrolls_into_view() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = ui_mut(&mut app, &pr);
+            let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).unwrap().phase else {
+                panic!("ready")
+            };
+            let long = "x".repeat(400);
+            let body: String = (1..=400).map(|n| format!("+{n} {long}\n")).collect();
+            ready.view.diff.push(FileDiff {
+                path: "wide.txt".into(),
+                previous_path: None,
+                status: "added".into(),
+                additions: 400,
+                deletions: 0,
+                patch: Some(format!("@@ -0,0 +1,400 @@\n{body}")),
+            });
+        }
+        show_in(&mut app, &pr, "wide.txt", Some((300, 300)));
+        testing::settle(&mut app);
+        let line = testing::find::<LineButton>(&mut app, |b| b.line == 300);
+        let body = testing::find::<BodyPart>(&mut app, |_| true);
+        let (_, by, _, bh) = testing::frame(&app, body);
+        let (_, ly, _, lh) = testing::frame(&app, line);
+        assert!(
+            ly >= by && ly + lh <= by + bh,
+            "the line at {ly}..{} is inside the view {by}..{}",
+            ly + lh,
+            by + bh
         );
     }
 }

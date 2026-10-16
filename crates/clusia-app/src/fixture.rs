@@ -1882,7 +1882,7 @@ fn demo_diff() -> Vec<FileDiff> {
                 "-        let token = self.load()?;",
                 "-        if token.expires_at > now() {",
                 "+        let token = self.load().await?;",
-                "+        // Refresh one minute early so a request never races the expiry.",
+                "+        // Refresh one minute early so a request never races the expiry: the exchange can take seconds on a slow network, and a token that lapses mid-flight would fail the whole call.",
                 "+        if token.expires_at > now() + Duration::from_secs(60) {",
                 "             return Ok(token);",
                 "         }",

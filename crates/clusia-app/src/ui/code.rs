@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use bevy::prelude::*;
-use bevy::text::{TextBackgroundColor, TextSpan};
+use bevy::text::{LineBreak, TextBackgroundColor, TextSpan};
 use clusia_highlight::{Class, Span};
 
 use crate::fonts::UiFonts;
@@ -26,11 +26,33 @@ pub struct CodeSpan {
 
 /// One line of code in JetBrains Mono at `size` points, never wrapped.
 pub fn code_line(fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>) -> impl Bundle {
+    code_text(fonts, size, spans, TextLayout::no_wrap())
+}
+
+/// A line of code that breaks at the width of its box, between any two characters (code has no
+/// word boundaries worth keeping, and a long token must still fit). The runs keep their colors
+/// across the break; the text takes the width its parent gives it.
+pub fn wrapped_code_line(fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>) -> impl Bundle {
+    (
+        code_text(
+            fonts,
+            size,
+            spans,
+            TextLayout::linebreak(LineBreak::AnyCharacter),
+        ),
+        Node {
+            width: percent(100),
+            ..default()
+        },
+    )
+}
+
+fn code_text(fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>, layout: TextLayout) -> impl Bundle {
     let face = font(fonts, Type::MONO.size(size));
     (
         Text::default(),
         face.clone(),
-        TextLayout::no_wrap(),
+        layout,
         Children::spawn(SpawnWith(move |p: &mut ChildSpawner| {
             for s in spans {
                 let mut span = p.spawn((

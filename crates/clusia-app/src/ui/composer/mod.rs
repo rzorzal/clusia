@@ -1236,7 +1236,7 @@ mod tests {
         assert_eq!(
             suggestion_source(&files, path, Some(40), 41).as_deref(),
             Some(
-                "        // Refresh one minute early so a request never races the expiry.\n        if token.expires_at > now() + Duration::from_secs(60) {"
+                "        // Refresh one minute early so a request never races the expiry: the exchange can take seconds on a slow network, and a token that lapses mid-flight would fail the whole call.\n        if token.expires_at > now() + Duration::from_secs(60) {"
             )
         );
         assert_eq!(suggestion_source(&files, path, None, 9999), None);
