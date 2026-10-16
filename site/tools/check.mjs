@@ -6,7 +6,7 @@ const INSTALL = 'curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/mai
 const PAGES = ['index.html', 'features.html', 'screens.html', 'install.html', 'quick-start.html'];
 const REPO_URL = 'https://github.com/rzorzal/clusia';
 const DEMO_OWNERS = new Set(['rzorzal', 'acme', 'octo']);
-const ALLOWED_LINK_HOST = 'fonts.googleapis.com';
+const ALLOWED_LINK_HOSTS = new Set(['fonts.googleapis.com', 'fonts.gstatic.com']);
 
 const htmlFiles = (dir) =>
   readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -92,10 +92,12 @@ export function checkDir(dir) {
       try {
         host = new URL(href, 'https://x.invalid').hostname;
       } catch {}
-      if (host !== ALLOWED_LINK_HOST) fail(file, `external <link href="${href}"> is not allowed`);
+      if (!ALLOWED_LINK_HOSTS.has(host)) fail(file, `external <link href="${href}"> is not allowed`);
     }
 
-    for (const m of textOf(html).matchAll(/\b([A-Za-z0-9-]+)\/[A-Za-z0-9._-]+#\d+/g)) {
+    // Attribute text is visible too (alt, tooltips, link previews), so it is scanned along with the body.
+    const attrText = [...html.matchAll(/(?:^|\s)(?:alt|title|content)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)].map((m) => m[1] ?? m[2]).join(' ');
+    for (const m of `${textOf(html)} ${attrText}`.matchAll(/\b([A-Za-z0-9-]+)\/[A-Za-z0-9._-]+#\d+/g)) {
       if (!DEMO_OWNERS.has(m[1])) fail(file, `"${m[0]}" is not a demo repository (owner must be rzorzal, acme or octo)`);
     }
 

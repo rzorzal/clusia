@@ -87,6 +87,23 @@ test('only fonts.googleapis.com is an allowed external link host', () => {
   assert.ok(checkDir(bad).some((p) => p.includes('evil.example')));
 });
 
+test('Google Fonts links on both of its hosts pass, any other host still fails', () => {
+  const head = '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">';
+  assert.deepEqual(checkDir(fixture({ 'index.html': page({ head }) })).filter((p) => !p.startsWith('warning:')), []);
+  const bad = fixture({ 'index.html': page({ head: head + '<link rel="preconnect" href="https://other.example">' }) });
+  assert.ok(checkDir(bad).some((p) => p.includes('other.example')));
+});
+
+test('a non-demo owner/repo#N in an alt, title or content attribute fails', () => {
+  const img = fixture({ 'index.html': page({ body: '<img src="a.png" alt="someco/app#3" width="1" height="1">' }) });
+  writeFileSync(join(img, 'a.png'), '');
+  assert.ok(checkDir(img).some((p) => p.includes('someco/app#3')));
+  const title = fixture({ 'index.html': page({ body: '<a href="#" title="someco/app#4">x</a>' }) });
+  assert.ok(checkDir(title).some((p) => p.includes('someco/app#4')));
+  const meta = fixture({ 'index.html': page({ head: '<meta name="description" content="someco/app#5">' }) });
+  assert.ok(checkDir(meta).some((p) => p.includes('someco/app#5')));
+});
+
 test('a page without the nav links fails', () => {
   const dir = fixture({ 'index.html': `<!doctype html><html><body>${COPY}</body></html>` });
   assert.ok(checkDir(dir).some((p) => /nav/.test(p)));
