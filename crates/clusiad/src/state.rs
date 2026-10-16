@@ -102,6 +102,8 @@ pub(crate) struct Shared {
     pub worktree_lock: Mutex<()>,
     /// Serialises the read-modify-write of the window's open tabs.
     pub tabs_lock: Mutex<()>,
+    /// Serialises the read-modify-write of the hidden comments.
+    pub hidden_lock: Mutex<()>,
     /// File keys of pull requests checked out since the daemon started; retention leaves them alone.
     pub touched: std::sync::Mutex<HashSet<String>>,
     /// One mutex per PR serialises review mutations.
@@ -184,6 +186,7 @@ impl Shared {
             client: Mutex::new(None),
             worktree_lock: Mutex::new(()),
             tabs_lock: Mutex::new(()),
+            hidden_lock: Mutex::new(()),
             touched: std::sync::Mutex::new(HashSet::new()),
             review_locks: std::sync::Mutex::new(HashMap::new()),
             files_cache: Mutex::new(HashMap::new()),
