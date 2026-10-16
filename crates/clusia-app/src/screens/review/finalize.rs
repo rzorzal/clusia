@@ -9,7 +9,8 @@ use bevy::input_focus::FocusLost;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::text::EditableText;
+use bevy::text::{EditableText, RemSize};
+use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::revalidation::{blocking_obsolete, pending};
 use clusia_core::{DraftKind, ItemStatus, PrRef, Verdict};
@@ -104,24 +105,54 @@ fn file_name(path: &str) -> &str {
 /// text size.
 const PLACE_CHARS: usize = 17;
 
-/// The label column's width in pixels: `PLACE_CHARS` monospace characters at the largest text size.
-const PLACE_WIDTH: f32 = 160.0;
+/// The label column's width in pixels at the medium text size: room for `PLACE_CHARS` monospace
+/// characters. `size_place_labels` scales it with the text.
+const PLACE_WIDTH: f32 = 144.0;
+
+/// The label column of an item row.
+#[derive(Component)]
+struct PlaceLabel;
+
+fn size_place_labels(
+    rem: Option<Res<RemSize>>,
+    added: Query<(), Added<PlaceLabel>>,
+    mut labels: Query<&mut Node, With<PlaceLabel>>,
+) {
+    let changed = rem.as_ref().is_some_and(|r| r.is_changed());
+    if !changed && added.is_empty() {
+        return;
+    }
+    let scale = rem.map_or(1.0, |r| r.0);
+    for mut node in &mut labels {
+        node.width = px(PLACE_WIDTH * scale);
+    }
+}
 
 /// The popup that names the whole path of a cut label while the pointer is on it.
 #[derive(Component)]
 struct PlaceTitle;
 
+/// Shows the popup of a hovered label under it, or over it for a row in the lower half of the
+/// body, where the body's edge would cut it off.
 fn show_place_titles(
-    labels: Query<(&Hovered, &Children), Changed<Hovered>>,
+    labels: Query<(&Hovered, &Children, &ComputedNode, &UiGlobalTransform), Changed<Hovered>>,
+    body: Query<(&ComputedNode, &UiGlobalTransform), With<FinalizeBody>>,
     mut titles: Query<&mut Node, With<PlaceTitle>>,
 ) {
-    for (hovered, children) in &labels {
+    let middle = body.iter().next().map(|(_, at)| at.translation.y);
+    for (hovered, children, _, at) in &labels {
+        let low = middle.is_some_and(|m| at.translation.y > m);
         for child in children {
             if let Ok(mut node) = titles.get_mut(*child) {
                 node.display = if hovered.get() {
                     Display::Flex
                 } else {
                     Display::None
+                };
+                (node.top, node.bottom) = if low {
+                    (Val::Auto, percent(100))
+                } else {
+                    (percent(100), Val::Auto)
                 };
             }
         }
@@ -336,6 +367,7 @@ impl Plugin for FinalizePlugin {
                     rebuild_modal,
                     mirror_texts,
                     escape_closes,
+                    size_place_labels,
                     show_place_titles,
                 )
                     .chain()
@@ -490,6 +522,7 @@ fn card_content(
                         flex_shrink: 0.0,
                         ..default()
                     },
+                    PlaceLabel,
                     // Above the editor beside it, which the full path would otherwise sit under.
                     ZIndex(1),
                     children![text(fonts, item.label.clone(), Type::MONO.ink(Swatch::Fg))],
@@ -1090,6 +1123,7 @@ mod tests {
     use crate::testing::{self, NOW};
     use crate::ui::composer::testkit::with_fonts;
     use crate::ui::text_area::Grow;
+    use bevy::ecs::system::RunSystemOnce;
     use clusia_core::Role;
     use clusia_core::revalidation::{Decision, RoundState};
     use clusia_protocol::PublishResult;
@@ -2052,6 +2086,10 @@ mod tests {
             assert_eq!(node.overflow, Overflow::scroll_y(), "{what}");
             let laid = app.world().get::<bevy::ui::ComputedNode>(body).unwrap();
             assert!(
+                laid.size.y > 100.0,
+                "{what}: the body keeps a usable height"
+            );
+            assert!(
                 laid.content_size.y > laid.size.y + 1.0,
                 "{what}: the content ({}) is taller than the body ({}) and scrolls",
                 laid.content_size.y,
@@ -2088,5 +2126,60 @@ mod tests {
         // 6 lines of 13 px text at the editor's line height, plus its padding and border: far
         // less than the 46 lines of the text.
         assert!(tall < 200.0, "the editor stops at its cap: {tall}");
+    }
+
+    #[test]
+    fn the_place_column_follows_the_text_size_and_holds_a_cut_place() {
+        let mut app = crowded_finalize(UVec2::new(1280, 800), 3, 4);
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        testing::settle(&mut app);
+        let label = testing::find::<PlaceLabel>(&mut app, |_| true);
+        let (_, _, column, _) = testing::frame(&app, label);
+        assert!(
+            (column - PLACE_WIDTH * 15.0 / 13.0).abs() <= 1.0,
+            "the column is {column} wide"
+        );
+        let text = app.world().get::<Children>(label).unwrap()[0];
+        let cut = app.world().get::<Text>(text).unwrap().0.clone();
+        assert_eq!(cut.chars().count(), PLACE_CHARS, "{cut}");
+        let (_, _, shown, _) = testing::frame(&app, text);
+        assert!(
+            shown <= column,
+            "{cut} is {shown} wide in a {column} column"
+        );
+    }
+
+    #[test]
+    fn the_title_opens_under_a_high_row_and_over_a_low_one() {
+        let mut app = crowded_finalize(UVec2::new(1280, 800), 14, 4);
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(Entity, &Children), With<PlaceLabel>>();
+        let labels: Vec<(Entity, Entity)> = q
+            .iter(app.world())
+            .filter_map(|(e, c)| {
+                c.iter()
+                    .find(|c| app.world().get::<PlaceTitle>(*c).is_some())
+                    .map(|t| (e, t))
+            })
+            .collect();
+        let (first, first_title) = labels[0];
+        let (last, last_title) = *labels.last().unwrap();
+        for label in [first, last] {
+            app.world_mut().entity_mut(label).insert(Hovered(true));
+        }
+        // The picking systems would reset the hover of a pointer that is not there.
+        app.world_mut().run_system_once(show_place_titles).unwrap();
+        let node = |app: &App, e: Entity| app.world().get::<Node>(e).unwrap().clone();
+        let high = node(&app, first_title);
+        assert_eq!(
+            (high.display, high.top, high.bottom),
+            (Display::Flex, percent(100), Val::Auto)
+        );
+        let low = node(&app, last_title);
+        assert_eq!(
+            (low.display, low.top, low.bottom),
+            (Display::Flex, Val::Auto, percent(100))
+        );
     }
 }

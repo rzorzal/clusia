@@ -1729,7 +1729,7 @@ mod tests {
             .insert_resource(tabs)
             .insert_resource(keys)
             .init_resource::<TabsChanged>()
-            .add_message::<BackdropClicked>()
+            .add_plugins(crate::ui::modal::ModalPlugin)
             .add_systems(
                 Update,
                 (
