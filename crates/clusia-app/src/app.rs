@@ -77,6 +77,20 @@ impl ScreenshotPlan {
 /// How long the window waits, once closed, for the bridge to deliver what is still queued.
 const BRIDGE_EXIT_WAIT: Duration = Duration::from_secs(3);
 
+/// Only a live, interactive window joins the Dock; demos and screenshots stay out of it so they
+/// neither pop an icon nor take focus.
+fn joins_dock(launch: &Launch) -> bool {
+    launch.mode == Mode::Live && launch.screenshot.is_none()
+}
+
+fn dock_source(launch: &Launch) -> platform_window::DockSource {
+    if joins_dock(launch) {
+        platform_window::DockSource::default()
+    } else {
+        platform_window::DockSource(|| {})
+    }
+}
+
 pub fn run(launch: Launch) {
     let bridge = BridgeSlot::default();
     // Demos and screenshots keep one fixed window, so renders do not depend on the display.
@@ -98,6 +112,7 @@ pub fn run(launch: Launch) {
             }),
     )
     .insert_resource(StartTarget(launch.target.clone()))
+    .insert_resource(dock_source(&launch))
     .add_plugins((
         TabNavigationPlugin,
         FontsPlugin,
@@ -224,6 +239,30 @@ mod tests {
                 visible: Rect::new(1512.0, 0.0, 2560.0, 1415.0),
             },
         ]
+    }
+
+    fn launch(mode: Mode, screenshot: Option<&str>) -> Launch {
+        Launch {
+            paths: Paths::new("/nonexistent/clusia-test"),
+            home: None,
+            target: WindowTarget::Home,
+            mode,
+            screenshot: screenshot.map(PathBuf::from),
+            frames: 1,
+            frame_step: None,
+            scene: None,
+        }
+    }
+
+    #[test]
+    fn only_a_live_interactive_window_joins_the_dock() {
+        let demo = Mode::Demo {
+            theme: None,
+            settings: Vec::new(),
+        };
+        assert!(joins_dock(&launch(Mode::Live, None)));
+        assert!(!joins_dock(&launch(Mode::Live, Some("a.png"))));
+        assert!(!joins_dock(&launch(demo, None)));
     }
 
     #[test]

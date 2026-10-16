@@ -8,7 +8,7 @@ use bevy::ecs::system::NonSendMarker;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowFocused, WindowPosition};
 use objc2::{AnyThread, MainThreadMarker};
-use objc2_app_kit::{NSApplication, NSImage, NSScreen, NSWorkspace};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage, NSScreen, NSWorkspace};
 use objc2_foundation::{NSNumber, NSString};
 
 use crate::window_frame::{Display, Rect, Remembered};
@@ -65,6 +65,57 @@ pub fn bring_forward(recorder: Option<&mut Foregrounds>, main_thread: NonSendMar
         Some(count) => count.0 += 1,
         None => activate(main_thread),
     }
+}
+
+/// How this process becomes a regular app (Dock icon, app menu, ⌘-Tab). The bundle is an agent
+/// app (`LSUIElement`) for the tray's sake, so the window process opts in at startup. Tests and
+/// demo runs insert a stand-in.
+#[derive(Resource, Clone, Copy)]
+pub struct DockSource(pub fn());
+
+impl Default for DockSource {
+    fn default() -> Self {
+        Self(join_dock)
+    }
+}
+
+fn join_dock() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    quit_through_the_window(&app);
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+}
+
+/// Points the app menu's Quit (⌘Q) at the key window's close, so it takes the window's own close
+/// path, which holds the window while a comment is being written. Left to itself, `terminate:`
+/// would end the process past that check.
+fn quit_through_the_window(app: &NSApplication) {
+    let Some(app_menu) = app
+        .mainMenu()
+        .and_then(|bar| bar.itemAtIndex(0))
+        .and_then(|item| item.submenu())
+    else {
+        return;
+    };
+    for item in app_menu.itemArray() {
+        if item.keyEquivalent().to_string() == "q" {
+            // SAFETY: `performClose:` takes the sender and is understood by NSWindow, which the
+            // responder chain reaches with a nil target.
+            unsafe {
+                item.setTarget(None);
+                item.setAction(Some(objc2::sel!(performClose:)));
+            }
+        }
+    }
+}
+
+/// Makes the window process a regular app once, at startup.
+fn show_in_dock(source: Res<DockSource>, _main_thread: NonSendMarker) {
+    (source.0)();
 }
 
 /// Where the system's Reduce Motion setting is read from.
@@ -256,7 +307,8 @@ impl Plugin for PlatformPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ReduceMotionSource>()
             .init_resource::<DisplaySource>()
-            .add_systems(Startup, set_icon)
+            .init_resource::<DockSource>()
+            .add_systems(Startup, (show_in_dock, set_icon).chain())
             .add_systems(
                 Update,
                 (
@@ -321,6 +373,20 @@ mod tests {
         focus(&mut app, true);
         app.update();
         assert!(app.world().resource::<Motion>().reduced);
+    }
+
+    static DOCK_JOINS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    #[test]
+    fn the_window_joins_the_dock_once_at_startup() {
+        let mut app = App::new();
+        app.insert_resource(DockSource(|| {
+            DOCK_JOINS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }))
+        .add_systems(Startup, show_in_dock);
+        app.update();
+        app.update();
+        assert_eq!(DOCK_JOINS.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
