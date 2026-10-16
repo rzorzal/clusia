@@ -755,12 +755,15 @@ tbody tr:last-child td {
    Hero text sits straight on the sky, so its ink follows the sky's brightness, not the scheme. */
 .home {
   --sky-ink: #1B1F1C;
+  /* The sky's own color pushed away from the ink, laid behind the hero text. */
+  --sky-haze: color-mix(in srgb, var(--sky-top) 65%, #ffffff);
   --ground-top: color-mix(in srgb, var(--hill-front) 55%, var(--sand-back));
   /* The last stretch of the page (footer and sea) stands on the sand; .ground covers the rest. */
   background: linear-gradient(var(--sand-front), var(--sand-front)) left bottom / 100% 900px no-repeat;
 }
 
-/* In a window taller than the page, the ground stretches so the page still ends on sand and sea. */
+/* In a window taller than the page, the extra height opens up the sky above the hero text,
+   so the walk from the hills down to the sea keeps its proportions. */
 body.home {
   display: flex;
   flex-direction: column;
@@ -772,16 +775,9 @@ body.home {
   flex-direction: column;
 }
 
-.home .ground {
-  flex: 1 0 auto;
-}
-
-.home .footer {
-  flex: none;
-}
-
 [data-sky="dark"] .home {
   --sky-ink: #FFF4E6;
+  --sky-haze: color-mix(in srgb, var(--sky-top) 75%, #000000);
 }
 
 /* The backdrop sinks a little so the hero has open sky; its sea shows only at the end of the page. */
@@ -793,6 +789,11 @@ body.home {
   display: none;
 }
 
+/* Out to the right, clear of the headline; the sea's moon glint sits under it. */
+.home .restinga .moon {
+  transform: translate(620px, -40px);
+}
+
 .home .hero {
   position: relative;
   z-index: 1;
@@ -802,42 +803,67 @@ body.home {
   width: 100%;
   max-width: 1120px;
   min-height: min(calc(100svh - 80px), 900px);
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  justify-content: flex-end;
   margin: 0 auto;
   padding: clamp(40px, 9vh, 104px) var(--gutter) clamp(150px, 26vh, 260px);
 }
 
-/* A haze of the sky's own color behind the text keeps it readable over the sun and the hills. */
-.home .hero::before {
-  content: "";
-  position: absolute;
-  z-index: -1;
-  inset: -4% 18% 8% -14%;
-  background: radial-gradient(closest-side, color-mix(in srgb, var(--sky-top) 72%, transparent), transparent);
-  pointer-events: none;
-}
-
 .hero-text {
+  position: relative;
   max-width: 720px;
   margin-left: clamp(0px, 3vw, 40px);
 }
 
-.hero-lockup {
-  margin: 0 0 clamp(18px, 3vh, 30px);
+/* Fully laid from about 28 px outside the text, so every glyph has the haze behind it. */
+.hero-text::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -56px -72px;
+  border-radius: 56px;
+  background: color-mix(in srgb, var(--sky-haze) 80%, transparent);
+  filter: blur(28px);
+  pointer-events: none;
 }
 
-.hero-lockup img {
+.hero-lockup {
   display: block;
   width: auto;
   height: clamp(54px, 7vw, 80px);
+  margin: 0 0 clamp(18px, 3vh, 30px);
+  overflow: visible;
 }
 
-.hero .on-dark-sky,
-[data-sky="dark"] .hero .on-light-sky {
-  display: none;
+.lockup-word,
+.lockup-tag {
+  fill: var(--sky-ink);
 }
 
-[data-sky="dark"] .hero .on-dark-sky {
-  display: block;
+.lockup-leaf {
+  fill: #2F9E44;
+}
+
+.lockup-berry {
+  fill: #D9572B;
+}
+
+.lockup-stem {
+  stroke: #5D665F;
+}
+
+[data-sky="dark"] .lockup-leaf {
+  fill: #4CC35F;
+}
+
+[data-sky="dark"] .lockup-berry {
+  fill: #F07A4A;
+}
+
+[data-sky="dark"] .lockup-stem {
+  stroke: #9AA49C;
 }
 
 .home .hero h1,
@@ -912,7 +938,7 @@ body.home {
 /* The ground: vegetated dunes at the top, plain sand by the sea. */
 .ground {
   position: relative;
-  padding: clamp(40px, 8vh, 96px) 0 clamp(64px, 10vh, 120px);
+  padding: clamp(40px, 8vh, 96px) 0 8px;
   background: linear-gradient(180deg, var(--ground-top) 0, var(--sand-back) 48%, var(--sand-front) 88%);
 }
 
@@ -975,6 +1001,65 @@ body.home {
 .dune-1 { top: 28%; }
 .dune-2 { top: 62%; }
 
+/* A band of dunes and plants between two panels, which tuck over its edges. */
+.strip {
+  position: relative;
+  height: clamp(250px, 17vw, 260px);
+  margin: calc(-1 * clamp(24px, 3.4vw, 52px)) 0;
+  pointer-events: none;
+}
+
+.strip svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  will-change: transform;
+}
+
+/* On a phone the strip would show only its middle; laid out at full width and scaled down,
+   it shows twice as much of the dunes between the panels. */
+@media (max-width: 760px) {
+  .strip {
+    height: 180px;
+  }
+
+  .strip svg {
+    left: 50%;
+    width: 1200px;
+    margin-left: -600px;
+  }
+}
+
+/* Translucent, so the same dunes read on green ground, on sand, by day and by night. */
+.hump {
+  fill: color-mix(in srgb, var(--shrub) 20%, transparent);
+}
+
+.hump-light {
+  fill: color-mix(in srgb, var(--sky-bottom) 30%, transparent);
+}
+
+.runner-stem {
+  fill: none;
+  stroke: color-mix(in srgb, var(--shrub) 80%, var(--sand-back));
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.runner-leaf {
+  fill: color-mix(in srgb, var(--shrub) 85%, var(--hill-front));
+}
+
+.runner-flower {
+  fill: color-mix(in srgb, #e889b5 70%, var(--sand-front));
+}
+
+.runner-throat {
+  fill: color-mix(in srgb, #ffffff 55%, var(--sand-front));
+}
+
 .ripple {
   fill: color-mix(in srgb, var(--sand-front) 72%, #ffffff);
   opacity: 0.3;
@@ -983,8 +1068,9 @@ body.home {
 /* Glass panels like the card, one per part of the story, with room between them for the dunes. */
 .panel {
   position: relative;
+  z-index: 1;
   width: min(1040px, 100% - 2 * var(--gutter));
-  margin: 0 auto clamp(72px, 14vh, 150px);
+  margin: 0 auto;
   padding: clamp(26px, 5vw, 56px);
   border-radius: 28px;
   background: color-mix(in srgb, var(--card) 94%, transparent);
@@ -1116,13 +1202,50 @@ body.home {
 }
 
 .home .footer {
-  margin-top: 40px;
-  margin-bottom: 36px;
+  z-index: 2;
+  margin-top: 36px;
+  margin-bottom: 30px;
+}
+
+/* The shore: the last plants on the upper sand, the footer standing on it, then the sea. */
+.shore {
+  position: relative;
+  --sea-height: clamp(260px, 34vh, 340px);
+}
+
+.shore-plants {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  bottom: calc(var(--sea-height) - 14px);
+  height: 300px;
+  overflow-x: clip;
+  pointer-events: none;
+}
+
+.shore-plants svg {
+  position: absolute;
+  bottom: 0;
+  width: clamp(250px, 32vw, 480px);
+  height: auto;
+  aspect-ratio: 480 / 260;
+  overflow: visible;
+  will-change: transform;
+}
+
+.shore-left {
+  left: -40px;
+}
+
+.shore-right {
+  right: -40px;
 }
 
 /* The sea at the foot of the page: wide repeating wave paths slide sideways, each band at its own pace. */
 .sea {
-  height: clamp(150px, 18vw, 240px);
+  position: relative;
+  height: var(--sea-height);
 }
 
 .sea svg {
@@ -1133,7 +1256,7 @@ body.home {
 }
 
 .wet-sand {
-  fill: color-mix(in srgb, var(--sand-front) 70%, var(--wave-1));
+  fill: color-mix(in srgb, var(--sand-back) 86%, #000000);
 }
 
 .sea .wave-1 {
@@ -1153,9 +1276,82 @@ body.home {
 
 .sea .foam {
   fill: none;
-  stroke: color-mix(in srgb, var(--wave-1) 40%, #ffffff);
-  stroke-width: 2.5;
+  stroke: color-mix(in srgb, var(--wave-1) 30%, #ffffff);
+  stroke-width: 3;
+  stroke-linecap: round;
+  opacity: 0.7;
+}
+
+.sea .crest {
+  fill: none;
+  stroke: color-mix(in srgb, var(--wave-1) 30%, #ffffff);
+  stroke-width: 5;
+  stroke-linecap: round;
+  opacity: 0.8;
+}
+
+.wave-2 .crest {
+  stroke-width: 4;
+  opacity: 0.6;
+}
+
+.wave-3 .crest {
+  stroke-width: 3.5;
+  opacity: 0.45;
+}
+
+/* The thin sheet of a spent wave running up the wet sand and back. */
+.swash {
+  animation: wash 5.5s ease-in-out infinite alternate;
+}
+
+.swash-water {
+  fill: color-mix(in srgb, var(--wave-1) 45%, transparent);
+}
+
+.swash-lace {
+  fill: none;
+  stroke: color-mix(in srgb, var(--wave-1) 25%, #ffffff);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  opacity: 0.85;
+}
+
+.swash-foam {
+  fill: color-mix(in srgb, var(--wave-1) 20%, #ffffff);
   opacity: 0.75;
+}
+
+@keyframes wash {
+  from { transform: translateY(8px); }
+  to { transform: translateY(-8px); }
+}
+
+/* The sun and the moon on the water, as bright as they are in the sky. */
+.glint rect {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: shimmer 3.4s ease-in-out infinite alternate;
+}
+
+.glint rect:nth-child(even) {
+  animation-delay: -1.7s;
+}
+
+.glint-sun {
+  fill: color-mix(in srgb, var(--sun) 55%, #ffffff);
+  /* Strongest when the sun is low over the water (--sun-y near 1), faint at noon. */
+  opacity: calc(var(--sun-opacity) * (0.2 + var(--sun-y) * 0.6));
+}
+
+.glint-moon {
+  fill: #E9ECE9;
+  opacity: calc(var(--moon-opacity) * 0.55);
+}
+
+@keyframes shimmer {
+  from { transform: scaleX(0.78); }
+  to { transform: scaleX(1.12); }
 }
 
 /* ---------- Small screens ---------- */
@@ -1239,7 +1435,9 @@ body.home {
 
 @media (prefers-reduced-motion: reduce) {
   .restinga .wave,
-  .sea .wave {
+  .sea .wave,
+  .swash,
+  .glint rect {
     animation: none;
   }
 

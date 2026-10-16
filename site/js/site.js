@@ -19,6 +19,17 @@ export const layerShift = (scrollY, depth) => Math.min(Math.max(scrollY, 0), PAR
 // than the page around it. The offset stays bounded however long the page is.
 export const driftShift = (fromCentre, speed) => Math.round(-fromCentre * speed) || 0;
 
+// Pieces more than a viewport above or below the screen keep their last shift: they cannot be seen.
+export function driftPlan(pieces, scrollY, viewport) {
+  const plan = [];
+  pieces.forEach((p, i) => {
+    const top = p.top - scrollY;
+    if (top + p.height < -viewport || top > 2 * viewport) return;
+    plan.push([i, driftShift(top + p.height / 2 - viewport / 2, p.speed)]);
+  });
+  return plan;
+}
+
 // `env` stands in for the window so the copy path can run outside a browser. The button's
 // aria-label hides its changing text from screen readers, so `status` (a live region) says it.
 export async function copyFrom(button, env = globalThis, status = null) {
@@ -47,23 +58,28 @@ export async function copyFrom(button, env = globalThis, status = null) {
   }, 1500);
 }
 
-function parallax(layers, drifters) {
+function parallax(layers, pieces) {
   let queued = false;
+  // Where the layout put each piece, in page coordinates, taken once and again on resize or
+  // load (web fonts can move things); the shift applied so far is taken back out.
+  const measure = () => {
+    for (const p of pieces) {
+      const box = p.el.getBoundingClientRect();
+      p.top = box.top + scrollY - p.shift;
+      p.height = box.height;
+    }
+  };
   const update = () => {
     queued = false;
+    // No layout is read here, so every write below lands in one pass.
+    const plan = driftPlan(pieces, scrollY, innerHeight);
     for (const [layer, depth] of layers) layer.style.transform = `translate3d(0, ${layerShift(scrollY, depth)}px, 0)`;
-    // All reads before any write. The box measured includes the shift applied last time,
-    // which is taken back out to find where the layout put the piece.
-    const middle = innerHeight / 2;
-    const shifts = drifters.map((d) => {
-      const box = d.el.getBoundingClientRect();
-      return driftShift(box.top + box.height / 2 - d.shift - middle, d.speed);
-    });
-    drifters.forEach((d, i) => {
-      if (shifts[i] === d.shift) return;
-      d.shift = shifts[i];
-      d.el.style.transform = `translate3d(0, ${d.shift}px, 0)`;
-    });
+    for (const [i, shift] of plan) {
+      const p = pieces[i];
+      if (shift === p.shift) continue;
+      p.shift = shift;
+      p.el.style.transform = `translate3d(0, ${shift}px, 0)`;
+    }
   };
   const queue = () => {
     if (!queued) {
@@ -71,8 +87,14 @@ function parallax(layers, drifters) {
       requestAnimationFrame(update);
     }
   };
+  const remeasure = () => {
+    measure();
+    queue();
+  };
   addEventListener('scroll', queue, { passive: true });
-  addEventListener('resize', queue);
+  addEventListener('resize', remeasure);
+  addEventListener('load', remeasure);
+  measure();
   update();
 }
 
@@ -104,7 +126,7 @@ function init() {
   if (!still) {
     parallax(
       [...document.querySelectorAll('.restinga .layer')].map((layer) => [layer, Number(layer.dataset.depth) || 0]),
-      [...document.querySelectorAll('[data-drift]')].map((el) => ({ el, speed: Number(el.dataset.drift) || 0, shift: 0 })),
+      [...document.querySelectorAll('[data-drift]')].map((el) => ({ el, speed: Number(el.dataset.drift) || 0, shift: 0, top: 0, height: 0 })),
     );
   }
 

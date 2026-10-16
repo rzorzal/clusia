@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { paint, layerShift, PARALLAX_RANGE, driftShift, copyFrom } from '../js/site.js';
+import { paint, layerShift, PARALLAX_RANGE, driftShift, driftPlan, copyFrom } from '../js/site.js';
 import { paletteAt, skyAt } from '../js/palette.js';
 
 const fakeRoot = () => {
@@ -44,6 +44,20 @@ test('a drifting piece moves against its distance from the middle of the screen,
   assert.equal(driftShift(333, 0.1), -33);
   assert.ok(Object.is(driftShift(0, 0.3), 0));
   assert.ok(Object.is(driftShift(-0.4, 0.3), 0));
+});
+
+test('driftPlan moves only the pieces within a viewport of the screen, from positions measured once', () => {
+  // top and height are page coordinates of where the layout put each piece.
+  const pieces = [
+    { top: 100, height: 200, speed: 0.2 },   // on screen at the top
+    { top: 1500, height: 200, speed: -0.1 }, // just below the screen
+    { top: 5000, height: 200, speed: 0.2 },  // far below
+    { top: 0, height: 100, speed: 0.3 },     // far above once scrolled
+  ];
+  assert.deepEqual(driftPlan(pieces, 0, 900), [[0, driftShift(200 - 450, 0.2)], [1, driftShift(1600 - 450, -0.1)], [3, driftShift(50 - 450, 0.3)]]);
+  const later = driftPlan(pieces, 3600, 900);
+  assert.deepEqual(later.map(([i]) => i), [2]);
+  assert.deepEqual(later[0], [2, driftShift(5100 - 3600 - 450, 0.2)]);
 });
 
 function fakeCopy({ clipboard, execCommand = () => true }) {
