@@ -24,7 +24,9 @@ use crate::bridge::{Model, Toast, Toasts};
 use crate::fonts::UiFonts;
 use crate::review_state::{EditTarget, Phase, ReviewTabs};
 use crate::theme::{Swatch, Theme};
-use crate::ui::kit::{Fill, HoverFill, Ink, Stroke, Type, panel, segment, segments, text};
+use crate::ui::kit::{
+    Fill, HoverFill, Icon, Ink, Stroke, Type, Variant, icon_button, panel, segment, segments, text,
+};
 use crate::ui::markdown::MdImage;
 use crate::ui::markdown::build::{RenderOpts, is_external, markdown};
 use crate::ui::markdown::parse::parse;
@@ -41,7 +43,7 @@ pub(crate) mod testkit;
 
 use toolbar::{
     Chip, ToolbarAction, ToolbarFor, action_buttons, chips_in, cursor_after_removal,
-    insert_suggestion, remove_chip, tool_button,
+    insert_suggestion, remove_chip,
 };
 
 /// Write shows the text area, Preview the rendered comment.
@@ -714,7 +716,7 @@ fn chip_node(p: &mut ChildSpawnerCommands, fonts: &UiFonts, key: &ComposerKey, c
             l.spawn(text(fonts, chip.note(), Type::META.ink(note)));
         });
         c.spawn((
-            tool_button(fonts, "×", false, false),
+            icon_button(Icon::Close, Variant::Ghost, 26.0),
             ChipRemove {
                 key: key.clone(),
                 raw: chip.raw.clone(),

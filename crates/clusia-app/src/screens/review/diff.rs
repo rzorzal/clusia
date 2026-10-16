@@ -38,7 +38,7 @@ use crate::ui::code::{CodeSpan, code_line, spans_for};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, avatar, badge, button, card, panel,
-    segment, segments, text,
+    segment, segment_node, segments, text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
@@ -1016,13 +1016,7 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
         }
         for label in ["Story", "Calls"] {
             s.spawn((
-                Node {
-                    height: px(26),
-                    padding: UiRect::horizontal(px(12)),
-                    align_items: AlignItems::Center,
-                    border_radius: BorderRadius::all(px(6)),
-                    ..default()
-                },
+                segment_node(),
                 Hovered::default(),
                 LaterSegment,
                 children![text(fonts, label, Type::MUTED.ink(Swatch::Faint))],

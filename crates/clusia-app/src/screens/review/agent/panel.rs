@@ -30,7 +30,8 @@ use crate::screens::review::shell::{HarnessButton, RightPanel, on_harness};
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, panel, text,
+    Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, icon_button,
+    panel, text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown};
@@ -1101,24 +1102,18 @@ fn rebuild_rules(
                                 Type::META,
                             ));
                             chip.spawn((
-                                Node {
-                                    padding: UiRect::axes(px(5), px(0)),
-                                    border_radius: BorderRadius::all(px(8)),
-                                    ..default()
-                                },
-                                (WidgetButton, Clickable),
-                                Hovered::default(),
-                                TabIndex(0),
-                                BackgroundColor::default(),
-                                Fill(Swatch::Clear),
-                                HoverFill(Swatch::Hover),
+                                icon_button(Icon::Close, Variant::Ghost, 18.0),
                                 RevokeButton {
                                     pr: pr.clone(),
                                     rule: rule.clone(),
                                 },
                                 observe(on_revoke),
-                                children![text(&fonts, "×", Type::META)],
-                            ));
+                            ))
+                            .entry::<Node>()
+                            .and_modify(|mut node| {
+                                node.align_self = AlignSelf::Center;
+                                node.border_radius = BorderRadius::all(px(8));
+                            });
                         });
                 }
             });
