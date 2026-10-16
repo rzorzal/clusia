@@ -82,7 +82,7 @@ pub fn run(launch: Launch) {
             .disable::<LogPlugin>()
             .set(WindowPlugin {
                 primary_window: Some(window()),
-                // The window asks before closing review tabs with a draft (`screens::review::leave`).
+                // A comment being written or a publish running holds the window (`screens::review::leave`).
                 close_when_requested: false,
                 ..default()
             }),
@@ -96,6 +96,7 @@ pub fn run(launch: Launch) {
         crate::ui::emoji::EmojiPlugin,
         crate::nav::NavPlugin,
         crate::review_state::ReviewStatePlugin,
+        crate::tab_memory::TabMemoryPlugin,
         crate::screens::home::HomePlugin,
         crate::screens::first_run::FirstRunPlugin,
         crate::screens::config::ConfigPlugin,
@@ -136,9 +137,9 @@ pub fn run(launch: Launch) {
         }
     }
     app.run();
-    // Leaving the window sends `CloseReview` / `Discard` for its tabs and exits in the same
-    // frame. The app (and its `Asks` sender) is gone now, so the bridge answers what is queued
-    // and ends; wait for it, so those choices reach the daemon before the process exits.
+    // The window may exit in the frame that sent its last asks (the tabs it keeps, a choice in
+    // the leave prompt). The app (and its `Asks` sender) is gone now, so the bridge answers what
+    // is queued and ends; wait for it, so those reach the daemon before the process exits.
     if let Some(thread) = bridge.take()
         && !thread.finish(BRIDGE_EXIT_WAIT)
     {

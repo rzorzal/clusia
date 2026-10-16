@@ -42,6 +42,7 @@ use crate::screens::review::checks::{self, Checks, proposed_comment};
 use crate::screens::review::diagrams::{Diagrams, modal};
 use crate::screens::review::revalidation::Revalidations;
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
+use crate::tab_memory::TabsRestored;
 use crate::ui::media::MediaCache;
 
 /// Events arriving within this window share one refresh.
@@ -107,6 +108,8 @@ pub enum Ask {
     },
     /// Leave the review (saved when the draft has items): `Left`.
     CloseReview(PrRef),
+    /// The window's tabs now, kept by the daemon so they come back with the window.
+    SetOpenTabs(clusia_core::OpenTabs),
     Discard(PrRef),
     /// Worker connection: `Tell::Media` with this URL.
     FetchMedia(String),
@@ -708,6 +711,8 @@ pub enum Tell {
     Lost(String),
     /// The daemon is stopping on request (the tray's Quit): the window closes too.
     Quit,
+    /// The tabs the window had open last time, once per window.
+    Restored(clusia_core::OpenTabs),
     /// A `LoadStep` event, live while a review opens.
     Step(LoadStep),
     Opened {
@@ -877,8 +882,18 @@ async fn run(
     mut asks: UnboundedReceiver<Ask>,
 ) {
     let open = OpenSet::default();
+    let mut restored = false;
     loop {
-        match session(&paths, home.as_deref(), &teller, &open, &mut asks).await {
+        match session(
+            &paths,
+            home.as_deref(),
+            &teller,
+            &open,
+            &mut restored,
+            &mut asks,
+        )
+        .await
+        {
             Ok(()) => return,
             Err(reason) => teller.send(Tell::Lost(reason)),
         }
@@ -1012,6 +1027,8 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
                 item: None,
             }));
         }
+        // The window sends its tabs again once it is back.
+        Ask::SetOpenTabs(_) => {}
         Ask::Revalidate(_) | Ask::StopRevalidation(_) => teller.send(Tell::Notice {
             text: "Not connected to clusiad — not sent".into(),
             warning: true,
@@ -1038,6 +1055,7 @@ async fn session(
     home: Option<&Path>,
     teller: &Teller,
     open: &OpenSet,
+    restored: &mut bool,
     asks: &mut UnboundedReceiver<Ask>,
 ) -> Result<(), String> {
     let (mut client, _) = clusia_protocol::launcher::ensure_daemon(paths, home, crate::CLIENT_NAME)
@@ -1066,6 +1084,17 @@ async fn session(
         snap.sync = Some(s);
     }
     teller.send(Tell::Snapshot(Box::new(snap.clone())));
+    // Once per window: a reconnect must not close idle tabs the window still shows. A refusal
+    // counts as no saved tabs, so the window keeps saving its own from now on: with nothing
+    // saved, a closed window would leave its reviews open with no tab to close them from.
+    if !*restored {
+        let tabs = match request(&mut client, Command::RestoreTabs).await? {
+            Some(Reply::OpenTabs(tabs)) => tabs,
+            _ => clusia_core::OpenTabs::default(),
+        };
+        *restored = true;
+        teller.send(Tell::Restored(tabs));
+    }
     // A new connection holds nothing yet.
     let mut held = HashSet::new();
     hold_open_reviews(&mut client, open, &mut held).await?;
@@ -1460,6 +1489,9 @@ async fn answer(
         }
         Ask::RemoveItem { pr, id } => {
             notify(client, teller, Command::RemoveDraftItem { pr, id }, "").await?;
+        }
+        Ask::SetOpenTabs(tabs) => {
+            request(client, Command::SetOpenTabs { tabs }).await?;
         }
         Ask::CloseReview(pr) => {
             open_set(open).remove(&pr);
@@ -2286,6 +2318,7 @@ impl Plugin for BridgePlugin {
         app.init_resource::<Model>()
             .init_resource::<Toasts>()
             .add_message::<ShowRequested>()
+            .add_message::<TabsRestored>()
             .add_message::<GifsArrived>()
             .add_systems(PreUpdate, pump);
         match self.mode {
@@ -2347,6 +2380,7 @@ pub(crate) fn pump(
     mut asks: ResMut<Asks>,
     mut show: MessageWriter<ShowRequested>,
     mut exit: MessageWriter<AppExit>,
+    mut restored: MessageWriter<TabsRestored>,
     mut reviews: MessageWriter<ReviewEvent>,
     mut media: ResMut<MediaCache>,
     mut gifs: MessageWriter<GifsArrived>,
@@ -2434,6 +2468,9 @@ pub(crate) fn pump(
             }
             Tell::Quit => {
                 exit.write(AppExit::Success);
+            }
+            Tell::Restored(tabs) => {
+                restored.write(TabsRestored(tabs));
             }
             Tell::Refused { message, .. } => toasts.0.push(Toast {
                 text: message,
@@ -2797,6 +2834,8 @@ pub(crate) fn demo_answers(
                 pr,
             }),
             Ask::CloseReview(pr) | Ask::Discard(pr) => tells.push(Tell::Left(pr)),
+            // Nothing keeps the demo's tabs.
+            Ask::SetOpenTabs(_) => {}
             Ask::SearchGifs { query, offset } => {
                 tells.push(Tell::Gifs(Ok(fixture::demo_gif_page(&query, offset))));
             }
@@ -4572,6 +4611,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .add_message::<ReviewEvent>()
             .add_message::<ShowRequested>()
+            .add_message::<TabsRestored>()
             .add_message::<AppExit>()
             .add_message::<GifsArrived>()
             .insert_resource(inbox)

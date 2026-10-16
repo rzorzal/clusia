@@ -75,6 +75,7 @@ pub fn app(snapshot: Snapshot) -> App {
         ))
         .add_plugins(FirstRunPlugin)
         .add_plugins(ReviewStatePlugin)
+        .add_plugins(crate::tab_memory::TabMemoryPlugin)
         .add_plugins(ReviewPlugin)
         .add_plugins(OpenPrPlugin)
         .init_resource::<OpenUrls>()

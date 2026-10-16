@@ -855,21 +855,47 @@ pub(crate) async fn remove_item(shared: &Shared, pr: &PrRef, id: &str) -> Outcom
 }
 
 pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {
+    match leave(shared, client, pr, false).await {
+        Ok(_) => Outcome::Ok(Reply::Ack),
+        Err(out) => out,
+    }
+}
+
+/// Closes the review like `close`, unless its draft has items: `Ok(true)` when it closed (or
+/// there was nothing to close). The draft is read under the review lock, so an item added
+/// meanwhile keeps the review.
+#[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
+pub(crate) async fn close_if_empty(
+    shared: &Shared,
+    client: &str,
+    pr: &PrRef,
+) -> Result<bool, Outcome> {
+    leave(shared, client, pr, true).await
+}
+
+#[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
+async fn leave(
+    shared: &Shared,
+    client: &str,
+    pr: &PrRef,
+    only_empty: bool,
+) -> Result<bool, Outcome> {
     let guard = lock(shared, pr).await;
-    let mut review = match load_stored(shared, pr) {
-        Ok(Some(r)) => r,
-        Ok(None) => return Outcome::Ok(Reply::Ack),
-        Err(out) => return out,
+    let Some(mut review) = load_stored(shared, pr)? else {
+        return Ok(true);
     };
+    if only_empty && !review.draft.is_empty() {
+        return Ok(false);
+    }
     if review.state != ReviewState::Active {
-        return Outcome::Ok(Reply::Ack);
+        return Ok(true);
     }
     if review.draft.is_empty() {
         if let Err(e) = delete_review(&shared.paths, pr) {
-            return Outcome::Err(ProtocolError::new(
+            return Err(Outcome::Err(ProtocolError::new(
                 ErrorCode::Internal,
                 format!("could not delete the review file: {e}"),
-            ));
+            )));
         }
         shared.sessions.cancel_ended(shared, pr);
         crate::agent::forget(shared, pr);
@@ -877,14 +903,12 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
         // windows hear it ended.
         drop(guard);
         crate::agent::stop(shared, pr).await;
-        return Outcome::Ok(Reply::Ack);
+        return Ok(true);
     }
     if let Err(e) = review.apply(ReviewEvent::Leave, now_unix()) {
-        return invalid_state(e.to_string());
+        return Err(invalid_state(e.to_string()));
     }
-    if let Err(out) = save(shared, &review) {
-        return out;
-    }
+    save(shared, &review)?;
     record(shared, ActivityKind::ReviewSaved, pr, client, None, None);
     announce(shared, &review);
     // Out of the lock: a run that is finishing needs it to store its result.
@@ -892,7 +916,7 @@ pub(crate) async fn close(shared: &Shared, client: &str, pr: &PrRef) -> Outcome 
     crate::checks::stop_all(shared, pr, crate::turns::Why::User).await;
     crate::diagrams::stop_all(shared, pr, crate::turns::Why::User).await;
     shared.sessions.close_review(shared, pr).await;
-    Outcome::Ok(Reply::Ack)
+    Ok(true)
 }
 
 /// Removes Clúsia's worktree and pins for `pr` (best effort).

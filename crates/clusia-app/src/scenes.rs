@@ -84,6 +84,19 @@ fn steps(pr: &clusia_core::PrRef) -> Vec<LoadStep> {
     ]
 }
 
+/// The tabs a window left open: the demo review shown in Comments, two more beside it.
+pub fn restored_tabs() -> clusia_core::OpenTabs {
+    use clusia_core::OpenTabs;
+    OpenTabs {
+        tabs: vec![
+            OpenTabs::tab("rzorzal/clusia#98".parse().expect("valid ref"), "diff"),
+            OpenTabs::tab(fixture::demo_pr(), "comments"),
+            OpenTabs::tab("acme/widgets#5".parse().expect("valid ref"), "security"),
+        ],
+        selected: Some(fixture::demo_pr()),
+    }
+}
+
 /// The comment the composer scenes have typed (mockup `Composer.png`).
 const COMPOSER_TEXT: &str = "**Holding the lock across the network call** is what bit us on CI :turtle:\n\nCould we:\n1. re-check `expires_at` after taking the lock\n2. release it before `exchange`?\n\n_Trace from the race test below_ :point_down:\n![waiting](https://media.giphy.com/media/demo-party/giphy.gif)";
 
@@ -376,6 +389,14 @@ pub fn stage(world: &mut World, scene: Scene) {
     ) {
         return;
     }
+    if scene == Scene::Restored {
+        // The window opens again: the daemon hands back the tabs it had, as `RestoreTabs` would.
+        let _ = world
+            .resource::<Outbox>()
+            .0
+            .send(Tell::Restored(restored_tabs()));
+        return;
+    }
     let now = world.resource::<Clock>().now();
     let (view, news) = fixture::demo_review(now);
     let pr = view.review.pr.clone();
@@ -404,7 +425,8 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::ConfigAbout
         | Scene::ConfigHarness
         | Scene::ConfigHarnessCodex
-        | Scene::ConfigHarnessCustom => {}
+        | Scene::ConfigHarnessCustom
+        | Scene::Restored => {}
         Scene::AgentChat
         | Scene::AgentChatCodex
         | Scene::AgentChatCustom
@@ -468,7 +490,7 @@ pub fn stage(world: &mut World, scene: Scene) {
                 "Nice change overall. Two things on the token store before this goes in.".into();
         }
         Scene::WhatsNew => ui.modal = Some(Modal::WhatsNew),
-        Scene::Leave => ui.modal = Some(Modal::Leave { window: false }),
+        Scene::Leave => ui.modal = Some(Modal::Leave),
         Scene::Diagrams
         | Scene::DiagramsDeps
         | Scene::DiagramsSequence
@@ -655,6 +677,7 @@ mod tests {
                     | Scene::HomeFooter
                     | Scene::FirstRunCustom
                     | Scene::ConfigHarnessCustom
+                    | Scene::Restored
             ) {
                 continue;
             }
@@ -711,7 +734,8 @@ mod tests {
                 | Scene::ConfigHarnessCodex
                 | Scene::HomeFooter
                 | Scene::FirstRunCustom
-                | Scene::ConfigHarnessCustom => {
+                | Scene::ConfigHarnessCustom
+                | Scene::Restored => {
                     unreachable!("skipped above")
                 }
                 Scene::AgentChat | Scene::AgentChatCodex | Scene::AgentChatCustom => {
@@ -843,6 +867,20 @@ mod tests {
             [true, false]
         );
         assert!(testing::shows(&mut app, "Found · /opt/homebrew/bin/codex"));
+    }
+
+    #[test]
+    fn the_restored_scene_brings_back_three_tabs_with_the_demo_review_in_comments() {
+        let mut app = staged_outside_review(Scene::Restored);
+        let nav = app.world().resource::<Nav>().clone();
+        let prs: Vec<_> = restored_tabs().tabs.into_iter().map(|t| t.pr).collect();
+        assert_eq!(nav.reviews, prs);
+        assert_eq!(nav.screen, Screen::Review(fixture::demo_pr()));
+        assert_eq!(
+            testing::tab(&app, &fixture::demo_pr()).ui.section,
+            ReviewSection::Comments
+        );
+        assert_eq!(testing::count::<crate::nav::CloseTab>(&mut app), 3);
     }
 
     #[test]

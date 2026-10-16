@@ -1,5 +1,6 @@
 //! Leaving a review without deciding (spec §6.5, mockup `LeavePrompt.png`): closing a review
-//! tab, or the window, while the draft has items asks first. Quit from the tray never asks.
+//! tab while the draft has items asks first. Closing the window, or Quit from the tray, leaves
+//! every review open (`tab_memory` brings the tabs back), so neither asks.
 
 use bevy::input::ButtonInput;
 use bevy::prelude::*;
@@ -24,15 +25,6 @@ pub const FINISH_COMMENT: &str = "Finish or cancel the comment you're writing fi
 
 /// Why the window did not close: a publish is still running.
 pub const WAIT_PUBLISH: &str = "Wait for the publish to finish";
-
-/// A window close in progress: the window, the tabs still to ask about, and the tabs left on
-/// the daemon (`CloseReview`) only once the close goes ahead.
-#[derive(Resource, Debug, Default)]
-pub struct WindowClosing {
-    pub window: Option<Entity>,
-    pub queue: Vec<PrRef>,
-    pub close: Vec<PrRef>,
-}
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct LeaveModal(pub PrRef);
@@ -121,20 +113,12 @@ pub struct LeavePlugin;
 impl Plugin for LeavePlugin {
     fn build(&self, app: &mut App) {
         // `WindowPlugin` registers it in the real app; headless tests need it too.
-        app.add_message::<WindowCloseRequested>()
-            .init_resource::<WindowClosing>()
-            .add_systems(
-                Update,
-                (
-                    tab_close,
-                    window_close,
-                    advance_closing,
-                    spawn_modal,
-                    escape_cancels,
-                )
-                    .chain()
-                    .after(ReviewSystems),
-            );
+        app.add_message::<WindowCloseRequested>().add_systems(
+            Update,
+            (tab_close, window_close, spawn_modal, escape_cancels)
+                .chain()
+                .after(ReviewSystems),
+        );
     }
 }
 
@@ -157,7 +141,7 @@ fn tab_close(
             continue;
         }
         if needs_prompt(tab) {
-            tab.ui.modal = Some(Modal::Leave { window: false });
+            tab.ui.modal = Some(Modal::Leave);
             nav.go(&WindowTarget::Review { pr: pr.clone() });
             continue;
         }
@@ -168,91 +152,28 @@ fn tab_close(
     }
 }
 
+/// The window closes at once and the reviews stay open on the daemon, drafts saved: nothing
+/// is lost, so nothing is asked. Only a comment being written or a publish running holds it.
 fn window_close(
+    mut commands: Commands,
     mut requests: MessageReader<WindowCloseRequested>,
-    mut closing: ResMut<WindowClosing>,
     tabs: Res<ReviewTabs>,
     mut nav: ResMut<Nav>,
+    windows: Query<(), With<Window>>,
+    mut exit: MessageWriter<AppExit>,
     mut toasts: ResMut<Toasts>,
     time: Res<Time>,
 ) {
     for request in requests.read() {
-        if closing.window.is_some() {
-            continue; // already asking
-        }
-        // A comment being written or a publish running cancels the close: nothing is sent.
         if let Some((pr, why)) = window_held(&nav, &tabs) {
             hold(&pr, why, &mut nav, &mut toasts, &time);
             continue;
         }
-        *closing = WindowClosing {
-            window: Some(request.window),
-            ..default()
-        };
-        for pr in &nav.reviews {
-            let Some(tab) = tabs.0.get(pr) else { continue };
-            if needs_prompt(tab) {
-                closing.queue.push(pr.clone());
-            } else if matches!(tab.phase, Phase::Ready(_)) {
-                closing.close.push(pr.clone());
-            }
+        if windows.contains(request.window) {
+            commands.entity(request.window).despawn();
         }
+        exit.write(AppExit::Success);
     }
-}
-
-/// Asks about the next tab, or closes the window when none is left.
-fn advance_closing(
-    mut commands: Commands,
-    mut closing: ResMut<WindowClosing>,
-    mut tabs: ResMut<ReviewTabs>,
-    mut nav: ResMut<Nav>,
-    windows: Query<(), With<Window>>,
-    mut exit: MessageWriter<AppExit>,
-    mut asks: ResMut<Asks>,
-    mut toasts: ResMut<Toasts>,
-    time: Res<Time>,
-) {
-    let Some(window) = closing.window else {
-        return;
-    };
-    let asking = tabs
-        .0
-        .values()
-        .any(|t| t.ui.modal == Some(Modal::Leave { window: true }));
-    if asking {
-        return;
-    }
-    while !closing.queue.is_empty() {
-        let pr = closing.queue.remove(0);
-        if let Some(tab) = tabs.0.get_mut(&pr)
-            && needs_prompt(tab)
-        {
-            tab.ui.modal = Some(Modal::Leave { window: true });
-            nav.go(&WindowTarget::Review { pr });
-            return;
-        }
-    }
-    // Re-checked before leaving anything: the close is cancelled as it would have been at first.
-    if let Some((pr, why)) = window_held(&nav, &tabs) {
-        hold(&pr, why, &mut nav, &mut toasts, &time);
-        *closing = WindowClosing::default();
-        return;
-    }
-    // The close is sure now: the tabs that needed no answer are left on the daemon.
-    for pr in std::mem::take(&mut closing.close) {
-        if tabs
-            .0
-            .get(&pr)
-            .is_some_and(|t| matches!(t.phase, Phase::Ready(_)))
-        {
-            asks.send(Ask::CloseReview(pr));
-        }
-    }
-    if windows.contains(window) {
-        commands.entity(window).despawn();
-    }
-    exit.write(AppExit::Success);
-    *closing = WindowClosing::default();
 }
 
 fn spawn_modal(
@@ -266,7 +187,7 @@ fn spawn_modal(
         return;
     };
     let Some(tab) = tabs.0.get(pr) else { return };
-    let Some(modal @ Modal::Leave { .. }) = tab.ui.modal else {
+    let Some(modal @ Modal::Leave) = tab.ui.modal else {
         return;
     };
     if modals.iter().any(|m| &m.pr == pr && m.modal == modal) {
@@ -363,22 +284,15 @@ fn on_finalize_now(
     activate: On<Activate>,
     buttons: Query<&LeaveFinalize>,
     mut tabs: ResMut<ReviewTabs>,
-    mut closing: ResMut<WindowClosing>,
 ) {
     if let Ok(LeaveFinalize(pr)) = buttons.get(activate.entity)
         && let Some(tab) = tabs.0.get_mut(pr)
     {
         tab.ui.modal = Some(Modal::Finalize);
-        *closing = WindowClosing::default(); // deciding now: the window stays
     }
 }
 
-fn escape_cancels(
-    keys: Res<ButtonInput<KeyCode>>,
-    nav: Res<Nav>,
-    mut tabs: ResMut<ReviewTabs>,
-    mut closing: ResMut<WindowClosing>,
-) {
+fn escape_cancels(keys: Res<ButtonInput<KeyCode>>, nav: Res<Nav>, mut tabs: ResMut<ReviewTabs>) {
     if !escape_pressed(&keys) {
         return;
     }
@@ -386,10 +300,9 @@ fn escape_cancels(
         return;
     };
     if let Some(tab) = tabs.0.get_mut(pr)
-        && matches!(tab.ui.modal, Some(Modal::Leave { .. }))
+        && tab.ui.modal == Some(Modal::Leave)
     {
         tab.ui.modal = None;
-        *closing = WindowClosing::default();
     }
 }
 
@@ -470,10 +383,7 @@ mod tests {
         let close = testing::find::<CloseTab>(&mut app, |c| c.0 == pr);
         testing::activate(&mut app, close);
         testing::settle(&mut app);
-        assert_eq!(
-            testing::tab(&app, &pr).ui.modal,
-            Some(Modal::Leave { window: false })
-        );
+        assert_eq!(testing::tab(&app, &pr).ui.modal, Some(Modal::Leave));
         assert!(
             app.world().resource::<Nav>().reviews.contains(&pr),
             "still open"
@@ -575,58 +485,11 @@ mod tests {
     }
 
     #[test]
-    fn window_close_asks_then_exits() {
+    fn window_close_keeps_every_review_open_and_exits_without_asking() {
         let mut app = review_app();
         let pr = fixture::demo_pr();
         set_active(&mut app, &pr);
-        // A second tab that is still loading closes without a prompt or a CloseReview.
-        let loading: PrRef = "rzorzal/clusia#98".parse().unwrap();
-        app.world_mut()
-            .resource_mut::<Nav>()
-            .go(&WindowTarget::Review { pr: loading });
-        testing::settle(&mut app);
-        testing::recorded(&mut app);
-        let w = window(&mut app);
-        close_window(&mut app, w);
-        assert_eq!(
-            testing::tab(&app, &pr).ui.modal,
-            Some(Modal::Leave { window: true })
-        );
-        assert_eq!(
-            app.world().resource::<Nav>().screen,
-            Screen::Review(pr.clone())
-        );
-        assert!(
-            app.world().get_entity(w).is_ok(),
-            "the window waits for the answer"
-        );
-        assert!(!exits(&app));
-        let keep = testing::find::<LeaveKeep>(&mut app, |_| true);
-        testing::activate(&mut app, keep);
-        assert!(exits(&app));
-        assert!(app.world().get_entity(w).is_err(), "the window is gone");
-        assert_eq!(testing::recorded(&mut app), [Ask::CloseReview(pr)]);
-    }
-
-    #[test]
-    fn window_close_without_items_exits_at_once() {
-        let mut app = review_app();
-        let pr = fixture::demo_pr();
-        empty_draft(&mut app, &pr);
-        let w = window(&mut app);
-        close_window(&mut app, w);
-        assert_eq!(testing::count::<LeaveModal>(&mut app), 0);
-        assert_eq!(testing::recorded(&mut app), [Ask::CloseReview(pr)]);
-        assert!(app.world().get_entity(w).is_err());
-        assert!(exits(&app));
-    }
-
-    #[test]
-    fn finalize_now_cancels_the_window_close() {
-        let mut app = review_app();
-        let pr = fixture::demo_pr();
-        set_active(&mut app, &pr);
-        // A second ready tab without items: closed on the daemon only once the close is sure.
+        // A second ready tab without items, and a third one still loading.
         let quiet: PrRef = "rzorzal/clusia#98".parse().unwrap();
         app.world_mut()
             .resource_mut::<Nav>()
@@ -642,29 +505,26 @@ mod tests {
                 cached_at: None,
             }));
         }
+        let loading: PrRef = "acme/widgets#5".parse().unwrap();
         app.world_mut()
             .resource_mut::<Nav>()
-            .go(&WindowTarget::Review { pr: pr.clone() });
+            .go(&WindowTarget::Review { pr: loading });
         testing::settle(&mut app);
         testing::recorded(&mut app);
         let w = window(&mut app);
         close_window(&mut app, w);
+        assert!(exits(&app));
+        assert!(app.world().get_entity(w).is_err(), "the window is gone");
+        assert_eq!(testing::count::<LeaveModal>(&mut app), 0, "nothing asked");
+        assert_eq!(testing::tab(&app, &pr).ui.modal, None);
+        let asks = testing::recorded(&mut app);
         assert!(
-            testing::recorded(&mut app).is_empty(),
-            "nothing sent while asking"
+            !asks
+                .iter()
+                .any(|a| matches!(a, Ask::CloseReview(_) | Ask::Discard(_))),
+            "no review is left: {asks:?}"
         );
-        let now = testing::find::<LeaveFinalize>(&mut app, |_| true);
-        testing::activate(&mut app, now);
-        assert!(!exits(&app));
-        testing::settle(&mut app);
-        assert_eq!(testing::tab(&app, &pr).ui.modal, Some(Modal::Finalize));
-        assert!(app.world().get_entity(w).is_ok());
-        assert_eq!(app.world().resource::<WindowClosing>().window, None);
-        assert!(
-            testing::recorded(&mut app).is_empty(),
-            "the cancelled close sent nothing"
-        );
-        assert!(app.world().resource::<Nav>().reviews.contains(&quiet));
+        assert_eq!(app.world().resource::<Nav>().reviews.len(), 3, "tabs kept");
     }
 
     #[test]
@@ -687,7 +547,6 @@ mod tests {
         assert!(!exits(&app));
         assert!(app.world().get_entity(w).is_ok(), "the window stays");
         assert!(testing::recorded(&mut app).is_empty(), "nothing sent");
-        assert_eq!(app.world().resource::<WindowClosing>().window, None);
         assert_eq!(
             app.world().resource::<Nav>().screen,
             Screen::Review(pr.clone())
@@ -768,7 +627,6 @@ mod tests {
         assert!(!exits(&app));
         assert!(app.world().get_entity(w).is_ok(), "the window stays");
         assert!(testing::recorded(&mut app).is_empty(), "nothing sent");
-        assert_eq!(app.world().resource::<WindowClosing>().window, None);
         assert_eq!(
             app.world().resource::<Nav>().screen,
             Screen::Review(pr.clone())
@@ -809,8 +667,13 @@ mod tests {
         let mut app = review_app();
         let pr = fixture::demo_pr();
         set_active(&mut app, &pr);
+        testing::recorded(&mut app);
         testing::tell(&mut app, Tell::Quit);
         assert!(exits(&app));
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "the reviews stay open, like a window close"
+        );
         testing::settle(&mut app);
         assert_eq!(testing::count::<LeaveModal>(&mut app), 0);
         assert_eq!(testing::tab(&app, &pr).ui.modal, None);
