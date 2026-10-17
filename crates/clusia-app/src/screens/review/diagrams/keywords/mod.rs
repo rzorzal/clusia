@@ -29,6 +29,8 @@ use crate::ui::kit::{Fill, Type, text};
 use crate::ui::spinner::Motion;
 
 pub mod input;
+mod keys;
+mod overlays;
 pub mod panels;
 pub mod render;
 
@@ -138,6 +140,7 @@ pub struct KeywordsPlugin;
 impl Plugin for KeywordsPlugin {
     fn build(&self, app: &mut App) {
         input::add_systems(app);
+        app.add_plugins(overlays::OverlaysPlugin);
         app.add_systems(
             Update,
             (

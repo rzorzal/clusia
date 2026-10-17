@@ -17,7 +17,8 @@ use bevy::window::{PrimaryWindow, RequestRedraw};
 
 use clusia_diagram::keywords::Scene3D;
 
-use super::render::{Lens, SCALE, clamped, pixel_radius, project, view_pose, visible, world};
+use super::overlays::set_use_case;
+use super::render::{Lens, SCALE, clamped, pixel_radius, project, visible, world};
 use super::{KeywordsCanvas, KeywordsRuntime, SceneImage};
 use crate::review_state::{CameraPose, KeywordsUi, ReviewTabs, View3D};
 use crate::screens::review::diagrams::view::{pinch_factor, wheel_pixels};
@@ -325,8 +326,8 @@ pub(super) fn attach_input(mut commands: Commands, added: Query<Entity, Added<Sc
                             ui.card = None;
                             // Letting go of a focused use case also returns the camera, as the
                             // pills and Esc do.
-                            if ui.use_case.take().is_some() {
-                                ui.camera = view_pose(ui.view, &CameraPose::default());
+                            if ui.use_case.is_some() {
+                                set_use_case(ui, &rt.scene, None);
                             }
                         }
                         _ => {}

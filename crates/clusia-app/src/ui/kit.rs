@@ -546,7 +546,7 @@ pub fn toggle(on: bool) -> impl Bundle {
     )
 }
 
-fn checkbox_box(on: bool, enabled: bool) -> impl Bundle {
+pub fn checkbox_box(on: bool, enabled: bool) -> impl Bundle {
     let (fill, stroke) = match (on, enabled) {
         (true, true) => (Swatch::Green, Swatch::Green),
         (true, false) => (Swatch::Line, Swatch::Line),

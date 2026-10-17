@@ -174,7 +174,9 @@ fn on_view(activate: On<Activate>, buttons: Query<&ViewButton>, mut tabs: ResMut
 
 /// Adds the panels that sit on the scene (the use-case pills, the focus card, the filters and
 /// the legend).
-pub fn spawn_overlays(_p: &mut ChildSpawnerCommands, _fonts: &UiFonts, _pr: &PrRef) {}
+pub fn spawn_overlays(p: &mut ChildSpawnerCommands, _fonts: &UiFonts, pr: &PrRef) {
+    super::overlays::spawn_regions(p, pr);
+}
 
 // ---- the tooltip
 
