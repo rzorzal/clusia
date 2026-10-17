@@ -1,0 +1,1661 @@
+/* Landscape colors default to the day palette, so the page is complete without
+   JavaScript; site.js overwrites them for the visitor's hour. Card, ink and
+   accent follow the scheme only and are never blended. */
+:root {
+  --sky-top: #e9f5ec;
+  --sky-bottom: #fff4e6;
+  --sun: #f07a4a;
+  --hill-back: #9ccfa4;
+  --hill-front: #4cc35f;
+  --shrub: #2f9e44;
+  --sand-back: #ebd9b4;
+  --sand-front: #f3e6c8;
+  --wave-1: #7fc8d8;
+  --wave-2: #3fa7c0;
+  --wave-3: #2a7f9e;
+  --sun-opacity: 0.85;
+  --moon-opacity: 0;
+  --stars-opacity: 0;
+  --sun-y: 0.15;
+
+  --card: #ffffff;
+  --ink: #1B1F1C;
+  --muted: #5D665F;
+  --accent: #2F9E44;
+  --accent-text: #1F7A33;
+  --on-accent: #0c0e0d;
+  --code-bg: #1B1F1C;
+  --code-ink: #E9ECE9;
+  --line: color-mix(in srgb, var(--ink) 11%, transparent);
+  --tint: color-mix(in srgb, var(--ink) 5%, transparent);
+  --shadow: 0 1px 2px rgb(20 30 22 / 0.06), 0 18px 48px -12px rgb(20 30 22 / 0.22);
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --gutter: 16px;
+  color-scheme: light;
+}
+
+[data-scheme="dark"] {
+  --card: #23282a;
+  --ink: #E9ECE9;
+  --muted: #9AA49C;
+  --accent: #4CC35F;
+  --accent-text: #4CC35F;
+  --on-accent: #0c0e0d;
+  --code-bg: #131716;
+  --code-ink: #E9ECE9;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 18px 48px -12px rgb(0 0 0 / 0.6);
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--sky-top);
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: 96px;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 16.5px;
+  line-height: 1.65;
+  color: var(--ink);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  overflow-x: clip;
+}
+
+a {
+  color: var(--accent-text);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ---------- The restinga ---------- */
+
+/* Shrub, grass and bromeliad parts live in <symbol>s; their <use> clones sit in a
+   shadow tree, where descendant selectors from .restinga never match. */
+
+.restinga {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--sky-top) 0%, var(--sky-bottom) 62%);
+  pointer-events: none;
+}
+
+/* Anchored to the bottom and widened on tall screens (up to 160vw), so a phone
+   still sees hills, dunes and sea; the sky gradient fills the rest. */
+.restinga svg {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: max(100%, min(110vh, 160vw));
+  height: auto;
+  aspect-ratio: 16 / 10;
+  transform: translateX(-50%);
+  overflow: visible;
+}
+
+.restinga .layer {
+  will-change: transform;
+}
+
+.restinga .stars {
+  fill: #E9ECE9;
+  opacity: var(--stars-opacity);
+}
+
+.restinga .moon {
+  fill: #E9ECE9;
+  opacity: var(--moon-opacity);
+}
+
+.restinga .moon-glow {
+  opacity: 0.08;
+}
+
+/* --sun-y runs from 0 (high in the sky) to 1 (behind the hills). */
+.restinga .sun {
+  fill: var(--sun);
+  opacity: var(--sun-opacity);
+  transform: translateY(calc(var(--sun-y) * 520px));
+}
+
+.restinga .sun-glow {
+  opacity: 0.22;
+}
+
+.restinga .far-ridge {
+  fill: color-mix(in srgb, var(--hill-back) 55%, var(--sky-bottom));
+}
+
+.restinga .hill-back {
+  fill: var(--hill-back);
+}
+
+.restinga .hill-front {
+  fill: var(--hill-front);
+}
+
+.restinga .sand-back {
+  fill: var(--sand-back);
+}
+
+.restinga .dune-light {
+  fill: color-mix(in srgb, var(--sand-back) 70%, var(--sand-front));
+}
+
+.restinga .sand-front {
+  fill: var(--sand-front);
+}
+
+.canopy {
+  fill: var(--shrub);
+}
+
+.shade {
+  fill: color-mix(in srgb, var(--shrub) 70%, #000);
+  opacity: 0.35;
+}
+
+.leaf {
+  fill: color-mix(in srgb, var(--shrub) 78%, var(--hill-front));
+}
+
+.fruit {
+  fill: color-mix(in srgb, var(--sun) 70%, var(--shrub));
+}
+
+.bloom {
+  fill: color-mix(in srgb, var(--sand-front) 55%, #ffffff);
+  opacity: 0.9;
+}
+
+.grass {
+  fill: none;
+  stroke: var(--shrub);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.brom {
+  fill: color-mix(in srgb, var(--shrub) 65%, var(--hill-front));
+}
+
+.restinga .wave-1 {
+  fill: var(--wave-1);
+  animation: swell 9s linear infinite;
+}
+
+.restinga .wave-2 {
+  fill: var(--wave-2);
+  animation: swell-2 13s linear infinite;
+}
+
+.restinga .wave-3 {
+  fill: var(--wave-3);
+  animation: swell-3 17s linear infinite;
+}
+
+.restinga .foam {
+  fill: none;
+  stroke: color-mix(in srgb, var(--wave-1) 50%, #ffffff);
+  stroke-width: 2;
+  opacity: 0.6;
+}
+
+/* Each wave path repeats every 200, 240 and 280 units, so one period loops seamlessly. */
+@keyframes swell {
+  to { transform: translateX(-200px); }
+}
+
+@keyframes swell-2 {
+  to { transform: translateX(240px); }
+}
+
+@keyframes swell-3 {
+  to { transform: translateX(-280px); }
+}
+
+/* ---------- Navigation ---------- */
+
+.nav {
+  position: sticky;
+  top: 12px;
+  z-index: 10;
+  max-width: 1120px;
+  margin: 12px auto 0;
+  padding: 0 var(--gutter);
+}
+
+.nav nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow);
+  border: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  margin-right: auto;
+  border-radius: 8px;
+}
+
+.brand img {
+  display: block;
+  width: auto;
+  height: 34px;
+}
+
+.lockup-dark,
+[data-scheme="dark"] .lockup-light {
+  display: none !important;
+}
+
+[data-scheme="dark"] .lockup-dark {
+  display: block !important;
+}
+
+.links {
+  display: flex;
+  gap: 2px;
+}
+
+.links a,
+.github {
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 15px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.links a:hover,
+.github:hover {
+  background: var(--tint);
+}
+
+.links a[aria-current="page"] {
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  font-weight: 600;
+}
+
+.github {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+}
+
+/* ---------- The floating card ---------- */
+
+.card,
+.footer {
+  position: relative;
+  width: min(880px, 100% - 2 * var(--gutter));
+  margin-inline: auto;
+  background: color-mix(in srgb, var(--card) 96%, transparent);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+.card {
+  margin-top: clamp(28px, 7vw, 72px);
+  padding: clamp(28px, 6vw, 64px);
+  border-radius: 28px;
+}
+
+.card > :first-child {
+  margin-top: 0;
+}
+
+.card > :last-child {
+  margin-bottom: 0;
+}
+
+.footer {
+  margin-top: 24px;
+  margin-bottom: clamp(40px, 12vh, 140px);
+  padding: 28px clamp(20px, 5vw, 40px);
+  border-radius: 22px;
+  color: var(--muted);
+  font-size: 14.5px;
+}
+
+.footer p {
+  margin: 0;
+}
+
+.footer-lead {
+  color: var(--ink);
+  font-weight: 600;
+  margin-bottom: 12px !important;
+}
+
+.footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  margin-top: 20px !important;
+}
+
+.footer-links a {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.footer-note {
+  margin-top: 10px !important;
+}
+
+/* ---------- Type ---------- */
+
+h1,
+h2,
+h3 {
+  line-height: 1.15;
+  letter-spacing: -0.022em;
+  color: var(--ink);
+}
+
+h1 {
+  font-size: clamp(38px, 6.4vw, 60px);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  margin: 0 0 16px;
+}
+
+h2 {
+  font-size: clamp(22px, 2.6vw, 27px);
+  font-weight: 700;
+  margin: 56px 0 14px;
+}
+
+p {
+  margin: 0 0 14px;
+}
+
+.eyebrow {
+  display: inline-block;
+  margin-bottom: 18px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.lead {
+  font-size: clamp(18px, 2.1vw, 20.5px);
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 34em;
+  margin-bottom: 28px;
+}
+
+strong {
+  font-weight: 650;
+  color: var(--ink);
+}
+
+:not(pre) > code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  padding: 0.12em 0.4em;
+  border-radius: 6px;
+  background: var(--tint);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Install command and code blocks ---------- */
+
+/* The command keeps one line and scrolls inside its box; the page never scrolls sideways. */
+.install {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 7px 7px 18px;
+  border-radius: 16px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.06);
+}
+
+.install::before {
+  content: "$";
+  flex: none;
+  font-family: var(--mono);
+  font-size: 15px;
+  color: #4CC35F;
+  user-select: none;
+}
+
+.install code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 12px 0;
+  font-family: var(--mono);
+  font-size: 15px;
+  background: none;
+  color: inherit;
+  scrollbar-width: thin;
+}
+
+html:not(.js) .copy {
+  display: none;
+}
+
+.copy {
+  flex: none;
+  min-width: 84px;
+  padding: 11px 18px;
+  border: 0;
+  border-radius: 11px;
+  font: 600 15px/1 Inter, system-ui, sans-serif;
+  color: var(--on-accent);
+  background: var(--accent);
+  cursor: pointer;
+  transition: filter 0.15s, transform 0.15s;
+}
+
+.copy:hover {
+  filter: brightness(1.08);
+}
+
+.copy:active {
+  transform: translateY(1px);
+}
+
+.code {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 14px 0 18px;
+  border-radius: 14px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+}
+
+.code pre {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 16px 0 16px 18px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.7;
+  scrollbar-width: thin;
+}
+
+.code code {
+  font: inherit;
+}
+
+.code .copy {
+  margin: 8px 8px 0 0;
+  min-width: 0;
+  padding: 8px 13px;
+  font-size: 13.5px;
+  border-radius: 9px;
+}
+
+/* From 600 px up the whole command is in view, wrapping at a space or, if it must, inside the URL. */
+@media (min-width: 600px) {
+  .install code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    padding: 10px 0;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+
+  /* Level with the first line when the command wraps. */
+  .install::before {
+    align-self: flex-start;
+    padding-top: 10px;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- Install page pieces ---------- */
+
+.steps {
+  list-style: none;
+  counter-reset: step;
+  margin: 18px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.steps li {
+  counter-increment: step;
+  position: relative;
+  padding: 16px 18px 16px 64px;
+  border-radius: 16px;
+  background: var(--tint);
+}
+
+.steps li::before {
+  content: counter(step);
+  position: absolute;
+  left: 16px;
+  top: 15px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+.facts {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.facts li {
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.facts strong {
+  display: block;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  margin: 14px 0 22px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+th {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--tint);
+}
+
+td:nth-child(-n + 2) {
+  white-space: nowrap;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.next {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 48px;
+  padding: 14px 22px;
+  border-radius: 14px;
+  font-weight: 650;
+  font-size: 17px;
+  text-decoration: none;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.next span:first-child {
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.next span:last-child {
+  color: var(--accent-text);
+}
+
+.next:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.hero .next {
+  margin-top: 8px;
+}
+
+/* ---------- Screenshots ---------- */
+
+.shot {
+  margin: 28px 0;
+}
+
+/* :where keeps this at one class, so .shot-dark and .shot-light below decide which one shows. */
+.shot :where(img) {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+.shot-dark {
+  display: none;
+}
+
+[data-scheme="dark"] .shot-light {
+  display: none;
+}
+
+[data-scheme="dark"] .shot-dark {
+  display: block;
+}
+
+.shot figcaption {
+  margin-top: 12px;
+  font-size: 14.5px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ---------- Reveal ---------- */
+
+.js .reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.js .reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- Home ---------- */
+
+/* The home walks down from the sky, through the vegetated dunes, to the sand and the sea.
+   Hero text sits straight on the sky, so its ink follows the sky's brightness, not the scheme. */
+.home {
+  --sky-ink: #1B1F1C;
+  /* The sky's own color pushed away from the ink, laid behind the hero text. */
+  --sky-haze: color-mix(in srgb, var(--sky-top) 65%, #ffffff);
+  --ground-top: color-mix(in srgb, var(--hill-front) 55%, var(--sand-back));
+  /* The last stretch of the page (footer and sea) stands on the sand; .ground covers the rest. */
+  background: linear-gradient(var(--sand-front), var(--sand-front)) left bottom / 100% 900px no-repeat;
+}
+
+/* In a window taller than the page, the extra height opens up the sky above the hero text,
+   so the walk from the hills down to the sea keeps its proportions. */
+body.home {
+  display: flex;
+  flex-direction: column;
+}
+
+.home .story {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+
+[data-sky="dark"] .home {
+  --sky-ink: #FFF4E6;
+  --sky-haze: color-mix(in srgb, var(--sky-top) 75%, #000000);
+}
+
+/* The backdrop sinks a little so the hero has open sky; its sea shows only at the end of the page. */
+.home .restinga svg {
+  transform: translate(-50%, 22%);
+}
+
+.home .restinga .wave {
+  display: none;
+}
+
+/* Out to the right, clear of the headline; the sea's moon glint sits under it. */
+.home .restinga .moon {
+  transform: translate(620px, -40px);
+}
+
+.home .hero {
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+  /* An explicit width: with auto margins in the flex column the hero would size to its
+     content, and the one-line command on a phone is wider than the screen. */
+  width: 100%;
+  max-width: 1120px;
+  min-height: min(calc(100svh - 80px), 900px);
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  justify-content: flex-end;
+  margin: 0 auto;
+  padding: clamp(40px, 9vh, 104px) var(--gutter) clamp(150px, 26vh, 260px);
+}
+
+.hero-text {
+  position: relative;
+  max-width: 720px;
+  margin-left: clamp(0px, 3vw, 40px);
+}
+
+/* Fully laid from about 28 px outside the text, so every glyph has the haze behind it. */
+.hero-text::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -56px -72px;
+  border-radius: 56px;
+  background: color-mix(in srgb, var(--sky-haze) 80%, transparent);
+  filter: blur(28px);
+  pointer-events: none;
+}
+
+.hero-lockup {
+  display: block;
+  width: auto;
+  height: clamp(54px, 7vw, 80px);
+  margin: 0 0 clamp(18px, 3vh, 30px);
+  overflow: visible;
+}
+
+.lockup-word,
+.lockup-tag {
+  fill: var(--sky-ink);
+}
+
+.lockup-leaf {
+  fill: #2F9E44;
+}
+
+.lockup-berry {
+  fill: #D9572B;
+}
+
+.lockup-stem {
+  stroke: #5D665F;
+}
+
+[data-sky="dark"] .lockup-leaf {
+  fill: #4CC35F;
+}
+
+[data-sky="dark"] .lockup-berry {
+  fill: #F07A4A;
+}
+
+[data-sky="dark"] .lockup-stem {
+  stroke: #9AA49C;
+}
+
+.home .hero h1,
+.home .hero .lead,
+.hero-hint {
+  color: var(--sky-ink);
+  text-shadow: 0 0 22px color-mix(in srgb, var(--sky-top) 80%, transparent);
+}
+
+.home .hero h1 {
+  font-size: clamp(40px, 6.6vw, 76px);
+  line-height: 1.04;
+  letter-spacing: -0.04em;
+  margin-bottom: 20px;
+}
+
+.home .hero .lead {
+  max-width: 30em;
+  font-weight: 450;
+  margin-bottom: 30px;
+}
+
+.hero-hint {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.home .hero .install {
+  max-width: 680px;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.06), 0 18px 40px -16px rgb(0 0 0 / 0.45);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin: 22px 0 0;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-radius: 12px;
+  font-weight: 650;
+  font-size: 16px;
+  text-decoration: none;
+  color: var(--on-accent);
+  background: var(--accent);
+  transition: filter 0.15s, background-color 0.15s;
+}
+
+.button:hover {
+  filter: brightness(1.08);
+}
+
+.button-quiet {
+  color: var(--sky-ink);
+  background: color-mix(in srgb, var(--sky-top) 55%, transparent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--sky-ink) 45%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.button-quiet:hover {
+  filter: none;
+  background: color-mix(in srgb, var(--sky-top) 80%, transparent);
+}
+
+/* The ground: vegetated dunes at the top, plain sand by the sea. */
+.ground {
+  position: relative;
+  padding: clamp(40px, 8vh, 96px) 0 8px;
+  background: linear-gradient(180deg, var(--ground-top) 0, var(--sand-back) 48%, var(--sand-front) 88%);
+}
+
+.crest {
+  position: absolute;
+  bottom: calc(100% - 1px);
+  left: 0;
+  display: block;
+  width: 100%;
+  height: clamp(130px, 16vw, 230px);
+  overflow: visible;
+  pointer-events: none;
+}
+
+.crest-back {
+  fill: color-mix(in srgb, var(--hill-back) 60%, var(--hill-front));
+}
+
+.crest-front {
+  fill: var(--ground-top);
+}
+
+.scenery {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.scenery svg {
+  position: absolute;
+  display: block;
+  overflow: visible;
+  will-change: transform;
+}
+
+.clump {
+  width: clamp(220px, 30vw, 440px);
+  height: auto;
+  aspect-ratio: 400 / 240;
+}
+
+.mound {
+  fill: color-mix(in srgb, var(--shrub) 28%, var(--sand-back));
+}
+
+.clump-1 { top: 2%; left: -6%; }
+.clump-2 { top: 17%; right: -7%; }
+.clump-3 { top: 36%; left: -5%; }
+.clump-4 { top: 52%; right: -6%; }
+.clump-5 { top: 70%; left: -4%; }
+.clump-6 { top: 82%; right: -5%; }
+
+.dune {
+  left: 0;
+  width: 100%;
+  height: 200px;
+}
+
+.dune-1 { top: 28%; }
+.dune-2 { top: 62%; }
+
+/* A band of dunes and plants between two panels, which tuck over its edges. */
+.strip {
+  position: relative;
+  height: clamp(250px, 17vw, 260px);
+  margin: calc(-1 * clamp(24px, 3.4vw, 52px)) 0;
+  pointer-events: none;
+}
+
+.strip svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  will-change: transform;
+}
+
+/* On a phone the strip would show only its middle; laid out at full width and scaled down,
+   it shows twice as much of the dunes between the panels. */
+@media (max-width: 760px) {
+  .strip {
+    height: 180px;
+  }
+
+  .strip svg {
+    left: 50%;
+    width: 1200px;
+    margin-left: -600px;
+  }
+}
+
+/* Translucent, so the same dunes read on green ground, on sand, by day and by night. */
+.hump {
+  fill: color-mix(in srgb, var(--shrub) 20%, transparent);
+}
+
+.hump-light {
+  fill: color-mix(in srgb, var(--sky-bottom) 30%, transparent);
+}
+
+.runner-stem {
+  fill: none;
+  stroke: color-mix(in srgb, var(--shrub) 80%, var(--sand-back));
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.runner-leaf {
+  fill: color-mix(in srgb, var(--shrub) 85%, var(--hill-front));
+}
+
+.runner-flower {
+  fill: color-mix(in srgb, #e889b5 70%, var(--sand-front));
+}
+
+.runner-throat {
+  fill: color-mix(in srgb, #ffffff 55%, var(--sand-front));
+}
+
+.ripple {
+  fill: color-mix(in srgb, var(--sand-front) 72%, #ffffff);
+  opacity: 0.3;
+}
+
+/* Glass panels like the card, one per part of the story, with room between them for the dunes. */
+.panel {
+  position: relative;
+  z-index: 1;
+  width: min(1040px, 100% - 2 * var(--gutter));
+  margin: 0 auto;
+  padding: clamp(26px, 5vw, 56px);
+  border-radius: 28px;
+  background: color-mix(in srgb, var(--card) 96%, transparent);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+.panel h2 {
+  margin: 0 0 12px;
+  font-size: clamp(26px, 3.4vw, 38px);
+  letter-spacing: -0.03em;
+}
+
+.panel-text {
+  max-width: 40em;
+}
+
+.panel-text p:last-child {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: clamp(16.5px, 1.6vw, 18px);
+}
+
+.kicker {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+}
+
+.panel .shot {
+  margin: clamp(22px, 4vw, 36px) 0 0;
+}
+
+.panel .shot img {
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+}
+
+/* The popover is tall and narrow, so it stands beside its text from 760 px up. */
+.panel-side .shot-tall {
+  max-width: 340px;
+  margin-inline: auto;
+}
+
+@media (min-width: 760px) {
+  .panel-side {
+    display: grid;
+    grid-template-columns: 1fr minmax(260px, 340px);
+    align-items: center;
+    gap: clamp(32px, 5vw, 64px);
+  }
+
+  .panel-side .shot-tall {
+    margin: 0;
+  }
+}
+
+.paths {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.path {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding: 22px 56px 22px 22px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: var(--tint);
+  color: var(--muted);
+  text-decoration: none;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.path strong {
+  font-size: 19px;
+}
+
+.path .arrow {
+  position: absolute;
+  right: 22px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 22px;
+  color: var(--accent-text);
+}
+
+.path:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.beach {
+  max-width: 820px;
+  margin-bottom: 0;
+  text-align: center;
+}
+
+.beach > p:first-of-type {
+  color: var(--muted);
+  margin-bottom: 22px;
+}
+
+.beach .install {
+  text-align: left;
+}
+
+.beach-more {
+  margin: 18px 0 0;
+  font-weight: 600;
+}
+
+/* The beach section above already carries the install block. */
+.home .footer-lead,
+.home .footer .install {
+  display: none;
+}
+
+.home .footer-links {
+  margin-top: 0 !important;
+}
+
+.home .footer {
+  z-index: 2;
+  margin-top: 36px;
+  margin-bottom: 30px;
+}
+
+/* The shore: the last plants on the upper sand, the footer standing on it, then the sea. */
+.shore {
+  position: relative;
+  --sea-height: clamp(260px, 34vh, 340px);
+}
+
+.shore-plants {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  bottom: calc(var(--sea-height) - 14px);
+  height: 300px;
+  overflow-x: clip;
+  pointer-events: none;
+}
+
+.shore-plants svg {
+  position: absolute;
+  bottom: 0;
+  width: clamp(250px, 32vw, 480px);
+  height: auto;
+  aspect-ratio: 480 / 260;
+  overflow: visible;
+  will-change: transform;
+}
+
+.shore-left {
+  left: -40px;
+}
+
+.shore-right {
+  right: -40px;
+}
+
+/* The sea at the foot of the page: wide repeating wave paths slide sideways, each band at its own pace. */
+.sea {
+  position: relative;
+  height: var(--sea-height);
+}
+
+.sea svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.wet-sand {
+  fill: color-mix(in srgb, var(--sand-back) 86%, #000000);
+}
+
+.sea .wave-1 {
+  fill: var(--wave-1);
+  animation: swell 8s linear infinite;
+}
+
+.sea .wave-2 {
+  fill: var(--wave-2);
+  animation: swell-2 11s linear infinite;
+}
+
+.sea .wave-3 {
+  fill: var(--wave-3);
+  animation: swell-3 14s linear infinite;
+}
+
+.sea .foam {
+  fill: none;
+  stroke: color-mix(in srgb, var(--wave-1) 30%, #ffffff);
+  stroke-width: 3;
+  stroke-linecap: round;
+  opacity: 0.7;
+}
+
+.sea .crest {
+  fill: none;
+  stroke: color-mix(in srgb, var(--wave-1) 30%, #ffffff);
+  stroke-width: 5;
+  stroke-linecap: round;
+  opacity: 0.8;
+}
+
+.wave-2 .crest {
+  stroke-width: 4;
+  opacity: 0.6;
+}
+
+.wave-3 .crest {
+  stroke-width: 3.5;
+  opacity: 0.45;
+}
+
+/* The thin sheet of a spent wave running up the wet sand and back. */
+.swash {
+  animation: wash 5.5s ease-in-out infinite alternate;
+}
+
+.swash-water {
+  fill: color-mix(in srgb, var(--wave-1) 45%, transparent);
+}
+
+.swash-lace {
+  fill: none;
+  stroke: color-mix(in srgb, var(--wave-1) 25%, #ffffff);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  opacity: 0.85;
+}
+
+.swash-foam {
+  fill: color-mix(in srgb, var(--wave-1) 20%, #ffffff);
+  opacity: 0.75;
+}
+
+@keyframes wash {
+  from { transform: translateY(8px); }
+  to { transform: translateY(-8px); }
+}
+
+/* The sun and the moon on the water, as bright as they are in the sky. */
+.glint rect {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: shimmer 3.4s ease-in-out infinite alternate;
+}
+
+.glint rect:nth-child(even) {
+  animation-delay: -1.7s;
+}
+
+.glint-sun {
+  fill: color-mix(in srgb, var(--sun) 55%, #ffffff);
+  /* Strongest when the sun is low over the water (--sun-y near 1), faint at noon. */
+  opacity: calc(var(--sun-opacity) * (0.2 + var(--sun-y) * 0.6));
+}
+
+.glint-moon {
+  fill: #E9ECE9;
+  opacity: calc(var(--moon-opacity) * 0.55);
+}
+
+@keyframes shimmer {
+  from { transform: scaleX(0.78); }
+  to { transform: scaleX(1.12); }
+}
+
+/* ---------- Small screens ---------- */
+
+@media (max-width: 760px) {
+  .nav nav {
+    flex-wrap: wrap;
+    row-gap: 4px;
+    padding: 10px 8px 6px 16px;
+    border-radius: 22px;
+  }
+
+  .links {
+    order: 3;
+    width: 100%;
+    justify-content: space-between;
+    margin-left: -8px;
+    margin-right: -0px;
+  }
+
+  .links a {
+    padding: 6px 9px;
+    font-size: 14.5px;
+  }
+
+  .brand img {
+    height: 30px;
+  }
+
+  .install {
+    padding-left: 14px;
+  }
+
+  .install code,
+  .install::before {
+    font-size: 14px;
+  }
+
+  .copy {
+    min-width: 0;
+    padding: 11px 14px;
+  }
+
+  .steps li {
+    padding: 14px 14px 14px 56px;
+  }
+
+  .steps li::before {
+    left: 12px;
+  }
+}
+
+/* On a phone each option becomes a small block: flag and variable on one line, the description below. */
+@media (max-width: 560px) {
+  .table-scroll thead {
+    display: none;
+  }
+
+  .table-scroll tr {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .table-scroll tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .table-scroll td {
+    padding: 0;
+    border: 0;
+  }
+
+  .table-scroll td:nth-child(3) {
+    width: 100%;
+    color: var(--muted);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .restinga .wave,
+  .sea .wave,
+  .swash,
+  .glint rect {
+    animation: none;
+  }
+
+  .js .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .links a,
+  .github,
+  .copy,
+  .next,
+  .button,
+  .path {
+    transition: none;
+  }
+}
+
+/* ---------- Features page ---------- */
+
+.card-wide {
+  width: min(1120px, 100% - 2 * var(--gutter));
+}
+
+.feature {
+  margin-top: clamp(40px, 6vw, 72px);
+}
+
+.feature-text h2 {
+  margin-top: 0;
+}
+
+.feature-text p:last-child {
+  color: var(--muted);
+  font-size: clamp(16.5px, 1.6vw, 18px);
+}
+
+.feature .shot {
+  margin: 20px 0 0;
+}
+
+.feature .shot img {
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+}
+
+.feature .shot-tall {
+  max-width: 340px;
+  margin-inline: auto;
+}
+
+/* Text and screenshot side by side, swapping sides on every other feature. */
+@media (min-width: 900px) {
+  .feature {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    align-items: center;
+    gap: clamp(32px, 4vw, 56px);
+  }
+
+  .feature:nth-of-type(odd) {
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  }
+
+  .feature:nth-of-type(odd) .feature-text {
+    order: 2;
+  }
+
+  .feature .shot {
+    margin: 0;
+  }
+
+  .feature .shot-tall {
+    justify-self: center;
+    width: 100%;
+  }
+}
+
+.feature-cli .code {
+  margin-bottom: 0;
+}
+
+/* ---------- Screens page ---------- */
+
+.screens-note {
+  margin: 0 0 24px;
+  font-size: 14.5px;
+  color: var(--muted);
+}
+
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  gap: clamp(20px, 3vw, 32px);
+  margin: clamp(32px, 5vw, 56px) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.thumb-item {
+  margin: 0;
+}
+
+.thumb {
+  display: block;
+  line-height: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.thumb:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 0 0 2px var(--accent), var(--shadow);
+}
+
+.thumb:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* No display here: .shot-dark and .shot-light decide which image shows. The zero line height
+   keeps the inline image from leaving a gap under it. */
+.thumb :where(img) {
+  width: 100%;
+  aspect-ratio: 8 / 5;
+  height: auto;
+  object-fit: cover;
+  object-position: top;
+}
+
+.thumb-tall :where(img) {
+  object-fit: contain;
+  background: var(--card);
+}
+
+.thumb-item figcaption {
+  margin-top: 12px;
+  font-size: 14.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.lightbox {
+  width: min(1600px, 100vw - 32px);
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  overflow: auto;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.lightbox::backdrop {
+  background: rgb(8 12 10 / 0.72);
+}
+
+.lightbox img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.lightbox-close {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  z-index: 1;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 50%;
+  font-size: 26px;
+  line-height: 1;
+  color: #fff;
+  background: rgb(8 12 10 / 0.7);
+  cursor: pointer;
+}
+
+.lightbox-close:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thumb {
+    transition: none;
+  }
+}
+
+/* ---------- Quick start ---------- */
+
+.install-lead {
+  margin: 22px 0 -4px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.steps + .shot {
+  margin-top: 32px;
+}
+
+/* The description column is prose, so it wraps even though the first two columns of a table do not. */
+.table-cmds td:nth-child(2) {
+  white-space: normal;
+}
+
+@media (max-width: 700px) {
+  .table-cmds td:first-child {
+    white-space: normal;
+  }
+
+  .table-cmds code {
+    overflow-wrap: anywhere;
+  }
+}
