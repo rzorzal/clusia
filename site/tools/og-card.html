@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Clúsia share card</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap">
+<style>
+  html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; font-family: Inter, system-ui, sans-serif; color: #1B1F1C; }
+  .card { position: relative; width: 1200px; height: 630px; overflow: hidden; background: linear-gradient(180deg, #E9F5EC 0%, #FFF4E6 100%); }
+  .land { position: absolute; inset: 0; width: 1200px; height: 630px; }
+  .copy { position: absolute; left: 72px; top: 0; bottom: 0; width: 520px; display: flex; flex-direction: column; justify-content: center; z-index: 2; }
+  .brand { display: flex; align-items: center; gap: 16px; font-weight: 700; font-size: 34px; letter-spacing: -0.01em; }
+  .brand img { width: 52px; height: 52px; }
+  h1 { margin: 34px 0 0; font-size: 66px; line-height: 1.04; font-weight: 800; letter-spacing: -0.03em; }
+  .tag { margin: 26px 0 0; font-size: 26px; font-weight: 500; color: #3d4a41; }
+  /* The screenshot is wider than the card: the right edge crops it, and the tilt pivots on its left side. */
+  .shot { position: absolute; left: 640px; top: 96px; width: 760px; height: 475px; border-radius: 18px; transform: rotate(-3deg); transform-origin: 20% 50%;
+    box-shadow: 0 30px 60px rgba(27, 31, 28, 0.25), 0 6px 16px rgba(27, 31, 28, 0.15); background: #fff url("../../docs/assets/sp1-m5b-review-light.png") left top / cover no-repeat; z-index: 1; }
+</style>
+</head>
+<body>
+<div class="card">
+  <svg class="land" viewBox="0 0 1200 630" aria-hidden="true">
+    <path d="M0 470C140 430 260 420 400 440C560 464 700 410 860 414C1000 418 1100 440 1200 426V630H0Z" fill="#9CCFA4"/>
+    <path d="M0 540C180 498 320 506 480 526C640 546 800 500 980 506C1080 510 1150 528 1200 520V630H0Z" fill="#4CC35F"/>
+    <g fill="#2F9E44">
+      <circle cx="60" cy="560" r="44"/><circle cx="118" cy="548" r="38"/><circle cx="30" cy="590" r="40"/>
+      <circle cx="430" cy="574" r="34"/><circle cx="484" cy="580" r="26"/>
+      <circle cx="590" cy="548" r="28"/><circle cx="628" cy="556" r="22"/>
+    </g>
+    <g fill="#FFF4E6"><circle cx="48" cy="540" r="5"/><circle cx="112" cy="530" r="4.5"/><circle cx="76" cy="572" r="4"/><circle cx="426" cy="560" r="4.5"/><circle cx="586" cy="534" r="4"/></g>
+    <g fill="#F07A4A"><circle cx="48" cy="540" r="1.8"/><circle cx="112" cy="530" r="1.6"/><circle cx="76" cy="572" r="1.5"/><circle cx="426" cy="560" r="1.7"/><circle cx="586" cy="534" r="1.5"/></g>
+  </svg>
+  <div class="copy">
+    <div class="brand"><img src="../../docs/assets/brand/clusia-mark.svg" alt="">Clúsia</div>
+    <h1>PR Reviews for Humans</h1>
+    <p class="tag">Free and open source · macOS</p>
+  </div>
+  <div class="shot"></div>
+</div>
+</body>
+</html>
