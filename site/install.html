@@ -64,7 +64,7 @@
   <p class="eyebrow">macOS · Apple silicon or Intel</p>
   <h1>Install Clúsia</h1>
   <p class="lead">Open Terminal, paste this line and press Return. The app opens by itself when it is ready, about 5 minutes the first time.</p>
-  <div class="install"><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash</code><button class="copy" aria-label="Copy install command">Copy</button></div>
+  <div class="install"><code data-copy tabindex="0" role="region" aria-label="Install command">curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash</code><button class="copy" aria-label="Copy install command">Copy</button></div>
 </section>
 
 <section class="reveal">
@@ -89,7 +89,7 @@
 
 <section>
   <h2>Options</h2>
-  <div class="table-scroll">
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Table">
     <table>
       <thead><tr><th>Option</th><th>Environment</th><th>What it does</th></tr></thead>
       <tbody>
@@ -101,20 +101,20 @@
     </table>
   </div>
   <p>Through the pipe, pass options after <code>bash -s --</code>:</p>
-  <div class="code"><pre><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash -s -- --no-brew</code></pre><button class="copy" aria-label="Copy the command with an option">Copy</button></div>
+  <div class="code"><pre tabindex="0" role="region" aria-label="Command example"><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash -s -- --no-brew</code></pre><button class="copy" aria-label="Copy the command with an option">Copy</button></div>
 </section>
 
 <section>
   <h2>Homebrew by hand</h2>
   <p>The same two steps the script runs:</p>
-  <div class="code"><pre><code data-copy>brew install --HEAD rzorzal/clusia/clusia
+  <div class="code"><pre tabindex="0" role="region" aria-label="Command example"><code data-copy>brew install --HEAD rzorzal/clusia/clusia
 clusia install --from &quot;$(brew --prefix clusia)/libexec/bin&quot;</code></pre><button class="copy" aria-label="Copy the Homebrew commands">Copy</button></div>
 </section>
 
 <section>
   <h2>Read the script first</h2>
   <p>Download it, read it, then run it:</p>
-  <div class="code"><pre><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh -o install.sh
+  <div class="code"><pre tabindex="0" role="region" aria-label="Command example"><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh -o install.sh
 less install.sh
 bash install.sh</code></pre><button class="copy" aria-label="Copy the commands that download the script">Copy</button></div>
 </section>
@@ -122,7 +122,7 @@ bash install.sh</code></pre><button class="copy" aria-label="Copy the commands t
 <section>
   <h2>From a clone</h2>
   <p>From a clone of the repository (you need Git and the Rust toolchain pinned in <code>rust-toolchain.toml</code>):</p>
-  <div class="code"><pre><code data-copy>cargo run --release -p clusia -- install</code></pre><button class="copy" aria-label="Copy the build command">Copy</button></div>
+  <div class="code"><pre tabindex="0" role="region" aria-label="Command example"><code data-copy>cargo run --release -p clusia -- install</code></pre><button class="copy" aria-label="Copy the build command">Copy</button></div>
   <p><code>clusia install --dry-run</code> shows what it would do.</p>
 </section>
 
@@ -133,7 +133,7 @@ bash install.sh</code></pre><button class="copy" aria-label="Copy the commands t
 
 <section>
   <h2>Uninstall</h2>
-  <div class="code"><pre><code data-copy>clusia uninstall
+  <div class="code"><pre tabindex="0" role="region" aria-label="Command example"><code data-copy>clusia uninstall
 brew uninstall clusia    # only if you installed through Homebrew</code></pre><button class="copy" aria-label="Copy the uninstall commands">Copy</button></div>
   <p><code>clusia uninstall</code> removes the app, the login agent and the <code>clusia</code> link. Your reviews and settings stay in <code>~/Library/Application Support/Clusia</code> until you delete that folder.</p>
 </section>
@@ -142,7 +142,7 @@ brew uninstall clusia    # only if you installed through Homebrew</code></pre><b
 </main>
 <footer class="footer">
   <p class="footer-lead">Install on your Mac</p>
-  <div class="install"><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash</code><button class="copy" aria-label="Copy install command">Copy</button></div>
+  <div class="install"><code data-copy tabindex="0" role="region" aria-label="Install command">curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash</code><button class="copy" aria-label="Copy install command">Copy</button></div>
   <p class="footer-links">
     <a href="https://github.com/rzorzal/clusia">GitHub repository</a>
     <a href="https://github.com/rzorzal/clusia/blob/main/LICENSE">Apache License 2.0</a>

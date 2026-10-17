@@ -27,43 +27,54 @@ function fixture(files) {
   return dir;
 }
 
-test('a clean fixture passes, with a warning for pages that do not exist yet', () => {
-  const dir = fixture({ 'index.html': page({ body: '<h1 id="top">x</h1><a href="#top">up</a>' }) });
-  const problems = checkDir(dir);
-  assert.deepEqual(problems.filter((p) => !p.startsWith('warning:')), []);
-  assert.ok(problems.some((p) => p.startsWith('warning:') && p.includes('features.html')));
+const ALL = Object.fromEntries(
+  ['index.html', 'features.html', 'screens.html', 'install.html', 'quick-start.html'].map((n) => [n, page()]),
+);
+
+test('a clean fixture with all five pages passes with no output', () => {
+  const dir = fixture({ ...ALL, 'index.html': page({ body: '<h1 id="top">x</h1><a href="#top">up</a>' }) });
+  assert.deepEqual(checkDir(dir), []);
   const run = spawnSync('node', [CHECK, dir], { encoding: 'utf8' });
   assert.equal(run.status, 0);
 });
 
+test('a missing page fails, and so does every link to it', () => {
+  const { 'features.html': _gone, ...rest } = ALL;
+  const dir = fixture(rest);
+  const problems = checkDir(dir);
+  assert.ok(problems.some((p) => p.includes('features.html')));
+  const run = spawnSync('node', [CHECK, dir], { encoding: 'utf8' });
+  assert.equal(run.status, 1);
+});
+
 test('an absolute href fails', () => {
-  const dir = fixture({ 'index.html': page({ head: '<link rel="stylesheet" href="/x.css">' }) });
+  const dir = fixture({ ...ALL, 'index.html': page({ head: '<link rel="stylesheet" href="/x.css">' }) });
   const run = spawnSync('node', [CHECK, dir], { encoding: 'utf8' });
   assert.equal(run.status, 1);
   assert.match(run.stdout, /index\.html.*\/x\.css/);
 });
 
 test('an img without alt fails', () => {
-  const dir = fixture({ 'index.html': page({ body: '<img src="a.png" width="1" height="1">' }) });
+  const dir = fixture({ ...ALL, 'index.html': page({ body: '<img src="a.png" width="1" height="1">' }) });
   writeFileSync(join(dir, 'a.png'), '');
   assert.ok(checkDir(dir).some((p) => /alt/.test(p)));
 });
 
 test('an img without width and height fails', () => {
-  const dir = fixture({ 'index.html': page({ body: '<img src="a.png" alt="a">' }) });
+  const dir = fixture({ ...ALL, 'index.html': page({ body: '<img src="a.png" alt="a">' }) });
   writeFileSync(join(dir, 'a.png'), '');
   assert.ok(checkDir(dir).some((p) => /width/.test(p)));
 });
 
 test('a non-demo owner in owner/repo#N fails, a demo owner passes', () => {
-  const bad = fixture({ 'index.html': page({ body: '<p>someco/app#12</p>' }) });
+  const bad = fixture({ ...ALL, 'index.html': page({ body: '<p>someco/app#12</p>' }) });
   assert.ok(checkDir(bad).some((p) => p.includes('someco/app#12')));
-  const ok = fixture({ 'index.html': page({ body: '<p>acme/widgets#12 octo/x#1 rzorzal/clusia#3</p>' }) });
-  assert.deepEqual(checkDir(ok).filter((p) => !p.startsWith('warning:')), []);
+  const ok = fixture({ ...ALL, 'index.html': page({ body: '<p>acme/widgets#12 octo/x#1 rzorzal/clusia#3</p>' }) });
+  assert.deepEqual(checkDir(ok), []);
 });
 
 test('a page without the install data-copy fails', () => {
-  const dir = fixture({ 'index.html': page({ copy: '<code>curl nothing</code>' }) });
+  const dir = fixture({ ...ALL, 'index.html': page({ copy: '<code>curl nothing</code>' }) });
   assert.ok(checkDir(dir).some((p) => /data-copy/.test(p)));
 });
 
@@ -81,26 +92,26 @@ test('a missing local file, a missing anchor and an external script fail', () =>
 });
 
 test('only fonts.googleapis.com is an allowed external link host', () => {
-  const ok = fixture({ 'index.html': page({ head: '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">' }) });
-  assert.deepEqual(checkDir(ok).filter((p) => !p.startsWith('warning:')), []);
-  const bad = fixture({ 'index.html': page({ head: '<link rel="stylesheet" href="https://evil.example/x.css">' }) });
+  const ok = fixture({ ...ALL, 'index.html': page({ head: '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">' }) });
+  assert.deepEqual(checkDir(ok), []);
+  const bad = fixture({ ...ALL, 'index.html': page({ head: '<link rel="stylesheet" href="https://evil.example/x.css">' }) });
   assert.ok(checkDir(bad).some((p) => p.includes('evil.example')));
 });
 
 test('Google Fonts links on both of its hosts pass, any other host still fails', () => {
   const head = '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">';
-  assert.deepEqual(checkDir(fixture({ 'index.html': page({ head }) })).filter((p) => !p.startsWith('warning:')), []);
-  const bad = fixture({ 'index.html': page({ head: head + '<link rel="preconnect" href="https://other.example">' }) });
+  assert.deepEqual(checkDir(fixture({ ...ALL, 'index.html': page({ head }) })), []);
+  const bad = fixture({ ...ALL, 'index.html': page({ head: head + '<link rel="preconnect" href="https://other.example">' }) });
   assert.ok(checkDir(bad).some((p) => p.includes('other.example')));
 });
 
 test('a non-demo owner/repo#N in an alt, title or content attribute fails', () => {
-  const img = fixture({ 'index.html': page({ body: '<img src="a.png" alt="someco/app#3" width="1" height="1">' }) });
+  const img = fixture({ ...ALL, 'index.html': page({ body: '<img src="a.png" alt="someco/app#3" width="1" height="1">' }) });
   writeFileSync(join(img, 'a.png'), '');
   assert.ok(checkDir(img).some((p) => p.includes('someco/app#3')));
-  const title = fixture({ 'index.html': page({ body: '<a href="#" title="someco/app#4">x</a>' }) });
+  const title = fixture({ ...ALL, 'index.html': page({ body: '<a href="#" title="someco/app#4">x</a>' }) });
   assert.ok(checkDir(title).some((p) => p.includes('someco/app#4')));
-  const meta = fixture({ 'index.html': page({ head: '<meta name="description" content="someco/app#5">' }) });
+  const meta = fixture({ ...ALL, 'index.html': page({ head: '<meta name="description" content="someco/app#5">' }) });
   assert.ok(checkDir(meta).some((p) => p.includes('someco/app#5')));
 });
 

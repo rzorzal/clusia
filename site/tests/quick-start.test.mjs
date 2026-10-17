@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const SITE = fileURLToPath(new URL('..', import.meta.url));
 const INSTALL = 'curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash';
-const INSTALL_BLOCK = `<div class="install"><code data-copy>${INSTALL}</code><button class="copy" aria-label="Copy install command">Copy</button></div>`;
+const INSTALL_BLOCK = `<div class="install"><code data-copy tabindex="0" role="region" aria-label="Install command">${INSTALL}</code><button class="copy" aria-label="Copy install command">Copy</button></div>`;
 
 const html = readFileSync(SITE + 'quick-start.html', 'utf8');
 const main = html.slice(html.indexOf('<main'), html.indexOf('</main>'));

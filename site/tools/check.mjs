@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const INSTALL = 'curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash';
@@ -36,6 +36,10 @@ export function checkDir(dir) {
   const problems = [];
   const fail = (file, msg) => problems.push(`${relative(root, file)}: ${msg}`);
 
+  for (const page of PAGES) {
+    if (!existsSync(join(root, page))) problems.push(`${page}: the page is missing`);
+  }
+
   for (const file of htmlFiles(root)) {
     const html = stripComments(readFileSync(file, 'utf8'));
     const ids = new Set([...html.matchAll(/\sid\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)].map((m) => m[1] ?? m[2]));
@@ -58,9 +62,7 @@ export function checkDir(dir) {
       let target = resolve(dirname(file), decodeURIComponent(path));
       if (existsSync(target) && statSync(target).isDirectory()) target = join(target, 'index.html');
       if (existsSync(target)) continue;
-      const missingPage = dirname(target) === root && PAGES.includes(target.slice(root.length + sep.length));
-      if (missingPage) problems.push(`warning: ${relative(root, file)}: ${kind}="${url}" points at a page that does not exist yet`);
-      else fail(file, `${kind}="${url}" does not resolve to a file`);
+      fail(file, `${kind}="${url}" does not resolve to a file`);
     }
 
     for (const a of tagsOf(html, 'img')) {
@@ -123,5 +125,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   const problems = checkDir(dir);
   for (const p of problems) console.log(p);
-  process.exit(problems.some((p) => !p.startsWith('warning:')) ? 1 : 0);
+  process.exit(problems.length > 0 ? 1 : 0);
 }

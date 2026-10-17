@@ -6,7 +6,7 @@ import { paletteAt, skyAt, SKY_INK, contrast } from '../js/palette.js';
 
 const SITE = fileURLToPath(new URL('..', import.meta.url));
 const INSTALL = 'curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash';
-const INSTALL_BLOCK = `<div class="install"><code data-copy>${INSTALL}</code><button class="copy" aria-label="Copy install command">Copy</button></div>`;
+const INSTALL_BLOCK = `<div class="install"><code data-copy tabindex="0" role="region" aria-label="Install command">${INSTALL}</code><button class="copy" aria-label="Copy install command">Copy</button></div>`;
 
 const html = readFileSync(SITE + 'index.html', 'utf8');
 const css = readFileSync(SITE + 'css/site.css', 'utf8');

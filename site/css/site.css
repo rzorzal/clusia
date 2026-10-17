@@ -334,9 +334,7 @@ img {
   position: relative;
   width: min(880px, 100% - 2 * var(--gutter));
   margin-inline: auto;
-  background: color-mix(in srgb, var(--card) 94%, transparent);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--card) 96%, transparent);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
@@ -486,6 +484,10 @@ strong {
   background: none;
   color: inherit;
   scrollbar-width: thin;
+}
+
+html:not(.js) .copy {
+  display: none;
 }
 
 .copy {
@@ -1073,9 +1075,7 @@ body.home {
   margin: 0 auto;
   padding: clamp(26px, 5vw, 56px);
   border-radius: 28px;
-  background: color-mix(in srgb, var(--card) 94%, transparent);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--card) 96%, transparent);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
