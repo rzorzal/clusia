@@ -71,6 +71,15 @@ pub enum Swatch {
     /// The outline of a box that changed since the version being compared.
     Amber,
     AmberSoft,
+    /// The 3D scene's background.
+    SceneBg,
+    Axis,
+    Grid,
+    Cloud,
+    /// Word family `i` (0..12; larger values clamp to the last).
+    Family(u8),
+    /// The places that belong to no use case.
+    Elsewhere,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -111,6 +120,17 @@ pub struct Tokens {
     pub ghost_fill: Color,
     pub amber: Color,
     pub amber_soft: Color,
+    /// The keyword view's floor: the colour its 3D image is cleared with.
+    pub scene_bg: Color,
+    /// The cube's three axes, and its floor grid.
+    pub axis: Color,
+    pub grid: Color,
+    /// A use case's cloud: the axis colour at 7 %.
+    pub cloud: Color,
+    /// Places that belong to no use case.
+    pub elsewhere: Color,
+    /// The twelve word-family colours, each at least 3:1 against `scene_bg`.
+    pub family: [Color; 12],
 }
 
 impl Tokens {
@@ -173,9 +193,18 @@ impl Tokens {
             Swatch::GhostFill => self.ghost_fill,
             Swatch::Amber => self.amber,
             Swatch::AmberSoft => self.amber_soft,
+            Swatch::SceneBg => self.scene_bg,
+            Swatch::Axis => self.axis,
+            Swatch::Grid => self.grid,
+            Swatch::Cloud => self.cloud,
+            Swatch::Family(i) => self.family[usize::from(i).min(11)],
+            Swatch::Elsewhere => self.elsewhere,
         }
     }
 }
+
+/// The colour of the keyword view's ambient light, the same in both themes.
+pub const SCENE_LIGHT: Color = Color::WHITE;
 
 pub const LIGHT: Tokens = Tokens {
     bg: Color::srgb_u8(0xF6, 0xF7, 0xF5),
@@ -235,6 +264,25 @@ pub const LIGHT: Tokens = Tokens {
     ghost_fill: Color::srgba_u8(0x8A, 0x93, 0x8C, 0x1A),
     amber: Color::srgb_u8(0xB7, 0x79, 0x1F),
     amber_soft: Color::srgba_u8(0xB7, 0x79, 0x1F, 0x1A),
+    scene_bg: Color::srgb_u8(0xFB, 0xFB, 0xF9),
+    axis: Color::srgb_u8(0x9A, 0x9D, 0x96),
+    grid: Color::srgb_u8(0xE8, 0xE8, 0xE3),
+    cloud: Color::srgba_u8(0x9A, 0x9D, 0x96, 0x12),
+    elsewhere: Color::srgb_u8(0x8A, 0x93, 0x8C),
+    family: [
+        Color::srgb_u8(0x2F, 0x9E, 0x44),
+        Color::srgb_u8(0x70, 0x48, 0xE8),
+        Color::srgb_u8(0x1C, 0x7E, 0xD6),
+        Color::srgb_u8(0xD9, 0x48, 0x0F),
+        Color::srgb_u8(0xC2, 0x25, 0x5C),
+        Color::srgb_u8(0x0C, 0x85, 0x99),
+        Color::srgb_u8(0xA3, 0x5F, 0x00),
+        Color::srgb_u8(0x42, 0x63, 0xEB),
+        Color::srgb_u8(0x8A, 0x5A, 0x2B),
+        Color::srgb_u8(0x5F, 0x7A, 0x00),
+        Color::srgb_u8(0x9C, 0x36, 0xB5),
+        Color::srgb_u8(0x49, 0x50, 0x57),
+    ],
 };
 
 pub const DARK: Tokens = Tokens {
@@ -294,6 +342,25 @@ pub const DARK: Tokens = Tokens {
     ghost_fill: Color::srgba_u8(0x6B, 0x74, 0x6D, 0x24),
     amber: Color::srgb_u8(0xE0, 0xA4, 0x3A),
     amber_soft: Color::srgba_u8(0xE0, 0xA4, 0x3A, 0x1F),
+    scene_bg: Color::srgb_u8(0x12, 0x14, 0x12),
+    axis: Color::srgb_u8(0x6C, 0x70, 0x6A),
+    grid: Color::srgb_u8(0x23, 0x26, 0x23),
+    cloud: Color::srgba_u8(0x6C, 0x70, 0x6A, 0x12),
+    elsewhere: Color::srgb_u8(0x6B, 0x74, 0x6D),
+    family: [
+        Color::srgb_u8(0x4C, 0xC3, 0x5F),
+        Color::srgb_u8(0x97, 0x75, 0xFA),
+        Color::srgb_u8(0x4D, 0xAB, 0xF7),
+        Color::srgb_u8(0xF0, 0x8C, 0x5A),
+        Color::srgb_u8(0xF0, 0x65, 0x95),
+        Color::srgb_u8(0x22, 0xB8, 0xCF),
+        Color::srgb_u8(0xF0, 0xA6, 0x3A),
+        Color::srgb_u8(0x74, 0x8F, 0xFC),
+        Color::srgb_u8(0xC9, 0x94, 0x5A),
+        Color::srgb_u8(0xA9, 0xC2, 0x3C),
+        Color::srgb_u8(0xCC, 0x5D, 0xE8),
+        Color::srgb_u8(0xAD, 0xB5, 0xBD),
+    ],
 };
 
 /// The look in effect. Changes only when the result differs, so `restyle` runs only then.
@@ -643,6 +710,57 @@ mod tests {
                     apart(tinted, marked) > 0.08,
                     "{name}: the mark shows on the row"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_scene_tokens_are_the_mockups() {
+        assert_eq!(LIGHT.scene_bg, Color::srgb_u8(0xFB, 0xFB, 0xF9));
+        assert_eq!(DARK.scene_bg, Color::srgb_u8(0x12, 0x14, 0x12));
+        assert_eq!(LIGHT.axis, Color::srgb_u8(0x9A, 0x9D, 0x96));
+        assert_eq!(DARK.axis, Color::srgb_u8(0x6C, 0x70, 0x6A));
+        assert_eq!(LIGHT.grid, Color::srgb_u8(0xE8, 0xE8, 0xE3));
+        assert_eq!(DARK.grid, Color::srgb_u8(0x23, 0x26, 0x23));
+        assert_eq!(LIGHT.get(Swatch::SceneBg), LIGHT.scene_bg);
+        assert_eq!(DARK.get(Swatch::Axis), DARK.axis);
+        assert_eq!(DARK.get(Swatch::Grid), DARK.grid);
+        assert_eq!(LIGHT.get(Swatch::Cloud), LIGHT.cloud);
+        assert_eq!(LIGHT.get(Swatch::Family(0)), LIGHT.family[0]);
+        assert_eq!(LIGHT.get(Swatch::Family(11)), LIGHT.family[11]);
+        assert_eq!(LIGHT.get(Swatch::Family(40)), LIGHT.family[11], "clamped");
+        assert_eq!(DARK.get(Swatch::Elsewhere), DARK.elsewhere);
+        for tokens in [LIGHT, DARK] {
+            let a = tokens.cloud.to_srgba().alpha;
+            assert!(
+                (a - 0.07).abs() < 0.005,
+                "a cloud is the axis colour at 7 %: {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_twelve_family_colours_read_on_the_scene_background_in_both_themes() {
+        for (name, tokens) in [("light", LIGHT), ("dark", DARK)] {
+            let bg = tokens.scene_bg.to_linear();
+            for (i, c) in tokens.family.iter().enumerate() {
+                let ratio = contrast(c.to_linear(), bg);
+                assert!(ratio >= 3.0, "{name} family {i}: {ratio:.2}");
+            }
+            for (what, c) in [("ring", tokens.green), ("elsewhere", tokens.elsewhere)] {
+                let ratio = contrast(c.to_linear(), bg);
+                assert!(ratio >= 3.0, "{name} {what}: {ratio:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_twelve_family_colours_differ() {
+        for tokens in [LIGHT, DARK] {
+            for i in 0..12 {
+                for j in (i + 1)..12 {
+                    assert_ne!(tokens.family[i], tokens.family[j], "{i} and {j}");
+                }
             }
         }
     }

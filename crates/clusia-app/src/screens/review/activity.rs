@@ -221,6 +221,7 @@ mod tests {
                     done: 1,
                     total: 3,
                     key: "flow".into(),
+                    step: None,
                 },
                 true,
             ),
@@ -301,6 +302,7 @@ mod tests {
                 done: 2,
                 total: 5,
                 key: "flow".into(),
+                step: None,
             },
         });
         let work = Work::of(&pr(), &chats, &checks, &diagrams, &revals);

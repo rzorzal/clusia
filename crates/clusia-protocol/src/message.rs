@@ -1258,8 +1258,15 @@ pub enum DiagramsState {
     Idle,
     /// The plan turn runs or waits (also while the summary turn that comes first runs).
     Planning,
-    /// Entry `key` is being drawn; `done` entries are over, out of `total`.
-    Drawing { done: u32, total: u32, key: String },
+    /// Entry `key` is being drawn; `done` entries are over, out of `total`. `step` says what a
+    /// drawing of several stages does now.
+    Drawing {
+        done: u32,
+        total: u32,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<String>,
+    },
     /// The run could not go on: the plan could not be made, or the run broke.
     Failed { message: String },
 }
@@ -3761,6 +3768,7 @@ mod tests {
                 done: 1,
                 total: 5,
                 key: "flow".into(),
+                step: None,
             }),
             r#"{"state":"drawing","done":1,"total":5,"key":"flow"}"#
         );
@@ -3769,6 +3777,26 @@ mod tests {
                 message: "no plan".into(),
             }),
             r#"{"state":"failed","message":"no plan"}"#
+        );
+        assert_eq!(
+            wire(&DiagramsState::Drawing {
+                done: 2,
+                total: 3,
+                key: "keywords".into(),
+                step: Some("Placing files on the axes…".into()),
+            }),
+            r#"{"state":"drawing","done":2,"total":3,"key":"keywords","step":"Placing files on the axes…"}"#
+        );
+        let old: DiagramsState =
+            serde_json::from_str(r#"{"state":"drawing","done":0,"total":1,"key":"flow"}"#).unwrap();
+        assert_eq!(
+            old,
+            DiagramsState::Drawing {
+                done: 0,
+                total: 1,
+                key: "flow".into(),
+                step: None,
+            }
         );
     }
 

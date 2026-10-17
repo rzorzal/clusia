@@ -40,6 +40,7 @@ pub fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
         DiagramKind::Classes => layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End),
         DiagramKind::Sequence => sequence::layout(spec, measure),
         DiagramKind::UseCases => usecase::layout(spec, measure),
+        DiagramKind::Keywords => Geometry::empty(),
     };
     geometry.normalise(MARGIN);
     geometry

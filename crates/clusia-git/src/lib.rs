@@ -2,6 +2,7 @@
 
 pub mod diff;
 pub mod discover;
+pub mod grep;
 pub mod remote;
 pub mod run;
 pub mod show;
@@ -14,6 +15,7 @@ pub use diff::{
 pub use discover::{
     DISCOVERY_DEPTH, LocalClone, Remote, expand_root, find_clones, find_local_clone, remotes,
 };
+pub use grep::{GrepCaps, GrepHit, GrepResult, grep_words};
 pub use remote::{RepoId, parse_remote};
 pub use run::{GitError, git, git_with_timeout};
 pub use show::file_at;

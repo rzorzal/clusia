@@ -94,6 +94,9 @@ pub struct HarnessView {
     /// commits.
     pub revalidate: bool,
     pub revalidate_error: Option<String>,
+    /// *3D keyword view*: add the keyword map to every set of diagrams.
+    pub keywords_3d: bool,
+    pub keywords_3d_error: Option<String>,
     /// Seconds without a new commit before the check starts.
     pub quiet: String,
     pub quiet_error: Option<String>,
@@ -208,7 +211,8 @@ pub fn ok_title(name: &str, version: &str, seconds: &str, account: Option<&str>)
     }
 }
 
-/// A *When I open a review* checkbox (and *Revalidate my draft*): the key it flips.
+/// A *When I open a review* checkbox (and *Revalidate my draft* and *3D keyword view*): the key
+/// it flips.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct OpenToggle(pub &'static str);
 
@@ -231,6 +235,7 @@ fn on_open_toggle(
         "harness.audit" => (!h.audit).to_string(),
         "harness.diagrams" => (!h.diagrams).to_string(),
         "harness.revalidate" => (!h.revalidate).to_string(),
+        "harness.keywords_3d" => (!h.keywords_3d).to_string(),
         _ => return,
     };
     set_config(&mut asks, &mut model, key, value);
@@ -328,6 +333,8 @@ pub fn view(
         check_timeout_error: refusal("harness.check_timeout_secs"),
         revalidate: h.revalidate,
         revalidate_error: refusal("harness.revalidate"),
+        keywords_3d: h.keywords_3d,
+        keywords_3d_error: refusal("harness.keywords_3d"),
         quiet: h.revalidate_quiet_secs.to_string(),
         quiet_error: refusal("harness.revalidate_quiet_secs"),
         areas: h.audit_areas.clone(),
@@ -585,6 +592,23 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
             children![text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange))],
         ));
     }
+    row(
+        p,
+        fonts,
+        "3D keyword view",
+        |r| {
+            r.spawn((
+                checkbox(v.keywords_3d),
+                OpenToggle("harness.keywords_3d"),
+                observe(on_open_toggle),
+            ));
+            r.spawn(text(fonts, "Include the 3D keyword view", Type::BODY));
+        },
+        "One more turn and a search of the repository",
+        v.keywords_3d_error
+            .as_deref()
+            .map(|m| ("harness.keywords_3d", m)),
+    );
     field_row(
         p,
         fonts,
@@ -1156,6 +1180,68 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn the_3d_keyword_view_is_its_own_row_that_starts_on() {
+        let mut app = harness_app();
+        assert!(crate::testing::shows(&mut app, "3D keyword view"));
+        assert!(crate::testing::shows(
+            &mut app,
+            "Include the 3D keyword view"
+        ));
+        assert!(crate::testing::shows(
+            &mut app,
+            "One more turn and a search of the repository"
+        ));
+        let toggle = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.keywords_3d");
+        crate::testing::activate(&mut app, toggle);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.keywords_3d".into(),
+                value: "false".into()
+            }]
+        );
+        crate::testing::set_config_locally(&mut app, "harness.keywords_3d", "false");
+        crate::testing::settle(&mut app);
+        let toggle = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.keywords_3d");
+        crate::testing::activate(&mut app, toggle);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.keywords_3d".into(),
+                value: "true".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_3d_row_does_not_depend_on_draw_diagrams() {
+        for diagrams in ["true", "false"] {
+            let mut app = harness_app();
+            crate::testing::set_config_locally(&mut app, "harness.diagrams", diagrams);
+            crate::testing::settle(&mut app);
+            assert!(
+                crate::testing::shows(&mut app, "Include the 3D keyword view"),
+                "diagrams {diagrams}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_view_shows_the_setting_and_a_refused_write_shows_why() {
+        let mut snap = crate::fixture::demo(crate::testing::NOW);
+        assert!(view(&snap, &HashMap::new(), &ProbeState::Idle).keywords_3d);
+        snap.config.harness.keywords_3d = false;
+        let mut rejected = HashMap::new();
+        rejected.insert(
+            "harness.keywords_3d".to_string(),
+            "not a boolean".to_string(),
+        );
+        let v = view(&snap, &rejected, &ProbeState::Idle);
+        assert!(!v.keywords_3d);
+        assert_eq!(v.keywords_3d_error.as_deref(), Some("not a boolean"));
     }
 
     #[test]

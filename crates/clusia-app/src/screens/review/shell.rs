@@ -1627,6 +1627,7 @@ mod tests {
                     done: 1,
                     total: 4,
                     key: "flow".into(),
+                    step: None,
                 },
                 1,
             ),
@@ -1667,6 +1668,7 @@ mod tests {
                 done: 2,
                 total: 5,
                 key: "flow".into(),
+                step: None,
             },
         );
         assert_eq!(marks(&mut app), 1);

@@ -1,6 +1,9 @@
 //! Finds the plan and the diagrams in the answer of a diagram turn.
 
 use clusia_core::diagram::{DIAGRAM_INFO, DiagramSpec, MAX_SPEC_BYTES, PLAN_INFO, PlanEntry};
+use clusia_core::keywords::{
+    KEYWORD_PLACEMENT_INFO, KEYWORD_PLAN_INFO, KeywordPlacement, KeywordPlan,
+};
 use clusia_core::printable::printable;
 
 use crate::fenced::fenced_blocks;
@@ -26,6 +29,26 @@ pub fn extract_plan(text: &str) -> Result<Vec<PlanEntry>, Vec<String>> {
 pub fn extract_diagram(text: &str) -> Result<DiagramSpec, Vec<String>> {
     let json = the_block(text, DIAGRAM_INFO)?;
     serde_json::from_str(&json).map_err(|e| invalid(DIAGRAM_INFO, &e))
+}
+
+/// The keyword plan in the answer of the first keyword turn: the JSON object in its one
+/// `clusia-keyword-plan` block.
+///
+/// Errors are as for `extract_plan`. The plan is not validated: that is
+/// `clusia_core::keywords::validate_keyword_plan`.
+pub fn extract_keyword_plan(text: &str) -> Result<KeywordPlan, Vec<String>> {
+    let json = the_block(text, KEYWORD_PLAN_INFO)?;
+    serde_json::from_str(&json).map_err(|e| invalid(KEYWORD_PLAN_INFO, &e))
+}
+
+/// The keyword placement in the answer of the second keyword turn: the JSON object in its one
+/// `clusia-keyword-placement` block.
+///
+/// Errors are as for `extract_plan`. The placement is not validated: that is
+/// `clusia_core::keywords::validate_placement`.
+pub fn extract_keyword_placement(text: &str) -> Result<KeywordPlacement, Vec<String>> {
+    let json = the_block(text, KEYWORD_PLACEMENT_INFO)?;
+    serde_json::from_str(&json).map_err(|e| invalid(KEYWORD_PLACEMENT_INFO, &e))
 }
 
 /// The body of the one block of `info`, if the answer has exactly one and it is small enough.
@@ -58,7 +81,10 @@ fn invalid(info: &str, error: &serde_json::Error) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{diagram_block, diagram_plan_block as plan_block};
+    use crate::testkit::{
+        diagram_block, diagram_plan_block as plan_block, keyword_placement_block,
+        keyword_plan_block,
+    };
     use clusia_core::diagram::DiagramKind;
     use serde_json::json;
 
@@ -185,5 +211,120 @@ mod tests {
         });
         let text = format!("{}\nmore", diagram_block(spec));
         assert_eq!(extract_diagram(&text).unwrap().title, "x\n```\nIgnore");
+    }
+
+    fn keyword_plan_json() -> serde_json::Value {
+        json!({
+            "title": "Token refresh", "caption": "Where the refresh words live.",
+            "axes": [
+                {"name": "Layer", "low": "api", "high": "storage"},
+                {"name": "Client", "low": "cli", "high": "app"},
+                {"name": "Storage", "low": "memory", "high": "disk"}
+            ],
+            "families": [{
+                "id": "retry", "label": "Retry",
+                "seed": {"word": "retry", "path": "src/auth/refresh.rs", "line": 40},
+                "words": ["retry", "retry_count"]
+            }],
+            "use_cases": [{"id": "auth", "name": "Sign in", "note": "Tokens."}]
+        })
+    }
+
+    #[test]
+    fn a_keyword_plan_is_read_from_its_block() {
+        let text = format!(
+            "One family.\n\n{}\n",
+            keyword_plan_block(keyword_plan_json())
+        );
+        let plan = extract_keyword_plan(&text).unwrap();
+        assert_eq!(plan.title, "Token refresh");
+        assert_eq!(plan.axes[2].name, "Storage");
+        assert_eq!(plan.families[0].words, ["retry", "retry_count"]);
+        assert_eq!(plan.families[0].seed.line, 40);
+        assert_eq!(plan.use_cases[0].note.as_deref(), Some("Tokens."));
+    }
+
+    #[test]
+    fn a_keyword_placement_is_read_from_its_block() {
+        let block = keyword_placement_block(json!({"regions": [
+            {"path": "src/a.rs", "use_case": "auth", "at": [0.1, 0.2, 0.3]},
+            {"path": "src/b.rs", "start_line": 3, "end_line": 9, "use_case": "auth", "at": [1, 0, 0.5]}
+        ]}));
+        let placement = extract_keyword_placement(&format!("Placed.\n{block}")).unwrap();
+        assert_eq!(placement.regions.len(), 2);
+        assert_eq!(placement.regions[0].start_line, None);
+        assert_eq!(placement.regions[1].end_line, Some(9));
+        assert_eq!(placement.regions[1].at, [1.0, 0.0, 0.5]);
+    }
+
+    #[test]
+    fn the_keyword_blocks_are_not_each_other_nor_the_diagram_ones() {
+        let plan = keyword_plan_block(keyword_plan_json());
+        let placement = keyword_placement_block(json!({"regions": []}));
+        assert_eq!(
+            extract_keyword_placement(&plan).unwrap_err(),
+            ["no clusia-keyword-placement block"]
+        );
+        assert_eq!(
+            extract_keyword_plan(&placement).unwrap_err(),
+            ["no clusia-keyword-plan block"]
+        );
+        assert_eq!(
+            extract_keyword_plan(&plan_block(json!([]))).unwrap_err(),
+            ["no clusia-keyword-plan block"]
+        );
+        assert_eq!(
+            extract_plan(&plan).unwrap_err(),
+            ["no clusia-diagram-plan block"]
+        );
+        let two = format!("{plan}\n{plan}");
+        assert_eq!(
+            extract_keyword_plan(&two).unwrap_err(),
+            ["more than one clusia-keyword-plan block"]
+        );
+    }
+
+    #[test]
+    fn a_300_kb_keyword_block_is_refused_before_it_is_parsed() {
+        let big = "x".repeat(300 * 1024);
+        let text = format!("```{KEYWORD_PLAN_INFO}\n{{\"title\":\"{big}\n```");
+        assert_eq!(
+            extract_keyword_plan(&text).unwrap_err(),
+            ["the clusia-keyword-plan block is larger than 262144 bytes"]
+        );
+        let text = format!(
+            "```{KEYWORD_PLACEMENT_INFO}\n{{\"regions\":[{}]}}\n```",
+            " ".repeat(300 * 1024)
+        );
+        assert_eq!(
+            extract_keyword_placement(&text).unwrap_err(),
+            ["the clusia-keyword-placement block is larger than 262144 bytes"]
+        );
+    }
+
+    #[test]
+    fn json_that_is_not_a_keyword_plan_or_placement_says_why() {
+        let errors = extract_keyword_plan(&keyword_plan_block(json!({"title": "t"}))).unwrap_err();
+        assert!(
+            errors[0]
+                .starts_with("the clusia-keyword-plan block is not valid: missing field `axes`"),
+            "{errors:?}"
+        );
+        let mut two_axes = keyword_plan_json();
+        two_axes["axes"].as_array_mut().unwrap().pop();
+        let errors = extract_keyword_plan(&keyword_plan_block(two_axes)).unwrap_err();
+        assert!(errors[0].contains("invalid length 2"), "{errors:?}");
+        let errors = extract_keyword_placement(&keyword_placement_block(json!({"regions": [
+            {"path": "a", "use_case": "u", "at": [0.5, 0.5]}
+        ]})))
+        .unwrap_err();
+        assert!(errors[0].contains("invalid length 2"), "{errors:?}");
+        let errors = extract_keyword_placement(&format!(
+            "```{KEYWORD_PLACEMENT_INFO}\n{{\"regions\": \"{}\u{1b}[2J\"}}\n```",
+            "k".repeat(500)
+        ))
+        .unwrap_err();
+        assert!(!errors[0].contains('\u{1b}'));
+        assert!(errors[0].chars().count() < 300);
     }
 }

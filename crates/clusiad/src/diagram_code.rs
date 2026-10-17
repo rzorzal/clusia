@@ -1,9 +1,10 @@
-//! The code a diagram box points at, for the node modal: the lines around the box's anchor as
-//! they were at the commit the diagram was drawn from.
+//! The code a diagram box or a place of the keyword map points at, for the node modal: the lines
+//! around its anchor as they were at the commit the diagram was drawn from.
 
 use std::path::Path;
 
 use clusia_core::diagram::{CodeAnchor, DiagramVersion, EntryState};
+use clusia_core::keywords::{KEYWORDS_KEY, parse_place_node};
 use clusia_core::printable::printable_lines;
 use clusia_core::{PrRef, added_lines};
 use clusia_git::{file_at, is_object_id, repo_of_worktree};
@@ -13,7 +14,8 @@ use crate::diagrams::stored_version;
 use crate::reviews;
 use crate::state::Shared;
 
-/// Lines shown after the anchor; the window starts on its first line, as the header says.
+/// Lines shown after the anchor. A box's window starts on its first line, as the header says; a
+/// place's starts one line before it.
 const AFTER: u32 = 2;
 /// The most lines one answer holds.
 const MAX_LINES: u32 = 200;
@@ -26,9 +28,9 @@ fn not_found(message: String) -> Outcome {
     Outcome::Err(ProtocolError::new(ErrorCode::NotFound, message))
 }
 
-/// The commit of version `number` and the anchor of box `node` of diagram `key` in it; the
-/// anchor is `None` for a box that is not tied to code. Whatever the client says about lines is
-/// never read: only what the daemon stored counts.
+/// The commit of version `number` and the anchor of `node` (a diagram box or a place of the
+/// keyword map) of diagram `key` in it; the anchor is `None` for a box that is not tied to
+/// code. Whatever the client says about lines is never read: only what the daemon stored counts.
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
 pub(crate) fn anchored_node(
     shared: &Shared,
@@ -60,14 +62,22 @@ fn find_anchor(
             "there is no diagram {key} in version {number}"
         )));
     };
-    let EntryState::Ready { spec, .. } = &entry.state else {
-        return Err(reviews::invalid_state("That diagram was not drawn"));
-    };
-    match spec.nodes.iter().find(|n| n.id == node) {
-        Some(found) => Ok(found.anchor.clone()),
-        None => Err(not_found(format!(
-            "there is no box {node} in diagram {key}"
-        ))),
+    match &entry.state {
+        EntryState::Ready { spec, .. } => match spec.nodes.iter().find(|n| n.id == node) {
+            Some(found) => Ok(found.anchor.clone()),
+            None => Err(not_found(format!(
+                "there is no box {node} in diagram {key}"
+            ))),
+        },
+        EntryState::ReadyMap { map, .. } => {
+            match parse_place_node(node).and_then(|i| map.anchor(i)) {
+                Some(anchor) => Ok(Some(anchor)),
+                None => Err(not_found(format!(
+                    "there is no place {node} in diagram {key}"
+                ))),
+            }
+        }
+        _ => Err(reviews::invalid_state("That diagram was not drawn")),
     }
 }
 
@@ -140,9 +150,10 @@ fn unavailable(anchor: &CodeAnchor, commit: &str, why: String) -> Outcome {
     }))
 }
 
-/// `ReadDiagramCode`. A version at the review's head is read from the worktree, and its lines
-/// the pull request adds are marked; an older one is read from its pinned commit, with no line
-/// marked. Code that cannot be read comes back as `unavailable`, not as an error.
+/// `ReadDiagramCode`. A place of the keyword map gets one line before it. A version at the
+/// review's head is read from the worktree, and its lines the pull request adds are marked; an
+/// older one is read from its pinned commit, with no line marked. Code that cannot be read comes
+/// back as `unavailable`, not as an error.
 pub(crate) async fn read(
     shared: &Shared,
     pr: &PrRef,
@@ -187,7 +198,13 @@ pub(crate) async fn read(
             format!("The code at {} is no longer available.", seven(&commit)),
         );
     };
-    let (first, lines) = window(&text, anchor.start_line, anchor.end_line);
+    // A place is one line: one line of context above it, so it reads in place.
+    let before = u32::from(key == KEYWORDS_KEY && parse_place_node(node).is_some());
+    let (first, lines) = window(
+        &text,
+        anchor.start_line.saturating_sub(before).max(1),
+        anchor.end_line,
+    );
     if lines.is_empty() {
         return unavailable(
             &anchor,
@@ -213,7 +230,8 @@ pub(crate) async fn read(
         .zip(lines)
         .map(|(number, text)| CodeLine {
             number,
-            changed: number <= anchor.end_line && changed.contains(&number),
+            changed: (anchor.start_line..=anchor.end_line).contains(&number)
+                && changed.contains(&number),
             text,
         })
         .collect();

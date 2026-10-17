@@ -235,6 +235,8 @@ pub struct TabUi {
     pub focus_seq: u32,
     /// The key of the row whose ⋯ menu is open.
     pub diagram_menu: Option<String>,
+    /// The 3D keyword view's state.
+    pub keywords: KeywordsUi,
     /// The comments hidden in this pull request, as the daemon keeps them.
     pub hidden: clusia_core::HiddenComments,
     /// `GetHiddenComments` was asked for.
@@ -267,10 +269,53 @@ impl Default for TabUi {
             focus_line: None,
             focus_seq: 0,
             diagram_menu: None,
+            keywords: KeywordsUi::default(),
             hidden: clusia_core::HiddenComments::default(),
             hidden_asked: false,
         }
     }
+}
+
+/// Which view of the 3D keyword scene is shown: the free perspective one or a flat projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View3D {
+    #[default]
+    Free,
+    XY,
+    XZ,
+    ZY,
+}
+
+/// An orbit camera: it looks at `target` from `distance`, at `yaw` around Y and `pitch` above
+/// the floor (radians). `Default` is in `keywords::render`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraPose {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+    pub target: [f32; 3],
+}
+
+// A pose is never NaN: every write clamps, and a view is built only from finite values.
+impl Eq for CameraPose {}
+
+/// What the reviewer chose in the 3D keyword view of a tab.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KeywordsUi {
+    pub view: View3D,
+    /// The focused use case (index into the plan's use cases).
+    pub use_case: Option<u16>,
+    /// The point whose code card is open (index into the scene's points).
+    pub card: Option<u32>,
+    /// Bit `i` set: family `i` is hidden.
+    pub hidden_families: u16,
+    /// Bit `i` set: use case `i` is hidden.
+    pub hidden_use_cases: u16,
+    pub only_changed: bool,
+    /// The pose the camera is asked to be at; the view moves there.
+    pub camera: CameraPose,
+    /// The version and entry the choices above were made on; another one starts them over.
+    pub shown: Option<(u32, String)>,
 }
 
 /// An open review: the daemon's view (with the patches in `view.diff`) and what changed since
@@ -1224,5 +1269,26 @@ mod tests {
         );
         assert_eq!(EditTarget::General.line_place(), None);
         assert_eq!(EditTarget::Item("i1".into()).line_place(), None);
+    }
+
+    #[test]
+    fn a_new_tab_holds_the_default_keyword_view() {
+        let ui = TabUi::default().keywords;
+        assert_eq!(
+            (
+                ui.view,
+                ui.use_case,
+                ui.card,
+                ui.hidden_families,
+                ui.hidden_use_cases,
+                ui.only_changed
+            ),
+            (View3D::Free, None, None, 0, 0, false)
+        );
+        let eye = ui.camera.eye();
+        assert!(
+            eye.distance(bevy::math::Vec3::new(3.4, 2.3, 3.6) * 1.4) < 1e-4,
+            "{eye}"
+        );
     }
 }

@@ -523,8 +523,8 @@ fn too_long_home_fails_before_running() {
 mod review_flow {
     use super::*;
     use clusia_harness::testkit::{
-        FakeClaude, Script, Turn, diagram_block, diagram_plan_block, finding_block, pass_block,
-        revalidation_block,
+        FakeClaude, Script, Turn, diagram_block, diagram_plan_block, finding_block,
+        keyword_placement_block, keyword_plan_block, pass_block, revalidation_block,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -863,6 +863,7 @@ mod review_flow {
                 ("harness.on_open", "wait".to_string()),
                 ("harness.check_security", "false".to_string()),
                 ("harness.audit", "false".to_string()),
+                ("harness.keywords_3d", "false".to_string()),
                 ("harness.program", fake.display().to_string()),
             ] {
                 let o = world.run(&["config", "set", key, &value]);
@@ -1111,6 +1112,73 @@ mod review_flow {
                 .iter()
                 .all(|c| c.argv.iter().any(|a| a == "--session-id")),
             "a review with no chat has no session to fork"
+        );
+    }
+
+    #[test]
+    fn diagrams_list_the_keyword_map_and_json_holds_it() {
+        let w = AgentWorld::new(Script::turns(vec![
+            Turn::answer_blocks(
+                "One diagram.",
+                &[diagram_plan_block(json!([
+                    {"key": "flow", "kind": "flow", "title": "Token refresh", "purpose": "The path"}
+                ]))],
+            ),
+            Turn::answer_blocks(
+                "Drawn.",
+                &[diagram_block(json!({
+                    "key": "flow", "kind": "flow", "title": "Token refresh", "caption": "c",
+                    "nodes": [{"id": "a", "label": "refresh()", "shape": "box"}]
+                }))],
+            ),
+            Turn::answer_blocks(
+                "The words.",
+                &[keyword_plan_block(json!({
+                    "title": "Where the words live", "caption": "c",
+                    "axes": [
+                        {"name": "Layer", "low": "a", "high": "b"},
+                        {"name": "Time", "low": "a", "high": "b"},
+                        {"name": "Risk", "low": "a", "high": "b"}
+                    ],
+                    "families": [{"id": "count", "label": "count",
+                        "seed": {"word": "two", "path": "feature.txt", "line": 2},
+                        "words": ["two", "three"]}],
+                    "use_cases": [{"id": "feature", "name": "The feature"}]
+                }))],
+            ),
+            Turn::answer_blocks(
+                "Placed.",
+                &[keyword_placement_block(json!({
+                    "regions": [{"path": "feature.txt", "use_case": "feature", "at": [0.5, 0.5, 0.5]}]
+                }))],
+            ),
+        ]));
+        let on = w.run(&["config", "set", "harness.keywords_3d", "true"]);
+        assert!(on.status.success(), "{}", stderr(&on));
+        let o = w.run(&["diagrams", "acme/widgets#7", "--draw"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert!(
+            has_line(
+                &stdout(&o),
+                "keywords  Keywords 3D  Where the words live  ready · 1 family · 2 places"
+            ),
+            "{}",
+            stdout(&o)
+        );
+        assert!(
+            stderr(&o)
+                .contains("drawing 2 of 2: Where the words live · Placing files on the axes…"),
+            "{}",
+            stderr(&o)
+        );
+        let json = w.run(&["--json", "diagrams", "acme/widgets#7"]);
+        let printed: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+        let entry = &printed["version"]["entries"][1];
+        assert_eq!(entry["plan"]["kind"], json!("keywords"));
+        assert_eq!(entry["state"]["state"], json!("ready_map"));
+        assert_eq!(
+            entry["state"]["map"]["places"].as_array().map(Vec::len),
+            Some(2)
         );
     }
 

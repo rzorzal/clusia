@@ -191,7 +191,7 @@ impl DiagramsModel {
                 let anchor = self
                     .loaded
                     .get(number)
-                    .and_then(|v| super::modal::node_anchor(v, key, node));
+                    .and_then(|v| super::modal::anchor_of(v, key, node));
                 if !anchor.is_some_and(|a| code.unavailable.is_some() || a.path == code.path) {
                     return;
                 }
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(m.loaded.keys().copied().collect::<Vec<_>>(), [2]);
         assert_eq!(m.state, DiagramsState::Idle);
         assert!(!m.stale && !m.busy());
-        assert_eq!(m.versions[1].entries.len(), 8);
+        assert_eq!(m.versions[1].entries.len(), 9);
         assert_eq!(m.versions[0].entries.len(), 3);
     }
 
@@ -405,6 +405,7 @@ mod tests {
                 done: 1,
                 total: 5,
                 key: "flow".into(),
+                step: None,
             },
         });
         assert!(m.asked);

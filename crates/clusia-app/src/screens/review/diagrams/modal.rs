@@ -14,8 +14,10 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::diagram::{Change, CodeAnchor, DiagramVersion, EntryState, Node as BoxNode};
 use clusia_core::draft::{Anchor, DraftKind, Origin, Side};
+use clusia_core::keywords::{KeywordMap, parse_place_node};
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::{PrRef, Review, commentable_lines};
+use clusia_diagram::keywords::ELSEWHERE;
 use clusia_highlight::highlight;
 use clusia_protocol::DiagramCode;
 
@@ -24,6 +26,7 @@ use crate::fonts::UiFonts;
 use crate::nav::{Nav, Screen};
 use crate::review_state::{EditTarget, Editor, Modal, Phase, Ready, ReviewTabs, Tab, TabUi};
 use crate::screens::review::ReviewSystems;
+use crate::screens::review::diagrams::keywords::use_case_name;
 use crate::screens::review::diagrams::{Diagrams, DiagramsModel};
 use crate::screens::review::diff::{in_diff, show_line, unsent};
 use crate::screens::review::editor::{
@@ -117,6 +120,109 @@ pub fn node_anchor<'a>(
     node_of(version, key, node)?.anchor.as_ref()
 }
 
+/// Said under the comment field of a place the pull request does not change.
+pub const PLACE_NOT_IN_DIFF: &str = "Not in the diff: the comment goes to the review body.";
+
+/// The place `node` names (`p<N>`) in the keyword map of the entry `key`, with its index.
+pub fn place_of<'a>(
+    version: &'a DiagramVersion,
+    key: &str,
+    node: &str,
+) -> Option<(&'a KeywordMap, usize)> {
+    let index = parse_place_node(node)?;
+    match &version.entry(key)?.state {
+        EntryState::ReadyMap { map, .. } if index < map.places.len() => Some((&**map, index)),
+        _ => None,
+    }
+}
+
+/// The code `node` stands for: a box's anchor, or the line of a place.
+pub fn anchor_of(version: &DiagramVersion, key: &str, node: &str) -> Option<CodeAnchor> {
+    node_anchor(version, key, node).cloned().or_else(|| {
+        let (map, index) = place_of(version, key, node)?;
+        map.anchor(index)
+    })
+}
+
+/// Whether `node` is a box or a place of `key` in `version`.
+pub fn node_exists(version: &DiagramVersion, key: &str, node: &str) -> bool {
+    node_of(version, key, node).is_some() || place_of(version, key, node).is_some()
+}
+
+/// Whether `line` of `path` is a line of the pull request's diff a comment can be put on.
+pub fn line_in_diff(ready: &Ready, path: &str, line: u32) -> bool {
+    ready
+        .view
+        .diff
+        .iter()
+        .find(|f| f.path == path)
+        .and_then(|f| f.patch.as_deref())
+        .is_some_and(|patch| commentable_lines(patch).1.contains(&line))
+}
+
+/// What the dialog is about: a box of a drawing or a place of a keyword map.
+struct Subject {
+    label: String,
+    change: Change,
+    note: Option<String>,
+    anchor: Option<CodeAnchor>,
+    /// A place: its hint says where the comment lands by the diff, not by the daemon's words.
+    place: bool,
+}
+
+fn subject(version: &DiagramVersion, key: &str, node: &str) -> Option<Subject> {
+    if let Some(n) = node_of(version, key, node) {
+        return Some(Subject {
+            label: printable(&n.label),
+            change: n.change,
+            note: n.note.as_deref().map(printable).filter(|n| !n.is_empty()),
+            anchor: n.anchor.clone(),
+            place: false,
+        });
+    }
+    let (map, index) = place_of(version, key, node)?;
+    let place = map.places.get(index)?;
+    let use_case = map
+        .use_case_of(place)
+        .and_then(|u| u16::try_from(u).ok())
+        .unwrap_or(ELSEWHERE);
+    let family = map.plan.families.get(map.family_of(place))?;
+    Some(Subject {
+        label: printable(&map.words.get(usize::from(place.word))?.text),
+        change: if place.changed() {
+            Change::Changed
+        } else {
+            Change::Unchanged
+        },
+        note: Some(format!(
+            "{} · {}",
+            printable(&use_case_name(map, use_case)),
+            printable(&family.label)
+        )),
+        anchor: map.anchor(index),
+        place: true,
+    })
+}
+
+/// Where a comment on a place lands: on its line when the drawing is of the newest commit and
+/// the line is in the diff, in the review body when it is not, and wherever the line has moved
+/// to (or the body) when the drawing is older.
+fn place_hint(commit: &str, head: &str, a: &CodeAnchor, in_diff: bool) -> String {
+    let line = a.start_line;
+    if commit != head {
+        format!(
+            "Lands in the draft as a comment on line {line} of the code at {}: it moves to the \
+             newest commit when that line is still in the change, and goes to the review body \
+             otherwise.",
+            short(commit)
+        )
+    } else if in_diff {
+        format!("Lands in the draft as a comment on line {line}, the code this place stands for.")
+    } else {
+        PLACE_NOT_IN_DIFF.to_string()
+    }
+}
+
 /// `38–48`, or `38` for one line.
 pub fn lines_text(a: &CodeAnchor) -> String {
     if a.start_line == a.end_line {
@@ -130,7 +236,7 @@ fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-fn code_rows(code: &DiagramCode) -> Vec<CodeRow> {
+pub(crate) fn code_rows(code: &DiagramCode) -> Vec<CodeRow> {
     let lines: Vec<String> = code
         .lines
         .iter()
@@ -150,8 +256,8 @@ fn code_rows(code: &DiagramCode) -> Vec<CodeRow> {
         .collect()
 }
 
-/// The dialog for `target` (version number, key, box id), or `None` when the drawing or the box
-/// is not there.
+/// The dialog for `target` (version number, key, box or place id), or `None` when the drawing
+/// or what it names is not there.
 pub fn node_view(
     tab: &Tab,
     target: &(u32, String, String),
@@ -161,9 +267,9 @@ pub fn node_view(
     read_only: Option<&'static str>,
 ) -> Option<NodeView> {
     let ready = tab.ready()?;
-    let node = node_of(version, &target.1, &target.2)?;
+    let subject = subject(version, &target.1, &target.2)?;
     let head = &ready.view.review.head_sha;
-    let body = match (&node.anchor, code) {
+    let body = match (&subject.anchor, code) {
         (None, _) => NodeBody::NoAnchor,
         (Some(_), Some(c)) => match &c.unavailable {
             Some(why) => NodeBody::Unavailable(printable(why)),
@@ -172,7 +278,15 @@ pub fn node_view(
         (Some(_), None) if !live => NodeBody::Offline,
         (Some(_), None) => NodeBody::Loading,
     };
-    let hint = node.anchor.as_ref().map(|a| {
+    let hint = subject.anchor.as_ref().map(|a| {
+        if subject.place {
+            return place_hint(
+                &version.commit,
+                head,
+                a,
+                line_in_diff(ready, &a.path, a.start_line),
+            );
+        }
         let lines = lines_text(a);
         if &version.commit == head {
             format!(
@@ -187,7 +301,7 @@ pub fn node_view(
             )
         }
     });
-    let jump = match &node.anchor {
+    let jump = match &subject.anchor {
         None => DiffJump::Hidden,
         Some(a) if in_diff(ready, &a.path) => DiffJump::Ready,
         Some(_) => DiffJump::NotInDiff,
@@ -197,17 +311,13 @@ pub fn node_view(
             if (*number, key, node) == (target.0, &target.1, &target.2))
     });
     Some(NodeView {
-        label: printable(&node.label),
-        change: node.change,
-        place: node
+        label: subject.label,
+        change: subject.change,
+        place: subject
             .anchor
             .as_ref()
             .map(|a| format!("{} · {}", printable(&a.path), lines_text(a))),
-        note: node
-            .note
-            .as_deref()
-            .map(printable)
-            .filter(|n| !n.is_empty()),
+        note: subject.note,
         body,
         hint,
         jump,
@@ -229,8 +339,9 @@ fn dot_of(change: Change) -> (Swatch, Swatch) {
 
 // --- the demo daemon -------------------------------------------------------------------
 
-/// What the demo daemon answers to `ReadDiagramCode`: the code of the box's anchor, taken from
-/// the patch the demo review holds (the head is the only commit the demo has).
+/// What the demo daemon answers to `ReadDiagramCode`: the code of the anchor of the box or the
+/// place, taken from the patch the demo review holds (the head is the only commit the demo has);
+/// a place in a file the demo holds no patch of gets `fixture::demo_place_code`.
 pub fn demo_code_for(
     model: Option<&DiagramsModel>,
     ready: Option<&Ready>,
@@ -240,7 +351,7 @@ pub fn demo_code_for(
 ) -> DiagramCode {
     let version = model.and_then(|m| m.loaded.get(&number));
     let commit = version.map(|v| v.commit.clone()).unwrap_or_default();
-    let anchor = version.and_then(|v| node_anchor(v, key, node));
+    let anchor = version.and_then(|v| anchor_of(v, key, node));
     let (Some(anchor), Some(ready)) = (anchor, ready) else {
         return DiagramCode {
             path: String::new(),
@@ -260,13 +371,24 @@ pub fn demo_code_for(
         .iter()
         .find(|f| f.path == anchor.path)
         .and_then(|f| f.patch.as_deref());
-    crate::fixture::demo_diagram_code(
+    let is_place = version.is_some_and(|v| place_of(v, key, node).is_some());
+    // A place's window starts one line above it, as the daemon's does.
+    let first = if is_place {
+        anchor.start_line.saturating_sub(1).max(1)
+    } else {
+        anchor.start_line
+    };
+    let code = crate::fixture::demo_diagram_code(
         &anchor.path,
         &commit,
         patch,
-        (anchor.start_line, anchor.end_line),
+        (first, anchor.end_line),
         at_head,
-    )
+    );
+    if code.unavailable.is_some() && is_place {
+        return crate::fixture::demo_place_code(&anchor.path, &commit, anchor.start_line);
+    }
+    code
 }
 
 /// What the demo daemon does with a comment on a box: a line comment at the head when every
@@ -474,7 +596,7 @@ fn ask_code(
         .0
         .get(&pr)
         .and_then(|m| m.loaded.get(&number))
-        .is_some_and(|v| node_anchor(v, &key, &node).is_some());
+        .is_some_and(|v| anchor_of(v, &key, &node).is_some());
     let known = diagrams
         .0
         .get(&pr)
@@ -527,7 +649,7 @@ fn rebuild_modal(
             continue;
         };
         // A redraw without the box leaves nothing for the comment to land on.
-        if node_of(version, &target.1, &target.2).is_none() {
+        if !node_exists(version, &target.1, &target.2) {
             gone.push(part.pr.clone());
             continue;
         }
@@ -636,7 +758,7 @@ fn card_content(
             n.spawn(text(fonts, note.clone(), Type::MUTED));
         });
     }
-    body_block(p, fonts, &v.body);
+    body_block(p, fonts, &v.body, 24.0);
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
         row_gap: px(8),
@@ -700,7 +822,12 @@ fn card_content(
     });
 }
 
-fn body_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, body: &NodeBody) {
+pub(crate) fn body_block(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    body: &NodeBody,
+    inset: f32,
+) {
     let said = match body {
         NodeBody::Loading => Some("Reading the code…".to_string()),
         NodeBody::Offline => Some("Not connected to clusiad: the code cannot be read.".to_string()),
@@ -710,7 +837,7 @@ fn body_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, body: &NodeBody) {
     };
     let frame = Node {
         flex_direction: FlexDirection::Column,
-        margin: UiRect::horizontal(px(24)),
+        margin: UiRect::horizontal(px(inset)),
         padding: UiRect::axes(px(0), px(10)),
         border_radius: BorderRadius::all(px(6)),
         overflow: Overflow::clip(),
@@ -805,7 +932,7 @@ fn on_open_diff(
     let Some(version) = diagrams.0.get(pr).and_then(|m| m.loaded.get(&number)) else {
         return;
     };
-    let Some(anchor) = node_anchor(version, &key, &node).cloned() else {
+    let Some(anchor) = anchor_of(version, &key, &node) else {
         return;
     };
     let at_head = tab
@@ -936,11 +1063,13 @@ pub(crate) fn test_version(commit: &str, anchor: Option<(&str, u32, u32)>) -> Di
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::{DiagramsTell, Tell};
     use crate::fixture;
     use crate::review_state::ReviewSection;
     use crate::screens::review::editor::EditorArea;
     use crate::testing::{self, NOW};
     use bevy::text::EditableText;
+    use clusia_core::keywords::{KeywordMap, place_node};
     use clusia_protocol::CodeLine;
 
     const REFRESH: &str = "src/auth/refresh.rs";
@@ -1822,5 +1951,220 @@ mod tests {
         assert_eq!(testing::tab(&app, &pr).ui.modal, Some(Modal::DiagramNode));
         assert_eq!(testing::count::<NodeModal>(&mut app), 1);
         assert_eq!(reads(&mut app).len(), 1, "the box's code was asked for");
+    }
+
+    // --- the dialog on a place of the keyword map ---------------------------------------------
+
+    fn open_place(app: &mut App, map: KeywordMap, place: u32) -> PrRef {
+        let pr = testing::open_keywords_with(app, map, |_| {});
+        edit_ui(app, &pr, |ui| {
+            ui.modal = Some(Modal::DiagramNode);
+            ui.diagram_node = Some((2, "keywords".into(), place_node(place as usize)));
+        });
+        testing::settle(app);
+        pr
+    }
+
+    fn put_place_code(app: &mut App, pr: &PrRef, node: &str, code: DiagramCode) {
+        testing::tell(
+            app,
+            Tell::Diagrams(DiagramsTell::Code {
+                pr: pr.clone(),
+                number: 2,
+                key: "keywords".into(),
+                node: node.into(),
+                code,
+            }),
+        );
+        testing::settle(app);
+    }
+
+    fn place_code(path: &str, line: u32, commit: &str) -> DiagramCode {
+        fixture::demo_place_code(path, commit, line)
+    }
+
+    #[test]
+    fn a_place_resolves_to_its_line_and_a_box_still_resolves_to_its_anchor() {
+        let map = fixture::keywords_map_at(REFRESH, 44, true);
+        let version =
+            fixture::with_keywords_map(vec![test_version(&head(), Some((REFRESH, 38, 48)))], map)
+                .pop()
+                .expect("a version");
+        assert_eq!(
+            anchor_of(&version, "keywords", "p0"),
+            Some(CodeAnchor {
+                path: REFRESH.into(),
+                start_line: 44,
+                end_line: 44
+            })
+        );
+        assert_eq!(
+            anchor_of(&version, "flow", "refresh").map(|a| (a.start_line, a.end_line)),
+            Some((38, 48))
+        );
+        for bad in ["p1", "p", "q0", "p-1", "refresh"] {
+            assert_eq!(anchor_of(&version, "keywords", bad), None, "{bad}");
+            assert!(!node_exists(&version, "keywords", bad), "{bad}");
+        }
+        assert!(node_exists(&version, "keywords", "p0"));
+        assert!(node_exists(&version, "flow", "refresh"));
+        assert_eq!(anchor_of(&version, "gone", "p0"), None);
+    }
+
+    #[test]
+    fn the_dialog_of_a_changed_place_in_the_diff_asks_for_its_code_and_lands_on_the_line() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_place(&mut app, fixture::keywords_map_at(REFRESH, 44, true), 0);
+        assert_eq!(
+            reads(&mut app),
+            [Ask::ReadDiagramCode {
+                pr: pr.clone(),
+                number: 2,
+                key: "keywords".into(),
+                node: "p0".into(),
+            }]
+        );
+        testing::settle(&mut app);
+        assert!(reads(&mut app).is_empty(), "asked once");
+        put_place_code(&mut app, &pr, "p0", place_code(REFRESH, 44, &head()));
+        assert!(!testing::shows(&mut app, "Reading the code…"));
+        for needle in [
+            "token",
+            "src/auth/refresh.rs · 44",
+            "Everything · token",
+            "Open in diff",
+            "Add to draft",
+            "Lands in the draft as a comment on line 44, the code this place stands for.",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+    }
+
+    #[test]
+    fn a_place_outside_the_diff_says_the_comment_goes_to_the_review_body() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_place(
+            &mut app,
+            fixture::keywords_map_at("src/session.rs", 9, false),
+            0,
+        );
+        put_place_code(
+            &mut app,
+            &pr,
+            "p0",
+            place_code("src/session.rs", 9, &head()),
+        );
+        assert!(testing::shows(
+            &mut app,
+            "Not in the diff: the comment goes to the review body."
+        ));
+        assert!(testing::shows(&mut app, "src/session.rs · 9"));
+        assert!(!testing::shows(
+            &mut app,
+            "Lands in the draft as a comment on line"
+        ));
+    }
+
+    #[test]
+    fn a_place_of_an_older_version_says_it_moves_and_a_force_push_says_the_code_is_gone() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_place(&mut app, fixture::keywords_map_at(REFRESH, 44, true), 0);
+        let old = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+        {
+            let mut diagrams = app.world_mut().resource_mut::<Diagrams>();
+            diagrams
+                .0
+                .get_mut(&pr)
+                .and_then(|m| m.loaded.get_mut(&2))
+                .expect("version 2")
+                .commit = old.into();
+        }
+        testing::settle(&mut app);
+        assert!(testing::shows(
+            &mut app,
+            "Lands in the draft as a comment on line 44 of the code at a1b2c3d: it moves to the newest commit when that line is still in the change, and goes to the review body otherwise."
+        ));
+        let gone = DiagramCode {
+            path: REFRESH.into(),
+            commit: old.into(),
+            start_line: 44,
+            lines: Vec::new(),
+            unavailable: Some("The code at a1b2c3d is no longer available.".into()),
+        };
+        put_place_code(&mut app, &pr, "p0", gone);
+        assert!(testing::shows(
+            &mut app,
+            "The code at a1b2c3d is no longer available."
+        ));
+        assert!(
+            testing::shows(&mut app, "Add to draft"),
+            "the comment can still be written"
+        );
+    }
+
+    #[test]
+    fn a_comment_on_a_place_asks_the_daemon_with_the_place_node() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_place(&mut app, fixture::keywords_map_at(REFRESH, 44, true), 0);
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |a| a.0 == pr);
+        testing::type_into(&mut app, area, "Why one minute?");
+        let submit = testing::find::<EditorSubmit>(&mut app, |s| s.0 == pr);
+        testing::activate(&mut app, submit);
+        assert_eq!(
+            adds(&mut app),
+            [Ask::AddDiagramComment {
+                pr,
+                number: 2,
+                key: "keywords".into(),
+                node: "p0".into(),
+                body: "Why one minute?".into(),
+                ticket: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn the_demo_daemon_files_a_place_in_the_diff_on_its_line_and_the_others_in_the_body() {
+        let on_line = fixture::with_keywords_map(
+            vec![test_version(&head(), None)],
+            fixture::keywords_map_at(REFRESH, 44, true),
+        );
+        let item = comment(anchor_of(&on_line[0], "keywords", "p0"), "Why?");
+        assert_eq!(
+            (item.kind, item.origin),
+            (DraftKind::LineComment, Origin::Diagram)
+        );
+        assert_eq!(
+            item.anchor.map(|a| (a.start_line, a.line)),
+            Some((None, 44))
+        );
+        let elsewhere = fixture::with_keywords_map(
+            vec![test_version(&head(), None)],
+            fixture::keywords_map_at("src/session.rs", 9, false),
+        );
+        let item = comment(anchor_of(&elsewhere[0], "keywords", "p0"), "Why?");
+        assert_eq!((item.kind, item.anchor), (DraftKind::General, None));
+        assert_eq!(item.body, "src/session.rs:9: Why?");
+    }
+
+    #[test]
+    fn the_demo_reads_a_place_the_demo_diff_does_not_hold() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = open_place(
+            &mut app,
+            fixture::keywords_map_at("src/session.rs", 9, false),
+            0,
+        );
+        let diagrams = app.world().resource::<Diagrams>();
+        let ready = testing::ready(&app, &pr);
+        let code = demo_code_for(diagrams.0.get(&pr), Some(&ready), 2, "keywords", "p0");
+        assert_eq!(code.unavailable, None);
+        assert_eq!(
+            (code.path.as_str(), code.start_line, code.lines.len()),
+            ("src/session.rs", 8, 4)
+        );
+        let known = demo_code_for(diagrams.0.get(&pr), Some(&ready), 2, "keywords", "p7");
+        assert!(known.unavailable.is_some(), "no such place");
     }
 }

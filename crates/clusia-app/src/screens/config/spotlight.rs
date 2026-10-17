@@ -203,7 +203,11 @@ mod tests {
 
     #[test]
     fn a_checkbox_row_is_tinted_with_its_label() {
-        for key in ["harness.diagrams", "harness.revalidate"] {
+        for key in [
+            "harness.diagrams",
+            "harness.revalidate",
+            "harness.keywords_3d",
+        ] {
             let mut app = config_at(key);
             let row = row_of::<OpenToggle>(&mut app, |t| t.0 == key);
             assert_eq!(fill_of(&app, row), Some(Swatch::GreenSoft), "{key}");

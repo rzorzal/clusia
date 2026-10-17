@@ -1049,6 +1049,9 @@ pub(crate) mod tests {
         let program = FakeClaude::install(fake.path(), script);
         let mut config = Config::default();
         config.harness.program = Some(program.display().to_string());
+        // The 3D keyword view adds two turns and a search to every drawing; tests that want it
+        // turn it on.
+        config.harness.keywords_3d = false;
         tweak(&mut config);
         let options = crate::options::DaemonOptions {
             claude_program: Some("/nonexistent/claude".into()),

@@ -8,6 +8,10 @@ use clusia_core::diagram::{
     Group, GroupKind, History, LineStyle, Message, Node, PlanEntry, Row, RowKey, Shape,
     VersionPhase,
 };
+use clusia_core::keywords::{
+    AddedLines, Axis, Family, Hit, KEYWORDS_KEY, KEYWORDS_TITLE, KeywordMap, KeywordPlacement,
+    KeywordPlan, Region, Seed, UseCase, build_map,
+};
 use clusia_core::media::MediaKind;
 use clusia_core::revalidation::{
     CommitLine, Decision, Proposal, Revalidation, RoundState, Verdict, fingerprint,
@@ -1461,7 +1465,7 @@ fn dg_entry(spec: DiagramSpec) -> DiagramEntry {
 
 /// The review's drawings, oldest first: version 1 at an older commit with the flow, the
 /// sequence and the classes, and version 2 at the demo head with the eight diagrams of
-/// the demo review (the three of version 1 carry their history).
+/// the demo review and the 3D keyword entry (the three of version 1 carry their history).
 /// They do not depend on the review; `_pr` names the demo review they belong to.
 pub fn demo_diagrams(now: i64, _pr: &PrRef) -> Vec<DiagramVersion> {
     let specs = vec![
@@ -1479,7 +1483,7 @@ pub fn demo_diagrams(now: i64, _pr: &PrRef) -> Vec<DiagramVersion> {
         .filter(|s| ["flow", "sequence", "classes"].contains(&s.key.as_str()))
         .map(|s| dg_entry(dg_before(s)))
         .collect();
-    vec![
+    with_keywords(vec![
         DiagramVersion {
             number: 1,
             commit: DIAGRAMS_V1_COMMIT.into(),
@@ -1496,22 +1500,13 @@ pub fn demo_diagrams(now: i64, _pr: &PrRef) -> Vec<DiagramVersion> {
             phase: VersionPhase::Done,
             entries: specs.into_iter().map(dg_entry).collect(),
         },
-    ]
+    ])
 }
 
 /// `demo_diagrams` as the tell a scene sends through the outbox: both versions listed, the
 /// second one whole, nothing running, and no new commit.
 pub fn demo_diagrams_tell(pr: &PrRef, now: i64) -> Tell {
-    let versions = demo_diagrams(now, pr);
-    Tell::Diagrams(DiagramsTell::Loaded {
-        pr: pr.clone(),
-        versions: versions.iter().map(DiagramVersion::info).collect(),
-        latest: versions.last().cloned().map(Box::new),
-        state: DiagramsState::Idle,
-        head: HEAD_SHA.into(),
-        stale: false,
-        stale_reason: None,
-    })
+    diagrams_tell_of(pr, demo_diagrams(now, pr))
 }
 
 /// The mockups' two results (`Security.png`, `Audits.png`): three security findings, and an
@@ -2152,11 +2147,367 @@ fn heat(now: i64) -> Vec<DayCount> {
         .collect()
 }
 
+// ---- the 3D keyword view
+
+/// One run of the demo's search results: `count` lines of `path`, each holding `text`, the first
+/// `changed` of them lines the pull request adds.
+struct KeywordHits {
+    path: &'static str,
+    text: &'static str,
+    count: u32,
+    changed: u32,
+}
+
+const KW_STORE: &str = "src/token/store.rs";
+const KW_HTTP: &str = "src/client/http.rs";
+const KW_SESSION: &str = "src/session.rs";
+const KW_LOGIN: &str = "src/auth/login.rs";
+const KW_REFRESH_DECL: &str = "    pub fn refresh(&self) -> Token {";
+const KW_LOCK_DECL: &str = "    refresh_lock: Mutex<()>,";
+const KW_TOKEN_USE: &str = "        let t = self.access_token();";
+const KW_EXPIRES_DECL: &str = "    pub fn expires_at(&self) -> i64 {";
+
+#[rustfmt::skip]
+const KW_HITS: &[KeywordHits] = &[
+    KeywordHits { path: KW_STORE, text: "pub struct TokenStore {", count: 1, changed: 0 },
+    KeywordHits { path: KW_STORE, text: KW_LOCK_DECL, count: 1, changed: 1 },
+    KeywordHits { path: KW_STORE, text: "pub struct RefreshError;", count: 1, changed: 1 },
+    KeywordHits { path: KW_STORE, text: KW_REFRESH_DECL, count: 1, changed: 1 },
+    KeywordHits { path: KW_STORE, text: "    pub fn refresh_token(&self) -> String {", count: 1, changed: 1 },
+    KeywordHits { path: KW_STORE, text: "        self.refresh();", count: 4, changed: 1 },
+    KeywordHits { path: KW_STORE, text: "        let _g = self.lock();", count: 4, changed: 3 },
+    KeywordHits { path: KW_STORE, text: KW_TOKEN_USE, count: 3, changed: 1 },
+    KeywordHits { path: KW_STORE, text: "        if self.expires_at() < now {", count: 3, changed: 2 },
+    KeywordHits { path: KW_HTTP, text: "    pub fn token(&self) -> Token {", count: 1, changed: 0 },
+    KeywordHits { path: KW_HTTP, text: "        self.refresh();", count: 3, changed: 1 },
+    KeywordHits { path: KW_HTTP, text: "        let _g = self.lock();", count: 1, changed: 0 },
+    KeywordHits { path: KW_HTTP, text: "        let t = self.token();", count: 38, changed: 1 },
+    KeywordHits { path: KW_LOGIN, text: KW_TOKEN_USE, count: 18, changed: 0 },
+    KeywordHits { path: KW_LOGIN, text: "        if self.expires_at() < now {", count: 3, changed: 0 },
+    KeywordHits { path: KW_SESSION, text: KW_EXPIRES_DECL, count: 1, changed: 1 },
+    KeywordHits { path: KW_SESSION, text: "    pub fn is_expired(&self) -> bool {", count: 1, changed: 0 },
+    KeywordHits { path: KW_SESSION, text: "        if self.is_expired() {", count: 6, changed: 1 },
+    KeywordHits { path: KW_SESSION, text: "        self.refresh_token();", count: 3, changed: 0 },
+    KeywordHits { path: KW_SESSION, text: "        let t = self.expiry();", count: 14, changed: 0 },
+];
+
+/// The hits the rows stand for, one per line (each file's lines count up from 10 in threes), and
+/// the lines the pull request adds.
+fn keyword_hits(rows: &[KeywordHits]) -> (Vec<Hit>, AddedLines) {
+    let mut next: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut hits = Vec::new();
+    let mut added = AddedLines::new();
+    for row in rows {
+        for i in 0..row.count {
+            let line = next.entry(row.path).or_insert(10);
+            hits.push(Hit {
+                path: row.path.into(),
+                line: *line,
+                text: row.text.into(),
+                words: None,
+            });
+            if i < row.changed {
+                added.entry(row.path.into()).or_default().insert(*line);
+            }
+            *line += 3;
+        }
+    }
+    (hits, added)
+}
+
+fn keyword_axes() -> [Axis; 3] {
+    let axis = |name: &str, low: &str, high: &str| Axis {
+        name: name.into(),
+        low: low.into(),
+        high: high.into(),
+    };
+    [
+        axis("Layer", "client", "storage"),
+        axis("Moment", "before send", "after reply"),
+        axis("Distance", "near", "far"),
+    ]
+}
+
+fn keyword_region(path: &str, use_case: &str, at: [f32; 3]) -> Region {
+    Region {
+        path: path.into(),
+        start_line: None,
+        end_line: None,
+        use_case: use_case.into(),
+        at,
+    }
+}
+
+/// The map of `rzorzal/clusia#123` the mockups show: four families, four use cases, three
+/// bundles (×37, ×18, ×14), declarations, changed places, and 212 more places counted but not
+/// listed.
+pub fn keywords_map() -> KeywordMap {
+    let (hits, added) = keyword_hits(KW_HITS);
+    let seed = |word: &str, path: &str, text: &str| Seed {
+        word: word.into(),
+        path: path.into(),
+        line: hits
+            .iter()
+            .find(|h| h.path == path && h.text == text)
+            .map(|h| h.line)
+            .expect("a row with that text"),
+    };
+    let family = |id: &str, seed: Seed, words: &[&str]| Family {
+        id: id.into(),
+        label: id.into(),
+        seed,
+        words: words.iter().map(|w| w.to_string()).collect(),
+        history: None,
+    };
+    let use_case = |id: &str, name: &str| UseCase {
+        id: id.into(),
+        name: name.into(),
+        note: None,
+        history: None,
+    };
+    let plan = KeywordPlan {
+        title: KEYWORDS_TITLE.into(),
+        caption: "Where the words of this change appear in the repository.".into(),
+        axes: keyword_axes(),
+        families: vec![
+            family(
+                "refresh",
+                seed("refresh", KW_STORE, KW_REFRESH_DECL),
+                &["refresh", "refresh_token", "RefreshError"],
+            ),
+            family(
+                "lock",
+                seed("refresh_lock", KW_STORE, KW_LOCK_DECL),
+                &["refresh_lock", "lock"],
+            ),
+            family(
+                "token",
+                seed("access_token", KW_STORE, KW_TOKEN_USE),
+                &["token", "TokenStore", "access_token"],
+            ),
+            family(
+                "expiry",
+                seed("expires_at", KW_SESSION, KW_EXPIRES_DECL),
+                &["expires_at", "is_expired", "expiry"],
+            ),
+        ],
+        use_cases: vec![
+            use_case("refresh", "Token refresh"),
+            use_case("signing", "Request signing"),
+            use_case("expiry", "Session expiry"),
+            use_case("login", "Login"),
+        ],
+    };
+    let placement = KeywordPlacement {
+        regions: vec![
+            keyword_region(KW_STORE, "refresh", [0.775, 0.725, 0.45]),
+            keyword_region(KW_HTTP, "signing", [0.2, 0.575, 0.675]),
+            keyword_region(KW_SESSION, "expiry", [0.625, 0.225, 0.75]),
+            keyword_region(KW_LOGIN, "login", [0.25, 0.25, 0.225]),
+        ],
+    };
+    // Eleven words: ten with 19 more places each and one with 22.
+    let mut overflow = vec![19; 10];
+    overflow.push(22);
+    build_map(plan, placement, &hits, overflow, false, &added)
+}
+
+/// A map of one family and one use case with `places` changed places in one file: for the
+/// extremes (none, exactly the point cap, past it).
+pub fn keywords_map_of(places: u32) -> KeywordMap {
+    let hits: Vec<Hit> = (1..=places)
+        .map(|line| Hit {
+            path: "src/lib.rs".into(),
+            line,
+            text: "token();".into(),
+            words: None,
+        })
+        .collect();
+    let mut added = AddedLines::new();
+    added.insert("src/lib.rs".into(), (1..=places).collect());
+    let plan = KeywordPlan {
+        title: KEYWORDS_TITLE.into(),
+        caption: String::new(),
+        axes: keyword_axes(),
+        families: vec![Family {
+            id: "token".into(),
+            label: "token".into(),
+            seed: Seed {
+                word: "token".into(),
+                path: "src/lib.rs".into(),
+                line: 1,
+            },
+            words: vec!["token".into()],
+            history: None,
+        }],
+        use_cases: vec![UseCase {
+            id: "all".into(),
+            name: "Everything".into(),
+            note: None,
+            history: None,
+        }],
+    };
+    let placement = KeywordPlacement {
+        regions: vec![keyword_region("src/lib.rs", "all", [0.5, 0.5, 0.5])],
+    };
+    build_map(plan, placement, &hits, vec![0], false, &added)
+}
+
+/// A map with one place: `line` of `path`, a line the pull request adds when `added`.
+pub fn keywords_map_at(path: &str, line: u32, added: bool) -> KeywordMap {
+    let hits = vec![Hit {
+        path: path.into(),
+        line,
+        text: "        let t = self.token();".into(),
+        words: None,
+    }];
+    let mut lines = AddedLines::new();
+    if added {
+        lines.entry(path.into()).or_default().insert(line);
+    }
+    let plan = KeywordPlan {
+        title: KEYWORDS_TITLE.into(),
+        caption: String::new(),
+        axes: keyword_axes(),
+        families: vec![Family {
+            id: "token".into(),
+            label: "token".into(),
+            seed: Seed {
+                word: "token".into(),
+                path: path.into(),
+                line,
+            },
+            words: vec!["token".into()],
+            history: None,
+        }],
+        use_cases: vec![UseCase {
+            id: "all".into(),
+            name: "Everything".into(),
+            note: None,
+            history: None,
+        }],
+    };
+    let placement = KeywordPlacement {
+        regions: vec![keyword_region(path, "all", [0.5, 0.5, 0.5])],
+    };
+    build_map(plan, placement, &hits, vec![0], false, &lines)
+}
+
+/// What the demo daemon reads for a keyword place in a file the demo review holds no patch of:
+/// one line before it and two after (the daemon's window for a place).
+pub fn demo_place_code(path: &str, commit: &str, line: u32) -> DiagramCode {
+    let texts = [
+        "        let _g = self.lock();",
+        "        let t = self.token();",
+        "        t.refresh(&client)?;",
+        "    }",
+    ];
+    DiagramCode {
+        path: path.into(),
+        commit: commit.into(),
+        start_line: line.saturating_sub(1).max(1),
+        lines: texts
+            .iter()
+            .zip(line.saturating_sub(1).max(1)..)
+            .map(|(text, number)| CodeLine {
+                number,
+                text: (*text).into(),
+                changed: false,
+            })
+            .collect(),
+        unavailable: None,
+    }
+}
+
+/// The Keywords entry of a version: ready, holding `map`.
+pub fn keywords_entry_of(map: KeywordMap) -> DiagramEntry {
+    DiagramEntry {
+        plan: clusia_core::diagram::keywords_entry(),
+        state: EntryState::ReadyMap {
+            map: Box::new(map),
+            notes: Vec::new(),
+        },
+    }
+}
+
+pub fn keywords_entry() -> DiagramEntry {
+    keywords_entry_of(keywords_map())
+}
+
+/// `versions` with `map` as the last one's Keywords entry (replacing the one it has).
+pub fn with_keywords_map(
+    mut versions: Vec<DiagramVersion>,
+    map: KeywordMap,
+) -> Vec<DiagramVersion> {
+    if let Some(last) = versions.last_mut() {
+        last.entries.retain(|e| e.plan.key != KEYWORDS_KEY);
+        last.entries.push(keywords_entry_of(map));
+    }
+    versions
+}
+
+/// `versions` with the demo's Keywords entry at the end of the last one, unless it has one.
+pub fn with_keywords(versions: Vec<DiagramVersion>) -> Vec<DiagramVersion> {
+    let has = versions
+        .last()
+        .is_some_and(|v| v.entries.iter().any(|e| e.plan.key == KEYWORDS_KEY));
+    if has {
+        versions
+    } else {
+        with_keywords_map(versions, keywords_map())
+    }
+}
+
+/// `versions` as the tell a scene sends through the outbox: all of them listed, the last one
+/// whole, nothing running, and no new commit.
+pub fn diagrams_tell_of(pr: &PrRef, versions: Vec<DiagramVersion>) -> Tell {
+    Tell::Diagrams(DiagramsTell::Loaded {
+        pr: pr.clone(),
+        versions: versions.iter().map(DiagramVersion::info).collect(),
+        latest: versions.last().cloned().map(Box::new),
+        state: DiagramsState::Idle,
+        head: HEAD_SHA.into(),
+        stale: false,
+        stale_reason: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::NOW;
     use clusia_core::checks::anchor_in_diff;
+
+    #[test]
+    fn the_demo_drawings_end_with_the_keywords_entry() {
+        let versions = demo_diagrams(NOW, &demo_pr());
+        let keys: Vec<&str> = versions[1]
+            .entries
+            .iter()
+            .map(|e| e.plan.key.as_str())
+            .collect();
+        assert_eq!(keys.len(), 9);
+        assert_eq!(keys.last(), Some(&"keywords"));
+        assert_eq!(keys.iter().filter(|k| **k == "keywords").count(), 1);
+        assert_eq!(
+            versions[0].entries.len(),
+            3,
+            "a version from before has none"
+        );
+        assert!(versions[0].entries.iter().all(|e| e.plan.key != "keywords"));
+        let last = versions[1].entries.last().unwrap();
+        assert_eq!(last.plan.kind, DiagramKind::Keywords);
+        assert_eq!(last.plan.title, "Where the words live");
+        let EntryState::ReadyMap { map, .. } = &last.state else {
+            panic!("a map: {:?}", last.state)
+        };
+        assert_eq!((map.plan.families.len(), map.plan.use_cases.len()), (4, 4));
+        let info = versions[1].info();
+        let entry = info.entries.last().unwrap();
+        assert_eq!(entry.state, clusia_core::diagram::EntryStateName::Ready);
+        assert_eq!(entry.count as usize, map.plan.families.len());
+        assert_eq!(entry.places, map.total_places());
+    }
 
     #[test]
     fn the_codex_demo_is_the_demo_with_codex_chosen() {
@@ -2615,12 +2966,14 @@ mod tests {
         assert_eq!(
             keys(&versions[1]),
             [
-                "flow", "deps", "sequence", "er", "usecase", "dataflow", "states", "classes"
+                "flow", "deps", "sequence", "er", "usecase", "dataflow", "states", "classes",
+                "keywords"
             ]
         );
         assert_eq!(keys(&versions[0]), ["flow", "sequence", "classes"]);
         let kinds: Vec<DiagramKind> = versions[1].entries.iter().map(|e| e.plan.kind).collect();
-        assert_eq!(kinds, DiagramKind::ALL);
+        assert_eq!(kinds[..8], DiagramKind::ALL);
+        assert_eq!(kinds[8], DiagramKind::Keywords);
         assert!(versions.iter().all(|v| v.harness == "Claude Code"));
     }
 
@@ -2628,7 +2981,7 @@ mod tests {
     fn the_demo_drawings_hold_together() {
         let files: Vec<String> = demo_diff().into_iter().map(|f| f.path).collect();
         for version in demo_diagrams(NOW, &demo_pr()) {
-            for entry in &version.entries {
+            for entry in version.entries.iter().filter(|e| e.plan.key != "keywords") {
                 let EntryState::Ready { spec, .. } = &entry.state else {
                     panic!("every demo entry is ready");
                 };

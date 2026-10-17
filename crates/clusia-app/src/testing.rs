@@ -1,20 +1,30 @@
 //! A headless app for unit tests: MinimalPlugins, no window, no GPU, no daemon. Asks are
 //! recorded in `Asks::recorded`. Each task that adds a logic plugin registers it in `app`.
 
+use bevy::camera::NormalizedRenderTarget;
 use bevy::clipboard::Clipboard;
 use bevy::input::ButtonInput;
+use bevy::input::mouse::MouseScrollUnit;
+use bevy::input::touch::TouchPhase;
 use bevy::input_focus::InputFocus;
+use bevy::picking::backend::HitData;
+use bevy::picking::events::{Click, Drag, DragEnd, Move, Out, Pointer, Press, Scroll};
+use bevy::picking::pointer::{Location, PointerButton, PointerId};
 use bevy::prelude::*;
 use bevy::text::{EditableText, FontCx, LayoutCx, TextEdit};
+use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::ui_widgets::Activate;
 use bevy::window::{RequestRedraw, WindowThemeChanged};
+use clusia_core::keywords::{KEYWORDS_KEY, KeywordMap};
 use clusia_core::revalidation::{
     CommitLine, Decision, Proposal, Revalidation, RoundState, Verdict, fingerprint,
 };
 use clusia_core::{
     Anchor, Density, DraftItem, DraftKind, ItemStatus, Origin, Paths, PrRef, Review, Side,
 };
+use clusia_diagram::keywords::Scene3D;
 use clusia_protocol::WindowTarget;
+use std::time::Duration;
 
 use crate::app::{AppPaths, StartTarget};
 use crate::bridge::{
@@ -26,12 +36,17 @@ use crate::fixture;
 use crate::fonts::UiFonts;
 use crate::nav::{Nav, NavPlugin};
 use crate::platform_open::OpenUrls;
-use crate::review_state::{Phase, Ready, ReviewSection, ReviewStatePlugin, ReviewTabs, Tab};
+use crate::review_state::{
+    KeywordsUi, Phase, Ready, ReviewSection, ReviewStatePlugin, ReviewTabs, Tab,
+};
 use crate::screens::config::ConfigPlugin;
 use crate::screens::first_run::FirstRunPlugin;
 use crate::screens::home::HomePlugin;
 use crate::screens::open_pr::OpenPrPlugin;
 use crate::screens::review::ReviewPlugin;
+use crate::screens::review::diagrams::keywords::{
+    KeywordsCanvas, KeywordsRuntime, SceneImage, input, render,
+};
 use crate::snapshot::{self, Snapshot};
 use crate::theme::{LIGHT, Theme, ThemePlugin};
 use crate::ui::emoji::EmojiPlugin;
@@ -44,6 +59,8 @@ pub fn app(snapshot: Snapshot) -> App {
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, AssetPlugin::default()))
         .init_asset::<Image>()
+        .init_asset::<Mesh>()
+        .init_asset::<StandardMaterial>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<InputFocus>()
         .add_message::<WindowThemeChanged>()
@@ -578,4 +595,258 @@ pub fn open_round(app: &mut App, state: RoundState) -> PrRef {
     settle(app);
     recorded(app);
     pr
+}
+
+// ---- the 3D keyword view
+
+/// Where the keyword view's image node sits on the window in tests.
+pub const KEYWORDS_ORIGIN: Vec2 = Vec2::new(300.0, 120.0);
+
+/// Opens the demo review on the keyword view of `fixture::keywords_map()`.
+pub fn open_keywords(app: &mut App) -> PrRef {
+    open_keywords_with(app, fixture::keywords_map(), |_| {})
+}
+
+/// Opens the demo review on the keyword view of `map`, after `edit` set the tab's keyword state
+/// (so the scene is built from it).
+pub fn open_keywords_with(
+    app: &mut App,
+    map: KeywordMap,
+    edit: impl FnOnce(&mut KeywordsUi),
+) -> PrRef {
+    let pr = open_ready(app, false);
+    {
+        let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+        let ui = &mut tabs.0.get_mut(&pr).expect("an open tab").ui;
+        ui.section = ReviewSection::Diagrams;
+        ui.diagram = Some(KEYWORDS_KEY.into());
+        edit(&mut ui.keywords);
+    }
+    let versions = fixture::with_keywords_map(fixture::demo_diagrams(NOW, &pr), map);
+    tell(app, fixture::diagrams_tell_of(&pr, versions));
+    settle(app);
+    pr
+}
+
+/// Edits the keyword state of the tab of `pr` and runs a frame.
+pub fn set_keywords(app: &mut App, pr: &PrRef, edit: impl FnOnce(&mut KeywordsUi)) {
+    {
+        let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+        edit(&mut tabs.0.get_mut(pr).expect("an open tab").ui.keywords);
+    }
+    settle(app);
+}
+
+pub fn keywords_ui(app: &App, pr: &PrRef) -> KeywordsUi {
+    tab(app, pr).ui.keywords
+}
+
+/// The runtime of the keyword canvas of `pr`.
+pub fn runtime<'a>(app: &'a App, pr: &PrRef) -> &'a KeywordsRuntime {
+    app.world()
+        .iter_entities()
+        .find_map(|e| {
+            let canvas = e.get::<KeywordsCanvas>()?;
+            (canvas.0 == *pr).then(|| e.get::<KeywordsRuntime>())?
+        })
+        .expect("a keyword canvas with its runtime")
+}
+
+/// The scene and the hovered point of `pr`'s keyword view.
+pub fn keywords_runtime(app: &App, pr: &PrRef) -> (Scene3D, Option<u32>) {
+    let rt = runtime(app, pr);
+    (rt.scene.clone(), rt.hover)
+}
+
+/// Every entity with a `C`.
+pub fn entities<C: Component>(app: &mut App) -> Vec<Entity> {
+    let mut q = app.world_mut().query_filtered::<Entity, With<C>>();
+    q.iter(app.world()).collect()
+}
+
+/// Gives `entity` the size and place layout would: `origin` is its top-left corner on the
+/// window, in logical pixels. The test app has no window, so its layout leaves a node it was
+/// given a size for alone (`a_node_given_a_size_keeps_it_across_frames` pins that).
+pub fn place_node(app: &mut App, entity: Entity, origin: Vec2, size: Vec2) {
+    app.world_mut().entity_mut(entity).insert((
+        ComputedNode {
+            size,
+            ..ComputedNode::DEFAULT
+        },
+        UiGlobalTransform::from_translation(origin + size / 2.0),
+    ));
+}
+
+/// Lays the keyword image out at `size` (logical pixels) at `KEYWORDS_ORIGIN` and runs frames;
+/// returns the origin.
+pub fn size_keywords(app: &mut App, pr: &PrRef, size: Vec2) -> Vec2 {
+    let image = find::<SceneImage>(app, |s| s.0 == *pr);
+    place_node(app, image, KEYWORDS_ORIGIN, size);
+    settle(app);
+    KEYWORDS_ORIGIN
+}
+
+/// Where point `index` of `pr`'s scene is on the window (the image must have been sized).
+pub fn point_screen_pos(app: &mut App, pr: &PrRef, index: u32) -> Vec2 {
+    let image = find::<SceneImage>(app, |s| s.0 == *pr);
+    let size = app
+        .world()
+        .get::<ComputedNode>(image)
+        .expect("a sized image")
+        .size;
+    let rt = runtime(app, pr);
+    let point = &rt.scene.points[index as usize];
+    let (at, _) = render::project(&rt.pose, rt.lens, size, render::world(point.pos))
+        .expect("the point is in front of the camera");
+    KEYWORDS_ORIGIN + at
+}
+
+// ---- the pointer on the 3D keyword view
+
+fn location(position: Vec2) -> Location {
+    Location {
+        target: NormalizedRenderTarget::None {
+            width: 1,
+            height: 1,
+        },
+        position,
+    }
+}
+
+fn nowhere() -> HitData {
+    HitData::new(Entity::PLACEHOLDER, 0.0, None, None)
+}
+
+fn image_of(app: &mut App, pr: &PrRef) -> Entity {
+    find::<SceneImage>(app, |s| s.0 == *pr)
+}
+
+fn press_at(app: &mut App, image: Entity, position: Vec2) {
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(position),
+        Press {
+            button: PointerButton::Primary,
+            hit: nowhere(),
+            count: 1,
+        },
+        image,
+    ));
+}
+
+fn click_event(app: &mut App, image: Entity, position: Vec2) {
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(position),
+        Click {
+            button: PointerButton::Primary,
+            hit: nowhere(),
+            duration: Duration::from_millis(80),
+            count: 1,
+        },
+        image,
+    ));
+}
+
+/// The pointer moves to `position` (window pixels) over the 3D image.
+pub fn hover_at(app: &mut App, pr: &PrRef, position: Vec2) {
+    let image = image_of(app, pr);
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(position),
+        Move {
+            hit: nowhere(),
+            delta: Vec2::ZERO,
+        },
+        image,
+    ));
+    app.update();
+}
+
+/// The pointer leaves the 3D image.
+pub fn leave(app: &mut App, pr: &PrRef) {
+    let image = image_of(app, pr);
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(Vec2::ZERO),
+        Out { hit: nowhere() },
+        image,
+    ));
+    app.update();
+}
+
+/// A press and a click at `position`.
+pub fn click_at(app: &mut App, pr: &PrRef, position: Vec2) {
+    let image = image_of(app, pr);
+    press_at(app, image, position);
+    click_event(app, image, position);
+    settle(app);
+}
+
+/// A press at `from`, one drag of `delta`, the release, and the click the picking backend
+/// sends when the button is released over what was pressed.
+pub fn drag_by(app: &mut App, pr: &PrRef, from: Vec2, delta: Vec2) {
+    let image = image_of(app, pr);
+    press_at(app, image, from);
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(from + delta),
+        Drag {
+            button: PointerButton::Primary,
+            distance: delta,
+            delta,
+        },
+        image,
+    ));
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(from + delta),
+        DragEnd {
+            button: PointerButton::Primary,
+            distance: delta,
+        },
+        image,
+    ));
+    click_event(app, image, from + delta);
+    settle(app);
+}
+
+/// The wheel turns `lines` (positive: up) over the 3D image.
+pub fn scroll_at(app: &mut App, pr: &PrRef, position: Vec2, lines: f32) {
+    let image = image_of(app, pr);
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(position),
+        Scroll {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: lines,
+            hit: nowhere(),
+            phase: TouchPhase::Moved,
+        },
+        image,
+    ));
+    settle(app);
+}
+
+/// The points a click at their own centre would pick (nothing nearer covers them).
+pub fn pickable(app: &mut App, pr: &PrRef) -> Vec<u32> {
+    let image = image_of(app, pr);
+    let size = app
+        .world()
+        .get::<ComputedNode>(image)
+        .expect("a sized image")
+        .size;
+    let ui = keywords_ui(app, pr);
+    let rt = runtime(app, pr);
+    (0..rt.scene.points.len() as u32)
+        .filter(|&i| {
+            let point = &rt.scene.points[i as usize];
+            let Some((at, _)) = render::project(&rt.pose, rt.lens, size, render::world(point.pos))
+            else {
+                return false;
+            };
+            input::pick(&rt.scene, &ui, &rt.pose, rt.lens, size, at) == Some(i)
+        })
+        .collect()
 }

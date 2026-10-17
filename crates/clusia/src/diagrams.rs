@@ -29,6 +29,15 @@ fn state_text(state: &EntryState) -> String {
         EntryState::Drawing => "drawing".into(),
         EntryState::Ready { notes, .. } if notes.is_empty() => "ready".into(),
         EntryState::Ready { notes, .. } => format!("ready · {} noted", notes.len()),
+        EntryState::ReadyMap { map, .. } => {
+            let families = map.plan.families.len();
+            let places = map.total_places();
+            format!(
+                "ready · {families} {} · {places} {}",
+                if families == 1 { "family" } else { "families" },
+                if places == 1 { "place" } else { "places" },
+            )
+        }
         EntryState::Failed { reason } => format!("failed · {}", line_of(reason)),
         EntryState::NotDrawn => "not drawn".into(),
     }
@@ -94,11 +103,22 @@ pub(crate) fn progress_line(
 ) -> Option<String> {
     match state {
         DiagramsState::Planning => Some("planning the diagrams".into()),
-        DiagramsState::Drawing { done, total, key } => Some(format!(
-            "drawing {} of {total}: {}",
-            done + 1,
-            line_of(titles.get(key).map_or(key.as_str(), String::as_str))
-        )),
+        DiagramsState::Drawing {
+            done,
+            total,
+            key,
+            step,
+        } => {
+            let mut line = format!(
+                "drawing {} of {total}: {}",
+                done + 1,
+                line_of(titles.get(key).map_or(key.as_str(), String::as_str))
+            );
+            if let Some(step) = step {
+                line.push_str(&format!(" · {}", line_of(step)));
+            }
+            Some(line)
+        }
         DiagramsState::Idle | DiagramsState::Failed { .. } => None,
     }
 }
@@ -392,7 +412,8 @@ mod tests {
                 &DiagramsState::Drawing {
                     done: 1,
                     total: 5,
-                    key: "flow".into()
+                    key: "flow".into(),
+                    step: None,
                 },
                 &titles
             )
@@ -404,7 +425,8 @@ mod tests {
                 &DiagramsState::Drawing {
                     done: 0,
                     total: 1,
-                    key: "x".into()
+                    key: "x".into(),
+                    step: None,
                 },
                 &titles
             )
@@ -416,5 +438,112 @@ mod tests {
             Some("planning the diagrams")
         );
         assert_eq!(progress_line(&DiagramsState::Idle, &titles), None);
+    }
+
+    /// A map of one family and two places, `src/a.rs:2` (changed) and `src/other.rs:7`.
+    fn small_map() -> clusia_core::keywords::KeywordMap {
+        serde_json::from_value(json!({
+            "plan": {
+                "title": "Where the words live", "caption": "",
+                "axes": [
+                    {"name": "Layer", "low": "client", "high": "storage"},
+                    {"name": "Time", "low": "login", "high": "expiry"},
+                    {"name": "Risk", "low": "safe", "high": "risky"}
+                ],
+                "families": [{"id": "refresh", "label": "refresh",
+                    "seed": {"word": "refresh_token", "path": "src/a.rs", "line": 2},
+                    "words": ["refresh_token"]}],
+                "use_cases": [{"id": "refresh", "name": "Token refresh"}]
+            },
+            "regions": [],
+            "paths": ["src/a.rs", "src/other.rs"],
+            "words": [{"text": "refresh_token", "family": 0}],
+            "places": [[0, 2, 0, 65535, 2], [1, 7, 0, 65535, 0]],
+            "overflow": [0],
+            "search_cut": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_keyword_map_lists_its_families_and_places_and_its_json_holds_the_map() {
+        let mut v = version(vec![("flow", EntryState::NotDrawn)]);
+        v.entries.push(DiagramEntry {
+            plan: clusia_core::diagram::keywords_entry(),
+            state: EntryState::ReadyMap {
+                map: Box::new(small_map()),
+                notes: Vec::new(),
+            },
+        });
+        let lines = list_lines(Some(&v), false, "a1b2c3d4e5f6", None);
+        assert_eq!(
+            lines[1],
+            "keywords  Keywords 3D  Where the words live  ready · 1 family · 2 places"
+        );
+        let out = output(&Listing {
+            latest: Some(v),
+            stale: false,
+            head: String::new(),
+            reason: None,
+        });
+        let entry = &out.json["version"]["entries"][1];
+        assert_eq!(entry["state"]["state"], json!("ready_map"));
+        assert_eq!(
+            entry["state"]["map"]["places"][0],
+            json!([0, 2, 0, 65535, 2])
+        );
+    }
+
+    #[test]
+    fn progress_says_what_the_keyword_entry_does() {
+        let titles = HashMap::from([("keywords".to_string(), "Where the words live".to_string())]);
+        let state = DiagramsState::Drawing {
+            done: 2,
+            total: 3,
+            key: "keywords".into(),
+            step: Some("Finding where the words live…\n".into()),
+        };
+        assert_eq!(
+            progress_line(&state, &titles).as_deref(),
+            Some("drawing 3 of 3: Where the words live · Finding where the words live…")
+        );
+    }
+
+    #[test]
+    fn a_ready_map_lists_its_families_and_places() {
+        let map: clusia_core::keywords::KeywordMap = serde_json::from_value(serde_json::json!({
+            "plan": {
+                "title": "Token refresh", "caption": "",
+                "axes": [
+                    {"name": "Layer", "low": "api", "high": "storage"},
+                    {"name": "Client", "low": "cli", "high": "app"},
+                    {"name": "Storage", "low": "memory", "high": "disk"}
+                ],
+                "families": [
+                    {"id": "retry", "label": "Retry", "seed": {"word": "retry", "path": "src/a.rs", "line": 1}, "words": ["retry"]},
+                    {"id": "token", "label": "Token", "seed": {"word": "token", "path": "src/a.rs", "line": 2}, "words": ["token"]}
+                ],
+                "use_cases": [{"id": "auth", "name": "Sign in"}]
+            },
+            "regions": [],
+            "paths": ["src/a.rs"],
+            "words": [{"text": "retry", "family": 0}, {"text": "token", "family": 1}],
+            "places": [[0, 1, 0, 65535, 3], [0, 2, 1, 65535, 0]],
+            "overflow": [5, 0]
+        })).unwrap();
+        let mut one = map.clone();
+        let state = EntryState::ReadyMap {
+            map: Box::new(map),
+            notes: vec!["1 word dropped".into()],
+        };
+        assert_eq!(state_text(&state), "ready · 2 families · 7 places");
+        one.plan.families.truncate(1);
+        one.places.truncate(1);
+        one.overflow = vec![0, 0];
+        let state = EntryState::ReadyMap {
+            map: Box::new(one),
+            notes: vec![],
+        };
+        assert_eq!(state_text(&state), "ready · 1 family · 1 place");
     }
 }

@@ -3,22 +3,36 @@
 //! checks. A review has at most one run at a time. The version being drawn is on disk from the
 //! moment the plan is made, so an entry changes there as soon as it changes on screen.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::diagram::{
-    DiagramContext, DiagramEntry, DiagramVersion, EntryState, ID_MAX, PlanEntry, VersionPhase,
-    draw_prompt, plan_prompt, repair_prompt, validate, validate_plan,
+    DiagramContext, DiagramEntry, DiagramKind, DiagramVersion, EntryState, ID_MAX, PlanEntry,
+    VersionPhase, context_block, draw_prompt, keywords_entry, plan_prompt, repair_prompt, validate,
+    validate_plan,
+};
+use clusia_core::keywords::{
+    AddedLines, CheckedPlan, FileHits, Hit, KEYWORDS_KEY, KeywordMap, KeywordPlan, MAX_FILE_BYTES,
+    MAX_MAP_BYTES, MAX_PLACEMENT_FILES, build_map, file_hits, has_word, keyword_plan_prompt,
+    placement_prompt, validate_keyword_plan, validate_placement,
 };
 use clusia_core::printable::printable;
 use clusia_core::{
-    Anchor, DiffMap, DraftKind, LineMap, Origin, PrRef, ReviewState, Side, fits_diff,
+    Anchor, DiffMap, DraftKind, FileDiff, LineMap, Origin, PrRef, ReviewState, Side, added_lines,
+    fits_diff,
 };
-use clusia_git::{diagram_ref, diff_between, is_object_id, pin_commit, repo_of_worktree};
+use clusia_git::{
+    GrepCaps, GrepHit, diagram_ref, diff_between, file_at, git, grep_words, is_object_id,
+    pin_commit, repo_of_worktree,
+};
 use clusia_harness::AgentEvent;
-use clusia_harness::{extract_diagram, extract_plan};
+use clusia_harness::{
+    extract_diagram, extract_keyword_placement, extract_keyword_plan, extract_plan,
+};
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, AnchorInput, DiagramsState, ErrorCode, Event, Outcome,
     ProtocolError, Reply, TurnOrigin, topics,
@@ -184,6 +198,10 @@ struct Job {
     pr_title: String,
     /// The paths of the pull request's files, for the anchors of a drawing.
     files: Vec<String>,
+    /// Whether the 3D keyword view is drawn after the agent's diagrams.
+    keywords: bool,
+    /// The lines the pull request adds, per path, for seeds and changed places.
+    added: AddedLines,
     /// The commit the run reads.
     head: String,
     /// The display name of the harness, kept in the version.
@@ -556,10 +574,13 @@ async fn draw_entry(
     index: usize,
 ) -> Result<EntryState, Why> {
     let plan = version.entries[index].plan.clone();
+    if plan.kind == DiagramKind::Keywords {
+        return draw_keywords(shared, pr, job, version, earlier).await;
+    }
     let others: Vec<PlanEntry> = version
         .entries
         .iter()
-        .filter(|e| e.plan.key != plan.key)
+        .filter(|e| e.plan.key != plan.key && e.plan.kind != DiagramKind::Keywords)
         .map(|e| e.plan.clone())
         .collect();
     let previous = previous_spec(earlier, version.number, &plan.key);
@@ -576,6 +597,243 @@ async fn draw_entry(
         Err(Halt::Failed(reason)) => Ok(EntryState::Failed { reason }),
         Err(Halt::Over(why)) => Err(why),
     }
+}
+
+/// The lines each file's patch adds; a file without a patch (binary, too big) adds none.
+fn added_of(files: &[FileDiff]) -> AddedLines {
+    files
+        .iter()
+        .filter_map(|file| Some((file.path.clone(), added_lines(file.patch.as_deref()?))))
+        .collect()
+}
+
+/// What the keywords entry says while its search and its second turn run.
+const STEP_FINDING: &str = "Finding where the words live…";
+const STEP_PLACING: &str = "Placing files on the axes…";
+/// The note of a map whose search ran out of time.
+const SEARCH_CUT_NOTE: &str = "Search stopped after 10 s; some places are missing.";
+const CHECKOUT_MOVED: &str = "The checkout moved while drawing.";
+const CHECKOUT_UNREADABLE: &str = "The checkout could not be read.";
+const MAP_TOO_LARGE: &str = "The map is too large to keep.";
+/// Validation's own reason for a plan with no family left.
+const UNTRACED: &str = "No word of this change could be traced.";
+
+/// Tells the windows what the entry being drawn does now.
+fn tell_step(shared: &Shared, pr: &PrRef, job: &Job, step: &str) {
+    let state = shared.diagrams.with(pr, |entry| {
+        let run = entry.run.as_mut().filter(|r| r.id == job.run)?;
+        let DiagramsState::Drawing { step: now, .. } = &mut run.state else {
+            return None;
+        };
+        *now = Some(step.to_string());
+        Some(run.state.clone())
+    });
+    if let Some(state) = state {
+        tell_state(shared, pr, state);
+    }
+}
+
+/// `work`, unless the run is stopped first; a stop drops `work`, and with it any child process.
+async fn unless_stopped<T>(stop: &Stop, work: impl Future<Output = T>) -> Result<T, Why> {
+    if stop.fired() {
+        return Err(stop.why());
+    }
+    tokio::select! {
+        out = work => Ok(out),
+        () = stop.notified() => Err(stop.why()),
+    }
+}
+
+/// The plan of the latest map before version `number`, so a new map keeps its ids.
+fn previous_map_plan(earlier: &[DiagramVersion], number: u32) -> Option<KeywordPlan> {
+    earlier
+        .iter()
+        .rev()
+        .filter(|v| v.number < number)
+        .find_map(|v| match &v.entry(KEYWORDS_KEY)?.state {
+            EntryState::ReadyMap { map, .. } => Some(map.plan.clone()),
+            _ => None,
+        })
+}
+
+fn map_notes(plan: Vec<String>, placement: Vec<String>, cut: bool) -> Vec<String> {
+    let mut notes = plan;
+    notes.extend(placement);
+    if cut {
+        notes.push(SEARCH_CUT_NOTE.to_string());
+    }
+    notes
+}
+
+/// The note for `dropped` families whose seed word is not on their seed line.
+fn seed_note(dropped: usize) -> Option<String> {
+    match dropped {
+        0 => None,
+        1 => Some("1 family dropped: its seed word is not on its line".to_string()),
+        n => Some(format!(
+            "{n} families dropped: their seed words are not on their lines"
+        )),
+    }
+}
+
+/// Keeps the families whose seed word is on their seed line at the run's commit; says how many
+/// went. Each seed file is read once.
+async fn keep_traced_seeds(repo: &Path, job: &Job, plan: &mut KeywordPlan) -> usize {
+    let mut texts: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for family in &plan.families {
+        if !texts.contains_key(&family.seed.path) {
+            let text = file_at(repo, &job.head, &family.seed.path, MAX_FILE_BYTES)
+                .await
+                .ok();
+            texts.insert(family.seed.path.clone(), text);
+        }
+    }
+    let before = plan.families.len();
+    plan.families.retain(|family| {
+        let seed = &family.seed;
+        texts
+            .get(&seed.path)
+            .and_then(Option::as_ref)
+            .and_then(|text| text.lines().nth((seed.line as usize).checked_sub(1)?))
+            .is_some_and(|line| has_word(line, &seed.word))
+    });
+    before - plan.families.len()
+}
+
+/// Why the worktree cannot be trusted to hold the commit `expected`, given what
+/// `git rev-parse HEAD` said: it could not be asked, or it answered another commit.
+fn checkout_problem<E>(head: &Result<String, E>, expected: &str) -> Option<&'static str> {
+    match head {
+        Err(_) => Some(CHECKOUT_UNREADABLE),
+        Ok(head) if head != expected => Some(CHECKOUT_MOVED),
+        Ok(_) => None,
+    }
+}
+
+/// Whether `map` is too big to store with its version.
+fn too_large(map: &KeywordMap) -> bool {
+    serde_json::to_vec(map).map_or(true, |bytes| bytes.len() > MAX_MAP_BYTES)
+}
+
+/// The files with hits, the pull request's first and then by hits, with the functions around
+/// their hits, read at the run's commit.
+async fn files_with_hits(repo: &Path, job: &Job, hits: &[GrepHit]) -> Vec<FileHits> {
+    let mut lines: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
+    for hit in hits {
+        lines.entry(hit.path.as_str()).or_default().push(hit.line);
+    }
+    let mut ranked: Vec<(&str, Vec<u32>, bool)> = lines
+        .into_iter()
+        .map(|(path, lines)| (path, lines, job.files.iter().any(|f| f == path)))
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then(b.1.len().cmp(&a.1.len()))
+            .then(a.0.cmp(b.0))
+    });
+    ranked.truncate(MAX_PLACEMENT_FILES);
+    let mut files = Vec::with_capacity(ranked.len());
+    for (path, mut lines, in_pr) in ranked {
+        lines.sort_unstable();
+        lines.dedup();
+        let text = file_at(repo, &job.head, path, MAX_FILE_BYTES)
+            .await
+            .unwrap_or_default();
+        files.push(file_hits(path, in_pr, &text, &lines));
+    }
+    files
+}
+
+/// The keywords entry: the words of the change, where they appear at the run's commit, and
+/// where their files sit on the agent's axes. Its failures are the entry's, not the run's.
+async fn draw_keywords(
+    shared: &Arc<Shared>,
+    pr: &PrRef,
+    job: &Job,
+    version: &DiagramVersion,
+    earlier: &[DiagramVersion],
+) -> Result<EntryState, Why> {
+    let failed = |reason: String| Ok(EntryState::Failed { reason });
+    let previous = previous_map_plan(earlier, version.number);
+    let words_prompt =
+        |forked: bool| keyword_plan_prompt(&context_block(&job.context(forked)), previous.as_ref());
+    let checked = ask_checked(shared, pr, job, Some(KEYWORDS_KEY), &words_prompt, |text| {
+        extract_keyword_plan(text).and_then(|raw| validate_keyword_plan(raw, &job.added))
+    })
+    .await;
+    let CheckedPlan {
+        mut plan,
+        mut notes,
+    } = match checked {
+        Ok(checked) => checked,
+        Err(Halt::Failed(reason)) => return failed(reason),
+        Err(Halt::Over(why)) => return Err(why),
+    };
+    tell_step(shared, pr, job, STEP_FINDING);
+    let repo = shared.paths.worktree_for(pr);
+    // The search reads the commit, but the attributes that leave files out come from the
+    // worktree, which must still be at that commit.
+    let head = unless_stopped(&job.stop, git(&repo, &["rev-parse", "HEAD"])).await?;
+    if let Some(reason) = checkout_problem(&head, &job.head) {
+        return failed(reason.to_string());
+    }
+    let dropped = unless_stopped(&job.stop, keep_traced_seeds(&repo, job, &mut plan)).await?;
+    if plan.families.is_empty() {
+        return failed(UNTRACED.to_string());
+    }
+    notes.extend(seed_note(dropped));
+    let words = plan.all_words();
+    let search = grep_words(&repo, &job.head, &words, GrepCaps::keywords());
+    let found = match unless_stopped(&job.stop, search).await? {
+        Ok(found) => found,
+        Err(e) => {
+            return failed(reason_of(&[format!(
+                "The repository could not be searched: {e}"
+            )]));
+        }
+    };
+    let files = unless_stopped(&job.stop, files_with_hits(&repo, job, &found.hits)).await?;
+    let sent: BTreeSet<String> = files.iter().map(|f| f.path.clone()).collect();
+    tell_step(shared, pr, job, STEP_PLACING);
+    let place_prompt = |_forked: bool| placement_prompt(&plan, &files);
+    let placed = ask_checked(shared, pr, job, Some(KEYWORDS_KEY), &place_prompt, |text| {
+        extract_keyword_placement(text).and_then(|raw| validate_placement(raw, &plan, &sent))
+    })
+    .await;
+    let placed = match placed {
+        Ok(placed) => placed,
+        Err(Halt::Failed(reason)) => return failed(reason),
+        Err(Halt::Over(why)) => return Err(why),
+    };
+    let hits: Vec<Hit> = found
+        .hits
+        .into_iter()
+        .map(|h| Hit {
+            path: h.path,
+            line: h.line,
+            text: h.text,
+            words: Some(h.words),
+        })
+        .collect();
+    let notes = map_notes(notes, placed.notes, found.cut);
+    let mut map = build_map(
+        plan,
+        placed.placement,
+        &hits,
+        found.overflow,
+        found.cut,
+        &job.added,
+    );
+    if let Some(previous) = &previous {
+        map.plan.append_removed(previous);
+    }
+    if too_large(&map) {
+        return failed(MAP_TOO_LARGE.to_string());
+    }
+    Ok(EntryState::ReadyMap {
+        map: Box::new(map),
+        notes,
+    })
 }
 
 /// Draws entries `from..` of `version`, one after the other.
@@ -600,7 +858,12 @@ async fn draw_entries(
             return End::Over(why);
         }
         let key = version.entries[index].plan.key.clone();
-        let state = DiagramsState::Drawing { done, total, key };
+        let state = DiagramsState::Drawing {
+            done,
+            total,
+            key,
+            step: None,
+        };
         shared.diagrams.set_state(pr, job.run, state.clone());
         tell_state(shared, pr, state);
         if !settle_entry(shared, pr, job, version, index, EntryState::Drawing).await {
@@ -628,9 +891,15 @@ async fn draw_entries(
 /// The plan turn, then every diagram of the plan as a new version.
 async fn draw_all(shared: &Arc<Shared>, pr: &PrRef, job: &Job) -> End {
     let earlier = versions_of(shared, pr);
-    let previous: Option<Vec<PlanEntry>> = earlier
-        .last()
-        .map(|v| v.entries.iter().map(|e| e.plan.clone()).collect());
+    // The agent never sees the keywords entry: it would have to copy it, and it is not the
+    // agent's to plan.
+    let previous: Option<Vec<PlanEntry>> = earlier.last().map(|v| {
+        v.entries
+            .iter()
+            .filter(|e| e.plan.kind != DiagramKind::Keywords)
+            .map(|e| e.plan.clone())
+            .collect()
+    });
     let base = |forked: bool| plan_prompt(&job.context(forked), previous.as_deref());
     let plan = match ask_checked(shared, pr, job, None, &base, |text| {
         extract_plan(text).and_then(validate_plan)
@@ -646,6 +915,11 @@ async fn draw_all(shared: &Arc<Shared>, pr: &PrRef, job: &Job) -> End {
             ));
         }
     };
+    let mut plan = plan;
+    if job.keywords {
+        debug_assert!(plan.iter().all(|e| e.key != KEYWORDS_KEY));
+        plan.push(keywords_entry());
+    }
     // `start` refused a run with no number left; a file written since then ends it here.
     let Some(number) = next_diagram_number(&shared.paths, pr) else {
         return End::Failed(NO_NUMBER_LEFT.to_string());
@@ -804,20 +1078,20 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, mode: Mode) -> Result<(), Outco
         }
         Mode::All => {}
     }
-    let limit = {
+    let (limit, keywords) = {
         let harness = &shared.config.read().await.harness;
-        Duration::from_secs(u64::from(harness.check_timeout_secs))
+        (
+            Duration::from_secs(u64::from(harness.check_timeout_secs)),
+            harness.keywords_3d,
+        )
     };
     // Code links are kept only for the pull request's files, so a missing cache reads them
     // again; only when that fails too is every link dropped.
-    let (pr_title, files) = match load_review_cache(&shared.paths, pr) {
-        Ok(Some(cache)) => (
-            cache.pr.summary.title,
-            cache.files.into_iter().map(|file| file.path).collect(),
-        ),
+    let (pr_title, diffs) = match load_review_cache(&shared.paths, pr) {
+        Ok(Some(cache)) => (cache.pr.summary.title, cache.files),
         _ => {
             let files = match reviews::files_for(shared, pr, &review.head_sha).await {
-                Ok(files) => files.iter().map(|file| file.path.clone()).collect(),
+                Ok(files) => files.as_ref().clone(),
                 Err(_) => {
                     tracing::warn!(pr = %pr, "the pull request's files could not be read; the diagrams get no code links");
                     Vec::new()
@@ -826,12 +1100,15 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, mode: Mode) -> Result<(), Outco
             (review.title.clone(), files)
         }
     };
+    let files = diffs.iter().map(|file| file.path.clone()).collect();
+    let added = added_of(&diffs);
     let first = match &mode {
         Mode::All => DiagramsState::Planning,
         Mode::One(key) => DiagramsState::Drawing {
             done: 0,
             total: 1,
             key: key.clone(),
+            step: None,
         },
     };
     let stop = Stop::new();
@@ -866,6 +1143,8 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, mode: Mode) -> Result<(), Outco
         mode,
         pr_title,
         files,
+        keywords,
+        added,
         head: review.head_sha.clone(),
         name: crate::sessions::name_for(shared, pr).await,
         limit,
@@ -1248,9 +1527,11 @@ async fn add_general(shared: &Shared, client: &str, pr: &PrRef, text: &str) -> O
 #[cfg(test)]
 mod tests {
     use clusia_core::checks::CheckKind;
-    use clusia_core::diagram::REPAIR_ECHO_MAX;
+    use clusia_core::diagram::{History, REPAIR_ECHO_MAX};
+    use clusia_core::keywords::KEYWORDS_TITLE;
     use clusia_harness::testkit::{
-        Call, FakeClaude, Script, Turn, diagram_block, diagram_plan_block,
+        Call, FakeClaude, Script, Turn, diagram_block, diagram_plan_block, keyword_placement_block,
+        keyword_plan_block,
     };
     use clusia_store::save_review;
     use serde_json::json;
@@ -1335,7 +1616,7 @@ mod tests {
             .map(|e| match &e.state {
                 EntryState::Waiting => "waiting",
                 EntryState::Drawing => "drawing",
-                EntryState::Ready { .. } => "ready",
+                EntryState::Ready { .. } | EntryState::ReadyMap { .. } => "ready",
                 EntryState::Failed { .. } => "failed",
                 EntryState::NotDrawn => "not drawn",
             })
@@ -2336,5 +2617,711 @@ mod tests {
             (found[0].key.as_str(), found[0].paths.as_slice()),
             ("flow", ["src/a.rs".to_string()].as_slice())
         );
+    }
+
+    const TOKEN_RS: &str = "pub fn refresh_token() {}\nfn other() {\n    refresh_token();\n}\n";
+    const HTTP_RS: &str = "fn sign() {\n    refresh_token();\n}\n";
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Makes the worktree of review 1 a repository whose commit holds `src/token.rs` and
+    /// `src/http.rs`, makes that commit the review's head, and has GitHub say the pull request
+    /// adds the four lines of `src/token.rs`. Returns the commit.
+    async fn keyword_repo(shared: &Shared) -> String {
+        let root = shared.paths.worktree_for(&pr(1));
+        git_in(&root, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/token.rs"), TOKEN_RS).unwrap();
+        std::fs::write(root.join("src/http.rs"), HTTP_RS).unwrap();
+        git_in(&root, &["add", "."]);
+        git_in(&root, &["commit", "-q", "-m", "one"]);
+        let head = git_in(&root, &["rev-parse", "HEAD"]);
+        set_head(shared, 1, &head);
+        let files = vec![clusia_core::FileDiff {
+            path: "src/token.rs".into(),
+            previous_path: None,
+            status: "added".into(),
+            additions: 4,
+            deletions: 0,
+            patch: Some(
+                "@@ -0,0 +1,4 @@\n+pub fn refresh_token() {}\n+fn other() {\n+    refresh_token();\n+}"
+                    .into(),
+            ),
+        }];
+        shared
+            .files_cache
+            .lock()
+            .await
+            .insert(pr(1), (head.clone(), Arc::new(files)));
+        head
+    }
+
+    fn keyword_plan_turn(seed_line: u32) -> Turn {
+        Turn::answer_blocks(
+            "The words.",
+            &[keyword_plan_block(json!({
+                "title": "Where the words live", "caption": "Refresh tokens",
+                "axes": [
+                    {"name": "Layer", "low": "client", "high": "storage"},
+                    {"name": "Time", "low": "login", "high": "expiry"},
+                    {"name": "Risk", "low": "safe", "high": "risky"}
+                ],
+                "families": [{"id": "refresh", "label": "refresh",
+                    "seed": {"word": "refresh_token", "path": "src/token.rs", "line": seed_line},
+                    "words": ["refresh_token"]}],
+                "use_cases": [{"id": "refresh", "name": "Token refresh"}]
+            }))],
+        )
+    }
+
+    fn keyword_placement_turn() -> Turn {
+        Turn::answer_blocks(
+            "Placed.",
+            &[keyword_placement_block(json!({
+                "regions": [{"path": "src/token.rs", "use_case": "refresh", "at": [0.5, 0.5, 0.5]}]
+            }))],
+        )
+    }
+
+    fn keywords_on(config: &mut clusia_core::Config) {
+        config.harness.keywords_3d = true;
+    }
+
+    fn map_of(version: &DiagramVersion) -> &KeywordMap {
+        match &version
+            .entry(KEYWORDS_KEY)
+            .expect("the keywords entry")
+            .state
+        {
+            EntryState::ReadyMap { map, .. } => map,
+            other => panic!("a map, got {other:?}"),
+        }
+    }
+
+    fn reason_at(version: &DiagramVersion, key: &str) -> String {
+        match &version.entry(key).expect("the entry").state {
+            EntryState::Failed { reason } => reason.clone(),
+            other => panic!("failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_keywords_entry_comes_last_and_maps_the_words_of_the_commit_in_two_turns() {
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            keyword_plan_turn(1),
+            keyword_placement_turn(),
+        ]);
+        let (_home, fake, shared) = lab(script, 1, keywords_on);
+        let head = keyword_repo(&shared).await;
+        assert!(matches!(
+            run(&shared, &pr(1)).await,
+            Outcome::Ok(Reply::Ack)
+        ));
+        settled(&shared, 1).await;
+        let version = latest(&shared, 1);
+        assert_eq!(version.commit, head);
+        let keys: Vec<&str> = version
+            .entries
+            .iter()
+            .map(|e| e.plan.key.as_str())
+            .collect();
+        assert_eq!(keys, ["flow", "keywords"]);
+        assert_eq!(
+            version.entries[1].plan.kind,
+            clusia_core::diagram::DiagramKind::Keywords
+        );
+        let map = map_of(&version);
+        let places: Vec<(String, u32, bool, bool, bool)> = (0..map.places.len())
+            .map(|i| {
+                let anchor = map.anchor(i).expect("an anchor");
+                let place = &map.places[i];
+                (
+                    anchor.path,
+                    anchor.start_line,
+                    place.declared(),
+                    place.changed(),
+                    map.use_case_of(place).is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            places,
+            [
+                ("src/http.rs".to_string(), 2, false, false, false),
+                ("src/token.rs".to_string(), 1, true, true, true),
+                ("src/token.rs".to_string(), 3, false, true, true),
+            ]
+        );
+        assert!(!map.search_cut);
+        let calls = FakeClaude::calls(fake.path());
+        assert_eq!(calls.len(), 4, "plan, flow, then two keyword turns");
+        let placing = prompt_of(&calls[3]);
+        assert!(placing.contains("src/http.rs"), "{placing}");
+        assert!(placing.contains("refresh_token"), "{placing}");
+        assert_eq!(shared.diagrams.live_state(&pr(1)), None);
+    }
+
+    #[tokio::test]
+    async fn with_the_setting_off_no_keywords_entry_is_drawn() {
+        let script = Script::turns(vec![plan_turn(&["flow"]), draw_turn("flow")]);
+        let (_home, fake, shared) = lab(script, 1, |config| config.harness.keywords_3d = false);
+        assert!(matches!(
+            run(&shared, &pr(1)).await,
+            Outcome::Ok(Reply::Ack)
+        ));
+        settled(&shared, 1).await;
+        let version = latest(&shared, 1);
+        assert!(version.entry(KEYWORDS_KEY).is_none());
+        assert_eq!(FakeClaude::calls(fake.path()).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_agent_never_sees_the_keywords_entry_but_a_redraw_gets_the_previous_words() {
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            keyword_plan_turn(1),
+            keyword_placement_turn(),
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            keyword_plan_turn(1),
+            keyword_placement_turn(),
+        ]);
+        let (_home, fake, shared) = lab(script, 1, keywords_on);
+        keyword_repo(&shared).await;
+        for _ in 0..2 {
+            assert!(matches!(
+                run(&shared, &pr(1)).await,
+                Outcome::Ok(Reply::Ack)
+            ));
+            settled(&shared, 1).await;
+        }
+        assert_eq!(latest(&shared, 1).number, 2);
+        let prompts: Vec<String> = FakeClaude::calls(fake.path())
+            .iter()
+            .map(prompt_of)
+            .collect();
+        assert_eq!(prompts.len(), 8);
+        for at in [1, 4, 5] {
+            assert!(
+                !prompts[at].contains(KEYWORDS_TITLE),
+                "turn {at} offers the keywords entry: {}",
+                prompts[at]
+            );
+        }
+        assert!(
+            prompts[6].contains("Token refresh"),
+            "the second keyword turn carries the first map's plan: {}",
+            prompts[6]
+        );
+    }
+
+    fn many_use_cases_turn(families: serde_json::Value, cases: &[(&str, Option<&str>)]) -> Turn {
+        let use_cases: Vec<serde_json::Value> = cases
+            .iter()
+            .map(|(id, history)| match history {
+                Some(h) => json!({"id": id, "name": format!("Case {id}"), "history": h}),
+                None => json!({"id": id, "name": format!("Case {id}")}),
+            })
+            .collect();
+        Turn::answer_blocks(
+            "The words.",
+            &[keyword_plan_block(json!({
+                "title": "Where the words live", "caption": "Refresh tokens",
+                "axes": [
+                    {"name": "Layer", "low": "client", "high": "storage"},
+                    {"name": "Time", "low": "login", "high": "expiry"},
+                    {"name": "Risk", "low": "safe", "high": "risky"}
+                ],
+                "families": families,
+                "use_cases": use_cases,
+            }))],
+        )
+    }
+
+    #[tokio::test]
+    async fn a_redraw_marks_what_the_commit_removed_without_asking_the_agent_to_keep_it() {
+        let first_cases: Vec<(&str, Option<&str>)> =
+            ["refresh", "u1", "u2", "u3", "u4", "u5", "u6", "u7"]
+                .map(|id| (id, None))
+                .to_vec();
+        let mut second_cases: Vec<(&str, Option<&str>)> = first_cases[..7].to_vec();
+        second_cases.push(("u7", Some("removed")));
+        second_cases.push(("fresh", Some("added")));
+        let refresh = json!({"id": "refresh", "label": "refresh",
+            "seed": {"word": "refresh_token", "path": "src/token.rs", "line": 1},
+            "words": ["refresh_token"]});
+        let other = json!({"id": "other", "label": "other",
+            "seed": {"word": "other", "path": "src/token.rs", "line": 2},
+            "words": ["other"]});
+        let gone = json!({"id": "other", "label": "other", "history": "removed",
+            "seed": {"word": "other", "path": "src/gone.rs", "line": 90},
+            "words": []});
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            many_use_cases_turn(json!([refresh.clone(), other]), &first_cases),
+            keyword_placement_turn(),
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            many_use_cases_turn(json!([refresh, gone]), &second_cases),
+            keyword_placement_turn(),
+        ]);
+        let (_home, fake, shared) = lab(script, 1, keywords_on);
+        keyword_repo(&shared).await;
+        for _ in 0..2 {
+            assert!(matches!(
+                run(&shared, &pr(1)).await,
+                Outcome::Ok(Reply::Ack)
+            ));
+            settled(&shared, 1).await;
+        }
+        assert_eq!(
+            FakeClaude::calls(fake.path()).len(),
+            8,
+            "no repair turn: nine entries, one of them removed, is a plan"
+        );
+        let version = latest(&shared, 1);
+        assert_eq!(version.number, 2);
+        let map = map_of(&version);
+        let families: Vec<(&str, Option<History>, usize)> = map
+            .plan
+            .families
+            .iter()
+            .map(|f| (f.id.as_str(), f.history, f.words.len()))
+            .collect();
+        assert_eq!(
+            families,
+            [("refresh", None, 1), ("other", Some(History::Removed), 0)]
+        );
+        let cases: Vec<(&str, Option<History>)> = map
+            .plan
+            .use_cases
+            .iter()
+            .map(|u| (u.id.as_str(), u.history))
+            .collect();
+        assert_eq!(cases.len(), 9);
+        assert_eq!(cases[7], ("fresh", Some(History::Added)));
+        assert_eq!(cases[8], ("u7", Some(History::Removed)));
+        assert!(
+            map.places.iter().all(|p| map.family_of(p) == 0),
+            "a removed family owns no place"
+        );
+        let notes = match &version.entry(KEYWORDS_KEY).unwrap().state {
+            EntryState::ReadyMap { notes, .. } => notes.clone(),
+            other => panic!("a map, got {other:?}"),
+        };
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_keyword_plan_that_stays_unreadable_fails_only_its_entry() {
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            Turn::answer("No words."),
+            Turn::answer("Still no words."),
+        ]);
+        let (_home, fake, shared) = lab(script, 1, keywords_on);
+        keyword_repo(&shared).await;
+        let _ = run(&shared, &pr(1)).await;
+        settled(&shared, 1).await;
+        let version = latest(&shared, 1);
+        assert!(matches!(version.entries[0].state, EntryState::Ready { .. }));
+        assert!(!reason_at(&version, KEYWORDS_KEY).is_empty());
+        assert_eq!(
+            FakeClaude::calls(fake.path()).len(),
+            4,
+            "one repair, no search turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_seed_on_a_line_the_change_does_not_add_is_traced_nowhere() {
+        // The last turn repeats, so the repair gives the same plan.
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            keyword_plan_turn(9),
+        ]);
+        let (_home, fake, shared) = lab(script, 1, keywords_on);
+        keyword_repo(&shared).await;
+        let _ = run(&shared, &pr(1)).await;
+        settled(&shared, 1).await;
+        assert_eq!(
+            reason_at(&latest(&shared, 1), KEYWORDS_KEY),
+            "No word of this change could be traced."
+        );
+        assert_eq!(FakeClaude::calls(fake.path()).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_seed_on_an_added_line_that_lacks_its_word_is_traced_nowhere() {
+        // Line 2 of `src/token.rs` is added (`fn other() {`) but does not hold `refresh_token`.
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            keyword_plan_turn(2),
+            keyword_placement_turn(),
+        ]);
+        let (_home, fake, shared) = lab(script, 1, keywords_on);
+        keyword_repo(&shared).await;
+        let _ = run(&shared, &pr(1)).await;
+        settled(&shared, 1).await;
+        assert_eq!(
+            reason_at(&latest(&shared, 1), KEYWORDS_KEY),
+            "No word of this change could be traced."
+        );
+        assert_eq!(
+            FakeClaude::calls(fake.path()).len(),
+            3,
+            "no repair, no placement turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_family_whose_seed_word_is_not_on_its_line_is_dropped_with_a_note() {
+        let two_families = Turn::answer_blocks(
+            "The words.",
+            &[keyword_plan_block(json!({
+                "title": "Where the words live", "caption": "c",
+                "axes": [
+                    {"name": "Layer", "low": "client", "high": "storage"},
+                    {"name": "Time", "low": "login", "high": "expiry"},
+                    {"name": "Risk", "low": "safe", "high": "risky"}
+                ],
+                "families": [
+                    {"id": "refresh", "label": "refresh",
+                     "seed": {"word": "refresh_token", "path": "src/token.rs", "line": 1},
+                     "words": ["refresh_token"]},
+                    {"id": "other", "label": "other",
+                     "seed": {"word": "other", "path": "src/token.rs", "line": 3},
+                     "words": ["other"]}
+                ],
+                "use_cases": [{"id": "refresh", "name": "Token refresh"}]
+            }))],
+        );
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            two_families,
+            keyword_placement_turn(),
+        ]);
+        let (_home, _fake, shared) = lab(script, 1, keywords_on);
+        keyword_repo(&shared).await;
+        let _ = run(&shared, &pr(1)).await;
+        settled(&shared, 1).await;
+        let version = latest(&shared, 1);
+        let EntryState::ReadyMap { map, notes } = &version.entry(KEYWORDS_KEY).unwrap().state
+        else {
+            panic!("a map");
+        };
+        let ids: Vec<&str> = map.plan.families.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["refresh"]);
+        assert!(
+            map.words.iter().all(|w| w.text != "other"),
+            "the dropped family's words are not searched"
+        );
+        assert!(
+            notes.contains(&"1 family dropped: its seed word is not on its line".to_string()),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_checkout_is_told_apart_from_a_moved_one() {
+        let ok: Result<String, &str> = Ok("abc".into());
+        assert_eq!(checkout_problem(&ok, "abc"), None);
+        assert_eq!(
+            checkout_problem(&ok, "def"),
+            Some("The checkout moved while drawing.")
+        );
+        let broken: Result<String, &str> = Err("not a repository");
+        assert_eq!(
+            checkout_problem(&broken, "abc"),
+            Some("The checkout could not be read.")
+        );
+    }
+
+    #[test]
+    fn the_seed_note_counts_the_dropped_families() {
+        assert_eq!(seed_note(0), None);
+        assert_eq!(
+            seed_note(1).as_deref(),
+            Some("1 family dropped: its seed word is not on its line")
+        );
+        assert_eq!(
+            seed_note(3).as_deref(),
+            Some("3 families dropped: their seed words are not on their lines")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_checkout_that_moved_fails_the_entry_before_the_search() {
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            keyword_plan_turn(1),
+            keyword_placement_turn(),
+        ]);
+        let (_home, fake, shared) = lab(script, 1, keywords_on);
+        keyword_repo(&shared).await;
+        let root = shared.paths.worktree_for(&pr(1));
+        std::fs::write(root.join("src/http.rs"), "moved\n").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "two"]);
+        let _ = run(&shared, &pr(1)).await;
+        settled(&shared, 1).await;
+        assert_eq!(
+            reason_at(&latest(&shared, 1), KEYWORDS_KEY),
+            "The checkout moved while drawing."
+        );
+        assert_eq!(FakeClaude::calls(fake.path()).len(), 3, "no placement turn");
+    }
+
+    #[tokio::test]
+    async fn stopping_during_the_placement_turn_leaves_the_entry_not_drawn_and_no_process() {
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            keyword_plan_turn(1),
+            Turn::hanging(),
+        ]);
+        let (_home, fake, shared) = lab(script, 1, keywords_on);
+        keyword_repo(&shared).await;
+        let _ = run(&shared, &pr(1)).await;
+        let pid = calls(&fake, 4).await[3].pid;
+        assert_eq!(
+            shared.diagrams.live_state(&pr(1)),
+            Some(DiagramsState::Drawing {
+                done: 1,
+                total: 2,
+                key: KEYWORDS_KEY.into(),
+                step: Some("Placing files on the axes…".into()),
+            })
+        );
+        let _ = stop(&shared, &pr(1));
+        settled(&shared, 1).await;
+        let stored = latest(&shared, 1);
+        assert!(matches!(
+            stored.entry(KEYWORDS_KEY).unwrap().state,
+            EntryState::NotDrawn
+        ));
+        assert_eq!(stored.phase, VersionPhase::Done);
+        assert!(!alive(pid));
+    }
+
+    #[tokio::test]
+    async fn work_between_turns_ends_when_the_run_is_stopped() {
+        let stop = Stop::new();
+        stop.fire(Why::User);
+        assert_eq!(
+            unless_stopped(&stop, async { 1 }).await,
+            Err(Why::User),
+            "a stop asked before is not lost"
+        );
+        let stop = Stop::new();
+        let later = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            later.fire(Why::Shutdown);
+        });
+        let started = Instant::now();
+        assert_eq!(
+            unless_stopped(&stop, std::future::pending::<()>()).await,
+            Err(Why::Shutdown)
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(unless_stopped(&Stop::new(), async { 7 }).await, Ok(7));
+    }
+
+    #[test]
+    fn a_cut_search_says_so_after_the_other_notes() {
+        assert_eq!(
+            map_notes(vec!["a".into()], vec!["b".into()], true),
+            [
+                "a",
+                "b",
+                "Search stopped after 10 s; some places are missing."
+            ]
+        );
+        assert_eq!(map_notes(Vec::new(), vec!["b".into()], false), ["b"]);
+    }
+
+    /// A map of one family and two places: `src/a.rs:2` (changed) and `src/other.rs:7`.
+    fn small_map() -> KeywordMap {
+        serde_json::from_value(json!({
+            "plan": {
+                "title": "Where the words live", "caption": "",
+                "axes": [
+                    {"name": "Layer", "low": "client", "high": "storage"},
+                    {"name": "Time", "low": "login", "high": "expiry"},
+                    {"name": "Risk", "low": "safe", "high": "risky"}
+                ],
+                "families": [{"id": "refresh", "label": "refresh",
+                    "seed": {"word": "refresh_token", "path": "src/a.rs", "line": 2},
+                    "words": ["refresh_token"]}],
+                "use_cases": [{"id": "refresh", "name": "Token refresh"}]
+            },
+            "regions": [],
+            "paths": ["src/a.rs", "src/other.rs"],
+            "words": [{"text": "refresh_token", "family": 0}],
+            "places": [[0, 2, 0, 65535, 2], [1, 7, 0, 65535, 0]],
+            "overflow": [0],
+            "search_cut": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_map_over_the_cap_is_too_large_to_keep() {
+        assert!(!too_large(&small_map()));
+        let mut big = small_map();
+        big.paths = (0..2_000)
+            .map(|i| format!("{i}{}", "x".repeat(2_000)))
+            .collect();
+        assert!(too_large(&big));
+    }
+
+    /// Version `number`, drawn from `commit`, whose only entry is `small_map`.
+    fn seed_map_version(shared: &Shared, number: u32, commit: &str) {
+        let version = DiagramVersion {
+            number,
+            commit: commit.into(),
+            harness: "Claude Code".into(),
+            drawn_at: 1,
+            phase: VersionPhase::Done,
+            entries: vec![DiagramEntry {
+                plan: clusia_core::diagram::keywords_entry(),
+                state: EntryState::ReadyMap {
+                    map: Box::new(small_map()),
+                    notes: Vec::new(),
+                },
+            }],
+        };
+        save_diagram_version(&shared.paths, &pr(1), &version).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_changed_place_is_a_line_comment_and_any_other_place_names_its_line() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        seed_map_version(&shared, 1, "h");
+        serve_files(&shared, "h").await;
+        let changed = item_of(comment(&shared, KEYWORDS_KEY, "p0", 1).await);
+        assert_eq!(
+            (changed.kind, changed.origin),
+            (DraftKind::LineComment, Origin::Diagram)
+        );
+        let anchor = changed.anchor.expect("an anchor");
+        assert_eq!(
+            (
+                anchor.path.as_str(),
+                anchor.start_line,
+                anchor.line,
+                anchor.side
+            ),
+            ("src/a.rs", None, 2, Side::Right)
+        );
+        let elsewhere = item_of(comment(&shared, KEYWORDS_KEY, "p1", 1).await);
+        assert_eq!(
+            (elsewhere.kind, elsewhere.anchor, elsewhere.body.as_str()),
+            (DraftKind::General, None, "src/other.rs:7: Why this?")
+        );
+        for node in ["p2", "a", "p", "p-1"] {
+            let Outcome::Err(refusal) = comment(&shared, KEYWORDS_KEY, node, 1).await else {
+                panic!("{node} is no place");
+            };
+            assert_eq!(refusal.code, ErrorCode::NotFound, "{node}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_place_of_a_version_after_a_force_push_is_named_and_its_code_is_gone() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        seed_map_version(&shared, 1, "an-older-commit");
+        serve_files(&shared, "h").await;
+        let item = item_of(comment(&shared, KEYWORDS_KEY, "p0", 1).await);
+        assert_eq!(
+            (item.kind, item.body.as_str()),
+            (DraftKind::General, "src/a.rs:2: Why this?")
+        );
+        let Outcome::Ok(Reply::DiagramCode(code)) =
+            crate::diagram_code::read(&shared, &pr(1), 1, KEYWORDS_KEY, "p0").await
+        else {
+            panic!("the code");
+        };
+        assert_eq!(
+            (code.path.as_str(), code.unavailable.as_deref()),
+            (
+                "src/a.rs",
+                Some("The code at an-olde is no longer available.")
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn the_code_of_a_place_starts_one_line_before_it() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        let root = shared.paths.worktree_for(&pr(1));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+        seed_map_version(&shared, 1, "h");
+        serve_files(&shared, "h").await;
+        let Outcome::Ok(Reply::DiagramCode(code)) =
+            crate::diagram_code::read(&shared, &pr(1), 1, KEYWORDS_KEY, "p0").await
+        else {
+            panic!("the code");
+        };
+        // Place p0 is line 2; every line of the file is added, but only the place's is tinted.
+        let lines: Vec<(u32, &str, bool)> = code
+            .lines
+            .iter()
+            .map(|l| (l.number, l.text.as_str(), l.changed))
+            .collect();
+        assert_eq!(code.start_line, 1);
+        assert_eq!(
+            lines,
+            [
+                (1, "one", false),
+                (2, "two", true),
+                (3, "three", false),
+                (4, "four", false),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_version_with_a_map_loads_and_lists_its_places() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        seed_map_version(&shared, 1, "h");
+        let Outcome::Ok(Reply::Diagrams {
+            versions, latest, ..
+        }) = get(&shared, &pr(1))
+        else {
+            panic!("the diagrams");
+        };
+        assert_eq!(versions[0].entries[0].places, 2);
+        assert_eq!(map_of(&latest.expect("the latest")).places.len(), 2);
     }
 }
