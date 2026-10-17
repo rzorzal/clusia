@@ -1,7 +1,9 @@
 //! Diagram layout, pure and deterministic: a `DiagramSpec` and a text `Measure` give a
-//! `Geometry` of boxes with wrapped text and orthogonal edge routes. No I/O, no UI types.
+//! `Geometry` of boxes with wrapped text and orthogonal edge routes. It also lays out the
+//! keyword map in 3D (`keywords::scene`). No I/O, no UI types.
 
 mod geometry;
+pub mod keywords;
 mod layered;
 mod layout;
 mod measure;
