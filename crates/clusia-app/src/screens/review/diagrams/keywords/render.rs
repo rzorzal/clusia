@@ -43,10 +43,14 @@ pub const LINE_WIDTH: f32 = 1.5;
 
 // ---- the camera
 
+/// How much farther than the mockup's offsets the default and the focus cameras sit, so the
+/// cube's floor and its axis names stay between the pills and the legend.
+const FRAMING: f32 = 1.5;
+
 impl Default for CameraPose {
-    /// The mockup's camera: at (3.4, 2.3, 3.6) looking at the origin.
+    /// The mockup's view direction, `FRAMING` times as far: from (3.4, 2.3, 3.6) of the origin.
     fn default() -> Self {
-        let eye = Vec3::new(3.4, 2.3, 3.6);
+        let eye = Vec3::new(3.4, 2.3, 3.6) * FRAMING;
         let distance = eye.length();
         Self {
             yaw: eye.x.atan2(eye.z),
@@ -196,12 +200,13 @@ pub fn view_pose(view: View3D, pose: &CameraPose) -> CameraPose {
     }
 }
 
-/// The camera of a use case focus: at the mockup's offset from the cloud's centre.
+/// The camera of a use case focus: at the mockup's direction, `FRAMING` times as far, from the
+/// cloud's centre.
 pub fn focus_pose(scene: &Scene3D, use_case: u16) -> CameraPose {
     let Some(cloud) = scene.clouds.iter().find(|c| c.use_case == use_case) else {
         return CameraPose::default();
     };
-    let offset = Vec3::new(1.7, 1.1, 1.8);
+    let offset = Vec3::new(1.7, 1.1, 1.8) * FRAMING;
     let distance = offset.length();
     CameraPose {
         yaw: offset.x.atan2(offset.z),
@@ -777,11 +782,31 @@ mod tests {
     }
 
     #[test]
-    fn the_default_pose_is_the_mockups_camera() {
+    fn the_default_framing_keeps_the_whole_cube_between_the_pills_and_the_legend() {
+        // A typical canvas: the pills take the top 8 %, the legend the bottom 12 %.
+        let size = Vec2::new(1270.0, 760.0);
         let pose = CameraPose::default();
-        assert!(pose.eye().distance(Vec3::new(3.4, 2.3, 3.6)) < 1e-4);
+        for x in [-1.0, 1.0] {
+            for y in [-1.0, 1.0] {
+                for z in [-1.0, 1.0] {
+                    let (at, _) = project(&pose, Lens::Perspective, size, world([x, y, z]))
+                        .expect("in front of the camera");
+                    assert!(
+                        at.y > size.y * 0.08 && at.y < size.y * 0.88,
+                        "corner {x} {y} {z} at {at}"
+                    );
+                    assert!(at.x > 0.0 && at.x < size.x, "{at}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_pose_looks_the_way_the_mockups_camera_does_from_farther() {
+        let pose = CameraPose::default();
+        assert!(pose.eye().distance(Vec3::new(3.4, 2.3, 3.6) * FRAMING) < 1e-4);
         assert_eq!(pose.target, [0.0; 3]);
-        assert!((pose.distance - 5.4599).abs() < 1e-3);
+        assert!((pose.distance - 5.4599 * FRAMING).abs() < 1e-3);
     }
 
     #[test]
@@ -890,7 +915,7 @@ mod tests {
         let pose = focus_pose(&scene, 2);
         assert!(
             pose.eye()
-                .distance(Vec3::new(0.5, -0.25, 0.75) + Vec3::new(1.7, 1.1, 1.8))
+                .distance(Vec3::new(0.5, -0.25, 0.75) + Vec3::new(1.7, 1.1, 1.8) * FRAMING)
                 < 1e-4
         );
         assert_eq!(

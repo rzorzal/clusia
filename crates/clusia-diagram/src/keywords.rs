@@ -16,7 +16,7 @@ pub enum PointShape {
 /// The use case of a place no region holds.
 pub const ELSEWHERE: u16 = u16::MAX;
 /// The radius of the ball a place's hashed offset falls in, in cube units.
-pub const JITTER: f32 = 0.12;
+pub const JITTER: f32 = 0.3;
 pub const RADIUS_DECLARED: f32 = 0.044;
 pub const RADIUS_USED: f32 = 0.028;
 /// A bundle of `n` places has radius `RADIUS_USED + RADIUS_BUNDLE_GROWTH · √n`.
@@ -602,6 +602,18 @@ mod tests {
             let j = jitter("src/a.rs", line, "retry");
             assert!(dist(j, [0.0; 3]) <= JITTER + 1e-6, "{line}: {j:?}");
         }
+    }
+
+    #[test]
+    fn the_jitter_spreads_a_use_case_into_a_cloud_not_a_clump() {
+        let n = 2_000;
+        let mean = (1..=n)
+            .map(|line| dist(jitter("src/a.rs", line, "retry"), [0.0; 3]))
+            .sum::<f32>()
+            / n as f32;
+        // The mean radius of a uniform ball is three quarters of its radius.
+        assert!((mean - 0.75 * JITTER).abs() < 0.02, "{mean}");
+        assert!(mean > 0.2, "{mean}");
     }
 
     #[test]

@@ -148,6 +148,7 @@ impl Plugin for KeywordsPlugin {
             (
                 drop_scenes,
                 panels::fill_header,
+                panels::fit_hint,
                 follow_camera,
                 panels::sync_card,
                 panels::ask_card_code,
@@ -734,56 +735,72 @@ fn rect_of(node: &ComputedNode, at: &UiGlobalTransform) -> Rect {
 
 /// Puts every label where its world position projects, clamped into the canvas and out of the
 /// panels; a label behind the camera is hidden, and so is one of a cloud or a bundle whose
-/// anchor is off the canvas (an axis name always stays, at the edge).
+/// anchor is off the canvas (an axis name always stays, at the edge). A bundle's count that
+/// would sit on a cloud or an axis name is hidden too, so a name is never written over.
 fn place_labels(
     runtimes: Query<(&KeywordsCanvas, &KeywordsRuntime)>,
     images: Query<(&SceneImage, &ComputedNode, &UiGlobalTransform)>,
     keep: Query<(&KeepOut, &ComputedNode, &UiGlobalTransform)>,
     mut labels: Query<(&Label3, &ComputedNode, &mut Node, &mut Visibility)>,
 ) {
-    for (label, own, mut node, mut visibility) in &mut labels {
-        let hide = |v: &mut Visibility| {
-            if *v != Visibility::Hidden {
-                *v = Visibility::Hidden;
+    let mut placed: Vec<(Mut<Node>, Mut<Visibility>, Option<(Vec2, Vec2)>, &Label3)> = Vec::new();
+    for (label, own, node, visibility) in &mut labels {
+        let spot = (|| {
+            let (_, rt) = runtimes.iter().find(|(c, _)| c.0 == label.pr)?;
+            let (_, canvas_node, canvas_at) = images.iter().find(|(i, _, _)| i.0 == label.pr)?;
+            let canvas = rect_of(canvas_node, canvas_at);
+            let size = canvas.size();
+            let (screen, _) = render::project(&rt.pose, rt.lens, size, label.world)?;
+            let outside = screen.cmplt(Vec2::ZERO).any() || screen.cmpgt(size).any();
+            if outside && !matches!(label.kind, LabelKind::Axis(_)) {
+                return None;
             }
-        };
-        let Some((_, rt)) = runtimes.iter().find(|(c, _)| c.0 == label.pr) else {
-            hide(&mut visibility);
+            let panels: Vec<Rect> = keep
+                .iter()
+                .filter(|(k, _, _)| k.0 == label.pr)
+                .map(|(_, n, at)| {
+                    let r = rect_of(n, at);
+                    Rect::from_corners(r.min - canvas.min, r.max - canvas.min)
+                })
+                .collect();
+            let label_size = own.size * own.inverse_scale_factor;
+            Some((
+                render::clamp_label(screen, label_size, size, &panels),
+                label_size,
+            ))
+        })();
+        placed.push((node, visibility, spot, label));
+    }
+    // The names a bundle's count must keep clear of.
+    let names: Vec<(PrRef, Rect)> = placed
+        .iter()
+        .filter(|(_, _, _, l)| !matches!(l.kind, LabelKind::Bundle(_)))
+        .filter_map(|(_, _, spot, l)| {
+            let (corner, size) = (*spot)?;
+            Some((l.pr.clone(), Rect::from_corners(corner, corner + size)))
+        })
+        .collect();
+    for (node, visibility, spot, label) in &mut placed {
+        let spot = spot.filter(|(corner, size)| {
+            !matches!(label.kind, LabelKind::Bundle(_))
+                || !names.iter().any(|(pr, r)| {
+                    let mine = Rect::from_corners(*corner, *corner + *size);
+                    *pr == label.pr && !mine.intersect(r.inflate(2.0)).is_empty()
+                })
+        });
+        let Some((corner, _)) = spot else {
+            if **visibility != Visibility::Hidden {
+                **visibility = Visibility::Hidden;
+            }
             continue;
         };
-        let Some((_, canvas_node, canvas_at)) = images.iter().find(|(i, _, _)| i.0 == label.pr)
-        else {
-            hide(&mut visibility);
-            continue;
-        };
-        let canvas = rect_of(canvas_node, canvas_at);
-        let size = canvas.size();
-        let Some((screen, _)) = render::project(&rt.pose, rt.lens, size, label.world) else {
-            hide(&mut visibility);
-            continue;
-        };
-        let outside = screen.cmplt(Vec2::ZERO).any() || screen.cmpgt(size).any();
-        if outside && !matches!(label.kind, LabelKind::Axis(_)) {
-            hide(&mut visibility);
-            continue;
-        }
-        let panels: Vec<Rect> = keep
-            .iter()
-            .filter(|(k, _, _)| k.0 == label.pr)
-            .map(|(_, n, at)| {
-                let r = rect_of(n, at);
-                Rect::from_corners(r.min - canvas.min, r.max - canvas.min)
-            })
-            .collect();
-        let label_size = own.size * own.inverse_scale_factor;
-        let corner = render::clamp_label(screen, label_size, size, &panels);
         let (left, top) = (px(corner.x), px(corner.y));
         if node.left != left || node.top != top {
             node.left = left;
             node.top = top;
         }
-        if *visibility != Visibility::Inherited {
-            *visibility = Visibility::Inherited;
+        if **visibility != Visibility::Inherited {
+            **visibility = Visibility::Inherited;
         }
     }
 }
@@ -1144,6 +1161,44 @@ mod tests {
             }
         }
         assert_eq!(axis, 3, "all three axis names stay");
+    }
+
+    #[test]
+    fn a_bundle_count_never_sits_on_a_name() {
+        let (mut app, pr) = open();
+        testing::size_keywords(&mut app, &pr, Vec2::new(900.0, 600.0));
+        for e in testing::entities::<Label3>(&mut app) {
+            testing::place_node(&mut app, e, Vec2::ZERO, Vec2::new(160.0, 30.0));
+        }
+        testing::settle(&mut app);
+        let mut q = app.world_mut().query::<(&Label3, &Node, &Visibility)>();
+        let (mut names, mut counts) = (Vec::new(), Vec::new());
+        for (l, node, vis) in q.iter(app.world()) {
+            if *vis == Visibility::Hidden {
+                continue;
+            }
+            let (Val::Px(x), Val::Px(y)) = (node.left, node.top) else {
+                panic!("pixel position");
+            };
+            let rect = Rect::from_corners(Vec2::new(x, y), Vec2::new(x + 160.0, y + 30.0));
+            match l.kind {
+                LabelKind::Bundle(_) => counts.push(rect),
+                _ => names.push(rect),
+            }
+        }
+        assert!(!names.is_empty());
+        for c in &counts {
+            assert!(
+                names.iter().all(|n| c.intersect(*n).is_empty()),
+                "a count at {c:?} sits on a name"
+            );
+        }
+        let mut all = app.world_mut().query::<&Label3>();
+        let bundles = all
+            .iter(app.world())
+            .filter(|l| matches!(l.kind, LabelKind::Bundle(_)))
+            .count();
+        assert!(counts.len() < bundles, "the collisions hid some counts");
     }
 
     #[test]

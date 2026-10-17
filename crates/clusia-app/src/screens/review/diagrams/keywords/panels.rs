@@ -120,6 +120,53 @@ pub(super) fn fill_header(
     }
 }
 
+/// The header's hint; it is shown only while the whole line fits beside the title and the chip.
+#[derive(Component, Debug, Default)]
+pub(super) struct HeaderHint {
+    /// The width it takes when shown, remembered while it is hidden.
+    width: f32,
+}
+
+/// Hides the hint when it does not fit whole (a word is never cut), shows it again when it does.
+pub(super) fn fit_hint(
+    mut hints: Query<(&mut HeaderHint, &mut Node, &ComputedNode, &ChildOf)>,
+    sizes: Query<&ComputedNode>,
+    children: Query<&Children>,
+) {
+    const GAP: f32 = 10.0;
+    for (mut hint, mut node, own, parent) in &mut hints {
+        if node.display != Display::None && own.size.x > 0.0 {
+            hint.width = own.size.x * own.inverse_scale_factor;
+        }
+        let (Ok(row), Ok(siblings)) = (sizes.get(parent.parent()), children.get(parent.parent()))
+        else {
+            continue;
+        };
+        if hint.width <= 0.0 || row.size.x <= 0.0 {
+            continue;
+        }
+        let others: f32 = siblings
+            .iter()
+            .filter_map(|c| sizes.get(c).ok())
+            .map(|n| n.size.x * n.inverse_scale_factor)
+            .sum::<f32>()
+            - if node.display == Display::None {
+                0.0
+            } else {
+                hint.width
+            };
+        let needed = others + hint.width + GAP * siblings.len().saturating_sub(1) as f32;
+        let display = if needed <= row.size.x * row.inverse_scale_factor {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != display {
+            node.display = display;
+        }
+    }
+}
+
 fn draw_header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &HeaderView) {
     p.spawn(Node {
         flex_grow: 1.0,
@@ -131,12 +178,19 @@ fn draw_header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &He
         ..default()
     })
     .with_children(|l| {
-        l.spawn((
+        // Each part keeps its own width, so `fit_hint` can tell when the hint has no room.
+        let fixed = || Node {
+            flex_shrink: 0.0,
+            ..default()
+        };
+        l.spawn(fixed()).with_child((
             text(fonts, v.title.clone(), Type::STRONG.size(14.0)),
             TextLayout::no_wrap(),
         ));
-        l.spawn(badge(fonts, CHIP, Tone::Neutral));
-        l.spawn((text(fonts, HINT, Type::META), TextLayout::no_wrap()));
+        l.spawn(fixed())
+            .with_child(badge(fonts, CHIP, Tone::Neutral));
+        l.spawn((fixed(), HeaderHint::default()))
+            .with_child((text(fonts, HINT, Type::META), TextLayout::no_wrap()));
     });
     p.spawn(Node {
         flex_shrink: 0.0,
@@ -881,6 +935,28 @@ mod tests {
         assert_eq!(v.title, "Where the words live");
         assert_eq!(v.view, View3D::XZ);
         assert_eq!(v.switch[0], "3D");
+    }
+
+    #[test]
+    fn the_hint_is_hidden_whole_when_it_does_not_fit_and_back_when_it_does() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let _pr = testing::open_keywords(&mut app);
+        let hint = testing::find::<HeaderHint>(&mut app, |_| true);
+        let row = app.world().get::<ChildOf>(hint).unwrap().parent();
+        let siblings: Vec<Entity> = app.world().get::<Children>(row).unwrap().iter().collect();
+        for (e, width) in siblings.iter().zip([100.0, 100.0, 400.0]) {
+            testing::place_node(&mut app, *e, Vec2::ZERO, Vec2::new(width, 20.0));
+        }
+        let display = |app: &mut App| app.world().get::<Node>(hint).unwrap().display;
+        // 100 + 100 + 400 and two gaps of 10 need 620.
+        testing::place_node(&mut app, row, Vec2::ZERO, Vec2::new(500.0, 20.0));
+        testing::settle(&mut app);
+        assert_eq!(display(&mut app), Display::None, "no room: not cut, gone");
+        // A node that is not displayed has no size.
+        testing::place_node(&mut app, hint, Vec2::ZERO, Vec2::ZERO);
+        testing::place_node(&mut app, row, Vec2::ZERO, Vec2::new(700.0, 20.0));
+        testing::settle(&mut app);
+        assert_eq!(display(&mut app), Display::Flex, "room again: shown whole");
     }
 
     #[test]

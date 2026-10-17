@@ -575,7 +575,7 @@ mod tests {
         };
         assert_eq!(pick_at(&scene, &ui, centre(&scene, 0)), None);
         let behind = one(
-            (CameraPose::default().eye().normalize() * 5.0).to_array(),
+            (CameraPose::default().eye().normalize() * 10.0).to_array(),
             0,
         );
         assert_eq!(pick_at(&behind, &KeywordsUi::default(), SIZE / 2.0), None);
