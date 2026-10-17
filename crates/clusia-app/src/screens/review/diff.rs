@@ -2841,10 +2841,27 @@ mod tests {
     #[test]
     fn the_mode_switch_shares_the_axis_of_the_path_and_the_counts() {
         let mut app = wrap_app();
-        let path = testing::find::<Text>(&mut app, |t| t.0 == REFRESH);
         let split = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
         let track = app.world().get::<ChildOf>(split).unwrap().parent();
         let row = app.world().get::<ChildOf>(track).unwrap().parent();
+        // The file list names the same path; only the header's own is on this row.
+        let path = {
+            let mut q = app.world_mut().query::<(Entity, &Text)>();
+            let named: Vec<Entity> = q
+                .iter(app.world())
+                .filter(|(_, t)| t.0 == REFRESH)
+                .map(|(e, _)| e)
+                .collect();
+            named
+                .into_iter()
+                .find(|&e| {
+                    std::iter::successors(Some(e), |&c| {
+                        app.world().get::<ChildOf>(c).map(|p| p.parent())
+                    })
+                    .any(|a| a == row)
+                })
+                .expect("the header's path")
+        };
         let (_, ry, _, rh) = testing::frame(&app, row);
         let axis = ry + (rh - 1.0) / 2.0;
         let at = testing::center(&app, track).y;
