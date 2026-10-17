@@ -93,6 +93,10 @@ export function checkDir(dir) {
         if (!(metaContent(html, 'property', prop) ?? '').trim()) fail(file, `needs <meta property="${prop}">`);
       }
       const ogUrl = metaContent(html, 'property', 'og:url');
+      // Crawlers and chat apps fetch these without a page to resolve against, so each must be a full site URL.
+      for (const [label, value] of [['canonical', canonical], ['og:image', metaContent(html, 'property', 'og:image')], ['og:url', ogUrl], ['twitter:image', metaContent(html, 'name', 'twitter:image')]]) {
+        if (value && !value.startsWith(SITE_URL)) fail(file, `${label} "${value}" must start with ${SITE_URL}`);
+      }
       if (canonical && ogUrl && ogUrl !== canonical) fail(file, `og:url ${ogUrl} must equal the canonical ${canonical}`);
       if (!(metaContent(html, 'name', 'twitter:card') ?? '').trim()) fail(file, 'needs <meta name="twitter:card">');
     }

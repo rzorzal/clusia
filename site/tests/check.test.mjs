@@ -178,3 +178,19 @@ test('a 404 page needs no share tags, and its absolute base keeps its relative l
   const broken = html.replace('install.html">i', 'gone.html">i');
   assert.ok(checkDir(fixture({ ...ALL, '404.html': broken })).some((p) => p.startsWith('404.html') && p.includes('gone.html')));
 });
+
+test('og:image, og:url, twitter:image and canonical must be absolute site URLs', () => {
+  const cases = [
+    ['og:image', 'og:image', `<meta property="og:image" content="assets/site-og.png">`],
+    ['twitter:image', null, `<meta name="twitter:image" content="assets/site-og.png">`],
+    ['canonical', 'canonical', `<link rel="canonical" href="features.html">`],
+    ['og:url', 'og:url', `<meta property="og:url" content="features.html">`],
+  ];
+  for (const [label, skip, tag] of cases) {
+    const html = page({ name: 'features.html', skip: skip ? [skip] : [], head: tag });
+    const problems = checkDir(fixture({ ...ALL, 'features.html': html }));
+    assert.ok(problems.some((p) => p.startsWith('features.html') && p.includes(label) && p.includes(BASE)), `relative ${label}`);
+  }
+  const ok = page({ name: 'features.html', head: `<meta name="twitter:image" content="${BASE}assets/site-og.png">` });
+  assert.deepEqual(checkDir(fixture({ ...ALL, 'features.html': ok })), []);
+});
