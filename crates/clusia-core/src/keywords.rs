@@ -780,9 +780,12 @@ pub fn declares(path: &str, line: &str, word: &str) -> bool {
 }
 
 fn declares_here(lang: Lang, indented: bool, before: &str, after: &str) -> bool {
+    let at_sign = before
+        .strip_suffix('@')
+        .is_some_and(|rest| rest.chars().next_back().is_none_or(char::is_whitespace));
     let attribute = match lang {
         Lang::Rust => before.ends_with("#[") || before.ends_with("#!["),
-        Lang::Script | Lang::Jvm | Lang::Swift | Lang::Python => before.ends_with('@'),
+        Lang::Script | Lang::Jvm | Lang::Swift | Lang::Python => at_sign,
         _ => false,
     };
     if attribute {
@@ -909,35 +912,44 @@ pub struct ScopeHits {
     pub name: String,
     /// The line of the opener.
     pub line: u32,
+    /// The last line of the scope: the line before the next opener, or the file's last line.
+    pub end: u32,
     pub hits: u32,
 }
 
 /// The hits of one file by scope: `lines` are the lines with a hit (a line twice is two hits),
-/// `text` is the file. A hit belongs to the nearest opener at or above it; a hit with none
-/// counts for the file only. Scopes come in file order.
+/// `text` is the file. A scope spans from its opener to the line before the next opener (the
+/// last one to the end of the file); a hit belongs to the scope whose span holds it, and a hit
+/// outside every span counts for the file only. Scopes without a hit are left out; the rest
+/// come in file order.
 pub fn file_hits(path: &str, in_pr: bool, text: &str, lines: &[u32]) -> FileHits {
-    let mut sorted = lines.to_vec();
-    sorted.sort_unstable();
     let mut scopes: Vec<ScopeHits> = Vec::new();
-    let mut current: Option<usize> = None;
-    let mut hits = sorted.iter().copied().peekable();
+    let mut last = 0u32;
     for (index, line) in text.lines().enumerate() {
-        let number = u32::try_from(index + 1).unwrap_or(u32::MAX);
-        if hits.peek().is_none() {
-            break;
-        }
+        last = u32::try_from(index + 1).unwrap_or(u32::MAX);
         if let Some(name) = scope_name(path, line) {
+            if let Some(open) = scopes.last_mut() {
+                open.end = last - 1;
+            }
             scopes.push(ScopeHits {
                 name,
-                line: number,
+                line: last,
+                end: last,
                 hits: 0,
             });
-            current = Some(scopes.len() - 1);
         }
-        while hits.next_if(|h| *h <= number).is_some() {
-            if let Some(scope) = current {
-                scopes[scope].hits += 1;
-            }
+    }
+    if let Some(open) = scopes.last_mut() {
+        open.end = last;
+    }
+    for hit in lines {
+        let at = scopes.partition_point(|s| s.line <= *hit);
+        if let Some(scope) = at
+            .checked_sub(1)
+            .map(|i| &mut scopes[i])
+            .filter(|s| *hit <= s.end)
+        {
+            scope.hits += 1;
         }
     }
     scopes.retain(|s| s.hits > 0);
@@ -1108,9 +1120,10 @@ fn file_entry(file: &FileHits) -> String {
     for scope in scopes {
         let _ = writeln!(
             out,
-            "    - {} (line {}) · {}",
+            "    - {} (lines {}\u{2013}{}) · {}",
             printable(&one_line(&scope.name)),
             scope.line,
+            scope.end,
             count_of(scope.hits, "hit", "hits")
         );
     }
@@ -1128,10 +1141,10 @@ pub fn placement_prompt(plan: &KeywordPlan, files: &[FileHits]) -> String {
         "families": plan.families.iter().map(|f| serde_json::json!({"id": f.id, "label": f.label, "words": f.words})).collect::<Vec<_>>(),
     });
     let mut out = format!(
-        "The words of this pull request were found in the files below, with how many times each file or function holds one of them. Place files and functions on the three axes and give each to a use case.\n{DATA_RULE}\nThe plan (data): {data}\nFiles with hits, most relevant first (data):\n"
+        "The words of this pull request were found in the files below, with how many times each file or scope (function, class or impl) holds one of them. Place files and scopes on the three axes and give each to a use case.\n{DATA_RULE}\nThe plan (data): {data}\nFiles with hits, most relevant first (data):\n"
     );
     let tail = format!(
-        "Answer with one sentence of prose, then exactly one fenced `{KEYWORD_PLACEMENT_INFO}` block holding one JSON object: {{\"regions\": [{{\"path\": \"<a file listed above>\", \"start_line\": <optional: the first line of a function listed above>, \"end_line\": <optional: its last line>, \"use_case\": \"<a use case id of the plan>\", \"at\": [<0 to 1 on {}>, <0 to 1 on {}>, <0 to 1 on {}>]}}]}}. A region without lines covers its whole file; a place takes the smallest region that holds it. Use at most {MAX_REGIONS} regions. Write nothing after the block.\n",
+        "Answer with one sentence of prose, then exactly one fenced `{KEYWORD_PLACEMENT_INFO}` block holding one JSON object: {{\"regions\": [{{\"path\": \"<a file listed above>\", \"start_line\": <optional: the first line of a scope listed above, copied exactly>, \"end_line\": <optional: the last line of that scope, copied exactly>, \"use_case\": \"<a use case id of the plan>\", \"at\": [<0 to 1 on {}>, <0 to 1 on {}>, <0 to 1 on {}>]}}]}}. Copy the lines of a listed scope exactly, or leave both out for the whole file; a region without lines covers its whole file; a place takes the smallest region that holds it. Use at most {MAX_REGIONS} regions. Write nothing after the block.\n",
         printable(&one_line(&plan.axes[0].name)),
         printable(&one_line(&plan.axes[1].name)),
         printable(&one_line(&plan.axes[2].name)),
@@ -1774,6 +1787,18 @@ mod tests {
     }
 
     #[test]
+    fn an_at_sign_inside_a_word_is_not_an_attribute() {
+        assert!(!declares(
+            "src/a.ts",
+            "let s = \"user@retry.com\";",
+            "retry"
+        ));
+        assert!(!declares("src/a.py", "mail = a@retry", "retry"));
+        assert!(declares("src/a.ts", "  @retry()", "retry"));
+        assert!(declares("src/a.ts", "foo @retry", "retry"));
+    }
+
+    #[test]
     fn the_name_a_line_opens() {
         let opens = [
             ("src/a.rs", "fn refresh(&self) {", "refresh"),
@@ -1865,11 +1890,13 @@ impl Store {
                     ScopeHits {
                         name: "Store".into(),
                         line: 2,
+                        end: 5,
                         hits: 1
                     },
                     ScopeHits {
                         name: "refresh".into(),
                         line: 7,
+                        end: 10,
                         hits: 2
                     },
                 ],
@@ -1878,6 +1905,28 @@ impl Store {
         let twice = file_hits("src/store.rs", false, STORE, &[8, 8]);
         assert_eq!((twice.hits, twice.scopes[0].hits), (2, 2));
         assert!(!twice.in_pr);
+    }
+
+    #[test]
+    fn a_scope_ends_where_the_next_one_opens_or_with_the_file() {
+        let hits = file_hits("src/store.rs", true, STORE, &[8, 12]);
+        let spans: Vec<_> = hits.scopes.iter().map(|s| (s.line, s.end)).collect();
+        assert_eq!(spans, [(7, 10), (11, 14)]);
+        let all = file_hits("src/store.rs", true, STORE, &[3, 6, 7, 11]);
+        let spans: Vec<_> = all
+            .scopes
+            .iter()
+            .map(|s| (s.name.as_str(), s.line, s.end))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                ("Store", 2, 5),
+                ("impl Store", 6, 6),
+                ("refresh", 7, 10),
+                ("reset", 11, 14)
+            ]
+        );
     }
 
     #[test]
@@ -2053,6 +2102,7 @@ impl Store {
                 .map(|(name, line, hits)| ScopeHits {
                     name: name.to_string(),
                     line: *line,
+                    end: *line + 2,
                     hits: *hits,
                 })
                 .collect(),
@@ -2067,7 +2117,7 @@ impl Store {
         ];
         let prompt = placement_prompt(&plan(), &files);
         let a = prompt
-            .find("- src/a.rs · 2 hits · in the pull request\n    - refresh (line 8) · 2 hits\n")
+            .find("- src/a.rs · 2 hits · in the pull request\n    - refresh (lines 8\u{2013}10) · 2 hits\n")
             .unwrap();
         let b = prompt.find("- src/b.rs · 90 hits\n").unwrap();
         assert!(a < b);
@@ -2075,6 +2125,8 @@ impl Store {
         assert!(prompt.contains("one fenced `clusia-keyword-placement` block"));
         assert!(prompt.contains("[<0 to 1 on Layer>, <0 to 1 on Client>, <0 to 1 on Storage>]"));
         assert!(prompt.contains("Use at most 300 regions."));
+        assert!(prompt.contains("Copy the lines of a listed scope exactly"));
+        assert!(!prompt.contains("function listed above"));
         assert!(
             placement_prompt(&plan(), &[])
                 .contains("Files with hits, most relevant first (data):\n")
