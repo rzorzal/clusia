@@ -1465,7 +1465,7 @@ fn dg_entry(spec: DiagramSpec) -> DiagramEntry {
 
 /// The review's drawings, oldest first: version 1 at an older commit with the flow, the
 /// sequence and the classes, and version 2 at the demo head with the eight diagrams of
-/// the demo review (the three of version 1 carry their history).
+/// the demo review and the 3D keyword entry (the three of version 1 carry their history).
 /// They do not depend on the review; `_pr` names the demo review they belong to.
 pub fn demo_diagrams(now: i64, _pr: &PrRef) -> Vec<DiagramVersion> {
     let specs = vec![
@@ -1483,7 +1483,7 @@ pub fn demo_diagrams(now: i64, _pr: &PrRef) -> Vec<DiagramVersion> {
         .filter(|s| ["flow", "sequence", "classes"].contains(&s.key.as_str()))
         .map(|s| dg_entry(dg_before(s)))
         .collect();
-    vec![
+    with_keywords(vec![
         DiagramVersion {
             number: 1,
             commit: DIAGRAMS_V1_COMMIT.into(),
@@ -1500,7 +1500,7 @@ pub fn demo_diagrams(now: i64, _pr: &PrRef) -> Vec<DiagramVersion> {
             phase: VersionPhase::Done,
             entries: specs.into_iter().map(dg_entry).collect(),
         },
-    ]
+    ])
 }
 
 /// `demo_diagrams` as the tell a scene sends through the outbox: both versions listed, the
@@ -2476,6 +2476,37 @@ mod tests {
     use clusia_core::checks::anchor_in_diff;
 
     #[test]
+    fn the_demo_drawings_end_with_the_keywords_entry() {
+        let versions = demo_diagrams(NOW, &demo_pr());
+        let keys: Vec<&str> = versions[1]
+            .entries
+            .iter()
+            .map(|e| e.plan.key.as_str())
+            .collect();
+        assert_eq!(keys.len(), 9);
+        assert_eq!(keys.last(), Some(&"keywords"));
+        assert_eq!(keys.iter().filter(|k| **k == "keywords").count(), 1);
+        assert_eq!(
+            versions[0].entries.len(),
+            3,
+            "a version from before has none"
+        );
+        assert!(versions[0].entries.iter().all(|e| e.plan.key != "keywords"));
+        let last = versions[1].entries.last().unwrap();
+        assert_eq!(last.plan.kind, DiagramKind::Keywords);
+        assert_eq!(last.plan.title, "Where the words live");
+        let EntryState::ReadyMap { map, .. } = &last.state else {
+            panic!("a map: {:?}", last.state)
+        };
+        assert_eq!((map.plan.families.len(), map.plan.use_cases.len()), (4, 4));
+        let info = versions[1].info();
+        let entry = info.entries.last().unwrap();
+        assert_eq!(entry.state, clusia_core::diagram::EntryStateName::Ready);
+        assert_eq!(entry.count as usize, map.plan.families.len());
+        assert_eq!(entry.places, map.total_places());
+    }
+
+    #[test]
     fn the_codex_demo_is_the_demo_with_codex_chosen() {
         use clusia_core::config::HarnessKind as Kind;
         let snap = demo_codex(1_700_000_000);
@@ -2932,12 +2963,14 @@ mod tests {
         assert_eq!(
             keys(&versions[1]),
             [
-                "flow", "deps", "sequence", "er", "usecase", "dataflow", "states", "classes"
+                "flow", "deps", "sequence", "er", "usecase", "dataflow", "states", "classes",
+                "keywords"
             ]
         );
         assert_eq!(keys(&versions[0]), ["flow", "sequence", "classes"]);
         let kinds: Vec<DiagramKind> = versions[1].entries.iter().map(|e| e.plan.kind).collect();
-        assert_eq!(kinds, DiagramKind::ALL);
+        assert_eq!(kinds[..8], DiagramKind::ALL);
+        assert_eq!(kinds[8], DiagramKind::Keywords);
         assert!(versions.iter().all(|v| v.harness == "Claude Code"));
     }
 
@@ -2945,7 +2978,7 @@ mod tests {
     fn the_demo_drawings_hold_together() {
         let files: Vec<String> = demo_diff().into_iter().map(|f| f.path).collect();
         for version in demo_diagrams(NOW, &demo_pr()) {
-            for entry in &version.entries {
+            for entry in version.entries.iter().filter(|e| e.plan.key != "keywords") {
                 let EntryState::Ready { spec, .. } = &entry.state else {
                     panic!("every demo entry is ready");
                 };

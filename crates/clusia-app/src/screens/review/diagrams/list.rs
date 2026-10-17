@@ -1529,7 +1529,7 @@ mod tests {
         let m = model();
         let v = diagrams_view(&inputs(Some(&m)));
         let list = list_of(&v);
-        assert_eq!(list.heading, "DIAGRAMS · 8");
+        assert_eq!(list.heading, "DIAGRAMS · 9");
         let rows: Vec<(&str, &str, bool)> = list
             .rows
             .iter()
@@ -1546,6 +1546,11 @@ mod tests {
                 ("Where the token goes", "Data flow · 2 processes", false),
                 ("Token life cycle", "States · 4", false),
                 ("Types involved", "Classes · 3", false),
+                (
+                    "Where the words live",
+                    "Keywords · 4 families · 320 places",
+                    false
+                ),
             ]
         );
         let f = &list.footer;
@@ -1922,9 +1927,9 @@ mod tests {
     fn the_tab_lists_the_diagrams_and_holds_a_canvas_for_the_selected_one() {
         let mut app = testing::app(fixture::demo(NOW));
         let pr = open(&mut app);
-        assert_eq!(testing::count::<DiagramRowButton>(&mut app), 8);
+        assert_eq!(testing::count::<DiagramRowButton>(&mut app), 9);
         assert_eq!(testing::count::<DiagramCanvas>(&mut app), 1);
-        assert!(testing::shows(&mut app, "DIAGRAMS · 8"));
+        assert!(testing::shows(&mut app, "DIAGRAMS · 9"));
         assert!(testing::shows(&mut app, "Token refresh flow"));
         assert!(testing::shows(
             &mut app,

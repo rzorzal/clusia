@@ -61,6 +61,14 @@ pub enum Scene {
     DiagramNode,
     DiagramsDrawing,
     DiagramsCompare,
+    /// The 3D keyword view, as Keywords3D.png.
+    DiagramsKeywords,
+    /// The 3D keyword view with the Token refresh use case focused.
+    DiagramsKeywordsUsecase,
+    /// The 3D keyword view with the code card of the changed `refresh` declaration open.
+    KeywordsCard,
+    /// The 3D keyword view as the first 2D projection.
+    KeywordsXy,
     /// The Diagrams tab with nothing drawn and no harness set up.
     DiagramsNoHarness,
     /// The Diagrams tab with nothing drawn, a harness set up and drawing on open off.
@@ -85,8 +93,17 @@ impl Scene {
             Scene::DiagramsDataflow => Some(DiagramKind::DataFlow),
             Scene::DiagramsStates => Some(DiagramKind::States),
             Scene::DiagramsClasses => Some(DiagramKind::Classes),
+            Scene::DiagramsKeywords
+            | Scene::DiagramsKeywordsUsecase
+            | Scene::KeywordsCard
+            | Scene::KeywordsXy => Some(DiagramKind::Keywords),
             _ => None,
         }
+    }
+
+    /// The scenes of the 3D keyword view, whose screenshots wait for the 3D camera.
+    pub fn is_keywords(self) -> bool {
+        self.diagram_kind() == Some(DiagramKind::Keywords)
     }
 
     /// The scenes of the Diagrams tab; each one hides the right panel, as the mockups have none.
@@ -163,6 +180,24 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args, clap::Error> {
         Args::try_parse_from(std::iter::once("clusia-app").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_keyword_scenes_are_diagram_scenes_of_their_kind() {
+        use clusia_core::diagram::DiagramKind;
+        for (name, scene) in [
+            ("diagrams-keywords", Scene::DiagramsKeywords),
+            ("diagrams-keywords-usecase", Scene::DiagramsKeywordsUsecase),
+            ("keywords-card", Scene::KeywordsCard),
+            ("keywords-xy", Scene::KeywordsXy),
+        ] {
+            let a = parse(&["--demo", "--scene", name]).unwrap();
+            assert_eq!(a.scene, Some(scene), "{name}");
+            assert_eq!(scene.diagram_kind(), Some(DiagramKind::Keywords));
+            assert!(scene.is_diagram() && scene.is_keywords(), "{name}");
+        }
+        assert!(!Scene::Diagrams.is_keywords());
+        assert!(!Scene::DiagramsDrawing.is_keywords());
     }
 
     #[test]

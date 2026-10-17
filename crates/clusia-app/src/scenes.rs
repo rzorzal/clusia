@@ -7,7 +7,9 @@ use clusia_core::checks::{AuditArea, default_areas};
 use clusia_core::diagram::{Change, DiagramKind, DiagramVersion, EntryState, VersionPhase};
 use clusia_core::draft::{DraftKind, ThreadRef};
 use clusia_core::hidden::{issue_comment_key, thread_key};
+use clusia_core::keywords::KeywordMap;
 use clusia_core::{Anchor, Origin, ReviewState, Side, Verdict};
+use clusia_diagram::keywords::{Point3, PointShape, Scene3D};
 use clusia_protocol::{
     AuthInfo, DiagramsState, LoadStep, LoadStepKind, SessionStateKind, StepStatus, SyncState,
     SyncStatus, WindowTarget,
@@ -19,13 +21,14 @@ use crate::clock::Clock;
 use crate::fixture;
 use crate::nav::{Nav, Section};
 use crate::review_state::{
-    DiffMode, EditTarget, Editor, Modal, Phase, Ready, RevalView, ReviewSection, ReviewTabs, Tab,
-    TabUi,
+    CameraPose, DiffMode, EditTarget, Editor, KeywordsUi, Modal, Phase, Ready, RevalView,
+    ReviewSection, ReviewTabs, Tab, TabUi, View3D,
 };
 use crate::screens::config::areas::areas_value;
 use crate::screens::open_pr::Palette;
 use crate::screens::review::agent::{Chats, PanelTab, PermissionQueue};
 use crate::screens::review::diagrams::Diagrams;
+use crate::screens::review::diagrams::keywords::render::{focus_pose, view_pose};
 use crate::ui::composer::popover::{PopoverKind, Popovers};
 use crate::ui::composer::{ComposerKey, ComposerMode, Slot};
 
@@ -322,6 +325,15 @@ fn stage_diagrams(ui: &mut TabUi, scene: Scene, now: i64) -> (Vec<DiagramVersion
     let kind = scene.diagram_kind().unwrap_or(DiagramKind::Flow);
     ui.diagram = key_of(&latest, kind);
     ui.diagram_compare = scene == Scene::DiagramsCompare;
+    if scene.is_keywords()
+        && let Some(EntryState::ReadyMap { map, .. }) = latest
+            .entries
+            .iter()
+            .find(|e| e.plan.kind == DiagramKind::Keywords)
+            .map(|e| &e.state)
+    {
+        ui.keywords = keywords_staged(scene, map);
+    }
     if scene == Scene::DiagramNode
         && let Some(key) = ui.diagram.clone()
         && let Some(node) = anchored_node(&latest, &key)
@@ -330,6 +342,44 @@ fn stage_diagrams(ui: &mut TabUi, scene: Scene, now: i64) -> (Vec<DiagramVersion
         ui.diagram_node = Some((latest.number, key, node));
     }
     (versions, DiagramsState::Idle)
+}
+
+/// What each keyword scene shows of the 3D view. It is written straight into the tab, camera
+/// included, so the first frame is the final one.
+fn keywords_staged(scene: Scene, map: &KeywordMap) -> KeywordsUi {
+    let scene3d = clusia_diagram::keywords::scene(map);
+    let mut ui = KeywordsUi::default();
+    match scene {
+        Scene::DiagramsKeywordsUsecase => {
+            ui.use_case = Some(0);
+            ui.camera = focus_pose(&scene3d, 0);
+        }
+        Scene::KeywordsCard => ui.card = card_point(map, &scene3d),
+        Scene::KeywordsXy => {
+            ui.view = View3D::XY;
+            ui.camera = view_pose(View3D::XY, &CameraPose::default());
+        }
+        _ => {}
+    }
+    ui
+}
+
+/// The changed declaration of `refresh` in `src/token/store.rs` (the card of the mockup),
+/// else the first changed point.
+fn card_point(map: &KeywordMap, scene: &Scene3D) -> Option<u32> {
+    let place_of = |p: &Point3| &map.places[p.places[0] as usize];
+    scene
+        .points
+        .iter()
+        .position(|p| {
+            let place = place_of(p);
+            p.changed
+                && p.shape == PointShape::Declared
+                && map.words[place.word as usize].text == "refresh"
+                && map.paths[place.path as usize] == "src/token/store.rs"
+        })
+        .or_else(|| scene.points.iter().position(|p| p.changed))
+        .map(|i| i as u32)
 }
 
 /// Fills the Diagrams model of `pr` with the daemon's answer to `GetDiagrams`, and the older
@@ -524,7 +574,11 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::DiagramsClasses
         | Scene::DiagramNode
         | Scene::DiagramsDrawing
-        | Scene::DiagramsCompare => {}
+        | Scene::DiagramsCompare
+        | Scene::DiagramsKeywords
+        | Scene::DiagramsKeywordsUsecase
+        | Scene::KeywordsCard
+        | Scene::KeywordsXy => {}
         Scene::DiagramsNoHarness | Scene::DiagramsNoAutoDraw => {
             ui.section = ReviewSection::Diagrams;
         }
@@ -853,7 +907,11 @@ mod tests {
                 | Scene::DiagramsClasses
                 | Scene::DiagramNode
                 | Scene::DiagramsDrawing
-                | Scene::DiagramsCompare => {
+                | Scene::DiagramsCompare
+                | Scene::DiagramsKeywords
+                | Scene::DiagramsKeywordsUsecase
+                | Scene::KeywordsCard
+                | Scene::KeywordsXy => {
                     assert_eq!(tab.ui.section, ReviewSection::Diagrams, "{scene:?}");
                     assert!(tab.ui.diagram.is_some(), "{scene:?}");
                 }
@@ -1536,7 +1594,7 @@ mod tests {
         );
     }
 
-    const DIAGRAM_SCENES: [Scene; 11] = [
+    const DIAGRAM_SCENES: [Scene; 15] = [
         Scene::Diagrams,
         Scene::DiagramsDeps,
         Scene::DiagramsSequence,
@@ -1548,6 +1606,10 @@ mod tests {
         Scene::DiagramNode,
         Scene::DiagramsDrawing,
         Scene::DiagramsCompare,
+        Scene::DiagramsKeywords,
+        Scene::DiagramsKeywordsUsecase,
+        Scene::KeywordsCard,
+        Scene::KeywordsXy,
     ];
 
     /// The versions the Diagrams model of `pr` holds, oldest first.
@@ -1593,10 +1655,10 @@ mod tests {
                 "{scene:?}"
             );
             assert!(
-                latest
-                    .entries
-                    .iter()
-                    .all(|e| matches!(e.state, EntryState::Ready { .. })),
+                latest.entries.iter().all(|e| matches!(
+                    e.state,
+                    EntryState::Ready { .. } | EntryState::ReadyMap { .. }
+                )),
                 "{scene:?}"
             );
         }
@@ -1623,14 +1685,107 @@ mod tests {
                 .map(|e| e.plan.title.clone())
                 .expect("the selected drawing");
             assert!(testing::shows(&mut app, &title), "{scene:?}: {title}");
-            let mut canvases = app
-                .world_mut()
-                .query::<&crate::screens::review::diagrams::DiagramCanvas>();
-            let drawn = canvases.iter(app.world()).count();
-            assert_eq!(drawn, 1, "{scene:?}: one canvas");
+            let drawn = testing::count::<crate::screens::review::diagrams::DiagramCanvas>(&mut app);
+            let keywords = testing::count::<
+                crate::screens::review::diagrams::keywords::KeywordsCanvas,
+            >(&mut app);
+            let (drawn_expected, keywords_expected) =
+                if scene.is_keywords() { (0, 1) } else { (1, 0) };
+            assert_eq!(
+                (drawn, keywords),
+                (drawn_expected, keywords_expected),
+                "{scene:?}: one canvas of its kind"
+            );
         }
         let mut app = staged(Scene::Diagrams);
         assert!(testing::shows(&mut app, "Token refresh flow"));
+    }
+
+    #[test]
+    fn the_keyword_scenes_stage_the_view_like_the_mockups() {
+        use crate::review_state::{CameraPose, KeywordsUi, View3D};
+        use crate::screens::review::diagrams::keywords::render::{focus_pose, view_pose};
+        let pr = fixture::demo_pr();
+        let map = fixture::keywords_map();
+        let scene3d = clusia_diagram::keywords::scene(&map);
+        for scene in [
+            Scene::DiagramsKeywords,
+            Scene::DiagramsKeywordsUsecase,
+            Scene::KeywordsCard,
+            Scene::KeywordsXy,
+        ] {
+            let app = staged(scene);
+            assert_eq!(
+                testing::tab(&app, &pr).ui.diagram.as_deref(),
+                Some("keywords"),
+                "{scene:?}"
+            );
+            let ui = testing::keywords_ui(&app, &pr);
+            match scene {
+                Scene::DiagramsKeywords => assert_eq!(ui, KeywordsUi::default()),
+                Scene::DiagramsKeywordsUsecase => {
+                    assert_eq!(map.plan.use_cases[0].name, "Token refresh");
+                    assert_eq!(ui.use_case, Some(0));
+                    assert_eq!(ui.camera, focus_pose(&scene3d, 0));
+                    assert_eq!((ui.card, ui.view), (None, View3D::Free));
+                }
+                Scene::KeywordsCard => {
+                    let point = &scene3d.points[ui.card.expect("a point") as usize];
+                    assert!(point.changed);
+                    let place = &map.places[point.places[0] as usize];
+                    assert_eq!(map.words[place.word as usize].text, "refresh");
+                    assert_eq!(map.paths[place.path as usize], "src/token/store.rs");
+                    assert_eq!(point.shape, clusia_diagram::keywords::PointShape::Declared);
+                    assert_eq!(ui.use_case, None);
+                }
+                Scene::KeywordsXy => {
+                    assert_eq!(ui.view, View3D::XY);
+                    assert_eq!(ui.camera, view_pose(View3D::XY, &CameraPose::default()));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn the_keyword_scenes_open_with_the_final_camera() {
+        use crate::screens::review::diagrams::keywords::KeywordsRuntime;
+        let pr = fixture::demo_pr();
+        let mut app = staged(Scene::DiagramsKeywordsUsecase);
+        testing::settle(&mut app);
+        let ui = testing::keywords_ui(&app, &pr);
+        let pose = app
+            .world_mut()
+            .query::<&KeywordsRuntime>()
+            .single(app.world())
+            .expect("one canvas")
+            .pose;
+        assert_eq!(pose, ui.camera, "no fly on the first frame");
+    }
+
+    #[test]
+    fn the_first_run_does_not_offer_the_3d_view() {
+        let mut app = staged_outside_review(Scene::FirstRun);
+        assert!(!testing::shows(&mut app, "Include the 3D keyword view"));
+    }
+
+    #[test]
+    fn a_map_drawn_before_keywords_were_turned_off_still_shows() {
+        let pr = fixture::demo_pr();
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::set_config_locally(&mut app, "harness.keywords_3d", "false");
+        stage(app.world_mut(), Scene::DiagramsKeywords);
+        stage_snapshot(app.world_mut(), Scene::DiagramsKeywords);
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.diagram.as_deref(),
+            Some("keywords")
+        );
+        assert!(testing::shows(&mut app, "Where the words live"));
+        assert_eq!(
+            testing::count::<crate::screens::review::diagrams::keywords::KeywordsCanvas>(&mut app),
+            1
+        );
     }
 
     #[test]

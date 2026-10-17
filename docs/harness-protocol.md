@@ -146,7 +146,9 @@ the program it opened with. The same happens when the last turn failed with `err
 **Checks, audits, revalidation and the diagrams never get a session**: they always send `session_id: null` with
 a prompt that carries the pull request's context and tells the program to read
 `.clusia/review.md`. The `session` line such a turn writes is dropped, so a check never becomes
-the chat's history.
+the chat's history. The diagram turns answer with a `clusia-diagram-plan` or `clusia-diagram` block,
+and the two turns of the 3D keyword view with one `clusia-keyword-plan` and one
+`clusia-keyword-placement` block.
 
 ## Stopping a turn
 

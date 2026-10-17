@@ -4666,6 +4666,100 @@ mod tests {
     }
 
     #[test]
+    fn the_demo_answers_the_keywords_entry() {
+        let pr = fixture::demo_pr();
+        let tells = demo_tells(vec![Ask::GetDiagrams(pr.clone())]);
+        let [
+            Tell::Diagrams(DiagramsTell::Loaded {
+                versions, latest, ..
+            }),
+        ] = tells.as_slice()
+        else {
+            panic!("loaded: {tells:?}");
+        };
+        let last = latest
+            .as_ref()
+            .and_then(|v| v.entries.last())
+            .expect("an entry");
+        assert_eq!(last.plan.key, "keywords");
+        assert_eq!(versions[1].entries.len(), 9);
+        let tells = demo_tells(vec![Ask::DrawDiagram {
+            pr: pr.clone(),
+            key: "keywords".into(),
+        }]);
+        assert!(matches!(
+            tells.as_slice(),
+            [Tell::Diagrams(DiagramsTell::Entry {
+                number: 2,
+                key,
+                state: EntryState::ReadyMap { .. },
+                ..
+            })] if key == "keywords"
+        ));
+    }
+
+    #[test]
+    fn the_demo_reads_the_code_of_a_place() {
+        use crate::review_state::{Phase, Ready, Tab, TabUi};
+        use crate::screens::review::diagrams::{Diagrams, DiagramsModel};
+        use clusia_core::keywords::place_node;
+        let pr = fixture::demo_pr();
+        let versions = fixture::demo_diagrams(1_790_000_000, &pr);
+        let latest = versions[1].clone();
+        let (view, _) = fixture::demo_review(1_790_000_000);
+        let mut model = DiagramsModel::default();
+        model.loaded.insert(2, latest);
+        let mut diagrams = Diagrams::default();
+        diagrams.0.insert(pr.clone(), model);
+        let mut tabs = ReviewTabs::default();
+        tabs.0.insert(
+            pr.clone(),
+            Tab {
+                phase: Phase::Ready(Box::new(Ready {
+                    view,
+                    news: Vec::new(),
+                    cached_at: None,
+                })),
+                ui: TabUi::default(),
+            },
+        );
+        let (inbox, outbox) = local_link();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .insert_resource(Asks {
+                recorded: vec![Ask::ReadDiagramCode {
+                    pr: pr.clone(),
+                    number: 2,
+                    key: "keywords".into(),
+                    node: place_node(0),
+                }],
+                ..Asks::default()
+            })
+            .insert_resource(Model::default())
+            .insert_resource(Toasts::default())
+            .insert_resource(tabs)
+            .insert_resource(diagrams)
+            .init_resource::<Revalidations>()
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .insert_resource(PermissionQueue::default())
+            .insert_resource(outbox)
+            .add_systems(Update, demo_answers);
+        app.update();
+        let tells: Vec<Tell> = inbox.0.try_iter().collect();
+        let [Tell::Diagrams(DiagramsTell::Code { code, node, .. })] = tells.as_slice() else {
+            panic!("the code: {tells:?}")
+        };
+        assert_eq!(node, "p0");
+        assert_eq!(code.unavailable, None);
+        assert!(!code.lines.is_empty());
+        let map = fixture::keywords_map();
+        let anchor = map.anchor(0).expect("place 0");
+        assert_eq!(code.path, anchor.path);
+        assert!(code.lines.iter().any(|l| l.number == anchor.start_line));
+    }
+
+    #[test]
     fn the_demo_answers_the_diagram_asks() {
         let pr = fixture::demo_pr();
         let tells = demo_tells(vec![Ask::GetDiagrams(pr.clone())]);

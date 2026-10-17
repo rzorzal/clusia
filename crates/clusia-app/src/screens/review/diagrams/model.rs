@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(m.loaded.keys().copied().collect::<Vec<_>>(), [2]);
         assert_eq!(m.state, DiagramsState::Idle);
         assert!(!m.stale && !m.busy());
-        assert_eq!(m.versions[1].entries.len(), 8);
+        assert_eq!(m.versions[1].entries.len(), 9);
         assert_eq!(m.versions[0].entries.len(), 3);
     }
 

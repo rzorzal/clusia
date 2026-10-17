@@ -17,6 +17,8 @@ use crate::bridge::BridgeSlot;
 use crate::clock::Clock;
 use crate::fonts::FontsPlugin;
 use crate::platform_window::{self, FrameMemory};
+use crate::screens::review::diagrams::keywords::KeywordsRuntime;
+use crate::screens::review::diagrams::keywords::render::is_ready;
 use crate::theme::{LIGHT, Theme};
 use crate::window_frame::{Display, Rect, Remembered};
 
@@ -60,6 +62,8 @@ struct ScreenshotPlan {
     path: PathBuf,
     after_frames: u32,
     frames: u32,
+    /// A 3D scene: the countdown starts once the camera has rendered.
+    needs_3d: bool,
 }
 
 impl ScreenshotPlan {
@@ -159,6 +163,7 @@ pub fn run(launch: Launch) {
             path: path.clone(),
             after_frames: 20,
             frames: launch.frames.max(1),
+            needs_3d: launch.scene.is_some_and(Scene::is_keywords),
         })
         .add_systems(Update, take_screenshot);
         if let Some(step) = launch.frame_step {
@@ -204,13 +209,29 @@ fn window(placed: Option<Rect>) -> Window {
     }
 }
 
+/// Whether the screenshot may start counting frames: a 3D scene waits for the camera to have
+/// rendered at its final size.
+fn gate_open(needs_3d: bool, ready: bool) -> bool {
+    !needs_3d || ready
+}
+
 /// Waits for fonts and layout to settle, saves the frames, and exits once they are written.
 fn take_screenshot(
     mut commands: Commands,
     plan: Res<ScreenshotPlan>,
+    runtimes: Query<&KeywordsRuntime>,
     mut frame: Local<u32>,
+    mut waited: Local<u32>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    if !gate_open(plan.needs_3d, runtimes.iter().any(is_ready)) {
+        *waited += 1;
+        if *waited > 900 {
+            error!("the 3D view never rendered; no screenshot was taken");
+            exit.write(AppExit::error());
+        }
+        return;
+    }
     *frame += 1;
     if let Some(i) = frame.checked_sub(plan.after_frames)
         && i < plan.frames
@@ -227,6 +248,13 @@ fn take_screenshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_3d_screenshot_waits_for_the_camera() {
+        assert!(gate_open(false, false), "other scenes do not wait");
+        assert!(gate_open(true, true));
+        assert!(!gate_open(true, false));
+    }
 
     fn desk() -> Vec<Display> {
         vec![
