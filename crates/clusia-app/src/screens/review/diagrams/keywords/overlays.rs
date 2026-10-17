@@ -254,6 +254,14 @@ pub fn legend_view(more: u32, search_cut: bool) -> LegendView {
     }
 }
 
+fn more_words_text(n: u32) -> String {
+    if n == 1 {
+        "+1 more word".to_string()
+    } else {
+        format!("+{n} more words")
+    }
+}
+
 fn places_text(n: u32) -> String {
     if n == 1 {
         "1 place".to_string()
@@ -789,7 +797,7 @@ fn draw_focus(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &FocusView) {
         });
     }
     if v.more_words > 0 {
-        p.spawn(muted(fonts, format!("+{} more words", v.more_words)));
+        p.spawn(muted(fonts, more_words_text(v.more_words)));
     }
     if !v.also_reach.is_empty() {
         p.spawn((
@@ -1094,19 +1102,25 @@ fn rebuild_filters(
 // ---- the legend
 
 fn legend_item(p: &mut ChildSpawnerCommands, fonts: &UiFonts, shape: impl Bundle, label: &str) {
-    p.spawn(Node {
-        column_gap: px(6),
-        align_items: AlignItems::Center,
-        ..default()
-    })
+    p.spawn((
+        Node {
+            column_gap: px(6),
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        Pickable::IGNORE,
+    ))
     .with_children(|c| {
-        c.spawn(shape);
-        c.spawn(muted(fonts, label));
+        c.spawn((shape, Pickable::IGNORE));
+        c.spawn((muted(fonts, label), Pickable::IGNORE));
     });
 }
 
 fn draw_legend(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &LegendView) {
-    p.spawn(text(fonts, "SHAPE", Type::MUTED.size(11.0)));
+    p.spawn((
+        text(fonts, "SHAPE", Type::MUTED.size(11.0)),
+        Pickable::IGNORE,
+    ));
     // Shapes are nodes, not glyphs: the bundled fonts have none of them.
     legend_item(
         p,
@@ -1161,6 +1175,7 @@ fn draw_legend(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &LegendView) {
         },
         BackgroundColor::default(),
         Fill(Swatch::Line),
+        Pickable::IGNORE,
     ));
     legend_item(
         p,
@@ -1179,10 +1194,13 @@ fn draw_legend(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &LegendView) {
         "Changed in this PR",
     );
     if let Some(more) = &v.more {
-        p.spawn(muted(fonts, more.clone()));
+        p.spawn((muted(fonts, more.clone()), Pickable::IGNORE));
     }
     if let Some(cut) = &v.cut {
-        p.spawn(text(fonts, cut.clone(), Type::META.ink(Swatch::Amber)));
+        p.spawn((
+            text(fonts, cut.clone(), Type::META.ink(Swatch::Amber)),
+            Pickable::IGNORE,
+        ));
     }
 }
 
@@ -1757,6 +1775,55 @@ mod tests {
             None,
             "the same name again deselects"
         );
+    }
+
+    #[test]
+    fn the_focus_card_pluralises_the_words_it_cuts() {
+        assert_eq!(more_words_text(1), "+1 more word");
+        assert_eq!(more_words_text(2), "+2 more words");
+        let mut map = small_map(false);
+        for i in 0..MAX_FOCUS_WORDS - 3 {
+            map.words.push(clusia_core::keywords::MapWord {
+                text: format!("extra_{i:02}"),
+                family: 0,
+            });
+            map.places.push(clusia_core::keywords::Place {
+                path: 0,
+                line: 100 + i as u32,
+                word: (map.words.len() - 1) as u16,
+                region: 0,
+                flags: 0,
+            });
+        }
+        // Four words already live in the first use case: one over the cap.
+        let card = focus_view(&map, 0, false).unwrap();
+        assert_eq!(card.more_words, 1);
+        assert_eq!(more_words_text(card.more_words), "+1 more word");
+    }
+
+    #[test]
+    fn every_node_of_the_legend_lets_the_pointer_through() {
+        let mut app = testing::app(fixture::demo(testing::NOW));
+        let _pr = testing::open_keywords(&mut app);
+        let legend = testing::find::<LegendBox>(&mut app, |_| true);
+        let mut below = Vec::new();
+        let mut stack = vec![legend];
+        while let Some(e) = stack.pop() {
+            if let Some(kids) = app.world().get::<Children>(e) {
+                for k in kids.iter() {
+                    below.push(k);
+                    stack.push(k);
+                }
+            }
+        }
+        assert!(below.len() > 8, "the legend is drawn");
+        for e in below {
+            assert_eq!(
+                app.world().get::<Pickable>(e),
+                Some(&Pickable::IGNORE),
+                "{e:?}"
+            );
+        }
     }
 
     #[test]
