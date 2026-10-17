@@ -1456,3 +1456,66 @@ body.home {
     transition: none;
   }
 }
+
+/* ---------- Features page ---------- */
+
+.card-wide {
+  width: min(1120px, 100% - 2 * var(--gutter));
+}
+
+.feature {
+  margin-top: clamp(40px, 6vw, 72px);
+}
+
+.feature-text h2 {
+  margin-top: 0;
+}
+
+.feature-text p:last-child {
+  color: var(--muted);
+  font-size: clamp(16.5px, 1.6vw, 18px);
+}
+
+.feature .shot {
+  margin: 20px 0 0;
+}
+
+.feature .shot img {
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+}
+
+.feature .shot-tall {
+  max-width: 340px;
+  margin-inline: auto;
+}
+
+/* Text and screenshot side by side, swapping sides on every other feature. */
+@media (min-width: 900px) {
+  .feature {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    align-items: center;
+    gap: clamp(32px, 4vw, 56px);
+  }
+
+  .feature:nth-of-type(odd) {
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  }
+
+  .feature:nth-of-type(odd) .feature-text {
+    order: 2;
+  }
+
+  .feature .shot {
+    margin: 0;
+  }
+
+  .feature .shot-tall {
+    justify-self: center;
+    width: 100%;
+  }
+}
+
+.feature-cli .code {
+  margin-bottom: 0;
+}

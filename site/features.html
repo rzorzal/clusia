@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en" data-scheme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Features — Clúsia</title>
+  <meta name="description" content="What Clúsia does: local worktree reviews, rich comments, drafts that follow the code, your own agent, security checks, diagrams and a menu bar tray.">
+  <link rel="icon" href="assets/brand/clusia-mark.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap">
+  <link rel="stylesheet" href="css/site.css">
+  <script type="module" src="js/site.js"></script>
+</head>
+<body>
+<div class="restinga" aria-hidden="true">
+<svg viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMax meet" focusable="false">
+<defs>
+<symbol id="clusia" viewBox="0 0 200 140" overflow="visible">
+<ellipse class="shade" cx="100" cy="132" rx="92" ry="12"/>
+<g class="canopy"><circle cx="52" cy="92" r="40"/><circle cx="92" cy="62" r="50"/><circle cx="140" cy="74" r="44"/><circle cx="176" cy="106" r="28"/><circle cx="24" cy="112" r="26"/><rect x="18" y="98" width="164" height="40" rx="12"/></g>
+<g class="leaf"><ellipse cx="76" cy="30" rx="14" ry="7" transform="rotate(-25 76 30)"/><ellipse cx="104" cy="22" rx="13" ry="6.5" transform="rotate(12 104 22)"/><ellipse cx="132" cy="42" rx="12" ry="6" transform="rotate(32 132 42)"/><ellipse cx="156" cy="56" rx="11" ry="5.5" transform="rotate(42 156 56)"/><ellipse cx="44" cy="62" rx="12" ry="6" transform="rotate(-40 44 62)"/><ellipse cx="26" cy="92" rx="10" ry="5" transform="rotate(-55 26 92)"/><ellipse cx="178" cy="86" rx="10" ry="5" transform="rotate(50 178 86)"/><ellipse cx="94" cy="50" rx="11" ry="5.5" transform="rotate(-12 94 50)"/><ellipse cx="120" cy="66" rx="10" ry="5" transform="rotate(22 120 66)"/><ellipse cx="66" cy="80" rx="9" ry="4.5" transform="rotate(-30 66 80)"/></g>
+<g class="fruit"><circle cx="64" cy="98" r="4.5"/><circle cx="124" cy="100" r="4"/><circle cx="152" cy="92" r="4.5"/><circle cx="100" cy="112" r="3.5"/></g>
+<g class="bloom"><circle cx="84" cy="74" r="5.5"/><circle cx="138" cy="60" r="5"/><circle cx="40" cy="104" r="4.5"/></g>
+<g class="fruit"><circle cx="84" cy="74" r="1.8"/><circle cx="138" cy="60" r="1.7"/><circle cx="40" cy="104" r="1.5"/></g>
+</symbol>
+<symbol id="tuft" viewBox="0 0 40 40" overflow="visible">
+<path class="grass" d="M12 40Q12 22 2 6M17 40Q17 18 16 0M21 40Q23 20 30 4M25 40Q28 26 39 16M8 40Q6 30 0 24"/>
+</symbol>
+<symbol id="bromeliad" viewBox="0 0 60 50" overflow="visible">
+<path class="brom" d="M30 50Q18 34 2 30Q16 40 24 50ZM30 50Q20 24 10 8Q22 28 26 50ZM30 50Q30 22 30 0Q34 26 34 50ZM30 50Q40 24 50 8Q38 28 34 50ZM30 50Q42 34 58 30Q44 40 36 50Z"/>
+<circle class="fruit" cx="30" cy="40" r="3"/>
+</symbol>
+<mask id="crescent" maskUnits="userSpaceOnUse" x="520" y="90" width="160" height="160"><rect x="520" y="90" width="160" height="160" fill="#fff"/><circle cx="614" cy="156" r="27" fill="#000"/></mask>
+</defs>
+<g class="stars"><circle cx="663" cy="-452" r="1.6"/><circle cx="1333" cy="-662" r="0.9"/><circle cx="1097" cy="-568" r="1.3"/><circle cx="1193" cy="-642" r="2.1"/><circle cx="439" cy="-684" r="0.9"/><circle cx="888" cy="96" r="0.9"/><circle cx="492" cy="-575" r="2.1"/><circle cx="869" cy="-639" r="2.1"/><circle cx="253" cy="-303" r="2.1"/><circle cx="126" cy="52" r="0.9"/><circle cx="452" cy="-665" r="2.1"/><circle cx="272" cy="-167" r="1.6"/><circle cx="295" cy="347" r="0.9"/><circle cx="1169" cy="-129" r="2.1"/><circle cx="1396" cy="-390" r="0.9"/><circle cx="1191" cy="-376" r="1.3"/><circle cx="199" cy="361" r="0.9"/><circle cx="1155" cy="-638" r="2.1"/><circle cx="421" cy="256" r="2.1"/><circle cx="875" cy="-117" r="1.6"/><circle cx="1199" cy="168" r="1.3"/><circle cx="613" cy="-252" r="1.1"/><circle cx="1431" cy="-261" r="0.9"/><circle cx="1176" cy="-146" r="2.1"/><circle cx="1013" cy="-57" r="1.6"/><circle cx="589" cy="-611" r="0.9"/><circle cx="1048" cy="96" r="1.1"/><circle cx="1550" cy="-60" r="1.1"/><circle cx="1001" cy="103" r="0.9"/><circle cx="1368" cy="-602" r="2.1"/><circle cx="1173" cy="-118" r="1.3"/><circle cx="1423" cy="-43" r="2.1"/><circle cx="1017" cy="174" r="0.9"/><circle cx="191" cy="-208" r="1.6"/><circle cx="1427" cy="-627" r="0.9"/><circle cx="1497" cy="-126" r="2.1"/><circle cx="1395" cy="152" r="1.3"/><circle cx="1467" cy="30" r="1.3"/><circle cx="46" cy="185" r="1.3"/><circle cx="344" cy="-521" r="1.6"/><circle cx="120" cy="-314" r="1.3"/><circle cx="264" cy="-253" r="1.6"/><circle cx="800" cy="256" r="0.9"/><circle cx="340" cy="159" r="1.6"/><circle cx="1125" cy="-191" r="1.1"/><circle cx="881" cy="366" r="1.3"/><circle cx="1446" cy="90" r="1.3"/><circle cx="1398" cy="19" r="1.1"/><circle cx="309" cy="-591" r="1.1"/><circle cx="309" cy="-285" r="1.1"/><circle cx="24" cy="233" r="2.1"/><circle cx="373" cy="-222" r="1.3"/><circle cx="8" cy="-462" r="1.6"/><circle cx="1094" cy="-4" r="2.1"/><circle cx="1159" cy="-108" r="1.1"/><circle cx="1414" cy="295" r="2.1"/><circle cx="1341" cy="-650" r="1.6"/><circle cx="1597" cy="385" r="1.6"/><circle cx="815" cy="57" r="1.6"/><circle cx="212" cy="226" r="1.6"/><circle cx="127" cy="-370" r="0.9"/><circle cx="427" cy="142" r="1.1"/><circle cx="225" cy="-64" r="2.1"/><circle cx="107" cy="-551" r="0.9"/><circle cx="1160" cy="-451" r="2.1"/><circle cx="207" cy="-16" r="2.1"/><circle cx="52" cy="-616" r="1.1"/><circle cx="1257" cy="10" r="1.1"/><circle cx="1299" cy="-244" r="1.3"/><circle cx="1233" cy="-15" r="1.6"/><circle cx="251" cy="-524" r="1.6"/><circle cx="954" cy="223" r="1.6"/><circle cx="638" cy="-585" r="1.1"/><circle cx="209" cy="-59" r="1.3"/><circle cx="980" cy="-430" r="2.1"/><circle cx="47" cy="-340" r="2.1"/><circle cx="740" cy="-460" r="2.1"/><circle cx="55" cy="321" r="1.3"/><circle cx="1316" cy="-574" r="1.3"/><circle cx="1061" cy="-9" r="1.1"/><circle cx="728" cy="-304" r="2.1"/><circle cx="1109" cy="269" r="1.3"/><circle cx="1303" cy="-304" r="2.1"/><circle cx="1553" cy="-361" r="1.1"/><circle cx="820" cy="-296" r="1.1"/><circle cx="1060" cy="249" r="1.3"/><circle cx="1497" cy="-701" r="0.9"/><circle cx="572" cy="207" r="1.3"/><circle cx="396" cy="-55" r="1.6"/><circle cx="1480" cy="-45" r="1.3"/></g>
+<g class="moon"><circle class="moon-glow" cx="600" cy="170" r="70"/><circle cx="600" cy="170" r="32" mask="url(#crescent)"/></g>
+<g class="sun"><circle class="sun-glow" cx="1040" cy="60" r="130"/><circle cx="1040" cy="60" r="64"/></g>
+<g class="layer" data-depth="0.1"><path class="far-ridge" d="M-100 480C80 446 170 412 300 420C430 428 500 380 620 386C740 392 800 440 900 432C1010 424 1060 376 1180 380C1300 384 1360 430 1470 420C1560 412 1630 400 1700 404V1600H-100Z"/><path class="hill-back" d="M-100 530C60 486 150 402 270 410C370 417 400 466 490 470C580 474 610 352 728 344C836 337 880 446 990 456C1090 465 1130 414 1230 410C1340 406 1390 464 1490 458C1570 453 1630 432 1700 440V1600H-100Z"/></g>
+<g class="layer" data-depth="0.25"><path class="hill-front" d="M-100 652C120 598 262 584 420 608C560 630 646 592 800 582C960 572 1060 618 1200 612C1340 606 1462 576 1700 596V1600H-100Z"/><use href="#clusia" transform="translate(30 514) scale(0.9 0.9)"/><use href="#clusia" transform="translate(312 541.2) scale(-0.6 0.6)"/><use href="#clusia" transform="translate(415 493) scale(1.1 1.1)"/><use href="#clusia" transform="translate(710 524) scale(-0.7 0.7)"/><use href="#clusia" transform="translate(765 477) scale(0.9 0.9)"/><use href="#clusia" transform="translate(944 533.6) scale(0.7 0.7)"/><use href="#clusia" transform="translate(1280 500) scale(-1 1)"/><use href="#clusia" transform="translate(1268 523.2) scale(0.7 0.7)"/><use href="#clusia" transform="translate(1612 487.2) scale(-0.9 0.9)"/></g>
+<g class="layer" data-depth="0.45"><path class="sand-back" d="M-100 774C150 730 300 712 520 746C700 774 822 724 1000 716C1180 708 1302 756 1462 750C1560 746 1640 736 1700 740V1600H-100Z"/><path class="dune-light" d="M330 724C430 716 500 726 560 744C640 768 700 760 780 744C700 752 640 744 560 730C480 716 410 716 330 724Z"/><use href="#clusia" transform="translate(190 580) scale(-1.5 1.5)"/><use href="#clusia" transform="translate(215 601) scale(1.1 1.1)"/><use href="#clusia" transform="translate(845 581) scale(-1.4 1.4)"/><use href="#clusia" transform="translate(860 608) scale(1 1)"/><use href="#clusia" transform="translate(1105 585) scale(1.4 1.4)"/><use href="#clusia" transform="translate(1680 594) scale(-1.2 1.2)"/><use href="#tuft" transform="translate(176 712) scale(1.2)"/><use href="#tuft" transform="translate(450 720) scale(1)"/><use href="#tuft" transform="translate(532 714) scale(1.4)"/><use href="#tuft" transform="translate(818 716) scale(1.1)"/><use href="#tuft" transform="translate(1074 692) scale(1.3)"/><use href="#tuft" transform="translate(1380 726) scale(1)"/><use href="#bromeliad" transform="translate(580 724) scale(1)"/><use href="#bromeliad" transform="translate(1033 703) scale(0.9)"/><use href="#bromeliad" transform="translate(1407 715) scale(1.1)"/></g>
+<g class="layer" data-depth="0.6"><path class="sand-front" d="M-100 862C200 842 420 834 700 850C980 866 1200 840 1700 848V1600H-100Z"/><use href="#clusia" transform="translate(-250 560) scale(2.4 2.4)"/><use href="#clusia" transform="translate(1880 532) scale(-2.6 2.6)"/><use href="#tuft" transform="translate(198 802) scale(1.6)"/><use href="#tuft" transform="translate(396 810) scale(1.2)"/><use href="#tuft" transform="translate(1170 800) scale(1.5)"/><use href="#tuft" transform="translate(1354 816) scale(1.3)"/><use href="#bromeliad" transform="translate(105 795) scale(1.5)"/><g class="wave wave-1"><path d="M-400 904 Q-350 895 -300 904 T-200 904 T-100 904 T0 904 T100 904 T200 904 T300 904 T400 904 T500 904 T600 904 T700 904 T800 904 T900 904 T1000 904 T1100 904 T1200 904 T1300 904 T1400 904 T1500 904 T1600 904 T1700 904 T1800 904 T1900 904 T2000 904 V1600 H-400Z"/><path class="foam" d="M-400 904 Q-350 895 -300 904 T-200 904 T-100 904 T0 904 T100 904 T200 904 T300 904 T400 904 T500 904 T600 904 T700 904 T800 904 T900 904 T1000 904 T1100 904 T1200 904 T1300 904 T1400 904 T1500 904 T1600 904 T1700 904 T1800 904 T1900 904 T2000 904"/></g><g class="wave wave-2"><path d="M-400 936 Q-340 925 -280 936 T-160 936 T-40 936 T80 936 T200 936 T320 936 T440 936 T560 936 T680 936 T800 936 T920 936 T1040 936 T1160 936 T1280 936 T1400 936 T1520 936 T1640 936 T1760 936 T1880 936 T2000 936 V1600 H-400Z"/></g><g class="wave wave-3"><path d="M-400 968 Q-330 956 -260 968 T-120 968 T20 968 T160 968 T300 968 T440 968 T580 968 T720 968 T860 968 T1000 968 T1140 968 T1280 968 T1420 968 T1560 968 T1700 968 T1840 968 T1980 968 T2120 968 V1600 H-400Z"/></g></g>
+</svg>
+</div>
+<header class="nav">
+  <nav aria-label="Main">
+    <a class="brand" href="index.html" aria-label="Clúsia home">
+      <img class="lockup-light" src="assets/brand/clusia-lockup.svg" width="964" height="272" alt="Clúsia">
+      <img class="lockup-dark" src="assets/brand/clusia-lockup-dark.svg" width="964" height="272" alt="Clúsia">
+    </a>
+    <div class="links">
+      <a href="features.html" aria-current="page">Features</a>
+      <a href="screens.html">Screens</a>
+      <a href="install.html">Install</a>
+      <a href="quick-start.html">Quick start</a>
+    </div>
+    <a class="github" href="https://github.com/rzorzal/clusia" aria-label="Clúsia on GitHub">
+      <svg viewBox="0 0 16 16" width="22" height="22" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    </a>
+  </nav>
+</header>
+<main class="card card-wide">
+<section class="hero">
+  <p class="eyebrow">PR Reviews for Humans</p>
+  <h1>Features</h1>
+  <p class="lead">Review pull requests carefully in a local worktree, with your own AI tools at your side. Nothing is sent anywhere you did not choose.</p>
+  <div class="install"><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash</code><button class="copy" aria-label="Copy install command">Copy</button></div>
+</section>
+
+<section class="feature">
+  <div class="feature-text">
+    <h2>Review in a local worktree</h2>
+    <p>Open a pull request in a local worktree. Write comments on the diff and keep them as a draft that follows the code when the author pushes again.</p>
+  </div>
+  <figure class="shot">
+    <img class="shot-light" src="assets/sp1-m5b-review-light.png" width="2560" height="1600" alt="The Clúsia review screen: PR header, sections, a syntax-highlighted diff with a thread and a draft comment, and the draft panel" loading="lazy">
+    <img class="shot-dark" src="assets/sp1-m5b-review-dark.png" width="2560" height="1600" alt="The Clúsia review screen: PR header, sections, a syntax-highlighted diff with a thread and a draft comment, and the draft panel (dark mode)" loading="lazy">
+  </figure>
+</section>
+
+<section class="feature reveal">
+  <div class="feature-text">
+    <h2>Rich comments with a preview of what GitHub will show</h2>
+    <p>Comments are rich text, with a toolbar, emoji, GIFs (add a Giphy key in Config › Media) and a preview of what GitHub will show. Click a line to comment, Shift-click for a range.</p>
+  </div>
+  <figure class="shot">
+    <img class="shot-light" src="assets/sp1-m5c-composer-light.png" width="1280" height="726" alt="The comment composer with its formatting toolbar and a preview of what GitHub will show" loading="lazy">
+    <img class="shot-dark" src="assets/sp1-m5c-composer-dark.png" width="1280" height="726" alt="The comment composer with its formatting toolbar and a preview of what GitHub will show (dark mode)" loading="lazy">
+  </figure>
+</section>
+
+<section class="feature reveal">
+  <div class="feature-text">
+    <h2>Drafts that follow the code: revalidation after new commits</h2>
+    <p>When the pull request of a saved review gets new commits, Clúsia first moves your comments to where their code went. Then your Claude Code reads every comment against the new commits and proposes to keep, move, mark obsolete or reword it. Nothing changes until you click.</p>
+  </div>
+  <figure class="shot">
+    <img class="shot-light" src="assets/sp2-m4-revalidated-light.png" width="2560" height="1600" alt="The revalidation screen: a row per comment with the proposal and the buttons to accept or keep your own" loading="lazy">
+    <img class="shot-dark" src="assets/sp2-m4-revalidated-dark.png" width="2560" height="1600" alt="The revalidation screen: a row per comment with the proposal and the buttons to accept or keep your own (dark mode)" loading="lazy">
+  </figure>
+</section>
+
+<section class="feature reveal">
+  <div class="feature-text">
+    <h2>One review, published when you are ready</h2>
+    <p>Keep everything as a draft and publish it as one GitHub review when you are ready: approve, request changes or comment.</p>
+  </div>
+  <figure class="shot">
+    <img class="shot-light" src="assets/sp2-m4-banner-light.png" width="2560" height="1600" alt="The review screen with the banner that offers to publish the draft as one review" loading="lazy">
+    <img class="shot-dark" src="assets/sp2-m4-banner-dark.png" width="2560" height="1600" alt="The review screen with the banner that offers to publish the draft as one review (dark mode)" loading="lazy">
+  </figure>
+</section>
+
+<section class="feature reveal">
+  <div class="feature-text">
+    <h2>A chat with your own agent per review</h2>
+    <p>Clúsia talks to your own Claude Code, Codex or a command of your own about the pull request you are reviewing. The Agent tab starts a session and writes a summary when you open a review; the conversation goes on when you open it again.</p>
+  </div>
+  <figure class="shot">
+    <img class="shot-light" src="assets/sp2-m1-agent-chat-light.png" width="1280" height="800" alt="The Clúsia review with the agent chat: a question, file reads, an answer and a suggested comment with Accept into draft, Edit and Dismiss" loading="lazy">
+    <img class="shot-dark" src="assets/sp2-m1-agent-chat-dark.png" width="1280" height="800" alt="The Clúsia review with the agent chat: a question, file reads, an answer and a suggested comment with Accept into draft, Edit and Dismiss (dark mode)" loading="lazy">
+  </figure>
+</section>
+
+<section class="feature reveal">
+  <div class="feature-text">
+    <h2>It reads, you decide: the permission modal</h2>
+    <p>The agent reads and searches the worktree. When it wants to run a command or edit a file, a modal shows the exact command or path and the reason, and you choose Deny, Allow for this review or Allow once. No answer means deny.</p>
+  </div>
+  <figure class="shot">
+    <img class="shot-light" src="assets/sp2-m2-permission-light.png" width="2560" height="1600" alt="The permission modal showing the command the agent wants to run, its reason, and the Deny, Allow for this review and Allow once buttons" loading="lazy">
+    <img class="shot-dark" src="assets/sp2-m2-permission-dark.png" width="2560" height="1600" alt="The permission modal showing the command the agent wants to run, its reason, and the Deny, Allow for this review and Allow once buttons (dark mode)" loading="lazy">
+  </figure>
+</section>
+
+<section class="feature reveal">
+  <div class="feature-text">
+    <h2>Security check and audit</h2>
+    <p>When a review opens, your Claude Code checks the change for security problems and audits it area by area. Each finding proposes a comment, and nothing joins your draft until you click.</p>
+  </div>
+  <figure class="shot">
+    <img class="shot-light" src="assets/sp2-m3-security-light.png" width="1280" height="726" alt="The security tab with findings, each proposing a review comment" loading="lazy">
+    <img class="shot-dark" src="assets/sp2-m3-security-dark.png" width="1280" height="726" alt="The security tab with findings, each proposing a review comment (dark mode)" loading="lazy">
+  </figure>
+</section>
+
+<section class="feature reveal">
+  <div class="feature-text">
+    <h2>Diagrams of the change</h2>
+    <p>The Diagrams tab draws up to eight diagrams that explain the pull request, chosen by your agent from eight kinds. A click on a box opens its code at the commit it was drawn from.</p>
+  </div>
+  <figure class="shot">
+    <img class="shot-light" src="assets/sp3-m1-diagrams-light.png" width="1280" height="800" alt="A diagram of a pull request in the Diagrams tab" loading="lazy">
+    <img class="shot-dark" src="assets/sp3-m1-diagrams-dark.png" width="1280" height="800" alt="A diagram of a pull request in the Diagrams tab (dark mode)" loading="lazy">
+  </figure>
+</section>
+
+<section class="feature reveal">
+  <div class="feature-text">
+    <h2>Always at hand in the menu bar</h2>
+    <p>A menu bar popover shows what is waiting for you, which saved reviews went stale and how your review activity looks over the last weeks.</p>
+  </div>
+  <figure class="shot shot-tall">
+    <img class="shot-light" src="assets/sp1-tray-readable-light.png" width="720" height="1226" alt="The Clúsia menu bar popover: activity heatmap, counters and pull request lists" loading="lazy">
+    <img class="shot-dark" src="assets/sp1-tray-readable-dark.png" width="720" height="1226" alt="The Clúsia menu bar popover: activity heatmap, counters and pull request lists (dark mode)" loading="lazy">
+  </figure>
+</section>
+
+<section class="feature feature-cli">
+  <div class="feature-text">
+    <h2>The <code>clusia</code> CLI</h2>
+    <p>Everything you do in the window can also be done from a terminal. Add <code>--json</code> for machine-readable output.</p>
+  </div>
+  <div class="code"><pre><code data-copy>clusia prs
+clusia open octo/hello#7
+clusia review comment octo/hello#7 src/lib.rs:42 &quot;Is the lock needed?&quot;
+clusia review publish octo/hello#7 --verdict approve</code></pre><button class="copy" aria-label="Copy the CLI commands">Copy</button></div>
+</section>
+
+<a class="next reveal" href="install.html"><span>Next</span> Install guide <span aria-hidden="true">→</span></a>
+</main>
+<footer class="footer">
+  <p class="footer-lead">Install on your Mac</p>
+  <div class="install"><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash</code><button class="copy" aria-label="Copy install command">Copy</button></div>
+  <p class="footer-links">
+    <a href="https://github.com/rzorzal/clusia">GitHub repository</a>
+    <a href="https://github.com/rzorzal/clusia/blob/main/LICENSE">Apache License 2.0</a>
+    <a href="https://github.com/users/rzorzal/projects/1">Project board</a>
+  </p>
+  <p class="footer-note">Clúsia · PR Reviews for Humans</p>
+</footer>
+</body>
+</html>
