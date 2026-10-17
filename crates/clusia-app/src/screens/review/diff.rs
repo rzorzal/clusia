@@ -282,6 +282,9 @@ pub fn show_line(tab: &mut Tab, path: &str, lines: Option<(u32, u32)>) -> bool {
 
 /// What a diff row costs in height at least; a wrapped line makes its row taller.
 const ROW_HEIGHT: f32 = 22.0;
+/// Where the text of a row starts, from its top. The number, the sign and the code share it, so a
+/// wrapped line keeps them on its first visual line while a single line still sits mid-row.
+const TEXT_TOP: f32 = 3.0;
 
 /// Lines of context kept above a line that is scrolled to.
 const FOCUS_CONTEXT: usize = 3;
@@ -1139,9 +1142,13 @@ fn number(p: &mut ChildSpawnerCommands, fonts: &UiFonts, n: Option<u32>, size: f
         width: px(NUMBER_WIDTH),
         min_height: px(ROW_HEIGHT),
         flex_shrink: 0.0,
-        align_items: AlignItems::Center,
+        align_self: AlignSelf::Start,
         justify_content: JustifyContent::FlexEnd,
-        padding: UiRect::right(px(10)),
+        padding: UiRect {
+            right: px(10),
+            top: px(TEXT_TOP),
+            ..default()
+        },
         ..default()
     })
     .with_children(|c| {
@@ -1159,7 +1166,8 @@ fn mark(p: &mut ChildSpawnerCommands, fonts: &UiFonts, kind: RowKind, size: f32)
         width: px(18),
         min_height: px(ROW_HEIGHT),
         flex_shrink: 0.0,
-        align_items: AlignItems::Center,
+        align_self: AlignSelf::Start,
+        padding: UiRect::top(px(TEXT_TOP)),
         ..default()
     })
     .with_children(|c| {
@@ -1175,8 +1183,11 @@ fn code(p: &mut ChildSpawnerCommands, fonts: &UiFonts, size: f32, spans: Vec<Cod
         flex_basis: px(0),
         min_width: px(0),
         min_height: px(ROW_HEIGHT),
-        align_items: AlignItems::Center,
-        padding: UiRect::right(px(8)),
+        padding: UiRect {
+            right: px(8),
+            top: px(TEXT_TOP),
+            ..default()
+        },
         ..default()
     })
     .with_children(|c| {
@@ -2881,6 +2892,49 @@ mod tests {
             4,
             "one number column per side, the sign, the code"
         );
+    }
+
+    /// The text of the number cell and the sign cell that sit before the code `text` in a unified
+    /// row, and the text of the code itself.
+    fn tops(app: &App, row: Entity, text: Entity) -> Vec<f32> {
+        let kids = app.world().get::<Children>(row).unwrap();
+        let mut tops: Vec<f32> = kids[..kids.len() - 1]
+            .iter()
+            .filter_map(|cell| app.world().get::<Children>(*cell))
+            .filter_map(|c| c.first().copied())
+            .map(|t| testing::frame(app, t).1)
+            .collect();
+        tops.push(testing::frame(app, text).1);
+        tops
+    }
+
+    #[test]
+    fn the_numbers_and_the_sign_sit_on_the_first_line_of_a_wrapped_row() {
+        let mut app = wrap_app();
+        let (text, row) = code_of(&mut app, LONG);
+        let (_, _, _, rh) = testing::frame(&app, row);
+        assert!(rh >= 2.0 * 22.0 - 1.0, "the row wrapped: {rh}");
+        let tops = tops(&app, row, text);
+        assert_eq!(tops.len(), 4, "old number, new number, sign, code");
+        let code = *tops.last().unwrap();
+        for (i, t) in tops.iter().enumerate() {
+            assert!((t - code).abs() <= 0.5, "cell {i} at {t}, code at {code}");
+        }
+    }
+
+    #[test]
+    fn split_numbers_and_sign_sit_on_the_first_line_of_a_wrapped_side() {
+        let mut app = wrap_app();
+        set_mode(&mut app, DiffMode::Split);
+        let (text, cell) = code_of(&mut app, LONG);
+        let (_, _, _, ch) = testing::frame(&app, cell);
+        assert!(ch >= 2.0 * 22.0 - 1.0, "the side wrapped: {ch}");
+        let tops = tops(&app, cell, text);
+        assert_eq!(tops.len(), 3, "number, sign, code");
+        let code = *tops.last().unwrap();
+        for (i, t) in tops.iter().enumerate() {
+            assert!((t - code).abs() <= 0.5, "cell {i} at {t}, code at {code}");
+        }
     }
 
     /// A press and release on `target`, as the picking backend sends them; they bubble up to the
