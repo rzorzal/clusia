@@ -1675,6 +1675,7 @@ mod tests {
             done: 1,
             total: 5,
             key: "deps".into(),
+            step: None,
         };
         m.versions[1].entries[1].state = EntryStateName::Drawing;
         m.versions[1].entries[2].state = EntryStateName::Waiting;
@@ -1775,6 +1776,7 @@ mod tests {
             done: 0,
             total: 2,
             key: "deps".into(),
+            step: None,
         };
         let mut i = inputs(Some(&m));
         i.selected = Some("flow");
@@ -1882,6 +1884,7 @@ mod tests {
                     done: 1,
                     total: 5,
                     key: "deps".into(),
+                    step: None,
                 },
             }),
         );
@@ -2179,6 +2182,7 @@ mod tests {
                 done: 0,
                 total: 2,
                 key: "deps".into(),
+                step: None,
             }),
         );
         testing::settle(&mut app);

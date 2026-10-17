@@ -303,6 +303,7 @@ fn drawing_version(latest: &DiagramVersion) -> (DiagramVersion, DiagramsState) {
         done: 2,
         total: 5,
         key,
+        step: None,
     };
     (version, state)
 }
@@ -1705,6 +1706,7 @@ mod tests {
                 done: 2,
                 total: 5,
                 key: drawing.entries[2].plan.key.clone(),
+                step: None,
             }
         );
         let tab = testing::tab(&app, &pr);

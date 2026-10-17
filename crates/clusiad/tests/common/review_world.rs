@@ -73,7 +73,11 @@ async fn world_with(
         })
         .await
         .unwrap();
-    for key in ["harness.check_security", "harness.audit"] {
+    for key in [
+        "harness.check_security",
+        "harness.audit",
+        "harness.keywords_3d",
+    ] {
         daemon
             .client()
             .await

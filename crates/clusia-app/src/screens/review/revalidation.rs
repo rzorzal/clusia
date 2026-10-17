@@ -2897,6 +2897,7 @@ mod tests {
             done: 1,
             total: 5,
             key: "flow".into(),
+            step: None,
         };
         let row = diagrams_row(Some(&model), None, true).expect("a row");
         assert!(row.drawing);

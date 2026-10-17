@@ -405,6 +405,7 @@ mod tests {
                 done: 1,
                 total: 5,
                 key: "flow".into(),
+                step: None,
             },
         });
         assert!(m.asked);

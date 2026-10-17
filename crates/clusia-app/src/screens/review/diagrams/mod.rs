@@ -200,6 +200,7 @@ mod tests {
                     done: 1,
                     total: 5,
                     key: "deps".into(),
+                    step: None,
                 },
             }),
         );

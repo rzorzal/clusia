@@ -7,7 +7,8 @@ use clusia_core::revalidation::DiagramsStale;
 use clusia_core::{DraftKind, Origin};
 use clusia_harness::testkit::{
     CodexScript, CodexTurn, CustomScript, CustomTurnScript, FakeClaude, Script, Turn,
-    diagram_block, diagram_plan_block, revalidation_block,
+    diagram_block, diagram_plan_block, keyword_placement_block, keyword_plan_block,
+    revalidation_block,
 };
 use clusia_protocol::{Client, Command, DiagramCode, DiagramsState, ErrorCode, Event, Reply};
 use common::agent::{calls, ready, refused, send, set_config, until, use_fake, watching};
@@ -149,6 +150,7 @@ async fn the_plan_and_each_drawing_arrive_as_they_settle() {
         done,
         total: 2,
         key: key.into(),
+        step: None,
     };
     assert_eq!(
         states,
@@ -867,4 +869,85 @@ async fn a_not_stale_answer_about_newer_commits_does_not_cover_an_older_drawing(
         panic!("the diagrams");
     };
     assert_eq!((stale, stale_reason), (true, None));
+}
+
+#[tokio::test]
+async fn the_keywords_entry_is_drawn_last_from_the_commit_and_never_reaches_the_chat() {
+    let keyword_plan = Turn::answer_blocks(
+        "The words.",
+        &[keyword_plan_block(json!({
+            "title": "Where the words live", "caption": "c",
+            "axes": [
+                {"name": "Layer", "low": "a", "high": "b"},
+                {"name": "Time", "low": "a", "high": "b"},
+                {"name": "Risk", "low": "a", "high": "b"}
+            ],
+            "families": [{"id": "count", "label": "count",
+                "seed": {"word": "two", "path": "feature.txt", "line": 2},
+                "words": ["two", "three"]}],
+            "use_cases": [{"id": "feature", "name": "The feature"}]
+        }))],
+    );
+    let placement = Turn::answer_blocks(
+        "Placed.",
+        &[keyword_placement_block(json!({
+            "regions": [{"path": "feature.txt", "use_case": "feature", "at": [0.2, 0.8, 0.5]}]
+        }))],
+    );
+    let script = Script::turns(vec![
+        plan(),
+        drawing("flow", "flow"),
+        drawing("graph", "graph"),
+        keyword_plan,
+        placement,
+    ]);
+    let w = world().await;
+    set_config(&w, "harness.keywords_3d", "true").await;
+    let _dir = use_fake(&w, script).await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(Command::DrawDiagrams { pr: pr7() })
+        .await
+        .unwrap();
+    let events = until(&mut watcher, idle).await;
+    let drawing = |done, key: &str, step: Option<&str>| DiagramsState::Drawing {
+        done,
+        total: 3,
+        key: key.into(),
+        step: step.map(str::to_string),
+    };
+    let states: Vec<&DiagramsState> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::DiagramsChanged { state, .. } => Some(state),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [
+            &DiagramsState::Planning,
+            &drawing(0, "flow", None),
+            &drawing(1, "graph", None),
+            &drawing(2, "keywords", None),
+            &drawing(2, "keywords", Some("Finding where the words live…")),
+            &drawing(2, "keywords", Some("Placing files on the axes…")),
+            &DiagramsState::Idle,
+        ]
+    );
+    let (_, latest, _) = diagrams_of(&mut c).await;
+    let latest = latest.expect("a version");
+    let keys: Vec<&str> = latest.entries.iter().map(|e| e.plan.key.as_str()).collect();
+    assert_eq!(keys, ["flow", "graph", "keywords"]);
+    let EntryState::ReadyMap { map, .. } = &latest.entries[2].state else {
+        panic!("a map: {:?}", latest.entries[2].state);
+    };
+    assert_eq!(map.paths, ["feature.txt"]);
+    assert_eq!(map.places.len(), 2, "two and three, each on its own line");
+    assert!(map.places.iter().all(|p| p.changed()));
+    let Reply::AgentLog(chat) = c.request(Command::GetAgentLog { pr: pr7() }).await.unwrap() else {
+        panic!("the log");
+    };
+    assert!(chat.is_empty(), "{chat:?}");
 }
