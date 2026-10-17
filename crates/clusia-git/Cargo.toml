@@ -8,6 +8,7 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+clusia-core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
