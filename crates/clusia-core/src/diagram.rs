@@ -829,7 +829,12 @@ pub fn validate_plan(raw: Vec<PlanEntry>) -> Result<Vec<PlanEntry>, Vec<String>>
         if entry.kind == DiagramKind::Keywords {
             fail(&mut errors, KEYWORDS_NOT_DRAWN.into());
         }
-        if !valid_id(&entry.key) {
+        if entry.key == KEYWORDS_KEY {
+            fail(
+                &mut errors,
+                format!("The key \"{KEYWORDS_KEY}\" is kept for Clúsia's map."),
+            );
+        } else if !valid_id(&entry.key) {
             fail(
                 &mut errors,
                 format!(
@@ -2126,6 +2131,16 @@ mod tests {
             },
         ];
         assert_eq!(validate_plan(plan).unwrap_err(), refused);
+    }
+
+    #[test]
+    fn a_plan_entry_keyed_keywords_is_refused_whatever_its_kind() {
+        let mut taken = entry(DiagramKind::Flow);
+        taken.key = "keywords".into();
+        assert_eq!(
+            validate_plan(vec![taken]).unwrap_err(),
+            ["The key \"keywords\" is kept for Clúsia's map."]
+        );
     }
 
     #[test]

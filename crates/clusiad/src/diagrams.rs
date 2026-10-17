@@ -613,6 +613,7 @@ const STEP_PLACING: &str = "Placing files on the axes…";
 /// The note of a map whose search ran out of time.
 const SEARCH_CUT_NOTE: &str = "Search stopped after 10 s; some places are missing.";
 const CHECKOUT_MOVED: &str = "The checkout moved while drawing.";
+const CHECKOUT_UNREADABLE: &str = "The checkout could not be read.";
 const MAP_TOO_LARGE: &str = "The map is too large to keep.";
 /// Validation's own reason for a plan with no family left.
 const UNTRACED: &str = "No word of this change could be traced.";
@@ -699,6 +700,16 @@ async fn keep_traced_seeds(repo: &Path, job: &Job, plan: &mut KeywordPlan) -> us
     before - plan.families.len()
 }
 
+/// Why the worktree cannot be trusted to hold the commit `expected`, given what
+/// `git rev-parse HEAD` said: it could not be asked, or it answered another commit.
+fn checkout_problem<E>(head: &Result<String, E>, expected: &str) -> Option<&'static str> {
+    match head {
+        Err(_) => Some(CHECKOUT_UNREADABLE),
+        Ok(head) if head != expected => Some(CHECKOUT_MOVED),
+        Ok(_) => None,
+    }
+}
+
 /// Whether `map` is too big to store with its version.
 fn too_large(map: &KeywordMap) -> bool {
     serde_json::to_vec(map).map_or(true, |bytes| bytes.len() > MAX_MAP_BYTES)
@@ -762,9 +773,9 @@ async fn draw_keywords(
     let repo = shared.paths.worktree_for(pr);
     // The search reads the commit, but the attributes that leave files out come from the
     // worktree, which must still be at that commit.
-    match unless_stopped(&job.stop, git(&repo, &["rev-parse", "HEAD"])).await? {
-        Ok(head) if head == job.head => {}
-        _ => return failed(CHECKOUT_MOVED.to_string()),
+    let head = unless_stopped(&job.stop, git(&repo, &["rev-parse", "HEAD"])).await?;
+    if let Some(reason) = checkout_problem(&head, &job.head) {
+        return failed(reason.to_string());
     }
     let dropped = unless_stopped(&job.stop, keep_traced_seeds(&repo, job, &mut plan)).await?;
     if plan.families.is_empty() {
@@ -902,6 +913,7 @@ async fn draw_all(shared: &Arc<Shared>, pr: &PrRef, job: &Job) -> End {
     };
     let mut plan = plan;
     if job.keywords {
+        debug_assert!(plan.iter().all(|e| e.key != KEYWORDS_KEY));
         plan.push(keywords_entry());
     }
     // `start` refused a run with no number left; a file written since then ends it here.
@@ -2933,6 +2945,21 @@ mod tests {
         assert!(
             notes.contains(&"1 family dropped: its seed word is not on its line".to_string()),
             "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_checkout_is_told_apart_from_a_moved_one() {
+        let ok: Result<String, &str> = Ok("abc".into());
+        assert_eq!(checkout_problem(&ok, "abc"), None);
+        assert_eq!(
+            checkout_problem(&ok, "def"),
+            Some("The checkout moved while drawing.")
+        );
+        let broken: Result<String, &str> = Err("not a repository");
+        assert_eq!(
+            checkout_problem(&broken, "abc"),
+            Some("The checkout could not be read.")
         );
     }
 

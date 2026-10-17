@@ -14,7 +14,8 @@ use crate::diagrams::stored_version;
 use crate::reviews;
 use crate::state::Shared;
 
-/// Lines shown after the anchor; the window starts on its first line, as the header says.
+/// Lines shown after the anchor. A box's window starts on its first line, as the header says; a
+/// place's starts one line before it.
 const AFTER: u32 = 2;
 /// The most lines one answer holds.
 const MAX_LINES: u32 = 200;
@@ -28,8 +29,8 @@ fn not_found(message: String) -> Outcome {
 }
 
 /// The commit of version `number` and the anchor of `node` (a diagram box or a place of the
-/// keyword map) of diagram `key` in it; the anchor is `None` for a box that is not tied to code. Whatever the client says about lines is
-/// never read: only what the daemon stored counts.
+/// keyword map) of diagram `key` in it; the anchor is `None` for a box that is not tied to
+/// code. Whatever the client says about lines is never read: only what the daemon stored counts.
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
 pub(crate) fn anchored_node(
     shared: &Shared,
@@ -149,9 +150,9 @@ fn unavailable(anchor: &CodeAnchor, commit: &str, why: String) -> Outcome {
     }))
 }
 
-/// `ReadDiagramCode`. A place of the keyword map gets one line before it. A version at the review's head is read from the worktree, and its lines
-/// the pull request adds are marked; an older one is read from its pinned commit, with no line
-/// marked. Code that cannot be read comes back as `unavailable`, not as an error.
+/// `ReadDiagramCode`. A place of the keyword map gets one line before it. A version at the
+/// review's head is read from the worktree, and its lines the pull request adds are marked; an
+/// older one is read from its pinned commit, with no line marked. Code that cannot be read comes back as `unavailable`, not as an error.
 pub(crate) async fn read(
     shared: &Shared,
     pr: &PrRef,
