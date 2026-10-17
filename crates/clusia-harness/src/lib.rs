@@ -21,7 +21,9 @@ pub use agent::{Agent, version_at_least};
 pub use check_blocks::extract_check_blocks;
 pub use codex_command::{CodexServerSpec, codex_server_command};
 pub use command::{BridgeSpec, ClaudeCode, ROLE_PROMPT, SessionArg, TurnSpec};
-pub use diagram_blocks::{extract_diagram, extract_plan};
+pub use diagram_blocks::{
+    extract_diagram, extract_keyword_placement, extract_keyword_plan, extract_plan,
+};
 pub use parse::{AgentEvent, ParseState, parse_line};
 pub use probe::parse_probe;
 pub use revalidation_blocks::{RawVerdict, extract_diagrams_stale, extract_revalidation_blocks};

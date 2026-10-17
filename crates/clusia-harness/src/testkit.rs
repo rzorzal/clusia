@@ -186,6 +186,16 @@ pub fn diagram_block(json: serde_json::Value) -> String {
     format!("```clusia-diagram\n{json}\n```")
 }
 
+/// A fenced `clusia-keyword-plan` block holding `json`, one keyword plan.
+pub fn keyword_plan_block(json: serde_json::Value) -> String {
+    format!("```clusia-keyword-plan\n{json}\n```")
+}
+
+/// A fenced `clusia-keyword-placement` block holding `json`, one keyword placement.
+pub fn keyword_placement_block(json: serde_json::Value) -> String {
+    format!("```clusia-keyword-placement\n{json}\n```")
+}
+
 /// A fenced `clusia-pass` block holding `json`.
 pub fn pass_block(json: serde_json::Value) -> String {
     format!("```clusia-pass\n{json}\n```")

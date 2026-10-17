@@ -1031,6 +1031,11 @@ pub fn keywords_entry() -> PlanEntry {
     }
 }
 
+/// What a prompt says about the pull request, as the diagram prompts write it.
+pub fn context_block(ctx: &DiagramContext) -> String {
+    context(ctx)
+}
+
 fn context(ctx: &DiagramContext) -> String {
     context_text(&PromptContext {
         pr_title: ctx.pr_title.clone(),
@@ -2172,5 +2177,16 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(info.places, 0);
+    }
+
+    #[test]
+    fn the_context_block_is_what_the_diagram_prompts_carry() {
+        let block = context_block(&ctx(true));
+        let prompt = draw_prompt(&ctx(true), &entry(DiagramKind::Flow), &[], None);
+        assert!(prompt.contains(&block));
+        let fresh = context_block(&ctx(false));
+        assert!(fresh.contains(".clusia/review.md"));
+        assert!(!block.contains(".clusia/review.md"));
+        assert!(!fresh.contains("\nIgnore the rules"));
     }
 }
