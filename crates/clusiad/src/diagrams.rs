@@ -1335,7 +1335,7 @@ mod tests {
             .map(|e| match &e.state {
                 EntryState::Waiting => "waiting",
                 EntryState::Drawing => "drawing",
-                EntryState::Ready { .. } => "ready",
+                EntryState::Ready { .. } | EntryState::ReadyMap { .. } => "ready",
                 EntryState::Failed { .. } => "failed",
                 EntryState::NotDrawn => "not drawn",
             })

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::checks::{DATA_RULE, PromptContext, context_text, one_line};
+use crate::keywords::{KEYWORDS_KEY, KEYWORDS_TITLE, KeywordMap};
 use crate::printable::{plain_relative, printable};
 
 /// The most diagrams one plan holds.
@@ -35,12 +36,15 @@ pub const ANCHOR_SPAN_MAX: u32 = 2_000;
 /// How much of an invalid answer a repair prompt quotes, in characters.
 pub const REPAIR_ECHO_MAX: usize = 20_000;
 /// The most validation errors one answer is told about.
-const ERROR_MAX: usize = 10;
+pub(crate) const ERROR_MAX: usize = 10;
 
 /// The info string of the fenced block that holds a plan.
 pub const PLAN_INFO: &str = "clusia-diagram-plan";
 /// The info string of the fenced block that holds one diagram.
 pub const DIAGRAM_INFO: &str = "clusia-diagram";
+
+/// Why a diagram of kind `keywords` is refused wherever an agent could write one.
+const KEYWORDS_NOT_DRAWN: &str = "keywords is added by Clúsia: it is not drawn as a diagram.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +57,8 @@ pub enum DiagramKind {
     DataFlow,
     States,
     Classes,
+    /// The 3D keyword view. Clúsia adds this entry itself; an agent never chooses it.
+    Keywords,
 }
 
 impl DiagramKind {
@@ -77,6 +83,7 @@ impl DiagramKind {
             DiagramKind::DataFlow => "Data flow",
             DiagramKind::States => "States",
             DiagramKind::Classes => "Classes",
+            DiagramKind::Keywords => "Keywords 3D",
         }
     }
 
@@ -88,6 +95,7 @@ impl DiagramKind {
             DiagramKind::Graph => "modules",
             DiagramKind::Sequence => "messages",
             DiagramKind::DataFlow => "processes",
+            DiagramKind::Keywords => "families",
             DiagramKind::EntityRelationship
             | DiagramKind::UseCases
             | DiagramKind::States
@@ -102,6 +110,7 @@ impl DiagramKind {
             (DiagramKind::Graph, 1) => "module",
             (DiagramKind::Sequence, 1) => "message",
             (DiagramKind::DataFlow, 1) => "process",
+            (DiagramKind::Keywords, 1) => "family",
             _ => self.count_noun(),
         };
         if noun.is_empty() {
@@ -122,6 +131,7 @@ impl DiagramKind {
             DiagramKind::DataFlow => "data_flow",
             DiagramKind::States => "states",
             DiagramKind::Classes => "classes",
+            DiagramKind::Keywords => "keywords",
         }
     }
 }
@@ -391,6 +401,7 @@ impl DiagramSpec {
             DiagramKind::DataFlow => of(|n| n.shape == Shape::Circle),
             DiagramKind::States => of(|n| n.shape != Shape::Start),
             DiagramKind::Flow | DiagramKind::Graph | DiagramKind::Classes => self.nodes.len(),
+            DiagramKind::Keywords => 0,
         };
         u32::try_from(n).unwrap_or(u32::MAX)
     }
@@ -474,11 +485,12 @@ fn accepts(kind: DiagramKind) -> Accepts {
             ends: true,
             ..base
         },
+        DiagramKind::Keywords => base,
     }
 }
 
 /// Whether `id` is 1 to `ID_MAX` characters of letters, digits, `_`, `.` and `-`.
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     (1..=ID_MAX).contains(&id.len())
         && id
             .bytes()
@@ -486,7 +498,7 @@ fn valid_id(id: &str) -> bool {
 }
 
 /// Untrusted text as it can be quoted in an error: its first 40 characters, with escapes.
-fn shown(text: &str) -> String {
+pub(crate) fn shown(text: &str) -> String {
     let head: String = text.chars().take(40).collect();
     let more = if text.chars().nth(40).is_some() {
         "…"
@@ -496,11 +508,11 @@ fn shown(text: &str) -> String {
     format!("{}{more}", printable(&head))
 }
 
-fn count_of(n: u32, one: &str, many: &str) -> String {
+pub(crate) fn count_of(n: u32, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-fn fail(errors: &mut Vec<String>, message: String) {
+pub(crate) fn fail(errors: &mut Vec<String>, message: String) {
     if errors.len() < ERROR_MAX && !errors.contains(&message) {
         errors.push(message);
     }
@@ -508,14 +520,14 @@ fn fail(errors: &mut Vec<String>, message: String) {
 
 /// Cleans the text of a spec and counts what it had to cut.
 #[derive(Default)]
-struct Cleaner {
-    cut: u32,
+pub(crate) struct Cleaner {
+    pub(crate) cut: u32,
 }
 
 impl Cleaner {
     /// `raw` trimmed, cut at `cap` characters with `…` (the length is counted on the raw text),
     /// then with its control and invisible characters shown as escapes.
-    fn text(&mut self, raw: &str, cap: usize) -> String {
+    pub(crate) fn text(&mut self, raw: &str, cap: usize) -> String {
         let trimmed = raw.trim();
         if trimmed.chars().count() > cap {
             self.cut += 1;
@@ -526,7 +538,7 @@ impl Cleaner {
         }
     }
 
-    fn optional(&mut self, raw: Option<&str>, cap: usize) -> Option<String> {
+    pub(crate) fn optional(&mut self, raw: Option<&str>, cap: usize) -> Option<String> {
         raw.map(|r| self.text(r, cap)).filter(|s| !s.is_empty())
     }
 }
@@ -545,6 +557,9 @@ pub fn validate(
     files: &[String],
 ) -> Result<Checked, Vec<String>> {
     let kind = expected.kind;
+    if kind == DiagramKind::Keywords || raw.kind == DiagramKind::Keywords {
+        return Err(vec![KEYWORDS_NOT_DRAWN.into()]);
+    }
     let rules = accepts(kind);
     let name = kind.label();
     let mut errors = Vec::new();
@@ -811,6 +826,9 @@ pub fn validate_plan(raw: Vec<PlanEntry>) -> Result<Vec<PlanEntry>, Vec<String>>
     let mut cleaner = Cleaner::default();
     let mut plan = Vec::new();
     for entry in raw {
+        if entry.kind == DiagramKind::Keywords {
+            fail(&mut errors, KEYWORDS_NOT_DRAWN.into());
+        }
         if !valid_id(&entry.key) {
             fail(
                 &mut errors,
@@ -852,6 +870,11 @@ pub enum EntryState {
     Drawing,
     Ready {
         spec: DiagramSpec,
+        notes: Vec<String>,
+    },
+    /// The 3D keyword entry, ready.
+    ReadyMap {
+        map: Box<KeywordMap>,
         notes: Vec<String>,
     },
     Failed {
@@ -916,6 +939,7 @@ impl DiagramVersion {
 }
 
 fn entry_info(entry: &DiagramEntry) -> EntryInfo {
+    let mut places = 0;
     let (state, count, reason, notes) = match &entry.state {
         EntryState::Waiting => (EntryStateName::Waiting, 0, None, 0),
         EntryState::Drawing => (EntryStateName::Drawing, 0, None, 0),
@@ -925,6 +949,15 @@ fn entry_info(entry: &DiagramEntry) -> EntryInfo {
             None,
             u32::try_from(notes.len()).unwrap_or(u32::MAX),
         ),
+        EntryState::ReadyMap { map, notes } => {
+            places = map.total_places();
+            (
+                EntryStateName::Ready,
+                u32::try_from(map.plan.families.len()).unwrap_or(u32::MAX),
+                None,
+                u32::try_from(notes.len()).unwrap_or(u32::MAX),
+            )
+        }
         EntryState::Failed { reason } => (EntryStateName::Failed, 0, Some(reason.clone()), 0),
         EntryState::NotDrawn => (EntryStateName::NotDrawn, 0, None, 0),
     };
@@ -936,6 +969,7 @@ fn entry_info(entry: &DiagramEntry) -> EntryInfo {
         count,
         reason,
         notes,
+        places,
     }
 }
 
@@ -961,6 +995,10 @@ pub struct EntryInfo {
     pub reason: Option<String>,
     /// How many things were dropped or cut from a ready entry.
     pub notes: u32,
+    /// How many places the keyword map holds, found ones and counted ones; zero for any other
+    /// entry.
+    #[serde(default)]
+    pub places: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -981,6 +1019,16 @@ pub struct DiagramContext {
     pub files: Vec<String>,
     /// Whether the session already holds the pull request (a fork of the review session).
     pub forked: bool,
+}
+
+/// The plan entry of the 3D keyword view, which Clúsia appends after the agent's entries.
+pub fn keywords_entry() -> PlanEntry {
+    PlanEntry {
+        key: KEYWORDS_KEY.into(),
+        kind: DiagramKind::Keywords,
+        title: KEYWORDS_TITLE.into(),
+        purpose: String::new(),
+    }
 }
 
 fn context(ctx: &DiagramContext) -> String {
@@ -1053,6 +1101,7 @@ Shapes: \"circle\" for a process that transforms data, \"store\" for data at res
         DiagramKind::States => "\
 Shapes: \"start\" for the initial point (one node; its label is not drawn) and \"pill\" for a state. An edge is a transition: {\"from\": \"<node id>\", \"to\": \"<node id>\", \"label\": \"<the event>\"}.
 ",
+        DiagramKind::Keywords => "",
         DiagramKind::Classes => "\
 Shape: \"class\" for every node. A node has \"rows\": [{\"text\": \"<field or method>\"}], the fields first and then the methods, at most 16, and \"divider_after\": <how many rows come before the divider>. An edge is a relation: {\"from\": \"<node id>\", \"to\": \"<node id>\", \"label\": \"<uses, extends, ...>\", \"style\": \"solid\" | \"dashed\", \"ends\": [\"<at most 8 characters>\", \"<at most 8 characters>\"]}.
 ",
@@ -1083,6 +1132,7 @@ fn kind_example(kind: DiagramKind) -> &'static str {
         DiagramKind::States => {
             r#"{"key":"token-life","kind":"states","title":"Token life cycle","caption":"A token is valid until it expires.","nodes":[{"id":"start","label":"start","shape":"start"},{"id":"valid","label":"Valid","shape":"pill"},{"id":"expired","label":"Expired","shape":"pill","change":"new"}],"edges":[{"from":"start","to":"valid"},{"from":"valid","to":"expired","label":"time passes"}]}"#
         }
+        DiagramKind::Keywords => "",
         DiagramKind::Classes => {
             r#"{"key":"types","kind":"classes","title":"Types involved","caption":"The store owns the token.","nodes":[{"id":"store","label":"TokenStore","shape":"class","rows":[{"text":"token: Token"},{"text":"refresh()"}],"divider_after":1},{"id":"token","label":"Token","shape":"class","rows":[{"text":"expires_at: i64"}]}],"edges":[{"from":"store","to":"token","label":"owns","ends":["1","1"]}]}"#
         }
@@ -1998,5 +2048,129 @@ mod tests {
         let exact = "a".repeat(REPAIR_ECHO_MAX);
         let p = repair_prompt(&ctx(true), "base", &exact, &[]);
         assert!(p.contains("Your previous answer, as a JSON string"));
+    }
+
+    fn keyword_map() -> KeywordMap {
+        serde_json::from_value(serde_json::json!({
+            "plan": {
+                "title": "Token refresh", "caption": "",
+                "axes": [
+                    {"name": "Layer", "low": "api", "high": "storage"},
+                    {"name": "Client", "low": "cli", "high": "app"},
+                    {"name": "Storage", "low": "memory", "high": "disk"}
+                ],
+                "families": [
+                    {"id": "retry", "label": "Retry", "seed": {"word": "retry", "path": "src/a.rs", "line": 1}, "words": ["retry"]},
+                    {"id": "token", "label": "Token", "seed": {"word": "token", "path": "src/a.rs", "line": 2}, "words": ["token"]}
+                ],
+                "use_cases": [{"id": "auth", "name": "Sign in"}]
+            },
+            "regions": [],
+            "paths": ["src/a.rs"],
+            "words": [{"text": "retry", "family": 0}, {"text": "token", "family": 1}],
+            "places": [[0, 1, 0, 65535, 3], [0, 2, 1, 65535, 0]],
+            "overflow": [5, 0]
+        })).unwrap()
+    }
+
+    #[test]
+    fn the_keywords_kind_is_not_one_an_agent_can_draw_or_plan() {
+        assert_eq!(DiagramKind::Keywords.label(), "Keywords 3D");
+        assert_eq!(DiagramKind::Keywords.wire(), "keywords");
+        assert_eq!(
+            serde_json::to_string(&DiagramKind::Keywords).unwrap(),
+            "\"keywords\""
+        );
+        assert_eq!(DiagramKind::ALL.len(), 8);
+        assert!(!DiagramKind::ALL.contains(&DiagramKind::Keywords));
+        assert_eq!(
+            DiagramKind::Keywords.list_meta(4),
+            "Keywords 3D · 4 families"
+        );
+        assert_eq!(DiagramKind::Keywords.list_meta(1), "Keywords 3D · 1 family");
+        let own = keywords_entry();
+        assert_eq!(
+            (
+                own.key.as_str(),
+                own.kind,
+                own.title.as_str(),
+                own.purpose.as_str()
+            ),
+            (
+                "keywords",
+                DiagramKind::Keywords,
+                "Where the words live",
+                ""
+            )
+        );
+
+        let refused = ["keywords is added by Clúsia: it is not drawn as a diagram."];
+        let spec = DiagramSpec::new("keywords", DiagramKind::Keywords, "t");
+        assert_eq!(validate(spec, &own, &files()).unwrap_err(), refused);
+        let mut sneaky = flow();
+        sneaky.kind = DiagramKind::Keywords;
+        assert_eq!(
+            validate(sneaky, &entry(DiagramKind::Flow), &files()).unwrap_err(),
+            refused
+        );
+        let plan = vec![
+            entry(DiagramKind::Flow),
+            PlanEntry {
+                key: "k".into(),
+                ..own
+            },
+        ];
+        assert_eq!(validate_plan(plan).unwrap_err(), refused);
+    }
+
+    #[test]
+    fn a_ready_map_has_its_own_tag_and_lists_as_a_ready_entry() {
+        let notes = vec!["1 family dropped".to_string()];
+        let entry = DiagramEntry {
+            plan: keywords_entry(),
+            state: EntryState::ReadyMap {
+                map: Box::new(keyword_map()),
+                notes,
+            },
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["state"]["state"], "ready_map");
+        assert_eq!(json["plan"]["kind"], "keywords");
+        assert_eq!(serde_json::from_value::<DiagramEntry>(json).unwrap(), entry);
+
+        let version = DiagramVersion {
+            number: 1,
+            commit: "a".repeat(40),
+            harness: "Claude Code".into(),
+            drawn_at: 1,
+            phase: VersionPhase::Done,
+            entries: vec![entry.clone()],
+        };
+        let info = &version.info().entries[0];
+        assert_eq!(info.state, EntryStateName::Ready);
+        assert_eq!((info.count, info.places, info.notes), (2, 7, 1));
+        assert_eq!(info.kind, DiagramKind::Keywords);
+        assert_eq!(
+            version.recovered().entries[0],
+            entry,
+            "a ready map survives a restart"
+        );
+    }
+
+    #[test]
+    fn entries_and_infos_without_the_new_fields_still_load() {
+        let old: DiagramEntry = serde_json::from_value(json!({
+            "plan": {"key": "flow", "kind": "flow", "title": "t"},
+            "state": {"state": "ready", "notes": [],
+                "spec": {"key": "flow", "kind": "flow", "title": "t", "nodes": [{"id": "a", "label": "A", "shape": "box"}]}}
+        }))
+        .unwrap();
+        assert!(matches!(old.state, EntryState::Ready { .. }));
+        let info: EntryInfo = serde_json::from_value(json!({
+            "key": "a", "kind": "flow", "title": "t", "state": "ready",
+            "count": 1, "reason": null, "notes": 0
+        }))
+        .unwrap();
+        assert_eq!(info.places, 0);
     }
 }

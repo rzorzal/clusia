@@ -29,6 +29,15 @@ fn state_text(state: &EntryState) -> String {
         EntryState::Drawing => "drawing".into(),
         EntryState::Ready { notes, .. } if notes.is_empty() => "ready".into(),
         EntryState::Ready { notes, .. } => format!("ready · {} noted", notes.len()),
+        EntryState::ReadyMap { map, .. } => {
+            let families = map.plan.families.len();
+            let places = map.total_places();
+            format!(
+                "ready · {families} {} · {places} {}",
+                if families == 1 { "family" } else { "families" },
+                if places == 1 { "place" } else { "places" },
+            )
+        }
         EntryState::Failed { reason } => format!("failed · {}", line_of(reason)),
         EntryState::NotDrawn => "not drawn".into(),
     }
@@ -416,5 +425,43 @@ mod tests {
             Some("planning the diagrams")
         );
         assert_eq!(progress_line(&DiagramsState::Idle, &titles), None);
+    }
+
+    #[test]
+    fn a_ready_map_lists_its_families_and_places() {
+        let map: clusia_core::keywords::KeywordMap = serde_json::from_value(serde_json::json!({
+            "plan": {
+                "title": "Token refresh", "caption": "",
+                "axes": [
+                    {"name": "Layer", "low": "api", "high": "storage"},
+                    {"name": "Client", "low": "cli", "high": "app"},
+                    {"name": "Storage", "low": "memory", "high": "disk"}
+                ],
+                "families": [
+                    {"id": "retry", "label": "Retry", "seed": {"word": "retry", "path": "src/a.rs", "line": 1}, "words": ["retry"]},
+                    {"id": "token", "label": "Token", "seed": {"word": "token", "path": "src/a.rs", "line": 2}, "words": ["token"]}
+                ],
+                "use_cases": [{"id": "auth", "name": "Sign in"}]
+            },
+            "regions": [],
+            "paths": ["src/a.rs"],
+            "words": [{"text": "retry", "family": 0}, {"text": "token", "family": 1}],
+            "places": [[0, 1, 0, 65535, 3], [0, 2, 1, 65535, 0]],
+            "overflow": [5, 0]
+        })).unwrap();
+        let mut one = map.clone();
+        let state = EntryState::ReadyMap {
+            map: Box::new(map),
+            notes: vec!["1 word dropped".into()],
+        };
+        assert_eq!(state_text(&state), "ready · 2 families · 7 places");
+        one.plan.families.truncate(1);
+        one.places.truncate(1);
+        one.overflow = vec![0, 0];
+        let state = EntryState::ReadyMap {
+            map: Box::new(one),
+            notes: vec![],
+        };
+        assert_eq!(state_text(&state), "ready · 1 family · 1 place");
     }
 }

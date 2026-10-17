@@ -587,6 +587,8 @@ pub struct Harness {
     pub audit: bool,
     /// Draw diagrams of the change when a review opens.
     pub diagrams: bool,
+    /// Add the 3D keyword view to every set of diagrams.
+    pub keywords_3d: bool,
     /// What the audit looks at: the six built-in areas and the user's own.
     pub audit_areas: Vec<AuditArea>,
     /// How long one security check or audit may run before it is stopped.
@@ -641,6 +643,7 @@ impl Default for Harness {
             check_security: true,
             audit: true,
             diagrams: false,
+            keywords_3d: true,
             audit_areas: default_areas(),
             check_timeout_secs: DEFAULT_CHECK_TIMEOUT_SECS,
             revalidate: true,
@@ -2072,5 +2075,16 @@ mod tests {
     fn the_program_is_trimmed_when_read() {
         let c: Config = serde_json::from_str(r#"{"harness":{"program":" /opt/claude "}}"#).unwrap();
         assert_eq!(c.harness.program.as_deref(), Some("/opt/claude"));
+    }
+
+    #[test]
+    fn the_keyword_view_is_on_by_default_and_a_config_without_the_key_gets_that() {
+        assert!(Config::default().harness.keywords_3d);
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert!(c.harness.keywords_3d);
+        let c: Config = serde_json::from_str(r#"{"harness":{"diagrams":true}}"#).unwrap();
+        assert!(c.harness.keywords_3d);
+        let off: Config = serde_json::from_str(r#"{"harness":{"keywords_3d":false}}"#).unwrap();
+        assert!(!off.harness.keywords_3d && !off.harness.diagrams);
     }
 }

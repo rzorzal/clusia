@@ -6,12 +6,14 @@ use std::io;
 use std::path::Path;
 
 use clusia_core::diagram::{DiagramVersion, MAX_DIAGRAMS, MAX_SPEC_BYTES};
+use clusia_core::keywords::MAX_MAP_BYTES;
 use clusia_core::{Paths, PrRef};
 
 use crate::atomic::write_atomic;
 
-/// The biggest file a version can be: every drawing at its cap, and room for the rest.
-const MAX_VERSION_BYTES: u64 = (MAX_DIAGRAMS * MAX_SPEC_BYTES) as u64 + 64 * 1024;
+/// The biggest file a version can be: every drawing at its cap, a keyword map at its cap, and
+/// room for the rest.
+const MAX_VERSION_BYTES: u64 = (MAX_DIAGRAMS * MAX_SPEC_BYTES + MAX_MAP_BYTES) as u64 + 64 * 1024;
 
 fn version_file(paths: &Paths, pr: &PrRef, n: u32) -> std::path::PathBuf {
     paths.diagrams_for(pr).join(format!("v{n}.json"))
@@ -129,7 +131,9 @@ mod tests {
     use super::*;
     use clusia_core::diagram::{
         DiagramEntry, DiagramKind, DiagramSpec, EntryState, Node, PlanEntry, Shape, VersionPhase,
+        keywords_entry,
     };
+    use clusia_core::keywords::KeywordMap;
 
     fn pr() -> PrRef {
         "acme/widgets#7".parse().unwrap()
@@ -332,5 +336,44 @@ mod tests {
         assert!(!p.diagrams_for(&pr()).exists());
         assert!(p.diagrams_for(&other).exists());
         delete_diagrams(&p, &pr()).unwrap();
+    }
+
+    #[test]
+    fn a_version_with_a_big_keyword_map_is_still_read() {
+        let (_d, p) = setup();
+        let places: Vec<_> = (0..130_000u32)
+            .map(|i| serde_json::json!([0, i, 0, 65535, 0]))
+            .collect();
+        let map: KeywordMap = serde_json::from_value(serde_json::json!({
+            "plan": {
+                "title": "T", "caption": "",
+                "axes": [
+                    {"name": "A", "low": "l", "high": "h"},
+                    {"name": "B", "low": "l", "high": "h"},
+                    {"name": "C", "low": "l", "high": "h"}
+                ],
+                "families": [{"id": "f", "label": "F", "seed": {"word": "retry", "path": "a.rs", "line": 1}, "words": ["retry"]}],
+                "use_cases": [{"id": "u", "name": "U"}]
+            },
+            "regions": [], "paths": ["a.rs"], "words": [{"text": "retry", "family": 0}],
+            "places": places, "overflow": [0]
+        }))
+        .unwrap();
+        let mut v = version(1);
+        v.entries.push(DiagramEntry {
+            plan: keywords_entry(),
+            state: EntryState::ReadyMap {
+                map: Box::new(map),
+                notes: vec![],
+            },
+        });
+        save_diagram_version(&p, &pr(), &v).unwrap();
+        let size = fs::metadata(version_file(&p, &pr(), 1)).unwrap().len();
+        assert!(
+            size > (MAX_DIAGRAMS * MAX_SPEC_BYTES) as u64 + 64 * 1024,
+            "{size}"
+        );
+        assert!(size < MAX_VERSION_BYTES, "{size}");
+        assert_eq!(load_diagram_version(&p, &pr(), 1), Some(v));
     }
 }
