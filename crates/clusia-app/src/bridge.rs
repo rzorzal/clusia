@@ -2865,8 +2865,7 @@ pub(crate) fn demo_answers(
                     .as_ref()
                     .and_then(|d| d.0.get(&pr))
                     .and_then(|m| m.loaded.get(&number))
-                    .and_then(|v| modal::node_anchor(v, &key, &node))
-                    .cloned();
+                    .and_then(|v| modal::anchor_of(v, &key, &node));
                 let patch = anchor.as_ref().and_then(|a| {
                     let ready = tabs.0.get(&pr)?.ready()?;
                     ready

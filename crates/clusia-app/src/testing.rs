@@ -1,9 +1,15 @@
 //! A headless app for unit tests: MinimalPlugins, no window, no GPU, no daemon. Asks are
 //! recorded in `Asks::recorded`. Each task that adds a logic plugin registers it in `app`.
 
+use bevy::camera::NormalizedRenderTarget;
 use bevy::clipboard::Clipboard;
 use bevy::input::ButtonInput;
+use bevy::input::mouse::MouseScrollUnit;
+use bevy::input::touch::TouchPhase;
 use bevy::input_focus::InputFocus;
+use bevy::picking::backend::HitData;
+use bevy::picking::events::{Click, Drag, DragEnd, Move, Out, Pointer, Press, Scroll};
+use bevy::picking::pointer::{Location, PointerButton, PointerId};
 use bevy::prelude::*;
 use bevy::text::{EditableText, FontCx, LayoutCx, TextEdit};
 use bevy::ui::{ComputedNode, UiGlobalTransform};
@@ -18,6 +24,7 @@ use clusia_core::{
 };
 use clusia_diagram::keywords::Scene3D;
 use clusia_protocol::WindowTarget;
+use std::time::Duration;
 
 use crate::app::{AppPaths, StartTarget};
 use crate::bridge::{
@@ -38,7 +45,7 @@ use crate::screens::home::HomePlugin;
 use crate::screens::open_pr::OpenPrPlugin;
 use crate::screens::review::ReviewPlugin;
 use crate::screens::review::diagrams::keywords::{
-    KeywordsCanvas, KeywordsRuntime, SceneImage, render,
+    KeywordsCanvas, KeywordsRuntime, SceneImage, input, render,
 };
 use crate::snapshot::{self, Snapshot};
 use crate::theme::{LIGHT, Theme, ThemePlugin};
@@ -664,4 +671,154 @@ pub fn point_screen_pos(app: &mut App, pr: &PrRef, index: u32) -> Vec2 {
     let (at, _) = render::project(&rt.pose, rt.lens, size, render::world(point.pos))
         .expect("the point is in front of the camera");
     KEYWORDS_ORIGIN + at
+}
+
+// ---- the pointer on the 3D keyword view
+
+fn location(position: Vec2) -> Location {
+    Location {
+        target: NormalizedRenderTarget::None {
+            width: 1,
+            height: 1,
+        },
+        position,
+    }
+}
+
+fn nowhere() -> HitData {
+    HitData::new(Entity::PLACEHOLDER, 0.0, None, None)
+}
+
+fn image_of(app: &mut App, pr: &PrRef) -> Entity {
+    find::<SceneImage>(app, |s| s.0 == *pr)
+}
+
+fn press_at(app: &mut App, image: Entity, position: Vec2) {
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(position),
+        Press {
+            button: PointerButton::Primary,
+            hit: nowhere(),
+            count: 1,
+        },
+        image,
+    ));
+}
+
+fn click_event(app: &mut App, image: Entity, position: Vec2) {
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(position),
+        Click {
+            button: PointerButton::Primary,
+            hit: nowhere(),
+            duration: Duration::from_millis(80),
+            count: 1,
+        },
+        image,
+    ));
+}
+
+/// The pointer moves to `position` (window pixels) over the 3D image.
+pub fn hover_at(app: &mut App, pr: &PrRef, position: Vec2) {
+    let image = image_of(app, pr);
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(position),
+        Move {
+            hit: nowhere(),
+            delta: Vec2::ZERO,
+        },
+        image,
+    ));
+    app.update();
+}
+
+/// The pointer leaves the 3D image.
+pub fn leave(app: &mut App, pr: &PrRef) {
+    let image = image_of(app, pr);
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(Vec2::ZERO),
+        Out { hit: nowhere() },
+        image,
+    ));
+    app.update();
+}
+
+/// A press and a click at `position`.
+pub fn click_at(app: &mut App, pr: &PrRef, position: Vec2) {
+    let image = image_of(app, pr);
+    press_at(app, image, position);
+    click_event(app, image, position);
+    settle(app);
+}
+
+/// A press at `from`, one drag of `delta`, the release, and the click the picking backend
+/// sends when the button is released over what was pressed.
+pub fn drag_by(app: &mut App, pr: &PrRef, from: Vec2, delta: Vec2) {
+    let image = image_of(app, pr);
+    press_at(app, image, from);
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(from + delta),
+        Drag {
+            button: PointerButton::Primary,
+            distance: delta,
+            delta,
+        },
+        image,
+    ));
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(from + delta),
+        DragEnd {
+            button: PointerButton::Primary,
+            distance: delta,
+        },
+        image,
+    ));
+    click_event(app, image, from + delta);
+    settle(app);
+}
+
+/// The wheel turns `lines` (positive: up) over the 3D image.
+pub fn scroll_at(app: &mut App, pr: &PrRef, position: Vec2, lines: f32) {
+    let image = image_of(app, pr);
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(position),
+        Scroll {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: lines,
+            hit: nowhere(),
+            phase: TouchPhase::Moved,
+        },
+        image,
+    ));
+    settle(app);
+}
+
+/// The points a click at their own centre would pick (nothing nearer covers them).
+pub fn pickable(app: &mut App, pr: &PrRef) -> Vec<u32> {
+    let image = image_of(app, pr);
+    let size = app
+        .world()
+        .get::<ComputedNode>(image)
+        .expect("a sized image")
+        .size;
+    let ui = keywords_ui(app, pr);
+    let rt = runtime(app, pr);
+    (0..rt.scene.points.len() as u32)
+        .filter(|&i| {
+            let point = &rt.scene.points[i as usize];
+            let Some((at, _)) = render::project(&rt.pose, rt.lens, size, render::world(point.pos))
+            else {
+                return false;
+            };
+            input::pick(&rt.scene, &ui, &rt.pose, rt.lens, size, at) == Some(i)
+        })
+        .collect()
 }

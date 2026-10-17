@@ -28,6 +28,7 @@ use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{Fill, Type, text};
 use crate::ui::spinner::Motion;
 
+pub mod input;
 pub mod panels;
 pub mod render;
 
@@ -136,9 +137,16 @@ pub struct KeywordsPlugin;
 
 impl Plugin for KeywordsPlugin {
     fn build(&self, app: &mut App) {
+        input::add_systems(app);
         app.add_systems(
             Update,
-            (drop_scenes, panels::fill_header, follow_camera)
+            (
+                drop_scenes,
+                panels::fill_header,
+                follow_camera,
+                panels::sync_card,
+                panels::ask_card_code,
+            )
                 .chain()
                 .after(fill_keywords),
         )
@@ -150,6 +158,7 @@ impl Plugin for KeywordsPlugin {
                 apply_looks,
                 restyle,
                 place_labels,
+                panels::sync_tooltip,
             )
                 .chain()
                 .after(UiSystems::PostLayout),
@@ -529,14 +538,21 @@ fn resize_targets(
             continue;
         }
         let rt = &mut *rt;
+        // The scale changes without the size when the window moves to another monitor.
+        let scale = 1.0 / node.inverse_scale_factor;
+        let stale = targets
+            .get(rt.camera)
+            .is_ok_and(|t| matches!(t, RenderTarget::Image(i) if i.scale_factor != scale));
+        if stale
+            && let Ok(mut target) = targets.get_mut(rt.camera)
+            && let RenderTarget::Image(image) = &mut *target
+        {
+            image.scale_factor = scale;
+            redraw.write(RequestRedraw);
+        }
         match render::next_size(rt.size, node.size, now - rt.resized_at) {
             Some(size) => {
                 render::resize_image(&mut images, &rt.image, size);
-                if let Ok(mut target) = targets.get_mut(rt.camera)
-                    && let RenderTarget::Image(image) = &mut *target
-                {
-                    image.scale_factor = 1.0 / node.inverse_scale_factor;
-                }
                 rt.size = size;
                 rt.resized_at = now;
                 rt.frames = 0;
@@ -1133,5 +1149,30 @@ mod tests {
         assert_eq!(use_case_name(&map, ELSEWHERE), ELSEWHERE_NAME);
         assert_eq!(use_case_name(&map, 99), ELSEWHERE_NAME);
         assert_eq!(KEYWORDS_KEY, "keywords");
+    }
+
+    #[test]
+    fn the_target_follows_the_scale_factor_even_when_the_size_stays() {
+        let (mut app, pr) = open();
+        testing::size_keywords(&mut app, &pr, Vec2::new(900.0, 600.0));
+        let scale = |app: &App, pr: &PrRef| {
+            let rt = testing::runtime(app, pr);
+            match app.world().get::<RenderTarget>(rt.camera) {
+                Some(RenderTarget::Image(image)) => image.scale_factor,
+                _ => panic!("an image target"),
+            }
+        };
+        let image = testing::find::<SceneImage>(&mut app, |s| s.0 == pr);
+        app.world_mut().entity_mut(image).insert(ComputedNode {
+            size: Vec2::new(900.0, 600.0),
+            inverse_scale_factor: 0.5,
+            ..ComputedNode::DEFAULT
+        });
+        testing::settle(&mut app);
+        assert_eq!(
+            scale(&app, &pr),
+            2.0,
+            "a monitor swap changes only the scale"
+        );
     }
 }

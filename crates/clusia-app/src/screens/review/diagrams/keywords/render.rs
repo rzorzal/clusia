@@ -120,6 +120,10 @@ pub fn project(pose: &CameraPose, lens: Lens, size: Vec2, world: Vec3) -> Option
             (x / (z * tan_half() * aspect), y / (z * tan_half()))
         }
         Lens::Orthographic => {
+            // The orthographic camera sees no depth, but what is behind its plane is not drawn.
+            if z < 0.0 {
+                return None;
+            }
             let h = ortho_height(pose.distance);
             (x / (h / 2.0 * aspect), y / (h / 2.0))
         }
@@ -146,6 +150,17 @@ pub fn lens_of(view: View3D) -> Lens {
     }
 }
 
+/// `pose` with its distance inside the camera's limits (a distance that is not a number goes to
+/// the default's), so a pose is never beyond what zooming allows.
+pub fn clamped(pose: CameraPose) -> CameraPose {
+    let distance = if pose.distance.is_finite() {
+        pose.distance.clamp(MIN_DISTANCE, MAX_DISTANCE)
+    } else {
+        CameraPose::default().distance
+    };
+    CameraPose { distance, ..pose }
+}
+
 fn flat(yaw: f32, pitch: f32, target: [f32; 3]) -> CameraPose {
     CameraPose {
         yaw,
@@ -168,13 +183,13 @@ pub fn view_pose(view: View3D, pose: &CameraPose) -> CameraPose {
     match view {
         View3D::Free if is_flat(pose) => {
             let d = CameraPose::default();
-            CameraPose {
+            clamped(CameraPose {
                 yaw: d.yaw,
                 pitch: d.pitch,
                 ..*pose
-            }
+            })
         }
-        View3D::Free => *pose,
+        View3D::Free => clamped(*pose),
         View3D::XY => flat(0.0, 0.0, pose.target),
         View3D::XZ => flat(0.0, FRAC_PI_2, pose.target),
         View3D::ZY => flat(-FRAC_PI_2, 0.0, pose.target),
@@ -1148,5 +1163,30 @@ mod tests {
             Vec2::new(250.0, 290.0),
             "a label in the clear does not move"
         );
+    }
+
+    #[test]
+    fn a_point_behind_an_orthographic_camera_is_not_on_the_screen() {
+        let pose = view_pose(View3D::XY, &CameraPose::default());
+        let ahead = Vec3::new(0.0, 0.0, 0.0);
+        let behind = pose.eye() + (pose.eye() - Vec3::from(pose.target)).normalize() * 2.0;
+        assert!(project(&pose, Lens::Orthographic, SIZE, ahead).is_some());
+        assert_eq!(project(&pose, Lens::Orthographic, SIZE, behind), None);
+    }
+
+    #[test]
+    fn a_view_never_holds_a_distance_outside_the_camera_limits() {
+        for distance in [100.0, 0.01, f32::NAN, f32::INFINITY] {
+            let pose = CameraPose {
+                distance,
+                ..CameraPose::default()
+            };
+            let free = view_pose(View3D::Free, &pose);
+            assert!(
+                (MIN_DISTANCE..=MAX_DISTANCE).contains(&free.distance),
+                "{distance} gave {}",
+                free.distance
+            );
+        }
     }
 }

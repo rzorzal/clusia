@@ -191,7 +191,7 @@ impl DiagramsModel {
                 let anchor = self
                     .loaded
                     .get(number)
-                    .and_then(|v| super::modal::node_anchor(v, key, node));
+                    .and_then(|v| super::modal::anchor_of(v, key, node));
                 if !anchor.is_some_and(|a| code.unavailable.is_some() || a.path == code.path) {
                     return;
                 }

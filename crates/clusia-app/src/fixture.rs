@@ -2351,6 +2351,71 @@ pub fn keywords_map_of(places: u32) -> KeywordMap {
     build_map(plan, placement, &hits, vec![0], false, &added)
 }
 
+/// A map with one place: `line` of `path`, a line the pull request adds when `added`.
+pub fn keywords_map_at(path: &str, line: u32, added: bool) -> KeywordMap {
+    let hits = vec![Hit {
+        path: path.into(),
+        line,
+        text: "        let t = self.token();".into(),
+    }];
+    let mut lines = AddedLines::new();
+    if added {
+        lines.entry(path.into()).or_default().insert(line);
+    }
+    let plan = KeywordPlan {
+        title: KEYWORDS_TITLE.into(),
+        caption: String::new(),
+        axes: keyword_axes(),
+        families: vec![Family {
+            id: "token".into(),
+            label: "token".into(),
+            seed: Seed {
+                word: "token".into(),
+                path: path.into(),
+                line,
+            },
+            words: vec!["token".into()],
+            history: None,
+        }],
+        use_cases: vec![UseCase {
+            id: "all".into(),
+            name: "Everything".into(),
+            note: None,
+            history: None,
+        }],
+    };
+    let placement = KeywordPlacement {
+        regions: vec![keyword_region(path, "all", [0.5, 0.5, 0.5])],
+    };
+    build_map(plan, placement, &hits, vec![0], false, &lines)
+}
+
+/// What the demo daemon reads for a keyword place in a file the demo review holds no patch of:
+/// one line before it and two after (the daemon's window for a place).
+pub fn demo_place_code(path: &str, commit: &str, line: u32) -> DiagramCode {
+    let texts = [
+        "        let _g = self.lock();",
+        "        let t = self.token();",
+        "        t.refresh(&client)?;",
+        "    }",
+    ];
+    DiagramCode {
+        path: path.into(),
+        commit: commit.into(),
+        start_line: line.saturating_sub(1).max(1),
+        lines: texts
+            .iter()
+            .zip(line.saturating_sub(1).max(1)..)
+            .map(|(text, number)| CodeLine {
+                number,
+                text: (*text).into(),
+                changed: false,
+            })
+            .collect(),
+        unavailable: None,
+    }
+}
+
 /// The Keywords entry of a version: ready, holding `map`.
 pub fn keywords_entry_of(map: KeywordMap) -> DiagramEntry {
     DiagramEntry {
