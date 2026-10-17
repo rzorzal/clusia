@@ -21,7 +21,7 @@ pub const RADIUS_DECLARED: f32 = 0.044;
 pub const RADIUS_USED: f32 = 0.028;
 /// A bundle of `n` places has radius `RADIUS_USED + RADIUS_BUNDLE_GROWTH · √n`.
 pub const RADIUS_BUNDLE_GROWTH: f32 = 0.0096;
-pub const CLOUD_MIN: f32 = 0.15;
+pub const CLOUD_MIN: f32 = 0.35;
 pub const CLOUD_MAX: f32 = 0.6;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -602,6 +602,11 @@ mod tests {
             let j = jitter("src/a.rs", line, "retry");
             assert!(dist(j, [0.0; 3]) <= JITTER + 1e-6, "{line}: {j:?}");
         }
+    }
+
+    #[test]
+    fn a_cloud_is_never_smaller_than_a_third_of_a_cube_unit_per_axis() {
+        const { assert!(CLOUD_MIN >= 0.35 && CLOUD_MAX == 0.6) };
     }
 
     #[test]

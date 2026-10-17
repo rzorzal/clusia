@@ -1287,7 +1287,7 @@ mod tests {
         );
         let eye = ui.camera.eye();
         assert!(
-            eye.distance(bevy::math::Vec3::new(3.4, 2.3, 3.6) * 1.5) < 1e-4,
+            eye.distance(bevy::math::Vec3::new(3.4, 2.3, 3.6) * 1.4) < 1e-4,
             "{eye}"
         );
     }

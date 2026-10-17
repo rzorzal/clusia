@@ -45,7 +45,7 @@ pub const LINE_WIDTH: f32 = 1.5;
 
 /// How much farther than the mockup's offsets the default and the focus cameras sit, so the
 /// cube's floor and its axis names stay between the pills and the legend.
-const FRAMING: f32 = 1.5;
+const FRAMING: f32 = 1.4;
 
 impl Default for CameraPose {
     /// The mockup's view direction, `FRAMING` times as far: from (3.4, 2.3, 3.6) of the origin.
@@ -783,8 +783,10 @@ mod tests {
 
     #[test]
     fn the_default_framing_keeps_the_whole_cube_between_the_pills_and_the_legend() {
-        // A typical canvas: the pills take the top 8 %, the legend the bottom 12 %.
+        // A typical canvas: the pills take the top 11 %, the legend the bottom 10 %.
         let size = Vec2::new(1270.0, 760.0);
+        let (free_top, free_bottom) = (size.y * 0.11, size.y * 0.90);
+        let (mut top, mut bottom) = (f32::MAX, f32::MIN);
         let pose = CameraPose::default();
         for x in [-1.0, 1.0] {
             for y in [-1.0, 1.0] {
@@ -792,13 +794,17 @@ mod tests {
                     let (at, _) = project(&pose, Lens::Perspective, size, world([x, y, z]))
                         .expect("in front of the camera");
                     assert!(
-                        at.y > size.y * 0.08 && at.y < size.y * 0.88,
+                        at.y > free_top && at.y < free_bottom,
                         "corner {x} {y} {z} at {at}"
                     );
                     assert!(at.x > 0.0 && at.x < size.x, "{at}");
+                    top = top.min(at.y);
+                    bottom = bottom.max(at.y);
                 }
             }
         }
+        let used = (bottom - top) / (free_bottom - free_top);
+        assert!(used >= 0.75, "the cube uses only {used} of the free height");
     }
 
     #[test]
