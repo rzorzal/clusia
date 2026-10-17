@@ -58,6 +58,34 @@ export async function copyFrom(button, env = globalThis, status = null) {
   }, 1500);
 }
 
+// A gallery link points at the light image (so it works without JS) and names the dark one.
+export const lightboxSource = (link, scheme) => (scheme === 'dark' ? link.dataset.dark : link.getAttribute('href'));
+
+function lightbox(root) {
+  const dialog = document.querySelector('dialog.lightbox');
+  if (!dialog) return;
+  // Made here, not in the markup, so the page holds no image without a source.
+  const image = document.createElement('img');
+  dialog.append(image);
+  let opener = null;
+  for (const link of document.querySelectorAll('.gallery a.thumb')) {
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      opener = link;
+      image.src = lightboxSource(link, root.dataset.scheme);
+      image.alt = link.querySelector(`.shot-${root.dataset.scheme === 'dark' ? 'dark' : 'light'}`).alt;
+      dialog.showModal();
+    });
+  }
+  dialog.querySelector('.lightbox-close').addEventListener('click', () => dialog.close());
+  // The dialog's own box is only the backdrop and its padding: the image and the button
+  // fill the rest, so a click that lands on the dialog itself is a click outside.
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog.addEventListener('close', () => opener?.focus());
+}
+
 function parallax(layers, pieces) {
   let queued = false;
   // Where the layout put each piece, in page coordinates, taken once and again on resize or
@@ -122,6 +150,7 @@ function init() {
   if (still || !('IntersectionObserver' in window)) items.forEach((item) => item.classList.add('is-visible'));
   else reveal(items);
   root.classList.add('js');
+  lightbox(root);
 
   if (!still) {
     parallax(

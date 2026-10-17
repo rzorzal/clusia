@@ -1519,3 +1519,113 @@ body.home {
 .feature-cli .code {
   margin-bottom: 0;
 }
+
+/* ---------- Screens page ---------- */
+
+.screens-note {
+  margin: 0 0 24px;
+  font-size: 14.5px;
+  color: var(--muted);
+}
+
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  gap: clamp(20px, 3vw, 32px);
+  margin: clamp(32px, 5vw, 56px) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.thumb-item {
+  margin: 0;
+}
+
+.thumb {
+  display: block;
+  line-height: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.thumb:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 0 0 2px var(--accent), var(--shadow);
+}
+
+.thumb:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* No display here: .shot-dark and .shot-light decide which image shows. The zero line height
+   keeps the inline image from leaving a gap under it. */
+.thumb :where(img) {
+  width: 100%;
+  aspect-ratio: 8 / 5;
+  height: auto;
+  object-fit: cover;
+  object-position: top;
+}
+
+.thumb-tall :where(img) {
+  object-fit: contain;
+  background: var(--card);
+}
+
+.thumb-item figcaption {
+  margin-top: 12px;
+  font-size: 14.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.lightbox {
+  width: min(1600px, 100vw - 32px);
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  overflow: auto;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.lightbox::backdrop {
+  background: rgb(8 12 10 / 0.72);
+}
+
+.lightbox img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.lightbox-close {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  z-index: 1;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 50%;
+  font-size: 26px;
+  line-height: 1;
+  color: #fff;
+  background: rgb(8 12 10 / 0.7);
+  cursor: pointer;
+}
+
+.lightbox-close:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thumb {
+    transition: none;
+  }
+}
