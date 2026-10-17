@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { checkDir } from '../tools/check.mjs';
@@ -18,17 +18,37 @@ const NAV = `<nav>
 </nav>`;
 const COPY = `<div class="install"><code data-copy>${INSTALL}</code></div>`;
 
-const page = ({ head = '', body = '', copy = COPY } = {}) =>
-  `<!doctype html><html><head><title>t</title>${head}</head><body>${NAV}${body}${copy}</body></html>`;
+const BASE = 'https://rzorzal.github.io/clusia/';
+const canonicalOf = (name) => (name === 'index.html' ? BASE : BASE + name);
+const seo = (name, { skip = [] } = {}) =>
+  [
+    ['description', `<meta name="description" content="About ${name}.">`],
+    ['canonical', `<link rel="canonical" href="${canonicalOf(name)}">`],
+    ['og:title', `<meta property="og:title" content="t">`],
+    ['og:description', `<meta property="og:description" content="d">`],
+    ['og:image', `<meta property="og:image" content="${BASE}assets/site-og.png">`],
+    ['og:url', `<meta property="og:url" content="${canonicalOf(name)}">`],
+    ['twitter:card', `<meta name="twitter:card" content="summary_large_image">`],
+  ]
+    .filter(([k]) => !skip.includes(k))
+    .map(([, tag]) => tag)
+    .join('');
 
-function fixture(files) {
+const page = ({ head = '', body = '', copy = COPY, name = 'index.html', skip = [] } = {}) =>
+  `<!doctype html><html><head><title>t</title>${seo(name, { skip })}${head}</head><body>${NAV}${body}${copy}</body></html>`;
+
+function fixture(files, { og = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'site-check-'));
-  for (const [name, html] of Object.entries(files)) writeFileSync(join(dir, name), html);
+  if (og) files = { 'assets/site-og.png': '', ...files };
+  for (const [name, html] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, name)), { recursive: true });
+    writeFileSync(join(dir, name), html);
+  }
   return dir;
 }
 
 const ALL = Object.fromEntries(
-  ['index.html', 'features.html', 'screens.html', 'install.html', 'quick-start.html'].map((n) => [n, page()]),
+  ['index.html', 'features.html', 'screens.html', 'install.html', 'quick-start.html'].map((n) => [n, page({ name: n })]),
 );
 
 test('a clean fixture with all five pages passes with no output', () => {
@@ -118,4 +138,43 @@ test('a non-demo owner/repo#N in an alt, title or content attribute fails', () =
 test('a page without the nav links fails', () => {
   const dir = fixture({ 'index.html': `<!doctype html><html><body>${COPY}</body></html>` });
   assert.ok(checkDir(dir).some((p) => /nav/.test(p)));
+});
+
+test('a page missing any of the share tags fails and names the tag', () => {
+  for (const [skip, pattern] of [
+    ['description', /meta description/],
+    ['canonical', /canonical/],
+    ['og:title', /og:title/],
+    ['og:description', /og:description/],
+    ['og:image', /og:image/],
+    ['og:url', /og:url/],
+    ['twitter:card', /twitter:card/],
+  ]) {
+    const dir = fixture({ ...ALL, 'features.html': page({ name: 'features.html', skip: [skip] }) });
+    assert.ok(checkDir(dir).some((p) => p.startsWith('features.html') && pattern.test(p)), `missing ${skip}`);
+  }
+});
+
+test('og:url must equal the canonical', () => {
+  const html = page({ name: 'features.html', skip: ['og:url'], head: '<meta property="og:url" content="https://rzorzal.github.io/clusia/other">' });
+  const problems = checkDir(fixture({ ...ALL, 'features.html': html }));
+  assert.ok(problems.some((p) => /og:url/.test(p) && /canonical/.test(p)));
+});
+
+test('two pages with the same description fail', () => {
+  const same = (n) => page({ name: n, skip: ['description'], head: '<meta name="description" content="Same words.">' });
+  const dir = fixture({ ...ALL, 'features.html': same('features.html'), 'screens.html': same('screens.html') });
+  assert.ok(checkDir(dir).some((p) => /same description/.test(p)));
+});
+
+test('the share image must be in the output', () => {
+  const dir = fixture(ALL, { og: false });
+  assert.ok(checkDir(dir).some((p) => p.includes('assets/site-og.png')));
+});
+
+test('a 404 page needs no share tags, and its absolute base keeps its relative links resolving at the root', () => {
+  const html = `<!doctype html><html><head><base href="https://rzorzal.github.io/clusia/"><meta name="robots" content="noindex"></head><body>${NAV}<a href="install.html">i</a>${COPY}</body></html>`;
+  assert.deepEqual(checkDir(fixture({ ...ALL, '404.html': html })), []);
+  const broken = html.replace('install.html">i', 'gone.html">i');
+  assert.ok(checkDir(fixture({ ...ALL, '404.html': broken })).some((p) => p.startsWith('404.html') && p.includes('gone.html')));
 });

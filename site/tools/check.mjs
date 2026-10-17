@@ -6,7 +6,11 @@ const INSTALL = 'curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/mai
 const PAGES = ['index.html', 'features.html', 'screens.html', 'install.html', 'quick-start.html'];
 const REPO_URL = 'https://github.com/rzorzal/clusia';
 const DEMO_OWNERS = new Set(['rzorzal', 'acme', 'octo']);
-const ALLOWED_LINK_HOSTS = new Set(['fonts.googleapis.com', 'fonts.gstatic.com']);
+const SITE_URL = 'https://rzorzal.github.io/clusia/';
+// The site's own origin is allowed for canonical links; the rest are the font hosts.
+const ALLOWED_LINK_HOSTS = new Set(['fonts.googleapis.com', 'fonts.gstatic.com', new URL(SITE_URL).hostname]);
+// Served for any missing path, so it carries a <base> and has no share tags of its own.
+const NOT_FOUND = '404.html';
 
 const htmlFiles = (dir) =>
   readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -22,6 +26,16 @@ const attr = (attrs, name) => {
   return m ? (m[1] ?? m[2] ?? m[3]) : null;
 };
 const hasAttr = (attrs, name) => new RegExp(`(?:^|\\s)${name}(?=[\\s=/]|$)`, 'i').test(attrs);
+
+// Content of the first <meta> whose `key` attribute (name or property) is `value`.
+const metaContent = (html, key, value) => {
+  for (const a of tagsOf(html, 'meta')) if (attr(a, key) === value) return attr(a, 'content');
+  return null;
+};
+const canonicalOf = (html) => {
+  for (const a of tagsOf(html, 'link')) if ((attr(a, 'rel') ?? '').toLowerCase() === 'canonical') return attr(a, 'href');
+  return null;
+};
 
 const isExternal = (url) => /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url);
 const stripComments = (html) => html.replace(/<!--[\s\S]*?-->/g, '');
@@ -39,6 +53,9 @@ export function checkDir(dir) {
   for (const page of PAGES) {
     if (!existsSync(join(root, page))) problems.push(`${page}: the page is missing`);
   }
+
+  const descriptions = new Map();
+  if (!existsSync(join(root, 'assets/site-og.png'))) problems.push('assets/site-og.png: the share image is missing');
 
   for (const file of htmlFiles(root)) {
     const html = stripComments(readFileSync(file, 'utf8'));
@@ -63,6 +80,21 @@ export function checkDir(dir) {
       if (existsSync(target) && statSync(target).isDirectory()) target = join(target, 'index.html');
       if (existsSync(target)) continue;
       fail(file, `${kind}="${url}" does not resolve to a file`);
+    }
+
+    if (relative(root, file) !== NOT_FOUND) {
+      const canonical = canonicalOf(html);
+      if (!canonical) fail(file, 'needs a <link rel="canonical">');
+      const description = (metaContent(html, 'name', 'description') ?? '').trim();
+      if (!description) fail(file, 'needs a meta description');
+      else if (descriptions.has(description)) fail(file, `has the same description as ${descriptions.get(description)}`);
+      else descriptions.set(description, relative(root, file));
+      for (const prop of ['og:title', 'og:description', 'og:image', 'og:url']) {
+        if (!(metaContent(html, 'property', prop) ?? '').trim()) fail(file, `needs <meta property="${prop}">`);
+      }
+      const ogUrl = metaContent(html, 'property', 'og:url');
+      if (canonical && ogUrl && ogUrl !== canonical) fail(file, `og:url ${ogUrl} must equal the canonical ${canonical}`);
+      if (!(metaContent(html, 'name', 'twitter:card') ?? '').trim()) fail(file, 'needs <meta name="twitter:card">');
     }
 
     for (const a of tagsOf(html, 'img')) {
