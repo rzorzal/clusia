@@ -16,11 +16,12 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use bevy::window::PrimaryWindow;
 
 use clusia_core::PrRef;
-use clusia_core::diagram::{EntryInfo, EntryStateName};
+use clusia_core::diagram::{DiagramKind, EntryInfo, EntryStateName};
 use clusia_core::printable::printable;
 use clusia_protocol::DiagramsState;
 
 use super::DiagramCanvas;
+use super::keywords::KeywordsCanvas;
 use super::model::{Diagrams, DiagramsModel, selected_key};
 use crate::bridge::{Ask, Asks, Model, Toasts};
 use crate::fonts::UiFonts;
@@ -107,6 +108,8 @@ pub struct MenuView {
 pub struct RowView {
     pub key: String,
     pub name: String,
+    /// A small tag after the name: `3D` for the keyword map.
+    pub tag: Option<&'static str>,
     /// The subtitle: `Flow · 5 boxes`, `drawing…`, `could not draw · Retry`.
     pub meta: String,
     pub state: RowState,
@@ -167,6 +170,8 @@ pub enum Pane {
         key: String,
         compare: bool,
     },
+    /// The selected entry is a keyword map: `KeywordsCanvas` draws it.
+    Keywords { number: u32, key: String },
     /// The selected entry has no drawing: why, and **Retry** on the latest version.
     Entry {
         title: String,
@@ -230,9 +235,33 @@ fn row_state(state: EntryStateName) -> RowState {
     }
 }
 
+/// What the daemon says it is doing on the entry being drawn (`Finding where the words live…`).
+fn drawing_step(state: &DiagramsState, e: &EntryInfo) -> Option<String> {
+    match state {
+        DiagramsState::Drawing {
+            key,
+            step: Some(step),
+            ..
+        } if *key == e.key && e.state == EntryStateName::Drawing => Some(cut(step, REASON_MAX)),
+        _ => None,
+    }
+}
+
+/// `Keywords · 4 families · 64 places`.
+pub fn keywords_meta(families: u32, places: u32) -> String {
+    format!(
+        "Keywords · {} · {}",
+        plural(families, "family", "families"),
+        plural(places, "place", "places")
+    )
+}
+
 fn meta_of(e: &EntryInfo, latest: bool) -> String {
     let retry = if latest { " · Retry" } else { "" };
     match e.state {
+        EntryStateName::Ready if e.kind == DiagramKind::Keywords => {
+            keywords_meta(e.count, e.places)
+        }
         EntryStateName::Ready => e.kind.list_meta(e.count),
         EntryStateName::Waiting => "waiting".into(),
         EntryStateName::Drawing => "drawing…".into(),
@@ -319,7 +348,8 @@ pub fn diagrams_view(i: &Inputs) -> DiagramsView {
             RowView {
                 key: e.key.clone(),
                 name: printable(&e.title),
-                meta: meta_of(e, latest),
+                tag: (e.kind == DiagramKind::Keywords).then_some("3D"),
+                meta: drawing_step(&m.state, e).unwrap_or_else(|| meta_of(e, latest)),
                 state: row_state(e.state),
                 selected,
                 menu: if selected {
@@ -388,11 +418,20 @@ pub fn diagrams_view(i: &Inputs) -> DiagramsView {
             retry: None,
         },
         Some(e) => match e.state {
-            EntryStateName::Ready if m.loaded.contains_key(&info.number) => Pane::Canvas {
-                number: info.number,
-                key: e.key.clone(),
-                compare,
-            },
+            EntryStateName::Ready if m.loaded.contains_key(&info.number) => {
+                if e.kind == DiagramKind::Keywords {
+                    Pane::Keywords {
+                        number: info.number,
+                        key: e.key.clone(),
+                    }
+                } else {
+                    Pane::Canvas {
+                        number: info.number,
+                        key: e.key.clone(),
+                        compare,
+                    }
+                }
+            }
             EntryStateName::Ready if m.failed.contains(&info.number) => Pane::Entry {
                 title: "Diagrams".into(),
                 line: "This version could not be read.".into(),
@@ -734,7 +773,27 @@ fn draw_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row: &Row
             } else {
                 Type::MUTED
             };
-            c.spawn(text(fonts, row.name.clone(), name));
+            c.spawn(Node {
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                ..default()
+            })
+            .with_children(|n| {
+                n.spawn(text(fonts, row.name.clone(), name));
+                if let Some(tag) = row.tag {
+                    n.spawn((
+                        Node {
+                            padding: UiRect::horizontal(px(4)),
+                            border: UiRect::all(px(1)),
+                            border_radius: BorderRadius::all(px(4)),
+                            ..default()
+                        },
+                        BorderColor::default(),
+                        Stroke(Swatch::Green),
+                        children![text(fonts, tag, Type::META.size(10.0).ink(Swatch::Green))],
+                    ));
+                }
+            });
             let meta = match row.state {
                 RowState::Failed | RowState::NotDrawn => Type::META.size(11.0).ink(Swatch::Orange),
                 _ => Type::META.size(11.0),
@@ -887,6 +946,20 @@ fn draw_pane(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, pane: &P
                 BackgroundColor::default(),
                 Fill(Swatch::Surface),
                 DiagramCanvas(pr.clone()),
+            ));
+        }
+        Pane::Keywords { .. } => {
+            p.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    min_width: px(0),
+                    min_height: px(0),
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                BackgroundColor::default(),
+                Fill(Swatch::SceneBg),
+                KeywordsCanvas(pr.clone()),
             ));
         }
         Pane::Loading => {
@@ -2273,5 +2346,122 @@ mod tests {
         let label = app.world().get::<Children>(link).unwrap()[0];
         let ink = app.world().get::<crate::ui::kit::Ink>(label).map(|i| i.0);
         assert_eq!(ink, Some(crate::theme::Swatch::Green));
+    }
+
+    fn keywords_model() -> DiagramsModel {
+        let mut m = DiagramsModel::default();
+        let versions =
+            fixture::with_keywords_map(fixture::demo_diagrams(NOW, &pr()), fixture::keywords_map());
+        let Tell::Diagrams(tell) = fixture::diagrams_tell_of(&pr(), versions) else {
+            panic!("a diagrams tell");
+        };
+        m.apply(&tell);
+        m
+    }
+
+    #[test]
+    fn the_keywords_entry_is_listed_last_with_its_tag_and_its_counts() {
+        let m = keywords_model();
+        let v = diagrams_view(&inputs(Some(&m)));
+        let list = list_of(&v);
+        assert_eq!(list.heading, "DIAGRAMS · 9");
+        let last = list.rows.last().expect("rows");
+        assert_eq!(
+            (last.key.as_str(), last.name.as_str(), last.state),
+            ("keywords", "Where the words live", RowState::Ready)
+        );
+        assert_eq!(last.tag, Some("3D"));
+        let places = fixture::keywords_map().total_places();
+        assert_eq!(
+            last.meta,
+            format!("Keywords · 4 families · {places} places")
+        );
+        assert!(
+            list.rows[..list.rows.len() - 1]
+                .iter()
+                .all(|r| r.tag.is_none()),
+            "only the map is tagged"
+        );
+    }
+
+    #[test]
+    fn the_drawing_entry_shows_the_step_the_daemon_reports() {
+        let mut m = keywords_model();
+        m.apply(&DiagramsTell::Entry {
+            pr: pr(),
+            number: 2,
+            key: "keywords".into(),
+            state: EntryState::Drawing,
+        });
+        let drawing = |step: Option<&str>| DiagramsState::Drawing {
+            done: 8,
+            total: 9,
+            key: "keywords".into(),
+            step: step.map(String::from),
+        };
+        m.state = drawing(Some("Finding where the words live…"));
+        let v = diagrams_view(&inputs(Some(&m)));
+        let row = |v: &DiagramsView, key: &str| {
+            list_of(v)
+                .rows
+                .iter()
+                .find(|r| r.key == key)
+                .map(|r| (r.state, r.meta.clone()))
+                .expect("a row")
+        };
+        assert_eq!(
+            row(&v, "keywords"),
+            (
+                RowState::Drawing,
+                "Finding where the words live…".to_string()
+            )
+        );
+        assert_eq!(
+            row(&v, "flow").1,
+            "Flow · 5 boxes",
+            "other rows keep theirs"
+        );
+        m.state = drawing(Some("Placing files on the axes…"));
+        let v = diagrams_view(&inputs(Some(&m)));
+        assert_eq!(row(&v, "keywords").1, "Placing files on the axes…");
+        m.state = drawing(None);
+        let v = diagrams_view(&inputs(Some(&m)));
+        assert_eq!(row(&v, "keywords").1, "drawing…");
+    }
+
+    #[test]
+    fn the_keywords_subtitle_counts_one_family_and_one_place_in_the_singular() {
+        assert_eq!(keywords_meta(1, 1), "Keywords · 1 family · 1 place");
+        assert_eq!(keywords_meta(12, 0), "Keywords · 12 families · 0 places");
+    }
+
+    #[test]
+    fn a_ready_map_shows_the_keywords_pane_and_the_others_the_box_canvas() {
+        let m = keywords_model();
+        let mut i = inputs(Some(&m));
+        i.selected = Some("keywords");
+        assert_eq!(
+            diagrams_view(&i).pane,
+            Pane::Keywords {
+                number: 2,
+                key: "keywords".into()
+            }
+        );
+        i.selected = Some("flow");
+        assert!(matches!(diagrams_view(&i).pane, Pane::Canvas { .. }));
+    }
+
+    #[test]
+    fn the_tab_draws_the_row_and_the_keywords_canvas() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let _pr = testing::open_keywords(&mut app);
+        assert!(testing::shows(&mut app, "Where the words live"));
+        assert!(testing::shows(&mut app, "3D"));
+        assert!(testing::shows(&mut app, "Keywords · 4 families"));
+        assert!(testing::shows(&mut app, "DIAGRAMS · 9"));
+        assert_eq!(
+            testing::count::<crate::screens::review::diagrams::keywords::KeywordsCanvas>(&mut app),
+            1
+        );
     }
 }

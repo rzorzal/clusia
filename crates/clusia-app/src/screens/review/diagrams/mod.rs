@@ -11,6 +11,7 @@ use crate::review_state::ReviewTabs;
 use crate::screens::review::ReviewSystems;
 
 pub mod canvas;
+pub mod keywords;
 pub mod list;
 pub mod modal;
 pub mod model;
@@ -30,6 +31,7 @@ impl Plugin for DiagramsPlugin {
     fn build(&self, app: &mut App) {
         list::add_systems(app);
         canvas::add_systems(app);
+        app.add_plugins(keywords::KeywordsPlugin);
         app.add_systems(
             Update,
             (
@@ -37,6 +39,7 @@ impl Plugin for DiagramsPlugin {
                 list::fill_diagrams,
                 list::sync_menu,
                 canvas::fill_canvas,
+                keywords::fill_keywords,
             )
                 .chain()
                 .after(ReviewSystems),
