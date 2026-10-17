@@ -87,7 +87,7 @@
   </ul>
 </section>
 
-<section class="reveal">
+<section>
   <h2>Options</h2>
   <div class="table-scroll">
     <table>
@@ -104,14 +104,14 @@
   <div class="code"><pre><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash -s -- --no-brew</code></pre><button class="copy" aria-label="Copy the command with an option">Copy</button></div>
 </section>
 
-<section class="reveal">
+<section>
   <h2>Homebrew by hand</h2>
   <p>The same two steps the script runs:</p>
   <div class="code"><pre><code data-copy>brew install --HEAD rzorzal/clusia/clusia
 clusia install --from &quot;$(brew --prefix clusia)/libexec/bin&quot;</code></pre><button class="copy" aria-label="Copy the Homebrew commands">Copy</button></div>
 </section>
 
-<section class="reveal">
+<section>
   <h2>Read the script first</h2>
   <p>Download it, read it, then run it:</p>
   <div class="code"><pre><code data-copy>curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh -o install.sh
@@ -119,7 +119,7 @@ less install.sh
 bash install.sh</code></pre><button class="copy" aria-label="Copy the commands that download the script">Copy</button></div>
 </section>
 
-<section class="reveal">
+<section>
   <h2>From a clone</h2>
   <p>From a clone of the repository (you need Git and the Rust toolchain pinned in <code>rust-toolchain.toml</code>):</p>
   <div class="code"><pre><code data-copy>cargo run --release -p clusia -- install</code></pre><button class="copy" aria-label="Copy the build command">Copy</button></div>
@@ -131,7 +131,7 @@ bash install.sh</code></pre><button class="copy" aria-label="Copy the commands t
   <p>Run the same command again. It replaces the app and keeps your settings and the notification permission.</p>
 </section>
 
-<section class="reveal">
+<section>
   <h2>Uninstall</h2>
   <div class="code"><pre><code data-copy>clusia uninstall
 brew uninstall clusia    # only if you installed through Homebrew</code></pre><button class="copy" aria-label="Copy the uninstall commands">Copy</button></div>

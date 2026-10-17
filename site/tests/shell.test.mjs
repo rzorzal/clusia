@@ -135,3 +135,24 @@ test('site.css pins the scheme colors, the card glass and the screenshot pair', 
   // Without JavaScript the landscape still has its day colors.
   assert.ok(light.includes('--sky-top: #e9f5ec;'));
 });
+
+// The element a tag opens, up to its matching close tag, counting nested tags of the same name.
+function elementAt(html, index, name) {
+  const re = new RegExp(`<(/?)${name}\\b[^>]*>`, 'gi');
+  re.lastIndex = index;
+  let depth = 0;
+  for (let m; (m = re.exec(html)); ) {
+    depth += m[1] ? -1 : 1;
+    if (depth === 0) return html.slice(index, m.index + m[0].length);
+  }
+  return html.slice(index);
+}
+
+for (const page of SHELL_PAGES) {
+  test(`${page} never hides the install command behind a reveal`, () => {
+    const html = read(page);
+    for (const m of html.matchAll(/<([a-z][a-z0-9]*)\b[^>]*\bclass="[^"]*\breveal\b[^"]*"[^>]*>/gi)) {
+      assert.ok(!/\sdata-copy\b/.test(elementAt(html, m.index, m[1])), `${m[0]} contains a data-copy element`);
+    }
+  });
+}
