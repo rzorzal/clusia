@@ -7,9 +7,9 @@ const SITE = fileURLToPath(new URL('..', import.meta.url));
 const DOCS = fileURLToPath(new URL('../../docs/', import.meta.url));
 const INSTALL = 'curl -fsSL https://raw.githubusercontent.com/rzorzal/clusia/main/install.sh | bash';
 const INSTALL_BLOCK = `<div class="install"><code data-copy>${INSTALL}</code><button class="copy" aria-label="Copy install command">Copy</button></div>`;
-const SHELL_PAGES = ['index.html', 'install.html', 'features.html'];
+const SHELL_PAGES = ['index.html', 'install.html', 'features.html', 'quick-start.html'];
 // The home tells its story on the sky and the sand, so its main is not the floating card.
-const MAIN_CLASS = { 'index.html': 'story', 'install.html': 'card', 'features.html': 'card card-wide' };
+const MAIN_CLASS = { 'index.html': 'story', 'install.html': 'card', 'features.html': 'card card-wide', 'quick-start.html': 'card card-wide' };
 
 const read = (name) => readFileSync(SITE + name, 'utf8');
 const between = (html, open, close) => {

@@ -1629,3 +1629,33 @@ body.home {
     transition: none;
   }
 }
+
+/* ---------- Quick start ---------- */
+
+.install-lead {
+  margin: 22px 0 -4px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.steps + .shot {
+  margin-top: 32px;
+}
+
+/* The description column is prose, so it wraps even though the first two columns of a table do not. */
+.table-cmds td:nth-child(2) {
+  white-space: normal;
+}
+
+@media (max-width: 700px) {
+  .table-cmds td:first-child {
+    white-space: normal;
+  }
+
+  .table-cmds code {
+    overflow-wrap: anywhere;
+  }
+}
