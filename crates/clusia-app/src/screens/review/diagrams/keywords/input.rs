@@ -334,11 +334,12 @@ pub(super) fn attach_input(mut commands: Commands, added: Query<Entity, Added<Sc
                 },
             )
             .observe(
-                move |scrolled: On<Pointer<Scroll>>,
+                move |mut scrolled: On<Pointer<Scroll>>,
                       images: Images,
                       mut runtimes: Runtimes,
                       mut tabs: ResMut<ReviewTabs>,
                       mut redraw: MessageWriter<RequestRedraw>| {
+                    scrolled.propagate(false);
                     let Ok((scene_image, _, _)) = images.get(image) else {
                         return;
                     };
@@ -351,7 +352,10 @@ pub(super) fn attach_input(mut commands: Commands, added: Query<Entity, Added<Sc
                         &mut rt.pose,
                         wheel_zoom(wheel_pixels(line, scrolled.event.y)),
                     );
-                    if let Some(tab) = tabs.0.get_mut(&scene_image.0) {
+                    // The tab's pose waits for the drag to end, which writes it.
+                    if !rt.dragging
+                        && let Some(tab) = tabs.0.get_mut(&scene_image.0)
+                    {
                         tab.ui.keywords.camera = rt.pose;
                     }
                     redraw.write(RequestRedraw);
@@ -367,6 +371,7 @@ pub(super) fn pinch(
     images: Images,
     mut runtimes: Runtimes,
     mut tabs: ResMut<ReviewTabs>,
+    mut redraw: MessageWriter<RequestRedraw>,
 ) {
     let cursor = windows.iter().next().and_then(Window::cursor_position);
     for pinch in pinches.read() {
@@ -381,6 +386,7 @@ pub(super) fn pinch(
                 if let Some(tab) = tabs.0.get_mut(&scene_image.0) {
                     tab.ui.keywords.camera = rt.pose;
                 }
+                redraw.write(RequestRedraw);
             }
         }
     }
@@ -760,5 +766,19 @@ mod tests {
         };
         orbit_by(&mut near, 0.1, 0.1);
         assert!((MIN_DISTANCE..=MAX_DISTANCE).contains(&near.distance));
+    }
+
+    #[test]
+    fn a_scroll_during_a_drag_zooms_the_view_but_leaves_the_tabs_pose_to_the_release() {
+        let (mut app, pr) = open();
+        let held = testing::keywords_ui(&app, &pr).camera;
+        let runtime = testing::find::<KeywordsRuntime>(&mut app, |_| true);
+        app.world_mut()
+            .get_mut::<KeywordsRuntime>(runtime)
+            .expect("a runtime")
+            .dragging = true;
+        testing::scroll_at(&mut app, &pr, blank(), 3.0);
+        assert!(testing::runtime(&app, &pr).pose.distance < held.distance);
+        assert_eq!(testing::keywords_ui(&app, &pr).camera, held);
     }
 }

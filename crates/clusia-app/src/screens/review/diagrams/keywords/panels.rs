@@ -3,6 +3,8 @@
 //! setting that turns the view off. `spawn_overlays` is where the panels that sit on the scene
 //! itself are added.
 
+use std::collections::HashMap;
+
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::Pickable;
@@ -732,48 +734,50 @@ pub(super) fn sync_card(
     }
 }
 
-/// Asks the daemon for the code of the open card's place once per card, as soon as there is a
+/// Asks the daemon for the code of each open card's place once per card, as soon as there is a
 /// connection (the dialog asks for the same key and finds the answer).
 pub(super) fn ask_card_code(
     tabs: Res<ReviewTabs>,
     diagrams: Res<Diagrams>,
     model: Res<Model>,
     runtimes: Query<(&KeywordsCanvas, &KeywordsRuntime)>,
-    mut asked: Local<Option<(PrRef, u32, String, String)>>,
+    mut asked: Local<HashMap<PrRef, (u32, String, String)>>,
     mut asks: ResMut<Asks>,
 ) {
-    let wanted = runtimes.iter().find_map(|(c, rt)| {
-        let i = tabs.0.get(&c.0)?.ui.keywords.card?;
-        let point = rt.scene.points.get(i as usize)?;
-        if point.shape == PointShape::Bundle {
-            return None;
+    asked.retain(|pr, _| runtimes.iter().any(|(c, _)| c.0 == *pr));
+    for (canvas, rt) in &runtimes {
+        let wanted = tabs
+            .0
+            .get(&canvas.0)
+            .and_then(|tab| tab.ui.keywords.card)
+            .and_then(|i| rt.scene.points.get(i as usize))
+            .filter(|point| point.shape != PointShape::Bundle)
+            .and_then(|point| point.places.first())
+            .map(|&first| (rt.number, rt.key.clone(), place_node(first as usize)));
+        let Some(id) = wanted else {
+            asked.remove(&canvas.0);
+            continue;
+        };
+        if diagrams
+            .0
+            .get(&canvas.0)
+            .is_some_and(|m| m.code.contains_key(&id))
+        {
+            asked.remove(&canvas.0);
+            continue;
         }
-        let node = place_node(*point.places.first()? as usize);
-        Some((c.0.clone(), rt.number, rt.key.clone(), node))
-    });
-    let Some((pr, number, key, node)) = wanted else {
-        *asked = None;
-        return;
-    };
-    if diagrams
-        .0
-        .get(&pr)
-        .is_some_and(|m| m.code.contains_key(&(number, key.clone(), node.clone())))
-    {
-        *asked = None;
-        return;
+        if model.connection != Connection::Live || asked.get(&canvas.0) == Some(&id) {
+            continue;
+        }
+        asked.insert(canvas.0.clone(), id.clone());
+        let (number, key, node) = id;
+        asks.send(Ask::ReadDiagramCode {
+            pr: canvas.0.clone(),
+            number,
+            key,
+            node,
+        });
     }
-    let id = (pr.clone(), number, key.clone(), node.clone());
-    if model.connection != Connection::Live || asked.as_ref() == Some(&id) {
-        return;
-    }
-    *asked = Some(id);
-    asks.send(Ask::ReadDiagramCode {
-        pr,
-        number,
-        key,
-        node,
-    });
 }
 
 /// Adds the tooltip and the card, above every other panel.
@@ -1122,11 +1126,7 @@ mod place_tests {
             "only the place's own line, not the lines the daemon marks"
         );
         let numbers: Vec<u32> = rows.iter().map(|r| r.number).collect();
-        assert_eq!(
-            numbers,
-            [43, 44, 45, 46],
-            "one line before and two after (C3)"
-        );
+        assert_eq!(numbers, [43, 44, 45, 46], "one line before and two after");
         assert!(rows[1].changed, "the lit row is the second");
     }
 
@@ -1315,5 +1315,65 @@ mod place_tests {
             testing::tab(&app, &pr).ui.diagram_node,
             Some((2, "keywords".to_string(), place_node(place as usize)))
         );
+    }
+
+    #[test]
+    fn every_canvas_with_a_card_asks_for_its_own_code() {
+        let (mut app, pr) = open();
+        let other: PrRef = "rzorzal/clusia#124".parse().expect("valid ref");
+        let i = first_of(
+            &testing::runtime(&app, &pr).scene,
+            PointShape::Declared,
+            Some(true),
+        );
+        let mut tab = testing::tab(&app, &pr);
+        tab.ui.keywords.card = Some(i);
+        let copy = {
+            let rt = testing::runtime(&app, &pr);
+            KeywordsRuntime {
+                number: rt.number,
+                key: rt.key.clone(),
+                map: rt.map.clone(),
+                scene: rt.scene.clone(),
+                camera: rt.camera,
+                image: rt.image.clone(),
+                assets: rt.assets.clone(),
+                points: rt.points.clone(),
+                rings: rt.rings.clone(),
+                clouds: rt.clouds.clone(),
+                hover: None,
+                cursor: None,
+                pose: rt.pose,
+                tween: None,
+                lens: rt.lens,
+                dragging: false,
+                size: rt.size,
+                resized_at: rt.resized_at,
+                frames: 0,
+                applied: None,
+                synced: None,
+            }
+        };
+        app.world_mut().spawn((KeywordsCanvas(other.clone()), copy));
+        testing::recorded(&mut app);
+        app.world_mut()
+            .resource_mut::<crate::nav::Nav>()
+            .reviews
+            .push(other.clone());
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            tabs.0.insert(other.clone(), tab);
+            tabs.0.get_mut(&pr).expect("the tab").ui.keywords.card = Some(i);
+        }
+        testing::settle(&mut app);
+        let mut asked: Vec<PrRef> = testing::recorded(&mut app)
+            .into_iter()
+            .filter_map(|a| match a {
+                Ask::ReadDiagramCode { pr, .. } => Some(pr),
+                _ => None,
+            })
+            .collect();
+        asked.sort_by_key(|p| p.to_string());
+        assert_eq!(asked, [pr, other]);
     }
 }

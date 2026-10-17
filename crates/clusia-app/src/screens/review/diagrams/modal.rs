@@ -182,7 +182,10 @@ fn subject(version: &DiagramVersion, key: &str, node: &str) -> Option<Subject> {
     }
     let (map, index) = place_of(version, key, node)?;
     let place = map.places.get(index)?;
-    let use_case = map.use_case_of(place).map_or(ELSEWHERE, |u| u as u16);
+    let use_case = map
+        .use_case_of(place)
+        .and_then(|u| u16::try_from(u).ok())
+        .unwrap_or(ELSEWHERE);
     let family = map.plan.families.get(map.family_of(place))?;
     Some(Subject {
         label: printable(&map.words.get(usize::from(place.word))?.text),
