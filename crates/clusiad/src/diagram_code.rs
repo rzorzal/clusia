@@ -152,7 +152,8 @@ fn unavailable(anchor: &CodeAnchor, commit: &str, why: String) -> Outcome {
 
 /// `ReadDiagramCode`. A place of the keyword map gets one line before it. A version at the
 /// review's head is read from the worktree, and its lines the pull request adds are marked; an
-/// older one is read from its pinned commit, with no line marked. Code that cannot be read comes back as `unavailable`, not as an error.
+/// older one is read from its pinned commit, with no line marked. Code that cannot be read comes
+/// back as `unavailable`, not as an error.
 pub(crate) async fn read(
     shared: &Shared,
     pr: &PrRef,

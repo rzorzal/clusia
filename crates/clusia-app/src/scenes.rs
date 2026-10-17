@@ -1722,7 +1722,13 @@ mod tests {
             );
             let ui = testing::keywords_ui(&app, &pr);
             match scene {
-                Scene::DiagramsKeywords => assert_eq!(ui, KeywordsUi::default()),
+                Scene::DiagramsKeywords => assert_eq!(
+                    ui,
+                    KeywordsUi {
+                        shown: ui.shown.clone(),
+                        ..KeywordsUi::default()
+                    }
+                ),
                 Scene::DiagramsKeywordsUsecase => {
                     assert_eq!(map.plan.use_cases[0].name, "Token refresh");
                     assert_eq!(ui.use_case, Some(0));

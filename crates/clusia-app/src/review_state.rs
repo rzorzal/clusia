@@ -314,6 +314,8 @@ pub struct KeywordsUi {
     pub only_changed: bool,
     /// The pose the camera is asked to be at; the view moves there.
     pub camera: CameraPose,
+    /// The version and entry the choices above were made on; another one starts them over.
+    pub shown: Option<(u32, String)>,
 }
 
 /// An open review: the daemon's view (with the patches in `view.diff`) and what changed since

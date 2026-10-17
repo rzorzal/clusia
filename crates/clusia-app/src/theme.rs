@@ -203,6 +203,9 @@ impl Tokens {
     }
 }
 
+/// The colour of the keyword view's ambient light, the same in both themes.
+pub const SCENE_LIGHT: Color = Color::WHITE;
+
 pub const LIGHT: Tokens = Tokens {
     bg: Color::srgb_u8(0xF6, 0xF7, 0xF5),
     chrome: Color::srgb_u8(0xEE, 0xF1, 0xEE),

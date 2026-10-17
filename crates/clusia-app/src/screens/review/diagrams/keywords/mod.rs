@@ -23,7 +23,7 @@ use clusia_diagram::keywords::{ELSEWHERE, PointShape, Scene3D, scene};
 use super::Diagrams;
 use super::model::picked;
 use crate::fonts::UiFonts;
-use crate::review_state::{CameraPose, ReviewTabs};
+use crate::review_state::{CameraPose, KeywordsUi, ReviewTabs};
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{Fill, Type, text};
 use crate::ui::spinner::Motion;
@@ -106,6 +106,8 @@ pub struct KeywordsRuntime {
     pub number: u32,
     pub key: String,
     pub map: KeywordMap,
+    /// What `fingerprint` said of `map`: a refill compares it instead of the whole map.
+    pub fingerprint: Fingerprint,
     pub scene: Scene3D,
     pub camera: Entity,
     pub image: Handle<Image>,
@@ -181,6 +183,19 @@ fn configure_gizmos(mut store: ResMut<GizmoConfigStore>) {
     config.line.width = render::LINE_WIDTH;
 }
 
+/// A few counts that tell one map of a version's entry from another without walking it.
+type Fingerprint = (usize, usize, usize, u32, bool);
+
+fn fingerprint(map: &KeywordMap) -> Fingerprint {
+    (
+        map.places.len(),
+        map.words.len(),
+        map.plan.families.len(),
+        map.total_places(),
+        map.search_cut,
+    )
+}
+
 /// The name of use case `index` in `map`.
 pub fn use_case_name(map: &KeywordMap, index: u16) -> String {
     if index == ELSEWHERE {
@@ -206,7 +221,8 @@ fn axis_text(map: &KeywordMap, axis: usize) -> String {
 
 /// Fills each `KeywordsCanvas` with the view of the map the tab selected, and again when the
 /// map, its version or its entry changes. Otherwise it does nothing, so the camera, the hover
-/// and the image keep their state.
+/// and the image keep their state. A card, a focus and filters mean something for one map only:
+/// another version or entry starts without them.
 pub(super) fn fill_keywords(
     mut commands: Commands,
     mut tabs: ResMut<ReviewTabs>,
@@ -232,10 +248,14 @@ pub(super) fn fill_keywords(
             continue;
         };
         let key = p.entry.plan.key.clone();
-        if runtime.is_some_and(|rt| rt.number == p.number && rt.key == key && rt.map == **map) {
+        let prints = fingerprint(map);
+        if runtime
+            .is_some_and(|rt| rt.number == p.number && rt.key == key && rt.fingerprint == prints)
+        {
             continue;
         }
         let number = p.number;
+        let key_shown = key.clone();
         let map: KeywordMap = (**map).clone();
         let scene = scene(&map);
         let (pose, view) = (tab.ui.keywords.camera, tab.ui.keywords.view);
@@ -270,6 +290,7 @@ pub(super) fn fill_keywords(
             number,
             key,
             map,
+            fingerprint: prints,
             scene,
             camera: spawned.camera,
             image: spawned.image,
@@ -289,8 +310,19 @@ pub(super) fn fill_keywords(
             applied: None,
             synced: None,
         });
-        if stale_card && let Some(tab) = tabs.0.get_mut(&canvas.0) {
-            tab.ui.keywords.card = None;
+        if let Some(tab) = tabs.0.get_mut(&canvas.0) {
+            let ui = &mut tab.ui.keywords;
+            let shown = Some((number, key_shown));
+            if ui.shown.is_some() && ui.shown != shown {
+                *ui = KeywordsUi {
+                    view: ui.view,
+                    camera: ui.camera,
+                    ..KeywordsUi::default()
+                };
+            } else if stale_card {
+                ui.card = None;
+            }
+            ui.shown = shown;
         }
     }
 }
@@ -966,6 +998,65 @@ mod tests {
                 assert_eq!(got, want, "point {i}");
             }
         }
+    }
+
+    /// Adds a version 3 that is a copy of the shown one, so the latest version changes.
+    fn step_to_a_new_version(app: &mut App, pr: &PrRef) {
+        let mut diagrams = app.world_mut().resource_mut::<Diagrams>();
+        let model = diagrams.0.get_mut(pr).expect("the model of the review");
+        let mut next = model.loaded[&2].clone();
+        next.number = 3;
+        model.versions.push(next.info());
+        model.loaded.insert(3, next);
+        testing::settle(app);
+    }
+
+    #[test]
+    fn stepping_to_another_version_resets_the_card_the_focus_and_the_filters() {
+        let (mut app, pr) = open();
+        edit(&mut app, &pr, |ui| {
+            ui.card = Some(0);
+            ui.use_case = Some(1);
+            ui.hidden_families = 0b1;
+            ui.hidden_use_cases = 0b10;
+            ui.only_changed = true;
+        });
+        let kept = testing::keywords_ui(&app, &pr);
+        assert_eq!(
+            (
+                kept.card,
+                kept.use_case,
+                kept.hidden_families,
+                kept.only_changed
+            ),
+            (Some(0), Some(1), 0b1, true),
+            "the same map keeps what was chosen"
+        );
+        assert_eq!(testing::runtime(&app, &pr).number, 2);
+        step_to_a_new_version(&mut app, &pr);
+        assert_eq!(testing::runtime(&app, &pr).number, 3);
+        let ui = testing::keywords_ui(&app, &pr);
+        assert_eq!(
+            (
+                ui.card,
+                ui.use_case,
+                ui.hidden_families,
+                ui.hidden_use_cases,
+                ui.only_changed
+            ),
+            (None, None, 0, 0, false)
+        );
+    }
+
+    #[test]
+    fn the_first_fill_keeps_what_the_tab_already_chose() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_keywords_with(&mut app, fixture::keywords_map(), |ui| {
+            ui.use_case = Some(1);
+            ui.hidden_families = 0b10;
+        });
+        let ui = testing::keywords_ui(&app, &pr);
+        assert_eq!((ui.use_case, ui.hidden_families), (Some(1), 0b10));
     }
 
     #[test]

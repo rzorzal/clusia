@@ -119,7 +119,10 @@ struct Candidate {
 
 /// Lays the map out in the cube. Places whose indexes do not fit the map's tables are left out.
 pub fn scene(map: &KeywordMap) -> Scene3D {
-    let overflow: u32 = map.overflow.iter().sum();
+    let overflow = map
+        .overflow
+        .iter()
+        .fold(0, |a: u32, n| a.saturating_add(*n));
     let count = map.places.len();
     let usable: Vec<bool> = map
         .places
@@ -175,7 +178,7 @@ pub fn scene(map: &KeywordMap) -> Scene3D {
     let mut candidates = candidates(map, &usable, &pos, &use_case, &family);
     let mut more = overflow;
     if candidates.len() > MAX_POINTS {
-        more += cap(&mut candidates);
+        more = more.saturating_add(cap(&mut candidates));
     }
     candidates.sort_by_key(|c| c.places[0]);
     let points: Vec<Point3> = candidates
@@ -874,6 +877,12 @@ mod tests {
                 ..Scene3D::default()
             }
         );
+    }
+
+    #[test]
+    fn counters_of_an_edited_file_saturate_instead_of_overflowing() {
+        let m = map(&[], 2, 1, Vec::new(), Vec::new(), vec![u32::MAX, 5]);
+        assert_eq!(scene(&m).more, u32::MAX);
     }
 
     #[test]

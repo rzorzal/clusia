@@ -2204,6 +2204,7 @@ fn keyword_hits(rows: &[KeywordHits]) -> (Vec<Hit>, AddedLines) {
                 path: row.path.into(),
                 line: *line,
                 text: row.text.into(),
+                words: None,
             });
             if i < row.changed {
                 added.entry(row.path.into()).or_default().insert(*line);
@@ -2319,6 +2320,7 @@ pub fn keywords_map_of(places: u32) -> KeywordMap {
             path: "src/lib.rs".into(),
             line,
             text: "token();".into(),
+            words: None,
         })
         .collect();
     let mut added = AddedLines::new();
@@ -2357,6 +2359,7 @@ pub fn keywords_map_at(path: &str, line: u32, added: bool) -> KeywordMap {
         path: path.into(),
         line,
         text: "        let t = self.token();".into(),
+        words: None,
     }];
     let mut lines = AddedLines::new();
     if added {

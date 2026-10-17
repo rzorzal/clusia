@@ -42,6 +42,10 @@ pub const KEYWORD_PLAN_INFO: &str = "clusia-keyword-plan";
 /// The info string of the fenced block that holds a keyword placement.
 pub const KEYWORD_PLACEMENT_INFO: &str = "clusia-keyword-placement";
 
+/// How many families, and how many use cases, a map can list with the ones taken out: the
+/// reviewer's filters keep one bit for each.
+const MAX_LISTED: usize = 16;
+
 /// The most scopes of one file the placement prompt lists.
 const MAX_SCOPES_PER_FILE: usize = 8;
 /// How much JSON of the previous plan a plan prompt carries before it shrinks it to the names.
@@ -100,6 +104,37 @@ impl KeywordPlan {
             .iter()
             .flat_map(|f| f.words.iter().cloned())
             .collect()
+    }
+
+    /// Adds the families and use cases of `previous` that this plan lacks, marked removed (a
+    /// family without words, so it owns no place). They go after the live ones, so the family
+    /// index of every word stays; what `previous` itself marks as removed is gone for good, and
+    /// the lists stop at `MAX_LISTED`.
+    pub fn append_removed(&mut self, previous: &KeywordPlan) {
+        let gone = |h: Option<History>| h == Some(History::Removed);
+        for family in &previous.families {
+            if self.families.len() >= MAX_LISTED {
+                break;
+            }
+            if !gone(family.history) && !self.families.iter().any(|f| f.id == family.id) {
+                self.families.push(Family {
+                    words: Vec::new(),
+                    history: Some(History::Removed),
+                    ..family.clone()
+                });
+            }
+        }
+        for case in &previous.use_cases {
+            if self.use_cases.len() >= MAX_LISTED {
+                break;
+            }
+            if !gone(case.history) && !self.use_cases.iter().any(|u| u.id == case.id) {
+                self.use_cases.push(UseCase {
+                    history: Some(History::Removed),
+                    ..case.clone()
+                });
+            }
+        }
     }
 }
 
@@ -273,11 +308,16 @@ fn valid_word(word: &str) -> bool {
 /// belongs to an earlier family, and every family past `MAX_FAMILIES` is dropped with a note;
 /// words that are not valid, repeat one of an earlier family or are past `MAX_WORDS` are dropped
 /// too, and the seed word always stays first. Broken ids, a missing use case and too many use
-/// cases are errors to tell the agent. Text over its cap is cut.
+/// cases are errors to tell the agent. Text over its cap is cut. Entries marked removed are set
+/// aside first: what is gone has no seed on an added line and no place, and `append_removed`
+/// brings it back from the previous plan.
 pub fn validate_keyword_plan(
-    raw: KeywordPlan,
+    mut raw: KeywordPlan,
     added: &AddedLines,
 ) -> Result<CheckedPlan, Vec<String>> {
+    raw.families.retain(|f| f.history != Some(History::Removed));
+    raw.use_cases
+        .retain(|u| u.history != Some(History::Removed));
     let mut errors = Vec::new();
     let mut cleaner = Cleaner::default();
 
@@ -896,6 +936,9 @@ pub struct Hit {
     pub path: String,
     pub line: u32,
     pub text: String,
+    /// The indexes (into the words of the plan) the search counted this line for. `None`: every
+    /// word the line holds.
+    pub words: Option<Vec<u16>>,
 }
 
 /// What the second turn is told about one file: how many hits it has and in which scopes.
@@ -978,7 +1021,7 @@ fn contains(region: &Region, line: u32) -> bool {
 
 /// The map of a plan, a placement and the hits of the search.
 ///
-/// One place for every (hit line, word on that line). A place takes the most specific region
+/// One place for every (hit line, word on that line the search counted it for). A place takes the most specific region
 /// that holds its line (the smallest span, a whole-file region last, the first listed on a tie)
 /// and has none when no region does. `overflow` is per word, in the order of the families'
 /// words; it is padded or cut to match.
@@ -1035,7 +1078,11 @@ pub fn build_map(
             .get(&hit.path)
             .is_some_and(|lines| lines.contains(&hit.line));
         for (i, word) in words.iter().enumerate() {
-            if !has_word(&hit.text, &word.text) {
+            let counted = hit
+                .words
+                .as_ref()
+                .is_none_or(|only| only.contains(&u16::try_from(i).unwrap_or(u16::MAX)));
+            if !counted || !has_word(&hit.text, &word.text) {
                 continue;
             }
             let mut flags = 0;
@@ -1083,6 +1130,12 @@ pub fn keyword_plan_prompt(context: &str, previous: Option<&KeywordPlan>) -> Str
         "Answer with one sentence of prose, then exactly one fenced `{KEYWORD_PLAN_INFO}` block holding one JSON object: {{\"title\": \"<at most {LABEL_MAX} characters>\", \"caption\": \"<one sentence, at most {CAPTION_MAX} characters>\", \"axes\": [{{\"name\": \"<axis>\", \"low\": \"<what the low end means>\", \"high\": \"<what the high end means>\"}}, <exactly three axes>], \"families\": [{{\"id\": \"<1 to 64 letters, digits, '_', '.' or '-'; different for every family>\", \"label\": \"<at most {LABEL_MAX} characters>\", \"seed\": {{\"word\": \"<a word of this family>\", \"path\": \"<a changed file>\", \"line\": <a line number in the new version of that file that this change adds>}}, \"words\": [\"<the words of the family>\"]}}], \"use_cases\": [{{\"id\": \"<id>\", \"name\": \"<at most {LABEL_MAX} characters>\", \"note\": \"<optional, at most {NOTE_MAX} characters>\"}}]}}. Limits: {MAX_FAMILIES} families, {MAX_WORDS} words per family, {MAX_USE_CASES} use cases. A word is {WORD_MIN} to {WORD_MAX} characters with no spaces, written exactly as it appears in the code, and belongs to one family only. Every family needs a seed on a line the pull request adds. Write nothing after the block."
     );
     if let Some(previous) = previous {
+        let mut live = previous.clone();
+        live.families
+            .retain(|f| f.history != Some(History::Removed));
+        live.use_cases
+            .retain(|u| u.history != Some(History::Removed));
+        let previous = &live;
         let full = serde_json::to_string(previous).unwrap_or_default();
         let json = if full.len() <= PREVIOUS_PLAN_MAX {
             full
@@ -1095,7 +1148,7 @@ pub fn keyword_plan_prompt(context: &str, previous: Option<&KeywordPlan>) -> Str
         };
         let _ = write!(
             out,
-            "The plan of the previous commit (data):\n```json\n{json}\n```\nKeep the id of every family and use case that is still the same thing. Add \"history\" to every family and use case: \"same\" when it is unchanged since then, \"added\" when it is new, \"changed\" when it was edited, and \"removed\" when it was in the previous plan and is gone; keep the removed ones in their lists with \"history\": \"removed\".\n"
+            "The plan of the previous commit (data):\n```json\n{json}\n```\nKeep the id of every family and use case that is still the same thing. Add \"history\" to every family and use case: \"same\" when it is unchanged since then, \"added\" when it is new and \"changed\" when it was edited. Leave out what is gone: it is marked removed for you.\n"
         );
     }
     out
@@ -1582,10 +1635,100 @@ mod tests {
     fn history_survives_validation() {
         let mut raw = plan();
         raw.families[0].history = Some(History::Changed);
-        raw.use_cases[1].history = Some(History::Removed);
+        raw.use_cases[1].history = Some(History::Added);
         let checked = validate_keyword_plan(raw, &added()).unwrap();
         assert_eq!(checked.plan.families[0].history, Some(History::Changed));
-        assert_eq!(checked.plan.use_cases[1].history, Some(History::Removed));
+        assert_eq!(checked.plan.use_cases[1].history, Some(History::Added));
+    }
+
+    #[test]
+    fn removed_entries_are_set_aside_before_the_seed_check_and_the_use_case_cap() {
+        let mut raw = plan();
+        let mut gone = family("gone", "legacy", "src/old.rs", 7, &["legacy"]);
+        gone.history = Some(History::Removed);
+        raw.families.push(gone);
+        raw.use_cases = (0..MAX_USE_CASES)
+            .map(|n| use_case(&format!("u{n}")))
+            .collect();
+        let mut removed = use_case("old");
+        removed.history = Some(History::Removed);
+        raw.use_cases.push(removed);
+        let checked = validate_keyword_plan(raw, &added()).unwrap();
+        assert_eq!(checked.plan.families.len(), 1);
+        assert_eq!(checked.plan.use_cases.len(), MAX_USE_CASES);
+        assert!(checked.plan.use_cases.iter().all(|u| u.id != "old"));
+        assert!(checked.notes.is_empty(), "{:?}", checked.notes);
+    }
+
+    #[test]
+    fn a_plan_of_removed_use_cases_alone_has_no_use_cases() {
+        let mut raw = plan();
+        for u in &mut raw.use_cases {
+            u.history = Some(History::Removed);
+        }
+        assert_eq!(
+            validate_keyword_plan(raw, &added()).unwrap_err(),
+            ["The plan has no use cases."]
+        );
+    }
+
+    #[test]
+    fn what_the_new_plan_lacks_comes_back_as_removed_without_words() {
+        let mut previous = plan();
+        previous.families.push(family(
+            "token",
+            "token",
+            "src/auth/refresh.rs",
+            41,
+            &["token"],
+        ));
+        previous.use_cases.push(use_case("cache"));
+        let mut already = family("older", "older", "src/a.rs", 1, &[]);
+        already.history = Some(History::Removed);
+        previous.families.push(already);
+        let mut next = plan();
+        next.use_cases.remove(1);
+        next.append_removed(&previous);
+        let ids: Vec<&str> = next.families.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["retry", "token"],
+            "the one removed a version ago stays gone"
+        );
+        let token = &next.families[1];
+        assert_eq!(token.history, Some(History::Removed));
+        assert!(token.words.is_empty());
+        assert_eq!(token.label, "The token family");
+        let cases: Vec<(&str, Option<History>)> = next
+            .use_cases
+            .iter()
+            .map(|u| (u.id.as_str(), u.history))
+            .collect();
+        assert_eq!(
+            cases,
+            [
+                ("auth", None),
+                ("http", Some(History::Removed)),
+                ("cache", Some(History::Removed))
+            ]
+        );
+        assert_eq!(next.all_words(), ["retry", "retry_count", "RetryPolicy"]);
+        let again = next.clone();
+        next.append_removed(&previous);
+        assert_eq!(next, again, "ids already there are not added twice");
+    }
+
+    #[test]
+    fn removed_entries_stop_at_what_the_filters_can_hold() {
+        let mut previous = plan();
+        previous.families = (0..20)
+            .map(|n| family(&format!("f{n}"), "w", "src/a.rs", 1, &[]))
+            .collect();
+        previous.use_cases = (0..20).map(|n| use_case(&format!("u{n}"))).collect();
+        let mut next = plan();
+        next.append_removed(&previous);
+        assert_eq!(next.families.len(), 16);
+        assert_eq!(next.use_cases.len(), 16);
     }
 
     fn region(path: &str, use_case: &str, lines: Option<(u32, u32)>, at: [f32; 3]) -> Region {
@@ -1943,7 +2086,29 @@ impl Store {
             path: path.into(),
             line,
             text: text.into(),
+            words: None,
         }
+    }
+
+    #[test]
+    fn a_line_is_a_place_only_for_the_words_the_search_counted_it_for() {
+        let mut plan = plan();
+        plan.families[0].words = vec!["retry".into(), "RetryPolicy".into()];
+        let both = "let p = RetryPolicy::new(retry);";
+        let mut capped = hit("src/auth/refresh.rs", 41, both);
+        capped.words = Some(vec![1]);
+        let free = hit("src/auth/refresh.rs", 42, both);
+        let placement = KeywordPlacement { regions: vec![] };
+        let map = build_map(
+            plan,
+            placement,
+            &[capped, free],
+            vec![0, 0],
+            false,
+            &added(),
+        );
+        let seen: Vec<(u32, u16)> = map.places.iter().map(|p| (p.line, p.word)).collect();
+        assert_eq!(seen, [(41, 1), (42, 0), (42, 1)]);
     }
 
     #[test]
@@ -2056,6 +2221,18 @@ impl Store {
         assert!(prompt.contains("Limits: 12 families, 8 words per family, 8 use cases."));
         assert!(prompt.contains("A word is 2 to 64 characters with no spaces"));
         assert!(!prompt.contains("previous commit"));
+    }
+
+    #[test]
+    fn the_plan_prompt_leaves_the_removed_to_clusia() {
+        let mut previous = plan();
+        let mut gone = family("gone", "legacy", "src/old.rs", 7, &[]);
+        gone.history = Some(History::Removed);
+        previous.families.push(gone);
+        let prompt = keyword_plan_prompt("c\n", Some(&previous));
+        assert!(!prompt.contains("keep the removed"));
+        assert!(!prompt.contains("\"id\":\"gone\""));
+        assert!(prompt.contains("Leave out what is gone"));
     }
 
     #[test]

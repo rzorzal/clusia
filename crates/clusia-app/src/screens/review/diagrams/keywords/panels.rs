@@ -1336,6 +1336,7 @@ mod place_tests {
                 number: rt.number,
                 key: rt.key.clone(),
                 map: rt.map.clone(),
+                fingerprint: rt.fingerprint,
                 scene: rt.scene.clone(),
                 camera: rt.camera,
                 image: rt.image.clone(),

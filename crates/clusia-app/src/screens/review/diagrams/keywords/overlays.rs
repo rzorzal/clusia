@@ -1299,6 +1299,7 @@ pub(super) mod fixture_map {
             path: path.into(),
             line,
             text: text.into(),
+            words: None,
         }
     }
 
@@ -1467,6 +1468,30 @@ mod tests {
             [None, Some(History::Removed)]
         );
         assert_eq!(filters_view(&map, &ui, false).families[1].mark, None);
+    }
+
+    #[test]
+    fn a_removed_family_and_use_case_without_words_or_places_still_list_and_focus() {
+        let mut map = small_map(false);
+        let mut family = map.plan.families[0].clone();
+        family.id = "gone".into();
+        family.words.clear();
+        family.history = Some(History::Removed);
+        map.plan.families.push(family);
+        let mut case = map.plan.use_cases[0].clone();
+        case.id = "gone".into();
+        case.history = Some(History::Removed);
+        map.plan.use_cases.push(case);
+        let ui = KeywordsUi::default();
+        let filters = filters_view(&map, &ui, true);
+        let family = filters.families.last().expect("the removed family");
+        assert_eq!((family.places, family.mark), (0, Some(History::Removed)));
+        let case = filters.use_cases.last().expect("the removed use case");
+        assert_eq!((case.places, case.mark), (0, Some(History::Removed)));
+        let last = index(map.plan.use_cases.len() - 1);
+        let focus = focus_view(&map, last, true).expect("a use case with no place");
+        assert_eq!((focus.places, focus.words.len()), (0, 0));
+        assert_eq!(focus.mark, Some(History::Removed));
     }
 
     #[test]

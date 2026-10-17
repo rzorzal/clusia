@@ -23,7 +23,8 @@ fn fake(dir: &Path, name: &str, body: &str) {
 }
 
 /// A `clusia` that records every command and answers like a settled review: old settings,
-/// one ready entry, a stale version 2, one item from a diagram box. `review discard` fails.
+/// a ready flow entry and a ready keywords entry in version 2, one item from a diagram box.
+/// `review discard` fails.
 fn recording_clusia(dir: &Path, log: &Path) {
     fake(
         dir,

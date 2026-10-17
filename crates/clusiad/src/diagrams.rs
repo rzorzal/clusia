@@ -812,10 +812,11 @@ async fn draw_keywords(
             path: h.path,
             line: h.line,
             text: h.text,
+            words: Some(h.words),
         })
         .collect();
     let notes = map_notes(notes, placed.notes, found.cut);
-    let map = build_map(
+    let mut map = build_map(
         plan,
         placed.placement,
         &hits,
@@ -823,6 +824,9 @@ async fn draw_keywords(
         found.cut,
         &job.added,
     );
+    if let Some(previous) = &previous {
+        map.plan.append_removed(previous);
+    }
     if too_large(&map) {
         return failed(MAP_TOO_LARGE.to_string());
     }
@@ -1523,7 +1527,7 @@ async fn add_general(shared: &Shared, client: &str, pr: &PrRef, text: &str) -> O
 #[cfg(test)]
 mod tests {
     use clusia_core::checks::CheckKind;
-    use clusia_core::diagram::REPAIR_ECHO_MAX;
+    use clusia_core::diagram::{History, REPAIR_ECHO_MAX};
     use clusia_core::keywords::KEYWORDS_TITLE;
     use clusia_harness::testkit::{
         Call, FakeClaude, Script, Turn, diagram_block, diagram_plan_block, keyword_placement_block,
@@ -2832,6 +2836,104 @@ mod tests {
             "the second keyword turn carries the first map's plan: {}",
             prompts[6]
         );
+    }
+
+    fn many_use_cases_turn(families: serde_json::Value, cases: &[(&str, Option<&str>)]) -> Turn {
+        let use_cases: Vec<serde_json::Value> = cases
+            .iter()
+            .map(|(id, history)| match history {
+                Some(h) => json!({"id": id, "name": format!("Case {id}"), "history": h}),
+                None => json!({"id": id, "name": format!("Case {id}")}),
+            })
+            .collect();
+        Turn::answer_blocks(
+            "The words.",
+            &[keyword_plan_block(json!({
+                "title": "Where the words live", "caption": "Refresh tokens",
+                "axes": [
+                    {"name": "Layer", "low": "client", "high": "storage"},
+                    {"name": "Time", "low": "login", "high": "expiry"},
+                    {"name": "Risk", "low": "safe", "high": "risky"}
+                ],
+                "families": families,
+                "use_cases": use_cases,
+            }))],
+        )
+    }
+
+    #[tokio::test]
+    async fn a_redraw_marks_what_the_commit_removed_without_asking_the_agent_to_keep_it() {
+        let first_cases: Vec<(&str, Option<&str>)> =
+            ["refresh", "u1", "u2", "u3", "u4", "u5", "u6", "u7"]
+                .map(|id| (id, None))
+                .to_vec();
+        let mut second_cases: Vec<(&str, Option<&str>)> = first_cases[..7].to_vec();
+        second_cases.push(("u7", Some("removed")));
+        second_cases.push(("fresh", Some("added")));
+        let refresh = json!({"id": "refresh", "label": "refresh",
+            "seed": {"word": "refresh_token", "path": "src/token.rs", "line": 1},
+            "words": ["refresh_token"]});
+        let other = json!({"id": "other", "label": "other",
+            "seed": {"word": "other", "path": "src/token.rs", "line": 2},
+            "words": ["other"]});
+        let gone = json!({"id": "other", "label": "other", "history": "removed",
+            "seed": {"word": "other", "path": "src/gone.rs", "line": 90},
+            "words": []});
+        let script = Script::turns(vec![
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            many_use_cases_turn(json!([refresh.clone(), other]), &first_cases),
+            keyword_placement_turn(),
+            plan_turn(&["flow"]),
+            draw_turn("flow"),
+            many_use_cases_turn(json!([refresh, gone]), &second_cases),
+            keyword_placement_turn(),
+        ]);
+        let (_home, fake, shared) = lab(script, 1, keywords_on);
+        keyword_repo(&shared).await;
+        for _ in 0..2 {
+            assert!(matches!(
+                run(&shared, &pr(1)).await,
+                Outcome::Ok(Reply::Ack)
+            ));
+            settled(&shared, 1).await;
+        }
+        assert_eq!(
+            FakeClaude::calls(fake.path()).len(),
+            8,
+            "no repair turn: nine entries, one of them removed, is a plan"
+        );
+        let version = latest(&shared, 1);
+        assert_eq!(version.number, 2);
+        let map = map_of(&version);
+        let families: Vec<(&str, Option<History>, usize)> = map
+            .plan
+            .families
+            .iter()
+            .map(|f| (f.id.as_str(), f.history, f.words.len()))
+            .collect();
+        assert_eq!(
+            families,
+            [("refresh", None, 1), ("other", Some(History::Removed), 0)]
+        );
+        let cases: Vec<(&str, Option<History>)> = map
+            .plan
+            .use_cases
+            .iter()
+            .map(|u| (u.id.as_str(), u.history))
+            .collect();
+        assert_eq!(cases.len(), 9);
+        assert_eq!(cases[7], ("fresh", Some(History::Added)));
+        assert_eq!(cases[8], ("u7", Some(History::Removed)));
+        assert!(
+            map.places.iter().all(|p| map.family_of(p) == 0),
+            "a removed family owns no place"
+        );
+        let notes = match &version.entry(KEYWORDS_KEY).unwrap().state {
+            EntryState::ReadyMap { notes, .. } => notes.clone(),
+            other => panic!("a map, got {other:?}"),
+        };
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     #[tokio::test]

@@ -396,6 +396,7 @@ pub(super) fn pinch(
 pub(super) fn add_systems(app: &mut App) {
     app.add_systems(Update, (attach_input, pinch).after(super::fill_keywords));
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

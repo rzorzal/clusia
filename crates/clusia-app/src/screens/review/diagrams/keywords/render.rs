@@ -16,7 +16,7 @@ use bevy::render::render_resource::{Extent3d, TextureFormat};
 
 use super::{KeywordCloud, KeywordPoint, KeywordRing, KeywordsRuntime, KeywordsScene};
 use crate::review_state::{CameraPose, KeywordsUi, View3D};
-use crate::theme::Tokens;
+use crate::theme::{SCENE_LIGHT, Tokens};
 use clusia_core::PrRef;
 use clusia_diagram::keywords::{ELSEWHERE, Point3, PointShape, Scene3D};
 
@@ -572,7 +572,7 @@ pub fn spawn_scene(
             Msaa::Sample4,
             layers(),
             AmbientLight {
-                color: Color::WHITE,
+                color: SCENE_LIGHT,
                 brightness: AMBIENT_BRIGHTNESS,
                 ..default()
             },
