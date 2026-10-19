@@ -50,6 +50,15 @@ pub fn text_size_value(size: TextSize) -> &'static str {
     }
 }
 
+/// The segment of *Open the Diff as* a stored view selects; Story and Calls select none.
+pub fn diff_view_value(view: DiffView) -> &'static str {
+    match view {
+        DiffView::Unified => "unified",
+        DiffView::Split => "split",
+        DiffView::Story | DiffView::Calls => "",
+    }
+}
+
 pub fn theme_value(t: ThemeChoice) -> &'static str {
     match t {
         ThemeChoice::Light => "light",
@@ -126,10 +135,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &AppearanceView) 
         "Open the Diff as",
         "appearance.diff_view",
         &[("Unified", "unified"), ("Split", "split")],
-        match v.diff_view {
-            DiffView::Unified => "unified",
-            DiffView::Split => "split",
-        },
+        diff_view_value(v.diff_view),
         "Each review can switch",
     );
     heading(p, fonts, "Preview");
@@ -552,5 +558,13 @@ mod tests {
         assert_eq!(v.density, Density::Compact);
         assert_eq!(v.diff_view, DiffView::Unified);
         assert_eq!(theme_value(ThemeChoice::Dark), "dark");
+    }
+
+    #[test]
+    fn story_and_calls_select_neither_segment_of_the_diff_row() {
+        assert_eq!(diff_view_value(DiffView::Unified), "unified");
+        assert_eq!(diff_view_value(DiffView::Split), "split");
+        assert_eq!(diff_view_value(DiffView::Story), "");
+        assert_eq!(diff_view_value(DiffView::Calls), "");
     }
 }

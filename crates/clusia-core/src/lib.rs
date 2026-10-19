@@ -24,6 +24,7 @@ pub mod printable;
 pub mod publish;
 pub mod revalidation;
 pub mod review;
+pub mod story;
 pub mod tabs;
 pub mod time;
 
@@ -34,8 +35,8 @@ pub use checks::{
     area_status, default_areas,
 };
 pub use config::{
-    CODE_SIZES, Config, Density, DiffView, Dnd, EventKind, General, HourMinute, ListSort, Lists,
-    Media, Notifications, Route, SoundId, TextSize, Weekday,
+    CODE_SIZES, Config, Density, Diff, DiffView, Dnd, EventKind, General, HourMinute, ListSort,
+    Lists, Media, Notifications, Route, SoundId, TextSize, Weekday,
 };
 pub use diffmap::{
     DiffMap, FileChange, Hunk, LineMap, Relocation, added_lines, can_comment, commentable_lines,

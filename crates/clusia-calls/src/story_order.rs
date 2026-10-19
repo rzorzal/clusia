@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use clusia_core::hunks::{FileHunks, HunkRef, hunk_ref};
+use clusia_core::story::{MAX_STEPS, SUBTITLE_MAX};
 use serde::{Deserialize, Serialize};
 
 use crate::changes::{ChangeKind, ChangedFunction};
@@ -12,12 +13,8 @@ use crate::index::{CallIndex, Function};
 use crate::packs::{language_name, pack_for};
 use crate::resolve::{Resolved, Target};
 
-/// Function steps kept as they are; the rest of the changed functions group by file. The
-/// story format caps a step list at the same number.
-const MAX_STEPS: usize = 12;
-/// Longest id and "Other files" subtitle.
+/// Longest id.
 const ID_MAX: usize = 128;
-const SUBTITLE_MAX: usize = 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaticStep {

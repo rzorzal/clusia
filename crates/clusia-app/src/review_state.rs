@@ -81,7 +81,8 @@ pub enum DiffMode {
 impl From<DiffView> for DiffMode {
     fn from(view: DiffView) -> Self {
         match view {
-            DiffView::Unified => DiffMode::Unified,
+            // The Diff opens on the Unified frame for the views that have no mode of their own.
+            DiffView::Unified | DiffView::Story | DiffView::Calls => DiffMode::Unified,
             DiffView::Split => DiffMode::Split,
         }
     }
@@ -715,6 +716,14 @@ mod tests {
             ),
             "Echo"
         );
+    }
+
+    #[test]
+    fn the_remembered_story_and_calls_views_open_the_unified_frame() {
+        assert_eq!(DiffMode::from(DiffView::Unified), DiffMode::Unified);
+        assert_eq!(DiffMode::from(DiffView::Split), DiffMode::Split);
+        assert_eq!(DiffMode::from(DiffView::Story), DiffMode::Unified);
+        assert_eq!(DiffMode::from(DiffView::Calls), DiffMode::Unified);
     }
 
     #[test]
