@@ -16,6 +16,7 @@ pub mod logging;
 pub mod media;
 pub mod notify;
 pub mod paths;
+pub mod people;
 pub mod permissions;
 pub mod pr;
 pub mod prdata;
@@ -50,6 +51,7 @@ pub use hidden::{HiddenComments, HiddenState};
 pub use media::{MAX_MEDIA_BYTES, MediaKind};
 pub use notify::OpenTarget;
 pub use paths::{LAUNCH_AGENT_FILE, Paths, PathsError};
+pub use people::Profile;
 pub use pr::{PrDetail, PrFilter, PrRef, PrRefError, PrSummary};
 pub use prdata::{
     ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, ReviewCache, ReviewInfo,
