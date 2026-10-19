@@ -1442,8 +1442,11 @@ fn below(
                 ..default()
             }))
             .with_children(|c| {
+                // The buttons drop to a second row when the card is narrow (a Split column).
                 c.spawn(Node {
                     column_gap: px(10),
+                    row_gap: px(4),
+                    flex_wrap: FlexWrap::Wrap,
                     align_items: AlignItems::Center,
                     ..default()
                 })
@@ -1454,7 +1457,8 @@ fn below(
                     // line high and clips what wraps below it.
                     let mut line = h.spawn(Node {
                         flex_grow: 1.0,
-                        min_width: px(0),
+                        flex_basis: px(0),
+                        min_width: px(60),
                         max_height: if t.expanded { Val::Auto } else { px(18) },
                         overflow: Overflow::clip(),
                         ..default()
@@ -1555,6 +1559,8 @@ fn below(
             .with_children(|c| {
                 c.spawn(Node {
                     column_gap: px(8),
+                    row_gap: px(4),
+                    flex_wrap: FlexWrap::Wrap,
                     align_items: AlignItems::Center,
                     ..default()
                 })
@@ -2836,6 +2842,27 @@ mod tests {
         let pr = fixture::demo_pr();
         ui_mut(app, &pr).0.get_mut(&pr).unwrap().ui.mode = mode;
         testing::settle(app);
+    }
+
+    #[test]
+    fn comment_headers_wrap_their_buttons_in_the_narrow_columns_of_split() {
+        for large in [false, true] {
+            let mut app = wrap_app();
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            set_mode(&mut app, DiffMode::Split);
+            testing::settle(&mut app);
+            let flagged: Vec<String> = testing::overflowing_text(&mut app)
+                .into_iter()
+                .filter(|t| {
+                    ["Expand", "Reply", "Copy markdown", "Edit", "Remove"]
+                        .iter()
+                        .any(|b| t.starts_with(&format!("\"{b}")))
+                })
+                .collect();
+            assert_eq!(flagged, Vec::<String>::new(), "large={large}");
+        }
     }
 
     #[test]
