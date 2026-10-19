@@ -230,6 +230,40 @@ pub fn overflowing_text(app: &mut App) -> Vec<String> {
     out
 }
 
+/// The texts under `root` whose lines run past its right edge (the lines, not the box a
+/// stretched text sits in), as `"<text> by <n>px"`.
+pub fn texts_past_right(app: &mut App, root: Entity) -> Vec<String> {
+    let (rx, _, rw, _) = frame(app, root);
+    let texts: Vec<Entity> = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<Text>>();
+        q.iter(app.world()).collect()
+    };
+    let mut out = Vec::new();
+    for text in texts {
+        let under = std::iter::successors(Some(text), |&e| {
+            app.world().get::<ChildOf>(e).map(|c| c.parent())
+        })
+        .any(|e| e == root);
+        let Some(node) = app.world().get::<ComputedNode>(text) else {
+            continue;
+        };
+        if !under || node.size.x <= 0.0 {
+            continue;
+        }
+        let (x, _, w, _) = frame(app, text);
+        let w = w.max(node.content_size.x * node.inverse_scale_factor);
+        let past = x + w - rx - rw;
+        if past > 1.5 {
+            let shown = app.world().get::<Text>(text).map_or("", |t| t.0.as_str());
+            out.push(format!(
+                "{:?} by {past:.0}px",
+                shown.chars().take(40).collect::<String>()
+            ));
+        }
+    }
+    out
+}
+
 /// The centre of `entity`'s laid-out box.
 pub fn center(app: &App, entity: Entity) -> Vec2 {
     let (x, y, w, h) = frame(app, entity);
