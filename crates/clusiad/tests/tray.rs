@@ -1,6 +1,5 @@
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use common::{TestDaemon, test_options};
@@ -11,15 +10,10 @@ async fn daemon_spawns_the_tray_with_its_home_and_stops_it() {
     let bin = tempfile::tempdir().unwrap();
     let record = bin.path().join("record");
     let prog = bin.path().join("fake-tray");
-    std::fs::write(
+    clusia_core::testkit::write_executable(
         &prog,
-        format!(
-            "#!/bin/sh\necho \"$$ $@\" >> '{}'\nexec sleep 30\n",
-            record.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("echo \"$$ $@\" >> '{}'\nexec sleep 30", record.display()),
+    );
 
     let mut options = test_options();
     options.tray_program = Some(prog);
@@ -62,15 +56,13 @@ async fn the_tray_is_told_the_daemon_started_it() {
     let bin = tempfile::tempdir().unwrap();
     let record = bin.path().join("record");
     let prog = bin.path().join("fake-tray");
-    std::fs::write(
+    clusia_core::testkit::write_executable(
         &prog,
-        format!(
-            "#!/bin/sh\necho \"$CLUSIA_LAUNCHED_BY\" >> '{}'\nexec sleep 30\n",
+        &format!(
+            "echo \"$CLUSIA_LAUNCHED_BY\" >> '{}'\nexec sleep 30",
             record.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let mut options = test_options();
     options.tray_program = Some(prog);

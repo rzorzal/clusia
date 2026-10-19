@@ -24,6 +24,8 @@ pub mod publish;
 pub mod revalidation;
 pub mod review;
 pub mod tabs;
+#[cfg(any(test, feature = "test-kit"))]
+pub mod testkit;
 pub mod time;
 
 pub use activity::{Activity, ActivityKind, ActivitySummary, DayCount};

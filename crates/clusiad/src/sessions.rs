@@ -1696,10 +1696,8 @@ mod tests {
 
     /// Writes `body` as an executable shell script in the lab's fake folder and returns its path.
     fn script(lab: &Lab, name: &str, body: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
         let path = lab.fake.path().join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        clusia_core::testkit::write_executable(&path, body);
         path.display().to_string()
     }
 
@@ -2310,10 +2308,8 @@ mod tests {
 
     /// A program that prints what `codex --version` prints.
     fn version_script(dir: &Path, said: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let program = dir.join("codex");
-        std::fs::write(&program, format!("#!/bin/sh\necho '{said}'\n")).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        clusia_core::testkit::write_executable(&program, &format!("echo '{said}'"));
         program
     }
 
@@ -2348,11 +2344,9 @@ mod tests {
 
     #[test]
     fn a_version_run_gets_no_github_token_for_either_agent() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("agent");
-        std::fs::write(&program, "#!/bin/sh\nexec /usr/bin/env\n").unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        clusia_core::testkit::write_executable(&program, "exec /usr/bin/env");
         let env: Vec<(OsString, OsString)> = [
             ("GH_TOKEN", "t1"),
             ("GITHUB_TOKEN", "t2"),

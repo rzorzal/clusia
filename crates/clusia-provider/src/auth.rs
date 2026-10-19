@@ -99,13 +99,11 @@ pub async fn gh_token(program: &Path, host: &str) -> Option<String> {
 mod tests {
     use super::*;
     use clusia_platform::MemoryStore;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     fn fake_gh(dir: &Path, body: &str) -> PathBuf {
         let p = dir.join("gh");
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        clusia_core::testkit::write_executable(&p, body);
         p
     }
 

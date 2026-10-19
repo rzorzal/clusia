@@ -262,8 +262,7 @@ mod tests {
     async fn a_slow_gh_is_unknown() {
         let dir = tempfile::tempdir().unwrap();
         let gh = dir.path().join("gh");
-        std::fs::write(&gh, "#!/bin/sh\nexec sleep 5\n").unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        clusia_core::testkit::write_executable(&gh, "exec sleep 5");
         let started = std::time::Instant::now();
         let login = github_login(&gh, "github.com", Duration::from_millis(200)).await;
         assert_eq!(login, GithubLogin::Unknown);
@@ -275,15 +274,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("agent");
         let dump = dir.path().join("env.txt");
-        std::fs::write(
+        clusia_core::testkit::write_executable(
             &program,
-            format!(
-                "#!/bin/sh\n/usr/bin/env > '{}'\necho 9.9.9\n",
-                dump.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("/usr/bin/env > '{}'\necho 9.9.9", dump.display()),
+        );
         let env: Vec<(OsString, OsString)> = [
             ("GH_TOKEN", "t1"),
             ("GITHUB_TOKEN", "t2"),

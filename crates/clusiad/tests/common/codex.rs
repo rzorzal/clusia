@@ -26,15 +26,15 @@ pub async fn use_fake_codex(w: &World, script: CodexScript) -> PathBuf {
 pub async fn codex_calls(dir: &Path, count: usize) -> Vec<CodexCall> {
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        FakeCodex::wait_for_calls(&dir, count, Duration::from_secs(5))
+        FakeCodex::wait_for_calls(&dir, count, clusia_core::testkit::HANG_BOUND)
     })
     .await
     .unwrap()
 }
 
-/// Whether the process left within a few seconds.
+/// Whether the process left, waiting no longer than `HANG_BOUND`.
 pub async fn codex_gone(pid: u32) -> bool {
-    for _ in 0..80 {
+    for _ in 0..clusia_core::testkit::polls(Duration::from_millis(50)) {
         if !FakeCodex::is_running(pid) {
             return true;
         }
@@ -46,7 +46,7 @@ pub async fn codex_gone(pid: u32) -> bool {
 /// Waits until process `index` of the fake was sent `count` requests called `method`, and gives
 /// the process back.
 pub async fn codex_after(dir: &Path, index: usize, method: &str, count: usize) -> CodexCall {
-    for _ in 0..100 {
+    for _ in 0..clusia_core::testkit::polls(Duration::from_millis(50)) {
         let dir = dir.to_path_buf();
         let calls = tokio::task::spawn_blocking(move || FakeCodex::calls(&dir))
             .await

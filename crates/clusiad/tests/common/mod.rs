@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 
 /// How long a test waits for an event the daemon pushes. It returns as soon as the event
 /// arrives; the margin only matters on a loaded machine.
-pub const EVENT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+pub const EVENT_WAIT: std::time::Duration = clusia_core::testkit::HANG_BOUND;
 
 /// No network, no real gh, no Keychain, no background loop.
 pub fn test_options() -> DaemonOptions {
@@ -61,7 +61,7 @@ impl TestDaemon {
     /// keeps inherited descriptors until it execs) is refused for a moment: retry until it lets go.
     pub async fn start_in(dir: tempfile::TempDir) -> Self {
         let paths = Paths::new(dir.path());
-        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let give_up = std::time::Instant::now() + clusia_core::testkit::HANG_BOUND;
         let daemon = loop {
             match Daemon::bind_with(paths.clone(), test_options()).await {
                 Err(clusiad::StartError::AlreadyRunning(_))

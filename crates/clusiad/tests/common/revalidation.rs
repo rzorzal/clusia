@@ -189,7 +189,7 @@ pub async fn round_titles(c: &mut Client) -> Vec<String> {
 /// What the inbox says once the first notice arrives, and a moment later, so a second one would
 /// show.
 pub async fn notices(c: &mut Client) -> Vec<String> {
-    for _ in 0..50 {
+    for _ in 0..clusia_core::testkit::polls(Duration::from_millis(100)) {
         if !round_titles(c).await.is_empty() {
             break;
         }

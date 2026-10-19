@@ -15,6 +15,9 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
+[features]
+test-kit = []
+
 [dev-dependencies]
 tempfile.workspace = true
 
