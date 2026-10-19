@@ -1590,7 +1590,7 @@ fn legend(c: &mut ChildSpawnerCommands, fonts: &Pen, tiles: Option<&Dots>, compa
                     r,
                     fonts,
                     tiles,
-                    "Changed",
+                    "Moved on",
                     Swatch::AmberSoft,
                     Swatch::Amber,
                     false,
@@ -2813,6 +2813,12 @@ mod tests {
             "the legend gains its second row"
         );
         assert!(shown.iter().any(|t| t == "Added"));
+        assert_eq!(
+            shown.iter().filter(|t| *t == "Changed").count(),
+            1,
+            "the history swatch has a name of its own"
+        );
+        assert!(shown.iter().any(|t| t == "Moved on"));
         assert!(
             shown.iter().any(|t| t == "save()"),
             "the label of the removed arrow"

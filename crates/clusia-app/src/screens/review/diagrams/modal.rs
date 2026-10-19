@@ -626,6 +626,8 @@ fn rebuild_modal(
     diagrams: Res<Diagrams>,
     model: Res<Model>,
     fonts: Res<UiFonts>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
     mut parts: Query<(Entity, &mut NodePart)>,
 ) {
     let mut gone = Vec::new();
@@ -683,7 +685,15 @@ fn rebuild_modal(
     }
     for pr in gone {
         if let Some(tab) = tabs.0.get_mut(&pr) {
+            let typed = tab
+                .ui
+                .editor
+                .as_ref()
+                .is_some_and(|e| !e.text.trim().is_empty());
             close(&mut tab.ui);
+            if typed {
+                not_sent(&mut toasts, &time, "The box is gone after the redraw");
+            }
         }
     }
 }
@@ -2006,6 +2016,39 @@ mod tests {
         let tab = testing::tab(&app, &pr);
         assert_eq!((tab.ui.modal, tab.ui.diagram_node), (None, None));
         assert_eq!(testing::count::<NodeModal>(&mut app), 0);
+    }
+
+    fn take_box_away(app: &mut App, pr: &PrRef) {
+        let mut diagrams = app.world_mut().resource_mut::<Diagrams>();
+        let model = diagrams.0.get_mut(pr).expect("a model");
+        for e in model.loaded.get_mut(&2).unwrap().entries.iter_mut() {
+            if let EntryState::Ready { spec, .. } = &mut e.state {
+                spec.nodes.retain(|n| n.id != "refresh");
+            }
+        }
+    }
+
+    #[test]
+    fn a_redraw_that_takes_the_box_away_says_so_when_a_comment_was_being_typed() {
+        let (mut app, pr) = app_with_box();
+        put_code(&mut app, &pr, "refresh", code_at(&head(), true));
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |a| a.0 == pr);
+        testing::type_into(&mut app, area, "Why this?");
+        testing::settle(&mut app);
+        take_box_away(&mut app, &pr);
+        testing::settle(&mut app);
+        let toasts = &app.world().resource::<Toasts>().0;
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].text, "The box is gone after the redraw");
+    }
+
+    #[test]
+    fn a_redraw_that_takes_the_box_away_is_quiet_when_nothing_was_typed() {
+        let (mut app, pr) = app_with_box();
+        take_box_away(&mut app, &pr);
+        testing::settle(&mut app);
+        assert!(app.world().resource::<Toasts>().0.is_empty());
     }
 
     #[test]

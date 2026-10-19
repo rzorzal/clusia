@@ -9,6 +9,7 @@ use clusia_core::PrRef;
 use clusia_core::diagram::{
     DiagramEntry, DiagramVersion, DiagramVersionInfo, EntryInfo, EntryStateName,
 };
+use clusia_core::keywords::{KEYWORDS_KEY, parse_place_node};
 use clusia_protocol::{DiagramCode, DiagramsState};
 
 use crate::bridge::DiagramsTell;
@@ -192,7 +193,14 @@ impl DiagramsModel {
                     .loaded
                     .get(number)
                     .and_then(|v| super::modal::anchor_of(v, key, node));
-                if !anchor.is_some_and(|a| code.unavailable.is_some() || a.path == code.path) {
+                // The daemon reads a window from the anchor's first line (one line above for a
+                // place), so a reply that starts elsewhere is for lines the box left.
+                let above = u32::from(key == KEYWORDS_KEY && parse_place_node(node).is_some());
+                if !anchor.is_some_and(|a| {
+                    code.unavailable.is_some()
+                        || (a.path == code.path
+                            && code.start_line == a.start_line.saturating_sub(above).max(1))
+                }) {
                     return;
                 }
                 let id = (*number, key.clone(), node.clone());
@@ -500,18 +508,22 @@ mod tests {
 
     /// The answer to a read of `node`: two lines of the file the box stands for.
     fn ask(m: &mut DiagramsModel, number: u32, key: &str, node: &str) {
-        let path = m
+        let (path, start_line) = m
             .loaded
             .get(&number)
             .and_then(|v| crate::screens::review::diagrams::modal::node_anchor(v, key, node))
-            .map(|a| a.path.clone())
+            .map(|a| (a.path.clone(), a.start_line))
             .expect("a box that stands for code");
         m.apply(&DiagramsTell::Code {
             pr: pr(),
             number,
             key: key.into(),
             node: node.into(),
-            code: DiagramCode { path, ..answer(2) },
+            code: DiagramCode {
+                path,
+                start_line,
+                ..answer(2)
+            },
         });
     }
 
@@ -545,6 +557,54 @@ mod tests {
         assert_eq!(m.code.len(), 1, "why there is no code is kept");
         m.apply(&reply("refresh", answer(3)));
         assert_eq!(m.code.len(), 2);
+    }
+
+    #[test]
+    fn a_late_answer_for_the_same_file_at_other_lines_is_dropped() {
+        let mut m = loaded();
+        anchor_box(&mut m, 2, "flow", "refresh");
+        let reply = |code: DiagramCode| DiagramsTell::Code {
+            pr: pr(),
+            number: 2,
+            key: "flow".into(),
+            node: "refresh".into(),
+            code,
+        };
+        m.apply(&reply(DiagramCode {
+            start_line: 90,
+            ..answer(3)
+        }));
+        assert!(m.code.is_empty(), "the redraw moved the box's lines");
+        m.apply(&reply(answer(3)));
+        assert_eq!(m.code.len(), 1, "the answer for the box's lines is kept");
+    }
+
+    #[test]
+    fn a_place_reply_is_kept_from_one_line_above_the_place_and_dropped_from_the_place() {
+        let mut m = loaded();
+        let version = m.loaded.get_mut(&2).expect("a version");
+        version.entries.retain(|e| e.plan.key != "keywords");
+        version
+            .entries
+            .push(fixture::keywords_entry_of(fixture::keywords_map_at(
+                "src/auth/refresh.rs",
+                44,
+                true,
+            )));
+        let reply = |start_line| DiagramsTell::Code {
+            pr: pr(),
+            number: 2,
+            key: "keywords".into(),
+            node: "p0".into(),
+            code: DiagramCode {
+                start_line,
+                ..answer(4)
+            },
+        };
+        m.apply(&reply(44));
+        assert!(m.code.is_empty(), "the place's own line is not the window");
+        m.apply(&reply(43));
+        assert_eq!(m.code.len(), 1, "the window opens a line above the place");
     }
 
     #[test]
