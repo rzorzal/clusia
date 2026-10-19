@@ -695,7 +695,7 @@ Rules for this rewrite:
 - Keep the id of every step that is still the same thing.
 - Set \"history\" on every step: \"same\", \"added\" or \"changed\".
 - A \"changed\" step carries \"since_previous\": one sentence of at most {SINCE_MAX} characters on what changed.
-- List the steps that are gone in \"removed\", {{\"id\": ...}} with their ids.
+- List the steps that are gone in \"removed\", each as {{\"id\": ..., \"title\": ...}} with its id.
 "
         );
     }
@@ -1320,6 +1320,29 @@ mod tests {
         marks.set("c1", &hunks, true, &nothing);
         assert_eq!(marks.hunks.len(), MAX_READ_MARKS);
         assert_eq!(marks.hunks[0].start_line, 4);
+    }
+
+    #[test]
+    fn the_removed_shape_the_prompt_asks_for_is_accepted() {
+        let steps = static_steps();
+        let prior = previous();
+        let p = story_prompt(&context(&steps, &[], &[], Some(&prior)));
+        let rule = p
+            .lines()
+            .find(|l| l.starts_with("- List the steps that are gone"))
+            .expect("rule");
+        let shape = &rule[rule.find('{').unwrap()..=rule.rfind('}').unwrap()];
+        assert_eq!(shape, r#"{"id": ..., "title": ...}"#);
+        let mut story = good();
+        story["steps"] = json!([story["steps"][0].clone()]);
+        story["steps"][0]["hunks"] = json!([
+            hunk("src/store.rs", 1, 30),
+            hunk("src/auth.rs", 10, 44),
+            hunk("README.md", 3, 3)
+        ]);
+        story["removed"] = json!([{"id": "auth", "title": "Callers use it"}]);
+        let v = check(&story, Some(&prior)).unwrap();
+        assert_eq!(v.spec.removed.len(), 1, "{:?}", v.notes);
     }
 
     fn static_steps() -> Vec<StaticStepInfo> {
