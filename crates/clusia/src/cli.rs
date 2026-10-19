@@ -84,6 +84,25 @@ pub enum Command {
         #[arg(long)]
         draw: bool,
     },
+    /// List a review's Story: the pull request as ordered steps. `--write` has the agent
+    /// write it first (or again, when one exists) and follows the run.
+    Story {
+        /// `owner/repo#number` or a pull request URL.
+        pr: String,
+        /// Write the story now (one turn of the agent) and follow it.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Print the call graph of a changed function: callers above, callees below.
+    Calls {
+        /// `owner/repo#number` or a pull request URL.
+        pr: String,
+        /// The function to centre on, by name; the first changed function when left out.
+        function: Option<String>,
+        /// How many levels of callers and callees to print, 1 to 5; `diff.calls_depth` when left out.
+        #[arg(long)]
+        depth: Option<u8>,
+    },
     /// Have the agent re-read the draft of a saved review against the new commits of its pull
     /// request, now, and print what it found for each comment.
     Revalidate {
