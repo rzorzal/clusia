@@ -1089,8 +1089,23 @@ fn spawn_canvas(
         ))
         .with_children(|content| spawn_content(content, fonts, ctx, spec, g));
     });
-    header(c, fonts, spec, g.dropped_texts);
-    zoom_control(c, fonts, canvas);
+    // One row over the canvas: the header takes what the zoom control leaves, whatever its width.
+    c.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(20),
+            right: px(16),
+            top: px(12),
+            column_gap: px(16),
+            align_items: AlignItems::FlexStart,
+            ..default()
+        },
+        ignore(),
+    ))
+    .with_children(|bar| {
+        header(bar, fonts, spec, g.dropped_texts);
+        zoom_control(bar, fonts, canvas);
+    });
     legend(c, fonts, ctx.tiles.as_ref(), ctx.compare);
 }
 
@@ -1356,17 +1371,13 @@ fn hidden_note(dropped: u32) -> Option<String> {
     }
 }
 
-/// The header stops this far from the canvas's right edge: the zoom control's width (at the
-/// largest text size) plus its margin, so a long caption wraps instead of running under it.
-const HEADER_CLEAR_OF_ZOOM: f32 = 184.0;
-
 fn header(c: &mut ChildSpawnerCommands, fonts: &Pen, spec: &DiagramSpec, dropped: u32) {
     c.spawn((
         Node {
-            position_type: PositionType::Absolute,
-            left: px(20),
-            right: px(HEADER_CLEAR_OF_ZOOM),
-            top: px(16),
+            flex_grow: 1.0,
+            flex_basis: px(0),
+            min_width: px(0),
+            margin: UiRect::top(px(4)),
             column_gap: px(10),
             row_gap: px(4),
             flex_wrap: FlexWrap::Wrap,
@@ -1437,9 +1448,7 @@ fn zoom_control(c: &mut ChildSpawnerCommands, fonts: &Pen, canvas: Entity) {
     };
     c.spawn((
         Node {
-            position_type: PositionType::Absolute,
-            right: px(16),
-            top: px(12),
+            flex_shrink: 0.0,
             column_gap: px(4),
             align_items: AlignItems::Center,
             border: px(1).all(),
@@ -2291,13 +2300,9 @@ mod tests {
                 (cx, cy, cw, ch),
                 (zx, zy, zw, zh)
             );
-            assert!(
-                cx + cw <= zx + zw,
-                "large={large}: the caption ends inside the canvas"
-            );
             let node = app.world().get::<ComputedNode>(caption).unwrap();
             assert!(
-                node.size.y * node.inverse_scale_factor > 24.0 || large,
+                node.size.y * node.inverse_scale_factor > 24.0,
                 "large={large}: a caption this long takes more than one line"
             );
         }
