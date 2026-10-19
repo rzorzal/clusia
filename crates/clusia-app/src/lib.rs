@@ -28,5 +28,8 @@ pub mod window_frame;
 #[cfg(test)]
 pub(crate) mod testing;
 
+#[cfg(test)]
+mod overflow;
+
 /// How the window introduces itself to the daemon.
 pub const CLIENT_NAME: &str = "clusia-app";

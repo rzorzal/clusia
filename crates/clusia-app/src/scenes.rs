@@ -182,7 +182,7 @@ fn accept_demo_finding(ready: &mut Ready, now: i64) {
 }
 
 /// Signs the demo out and gives the first-run screen its answers.
-fn stage_snapshot(world: &mut World, scene: Scene) {
+pub(crate) fn stage_snapshot(world: &mut World, scene: Scene) {
     match scene {
         Scene::ConfigGeneral => set_demo_config(world, &[("general.start_at_login", "true")]),
         Scene::ConfigNotifications | Scene::ConfigNotificationsBottom => {
