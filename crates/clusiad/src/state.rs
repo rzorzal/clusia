@@ -24,6 +24,7 @@ use crate::permissions::Permissions;
 use crate::revalidate::Revalidations;
 use crate::sessions::Sessions;
 use crate::spawner::Spawner;
+use crate::story::Stories;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct PrLists {
@@ -84,6 +85,8 @@ pub(crate) struct Shared {
     pub diagrams: Diagrams,
     /// The call graph indexes built for the reviews in use, and their builds.
     pub indexes: Indexes,
+    /// The running story turns of every review.
+    pub stories: Stories,
     /// The `codex app-server` processes, one per open review.
     pub codex: crate::codex::Servers,
     /// The timers and runs that revalidate the drafts of saved reviews.
@@ -178,6 +181,7 @@ impl Shared {
             checks: Checks::default(),
             diagrams: Diagrams::default(),
             indexes: Indexes::default(),
+            stories: Stories::default(),
             codex: crate::codex::Servers::default(),
             revalidations: Revalidations::default(),
             holds: Holds::default(),

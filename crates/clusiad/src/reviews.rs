@@ -915,6 +915,7 @@ async fn leave(
     drop(guard);
     crate::checks::stop_all(shared, pr, crate::turns::Why::User).await;
     crate::diagrams::stop_all(shared, pr, crate::turns::Why::User).await;
+    crate::story::stop_all(shared, pr, crate::turns::Why::User).await;
     shared.sessions.close_review(shared, pr).await;
     Ok(true)
 }
@@ -927,6 +928,7 @@ pub(crate) async fn cleanup_checkout(shared: &Shared, pr: &PrRef) {
         let _ = unpin(&repo, &reviewed_ref(pr.number)).await;
         let _ = unpin(&repo, &base_pin_ref(pr.number)).await;
         let _ = clusia_git::unpin_diagrams(&repo, pr.number).await;
+        let _ = clusia_git::unpin_stories(&repo, pr.number).await;
         if let Err(e) = remove_worktree(&repo, &path).await {
             tracing::warn!(error = %e, "cannot remove the worktree");
         }

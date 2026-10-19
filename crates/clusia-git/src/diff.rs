@@ -115,11 +115,25 @@ pub fn diagram_ref(number: u64, version: u32) -> String {
     format!("refs/clusia/diagrams/pr-{number}-v{version}")
 }
 
+/// The pin that keeps the commit of version `version` of the story of pull request `number`
+/// reachable.
+pub fn story_ref(number: u64, version: u32) -> String {
+    format!("refs/clusia/story/pr-{number}-v{version}")
+}
+
 /// Removes every diagram pin of pull request `number`: each one is tried, and the first
 /// failure is returned after the rest are gone.
 pub async fn unpin_diagrams(repo: &Path, number: u64) -> Result<(), GitError> {
-    let pattern = format!("refs/clusia/diagrams/pr-{number}-v*");
-    let listed = git(repo, &["for-each-ref", "--format=%(refname)", &pattern]).await?;
+    unpin_matching(repo, &format!("refs/clusia/diagrams/pr-{number}-v*")).await
+}
+
+/// Removes every story pin of pull request `number`, as `unpin_diagrams` does.
+pub async fn unpin_stories(repo: &Path, number: u64) -> Result<(), GitError> {
+    unpin_matching(repo, &format!("refs/clusia/story/pr-{number}-v*")).await
+}
+
+async fn unpin_matching(repo: &Path, pattern: &str) -> Result<(), GitError> {
+    let listed = git(repo, &["for-each-ref", "--format=%(refname)", pattern]).await?;
     let mut first = None;
     for name in listed.lines().filter(|name| !name.is_empty()) {
         if let Err(e) = unpin(repo, name).await {
@@ -289,6 +303,28 @@ mod tests {
         assert_eq!(left, "refs/clusia/diagrams/pr-7-v1", "the others are gone");
         std::fs::remove_file(&lock).unwrap();
         unpin_diagrams(&repo, 7).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn story_pins_are_removed_for_their_pull_request_only() {
+        let (_t, repo, first, second) = repo_with_two_commits();
+        for (number, version, sha) in [(7, 1, &first), (7, 2, &second), (70, 1, &first)] {
+            pin_commit(&repo, &story_ref(number, version), sha)
+                .await
+                .unwrap();
+        }
+        pin_commit(&repo, &diagram_ref(7, 1), &first).await.unwrap();
+        assert_eq!(story_ref(7, 2), "refs/clusia/story/pr-7-v2");
+        unpin_stories(&repo, 7).await.unwrap();
+        let left = sh(
+            &repo,
+            &["for-each-ref", "--format=%(refname)", "refs/clusia"],
+        );
+        assert_eq!(
+            left,
+            "refs/clusia/diagrams/pr-7-v1\nrefs/clusia/story/pr-70-v1"
+        );
+        unpin_stories(&repo, 7).await.unwrap();
     }
 
     #[tokio::test]

@@ -45,7 +45,6 @@ const MAX_MANIFESTS: usize = 200;
 /// How long a failed build is not tried again for the same commit.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 /// How often `wait_ready` looks.
-#[allow(dead_code)] // `wait_ready` is the interface other daemon modules wait on
 const POLL: Duration = Duration::from_millis(50);
 /// The budget of the index of the changed files at the merge base.
 const BASE_BUDGET: Duration = Duration::from_secs(10);
@@ -634,7 +633,6 @@ async fn index_head(
     Ok((index, texts))
 }
 
-#[allow(dead_code)] // interface for other daemon modules
 pub(crate) async fn wait_ready(
     shared: &Arc<Shared>,
     pr: &PrRef,

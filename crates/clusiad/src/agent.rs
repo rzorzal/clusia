@@ -345,6 +345,7 @@ pub(crate) async fn notify_finished(shared: &Shared, pr: &PrRef, turn: u64) {
 pub(crate) async fn stop(shared: &Shared, pr: &PrRef) {
     crate::checks::stop_all(shared, pr, crate::turns::Why::Ended).await;
     crate::diagrams::stop_all(shared, pr, crate::turns::Why::Ended).await;
+    crate::story::stop_all(shared, pr, crate::turns::Why::Ended).await;
     crate::revalidate::stop_all(shared, pr, crate::turns::Why::Ended).await;
     shared.sessions.end(shared, pr).await;
     crate::codex::close(shared, pr).await;
@@ -361,6 +362,7 @@ pub(crate) fn forget_checks(shared: &Shared, pr: &PrRef) {
     crate::checks::forget(shared, pr);
     crate::diagrams::forget(shared, pr);
     crate::calls::forget(shared, pr);
+    crate::story::forget(shared, pr);
     crate::revalidate::forget(shared, pr);
 }
 

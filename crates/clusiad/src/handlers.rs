@@ -244,16 +244,23 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::AddCallsComment { pr, function, body } => {
             crate::calls::add_calls_comment(shared, client, &pr, &function, &body).await
         }
-        Command::WriteStory { .. }
-        | Command::RewriteStory { .. }
-        | Command::StopStory { .. }
-        | Command::GetStory { .. }
-        | Command::GetStoryVersion { .. }
-        | Command::MarkStepRead { .. }
-        | Command::AddStepComment { .. } => Outcome::Err(ProtocolError::new(
-            ErrorCode::InvalidState,
-            "Story and Calls are not available yet",
-        )),
+        Command::WriteStory { pr } => crate::story::write(shared, &pr).await,
+        Command::RewriteStory { pr } => crate::story::rewrite(shared, &pr).await,
+        Command::StopStory { pr } => crate::story::stop(shared, &pr),
+        Command::GetStory { pr } => crate::story::get(shared, &pr).await,
+        Command::GetStoryVersion { pr, number } => crate::story::version(shared, &pr, number),
+        Command::MarkStepRead {
+            pr,
+            number,
+            step,
+            read,
+        } => crate::story::mark_read(shared, &pr, number, &step, read).await,
+        Command::AddStepComment {
+            pr,
+            number,
+            step,
+            body,
+        } => crate::story::add_step_comment(shared, client, &pr, number, &step, &body).await,
     }
 }
 

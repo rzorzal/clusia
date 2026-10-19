@@ -35,6 +35,7 @@ mod server;
 mod sessions;
 mod spawner;
 mod state;
+mod story;
 mod sync;
 mod tabs;
 mod tray;
