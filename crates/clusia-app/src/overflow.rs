@@ -99,11 +99,15 @@ fn lengthen_chat(app: &mut App, scene: Scene) {
 
 const TOKEN: &str = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it_at_all";
 
+/// The longest login GitHub allows.
+const LOGIN: &str = "maintainer-of-widgets-and-gadgets-xx-yy";
+
 fn long() -> String {
     format!("{TOKEN} {TOKEN} {TOKEN}")
 }
 
-/// Replaces every string under a `path`, `body` or `title` key by `long`.
+/// Replaces every string under a `path`, `body` or `title` key by `long`, and under an
+/// `author` key by a login of the longest length.
 fn stretch(value: &mut serde_json::Value, long: &str) {
     match value {
         serde_json::Value::Object(map) => {
@@ -111,6 +115,9 @@ fn stretch(value: &mut serde_json::Value, long: &str) {
                 match (key.as_str(), &v) {
                     ("path" | "body" | "title", serde_json::Value::String(_)) => {
                         *v = serde_json::Value::String(long.to_string());
+                    }
+                    ("author", serde_json::Value::String(_)) => {
+                        *v = serde_json::Value::String(LOGIN.to_string());
                     }
                     _ => stretch(v, long),
                 }
@@ -129,10 +136,22 @@ fn lengthen(app: &mut App) {
         let model = &mut app.world_mut().resource_mut::<Model>().snapshot;
         for p in model.assigned.iter_mut().chain(model.mine.iter_mut()) {
             p.title = l.clone();
-            p.author = TOKEN.into();
+            p.author = LOGIN.into();
         }
         for r in &mut model.reviews {
             r.title = l.clone();
+        }
+    }
+    for state in app
+        .world_mut()
+        .resource_mut::<crate::ui::people::People>()
+        .by_login
+        .values_mut()
+    {
+        if let crate::ui::people::ProfileState::Loaded(p) = state {
+            p.name = Some(l.clone());
+            p.company = Some(l.clone());
+            p.bio = Some(l.clone());
         }
     }
     let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
@@ -155,6 +174,7 @@ fn lengthen(app: &mut App) {
             *v = serde_json::from_value(json).expect("still a view");
             for n in &mut ready.news {
                 n.summary = l.clone();
+                n.who = n.who.as_ref().map(|_| format!("{LOGIN}, {LOGIN}"));
             }
         }
     }

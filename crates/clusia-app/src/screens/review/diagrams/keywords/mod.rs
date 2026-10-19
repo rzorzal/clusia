@@ -933,15 +933,20 @@ mod tests {
             UVec2::new(900, 600),
             "too soon after the last change"
         );
-        let runtime = testing::find::<KeywordsRuntime>(&mut app, |_| true);
-        app.world_mut()
-            .get_mut::<KeywordsRuntime>(runtime)
-            .expect("a runtime")
-            .resized_at -= 1.0;
+        // Each update is one test frame, so the tenth of a second passes after a few more.
+        let mut waited = 0;
+        while testing::runtime(&app, &pr).size != UVec2::new(1000, 700) {
+            app.update();
+            waited += 1;
+            assert!(waited <= 10, "the debounce ends after a few frames");
+        }
         testing::settle(&mut app);
         let rt = testing::runtime(&app, &pr);
         assert_eq!(rt.size, UVec2::new(1000, 700));
-        assert_eq!(rt.frames, 2, "counted since the change, once settled");
+        assert_eq!(
+            rt.frames, 3,
+            "the frames of the settle, counted since the change"
+        );
     }
 
     #[test]

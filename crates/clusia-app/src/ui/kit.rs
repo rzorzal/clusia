@@ -886,6 +886,7 @@ impl Plugin for KitPlugin {
             crate::ui::spinner::SpinnerPlugin,
             crate::ui::markdown::MarkdownPlugin,
             crate::ui::media::MediaPlugin,
+            crate::ui::people::PeoplePlugin,
             crate::ui::code_select::CodeSelectPlugin,
         ))
         .add_message::<FieldCommitted>()

@@ -252,10 +252,62 @@ pub fn demo_gif_bytes(url: &str) -> Vec<u8> {
     out
 }
 
-/// The demo's copy of a picture: Giphy URLs are animated GIFs, nothing else exists.
+/// The demo's copy of a picture: Giphy URLs are animated GIFs, avatars are small round PNGs
+/// colored by the login, nothing else exists.
 pub fn demo_media(url: &str) -> Option<(MediaKind, Vec<u8>)> {
-    url.starts_with("https://media.giphy.com/")
-        .then(|| (MediaKind::Gif, demo_gif_bytes(url)))
+    if url.starts_with("https://media.giphy.com/") {
+        return Some((MediaKind::Gif, demo_gif_bytes(url)));
+    }
+    let login = url
+        .strip_prefix("https://avatars.githubusercontent.com/")?
+        .split('?')
+        .next()?;
+    Some((MediaKind::Png, demo_avatar_bytes(login)))
+}
+
+/// A 96 px disc in a color taken from `login`, standing in for a downloaded avatar.
+fn demo_avatar_bytes(login: &str) -> Vec<u8> {
+    use image::{ImageFormat, Rgba, RgbaImage};
+    const SIDE: u32 = 96;
+    let hash = login.bytes().fold(2_166_136_261_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16_777_619)
+    });
+    let channel = |shift: u32| 60 + ((hash >> shift) & 0x7f) as u8;
+    let ink = Rgba([channel(0), channel(8), channel(16), 255]);
+    let mut image = RgbaImage::from_pixel(SIDE, SIDE, Rgba([0, 0, 0, 0]));
+    let centre = (SIDE as f32 - 1.0) / 2.0;
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let (dx, dy) = (x as f32 - centre, y as f32 - centre);
+        if dx * dx + dy * dy <= (SIDE as f32 / 2.0).powi(2) {
+            *pixel = ink;
+        }
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut out, ImageFormat::Png)
+        .expect("an in-memory encoder takes the picture");
+    out.into_inner()
+}
+
+/// The profile the demo shows for `login`; only the demo people have one.
+pub fn demo_profile(login: &str) -> Option<clusia_core::Profile> {
+    let (name, company, bio) = match login {
+        "octo" => (
+            "Octo Cat",
+            Some("@acme"),
+            Some("Maintains acme/widgets. Reviews slowly, merges carefully."),
+        ),
+        "mona" => ("Mona Lisa", Some("Acme Widgets"), None),
+        "hubot" => ("Hubot", None, Some("Automation for acme/widgets.")),
+        _ => return None,
+    };
+    Some(clusia_core::Profile {
+        login: login.to_string(),
+        name: Some(name.to_string()),
+        company: company.map(str::to_string),
+        bio: bio.map(str::to_string),
+        avatar_url: None,
+    })
 }
 
 /// The review every demo scene shows (mockup `Review.png`).

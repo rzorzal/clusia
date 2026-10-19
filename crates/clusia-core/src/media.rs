@@ -142,6 +142,7 @@ mod tests {
             "private-user-images.githubusercontent.com",
             "camo.githubusercontent.com",
             "github.githubassets.com",
+            "avatars.githubusercontent.com",
             "github-production-user-asset-6210df.s3.amazonaws.com",
             "media.giphy.com",
             "media0.giphy.com",
@@ -179,6 +180,7 @@ mod tests {
         assert!(needs_token("github.com"));
         assert!(needs_token("API.github.com"));
         for other in [
+            "avatars.githubusercontent.com",
             "user-images.githubusercontent.com",
             "camo.githubusercontent.com",
             "media.giphy.com",

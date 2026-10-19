@@ -23,6 +23,7 @@ mod media;
 mod news;
 mod notifications;
 mod options;
+mod people;
 mod permissions;
 mod proposals;
 mod publish;

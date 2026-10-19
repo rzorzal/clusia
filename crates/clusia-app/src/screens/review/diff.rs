@@ -38,12 +38,12 @@ use crate::ui::code::{CodeSpan, plain_text, spans_for, wrapped_code_line};
 use crate::ui::code_select::{ClickKind, CodeSelection, LineKey, selectable};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Preview, Reveal, SideTrack, Stroke, Tone, Type, Variant, avatar,
-    badge, button, card, panel, segment, segment_node, segments, text, wrapped_text,
-    wrapping_button,
+    Clickable, Fill, HoverFill, Preview, Reveal, SideTrack, Stroke, Tone, Type, Variant, badge,
+    button, card, panel, segment, segment_node, segments, text, wrapped_text, wrapping_button,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
+use crate::ui::people::{person_avatar, person_name};
 
 const NO_DIFF: &str = "No diff to show for this file";
 
@@ -1494,8 +1494,8 @@ fn below(
                     ..default()
                 })
                 .with_children(|h| {
-                    h.spawn(avatar(fonts, &t.author));
-                    h.spawn(text(fonts, format!("@{}", t.author), Type::STRONG));
+                    h.spawn(person_avatar(fonts, &t.author, 22.0));
+                    h.spawn(person_name(fonts, &t.author));
                     // Collapsed, the first comment shows as one line: the box is one text
                     // line high and clips what wraps below it.
                     let mut line = h.spawn((
@@ -1567,7 +1567,7 @@ fn below(
                             })
                             .with_children(|r| {
                                 if i > 0 {
-                                    r.spawn(text(fonts, format!("@{}", post.author), Type::STRONG));
+                                    r.spawn(person_name(fonts, &post.author));
                                 }
                                 r.spawn(Node {
                                     flex_grow: 1.0,
@@ -2591,6 +2591,44 @@ mod tests {
                 [Ask::AddItem { body: sent, ticket, .. }] if sent == body && *ticket > 0
             ),
             "sent again after reconnecting: {asks:?}"
+        );
+    }
+
+    #[test]
+    fn thread_authors_in_the_diff_open_their_profiles() {
+        use crate::platform_open::OpenUrls;
+        use crate::ui::people::{PersonAvatar, PersonTarget};
+        let mut app = review_app();
+        testing::settle(&mut app);
+        let name = testing::entities::<PersonTarget>(&mut app)
+            .into_iter()
+            .find(|e| {
+                app.world()
+                    .get::<PersonTarget>(*e)
+                    .is_some_and(|t| t.0 == "mona")
+                    && app.world().get::<PersonAvatar>(*e).is_none()
+            })
+            .expect("mona's name on her thread");
+        assert!(
+            testing::entities::<PersonAvatar>(&mut app)
+                .iter()
+                .any(|e| app
+                    .world()
+                    .get::<PersonAvatar>(*e)
+                    .is_some_and(|a| a.0 == "mona")),
+            "and her avatar"
+        );
+        testing::click_button(&mut app, name);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            ["https://github.com/mona"]
+        );
+        assert!(
+            testing::tab(&app, &fixture::demo_pr())
+                .ui
+                .expanded
+                .is_empty(),
+            "the click did not also toggle the thread"
         );
     }
 

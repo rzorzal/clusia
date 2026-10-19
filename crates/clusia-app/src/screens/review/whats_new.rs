@@ -28,6 +28,7 @@ use crate::ui::kit::{
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown_line};
 use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
+use crate::ui::people::person_name;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewsRow {
@@ -39,6 +40,8 @@ pub struct NewsRow {
     pub detail: String,
     /// `@mona, @hubot` or `You`
     pub who: String,
+    /// The logins in `who`, each opening a profile; empty for `You`.
+    pub people: Vec<String>,
     /// `GitHub`, `GitHub Actions`, `Clúsia`, `CLI`
     pub source: String,
     /// Where a click goes (`None`: nowhere, e.g. checks).
@@ -90,20 +93,21 @@ pub fn news_row(item: &NewsItem) -> NewsRow {
         NewsKind::Moved => ("↻", Tone::Orange, Some(ReviewSection::Diff)),
         NewsKind::Revalidated => ("↻", Tone::Green, None),
     };
-    let (who, source) = match item.source.strip_prefix("You via ") {
-        Some(client) => ("You".to_string(), client_name(client)),
-        None => (
-            item.who
+    let (who, people, source) = match item.source.strip_prefix("You via ") {
+        Some(client) => ("You".to_string(), Vec::new(), client_name(client)),
+        None => {
+            let people: Vec<String> = item
+                .who
                 .as_deref()
-                .map(|w| {
-                    w.split(", ")
-                        .map(|p| format!("@{p}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default(),
-            item.source.clone(),
-        ),
+                .map(|w| w.split(", ").map(str::to_string).collect())
+                .unwrap_or_default();
+            let who = people
+                .iter()
+                .map(|p| format!("@{p}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (who, people, item.source.clone())
+        }
     };
     NewsRow {
         icon,
@@ -111,6 +115,7 @@ pub fn news_row(item: &NewsItem) -> NewsRow {
         what,
         detail,
         who,
+        people,
         source,
         go,
     }
@@ -367,7 +372,22 @@ fn news_row_node(
             ..default()
         })
         .with_children(|w| {
-            if !row.who.is_empty() {
+            if !row.people.is_empty() {
+                w.spawn(Node {
+                    flex_wrap: FlexWrap::Wrap,
+                    justify_content: JustifyContent::FlexEnd,
+                    max_width: px(220),
+                    ..default()
+                })
+                .with_children(|names| {
+                    for (i, login) in row.people.iter().enumerate() {
+                        names.spawn(person_name(fonts, login));
+                        if i + 1 < row.people.len() {
+                            names.spawn(text(fonts, ",", Type::MUTED.size(12.0)));
+                        }
+                    }
+                });
+            } else if !row.who.is_empty() {
                 w.spawn(text(fonts, row.who.clone(), Type::MUTED.size(12.0)));
             }
             w.spawn(text(fonts, row.source.clone(), Type::META));
@@ -450,6 +470,52 @@ mod tests {
             summary: summary.into(),
             url: None,
         }
+    }
+
+    #[test]
+    fn people_in_a_row_open_their_profiles_and_not_the_row() {
+        use crate::platform_open::OpenUrls;
+        use crate::ui::people::{PersonAvatar, PersonTarget};
+        let row = news_row(&item(
+            NewsKind::Comment,
+            "GitHub",
+            Some("mona, hubot"),
+            "3 comments",
+        ));
+        assert_eq!(row.people, ["mona", "hubot"]);
+        assert!(
+            news_row(&item(
+                NewsKind::Comment,
+                "You via clusia",
+                None,
+                "1 comment"
+            ))
+            .people
+            .is_empty()
+        );
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, true);
+        testing::recorded(&mut app);
+        let named = testing::entities::<PersonTarget>(&mut app)
+            .into_iter()
+            .filter(|e| app.world().get::<PersonAvatar>(*e).is_none())
+            .filter(|e| {
+                app.world()
+                    .get::<PersonTarget>(*e)
+                    .is_some_and(|t| t.0 == "mona")
+            })
+            .collect::<Vec<_>>();
+        assert!(!named.is_empty(), "mona is named in What's new");
+        testing::click_button(&mut app, named[0]);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            ["https://github.com/mona"]
+        );
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "the row behind it was not pressed"
+        );
+        assert!(testing::tab(&app, &pr).ui.modal.is_some());
     }
 
     #[test]

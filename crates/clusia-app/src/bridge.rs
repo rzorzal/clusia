@@ -21,7 +21,8 @@ use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::draft::Origin;
 use clusia_core::revalidation::{self, Revalidation};
 use clusia_core::{
-    Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
+    Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Profile, Review, Side, ThreadRef,
+    Verdict,
 };
 use clusia_protocol::{
     AgentErrorKind, AgentLogEntry, AnchorInput, CheckState, CheckStatus, Client, ClientError,
@@ -44,6 +45,7 @@ use crate::screens::review::revalidation::Revalidations;
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::tab_memory::TabsRestored;
 use crate::ui::media::MediaCache;
+use crate::ui::people::People;
 
 /// Events arriving within this window share one refresh.
 pub const COALESCE: Duration = Duration::from_millis(100);
@@ -113,6 +115,8 @@ pub enum Ask {
     Discard(PrRef),
     /// Worker connection: `Tell::Media` with this URL.
     FetchMedia(String),
+    /// Worker connection: `Tell::Profile` with this login.
+    FetchProfile(String),
     /// Giphy search (empty query: trending), answered by `Tell::Gifs`.
     SearchGifs {
         query: String,
@@ -800,6 +804,11 @@ pub enum Tell {
         url: String,
         file: Result<MediaFile, MediaError>,
     },
+    /// The daemon's answer to `FetchProfile`: the user's public profile, or why there is none.
+    Profile {
+        login: String,
+        profile: Result<Profile, MediaError>,
+    },
 }
 
 /// The ends Bevy keeps, and the connection thread.
@@ -959,6 +968,10 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
         Ask::FetchMedia(url) => teller.send(Tell::Media {
             url: url.clone(),
             file: Err(MediaError::transient("Not connected to clusiad")),
+        }),
+        Ask::FetchProfile(login) => teller.send(Tell::Profile {
+            login: login.clone(),
+            profile: Err(MediaError::transient("Not connected to clusiad")),
         }),
         Ask::AgentSend { pr, .. } => teller.send(Tell::Agent(AgentTell::Refused {
             pr: pr.clone(),
@@ -1449,7 +1462,9 @@ async fn answer(
             open_set(open).insert(pr.clone());
             spawn_worker(paths, teller, open, ask);
         }
-        Ask::Publish { .. } | Ask::FetchMedia(_) => spawn_worker(paths, teller, open, ask),
+        Ask::Publish { .. } | Ask::FetchMedia(_) | Ask::FetchProfile(_) => {
+            spawn_worker(paths, teller, open, ask);
+        }
         Ask::LoadConversation(pr) => match client
             .request(Command::GetConversation { pr: pr.clone() })
             .await
@@ -2071,6 +2086,7 @@ async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
             teller.send(tell);
         }
         Ask::FetchMedia(url) => teller.send(fetch_media(&socket, url).await),
+        Ask::FetchProfile(login) => teller.send(fetch_profile(&socket, login).await),
         Ask::Publish {
             pr,
             verdict,
@@ -2173,6 +2189,36 @@ async fn fetch_media(socket: &Path, url: String) -> Tell {
         },
     };
     Tell::Media { url, file }
+}
+
+/// `Profile`: the daemon's answer for `login`, or the reason it has none.
+async fn fetch_profile(socket: &Path, login: String) -> Tell {
+    let profile = match worker(socket).await {
+        Err(message) => Err(MediaError::transient(message)),
+        Ok(mut client) => match client
+            .request(Command::GetProfile {
+                login: login.clone(),
+            })
+            .await
+        {
+            Ok(Reply::Profile(profile)) => Ok(profile),
+            Ok(_) => Err(MediaError::transient("clusiad sent an unexpected reply")),
+            Err(e) => Err(profile_error(e)),
+        },
+    };
+    Tell::Profile { login, profile }
+}
+
+/// A profile is final only when GitHub has no such user; a rate limit, a refused token or a
+/// failing server can pass, so the next hover asks again.
+fn profile_error(e: ClientError) -> MediaError {
+    match e {
+        ClientError::Server(e) => MediaError {
+            transient: e.code != ErrorCode::NotFound,
+            message: e.message,
+        },
+        e => MediaError::transient(lost(e)),
+    }
 }
 
 /// Only the daemon's error code says whether asking again can help; every other failure is the
@@ -2425,12 +2471,14 @@ fn connect(world: &mut World, paths: Paths, home: Option<PathBuf>, slot: &Bridge
     slot.put(link.thread);
 }
 
-/// What the daemon says about a review besides its draft, as one parameter of `pump`.
+/// What the daemon says about a review besides its draft, and about the people on it, as one
+/// parameter of `pump`.
 #[derive(SystemParam)]
 pub(crate) struct ReviewModels<'w> {
     checks: ResMut<'w, Checks>,
     diagrams: ResMut<'w, Diagrams>,
     revalidations: ResMut<'w, Revalidations>,
+    people: ResMut<'w, People>,
 }
 
 pub(crate) fn pump(
@@ -2456,6 +2504,7 @@ pub(crate) fn pump(
         mut checks,
         mut diagrams,
         mut revalidations,
+        mut people,
     } = models;
     for tell in inbox.0.try_iter() {
         let mut events = Vec::new();
@@ -2466,6 +2515,7 @@ pub(crate) fn pump(
             Tell::Snapshot(s) => {
                 if matches!(model.connection, Connection::Lost(_)) {
                     media.retry_failed();
+                    people.retry_failed();
                 }
                 // A refusal belongs to the key that was refused; a new status means a new verdict.
                 if s.giphy_key != model.snapshot.giphy_key {
@@ -2542,6 +2592,7 @@ pub(crate) fn pump(
                 until: time.elapsed_secs_f64() + TOAST_SECS,
             }),
             Tell::Media { url, file } => media.arrive(url, file),
+            Tell::Profile { login, profile } => people.arrive(login, profile),
             Tell::Agent(agent) => {
                 crate::screens::review::agent::suggestion::close_edited(&mut tabs, &agent);
                 if chats.apply(&agent) {
@@ -2921,6 +2972,11 @@ pub(crate) fn demo_answers(
                 tells.push(Tell::Gifs(Ok(fixture::demo_gif_page(&query, offset))));
             }
             Ask::FetchMedia(url) => tells.push(demo_media_tell(url)),
+            Ask::FetchProfile(login) => tells.push(Tell::Profile {
+                profile: fixture::demo_profile(&login)
+                    .ok_or_else(|| MediaError::refused("Demo mode knows no such person")),
+                login,
+            }),
             _ => toasts.0.push(Toast {
                 text: "Demo mode: nothing is sent to the daemon".into(),
                 warning: false,
@@ -2942,7 +2998,11 @@ fn demo_media_tell(url: String) -> Tell {
         .ok_or_else(|| MediaError::refused("Demo mode has no copy of this picture"))
         .and_then(|(kind, bytes)| {
             let dir = std::env::temp_dir().join("clusia-demo-media");
-            let path = dir.join(format!("{}.gif", clusia_core::media::cache_key(&url)));
+            let path = dir.join(format!(
+                "{}.{}",
+                clusia_core::media::cache_key(&url),
+                kind.extension()
+            ));
             std::fs::create_dir_all(&dir)
                 .and_then(|()| std::fs::write(&path, &bytes))
                 .map_err(|e| MediaError::transient(e.to_string()))?;
@@ -3496,6 +3556,30 @@ mod tests {
         assert!(!class(ErrorCode::NotFound));
         assert!(!class(ErrorCode::NotConfigured));
         assert!(media_error(ClientError::Closed).transient);
+    }
+
+    #[test]
+    fn only_a_missing_user_is_final_for_a_profile() {
+        let class = |code| {
+            profile_error(ClientError::Server(clusia_protocol::ProtocolError {
+                code,
+                message: "m".into(),
+            }))
+            .transient
+        };
+        for code in [
+            ErrorCode::RateLimited,
+            ErrorCode::Upstream,
+            ErrorCode::Unauthorized,
+            ErrorCode::Offline,
+        ] {
+            assert!(
+                class(code),
+                "{code:?} may pass, so the next hover asks again"
+            );
+        }
+        assert!(!class(ErrorCode::NotFound));
+        assert!(profile_error(ClientError::Closed).transient);
     }
 
     #[test]
@@ -4192,6 +4276,7 @@ mod tests {
                 .add_message::<ReviewEvent>()
                 .add_message::<AppExit>()
                 .init_resource::<MediaCache>()
+                .init_resource::<People>()
                 .insert_resource(ReviewTabs::default())
                 .init_resource::<Chats>()
                 .init_resource::<Checks>()
@@ -4823,6 +4908,7 @@ mod tests {
             .init_resource::<Toasts>()
             .init_resource::<ReviewTabs>()
             .init_resource::<MediaCache>()
+            .init_resource::<People>()
             .init_resource::<Chats>()
             .init_resource::<PermissionQueue>()
             .init_resource::<Checks>()

@@ -54,6 +54,9 @@ use crate::ui::kit::KitPlugin;
 
 pub const NOW: i64 = 1_790_000_000;
 
+/// How far each update of a test app moves its `Time`.
+pub const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
 pub fn app(snapshot: Snapshot) -> App {
     let (inbox, outbox) = bridge::local_link();
     let mut app = App::new();
@@ -77,6 +80,8 @@ pub fn app(snapshot: Snapshot) -> App {
             connection: Connection::Live,
             ..Model::default()
         })
+        // Every update advances `Time` by the same step, whatever the machine's load.
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(FRAME))
         .init_resource::<Asks>()
         .init_resource::<Toasts>()
         .insert_resource(inbox)
@@ -347,9 +352,32 @@ pub fn center(app: &App, entity: Entity) -> Vec2 {
     Vec2::new(x + w / 2.0, y + h / 2.0)
 }
 
-/// Takes the asks recorded since the last call.
+/// Takes the asks recorded since the last call, without the avatar downloads every screen with
+/// an author asks for (`recorded_with_avatars` keeps them).
 pub fn recorded(app: &mut App) -> Vec<Ask> {
+    let mut asks = recorded_with_avatars(app);
+    asks.retain(|ask| !matches!(ask, Ask::FetchMedia(url) if is_avatar(url)));
+    asks
+}
+
+/// Takes every ask recorded since the last call.
+pub fn recorded_with_avatars(app: &mut App) -> Vec<Ask> {
     std::mem::take(&mut app.world_mut().resource_mut::<Asks>().recorded)
+}
+
+fn is_avatar(url: &str) -> bool {
+    url.starts_with("https://avatars.githubusercontent.com/")
+}
+
+/// A primary press and release on `entity` with the button widgets listening, so it becomes the
+/// `Activate` of the nearest button, as in the window.
+pub fn click_button(app: &mut App, entity: Entity) {
+    use bevy::ui_widgets::ButtonPlugin;
+    if !app.is_plugin_added::<ButtonPlugin>() {
+        app.add_plugins(ButtonPlugin);
+    }
+    press_code(app, entity, Vec2::ZERO);
+    click(app, entity);
 }
 
 pub fn count<C: Component>(app: &mut App) -> usize {

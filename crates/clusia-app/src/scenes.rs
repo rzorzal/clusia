@@ -503,6 +503,16 @@ pub fn stage(world: &mut World, scene: Scene) {
             .send(Tell::Restored(restored_tabs()));
         return;
     }
+    if scene == Scene::PersonCard {
+        use crate::ui::people::{HoverCard, People, ProfileState};
+        world.resource_mut::<HoverCard>().pin("octo");
+        if let Some(profile) = fixture::demo_profile("octo") {
+            world
+                .resource_mut::<People>()
+                .by_login
+                .insert("octo".into(), ProfileState::Loaded(profile));
+        }
+    }
     let now = world.resource::<Clock>().now();
     let (view, news) = fixture::demo_review(now);
     let pr = view.review.pr.clone();
@@ -519,7 +529,12 @@ pub fn stage(world: &mut World, scene: Scene) {
     let mut round = None;
     let mut ui = TabUi::default();
     match scene {
-        Scene::Diff | Scene::DiffSelected | Scene::Loading | Scene::Failed | Scene::Palette => {}
+        Scene::Diff
+        | Scene::DiffSelected
+        | Scene::Loading
+        | Scene::Failed
+        | Scene::Palette
+        | Scene::PersonCard => {}
         Scene::FirstRun
         | Scene::FirstRunBoth
         | Scene::FirstRunCustom
@@ -890,6 +905,17 @@ mod tests {
                 }
                 Scene::DiffSelected => {
                     assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
+                }
+                Scene::PersonCard => {
+                    for _ in 0..4 {
+                        app.update();
+                    }
+                    assert_eq!(
+                        testing::count::<crate::ui::people::CardRoot>(&mut app),
+                        1,
+                        "the author's card is open"
+                    );
+                    assert!(testing::shows(&mut app, "Octo Cat"));
                 }
                 Scene::Split | Scene::SplitSelected => {
                     assert_eq!(tab.ui.mode, DiffMode::Split);

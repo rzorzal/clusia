@@ -19,6 +19,7 @@ use crate::giphy;
 use crate::media;
 use crate::news;
 use crate::notifications;
+use crate::people;
 use crate::permissions;
 use crate::proposals;
 use crate::publish;
@@ -128,6 +129,7 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::GetActivity => activity::summary(shared).await,
         Command::GiphyKeyStatus => giphy::key_status(shared),
         Command::FetchMedia { url } => media::fetch(shared, &url).await,
+        Command::GetProfile { login } => people::profile(shared, &login).await,
         Command::SearchGifs { query, offset } => giphy::search(shared, &query, offset).await,
         Command::SetGiphyKey { key } => giphy::set_key(shared, key.expose()).await,
         Command::ClearGiphyKey => giphy::clear_key(shared).await,
