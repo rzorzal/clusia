@@ -922,3 +922,23 @@ pub fn chord(app: &mut App, code: KeyCode) {
     }
     app.update();
 }
+
+/// Lets the window for a second press of a multi-click pass, and runs a frame.
+pub fn wait_out_multi_click(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<bevy::time::Time<bevy::time::Real>>()
+        .advance_by(crate::ui::code_select::MULTI_CLICK + Duration::from_millis(50));
+    app.update();
+}
+
+/// The left mouse button goes down where no code is, as the window sends it, and a frame.
+pub fn left_press(app: &mut App) {
+    use bevy::input::ButtonState;
+    use bevy::input::mouse::{MouseButton, MouseButtonInput};
+    app.world_mut().write_message(MouseButtonInput {
+        button: MouseButton::Left,
+        state: ButtonState::Pressed,
+        window: Entity::PLACEHOLDER,
+    });
+    app.update();
+}

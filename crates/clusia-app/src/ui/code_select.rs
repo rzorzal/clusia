@@ -5,6 +5,8 @@
 //! block); a drag selects between two points of one group, and in a split view stays on the
 //! column where it began. The selection lives in `CodeSelection`; Cmd-C copies its text.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::time::Duration;
 
@@ -204,7 +206,23 @@ pub struct CodeSelection {
     dragged: bool,
     multi: bool,
     pressed: bool,
+    /// A press on code is waiting for the click that ends it.
+    armed: bool,
+    /// What the group's lines said when the selection was first seen; a change ends it.
+    fingerprint: Option<u64>,
     last: Option<LastPress>,
+}
+
+/// What a click on a line that holds code means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickKind {
+    /// It ended a drag or a multi-click: it selected, and is no click on the line.
+    Selected,
+    /// It follows a press on the code, which may be the first of a double click: act on it once
+    /// no further press (the one at this time) has come.
+    Pending(Option<Duration>),
+    /// It follows no press on the code: act now.
+    Plain,
 }
 
 impl CodeSelection {
@@ -214,6 +232,12 @@ impl CodeSelection {
         self.column = column;
         self.anchor = anchor;
         self.focus = focus;
+        self.fingerprint = None;
+    }
+
+    /// The time of the latest press on code.
+    pub fn last_press(&self) -> Option<Duration> {
+        self.last.map(|l| l.at)
     }
 
     /// Whether nothing is selected.
@@ -221,10 +245,17 @@ impl CodeSelection {
         self.group.is_none() || self.anchor == self.focus
     }
 
-    /// Whether the press that began the latest gesture selected rather than clicked: it dragged,
-    /// or it was the second or third of a multi-click.
-    pub fn suppresses_click(&self) -> bool {
-        self.dragged || self.multi
+    /// Reads the click that ends a press, and consumes what the press left for it: a gesture
+    /// that selected (it dragged, or was the second or third of a multi-click) is no click.
+    pub fn take_click(&mut self) -> ClickKind {
+        let armed = std::mem::take(&mut self.armed);
+        if std::mem::take(&mut self.dragged) | std::mem::take(&mut self.multi) {
+            ClickKind::Selected
+        } else if armed {
+            ClickKind::Pending(self.last_press())
+        } else {
+            ClickKind::Plain
+        }
     }
 
     /// The text of the selection, one row per line.
@@ -278,7 +309,7 @@ pub struct CodeSelectPlugin;
 impl Plugin for CodeSelectPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CodeSelection>()
-            .add_systems(Update, (forget, copy_selection, paint).chain());
+            .add_systems(Update, (forget, drop_stale, copy_selection, paint).chain());
     }
 }
 
@@ -356,6 +387,8 @@ fn on_press(
     selection.dragged = false;
     selection.multi = count > 1;
     selection.pressed = true;
+    selection.armed = true;
+    selection.fingerprint = None;
     selection.last = Some(LastPress {
         at: time.elapsed(),
         key,
@@ -404,11 +437,40 @@ fn on_drag(drag: On<Pointer<Drag>>, lines: Query<Measured>, mut selection: ResMu
     }
 }
 
-/// A press that landed on no code ends the selection.
+/// A press that landed on no code ends the selection and whatever it left for a click.
 fn forget(mouse: Option<Res<ButtonInput<MouseButton>>>, mut selection: ResMut<CodeSelection>) {
-    let pressed = std::mem::take(&mut selection.pressed);
-    if !pressed && mouse.is_some_and(|m| m.just_pressed(MouseButton::Left)) {
+    // Reads first: writing marks the selection changed, which repaints it.
+    if selection.pressed {
+        selection.pressed = false;
+    } else if mouse.is_some_and(|m| m.just_pressed(MouseButton::Left)) {
         selection.group = None;
+        selection.dragged = false;
+        selection.multi = false;
+        selection.armed = false;
+    }
+}
+
+/// Ends a selection whose lines are gone or now say something else: its offsets would point
+/// into other text.
+fn drop_stale(mut selection: ResMut<CodeSelection>, lines: Query<&CodeLine>) {
+    let Some(group) = selection.group else {
+        return;
+    };
+    let mut own: Vec<&CodeLine> = lines.iter().filter(|l| l.key.group == group).collect();
+    if own.is_empty() {
+        selection.group = None;
+        return;
+    }
+    own.sort_by_key(|l| (l.key.order, l.key.column));
+    let mut hasher = DefaultHasher::new();
+    for l in own {
+        (l.key.order, l.key.column, &l.text).hash(&mut hasher);
+    }
+    let seen = hasher.finish();
+    match selection.fingerprint {
+        None => selection.fingerprint = Some(seen),
+        Some(then) if then != seen => selection.group = None,
+        Some(_) => {}
     }
 }
 
@@ -428,6 +490,11 @@ fn copy_selection(
         KeyCode::SuperRight,
         KeyCode::ControlLeft,
         KeyCode::ControlRight,
+    ]) && !keys.any_pressed([
+        KeyCode::ShiftLeft,
+        KeyCode::ShiftRight,
+        KeyCode::AltLeft,
+        KeyCode::AltRight,
     ]);
     if !chord || !keys.just_pressed(KeyCode::KeyC) || selection.is_empty() {
         return;
@@ -457,7 +524,18 @@ fn paint(
         &TextLayoutInfo,
     )>,
     mut layers: Query<(&mut Highlight, &ComputedNode, &UiGlobalTransform), Without<CodeLine>>,
+    moved: Query<
+        (),
+        Or<(
+            Added<CodeLine>,
+            Changed<TextLayoutInfo>,
+            Changed<ComputedNode>,
+        )>,
+    >,
 ) {
+    if !selection.is_changed() && moved.is_empty() {
+        return;
+    }
     for (line, block, node, transform, info) in &lines {
         let Ok((mut shown, layer_node, layer_at)) = layers.get_mut(line.layer) else {
             continue;
