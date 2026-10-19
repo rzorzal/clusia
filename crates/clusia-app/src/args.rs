@@ -13,6 +13,8 @@ use clusia_protocol::WindowTarget;
 pub enum Scene {
     Diff,
     Split,
+    DiffSelected,
+    SplitSelected,
     Comments,
     CommentsHidden,
     Finalize,

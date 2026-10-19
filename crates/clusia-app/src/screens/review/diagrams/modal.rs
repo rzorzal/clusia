@@ -34,7 +34,8 @@ use crate::screens::review::editor::{
 };
 use crate::screens::review::shell::ModalFor;
 use crate::theme::Swatch;
-use crate::ui::code::{CodeSpan, code_line, spans_for};
+use crate::ui::code::{CodeSpan, code_line, plain_text, spans_for};
+use crate::ui::code_select::{LineKey, selectable};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{Fill, Stroke, Type, Variant, button, disabled_button, panel, text};
 use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
@@ -865,7 +866,8 @@ pub(crate) fn body_block(
     };
     p.spawn((panel(scrolled, Swatch::Bg), ScrollArea, NodeCode))
         .with_children(|b| {
-            for row in rows {
+            let group = b.target_entity();
+            for (order, row) in rows.iter().enumerate() {
                 b.spawn((
                     Node {
                         min_height: px(21),
@@ -895,7 +897,17 @@ pub(crate) fn body_block(
                             Type::MONO.size(12.0).ink(Swatch::Faint),
                         ));
                     });
-                    r.spawn(code_line(fonts, 12.0, row.spans.clone()));
+                    let key = LineKey {
+                        group,
+                        order,
+                        column: 0,
+                    };
+                    selectable(
+                        r,
+                        key,
+                        plain_text(&row.spans),
+                        code_line(fonts, 12.0, row.spans.clone()),
+                    );
                 });
             }
         });
@@ -1455,6 +1467,34 @@ mod tests {
         let around = 64.0 + 32.0 + 196.0 + 62.0;
         assert!(around + CODE_MAX_HEIGHT <= 800.0 * 0.9);
         assert!(testing::shows(&mut app, "Add to draft"));
+    }
+
+    #[test]
+    fn the_code_of_a_box_is_selectable_line_by_line_without_numbers() {
+        let (mut app, pr) = app_with_box();
+        let code = DiagramCode {
+            path: REFRESH.into(),
+            commit: head(),
+            start_line: 1,
+            lines: (1..=3)
+                .map(|number| CodeLine {
+                    number,
+                    text: format!("let line_{number} = {number};"),
+                    changed: false,
+                })
+                .collect(),
+            unavailable: None,
+        };
+        put_code(&mut app, &pr, "refresh", code);
+        testing::settle(&mut app);
+        let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
+        let mut lines: Vec<_> = q.iter(app.world()).collect();
+        lines.sort_by_key(|l| l.key.order);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["let line_1 = 1;", "let line_2 = 2;", "let line_3 = 3;"]
+        );
     }
 
     #[test]

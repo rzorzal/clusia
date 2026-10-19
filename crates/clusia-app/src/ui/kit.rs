@@ -791,6 +791,7 @@ impl Plugin for KitPlugin {
             crate::ui::spinner::SpinnerPlugin,
             crate::ui::markdown::MarkdownPlugin,
             crate::ui::media::MediaPlugin,
+            crate::ui::code_select::CodeSelectPlugin,
         ))
         .add_message::<FieldCommitted>()
         .add_observer(commit_on_blur)

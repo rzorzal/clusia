@@ -69,6 +69,15 @@ fn code_text(fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>, layout: TextLayou
     )
 }
 
+/// The text of `spans` as the line it came from: an empty line (its one-space placeholder)
+/// has none.
+pub fn plain_text(spans: &[CodeSpan]) -> String {
+    match spans {
+        [only] if only.text == " " => String::new(),
+        _ => spans.iter().map(|s| s.text.as_str()).collect(),
+    }
+}
+
 /// Cuts `line` into colored runs from its highlight `spans` (byte offsets), splitting at the
 /// `emphasis` range (byte offsets) whose runs get the given background. Gaps and offsets that
 /// fall outside the line or inside a character become plain text; tabs become spaces; an empty

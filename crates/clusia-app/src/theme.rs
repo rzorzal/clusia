@@ -46,6 +46,8 @@ pub enum Swatch {
     OrangePress,
     Hover,
     Selected,
+    /// Highlight of selected code text.
+    TextSelect,
     /// The knob of a switch.
     Knob,
     /// Heatmap level 0–4 (higher values clamp to 4).
@@ -109,6 +111,7 @@ pub struct Tokens {
     pub orange_press: Color,
     pub hover: Color,
     pub selected: Color,
+    pub text_select: Color,
     pub knob: Color,
     pub heat: [Color; 5],
     pub canvas_dot: Color,
@@ -161,6 +164,7 @@ impl Tokens {
             Swatch::OrangePress => self.orange_press,
             Swatch::Hover => self.hover,
             Swatch::Selected => self.selected,
+            Swatch::TextSelect => self.text_select,
             Swatch::Knob => self.knob,
             Swatch::PreviewBg(dark) => {
                 if dark {
@@ -246,6 +250,8 @@ pub const LIGHT: Tokens = Tokens {
     orange_press: Color::srgba_u8(0xD9, 0x57, 0x2B, 0x38),
     hover: Color::srgb_u8(0xF1, 0xF4, 0xF1),
     selected: Color::srgb_u8(0xE9, 0xF6, 0xEB),
+    // Opaque like the tints around it: over added and removed rows it must still read.
+    text_select: Color::srgb_u8(0xBF, 0xD6, 0xF7),
     knob: Color::srgb_u8(0xFF, 0xFF, 0xFF),
     heat: [
         Color::srgb_u8(0xEC, 0xEE, 0xEC),
@@ -325,6 +331,7 @@ pub const DARK: Tokens = Tokens {
     orange_press: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x45),
     hover: Color::srgb_u8(0x22, 0x27, 0x24),
     selected: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x1F),
+    text_select: Color::srgb_u8(0x2B, 0x4A, 0x7A),
     knob: Color::srgb_u8(0xE9, 0xEC, 0xE9),
     heat: [
         Color::srgb_u8(0x2E, 0x30, 0x2E),
@@ -482,6 +489,25 @@ mod tests {
         assert_eq!(DARK.get(Swatch::PreviewBg(false)), LIGHT.bg);
         assert_eq!(DARK.get(Swatch::PreviewGreen(false)), LIGHT.green);
         assert_eq!(LIGHT.get(Swatch::PreviewInk(true)), DARK.fg);
+    }
+
+    #[test]
+    fn selected_code_shows_over_every_row_fill_in_both_themes() {
+        for theme in [LIGHT, DARK] {
+            let select = theme.get(Swatch::TextSelect);
+            assert_eq!(select.alpha(), 1.0, "opaque, drawn under the text");
+            for fill in [
+                Swatch::Bg,
+                Swatch::Chrome,
+                Swatch::Surface,
+                Swatch::AddedBg,
+                Swatch::RemovedBg,
+                Swatch::Selected,
+                Swatch::Hover,
+            ] {
+                assert_ne!(select, theme.get(fill), "{fill:?}");
+            }
+        }
     }
 
     #[test]

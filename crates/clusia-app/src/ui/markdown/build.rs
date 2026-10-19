@@ -16,7 +16,8 @@ use clusia_highlight::highlight;
 use crate::fonts::UiFonts;
 use crate::platform_open::{OpenUrls, visit};
 use crate::theme::{Swatch, Theme};
-use crate::ui::code::{code_line, spans_for};
+use crate::ui::code::{code_line, plain_text, spans_for};
+use crate::ui::code_select::{LineKey, selectable};
 use crate::ui::emoji::EmojiImages;
 use crate::ui::kit::{Clickable, Fill, Ink, Stroke, TextSized, Type, Variant, button, font, text};
 use crate::ui::markdown::parse::{Block, Inline, ListItem, Style};
@@ -524,13 +525,21 @@ fn code_block(
     let path = lang.map(path_for_lang).unwrap_or_default();
     let spans = highlight(&path, &shown.join("\n"));
     c.spawn(block_frame()).with_children(|b| {
+        let group = b.target_entity();
         for (i, line) in shown.iter().enumerate() {
             let line_spans = spans.get(i).map(Vec::as_slice).unwrap_or_default();
-            b.spawn(code_line(
-                fonts,
-                opts.code_size,
-                spans_for(line, line_spans, None),
-            ));
+            let runs = spans_for(line, line_spans, None);
+            let key = LineKey {
+                group,
+                order: i,
+                column: 0,
+            };
+            selectable(
+                b,
+                key,
+                plain_text(&runs),
+                code_line(fonts, opts.code_size, runs),
+            );
         }
         if all.len() > shown.len() {
             b.spawn(text(
@@ -566,6 +575,8 @@ fn suggestion(c: &mut ChildSpawnerCommands, fonts: &UiFonts, source: &str, opts:
             children![text(fonts, "Suggested change", Type::META)],
         ));
         let removed = opts.suggestion_base.as_deref().unwrap_or("");
+        let group = s.target_entity();
+        let mut order = 0;
         for (sign, fill, body) in [
             ("−", Swatch::RemovedBg, removed),
             ("+", Swatch::AddedBg, source),
@@ -584,7 +595,19 @@ fn suggestion(c: &mut ChildSpawnerCommands, fonts: &UiFonts, source: &str, opts:
                 ))
                 .with_children(|row| {
                     row.spawn(text(fonts, sign, Type::MONO.size(opts.code_size)));
-                    row.spawn(code_line(fonts, opts.code_size, spans_for(line, &[], None)));
+                    let runs = spans_for(line, &[], None);
+                    let key = LineKey {
+                        group,
+                        order,
+                        column: 0,
+                    };
+                    order += 1;
+                    selectable(
+                        row,
+                        key,
+                        plain_text(&runs),
+                        code_line(fonts, opts.code_size, runs),
+                    );
                 });
             }
             if all.len() > MAX_CODE_LINES {
@@ -835,10 +858,19 @@ fn on_copy(
     let Ok(copy) = copies.get(activate.entity) else {
         return;
     };
+    copy_text(recorder, clipboard, &copy.0);
+}
+
+/// Puts `text` on the clipboard, or records it where `CopiedText` stands in for the clipboard.
+pub fn copy_text(
+    recorder: Option<ResMut<CopiedText>>,
+    clipboard: Option<ResMut<Clipboard>>,
+    text: &str,
+) {
     match (recorder, clipboard) {
-        (Some(mut recorded), _) => recorded.0.push(copy.0.clone()),
+        (Some(mut recorded), _) => recorded.0.push(text.to_string()),
         (None, Some(mut clipboard)) => {
-            if let Err(e) = clipboard.set_text(copy.0.clone()) {
+            if let Err(e) = clipboard.set_text(text.to_string()) {
                 tracing::warn!(error = %e, "cannot copy to the clipboard");
             }
         }
@@ -1377,6 +1409,40 @@ mod tests {
         );
         let all = texts(&app, capped);
         assert_eq!(all.last().map(String::as_str), Some("… 50 more lines"));
+    }
+
+    #[test]
+    fn the_lines_of_a_code_block_are_selectable_without_signs() {
+        let mut app = fresh();
+        render(
+            &mut app,
+            vec![Block::Code {
+                lang: Some("rust".into()),
+                text: "let x = 1;\nlet y = 2;\n".into(),
+            }],
+        );
+        let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
+        let mut lines: Vec<_> = q.iter(app.world()).collect();
+        lines.sort_by_key(|l| l.key.order);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["let x = 1;", "let y = 2;"]);
+        assert_eq!(lines[0].key.group, lines[1].key.group);
+    }
+
+    #[test]
+    fn the_rows_of_a_suggestion_are_selectable_in_one_group() {
+        let mut app = fresh();
+        let opts = RenderOpts {
+            suggestion_base: Some("let a = 1;".into()),
+            ..RenderOpts::default()
+        };
+        let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
+        render_with(&mut app, vec![Block::Suggestion("let a = 2;".into())], opts);
+        let mut lines: Vec<_> = q.iter(app.world()).collect();
+        lines.sort_by_key(|l| l.key.order);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["let a = 1;", "let a = 2;"]);
+        assert_eq!(lines[0].key.group, lines[1].key.group);
     }
 
     #[test]
