@@ -23,7 +23,7 @@ use crate::screens::review::ReviewSystems;
 use crate::screens::review::shell::ModalFor;
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, button, panel, text,
+    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, button, panel, text, wrapped_text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown_line};
@@ -339,7 +339,7 @@ fn news_row_node(
             ..default()
         })
         .with_children(|t| {
-            t.spawn(text(fonts, row.what.clone(), Type::BODY.size(13.0)));
+            t.spawn(wrapped_text(fonts, row.what.clone(), Type::BODY.size(13.0)));
             if !row.detail.is_empty() {
                 markdown_line(t, fonts, &parse(&row.detail), Type::META, opts, 140);
             }
