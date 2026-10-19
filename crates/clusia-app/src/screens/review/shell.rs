@@ -819,31 +819,48 @@ pub fn header_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, h
         .with_children(|c| {
             c.spawn(Node {
                 column_gap: px(10),
+                row_gap: px(2),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Baseline,
                 ..default()
             })
             .with_children(|t| {
                 t.spawn(text(fonts, h.repo.clone(), Type::MUTED));
                 t.spawn(text(fonts, h.number.clone(), Type::MUTED));
-                t.spawn(text(fonts, h.title.clone(), Type::TITLE.size(17.0)));
+                t.spawn((
+                    wrapped_text(fonts, h.title.clone(), Type::TITLE.size(17.0)),
+                    Node {
+                        max_width: percent(100),
+                        ..default()
+                    },
+                ));
             });
             c.spawn(Node {
                 column_gap: px(10),
+                row_gap: px(4),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Center,
                 ..default()
             })
             .with_children(|m| {
-                m.spawn(text(fonts, h.author.clone(), Type::META));
+                m.spawn((
+                    wrapped_text(fonts, h.author.clone(), Type::META),
+                    Node {
+                        max_width: percent(100),
+                        ..default()
+                    },
+                ));
                 m.spawn(panel(
                     Node {
                         padding: UiRect::axes(px(6), px(2)),
                         border_radius: BorderRadius::all(px(4)),
+                        max_width: percent(100),
                         ..default()
                     },
                     Swatch::Chrome,
                 ))
                 .with_children(|chip| {
-                    chip.spawn(text(fonts, h.branches.clone(), Type::MONO));
+                    chip.spawn(wrapped_text(fonts, h.branches.clone(), Type::MONO));
                 });
                 m.spawn(Node {
                     column_gap: px(4),
