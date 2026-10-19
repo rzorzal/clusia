@@ -47,13 +47,10 @@ pub fn group_alive(pid: u32) -> bool {
     unsafe { libc::killpg(pid as i32, 0) == 0 }
 }
 
-/// How many 50 ms polls fit in `HANG_BOUND`.
-const HANG_POLLS: u128 = clusia_core::testkit::HANG_BOUND.as_millis() / 50;
-
 /// Waits until run `index` of the fake ignores SIGTERM: `hang()` records the pid of the child it
 /// starts only after its trap is set, so a stop sent before that would still kill it.
 pub async fn custom_hung(dir: &Path, index: usize) -> CustomCall {
-    for _ in 0..HANG_POLLS {
+    for _ in 0..clusia_core::testkit::polls(Duration::from_millis(50)) {
         let dir = dir.to_path_buf();
         let calls = tokio::task::spawn_blocking(move || FakeCustom::calls(&dir))
             .await
@@ -70,7 +67,9 @@ pub async fn custom_hung(dir: &Path, index: usize) -> CustomCall {
 
 /// Whether the whole group is gone within `seconds`, or within `HANG_BOUND` if that is longer.
 pub async fn group_gone(pid: u32, seconds: u64) -> bool {
-    let polls = clusia_core::testkit::patient(Duration::from_secs(seconds)).as_millis() / 100;
+    let every = Duration::from_millis(100);
+    let polls =
+        clusia_core::testkit::patient(Duration::from_secs(seconds)).as_millis() / every.as_millis();
     for _ in 0..polls {
         if !group_alive(pid) {
             return true;

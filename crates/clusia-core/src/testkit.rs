@@ -17,23 +17,35 @@ const WARMUP: &str = "CLUSIA_TEST_WARMUP";
 
 /// Writes `/bin/sh` script `body` at `path`, ready to be executed by the code under test.
 ///
-/// The file is complete, synced, executable and closed (so no `ETXTBSY`) before it appears under
-/// `path`, and it has already been run once, so later runs start without the first-run check.
+/// The file is complete, synced, executable and closed before it appears under `path`, and it
+/// has already been run once, so later runs start without the first-run check. A thread of the
+/// test process that forks meanwhile may still hold the write descriptor until it execs, which
+/// makes a run fail with `ETXTBSY`; the warm-up retries that briefly.
 pub fn write_executable(path: &Path, body: &str) {
-    let staging = path.with_extension("staging");
+    let name = path.file_name().unwrap().to_string_lossy();
+    let staging = path.with_file_name(format!(".{name}.staging"));
     let mut file = File::create(&staging).unwrap();
     write!(file, "#!/bin/sh\n[ -n \"${WARMUP}\" ] && exit 0\n{body}\n").unwrap();
     file.sync_all().unwrap();
     drop(file);
     fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)).unwrap();
     fs::rename(&staging, path).unwrap();
-    let warmed = Command::new(path)
-        .env(WARMUP, "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
+    let mut attempt = 0;
+    let warmed = loop {
+        let run = Command::new(path)
+            .env(WARMUP, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match run {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            other => break other.unwrap(),
+        }
+    };
     assert!(warmed.success(), "{} did not start", path.display());
 }
 
@@ -44,4 +56,9 @@ pub const HANG_BOUND: Duration = Duration::from_secs(60);
 /// `base`, but at least [`HANG_BOUND`].
 pub fn patient(base: Duration) -> Duration {
     base.max(HANG_BOUND)
+}
+
+/// How many polls `every` apart fit in `HANG_BOUND`.
+pub fn polls(every: Duration) -> u128 {
+    HANG_BOUND.as_millis() / every.as_millis()
 }
