@@ -360,6 +360,7 @@ pub(crate) fn forget_checks(shared: &Shared, pr: &PrRef) {
     });
     crate::checks::forget(shared, pr);
     crate::diagrams::forget(shared, pr);
+    crate::calls::forget(shared, pr);
     crate::revalidate::forget(shared, pr);
 }
 

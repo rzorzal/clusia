@@ -12,6 +12,7 @@ use clusia_protocol::{Event, PermissionStatus, SyncStatus};
 use clusia_provider::GitHub;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
+use crate::calls::Indexes;
 use crate::checks::Checks;
 use crate::diagrams::Diagrams;
 use crate::holds::Holds;
@@ -81,6 +82,8 @@ pub(crate) struct Shared {
     pub checks: Checks,
     /// The running diagram drawings of every review.
     pub diagrams: Diagrams,
+    /// The call graph indexes built for the reviews in use, and their builds.
+    pub indexes: Indexes,
     /// The `codex app-server` processes, one per open review.
     pub codex: crate::codex::Servers,
     /// The timers and runs that revalidate the drafts of saved reviews.
@@ -174,6 +177,7 @@ impl Shared {
             sessions: Sessions::default(),
             checks: Checks::default(),
             diagrams: Diagrams::default(),
+            indexes: Indexes::default(),
             codex: crate::codex::Servers::default(),
             revalidations: Revalidations::default(),
             holds: Holds::default(),

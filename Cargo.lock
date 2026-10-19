@@ -2040,6 +2040,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clusia-analytics",
+ "clusia-calls",
  "clusia-core",
  "clusia-git",
  "clusia-harness",

@@ -31,25 +31,6 @@ async fn the_story_and_calls_commands_are_not_available_yet() {
             step: "a".into(),
             body: "Why?".into(),
         },
-        Command::GetCalls {
-            pr: pr7(),
-            center: None,
-            depth: None,
-            expand: Vec::new(),
-        },
-        Command::FindFunction {
-            pr: pr7(),
-            query: "refresh".into(),
-        },
-        Command::ReadFunctionCode {
-            pr: pr7(),
-            function: "src/a.rs#f#1".into(),
-        },
-        Command::AddCallsComment {
-            pr: pr7(),
-            function: "src/a.rs#f#1".into(),
-            body: "Why?".into(),
-        },
     ];
     for command in commands {
         let refusal = refused(c.request(command.clone()).await);

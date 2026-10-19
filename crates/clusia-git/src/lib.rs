@@ -6,6 +6,7 @@ pub mod grep;
 pub mod remote;
 pub mod run;
 pub mod show;
+pub mod tree;
 pub mod worktree;
 
 pub use diff::{
@@ -19,4 +20,5 @@ pub use grep::{GrepCaps, GrepHit, GrepResult, grep_words};
 pub use remote::{RepoId, parse_remote};
 pub use run::{GitError, git, git_with_timeout};
 pub use show::file_at;
+pub use tree::{TreeFile, ls_tree, read_blobs, vendored_or_generated};
 pub use worktree::{clone_partial, ensure_worktree, fetch_pr, pr_ref_name, remove_worktree};

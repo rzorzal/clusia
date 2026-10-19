@@ -229,17 +229,28 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::ReanchorDraftItem { pr, id, anchor } => {
             proposals::reanchor(shared, &pr, &id, anchor).await
         }
+        Command::GetCalls {
+            pr,
+            center,
+            depth,
+            expand,
+        } => crate::calls::get_calls(shared, &pr, center.as_deref(), depth, &expand).await,
+        Command::FindFunction { pr, query } => {
+            crate::calls::find_function(shared, &pr, &query).await
+        }
+        Command::ReadFunctionCode { pr, function } => {
+            crate::calls::read_function_code(shared, &pr, &function).await
+        }
+        Command::AddCallsComment { pr, function, body } => {
+            crate::calls::add_calls_comment(shared, client, &pr, &function, &body).await
+        }
         Command::WriteStory { .. }
         | Command::RewriteStory { .. }
         | Command::StopStory { .. }
         | Command::GetStory { .. }
         | Command::GetStoryVersion { .. }
         | Command::MarkStepRead { .. }
-        | Command::AddStepComment { .. }
-        | Command::GetCalls { .. }
-        | Command::FindFunction { .. }
-        | Command::ReadFunctionCode { .. }
-        | Command::AddCallsComment { .. } => Outcome::Err(ProtocolError::new(
+        | Command::AddStepComment { .. } => Outcome::Err(ProtocolError::new(
             ErrorCode::InvalidState,
             "Story and Calls are not available yet",
         )),

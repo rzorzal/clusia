@@ -22,6 +22,7 @@ clusia-platform.workspace = true
 clusia-provider.workspace = true
 clusia-git.workspace = true
 clusia-analytics.workspace = true
+clusia-calls.workspace = true
 libc.workspace = true
 tokio.workspace = true
 serde.workspace = true

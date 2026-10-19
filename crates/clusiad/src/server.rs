@@ -225,6 +225,7 @@ impl Daemon {
         tokio::join!(
             crate::checks::shutdown(&self.shared),
             crate::diagrams::shutdown(&self.shared),
+            crate::calls::shutdown(&self.shared),
             crate::revalidate::shutdown(&self.shared),
             self.shared.sessions.shutdown(&self.shared),
             crate::codex::shutdown(&self.shared)
