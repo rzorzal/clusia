@@ -1865,6 +1865,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "clusia-calls"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "clusia-core"
 version = "0.1.0"
 dependencies = [
