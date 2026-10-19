@@ -10,6 +10,8 @@ use crate::review_state::{DiffMode, ReviewSection, ReviewTabs, TabUi};
 use crate::screens::review::ReviewSystems;
 
 pub mod model;
+pub mod ui;
+pub mod view;
 
 pub use model::{Stories, StoryModel};
 
@@ -25,10 +27,11 @@ impl Plugin for StoryPlugin {
             Update,
             (load_story, trigger_write).chain().after(ReviewSystems),
         );
+        ui::add_systems(app);
     }
 }
 
-/// The Story frame: an empty root that the view fills.
+/// The Story frame: the root that holds the list and the body.
 pub(crate) fn frame(p: &mut bevy::ecs::hierarchy::ChildSpawnerCommands, pr: &PrRef) {
     p.spawn((
         Node {
@@ -38,16 +41,100 @@ pub(crate) fn frame(p: &mut bevy::ecs::hierarchy::ChildSpawnerCommands, pr: &PrR
             ..default()
         },
         StoryRoot(pr.clone()),
-    ));
+    ))
+    .with_children(|root| ui::parts(root, pr));
 }
 
-/// The status bar's middle text while the Story view shows; `None` keeps the draft summary.
-pub(crate) fn status_text(
-    _ui: &TabUi,
-    _model: Option<&StoryModel>,
-    _draft: &str,
-) -> Option<String> {
-    None
+/// The status bar's middle text while the Story view shows, after the draft summary; `None`
+/// keeps the draft summary alone.
+pub(crate) fn status_text(ui: &TabUi, model: Option<&StoryModel>, draft: &str) -> Option<String> {
+    let m = model.filter(|m| m.received)?;
+    let tail = if m.busy() {
+        "writing the story".to_string()
+    } else if let Some((since, now)) = view::compare_active(ui, m) {
+        format!("comparing story versions {since} → {now}")
+    } else if m.outdated() {
+        "story from an older commit".to_string()
+    } else {
+        let (read, total) = view::step_counts(ui, m);
+        if total == 0 {
+            return None;
+        }
+        format!("{read} of {total} steps read")
+    };
+    Some(format!("{draft} · {tail}"))
+}
+
+/// What a scene shows of the Story, one per mockup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoryStage {
+    /// Version 1 written for the head, step 2 current.
+    Written,
+    /// No version yet, the agent writing.
+    Static,
+    /// Version 1 written for an older commit than the head.
+    Outdated,
+    /// Versions 1 and 2, the comparison on.
+    Compare,
+}
+
+/// Leaves the tab of `pr` on the Diff section in the Story mode with the model of `stage`.
+pub fn stage(world: &mut World, pr: &PrRef, stage: StoryStage, now: i64) {
+    let demo = crate::fixture::demo_story(now);
+    let mut first = demo.first;
+    if stage == StoryStage::Outdated {
+        first.commit = crate::fixture::DEMO_OLD_SHA.into();
+    }
+    let (versions, state, step, compare) = match stage {
+        StoryStage::Written | StoryStage::Outdated => (
+            vec![first],
+            clusia_protocol::StoryState::Idle,
+            Some("one-at-a-time"),
+            false,
+        ),
+        StoryStage::Static => (
+            Vec::new(),
+            clusia_protocol::StoryState::Writing,
+            None,
+            false,
+        ),
+        StoryStage::Compare => (
+            vec![first, demo.second],
+            clusia_protocol::StoryState::Idle,
+            Some("one-at-a-time"),
+            true,
+        ),
+    };
+    let read = if stage == StoryStage::Static {
+        Vec::new()
+    } else {
+        demo.read
+    };
+    let tell = crate::bridge::StoryTell::Loaded {
+        pr: pr.clone(),
+        versions: versions
+            .iter()
+            .map(|v| clusia_protocol::StoryVersionInfo {
+                number: v.number,
+                commit: v.commit.clone(),
+                state: v.state.clone(),
+            })
+            .collect(),
+        latest: versions.last().cloned().map(Box::new),
+        state,
+        static_steps: demo.static_steps,
+        read,
+        head: demo.head,
+        new_commits: if stage == StoryStage::Outdated { 2 } else { 0 },
+    };
+    world.resource_mut::<Stories>().apply(&tell);
+    if let Some(tab) = world.resource_mut::<ReviewTabs>().0.get_mut(pr) {
+        tab.ui.section = ReviewSection::Diff;
+        tab.ui.mode = DiffMode::Story;
+        tab.ui.story_step = step.map(str::to_string);
+        tab.ui.story_version = None;
+        tab.ui.story_compare = compare;
+    }
 }
 
 /// Whether the tab shows the Story: the Diff section in the Story mode.
@@ -103,7 +190,7 @@ fn load_story(
 /// Sends `WriteStory` when the Story view shows a review that has no version at all: the setting
 /// is on, the daemon is idle, and no earlier send waits for an answer. A failed or stopped run
 /// leaves a version, so it never starts again on its own.
-fn trigger_write(
+pub(super) fn trigger_write(
     tabs: Res<ReviewTabs>,
     model: Res<Model>,
     mut stories: ResMut<Stories>,
@@ -377,10 +464,123 @@ mod tests {
     }
 
     #[test]
-    fn the_story_status_text_is_left_to_the_draft_summary_until_the_view_writes_one() {
+    fn the_status_says_what_the_story_is_doing_after_the_draft_summary() {
+        use crate::screens::review::story::model::StoryModel;
+        let draft = "Draft saved · 4 items";
+        let loaded = |tell: Tell| {
+            let mut m = StoryModel::default();
+            let Tell::Story(t) = tell else {
+                panic!("a story tell")
+            };
+            m.apply(&t);
+            m
+        };
         let ui = TabUi::default();
-        assert_eq!(status_text(&ui, None, "Draft saved · 4 items"), None);
-        let _ = ReviewSection::Diff;
+        assert_eq!(status_text(&ui, None, draft), None);
+        assert_eq!(
+            status_text(&ui, Some(&StoryModel::default()), draft),
+            None,
+            "nothing known yet"
+        );
+
+        let mut m = loaded(fixture::demo_story_tell(&fixture::demo_pr(), NOW));
+        assert_eq!(
+            status_text(&ui, Some(&m), draft).as_deref(),
+            Some("Draft saved · 4 items · 1 of 6 steps read")
+        );
+        let compare = TabUi {
+            story_compare: true,
+            ..TabUi::default()
+        };
+        assert_eq!(
+            status_text(&compare, Some(&m), draft).as_deref(),
+            Some("Draft saved · 4 items · comparing story versions 1 → 2")
+        );
+        m.head = "feedfacefeedfacefeedfacefeedfacefeedface".into();
+        assert_eq!(
+            status_text(&ui, Some(&m), draft).as_deref(),
+            Some("Draft saved · 4 items · story from an older commit")
+        );
+        m.apply(&StoryTell::State {
+            pr: fixture::demo_pr(),
+            state: StoryState::Writing,
+        });
+        assert_eq!(
+            status_text(&compare, Some(&m), draft).as_deref(),
+            Some("Draft saved · 4 items · writing the story"),
+            "a run in progress wins over the rest"
+        );
+    }
+
+    #[test]
+    fn each_stage_leaves_the_tab_on_the_story_with_the_model_of_its_mockup() {
+        for (stage_kind, versions, step, compare, state) in [
+            (
+                StoryStage::Written,
+                1,
+                Some("one-at-a-time"),
+                false,
+                StoryState::Idle,
+            ),
+            (StoryStage::Static, 0, None, false, StoryState::Writing),
+            (
+                StoryStage::Outdated,
+                1,
+                Some("one-at-a-time"),
+                false,
+                StoryState::Idle,
+            ),
+            (
+                StoryStage::Compare,
+                2,
+                Some("one-at-a-time"),
+                true,
+                StoryState::Idle,
+            ),
+        ] {
+            let (mut app, pr) = {
+                let mut app = testing::app(fixture::demo(NOW));
+                let pr = testing::open_ready(&mut app, false);
+                (app, pr)
+            };
+            stage(app.world_mut(), &pr, stage_kind, NOW);
+            testing::settle(&mut app);
+            let tab = testing::tab(&app, &pr);
+            assert_eq!(
+                (tab.ui.section, tab.ui.mode),
+                (ReviewSection::Diff, DiffMode::Story)
+            );
+            assert_eq!(tab.ui.story_step.as_deref(), step, "{stage_kind:?}");
+            assert_eq!(
+                (tab.ui.story_compare, tab.ui.story_version),
+                (compare, None)
+            );
+            let m = &app.world().resource::<Stories>().0[&pr];
+            assert_eq!(m.versions.len(), versions, "{stage_kind:?}");
+            assert_eq!(m.state, state);
+            assert_eq!(
+                m.new_commits,
+                if stage_kind == StoryStage::Outdated {
+                    2
+                } else {
+                    0
+                }
+            );
+            assert!(
+                m.asked && m.received,
+                "the loader does not ask over a staged story"
+            );
+            assert_eq!(
+                m.outdated(),
+                stage_kind == StoryStage::Outdated,
+                "{stage_kind:?}"
+            );
+            let asks = testing::recorded(&mut app);
+            assert!(
+                !asks.contains(&Ask::GetStory(pr.clone()))
+                    && !asks.contains(&Ask::WriteStory(pr.clone()))
+            );
+        }
     }
 
     #[test]

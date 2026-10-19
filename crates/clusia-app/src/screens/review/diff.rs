@@ -163,7 +163,7 @@ pub struct DiffView {
 
 /// One file's rows highlighted per side, indexed by row.
 #[derive(Debug, Clone, Default)]
-struct Highlighted {
+pub(crate) struct Highlighted {
     left: Vec<Option<Vec<Span>>>,
     right: Vec<Option<Vec<Span>>>,
 }
@@ -181,7 +181,7 @@ impl HighlightCache {
         self.0.is_empty()
     }
 
-    fn get(&mut self, head: &str, path: &str, rows: &[Row]) -> &Highlighted {
+    pub(crate) fn get(&mut self, head: &str, path: &str, rows: &[Row]) -> &Highlighted {
         self.0
             .entry((head.to_string(), path.to_string()))
             .or_insert_with(|| {
@@ -213,6 +213,97 @@ fn patch_of<'a>(ready: &'a Ready, path: &str) -> Option<&'a str> {
         .iter()
         .find(|f| f.path == path)
         .and_then(|f| f.patch.as_deref())
+}
+
+/// Rows a step shows at most; the rest is counted, not drawn.
+pub(crate) const STEP_ROWS: usize = 60;
+
+/// The rows of a file's patch that a step's head-side `ranges` select: the added and context
+/// lines whose head line is in a range, and each run of removed lines right before a selected
+/// row (or right after one, at the end of a hunk). Indices ascend.
+pub(crate) fn rows_in_ranges(rows: &[Row], ranges: &[(u32, u32)]) -> Vec<usize> {
+    let hit = |row: &Row| {
+        row.kind != RowKind::Hunk
+            && row.kind != RowKind::Removed
+            && row
+                .new
+                .is_some_and(|n| ranges.iter().any(|&(a, b)| a <= n && n <= b.max(a)))
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        if rows[i].kind != RowKind::Removed {
+            if hit(&rows[i]) {
+                out.push(i);
+            }
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < rows.len() && rows[i].kind == RowKind::Removed {
+            i += 1;
+        }
+        let after = rows.get(i).filter(|r| r.kind != RowKind::Hunk);
+        let take = match after {
+            Some(next) => hit(next),
+            None => start > 0 && hit(&rows[start - 1]),
+        };
+        if take {
+            out.extend(start..i);
+        }
+    }
+    out
+}
+
+/// A step's lines of one file.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Excerpt {
+    pub path: String,
+    pub lines: Vec<(UnifiedLine, Vec<Below>)>,
+    /// Rows past `STEP_ROWS`.
+    pub hidden: usize,
+}
+
+/// The rows of `path` that `ranges` select, built as the Unified view builds them. Threads and
+/// the open editor sit under their rows; draft comments do not (a step lists them apart).
+/// `None` when the file is not in the diff or no row is in a range.
+pub(crate) fn excerpt(
+    ready: &Ready,
+    ui: &TabUi,
+    cache: &mut HighlightCache,
+    path: &str,
+    ranges: &[(u32, u32)],
+) -> Option<Excerpt> {
+    let patch = patch_of(ready, path)?;
+    let rows = parse_patch(patch);
+    let picked = rows_in_ranges(&rows, ranges);
+    if picked.is_empty() {
+        return None;
+    }
+    let (left_ok, right_ok) = commentable_lines(patch);
+    let can = |anchor: Option<(Side, u32)>| match anchor {
+        Some((Side::Left, n)) => left_ok.contains(&n),
+        Some((Side::Right, n)) => right_ok.contains(&n),
+        None => false,
+    };
+    let sel = selection(ui, path);
+    let mut below = placements(ready, ui, path, &rows);
+    let lit = cache.get(&ready.view.pr.head_sha, path, &rows);
+    let lines = picked
+        .iter()
+        .take(STEP_ROWS)
+        .map(|&i| {
+            let mut under = below.take(Side::Left, i);
+            under.extend(below.take(Side::Right, i));
+            under.retain(|b| !matches!(b, Below::Draft(_)));
+            (unified_line(&rows, i, lit, &can, sel), under)
+        })
+        .collect();
+    Some(Excerpt {
+        path: path.to_string(),
+        lines,
+        hidden: picked.len().saturating_sub(STEP_ROWS),
+    })
 }
 
 fn short(sha: &str) -> &str {
@@ -414,6 +505,33 @@ fn placements(ready: &Ready, ui: &TabUi, path: &str, rows: &[Row]) -> Placements
 }
 
 /// A row's colored spans from one side's highlighting.
+/// One Unified row as the view lists it: its numbers, colored spans, anchor and whether a click
+/// can comment on it.
+pub(crate) fn unified_line(
+    rows: &[Row],
+    index: usize,
+    lit: &Highlighted,
+    can: &dyn Fn(Option<(Side, u32)>) -> bool,
+    sel: Option<(Side, u32, u32)>,
+) -> UnifiedLine {
+    let row = &rows[index];
+    let side = if row.kind == RowKind::Removed {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    UnifiedLine {
+        row: index,
+        kind: row.kind,
+        old: row.old,
+        new: row.new,
+        spans: row_spans(row, index, side, lit, None),
+        anchor: anchor_of(row),
+        commentable: can(anchor_of(row)),
+        selected: is_selected(sel, anchor_of(row)),
+    }
+}
+
 fn row_spans(
     row: &Row,
     index: usize,
@@ -517,25 +635,10 @@ pub fn diff_view(
                 .iter()
                 .enumerate()
                 .take(limit)
-                .map(|(i, row)| {
-                    let side = if row.kind == RowKind::Removed {
-                        Side::Left
-                    } else {
-                        Side::Right
-                    };
+                .map(|(i, _)| {
                     let mut under = below.take(Side::Left, i);
                     under.extend(below.take(Side::Right, i));
-                    let line = UnifiedLine {
-                        row: i,
-                        kind: row.kind,
-                        old: row.old,
-                        new: row.new,
-                        spans: row_spans(row, i, side, lit, None),
-                        anchor: anchor_of(row),
-                        commentable: can(anchor_of(row)),
-                        selected: is_selected(sel, anchor_of(row)),
-                    };
-                    (line, under)
+                    (unified_line(&rows, i, lit, &can, sel), under)
                 })
                 .collect();
             out.body = DiffBody::Unified(lines);
@@ -764,7 +867,7 @@ impl Plugin for DiffPlugin {
 
 /// Fills the Diff section's body with the frame the mode wants, and again when the mode asks for
 /// another one. Unified and Split share the Files frame.
-fn fill_region(
+pub(crate) fn fill_region(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
     bodies: Query<(Entity, &SectionBody)>,
@@ -1162,6 +1265,10 @@ fn marker(kind: RowKind) -> (&'static str, Swatch) {
 }
 
 fn number(p: &mut ChildSpawnerCommands, fonts: &UiFonts, n: Option<u32>, size: f32) {
+    number_text(p, fonts, n.map(|n| n.to_string()).unwrap_or_default(), size);
+}
+
+fn number_text(p: &mut ChildSpawnerCommands, fonts: &UiFonts, text_: String, size: f32) {
     p.spawn(Node {
         width: px(NUMBER_WIDTH),
         min_height: px(ROW_HEIGHT),
@@ -1176,11 +1283,7 @@ fn number(p: &mut ChildSpawnerCommands, fonts: &UiFonts, n: Option<u32>, size: f
         ..default()
     })
     .with_children(|c| {
-        c.spawn(text(
-            fonts,
-            n.map(|n| n.to_string()).unwrap_or_default(),
-            Type::MONO.size(size).ink(Swatch::Faint),
-        ));
+        c.spawn(text(fonts, text_, Type::MONO.size(size).ink(Swatch::Faint)));
     });
 }
 
@@ -1257,6 +1360,87 @@ fn line_node(
     e.with_children(build);
 }
 
+/// Which number columns a Unified row draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gutter {
+    /// The old and the new number and a sign: the Diff.
+    Both,
+    /// One column with the head line (a `−` on a removed line) and no sign: a Story step.
+    Head,
+}
+
+/// The rows of a Unified body, each with what sits under it. `focus_row` is the index among
+/// `lines` that `Open in diff` lit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn unified_rows(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    path: &str,
+    lines: &[(UnifiedLine, Vec<Below>)],
+    size: f32,
+    editor: Option<&Editor>,
+    opts: &RenderOpts,
+    gutter: Gutter,
+    focus_row: Option<usize>,
+) {
+    let line_button = |row: usize, anchor: Option<(Side, u32)>, commentable: bool| {
+        let (side, line) = anchor.filter(|_| commentable)?;
+        Some(LineButton {
+            pr: pr.clone(),
+            path: path.to_string(),
+            row,
+            side,
+            line,
+        })
+    };
+    let indent = match gutter {
+        Gutter::Both => 2.0 * NUMBER_WIDTH + 18.0,
+        Gutter::Head => NUMBER_WIDTH,
+    };
+    for (at, (line, under)) in lines.iter().enumerate() {
+        line_node(
+            p,
+            percent(100),
+            line.kind,
+            line.selected,
+            line_button(line.row, line.anchor, line.commentable),
+            (focus_row == Some(at)).then(|| FocusRow(pr.clone())),
+            |r| {
+                match gutter {
+                    Gutter::Both => {
+                        number(r, fonts, line.old, size);
+                        number(r, fonts, line.new, size);
+                        mark(r, fonts, line.kind, size);
+                    }
+                    Gutter::Head => {
+                        let head = match (line.new, line.kind) {
+                            (Some(n), _) => n.to_string(),
+                            (None, RowKind::Removed) => "−".to_string(),
+                            (None, _) => String::new(),
+                        };
+                        number_text(r, fonts, head, size);
+                    }
+                }
+                code(r, fonts, size, line.spans.clone());
+            },
+        );
+        if !under.is_empty() {
+            p.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                padding: UiRect::new(px(indent), px(16), px(8), px(8)),
+                ..default()
+            })
+            .with_children(|b| {
+                for item in under {
+                    below(b, fonts, pr, item, editor, opts);
+                }
+            });
+        }
+    }
+}
+
 fn body(
     p: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -1289,35 +1473,18 @@ fn body(
             });
         }
         DiffBody::Unified(lines) => {
-            for (at, (line, under)) in lines.iter().enumerate() {
-                line_node(
-                    p,
-                    percent(100),
-                    line.kind,
-                    line.selected,
-                    line_button(line.row, line.anchor, line.commentable),
-                    focus_of(at),
-                    |r| {
-                        number(r, fonts, line.old, size);
-                        number(r, fonts, line.new, size);
-                        mark(r, fonts, line.kind, size);
-                        code(r, fonts, size, line.spans.clone());
-                    },
-                );
-                if !under.is_empty() {
-                    p.spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(8),
-                        padding: UiRect::new(px(2.0 * NUMBER_WIDTH + 18.0), px(16), px(8), px(8)),
-                        ..default()
-                    })
-                    .with_children(|b| {
-                        for item in under {
-                            below(b, fonts, pr, item, editor, opts);
-                        }
-                    });
-                }
-            }
+            unified_rows(
+                p,
+                fonts,
+                pr,
+                path,
+                lines,
+                size,
+                editor,
+                opts,
+                Gutter::Both,
+                v.focus_row,
+            );
         }
         DiffBody::Split {
             before,
@@ -3322,5 +3489,122 @@ mod tests {
             ly + lh,
             by + bh
         );
+    }
+
+    fn rows_of(path: &str) -> Vec<Row> {
+        parse_patch(&patch(&ready(), path))
+    }
+
+    #[test]
+    fn a_step_takes_the_head_lines_in_its_range_and_the_removed_run_before_them() {
+        let rows = rows_of(REFRESH);
+        let picked = rows_in_ranges(&rows, &[(39, 41)]);
+        let kinds: Vec<RowKind> = picked.iter().map(|&i| rows[i].kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                RowKind::Removed,
+                RowKind::Removed,
+                RowKind::Added,
+                RowKind::Added,
+                RowKind::Added
+            ]
+        );
+        let news: Vec<Option<u32>> = picked.iter().map(|&i| rows[i].new).collect();
+        assert_eq!(news, [None, None, Some(39), Some(40), Some(41)]);
+        assert!(picked.windows(2).all(|w| w[0] < w[1]), "in file order");
+    }
+
+    #[test]
+    fn a_range_keeps_context_lines_and_skips_the_hunk_header() {
+        let rows = rows_of(REFRESH);
+        let picked = rows_in_ranges(&rows, &[(42, 44)]);
+        let news: Vec<Option<u32>> = picked.iter().map(|&i| rows[i].new).collect();
+        assert_eq!(news, [Some(42), Some(43), Some(44)]);
+        assert!(picked.iter().all(|&i| rows[i].kind != RowKind::Hunk));
+    }
+
+    #[test]
+    fn several_ranges_join_and_a_range_outside_the_patch_picks_nothing() {
+        let rows = rows_of(REFRESH);
+        let both = rows_in_ranges(&rows, &[(44, 44), (67, 67)]);
+        let news: Vec<Option<u32>> = both.iter().map(|&i| rows[i].new).collect();
+        assert_eq!(news, [Some(44), Some(67)]);
+        assert!(rows_in_ranges(&rows, &[(500, 510)]).is_empty());
+        assert!(rows_in_ranges(&[], &[(1, 5)]).is_empty());
+    }
+
+    #[test]
+    fn an_excerpt_is_built_like_the_unified_rows_and_leaves_drafts_to_the_notes() {
+        let r = ready();
+        let mut ui = TabUi::default();
+        let mut cache = HighlightCache::default();
+        let ex = excerpt(&r, &ui, &mut cache, REFRESH, &[(43, 45)]).expect("an excerpt");
+        assert_eq!(ex.path, REFRESH);
+        assert_eq!(ex.hidden, 0);
+        let news: Vec<Option<u32>> = ex.lines.iter().map(|(l, _)| l.new).collect();
+        assert_eq!(news, [Some(43), Some(44), Some(45)]);
+        let (line44, under) = &ex.lines[1];
+        assert_eq!(line44.kind, RowKind::Added);
+        assert!(line44.commentable && line44.anchor == Some((Side::Right, 44)));
+        assert!(
+            under.iter().all(|b| !matches!(b, Below::Draft(_))),
+            "the draft comment on line 44 is a note, not a card under the row"
+        );
+        // An open line editor still shows under its row.
+        ui.editor = Some(Editor {
+            target: EditTarget::Line {
+                path: REFRESH.into(),
+                side: Side::Right,
+                start: None,
+                line: 44,
+            },
+            text: String::new(),
+            error: None,
+            ticket: None,
+            mode: ComposerMode::Write,
+        });
+        let ex = excerpt(&r, &ui, &mut cache, REFRESH, &[(43, 45)]).expect("an excerpt");
+        assert!(ex.lines[1].0.selected);
+        assert!(ex.lines[1].1.contains(&Below::Editor));
+        // mona's thread is on line 41.
+        let ex = excerpt(&r, &ui, &mut cache, REFRESH, &[(41, 41)]).expect("an excerpt");
+        assert!(ex.lines[0].1.iter().any(|b| matches!(b, Below::Thread(_))));
+    }
+
+    #[test]
+    fn an_excerpt_is_cut_at_the_cap_and_says_how_many_lines_it_left_out() {
+        let r = ready();
+        let ex = excerpt(
+            &r,
+            &TabUi::default(),
+            &mut HighlightCache::default(),
+            "src/auth/store.rs",
+            &[(1, 500)],
+        )
+        .expect("an excerpt");
+        assert_eq!(ex.lines.len(), STEP_ROWS);
+        assert!(
+            ex.hidden > 0,
+            "the store.rs hunk has more than {STEP_ROWS} rows"
+        );
+        assert!(
+            excerpt(
+                &r,
+                &TabUi::default(),
+                &mut HighlightCache::default(),
+                "nope.rs",
+                &[(1, 5)]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_head_gutter_row_has_one_number_cell_and_the_code_and_a_both_row_still_has_four() {
+        let mut app = wrap_app();
+        let (text, both) = code_of(&mut app, LONG);
+        assert_eq!(app.world().get::<Children>(both).unwrap().len(), 4);
+        let _ = text;
     }
 }

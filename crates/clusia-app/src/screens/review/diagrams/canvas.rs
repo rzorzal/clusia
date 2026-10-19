@@ -883,7 +883,7 @@ pub fn ring_parts(rect: GRect, radius: f32, gap: f32) -> RingParts {
 
 /// A dashed ring `gap` px outside `rect` (see `ring_parts`): a tiled node per side, solid when
 /// there are no tiles, and a bordered node per corner whose one round corner draws the arc.
-fn dashed_ring(
+pub(crate) fn dashed_ring(
     p: &mut ChildSpawnerCommands,
     tiles: Option<&Dots>,
     rect: GRect,

@@ -316,6 +316,8 @@ pub fn demo_diagram_code(
     }
 }
 
+/// The commit the first story of the outdated scene was written for (the mockup's "3f2a91c").
+pub const DEMO_OLD_SHA: &str = "3f2a91c0d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a3";
 const BASE_SHA: &str = "4f2a9c1e8d7b6a5f4e3d2c1b0a9f8e7d6c5b4a39";
 const HEAD_SHA: &str = "9be1d07c3a2f4e5d6c7b8a9f0e1d2c3b4a5f6e7d";
 

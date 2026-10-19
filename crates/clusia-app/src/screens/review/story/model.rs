@@ -19,6 +19,9 @@ pub struct StoryModel {
     pub asked: bool,
     /// The daemon's answer arrived.
     pub received: bool,
+    /// The daemon answered at least once: what the model holds is worth drawing, even while the
+    /// end of a run makes the answer stale (`received` is false until the next one).
+    pub known: bool,
     /// Every version the daemon lists, oldest first, without specs.
     pub versions: Vec<StoryVersionInfo>,
     /// The versions whole: the latest, and the older ones the reviewer stepped to.
@@ -45,6 +48,7 @@ impl Default for StoryModel {
         Self {
             asked: false,
             received: false,
+            known: false,
             versions: Vec::new(),
             loaded: HashMap::new(),
             requested: BTreeSet::new(),
@@ -116,6 +120,7 @@ impl StoryModel {
                 self.write_sent = false;
                 self.asked = true;
                 self.received = true;
+                self.known = true;
             }
             StoryTell::Version { version, .. } => {
                 let asked = self.requested.remove(&version.number);
