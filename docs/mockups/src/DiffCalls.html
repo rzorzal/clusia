@@ -81,9 +81,9 @@ const N = (id, name, meta, kind) => ({ id, name, meta, kind });
 const rows = [
   ['Up 3', [N('mw', 'auth_middleware', 'not touched', 'untouched'), N('main', 'cli::main', 'not touched', 'untouched'), N('m1', '+6 more callers', '', 'more')]],
   ['Up 2', [N('send', 'ApiClient::send', 'not touched · api.rs:30', 'untouched'), N('stream', 'ApiClient::stream', 'not touched', 'untouched'), N('run', 'cli::run', 'not touched', 'untouched')]],
-  ['Up 1', [N('token', 'TokenStore::token', 'not touched · every request', 'untouched'), N('race', 'tests::refresh_race', 'new test', 'added'), N('status', 'cli::auth_status', 'not touched', 'untouched')]],
+  ['Up 1', [N('token', 'TokenStore::token', 'not touched · 4 callers', 'untouched'), N('race', 'tests::refresh_race', 'new test', 'added'), N('status', 'cli::auth_status', 'not touched', 'untouched')]],
   ['', [N('refresh', 'TokenStore::refresh', '+9 −2 · body changed · 1 draft comment', 'center')]],
-  ['Down 1', [N('load', 'TokenStore::load', 'not touched', 'untouched'), N('now', 'now', 'not touched', 'untouched'), N('lock', 'Mutex::lock', 'tokio · new call', 'outside'), N('ex', 'HttpClient::exchange', '+4 −1 · retries', 'changed'), N('save', 'TokenStore::save', 'moved · atomic', 'changed')]],
+  ['Down 1', [N('load', 'TokenStore::load', 'not touched', 'untouched'), N('now', 'now', 'not touched', 'untouched'), N('lock', 'Mutex::lock', 'tokio · new call', 'outside'), N('ex', 'HttpClient::exchange', '+4 −1 · body changed', 'changed'), N('save', 'TokenStore::save', 'moved · +6 −1', 'changed')]],
   ['Down 2', [N('m2', '+2 more calls', '', 'more'), N('hsend', 'HttpClient::send', 'not touched', 'untouched'), N('wa', 'write_atomic', 'not touched', 'untouched')]],
   ['Down 3', [N('exec', 'reqwest::Client::execute', 'outside this repo', 'outside'), N('ren', 'fs::rename', 'std', 'outside')]],
 ];
@@ -142,7 +142,7 @@ const panel = state === 'unsupported' ? `
       <div style="background:var(--callHl)"><span class="n">25</span>    self.refresh().await</div>
       <div><span class="n">26</span>}</div>
     </div>
-    <span style="color:var(--muted);line-height:1.5">Every API request goes through here (3 levels up: <span class="mono">auth_middleware</span>), so the lock in <span class="mono">refresh</span> is on the hot path of the whole client.</span>
+    <span style="color:var(--muted);line-height:1.5">Reached from 9 callers in 3 levels, up to <span class="mono">auth_middleware</span>. <span class="mono">TokenStore::token</span> calls it at store.rs:25.</span>
     <span class="cap" style="padding:0">Also affected · signature changed</span>
     <div style="border-radius:8px;box-shadow:0 0 0 1.5px var(--orange);padding:10px 12px;line-height:1.5"><span class="mono">TokenStore::new(path, <span style="background:var(--orangeSoft)">client: HttpClient</span>)</span><br><span style="color:var(--muted)">4 callers outside this PR · </span><span style="text-decoration:underline;color:var(--muted)">show them</span></div>
   </div>`;
