@@ -1508,6 +1508,52 @@ mod tests {
     }
 
     #[test]
+    fn a_wrapped_code_line_is_selected_across_its_wrap_and_copies_as_one_line() {
+        let long = format!(
+            "let refreshed = store.refresh_with_retry({}).await?;",
+            (1..=14)
+                .map(|n| format!("token_{n}_with_a_long_name"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+        let pr = open_box(
+            &mut app,
+            test_version(&head(), Some((REFRESH, 38, 48))),
+            "refresh",
+        );
+        let code = DiagramCode {
+            path: REFRESH.into(),
+            commit: head(),
+            start_line: 1,
+            lines: vec![CodeLine {
+                number: 1,
+                text: long.clone(),
+                changed: false,
+            }],
+            unavailable: None,
+        };
+        put_code(&mut app, &pr, "refresh", code);
+        testing::settle(&mut app);
+        let line = testing::find::<crate::ui::code_select::CodeLine>(&mut app, |_| true);
+        let (_, _, _, h) = testing::frame(&app, line);
+        assert!(h > 24.0, "the line wraps onto more rows: {h}");
+        let from = testing::code_point(&app, line, 0);
+        let to = testing::code_point(&app, line, long.len());
+        assert!(to.y > from.y, "the end sits on a lower row than the start");
+        testing::press_code(&mut app, line, from);
+        testing::drag_code(&mut app, line, from, to);
+        let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
+        let lines: Vec<_> = q.iter(app.world()).collect();
+        let copied = app
+            .world()
+            .resource::<crate::ui::code_select::CodeSelection>()
+            .text(lines);
+        assert_eq!(copied, long);
+        assert!(!copied.contains('\n'));
+    }
+
+    #[test]
     fn a_long_code_line_wraps_inside_the_dialog_and_loses_nothing() {
         let long = format!(
             "let refreshed = store.refresh_with_retry({}).await?;",
