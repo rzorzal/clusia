@@ -1356,13 +1356,20 @@ fn hidden_note(dropped: u32) -> Option<String> {
     }
 }
 
+/// The header stops this far from the canvas's right edge: the zoom control's width (at the
+/// largest text size) plus its margin, so a long caption wraps instead of running under it.
+const HEADER_CLEAR_OF_ZOOM: f32 = 184.0;
+
 fn header(c: &mut ChildSpawnerCommands, fonts: &Pen, spec: &DiagramSpec, dropped: u32) {
     c.spawn((
         Node {
             position_type: PositionType::Absolute,
             left: px(20),
+            right: px(HEADER_CLEAR_OF_ZOOM),
             top: px(16),
             column_gap: px(10),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         },
@@ -1389,6 +1396,10 @@ fn header(c: &mut ChildSpawnerCommands, fonts: &Pen, spec: &DiagramSpec, dropped
             ));
         });
         h.spawn((
+            Node {
+                max_width: percent(100),
+                ..default()
+            },
             text(fonts, spec.caption.clone(), Type::MUTED.ink(Swatch::Faint)),
             ignore(),
         ));
@@ -2244,6 +2255,52 @@ mod tests {
             state.view.zoom,
             crate::screens::review::diagrams::view::ZOOM_MIN
         );
+    }
+
+    const LONG_CAPTION: &str = "How an expired access token is refreshed one minute early, retried once with a fresh \
+        refresh token, and written back to the store before the next request goes out";
+
+    #[test]
+    fn a_long_caption_wraps_and_stays_clear_of_the_zoom_control() {
+        for large in [false, true] {
+            let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            let pr = testing::open_ready(&mut app, false);
+            let mut versions = fixture::demo_diagrams(NOW, &pr);
+            for entry in &mut versions.last_mut().unwrap().entries {
+                if let EntryState::Ready { spec, .. } = &mut entry.state
+                    && spec.key == "flow"
+                {
+                    spec.caption = LONG_CAPTION.into();
+                }
+            }
+            testing::tell(&mut app, fixture::diagrams_tell_of(&pr, versions));
+            testing::set_section(&mut app, &pr, ReviewSection::Diagrams);
+            testing::settle(&mut app);
+            let caption = testing::find::<Text>(&mut app, |t| t.0 == LONG_CAPTION);
+            let plus = testing::find::<ZoomButton>(&mut app, |b| b.factor > 1.0);
+            let zoom = app.world().get::<ChildOf>(plus).unwrap().parent();
+            let (cx, cy, cw, ch) = testing::frame(&app, caption);
+            let (zx, zy, zw, zh) = testing::frame(&app, zoom);
+            let apart = cx + cw <= zx || cy + ch <= zy || zy + zh <= cy;
+            assert!(
+                apart,
+                "large={large}: caption {:?} overlaps the zoom control {:?}",
+                (cx, cy, cw, ch),
+                (zx, zy, zw, zh)
+            );
+            assert!(
+                cx + cw <= zx + zw,
+                "large={large}: the caption ends inside the canvas"
+            );
+            let node = app.world().get::<ComputedNode>(caption).unwrap();
+            assert!(
+                node.size.y * node.inverse_scale_factor > 24.0 || large,
+                "large={large}: a caption this long takes more than one line"
+            );
+        }
     }
 
     // ---- with the demo drawings on screen
