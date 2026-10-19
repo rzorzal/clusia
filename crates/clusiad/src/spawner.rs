@@ -15,7 +15,14 @@ pub trait Spawner: Send + Sync {
 /// editor that keeps running is left alone.
 const GRACE: Duration = Duration::from_secs(2);
 
-/// The last of a program's stderr that goes into an error message.
+/// How long to wait for the stderr text once the program has exited. A grandchild (the editor
+/// a command-line tool started) can hold the pipe open long after that.
+const STDERR_WAIT: Duration = Duration::from_millis(200);
+
+/// The most of a program's stderr that is kept; the rest is read and thrown away.
+const STDERR_KEEP: u64 = 64 * 1024;
+
+/// The last of a program's stderr that goes into an error message, in characters.
 const STDERR_TAIL: usize = 400;
 
 /// Launches real processes, detached from the daemon's stdin and stdout. It waits up to
@@ -34,38 +41,62 @@ impl Spawner for ProcessSpawner {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
-        let stderr = child.stderr.take();
+        let (chunks, text) = mpsc::channel::<Vec<u8>>();
+        if let Some(mut stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut kept = (&mut stderr).take(STDERR_KEEP);
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = kept.read(&mut buf) {
+                    if n == 0 || chunks.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                drop(chunks);
+                // Keep reading so a program that writes a lot never blocks on a full pipe.
+                let _ = io::copy(&mut stderr, &mut io::sink());
+            });
+        }
         let (done, exited) = mpsc::channel();
         std::thread::spawn(move || {
-            let mut text = Vec::new();
-            if let Some(mut stderr) = stderr {
-                // A program that outlives the grace period keeps this open; the read ends
-                // when it exits, and nobody is listening by then.
-                let _ = stderr.read_to_end(&mut text);
-            }
-            let status = child.wait();
-            let _ = done.send((status, text));
+            let _ = done.send(child.wait());
         });
         match exited.recv_timeout(GRACE) {
-            Ok((Ok(status), _)) if status.success() => Ok(()),
-            Ok((Ok(status), text)) => {
-                let text = String::from_utf8_lossy(&text);
-                let text = text.trim();
-                let tail = text
-                    .char_indices()
-                    .rev()
-                    .nth(STDERR_TAIL)
-                    .map_or(text, |(i, _)| &text[i..]);
-                Err(io::Error::other(if tail.is_empty() {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => {
+                let mut bytes = Vec::new();
+                while let Ok(chunk) = text.recv_timeout(STDERR_WAIT) {
+                    bytes.extend(chunk);
+                }
+                let message = printable(&String::from_utf8_lossy(&bytes));
+                Err(io::Error::other(if message.is_empty() {
                     status.to_string()
                 } else {
-                    format!("{status}: {tail}")
+                    format!("{status}: {message}")
                 }))
             }
-            Ok((Err(e), _)) => Err(e),
+            Ok(Err(e)) => Err(e),
             Err(_) => Ok(()),
         }
     }
+}
+
+/// The last [`STDERR_TAIL`] characters of `text` on one line: whitespace runs become a space
+/// and other control characters (ANSI escapes among them) are written out as `\u{..}`.
+fn printable(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let escaped: Vec<char> = flat
+        .chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_unicode().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect();
+    escaped[escaped.len().saturating_sub(STDERR_TAIL)..]
+        .iter()
+        .collect()
 }
 
 /// Remembers every argv instead of launching it.
@@ -123,7 +154,54 @@ mod tests {
     #[test]
     fn a_program_still_running_after_the_grace_period_counts_as_started() {
         let started = std::time::Instant::now();
-        assert!(ProcessSpawner.spawn(&sh("sleep 30")).is_ok());
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(ProcessSpawner.spawn(&sh("exec sleep 3")).is_ok());
+        let took = started.elapsed();
+        assert!(took >= GRACE && took < Duration::from_secs(3), "{took:?}");
+    }
+
+    #[test]
+    fn control_characters_in_stderr_are_escaped() {
+        let e = ProcessSpawner
+            .spawn(&sh("printf '\\033[31mx\\r\\n' >&2; exit 1"))
+            .unwrap_err();
+        let text = e.to_string();
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert!(text.contains("\\u{1b}[31mx"), "{text:?}");
+    }
+
+    #[test]
+    fn the_message_keeps_the_last_400_characters_of_stderr() {
+        let e = ProcessSpawner
+            .spawn(&sh("head -c 1000 /dev/zero | tr '\\0' x >&2; exit 1"))
+            .unwrap_err();
+        let text = e.to_string();
+        let shown = text.strip_prefix("exit status: 1: ").unwrap();
+        assert_eq!(shown.chars().count(), STDERR_TAIL);
+        assert!(shown.chars().all(|c| c == 'x'));
+    }
+
+    #[test]
+    fn a_program_that_floods_stderr_is_still_read_to_its_end() {
+        let e = ProcessSpawner
+            .spawn(&sh("head -c 300000 /dev/zero | tr '\\0' y >&2; exit 1"))
+            .unwrap_err();
+        assert!(e.to_string().contains("yyyy"));
+    }
+
+    #[test]
+    fn a_grandchild_holding_stderr_does_not_delay_a_success() {
+        let started = std::time::Instant::now();
+        assert!(ProcessSpawner.spawn(&sh("(sleep 3 &); exit 0")).is_ok());
+        assert!(started.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn a_grandchild_holding_stderr_does_not_hide_a_failure() {
+        let started = std::time::Instant::now();
+        let e = ProcessSpawner
+            .spawn(&sh("(sleep 3 &); echo bad >&2; exit 2"))
+            .unwrap_err();
+        assert!(e.to_string().contains("exit status: 2: bad"), "{e}");
+        assert!(started.elapsed() < Duration::from_millis(1500));
     }
 }

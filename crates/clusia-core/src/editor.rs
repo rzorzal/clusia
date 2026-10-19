@@ -3,9 +3,9 @@
 //! VS Code and Cursor are opened through their URL schemes with `/usr/bin/open`. That works
 //! from a launchd daemon whose `PATH` lacks the editors' command-line tools. Zed's URL handler
 //! does not reliably open a file at a line, so Zed runs the `cli` binary inside its app bundle
-//! (also found without `PATH`) with `path:line`. A custom
-//! command is split into words (quotes group words, no escapes, no shell); `{line}` and then
-//! `{path}` are substituted inside each word.
+//! (also found without `PATH`) with `path:line`. A custom command is split into
+//! words (quotes group words, no escapes, no shell); `{line}` and then `{path}` are substituted
+//! inside each word.
 
 use std::fmt::Write;
 
@@ -60,12 +60,13 @@ fn editor_argv_where(
         EditorKind::VsCode => open("vscode"),
         EditorKind::Cursor => open("cursor"),
         EditorKind::Zed => {
-            let home = std::env::var("HOME").unwrap_or_default();
+            let home = std::env::var("HOME").ok().filter(|h| !h.is_empty());
             let cli = ZED_CLIS
                 .iter()
-                .map(|c| match c.strip_prefix("~/") {
-                    Some(rest) => format!("{home}/{rest}"),
-                    None => (*c).to_string(),
+                .filter_map(|c| match (c.strip_prefix("~/"), &home) {
+                    (Some(rest), Some(home)) => Some(format!("{home}/{rest}")),
+                    (Some(_), None) => None,
+                    (None, _) => Some((*c).to_string()),
                 })
                 .find(|c| exists(c))
                 .ok_or(EditorError::NoZed)?;
