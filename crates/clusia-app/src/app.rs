@@ -308,6 +308,28 @@ mod tests {
     }
 
     #[test]
+    fn every_frame_of_a_screenshot_sequence_is_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut page = image::RgbImage::from_pixel(64, 48, image::Rgb([240, 240, 236]));
+        for x in 0..64 {
+            for y in 0..24 {
+                page.put_pixel(x, y, image::Rgb([20, 20, 20]));
+            }
+        }
+        page.save(dir.path().join("seq-0.png")).unwrap();
+        image::RgbImage::new(64, 48)
+            .save(dir.path().join("seq-1.png"))
+            .unwrap();
+        let mut two = launch(Mode::Live, dir.path().join("seq.png").to_str());
+        two.frames = 2;
+        let err = check_screenshots(&two).unwrap_err();
+        assert!(
+            err.contains("seq-1.png") && err.contains("the render is black"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn only_a_live_interactive_window_joins_the_dock() {
         let demo = Mode::Demo {
             theme: None,

@@ -86,7 +86,9 @@ fn resolve(args: &Args) -> Result<(Paths, Option<PathBuf>), String> {
     }
 }
 
-/// Another window owns this home: ask it to show the target, then leave.
+/// Another window owns this home: ask it to show the target, then leave. Nothing is rendered
+/// here and the other window takes no screenshot for this run, so it relies on no check of its
+/// own: there is no file to check.
 fn hand_over(launch: &Launch) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

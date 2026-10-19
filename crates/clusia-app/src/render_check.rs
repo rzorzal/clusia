@@ -156,6 +156,23 @@ mod tests {
         assert_eq!(verdict(stats(&page([22, 22, 26], [225, 225, 225]))), Ok(()));
     }
 
+    /// A light frame whose first `ink` of every 1000 pixels (in row order) are dark.
+    fn sparse(ink: usize) -> RgbImage {
+        let mut img = flat([246, 246, 242]);
+        for (i, p) in img.pixels_mut().enumerate() {
+            if i % 1000 < ink {
+                *p = Rgb([30, 30, 30]);
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn a_sparse_page_passes_at_the_edge_of_the_single_colour_share() {
+        assert_eq!(verdict(stats(&sparse(25))), Ok(()));
+        assert_eq!(verdict(stats(&sparse(15))), Err(Fault::Flat));
+    }
+
     #[test]
     fn the_message_says_the_screen_looks_locked_and_names_the_lock_when_known() {
         let known = Fault::Black.message(true);
