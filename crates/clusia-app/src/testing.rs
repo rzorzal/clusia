@@ -160,8 +160,8 @@ pub fn frame(app: &App, entity: Entity) -> (f32, f32, f32, f32) {
 
 /// Every `Text` that runs past the right edge of an ancestor with nothing between them that
 /// scrolls sideways (or past the bottom edge with nothing that scrolls down), as
-/// `"<text> ..."` lines. Clipped text is lost, so it counts as overflowing too. Hidden nodes
-/// (`Display::None`, zero size) are skipped.
+/// `"<text> ..."` lines. Clipped text is lost, so it counts as overflowing too, but a
+/// `Preview` cuts on purpose. Hidden nodes (`Display::None`, zero size) are skipped.
 pub fn overflowing_text(app: &mut App) -> Vec<String> {
     use bevy::ui::OverflowAxis;
     const SLACK: f32 = 10.0;
@@ -196,6 +196,10 @@ pub fn overflowing_text(app: &mut App) -> Vec<String> {
                 hidden = true;
                 break;
             }
+            if app.world().get::<crate::ui::kit::Preview>(at).is_some() {
+                hidden = true;
+                break;
+            }
             scrolls_x |= node.overflow.x == OverflowAxis::Scroll;
             scrolls_y |= node.overflow.y == OverflowAxis::Scroll;
             if app.world().get::<ComputedNode>(at).is_none() {
@@ -203,7 +207,10 @@ pub fn overflowing_text(app: &mut App) -> Vec<String> {
             }
             let (px, py, pw, ph) = frame(app, at);
             if found.is_none() && !scrolls_x && x + w > px + pw + SLACK {
-                found = Some(format!("right by {:.0}px of {at:?}", x + w - px - pw));
+                found = Some(format!(
+                    "right by {:.0}px of {at:?} at {x:.0}+{w:.0}, parent {px:.0}+{pw:.0}",
+                    x + w - px - pw
+                ));
             }
             if found.is_none() && !scrolls_y && y + h > py + ph + 4.0 && ph > 0.0 {
                 found = Some(format!("below by {:.0}px of {at:?}", y + h - py - ph));

@@ -137,6 +137,10 @@ pub fn text(fonts: &UiFonts, s: impl Into<String>, t: Type) -> impl Bundle {
     )
 }
 
+/// A box that cuts its content on purpose: a one-line preview whose full text a click shows.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Preview;
+
 /// `text` that breaks at the width of its box: at spaces where it can, between characters for
 /// a token wider than the box (a path or an identifier must still fit).
 pub fn wrapped_text(fonts: &UiFonts, s: impl Into<String>, t: Type) -> impl Bundle {

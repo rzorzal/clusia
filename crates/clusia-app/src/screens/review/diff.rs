@@ -37,8 +37,8 @@ use crate::theme::{Swatch, Theme};
 use crate::ui::code::{CodeSpan, spans_for, wrapped_code_line};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, avatar, badge, button, card, panel,
-    segment, segment_node, segments, text,
+    Clickable, Fill, HoverFill, Preview, Stroke, Tone, Type, Variant, avatar, badge, button, card,
+    panel, segment, segment_node, segments, text, wrapped_text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
@@ -805,10 +805,12 @@ fn frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
             c.spawn((
                 panel(
                     Node {
-                        height: px(46),
+                        min_height: px(46),
                         flex_shrink: 0.0,
-                        padding: UiRect::horizontal(px(16)),
+                        padding: UiRect::axes(px(16), px(6)),
                         column_gap: px(8),
+                        row_gap: px(4),
+                        flex_wrap: FlexWrap::Wrap,
                         align_items: AlignItems::Center,
                         border: UiRect::bottom(px(1)),
                         ..default()
@@ -1023,11 +1025,15 @@ fn file_list(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, files: &
             r.spawn((
                 Node {
                     flex_grow: 1.0,
+                    flex_basis: px(0),
                     min_width: px(0),
-                    overflow: Overflow::clip_x(),
                     ..default()
                 },
-                children![text(fonts, f.path.clone(), Type::MONO.ink(Swatch::Fg))],
+                children![wrapped_text(
+                    fonts,
+                    f.path.clone(),
+                    Type::MONO.ink(Swatch::Fg)
+                )],
             ));
             r.spawn(text(
                 fonts,
@@ -1045,10 +1051,12 @@ fn file_list(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, files: &
 
 fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffView) {
     if let Some(path) = &v.path {
-        p.spawn(text(
-            fonts,
-            path.clone(),
-            Type::MONO.ink(Swatch::Fg).size(13.0),
+        p.spawn((
+            wrapped_text(fonts, path.clone(), Type::MONO.ink(Swatch::Fg).size(13.0)),
+            Node {
+                max_width: percent(100),
+                ..default()
+            },
         ));
         p.spawn(text(
             fonts,
@@ -1317,7 +1325,7 @@ fn body(
                         ..default()
                     })
                     .with_children(|c| {
-                        c.spawn(text(fonts, label.clone(), Type::META));
+                        c.spawn(wrapped_text(fonts, label.clone(), Type::META));
                     });
                 }
             });
@@ -1455,14 +1463,17 @@ fn below(
                     h.spawn(text(fonts, format!("@{}", t.author), Type::STRONG));
                     // Collapsed, the first comment shows as one line: the box is one text
                     // line high and clips what wraps below it.
-                    let mut line = h.spawn(Node {
-                        flex_grow: 1.0,
-                        flex_basis: px(0),
-                        min_width: px(60),
-                        max_height: if t.expanded { Val::Auto } else { px(18) },
-                        overflow: Overflow::clip(),
-                        ..default()
-                    });
+                    let mut line = h.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            flex_basis: px(0),
+                            min_width: px(60),
+                            max_height: if t.expanded { Val::Auto } else { px(18) },
+                            overflow: Overflow::clip(),
+                            ..default()
+                        },
+                        Preview,
+                    ));
                     if !t.expanded
                         && let Some(first) = t.posts.first()
                     {
@@ -2862,6 +2873,56 @@ mod tests {
                 })
                 .collect();
             assert_eq!(flagged, Vec::<String>::new(), "large={large}");
+        }
+    }
+
+    #[test]
+    fn long_paths_wrap_in_the_header_the_file_list_and_the_split_labels() {
+        let token = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it";
+        for (mode, large) in [
+            (DiffMode::Unified, false),
+            (DiffMode::Unified, true),
+            (DiffMode::Split, false),
+            (DiffMode::Split, true),
+        ] {
+            let mut app = wrap_app();
+            let pr = fixture::demo_pr();
+            {
+                let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+                let tab = tabs.0.get_mut(&pr).unwrap();
+                let Phase::Ready(ready) = &mut tab.phase else {
+                    panic!("ready")
+                };
+                for (i, f) in ready.view.files.iter_mut().enumerate() {
+                    f.path = format!("src/{token}/{i}_{token}.rs");
+                }
+                for (i, f) in ready.view.diff.iter_mut().enumerate() {
+                    f.path = format!("src/{token}/{i}_{token}.rs");
+                }
+                ready.view.pr.head_ref = format!("{token}-{token}");
+                tab.ui.mode = mode;
+            }
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            testing::settle(&mut app);
+            let header = testing::find::<HeaderPart>(&mut app, |_| true);
+            let buttons = testing::entities::<FileButton>(&mut app);
+            assert!(!buttons.is_empty());
+            for root in std::iter::once(header).chain(buttons) {
+                assert_eq!(
+                    testing::texts_past_right(&mut app, root),
+                    Vec::<String>::new(),
+                    "{mode:?} large={large}"
+                );
+            }
+            let switch = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
+            let (hx, _, hw, _) = testing::frame(&app, header);
+            let (sx, _, sw, _) = testing::frame(&app, switch);
+            assert!(
+                sx + sw <= hx + hw,
+                "{mode:?} large={large}: the mode switch stays in the header"
+            );
         }
     }
 
