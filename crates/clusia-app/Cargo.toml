@@ -13,6 +13,7 @@ clusia-protocol.workspace = true
 clusia-view.workspace = true
 clusia-highlight.workspace = true
 clusia-diagram.workspace = true
+clusia-calls.workspace = true
 clusia-harness.workspace = true
 bevy.workspace = true
 crossbeam-channel.workspace = true

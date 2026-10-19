@@ -1,5 +1,6 @@
 //! Diff (spec §7.2, mockups `Review.png` and `DiffSplit.png`):
 //! - the file list, then one file's diff in Unified or Split with syntax colors;
+//! - the switch to Story and Calls, which have their own frames (`story`, `calls`);
 //! - open review threads and draft line comments under their lines;
 //! - a click on a commentable line opens the inline editor (Shift-click extends the range).
 //!
@@ -38,7 +39,7 @@ use crate::ui::code::{CodeSpan, spans_for, wrapped_code_line};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, avatar, badge, button, card, panel,
-    segment, segment_node, segments, text,
+    segment, segments, text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
@@ -236,6 +237,7 @@ fn display_index(rows: &[Row], mode: DiffMode, side: Side, line: u32) -> Option<
         DiffMode::Split => split_rows(rows)
             .iter()
             .position(|p| p.left == Some(row) || p.right == Some(row)),
+        DiffMode::Story | DiffMode::Calls => None,
     }
 }
 
@@ -606,13 +608,38 @@ pub fn diff_view(
                 lines,
             };
         }
+        // Story and Calls draw in frames of their own; this body stays empty.
+        DiffMode::Story | DiffMode::Calls => {}
     }
     out
 }
 
-/// The Diff section's root inside `SectionBody`; its absence means "fill me".
+/// What a Diff region is made of: the file list and one file's diff (Unified and Split), the
+/// Story, or the Calls graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    Files,
+    Story,
+    Calls,
+}
+
+impl From<DiffMode> for FrameKind {
+    fn from(mode: DiffMode) -> Self {
+        match mode {
+            DiffMode::Unified | DiffMode::Split => FrameKind::Files,
+            DiffMode::Story => FrameKind::Story,
+            DiffMode::Calls => FrameKind::Calls,
+        }
+    }
+}
+
+/// The Diff section's root inside `SectionBody`; its absence, or another kind than the mode
+/// wants, means "fill me".
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub struct DiffRegion(pub PrRef);
+pub struct DiffRegion {
+    pub pr: PrRef,
+    pub kind: FrameKind,
+}
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct FileButton {
@@ -663,13 +690,6 @@ pub struct DraftRemove {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ShowMore(pub PrRef);
 
-/// Story and Calls: shown, not usable yet.
-#[derive(Component, Debug)]
-struct LaterSegment;
-
-#[derive(Component, Debug)]
-struct LaterHint;
-
 #[derive(Component)]
 struct FilesPart {
     pr: PrRef,
@@ -679,7 +699,7 @@ struct FilesPart {
 #[derive(Component)]
 struct HeaderPart {
     pr: PrRef,
-    built: Option<(Option<String>, u64, u64, DiffMode)>,
+    built: Option<(Option<String>, u64, u64)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -735,19 +755,20 @@ impl Plugin for DiffPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HighlightCache>().add_systems(
             Update,
-            (fill_region, rebuild_diff, later_hints, reach_focus)
+            (fill_region, rebuild_diff, reach_focus)
                 .chain()
                 .after(ReviewSystems),
         );
     }
 }
 
-/// When the Diff section shows and `SectionBody` has no `DiffRegion`, spawn a `DiffRegion` for it.
+/// Fills the Diff section's body with the frame the mode wants, and again when the mode asks for
+/// another one. Unified and Split share the Files frame.
 fn fill_region(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
     bodies: Query<(Entity, &SectionBody)>,
-    regions: Query<&ChildOf, With<DiffRegion>>,
+    regions: Query<(&ChildOf, &DiffRegion)>,
 ) {
     for (entity, body) in &bodies {
         let Some(tab) = tabs.0.get(&body.pr) else {
@@ -756,12 +777,36 @@ fn fill_region(
         if tab.ui.section != ReviewSection::Diff || !matches!(tab.phase, Phase::Ready(_)) {
             continue;
         }
-        if regions.iter().any(|child_of| child_of.parent() == entity) {
+        let kind = FrameKind::from(tab.ui.mode);
+        if regions
+            .iter()
+            .any(|(child_of, region)| child_of.parent() == entity && region.kind == kind)
+        {
             continue;
         }
         commands.entity(entity).despawn_related::<Children>();
         let pr = body.pr.clone();
-        commands.entity(entity).with_children(|p| frame(p, &pr));
+        commands.entity(entity).with_children(|p| match kind {
+            FrameKind::Files => frame(p, &pr),
+            other => {
+                p.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        width: percent(100),
+                        min_height: px(0),
+                        ..default()
+                    },
+                    DiffRegion {
+                        pr: pr.clone(),
+                        kind: other,
+                    },
+                ))
+                .with_children(|r| match other {
+                    FrameKind::Story => super::story::frame(r, &pr),
+                    _ => super::calls::frame(r, &pr),
+                });
+            }
+        });
     }
 }
 
@@ -773,7 +818,10 @@ fn frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
             min_height: px(0),
             ..default()
         },
-        DiffRegion(pr.clone()),
+        DiffRegion {
+            pr: pr.clone(),
+            kind: FrameKind::Files,
+        },
     ))
     .with_children(|r| {
         r.spawn((
@@ -900,12 +948,11 @@ fn rebuild_diff(
         let Some((v, _)) = views.get(&part.pr) else {
             continue;
         };
-        let key = (v.path.clone(), v.additions, v.deletions, v.mode);
+        let key = (v.path.clone(), v.additions, v.deletions);
         if part.built.as_ref() == Some(&key) {
             continue;
         }
-        let pr = part.pr.clone();
-        refill(&mut commands, entity, |p| header(p, fonts, &pr, v));
+        refill(&mut commands, entity, |p| header(p, fonts, v));
         part.built = Some(key);
     }
     for (entity, mut part, mut scroll) in &mut bodies {
@@ -1043,7 +1090,7 @@ fn file_list(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, files: &
     }
 }
 
-fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffView) {
+fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &DiffView) {
     if let Some(path) = &v.path {
         p.spawn(text(
             fonts,
@@ -1061,27 +1108,29 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
             Type::MONO.ink(Swatch::Orange),
         ));
     }
-    p.spawn(Node {
-        flex_grow: 1.0,
-        ..default()
-    });
-    p.spawn((
-        text(fonts, "Arrives with SP3 (#71)", Type::META),
-        Node {
-            display: Display::None,
-            ..default()
-        },
-        LaterHint,
-    ));
+}
+
+/// The *Unified | Split | Story | Calls* switch, with `current` on. It sits at the right of the
+/// section row while the Diff section shows.
+pub(crate) fn mode_switch(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    current: DiffMode,
+) {
     let mut track = p.spawn(segments());
-    // The track sits at the start of a column elsewhere; in this row it shares the path's axis.
     track.entry::<Node>().and_modify(|mut n| {
         n.align_self = AlignSelf::Center;
     });
     track.with_children(|s| {
-        for (label, mode) in [("Unified", DiffMode::Unified), ("Split", DiffMode::Split)] {
+        for (label, mode) in [
+            ("Unified", DiffMode::Unified),
+            ("Split", DiffMode::Split),
+            ("Story", DiffMode::Story),
+            ("Calls", DiffMode::Calls),
+        ] {
             s.spawn((
-                segment(fonts, label, v.mode == mode),
+                segment(fonts, label, current == mode),
                 ModeButton {
                     pr: pr.clone(),
                     mode,
@@ -1089,32 +1138,7 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
                 observe(on_mode),
             ));
         }
-        for label in ["Story", "Calls"] {
-            s.spawn((
-                segment_node(),
-                Hovered::default(),
-                LaterSegment,
-                children![text(fonts, label, Type::MUTED.ink(Swatch::Faint))],
-            ));
-        }
     });
-}
-
-/// Shows the 'arrives later' hint while Story or Calls is hovered.
-fn later_hints(
-    segments: Query<&Hovered, With<LaterSegment>>,
-    mut hints: Query<&mut Node, With<LaterHint>>,
-) {
-    let want = if segments.iter().any(|h| h.get()) {
-        Display::Flex
-    } else {
-        Display::None
-    };
-    for mut node in &mut hints {
-        if node.display != want {
-            node.display = want;
-        }
-    }
 }
 
 const NUMBER_WIDTH: f32 = 44.0;
@@ -1631,11 +1655,22 @@ fn on_mode(
     }
     ui.mode = b.mode;
     ui.shown = SHOW_STEP;
-    let value = match b.mode {
+    set_config(
+        &mut asks,
+        &mut model,
+        "appearance.diff_view",
+        diff_view_key(b.mode),
+    );
+}
+
+/// The value `appearance.diff_view` takes for a mode.
+pub(crate) fn diff_view_key(mode: DiffMode) -> &'static str {
+    match mode {
         DiffMode::Unified => "unified",
         DiffMode::Split => "split",
-    };
-    set_config(&mut asks, &mut model, "appearance.diff_view", value);
+        DiffMode::Story => "story",
+        DiffMode::Calls => "calls",
+    }
 }
 
 fn on_line(
@@ -1802,7 +1837,10 @@ mod tests {
     use super::*;
     use crate::bridge::Tell;
     use crate::fixture;
+    use crate::screens::review::calls::CallsRoot;
     use crate::screens::review::editor::{EditorArea, EditorSubmit};
+    use crate::screens::review::shell::SectionTab;
+    use crate::screens::review::story::StoryRoot;
     use crate::testing::{self, NOW};
     use crate::ui::markdown::{CopiedText, CopyMarkdown};
     use bevy::text::EditableText;
@@ -2138,6 +2176,7 @@ mod tests {
                     .filter(|&(side, n)| clusia_core::can_comment(&patch, side, n))
                     .map(|(side, n)| (side == Side::Right, n))
                     .collect(),
+                DiffMode::Story | DiffMode::Calls => unreachable!("only the file views list lines"),
             };
             want.sort();
             want.dedup();
@@ -2838,46 +2877,129 @@ mod tests {
         testing::settle(app);
     }
 
+    fn parent_of(app: &App, entity: Entity) -> Entity {
+        app.world().get::<ChildOf>(entity).unwrap().parent()
+    }
+
     #[test]
-    fn the_mode_switch_shares_the_axis_of_the_path_and_the_counts() {
+    fn the_switch_sits_on_the_section_row_at_the_right() {
         let mut app = wrap_app();
-        let split = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
-        let track = app.world().get::<ChildOf>(split).unwrap().parent();
-        let row = app.world().get::<ChildOf>(track).unwrap().parent();
-        // The file list names the same path; only the header's own is on this row.
-        let path = {
-            let mut q = app.world_mut().query::<(Entity, &Text)>();
-            let named: Vec<Entity> = q
-                .iter(app.world())
-                .filter(|(_, t)| t.0 == REFRESH)
-                .map(|(e, _)| e)
-                .collect();
-            named
-                .into_iter()
-                .find(|&e| {
-                    std::iter::successors(Some(e), |&c| {
-                        app.world().get::<ChildOf>(c).map(|p| p.parent())
-                    })
-                    .any(|a| a == row)
-                })
-                .expect("the header's path")
+        let story = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Story);
+        let track = parent_of(&app, story);
+        let row = parent_of(&app, track);
+        let diff = testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Diff);
+        let tests = testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Tests);
+        assert_eq!(
+            parent_of(&app, diff),
+            row,
+            "the tabs and the switch share a row"
+        );
+        assert!(testing::center(&app, track).x > testing::center(&app, tests).x);
+        let (diff_y, track_y) = (
+            testing::center(&app, diff).y,
+            testing::center(&app, track).y,
+        );
+        assert!(
+            (diff_y - track_y).abs() <= 1.0,
+            "tab axis {diff_y}, switch axis {track_y}"
+        );
+        let (tx, _, tw, _) = testing::frame(&app, track);
+        let (rx, _, rw, _) = testing::frame(&app, row);
+        assert!(
+            ((tx + tw) - (rx + rw - 20.0)).abs() <= 1.0,
+            "20 px from the right edge"
+        );
+        let modes: Vec<DiffMode> = {
+            let mut q = app.world_mut().query::<&ModeButton>();
+            let mut found: Vec<DiffMode> = q.iter(app.world()).map(|b| b.mode).collect();
+            found.sort_by_key(|m| *m as u8);
+            found
         };
-        let (_, ry, _, rh) = testing::frame(&app, row);
-        let axis = ry + (rh - 1.0) / 2.0;
-        let at = testing::center(&app, track).y;
-        assert!(
-            (at - axis).abs() <= 0.5,
-            "switch at {at}, row axis at {axis}"
+        assert_eq!(
+            modes,
+            [
+                DiffMode::Unified,
+                DiffMode::Split,
+                DiffMode::Story,
+                DiffMode::Calls
+            ]
         );
-        let (_, ty, _, th) = testing::frame(&app, track);
-        assert!(
-            (ty - ry) > 4.0 && (ry + rh - 1.0) - (ty + th) > 4.0,
-            "room above and below"
+        assert!(!testing::shows(&mut app, "Arrives with SP3"));
+    }
+
+    #[test]
+    fn each_mode_writes_its_own_config_value() {
+        assert_eq!(diff_view_key(DiffMode::Unified), "unified");
+        assert_eq!(diff_view_key(DiffMode::Split), "split");
+        assert_eq!(diff_view_key(DiffMode::Story), "story");
+        assert_eq!(diff_view_key(DiffMode::Calls), "calls");
+    }
+
+    #[test]
+    fn the_switch_is_only_on_the_diff_section() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        testing::set_section(&mut app, &pr, ReviewSection::Comments);
+        assert_eq!(testing::count::<ModeButton>(&mut app), 0);
+        testing::set_section(&mut app, &pr, ReviewSection::Diff);
+        assert_eq!(testing::count::<ModeButton>(&mut app), 4);
+    }
+
+    #[test]
+    fn story_and_calls_get_their_own_frame_and_unified_and_split_share_one() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        let files = testing::find::<DiffRegion>(&mut app, |r| r.kind == FrameKind::Files);
+        let split = testing::find::<ModeButton>(&mut app, |m| m.mode == DiffMode::Split);
+        testing::activate(&mut app, split);
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::find::<DiffRegion>(&mut app, |r| r.kind == FrameKind::Files),
+            files,
+            "Unified and Split keep one frame"
         );
-        let path_at = testing::center(&app, path).y;
-        assert!(
-            (path_at - at).abs() <= 2.0,
-            "path at {path_at}, switch at {at}"
+
+        let story = testing::find::<ModeButton>(&mut app, |m| m.mode == DiffMode::Story);
+        testing::activate(&mut app, story);
+        testing::settle(&mut app);
+        assert_eq!(testing::tab(&app, &pr).ui.mode, DiffMode::Story);
+        assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
+        assert_eq!(testing::count::<StoryRoot>(&mut app), 1);
+        assert_eq!(
+            testing::count::<FileButton>(&mut app),
+            0,
+            "no file list on Story"
+        );
+
+        let calls = testing::find::<ModeButton>(&mut app, |m| m.mode == DiffMode::Calls);
+        testing::activate(&mut app, calls);
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<StoryRoot>(&mut app), 0);
+        assert_eq!(testing::count::<CallsRoot>(&mut app), 1);
+        assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
+
+        let unified = testing::find::<ModeButton>(&mut app, |m| m.mode == DiffMode::Unified);
+        testing::activate(&mut app, unified);
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<CallsRoot>(&mut app), 0);
+        assert_eq!(testing::count::<FileButton>(&mut app), 7);
+
+        let stored: Vec<Ask> = testing::recorded(&mut app)
+            .into_iter()
+            .filter(|a| matches!(a, Ask::SetConfig { .. }))
+            .collect();
+        let value = |v: &str| Ask::SetConfig {
+            key: "appearance.diff_view".into(),
+            value: v.into(),
+        };
+        assert_eq!(
+            stored,
+            [
+                value("split"),
+                value("story"),
+                value("calls"),
+                value("unified")
+            ]
         );
     }
 

@@ -1,13 +1,18 @@
 //! Demo data for `--demo` and screenshots: only `rzorzal` repositories and generic people.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
+use clusia_calls::{
+    CallIndex, ChangeKind, ChangedFunction, Function, Indexer, SourceFile, StaticStep,
+};
 use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass, Severity, finding_id};
 use clusia_core::diagram::{
     Change, CodeAnchor, DiagramEntry, DiagramKind, DiagramSpec, DiagramVersion, Edge, EntryState,
     Group, GroupKind, History, LineStyle, Message, Node, PlanEntry, Row, RowKey, Shape,
     VersionPhase,
 };
+use clusia_core::hunks::HunkRef;
 use clusia_core::keywords::{
     AddedLines, Axis, Family, Hit, KEYWORDS_KEY, KEYWORDS_TITLE, KeywordMap, KeywordPlacement,
     KeywordPlan, Region, Seed, UseCase, build_map,
@@ -16,6 +21,10 @@ use clusia_core::media::MediaKind;
 use clusia_core::revalidation::{
     CommitLine, Decision, Proposal, Revalidation, RoundState, Verdict, fingerprint,
 };
+use clusia_core::story::{
+    Chip, RemovedStep, Step, StepHistory, StorySpec, StoryUseCase, StoryVersion, StoryVersionState,
+    Tone,
+};
 use clusia_core::time::civil_from_days;
 use clusia_core::{
     ActivitySummary, Anchor, ChecksSummary, Config, DayCount, Draft, DraftItem, DraftKind,
@@ -23,15 +32,17 @@ use clusia_core::{
     ReviewInfo, ReviewState, ReviewThread, Role, Side, ThreadPost,
 };
 use clusia_protocol::{
-    AgentLogEntry, AuthInfo, CheckState, CheckStatus, CodeLine, DiagramCode, DiagramsState,
-    FileSummary, FirstRun, GifItem, GifPage, GithubLogin, Harness, HarnessKind, NewsItem, NewsKind,
-    PermissionOutcome, PermissionRequest, PermissionStatus, ProbeResult, RepoFolder, ReviewSummary,
-    ReviewView, Suggestion, SyncState, SyncStatus, TokenSource,
+    AgentLogEntry, AuthInfo, CallsIndexState, CheckState, CheckStatus, CodeLine, DiagramCode,
+    DiagramsState, FileSummary, FirstRun, FunctionHit, GifItem, GifPage, GithubLogin, Harness,
+    HarnessKind, NewsItem, NewsKind, PermissionOutcome, PermissionRequest, PermissionStatus,
+    ProbeResult, RepoFolder, ReviewSummary, ReviewView, StoryState, StoryVersionInfo, Suggestion,
+    SyncState, SyncStatus, TokenSource,
 };
 
 use clusia_view::diff::{RowKind, parse_patch};
 
-use crate::bridge::{ChecksTell, DiagramsTell, Tell};
+use crate::bridge::{CallsTell, ChecksTell, DiagramsTell, StoryTell, Tell};
+use crate::screens::review::calls::CallsRequest;
 use crate::snapshot::{GiphyKey, Snapshot};
 
 pub fn demo(now: i64) -> Snapshot {
@@ -2472,6 +2483,622 @@ pub fn diagrams_tell_of(pr: &PrRef, versions: Vec<DiagramVersion>) -> Tell {
     })
 }
 
+// ---- the Story and Calls views
+
+pub struct DemoStory {
+    pub static_steps: Vec<StaticStep>,
+    /// Version 1, written for the head, five steps.
+    pub first: StoryVersion,
+    /// Version 2, written for the head, six steps: one added, one changed, one removed.
+    pub second: StoryVersion,
+    /// The step ids read in the latest version.
+    pub read: Vec<String>,
+    pub head: String,
+}
+
+fn hunk(path: &str, start_line: u32, end_line: u32) -> HunkRef {
+    HunkRef {
+        path: path.into(),
+        start_line,
+        end_line,
+    }
+}
+
+fn chips(texts: &[(&str, Tone)]) -> Vec<Chip> {
+    texts
+        .iter()
+        .map(|(text, tone)| Chip {
+            text: (*text).into(),
+            tone: *tone,
+        })
+        .collect()
+}
+
+/// The Story of `DiffStory.png` and its siblings. Every hunk of `demo_diff` is in at least one
+/// step of each version and of the static order.
+pub fn demo_story(now: i64) -> DemoStory {
+    const REFRESH: &str = "src/auth/refresh.rs";
+    const STORE: &str = "src/auth/store.rs";
+    const HTTP: &str = "src/client/http.rs";
+    const TESTS: &str = "tests/refresh.rs";
+    let step = |id: &str,
+                title: &str,
+                subtitle: &str,
+                explanation: &str,
+                hunks: Vec<HunkRef>,
+                use_cases: &[&str]| Step {
+        id: id.into(),
+        title: title.into(),
+        subtitle: subtitle.into(),
+        explanation: explanation.into(),
+        hunks,
+        use_cases: use_cases.iter().map(|u| (*u).into()).collect(),
+        mechanical: false,
+        history: None,
+        since_previous: None,
+    };
+    let mechanical = || {
+        let mut s = step(
+            "mechanical",
+            "Small and mechanical",
+            "renames, imports, changelog · 4 files",
+            "Renames, a visibility change, a new config field and the changelog: nothing to decide.",
+            vec![
+                hunk(REFRESH, 62, 70),
+                hunk(STORE, 70, 73),
+                hunk(STORE, 93, 120),
+                hunk("src/auth/mod.rs", 1, 2),
+                hunk("src/auth/mod.rs", 5, 8),
+                hunk(HTTP, 12, 17),
+                hunk("src/config.rs", 20, 29),
+                hunk("CHANGELOG.md", 1, 7),
+            ],
+            &[],
+        );
+        s.mechanical = true;
+        s
+    };
+    let refresh_early = || {
+        step(
+            "refresh-early",
+            "Refresh one minute early",
+            "refresh.rs · 3 lines · 1 thread",
+            "The token is refreshed a minute before it expires, so a request never races the expiry.",
+            vec![hunk(REFRESH, 39, 41)],
+            &["expired-token"],
+        )
+    };
+    let safer_saves = || {
+        step(
+            "safer-saves",
+            "Safer saves",
+            "store.rs · moved block",
+            "save() moved from store.rs:20 to :88 and now writes to a temp file first.",
+            vec![hunk(STORE, 85, 91)],
+            &["restart"],
+        )
+    };
+    let race_tests = || {
+        step(
+            "race-tests",
+            "Tests for the race",
+            "tests/refresh.rs · new",
+            "Two requests refresh at once and the token is exchanged a single time.",
+            vec![hunk(TESTS, 1, 30)],
+            &["refresh-once"],
+        )
+    };
+    let one_at_a_time = || {
+        step(
+            "one-at-a-time",
+            "One refresh at a time",
+            "refresh.rs, store.rs · 1 draft comment",
+            "A new lock makes concurrent callers queue behind the first one. From the commit \u{201c}serialize refreshes so the token is exchanged once\u{201d}.",
+            vec![hunk(REFRESH, 43, 45), hunk("src/auth/mod.rs", 3, 4)],
+            &["refresh-once", "expired-token"],
+        )
+    };
+    let spec = |steps: Vec<Step>, removed: Vec<RemovedStep>| {
+        StorySpec {
+        sentence: "tokens are now refreshed a minute before they expire, and only one request refreshes at a time; the others wait and reuse the new token.".into(),
+        before: chips(&[
+            ("request A", Tone::Plain),
+            ("exchange", Tone::Plain),
+            ("request B", Tone::Plain),
+            ("exchange again · rejected", Tone::Bad),
+        ]),
+        after: chips(&[
+            ("request A", Tone::Plain),
+            ("lock", Tone::Good),
+            ("exchange", Tone::Plain),
+            ("request B", Tone::Plain),
+            ("waits", Tone::Plain),
+            ("reuses the new token", Tone::Good),
+        ]),
+        use_cases: vec![
+            StoryUseCase { id: "expired-token".into(), name: "Request with an expired token".into() },
+            StoryUseCase { id: "refresh-once".into(), name: "Two requests refresh at once".into() },
+            StoryUseCase { id: "restart".into(), name: "Restart keeps the login".into() },
+        ],
+        steps,
+        removed,
+    }
+    };
+    let version = |number: u32, spec: StorySpec| StoryVersion {
+        number,
+        commit: HEAD_SHA.into(),
+        harness: "Claude Code".into(),
+        started_at: rfc3339(now - 3600 * (3 - i64::from(number))),
+        state: StoryVersionState::Written,
+        spec: Some(spec),
+        notes: Vec::new(),
+    };
+    let first = version(
+        1,
+        spec(
+            vec![
+                refresh_early(),
+                one_at_a_time(),
+                safer_saves(),
+                race_tests(),
+                mechanical(),
+            ],
+            Vec::new(),
+        ),
+    );
+    let with_history = |mut s: Step, history: StepHistory, since: Option<&str>| {
+        s.history = Some(history);
+        s.since_previous = since.map(Into::into);
+        s
+    };
+    let mut retry = step(
+        "retry-limit",
+        "Retry with a limit",
+        "client/http.rs",
+        "The exchange retries server errors a few times, with a pause, instead of looping forever.",
+        vec![hunk(HTTP, 18, 45)],
+        &["expired-token"],
+    );
+    retry.mechanical = false;
+    let second = version(
+        2,
+        spec(
+            vec![
+                with_history(refresh_early(), StepHistory::Same, None),
+                with_history(
+                    one_at_a_time(),
+                    StepHistory::Changed,
+                    Some(
+                        "the lock is released before the token is saved, so a slow disk no longer blocks requests.",
+                    ),
+                ),
+                with_history(safer_saves(), StepHistory::Same, None),
+                with_history(retry, StepHistory::Added, None),
+                with_history(race_tests(), StepHistory::Same, None),
+                with_history(mechanical(), StepHistory::Same, None),
+            ],
+            vec![RemovedStep {
+                id: "retry-forever".into(),
+                title: "Retry forever on 5xx".into(),
+                subtitle: "client/http.rs".into(),
+            }],
+        ),
+    );
+    let statics = |id: &str,
+                   title: &str,
+                   subtitle: &str,
+                   explanation: &str,
+                   hunks: Vec<HunkRef>,
+                   other: bool| StaticStep {
+        id: id.into(),
+        title: title.into(),
+        subtitle: subtitle.into(),
+        explanation: explanation.into(),
+        hunks,
+        other,
+    };
+    DemoStory {
+        static_steps: vec![
+            statics(
+                "HttpClient::exchange",
+                "HttpClient::exchange",
+                "client/http.rs · +4 −1",
+                "Changed body · called by TokenStore::refresh · comes first because nothing it calls changed",
+                vec![hunk(HTTP, 18, 22)],
+                false,
+            ),
+            statics(
+                "TokenStore::save",
+                "TokenStore::save",
+                "auth/store.rs · moved, +6 −1",
+                "Moved from src/auth/store.rs:20 · called by TokenStore::refresh · comes first because nothing it calls changed",
+                vec![hunk(STORE, 85, 91)],
+                false,
+            ),
+            statics(
+                "TokenStore::new",
+                "TokenStore::new",
+                "auth/store.rs · signature",
+                "Signature changed · called by tests::refresh_race (+3) · comes first because nothing it calls changed",
+                vec![hunk(STORE, 70, 72)],
+                false,
+            ),
+            statics(
+                "TokenStore::refresh",
+                "TokenStore::refresh",
+                "auth/refresh.rs · +9 −2",
+                "Changed body · called by TokenStore::token (+2) · after TokenStore::save",
+                vec![hunk(REFRESH, 38, 48), hunk(REFRESH, 62, 70)],
+                false,
+            ),
+            statics(
+                "tests::refresh_race",
+                "tests::refresh_race",
+                "tests/refresh.rs · new",
+                "New · after TokenStore::refresh",
+                vec![hunk(TESTS, 1, 30)],
+                false,
+            ),
+            statics(
+                "other-files",
+                "Other files",
+                "CHANGELOG.md, mod.rs, config.rs, http.rs, store.rs · 5 files",
+                "95 lines changed",
+                vec![
+                    hunk("CHANGELOG.md", 1, 7),
+                    hunk("src/auth/mod.rs", 1, 8),
+                    hunk("src/config.rs", 20, 29),
+                    hunk(HTTP, 12, 17),
+                    hunk(HTTP, 23, 45),
+                    hunk(STORE, 73, 84),
+                    hunk(STORE, 92, 120),
+                ],
+                true,
+            ),
+        ],
+        first,
+        second,
+        read: vec!["refresh-early".into()],
+        head: HEAD_SHA.into(),
+    }
+}
+
+pub fn demo_story_version(now: i64, number: u32) -> Option<StoryVersion> {
+    let story = demo_story(now);
+    [story.first, story.second]
+        .into_iter()
+        .find(|v| v.number == number)
+}
+
+/// What the demo daemon says about the Story of the demo review: both versions, the second whole
+/// and written for the head, one step read.
+pub fn demo_story_tell(pr: &PrRef, now: i64) -> Tell {
+    let story = demo_story(now);
+    let info = |v: &StoryVersion| StoryVersionInfo {
+        number: v.number,
+        commit: v.commit.clone(),
+        state: v.state.clone(),
+    };
+    Tell::Story(StoryTell::Loaded {
+        pr: pr.clone(),
+        versions: vec![info(&story.first), info(&story.second)],
+        latest: Some(Box::new(story.second)),
+        state: StoryState::Idle,
+        static_steps: story.static_steps,
+        read: story.read,
+        head: story.head,
+        new_commits: 0,
+    })
+}
+
+/// Source text with each part at its line number, the lines between them blank, so a function
+/// starts on the line the demo patches name.
+fn at_lines(parts: &[(u32, &str)]) -> String {
+    let mut out = String::new();
+    let mut line = 1u32;
+    for (start, text) in parts {
+        assert!(
+            *start >= line,
+            "the part at line {start} overlaps the text above it"
+        );
+        while line < *start {
+            out.push('\n');
+            line += 1;
+        }
+        out.push_str(text);
+        out.push('\n');
+        line += text.lines().count() as u32;
+    }
+    out
+}
+
+/// The demo repository's Rust files at the head: the PR's files and the code around them that it
+/// does not touch (the callers of `TokenStore::token`, the CLI, the tests).
+fn demo_sources() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "src/auth/refresh.rs",
+            at_lines(&[
+                (37, "impl TokenStore {"),
+                (
+                    38,
+                    "    pub async fn refresh(&self) -> Result<Token, AuthError> {\n        let token = self.load().await?;\n        // Refresh one minute early so a request never races the expiry.\n        if token.expires_at > now() + Duration::from_secs(60) {\n            return Ok(token);\n        }\n        let _guard = self.refresh_lock.lock().await;\n        let fresh = self.client.exchange(&token.refresh).await?;\n        self.save(&fresh)?;\n        Ok(fresh)\n    }",
+                ),
+                (
+                    62,
+                    "    fn expired(&self, token: &Token) -> bool {\n        token.expires_at <= now()\n    }",
+                ),
+                (
+                    66,
+                    "    /// Drops the cached token so the next call refreshes it.\n    pub fn invalidate(&self) {\n        self.cache.lock().take();\n    }\n}",
+                ),
+            ]),
+        ),
+        (
+            "src/auth/store.rs",
+            at_lines(&[
+                (
+                    19,
+                    "impl TokenStore {\n    /// The token, refreshed when it is about to expire.\n    pub async fn token(&self) -> Result<Token, AuthError> {\n        if let Some(t) = self.cached() {\n            return Ok(t);\n        }\n        self.refresh().await\n    }\n\n    fn cached(&self) -> Option<Token> {\n        self.cache.lock().clone()\n    }\n}",
+                ),
+                (
+                    69,
+                    "impl TokenStore {\n    pub fn new(path: PathBuf, client: HttpClient) -> Self {\n        Self { path, client, cache: Mutex::new(None) }\n    }",
+                ),
+                (
+                    74,
+                    "    /// Reads the token, from memory when it is still cached.\n    pub fn load(&self) -> Result<Token, AuthError> {\n        if let Some(token) = self.cache.lock().clone() {\n            return Ok(token);\n        }\n        let data = fs::read(&self.path).map_err(AuthError::Read)?;\n        let token: Token = serde_json::from_slice(&data).map_err(AuthError::Decode)?;\n        Ok(token)\n    }",
+                ),
+                (
+                    85,
+                    "    /// Writes the token and updates the cache.\n    pub fn save(&self, token: &Token) -> Result<(), AuthError> {\n        let data = serde_json::to_vec_pretty(token).map_err(AuthError::Encode)?;\n        write_atomic(&self.path, &data)?;\n        Ok(())\n    }",
+                ),
+                (
+                    93,
+                    "    pub fn path(&self) -> &Path {\n        &self.path\n    }\n}",
+                ),
+                (
+                    100,
+                    "fn write_atomic(path: &Path, data: &[u8]) -> Result<(), AuthError> {\n    let tmp = path.with_extension(\"tmp\");\n    fs::write(&tmp, data).map_err(AuthError::Write)?;\n    fs::rename(&tmp, path).map_err(AuthError::Write)\n}",
+                ),
+            ]),
+        ),
+        (
+            "src/client/http.rs",
+            at_lines(&[
+                (16, "impl HttpClient {"),
+                (
+                    18,
+                    "    pub async fn exchange(&self, refresh: &str) -> Result<Token, AuthError> {\n        let request = self.exchange_request(refresh);\n        loop {\n            match self.send(request.clone()).await {\n                Ok(response) => return Ok(response.token()),\n                Err(e) if e.is_server() => sleep(BACKOFF).await,\n                Err(e) => return Err(AuthError::Exchange(e)),\n            }\n        }\n    }",
+                ),
+                (
+                    36,
+                    "    pub async fn send(&self, request: Request) -> Result<Response, HttpError> {\n        let request = request.bearer(&self.token);\n        self.inner.execute(request).await.map_err(HttpError::Send)\n    }\n\n    fn exchange_request(&self, refresh: &str) -> Request {\n        Request::post(&self.base, refresh)\n    }\n}",
+                ),
+            ]),
+        ),
+        (
+            "src/api.rs",
+            at_lines(&[
+                (28, "impl ApiClient {"),
+                (
+                    30,
+                    "    pub async fn send(&self, request: Request) -> Result<Response, ApiError> {\n        let token = self.store.token().await?;\n        self.http.dispatch(request.bearer(&token.access)).await\n    }\n\n    pub async fn stream(&self, request: Request) -> Result<Body, ApiError> {\n        let token = self.store.token().await?;\n        self.http.dispatch_stream(request.bearer(&token.access)).await\n    }\n}",
+                ),
+            ]),
+        ),
+        (
+            "src/auth/middleware.rs",
+            at_lines(&[(
+                1,
+                "pub async fn auth_middleware(api: &ApiClient, request: Request) -> Result<Response, ApiError> {\n    ApiClient::send(api, request).await\n}",
+            )]),
+        ),
+        (
+            "src/cli.rs",
+            at_lines(&[(
+                1,
+                "fn main() {\n    run();\n}\n\nfn run() {\n    let token = store().token();\n}\n\nfn auth_status() {\n    let fresh = store().refresh();\n}",
+            )]),
+        ),
+        (
+            "tests/refresh.rs",
+            at_lines(&[(
+                17,
+                "async fn refresh_race() {\n    let token = store().refresh().await;\n}",
+            )]),
+        ),
+    ]
+}
+
+/// The call index of the demo repository at the head, built by the real `Indexer`.
+pub fn demo_calls() -> CallIndex {
+    let mut indexer = Indexer::new(
+        HEAD_SHA,
+        vec!["tokio".into(), "serde_json".into(), "reqwest".into()],
+        Instant::now() + Duration::from_secs(10),
+    );
+    for (path, text) in demo_sources() {
+        indexer.add(SourceFile { path, text: &text });
+    }
+    indexer.finish()
+}
+
+fn demo_function<'a>(index: &'a CallIndex, path: &str, name: &str) -> &'a Function {
+    index
+        .functions
+        .iter()
+        .find(|f| f.path == path && f.name == name)
+        .unwrap_or_else(|| panic!("the demo index has no {name} in {path}"))
+}
+
+/// What the demo PR changed, as `DiffCalls.png` lists it: `refresh` and `exchange` changed,
+/// `new` with a signature change, `save` moved, and a new test.
+pub fn demo_changed(index: &CallIndex) -> Vec<ChangedFunction> {
+    let change = |path: &str,
+                  name: &str,
+                  kind: ChangeKind,
+                  added: u32,
+                  removed: u32,
+                  moved_from: Option<(&str, u32)>| {
+        ChangedFunction {
+            id: demo_function(index, path, name).id.clone(),
+            kind,
+            added,
+            removed,
+            moved_from: moved_from.map(|(p, l)| (p.to_string(), l)),
+        }
+    };
+    vec![
+        change(
+            "src/auth/refresh.rs",
+            "refresh",
+            ChangeKind::Changed,
+            9,
+            2,
+            None,
+        ),
+        change(
+            "src/auth/store.rs",
+            "new",
+            ChangeKind::Signature,
+            1,
+            1,
+            None,
+        ),
+        change(
+            "src/auth/store.rs",
+            "save",
+            ChangeKind::Moved,
+            6,
+            1,
+            Some(("src/auth/store.rs", 20)),
+        ),
+        change(
+            "src/client/http.rs",
+            "exchange",
+            ChangeKind::Changed,
+            4,
+            1,
+            None,
+        ),
+        change(
+            "tests/refresh.rs",
+            "refresh_race",
+            ChangeKind::New,
+            12,
+            0,
+            None,
+        ),
+    ]
+}
+
+/// What the demo daemon answers `GetCalls` with: the real `subgraph` of the demo index around
+/// `center` (`FunctionId.0`; `None`: `TokenStore::refresh`, the first changed function).
+pub fn demo_calls_graph(center: Option<&str>, depth: u8, expand: &[i8]) -> Tell {
+    let index = demo_calls();
+    let resolved = clusia_calls::resolve(&index);
+    let changed = demo_changed(&index);
+    let first = changed[0].id.clone();
+    let chosen = center
+        .and_then(|c| index.functions.iter().find(|f| f.id.0 == c))
+        .map_or(first, |f| f.id.clone());
+    let graph = clusia_calls::subgraph(&index, &resolved, &changed, &chosen, depth, expand);
+    Tell::Calls(CallsTell::Graph {
+        pr: demo_pr(),
+        request: CallsRequest {
+            center: center.map(str::to_string),
+            depth,
+            expand: expand.to_vec(),
+        },
+        graph: Some(Box::new(graph)),
+        index: CallsIndexState::Ready {
+            commit: HEAD_SHA.into(),
+            cut: false,
+        },
+        unsupported: Vec::new(),
+    })
+}
+
+/// What the demo daemon answers `FindFunction` with: the functions whose qualified name holds
+/// `query`, changed ones first, at most 20.
+pub fn demo_find(query: &str) -> Vec<FunctionHit> {
+    let index = demo_calls();
+    let changed = demo_changed(&index);
+    let needle = query.to_lowercase();
+    let mut hits: Vec<FunctionHit> = index
+        .functions
+        .iter()
+        .filter(|f| !needle.is_empty() && f.qualified.to_lowercase().contains(&needle))
+        .map(|f| FunctionHit {
+            id: f.id.0.clone(),
+            qualified: f.qualified.clone(),
+            path: f.path.clone(),
+            line: f.start_line,
+            kind: changed.iter().find(|c| c.id == f.id).map(|c| c.kind),
+            changed: changed.iter().any(|c| c.id == f.id),
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        b.changed
+            .cmp(&a.changed)
+            .then(a.qualified.cmp(&b.qualified))
+    });
+    hits.truncate(20);
+    hits
+}
+
+/// What the demo daemon answers `ReadFunctionCode` with: the function's lines of the demo source,
+/// the ones its patch adds marked changed; a function that is not in the index is "no longer
+/// available".
+pub fn demo_function_code(function: &str) -> DiagramCode {
+    let index = demo_calls();
+    let Some(f) = index.functions.iter().find(|f| f.id.0 == function) else {
+        return DiagramCode {
+            path: String::new(),
+            commit: HEAD_SHA.into(),
+            start_line: 0,
+            lines: Vec::new(),
+            unavailable: Some("The function is no longer available.".into()),
+        };
+    };
+    let text = demo_sources()
+        .into_iter()
+        .find(|(p, _)| *p == f.path)
+        .map(|(_, t)| t)
+        .unwrap_or_default();
+    let patch = demo_diff()
+        .into_iter()
+        .find(|d| d.path == f.path)
+        .and_then(|d| d.patch);
+    let added: Vec<u32> = patch
+        .as_deref()
+        .map(parse_patch)
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.kind == RowKind::Added)
+        .filter_map(|r| r.new)
+        .collect();
+    let lines: Vec<CodeLine> = text
+        .lines()
+        .enumerate()
+        .map(|(i, t)| (i as u32 + 1, t))
+        .filter(|(n, _)| (f.start_line..=f.end_line).contains(n))
+        .map(|(number, t)| CodeLine {
+            number,
+            text: t.to_string(),
+            changed: added.contains(&number),
+        })
+        .collect();
+    DiagramCode {
+        path: f.path.clone(),
+        commit: HEAD_SHA.into(),
+        start_line: f.start_line,
+        lines,
+        unavailable: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3216,5 +3843,330 @@ mod tests {
             anchor.line
         ));
         assert!(!reason.is_empty());
+    }
+
+    #[test]
+    fn the_demo_story_is_the_one_the_mockups_show() {
+        let s = demo_story(NOW);
+        let ids = |v: &StoryVersion| -> Vec<String> {
+            v.spec
+                .as_ref()
+                .expect("a spec")
+                .steps
+                .iter()
+                .map(|x| x.id.clone())
+                .collect()
+        };
+        assert_eq!(
+            ids(&s.first),
+            [
+                "refresh-early",
+                "one-at-a-time",
+                "safer-saves",
+                "race-tests",
+                "mechanical"
+            ]
+        );
+        assert_eq!(
+            ids(&s.second),
+            [
+                "refresh-early",
+                "one-at-a-time",
+                "safer-saves",
+                "retry-limit",
+                "race-tests",
+                "mechanical"
+            ]
+        );
+        let spec = s.second.spec.as_ref().unwrap();
+        let hist = |id: &str| spec.steps.iter().find(|x| x.id == id).unwrap().history;
+        assert_eq!(hist("retry-limit"), Some(StepHistory::Added));
+        assert_eq!(hist("one-at-a-time"), Some(StepHistory::Changed));
+        assert_eq!(hist("safer-saves"), Some(StepHistory::Same));
+        assert!(
+            spec.steps
+                .iter()
+                .find(|x| x.id == "one-at-a-time")
+                .unwrap()
+                .since_previous
+                .is_some()
+        );
+        assert_eq!(spec.removed.len(), 1);
+        assert_eq!(spec.removed[0].title, "Retry forever on 5xx");
+        assert!(
+            s.first
+                .spec
+                .as_ref()
+                .unwrap()
+                .steps
+                .iter()
+                .all(|x| x.history.is_none())
+        );
+        assert!(spec.steps.last().unwrap().mechanical);
+        assert_eq!((s.first.number, s.second.number), (1, 2));
+        assert_eq!(s.second.commit, HEAD_SHA);
+        assert_eq!(s.head, HEAD_SHA);
+        assert_eq!(s.read, ["refresh-early"]);
+        let names: Vec<&str> = s.static_steps.iter().map(|x| x.title.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "HttpClient::exchange",
+                "TokenStore::save",
+                "TokenStore::new",
+                "TokenStore::refresh",
+                "tests::refresh_race",
+                "Other files"
+            ]
+        );
+        assert!(s.static_steps.last().unwrap().other);
+        assert!(
+            s.static_steps.iter().all(|x| !x.explanation.is_empty()),
+            "every static step carries its explanation"
+        );
+        assert_eq!(
+            s.static_steps[0].explanation,
+            "Changed body · called by TokenStore::refresh · comes first because nothing it calls changed"
+        );
+        assert_eq!(s.static_steps[5].explanation, "95 lines changed");
+    }
+
+    /// The head-side `(start, end)` of every hunk header of `patch`.
+    fn hunk_ranges(patch: &str) -> Vec<(u32, u32)> {
+        patch
+            .lines()
+            .filter(|l| l.starts_with("@@"))
+            .map(|l| {
+                let plus = l.split('+').nth(1).expect("a new range");
+                let range = plus.split_whitespace().next().expect("a range");
+                let (start, len) = range.split_once(',').unwrap_or((range, "1"));
+                let start: u32 = start.parse().expect("a start");
+                (
+                    start,
+                    start + len.parse::<u32>().expect("a length").max(1) - 1,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_hunk_of_the_demo_diff_is_in_a_step_of_every_story() {
+        let s = demo_story(NOW);
+        let reach = |steps: Vec<&HunkRef>| {
+            for file in demo_diff() {
+                for (a, b) in hunk_ranges(file.patch.as_deref().unwrap()) {
+                    assert!(
+                        steps
+                            .iter()
+                            .any(|h| h.path == file.path && h.start_line <= b && a <= h.end_line),
+                        "{} {a}-{b} is in no step",
+                        file.path
+                    );
+                }
+            }
+        };
+        for v in [&s.first, &s.second] {
+            reach(
+                v.spec
+                    .as_ref()
+                    .unwrap()
+                    .steps
+                    .iter()
+                    .flat_map(|x| &x.hunks)
+                    .collect(),
+            );
+        }
+        reach(s.static_steps.iter().flat_map(|x| &x.hunks).collect());
+    }
+
+    #[test]
+    fn the_demo_story_tell_lists_both_versions_with_the_second_whole() {
+        let Tell::Story(StoryTell::Loaded {
+            versions,
+            latest,
+            state,
+            read,
+            head,
+            ..
+        }) = demo_story_tell(&demo_pr(), NOW)
+        else {
+            panic!("a loaded story");
+        };
+        assert_eq!(
+            versions.iter().map(|v| v.number).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(latest.expect("latest").number, 2);
+        assert_eq!(
+            (state, read, head),
+            (
+                StoryState::Idle,
+                vec!["refresh-early".to_string()],
+                HEAD_SHA.to_string()
+            )
+        );
+        assert_eq!(demo_story_version(NOW, 1).map(|v| v.number), Some(1));
+        assert!(demo_story_version(NOW, 3).is_none());
+    }
+
+    fn find_function<'a>(index: &'a CallIndex, path: &str, name: &str) -> &'a Function {
+        index
+            .functions
+            .iter()
+            .find(|f| f.path == path && f.name == name)
+            .unwrap_or_else(|| panic!("{path} {name}"))
+    }
+
+    #[test]
+    fn the_demo_index_puts_the_functions_on_the_lines_the_patches_name() {
+        let index = demo_calls();
+        assert!(
+            !index.cut && index.skipped.is_empty(),
+            "{:?}",
+            index.skipped
+        );
+        assert_eq!(index.commit, HEAD_SHA);
+        let refresh = find_function(&index, "src/auth/refresh.rs", "refresh");
+        assert_eq!((refresh.start_line, refresh.end_line), (38, 48));
+        let token = find_function(&index, "src/auth/store.rs", "token");
+        assert_eq!(token.start_line, 21);
+        let save = find_function(&index, "src/auth/store.rs", "save");
+        assert!(
+            save.start_line <= 88 && 88 <= save.end_line,
+            "the draft comment's line"
+        );
+        let exchange = find_function(&index, "src/client/http.rs", "exchange");
+        assert_eq!(exchange.start_line, 18);
+        assert_eq!(demo_calls().functions, index.functions, "deterministic");
+    }
+
+    #[test]
+    fn the_demo_changes_are_the_ones_the_calls_mockup_lists() {
+        let index = demo_calls();
+        let changed = demo_changed(&index);
+        let kinds: Vec<(String, ChangeKind)> = changed
+            .iter()
+            .map(|c| {
+                let f = index
+                    .functions
+                    .iter()
+                    .find(|f| f.id == c.id)
+                    .expect("indexed");
+                (f.name.clone(), c.kind)
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("refresh".to_string(), ChangeKind::Changed),
+                ("new".to_string(), ChangeKind::Signature),
+                ("save".to_string(), ChangeKind::Moved),
+                ("exchange".to_string(), ChangeKind::Changed),
+                ("refresh_race".to_string(), ChangeKind::New),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_demo_graph_runs_the_real_subgraph_around_refresh() {
+        use clusia_calls::NodeKind;
+        let index = demo_calls();
+        let Tell::Calls(CallsTell::Graph {
+            request,
+            graph,
+            index: state,
+            unsupported,
+            ..
+        }) = demo_calls_graph(None, 3, &[])
+        else {
+            panic!("a graph");
+        };
+        let graph = graph.expect("a graph");
+        assert_eq!(request.depth, 3);
+        assert_eq!(graph.depth, 3);
+        let refresh = find_function(&index, "src/auth/refresh.rs", "refresh");
+        assert_eq!(graph.center, refresh.id.0);
+        let name_of = |key: &str| {
+            index
+                .functions
+                .iter()
+                .find(|f| f.id.0 == key)
+                .map(|f| f.name.as_str())
+                .unwrap_or("")
+        };
+        let at = |level: i8| -> Vec<&str> {
+            graph
+                .nodes
+                .iter()
+                .filter(|n| n.level == level)
+                .map(|n| name_of(&n.key))
+                .collect()
+        };
+        assert!(at(-1).contains(&"token"), "{:?}", at(-1));
+        assert!(
+            at(1).contains(&"exchange") && at(1).contains(&"save"),
+            "{:?}",
+            at(1)
+        );
+        assert!(
+            graph.nodes.iter().any(|n| n.level <= -2) && graph.nodes.iter().any(|n| n.level >= 2),
+            "callers and callees go past the first level"
+        );
+        assert!(
+            graph.nodes.iter().any(|n| n.kind == NodeKind::Untouched),
+            "untouched code is in the graph"
+        );
+        assert!(graph.changed >= 3);
+        assert!(matches!(state, CallsIndexState::Ready { cut: false, .. }));
+        assert!(unsupported.is_empty());
+    }
+
+    #[test]
+    fn the_demo_graph_follows_the_centre_depth_and_expansion() {
+        let index = demo_calls();
+        let token = find_function(&index, "src/auth/store.rs", "token")
+            .id
+            .0
+            .clone();
+        let Tell::Calls(CallsTell::Graph { request, graph, .. }) =
+            demo_calls_graph(Some(&token), 1, &[-1])
+        else {
+            panic!("a graph");
+        };
+        assert_eq!(request.center.as_deref(), Some(token.as_str()));
+        assert_eq!(request.expand, [-1]);
+        let graph = graph.expect("a graph");
+        assert_eq!(graph.center, token);
+        assert!(graph.nodes.iter().all(|n| n.level.abs() <= 1));
+    }
+
+    #[test]
+    fn the_demo_finds_functions_by_a_substring_changed_ones_first() {
+        let hits = demo_find("TOKEN");
+        assert!(!hits.is_empty() && hits.len() <= 20);
+        assert!(
+            hits.iter()
+                .all(|h| h.qualified.to_lowercase().contains("token"))
+        );
+        let first_unchanged = hits.iter().position(|h| !h.changed).unwrap_or(hits.len());
+        assert!(
+            hits[first_unchanged..].iter().all(|h| !h.changed),
+            "changed first"
+        );
+        assert!(hits.iter().any(|h| h.changed));
+        assert!(demo_find("no such function").is_empty());
+    }
+
+    #[test]
+    fn the_demo_reads_a_functions_code_and_tints_the_lines_the_patch_adds() {
+        let code = demo_function_code("src/auth/refresh.rs#TokenStore::refresh#38");
+        assert_eq!(code.path, "src/auth/refresh.rs");
+        assert_eq!(code.commit, HEAD_SHA);
+        assert_eq!(code.unavailable, None);
+        assert_eq!(code.start_line, 38);
+        assert!(code.lines.iter().any(|l| l.number == 44 && l.changed));
+        assert!(code.lines.iter().any(|l| l.number == 38 && !l.changed));
+        let gone = demo_function_code("nowhere.rs#nothing#1");
+        assert!(gone.unavailable.is_some() && gone.lines.is_empty());
     }
 }

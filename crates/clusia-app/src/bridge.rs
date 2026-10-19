@@ -16,19 +16,21 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::RequestRedraw;
 use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
+use clusia_calls::{CallGraph, StaticStep};
 use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass};
 use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::draft::Origin;
 use clusia_core::revalidation::{self, Revalidation};
+use clusia_core::story::StoryVersion;
 use clusia_core::{
     Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Review, Side, ThreadRef, Verdict,
 };
 use clusia_protocol::{
-    AgentErrorKind, AgentLogEntry, AnchorInput, CheckState, CheckStatus, Client, ClientError,
-    Command, DiagramCode, DiagramsState, ErrorCode, Event, GifPage, LoadStep, LoadStepKind,
-    MediaFile, NewsItem, PermissionAnswerKind, PermissionOutcome, ProbeResult, ProtocolError,
-    PublishResult, Reply, ReviewView, Secret, SessionStateKind, StepStatus, Suggestion,
-    WindowTarget, topics,
+    AgentErrorKind, AgentLogEntry, AnchorInput, CallsIndexState, CheckState, CheckStatus, Client,
+    ClientError, Command, DiagramCode, DiagramsState, ErrorCode, Event, FunctionHit, GifPage,
+    LoadStep, LoadStepKind, MediaFile, NewsItem, PermissionAnswerKind, PermissionOutcome,
+    ProbeResult, ProtocolError, PublishResult, Reply, ReviewView, Secret, SessionStateKind,
+    StepStatus, StoryState, StoryVersionInfo, Suggestion, WindowTarget, topics,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -38,9 +40,11 @@ use crate::clock::Clock;
 use crate::fixture;
 use crate::review_state::{self, ReviewEvent, ReviewTabs};
 use crate::screens::review::agent::{Chats, PermissionQueue};
+use crate::screens::review::calls::{Calls, CallsRequest};
 use crate::screens::review::checks::{self, Checks, proposed_comment};
 use crate::screens::review::diagrams::{Diagrams, modal};
 use crate::screens::review::revalidation::Revalidations;
+use crate::screens::review::story::model::Stories;
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::tab_memory::TabsRestored;
 use crate::ui::media::MediaCache;
@@ -249,6 +253,57 @@ pub enum Ask {
         number: u32,
         key: String,
         node: String,
+        body: String,
+        ticket: u64,
+    },
+    /// Writes the review's Story with the agent; the progress comes back as `StoryTell`s.
+    WriteStory(PrRef),
+    /// Writes it again for the newest commit, keeping the old versions.
+    RewriteStory(PrRef),
+    StopStory(PrRef),
+    /// The versions, the latest one, the static order and the read marks: `StoryTell::Loaded`.
+    GetStory(PrRef),
+    /// One older version, whole: `StoryTell::Version`.
+    GetStoryVersion {
+        pr: PrRef,
+        number: u32,
+    },
+    /// Marks or unmarks every hunk of a step; a refusal comes back as `StoryTell::ReadRefused`.
+    MarkStepRead {
+        pr: PrRef,
+        number: u32,
+        step: String,
+        read: bool,
+    },
+    /// A comment on a step, into the draft. Answered by `Saved` or `Refused` with the ticket.
+    AddStepComment {
+        pr: PrRef,
+        number: u32,
+        step: String,
+        body: String,
+        ticket: u64,
+    },
+    /// The graph around `center` (`None`: the first changed function): `CallsTell::Graph`.
+    GetCalls {
+        pr: PrRef,
+        center: Option<String>,
+        depth: Option<u8>,
+        expand: Vec<i8>,
+    },
+    /// Up to 20 functions whose name holds `query`: `CallsTell::Found`.
+    FindFunction {
+        pr: PrRef,
+        query: String,
+    },
+    /// The code of a function at the index's commit: `CallsTell::Code`.
+    ReadFunctionCode {
+        pr: PrRef,
+        function: String,
+    },
+    /// A comment on a node, into the draft. Answered by `Saved` or `Refused` with the ticket.
+    AddCallsComment {
+        pr: PrRef,
+        function: String,
         body: String,
         ticket: u64,
     },
@@ -604,6 +659,111 @@ impl DiagramsTell {
     }
 }
 
+/// What the Story of a review did, from the daemon's events and from `GetStory`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoryTell {
+    /// Everything the daemon holds: the light list of versions, the latest one whole, the static
+    /// order and the read marks.
+    Loaded {
+        pr: PrRef,
+        versions: Vec<StoryVersionInfo>,
+        latest: Option<Box<StoryVersion>>,
+        state: StoryState,
+        static_steps: Vec<StaticStep>,
+        read: Vec<String>,
+        head: String,
+        new_commits: u32,
+    },
+    /// An older version, whole.
+    Version {
+        pr: PrRef,
+        version: Box<StoryVersion>,
+    },
+    /// The daemon could not send an older version.
+    Unreadable {
+        pr: PrRef,
+        number: u32,
+    },
+    State {
+        pr: PrRef,
+        state: StoryState,
+    },
+    /// The daemon refused a read mark: the optimistic mark is undone.
+    ReadRefused {
+        pr: PrRef,
+        step: String,
+        read: bool,
+    },
+}
+
+impl StoryTell {
+    pub fn pr(&self) -> &PrRef {
+        match self {
+            StoryTell::Loaded { pr, .. }
+            | StoryTell::Version { pr, .. }
+            | StoryTell::Unreadable { pr, .. }
+            | StoryTell::State { pr, .. }
+            | StoryTell::ReadRefused { pr, .. } => pr,
+        }
+    }
+
+    /// The tell for a story event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<StoryTell> {
+        match event.clone() {
+            Event::StoryChanged { pr, state } => Some(StoryTell::State { pr, state }),
+            _ => None,
+        }
+    }
+}
+
+/// What the call graph of a review did, from the daemon's events and from `GetCalls`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallsTell {
+    /// The graph the daemon drew for `request`; none while the index is not ready.
+    Graph {
+        pr: PrRef,
+        request: CallsRequest,
+        graph: Option<Box<CallGraph>>,
+        index: CallsIndexState,
+        unsupported: Vec<String>,
+    },
+    /// The functions `FindFunction` found for `query`.
+    Found {
+        pr: PrRef,
+        query: String,
+        hits: Vec<FunctionHit>,
+    },
+    /// The code of a function, or why there is none (`DiagramCode.unavailable`).
+    Code {
+        pr: PrRef,
+        function: String,
+        code: DiagramCode,
+    },
+    Index {
+        pr: PrRef,
+        state: CallsIndexState,
+    },
+}
+
+impl CallsTell {
+    pub fn pr(&self) -> &PrRef {
+        match self {
+            CallsTell::Graph { pr, .. }
+            | CallsTell::Found { pr, .. }
+            | CallsTell::Code { pr, .. }
+            | CallsTell::Index { pr, .. } => pr,
+        }
+    }
+
+    /// The tell for a calls event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<CallsTell> {
+        match event.clone() {
+            Event::CallsIndexChanged { pr, state } => Some(CallsTell::Index { pr, state }),
+            _ => None,
+        }
+    }
+}
+
 /// What the revalidation of a review did, from the daemon's events and from
 /// `GetRevalidation`.
 #[derive(Debug, Clone, PartialEq)]
@@ -786,6 +946,10 @@ pub enum Tell {
     },
     /// What the review's diagrams did.
     Diagrams(DiagramsTell),
+    /// What the review's Story did.
+    Story(StoryTell),
+    /// What the review's call graph did.
+    Calls(CallsTell),
     /// What the revalidation of the review's draft did.
     Revalidation(RevalidationTell),
     /// The review's chat log, in answer to `Ask::AgentLog`.
@@ -985,7 +1149,48 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
         | Ask::GetHiddenComments(_)
         | Ask::GetRevalidation(_)
         | Ask::GetDiagrams(_)
-        | Ask::GetDiagramVersion { .. } => {}
+        | Ask::GetDiagramVersion { .. }
+        | Ask::GetStory(_)
+        | Ask::GetStoryVersion { .. }
+        | Ask::GetCalls { .. }
+        | Ask::FindFunction { .. } => {}
+        Ask::WriteStory(_) | Ask::RewriteStory(_) | Ask::StopStory(_) => {
+            teller.send(Tell::Notice {
+                text: "Not connected to clusiad — not sent".into(),
+                warning: true,
+            });
+        }
+        // The card waits for its mark: undo it, and say why nothing happened.
+        Ask::MarkStepRead { pr, step, read, .. } => {
+            teller.send(Tell::Notice {
+                text: "Not connected to clusiad — not sent".into(),
+                warning: true,
+            });
+            teller.send(Tell::Story(StoryTell::ReadRefused {
+                pr: pr.clone(),
+                step: step.clone(),
+                read: *read,
+            }));
+        }
+        Ask::AddStepComment { pr, ticket, .. } | Ask::AddCallsComment { pr, ticket, .. } => {
+            teller.send(Tell::Refused {
+                pr: pr.clone(),
+                ticket: *ticket,
+                message: NOT_CONNECTED.into(),
+            });
+        }
+        // The node waits for its code: tell it there is none.
+        Ask::ReadFunctionCode { pr, function } => teller.send(Tell::Calls(CallsTell::Code {
+            pr: pr.clone(),
+            function: function.clone(),
+            code: DiagramCode {
+                path: String::new(),
+                commit: String::new(),
+                start_line: 0,
+                lines: Vec::new(),
+                unavailable: Some("Not connected to clusiad.".into()),
+            },
+        })),
         Ask::DrawDiagrams(_) | Ask::DrawDiagram { .. } | Ask::StopDiagrams(_) => {
             teller.send(Tell::Notice {
                 text: "Not connected to clusiad — not sent".into(),
@@ -1228,6 +1433,10 @@ async fn follow(
                 teller.send(Tell::Checks(tell));
             } else if let Some(tell) = DiagramsTell::from_event(other) {
                 teller.send(Tell::Diagrams(tell));
+            } else if let Some(tell) = StoryTell::from_event(other) {
+                teller.send(Tell::Story(tell));
+            } else if let Some(tell) = CallsTell::from_event(other) {
+                teller.send(Tell::Calls(tell));
             } else if let Some(tell) = RevalidationTell::from_event(other) {
                 teller.send(Tell::Revalidation(tell));
             }
@@ -1690,6 +1899,100 @@ async fn answer(
             };
             draft_write(client, teller, cmd, pr, ticket).await?;
         }
+        Ask::WriteStory(pr) => notify(client, teller, Command::WriteStory { pr }, "").await?,
+        Ask::RewriteStory(pr) => notify(client, teller, Command::RewriteStory { pr }, "").await?,
+        Ask::StopStory(pr) => notify(client, teller, Command::StopStory { pr }, "").await?,
+        Ask::GetStory(pr) => send_story(client, teller, pr).await?,
+        Ask::GetStoryVersion { pr, number } => {
+            let tell = match request(
+                client,
+                Command::GetStoryVersion {
+                    pr: pr.clone(),
+                    number,
+                },
+            )
+            .await?
+            {
+                Some(Reply::StoryVersion(version)) => StoryTell::Version {
+                    pr,
+                    version: Box::new(version),
+                },
+                _ => StoryTell::Unreadable { pr, number },
+            };
+            teller.send(Tell::Story(tell));
+        }
+        Ask::MarkStepRead {
+            pr,
+            number,
+            step,
+            read,
+        } => {
+            let cmd = Command::MarkStepRead {
+                pr: pr.clone(),
+                number,
+                step: step.clone(),
+                read,
+            };
+            match client.request(cmd).await {
+                Ok(_) => {}
+                Err(ClientError::Server(e)) => {
+                    teller.send(Tell::Notice {
+                        text: e.message,
+                        warning: true,
+                    });
+                    teller.send(Tell::Story(StoryTell::ReadRefused { pr, step, read }));
+                }
+                Err(e) => return Err(lost(e)),
+            }
+        }
+        Ask::AddStepComment {
+            pr,
+            number,
+            step,
+            body,
+            ticket,
+        } => {
+            let cmd = Command::AddStepComment {
+                pr: pr.clone(),
+                number,
+                step,
+                body,
+            };
+            draft_write(client, teller, cmd, pr, ticket).await?;
+        }
+        Ask::GetCalls {
+            pr,
+            center,
+            depth,
+            expand,
+        } => {
+            send_calls(client, teller, pr, center, depth, expand).await?;
+        }
+        Ask::FindFunction { pr, query } => {
+            let cmd = Command::FindFunction {
+                pr: pr.clone(),
+                query: query.clone(),
+            };
+            if let Some(Reply::Functions(hits)) = request(client, cmd).await? {
+                teller.send(Tell::Calls(CallsTell::Found { pr, query, hits }));
+            }
+        }
+        Ask::ReadFunctionCode { pr, function } => {
+            send_function_code(client, teller, pr, function).await?
+        }
+        Ask::AddCallsComment {
+            pr,
+            function,
+            body,
+            ticket,
+        } => {
+            let cmd = Command::AddCallsComment {
+                pr: pr.clone(),
+                function,
+                body,
+            };
+            draft_write(client, teller, cmd, pr, ticket).await?;
+        }
         Ask::Revalidate(pr) => notify(client, teller, Command::Revalidate { pr }, "").await?,
         Ask::StopRevalidation(pr) => {
             notify(client, teller, Command::StopRevalidation { pr }, "").await?;
@@ -1967,6 +2270,104 @@ async fn send_diagram_code(
         node,
         code,
     }));
+    Ok(())
+}
+
+/// `GetStory` → `StoryTell::Loaded` (a refusal is only logged).
+async fn send_story(client: &mut Client, teller: &Teller, pr: PrRef) -> Result<(), String> {
+    if let Some(Reply::Story {
+        versions,
+        latest,
+        state,
+        static_steps,
+        read,
+        head,
+        new_commits,
+    }) = request(client, Command::GetStory { pr: pr.clone() }).await?
+    {
+        teller.send(Tell::Story(StoryTell::Loaded {
+            pr,
+            versions,
+            latest: latest.map(Box::new),
+            state,
+            static_steps,
+            read,
+            head,
+            new_commits,
+        }));
+    }
+    Ok(())
+}
+
+/// `GetCalls` → `CallsTell::Graph`. A refusal is told as a graph that failed, so the view
+/// that waits for it says why.
+async fn send_calls(
+    client: &mut Client,
+    teller: &Teller,
+    pr: PrRef,
+    center: Option<String>,
+    depth: Option<u8>,
+    expand: Vec<i8>,
+) -> Result<(), String> {
+    let asked = CallsRequest {
+        center: center.clone(),
+        depth: depth.unwrap_or(0),
+        expand: expand.clone(),
+    };
+    let cmd = Command::GetCalls {
+        pr: pr.clone(),
+        center,
+        depth,
+        expand,
+    };
+    let (graph, index, unsupported) = match client.request(cmd).await {
+        Ok(Reply::Calls {
+            graph,
+            index,
+            unsupported,
+        }) => (graph.map(Box::new), index, unsupported),
+        Ok(_) => return Ok(()),
+        Err(ClientError::Server(e)) => (
+            None,
+            CallsIndexState::Failed { message: e.message },
+            Vec::new(),
+        ),
+        Err(e) => return Err(lost(e)),
+    };
+    teller.send(Tell::Calls(CallsTell::Graph {
+        pr,
+        request: asked,
+        graph,
+        index,
+        unsupported,
+    }));
+    Ok(())
+}
+
+/// `ReadFunctionCode` → `CallsTell::Code`. A refusal is told as code that is not available.
+async fn send_function_code(
+    client: &mut Client,
+    teller: &Teller,
+    pr: PrRef,
+    function: String,
+) -> Result<(), String> {
+    let cmd = Command::ReadFunctionCode {
+        pr: pr.clone(),
+        function: function.clone(),
+    };
+    let code = match client.request(cmd).await {
+        Ok(Reply::FunctionCode(code)) => code,
+        Ok(_) => return Ok(()),
+        Err(ClientError::Server(e)) => DiagramCode {
+            path: String::new(),
+            commit: String::new(),
+            start_line: 0,
+            lines: Vec::new(),
+            unavailable: Some(e.message),
+        },
+        Err(e) => return Err(lost(e)),
+    };
+    teller.send(Tell::Calls(CallsTell::Code { pr, function, code }));
     Ok(())
 }
 
@@ -2431,6 +2832,8 @@ pub(crate) struct ReviewModels<'w> {
     checks: ResMut<'w, Checks>,
     diagrams: ResMut<'w, Diagrams>,
     revalidations: ResMut<'w, Revalidations>,
+    stories: ResMut<'w, Stories>,
+    calls: ResMut<'w, Calls>,
 }
 
 pub(crate) fn pump(
@@ -2456,6 +2859,8 @@ pub(crate) fn pump(
         mut checks,
         mut diagrams,
         mut revalidations,
+        mut stories,
+        mut calls,
     } = models;
     for tell in inbox.0.try_iter() {
         let mut events = Vec::new();
@@ -2529,6 +2934,17 @@ pub(crate) fn pump(
                     model.reanchoring.clear();
                     model.all_pending = false;
                 }
+                for model in stories.0.values_mut() {
+                    model.asked = false;
+                    model.write_sent = false;
+                    model.requested.clear();
+                    model.failed.clear();
+                }
+                for model in calls.0.values_mut() {
+                    model.asked = false;
+                    model.asking = None;
+                    model.requested_code.clear();
+                }
             }
             Tell::Quit => {
                 exit.write(AppExit::Success);
@@ -2564,6 +2980,8 @@ pub(crate) fn pump(
                 }
             }
             Tell::Diagrams(tell) => diagrams.apply(&tell),
+            Tell::Story(tell) => stories.apply(&tell),
+            Tell::Calls(tell) => calls.apply(&tell),
             Tell::Revalidation(tell) => {
                 // A round that starts again shows its screen again, even after *Back to review*.
                 if let RevalidationTell::Round {
@@ -2878,6 +3296,116 @@ pub(crate) fn demo_answers(
                 });
                 tells.extend(demo_edit(&tabs, &pr, ticket, |review| {
                     modal::diagram_comment(review, anchor.as_ref(), patch.as_deref(), &body, now)
+                }));
+            }
+            Ask::GetStory(pr) if pr == fixture::demo_pr() => {
+                tells.push(fixture::demo_story_tell(&pr, now))
+            }
+            Ask::GetStory(pr) => tells.push(Tell::Story(StoryTell::Loaded {
+                pr,
+                versions: Vec::new(),
+                latest: None,
+                state: StoryState::Idle,
+                static_steps: Vec::new(),
+                read: Vec::new(),
+                head: String::new(),
+                new_commits: 0,
+            })),
+            Ask::GetStoryVersion { pr, number } => {
+                if let Some(version) = fixture::demo_story_version(now, number) {
+                    tells.push(Tell::Story(StoryTell::Version {
+                        pr,
+                        version: Box::new(version),
+                    }));
+                }
+            }
+            Ask::WriteStory(_) | Ask::RewriteStory(_) | Ask::MarkStepRead { .. } => {}
+            Ask::StopStory(pr) => tells.push(Tell::Story(StoryTell::State {
+                pr,
+                state: StoryState::Idle,
+            })),
+            Ask::AddStepComment {
+                pr,
+                number,
+                step,
+                body,
+                ticket,
+            } => {
+                let title = fixture::demo_story_version(now, number)
+                    .and_then(|v| v.spec)
+                    .and_then(|s| s.steps.into_iter().find(|x| x.id == step).map(|x| x.title))
+                    .unwrap_or(step);
+                tells.extend(demo_edit(&tabs, &pr, ticket, |review| {
+                    crate::screens::review::story::demo_step_comment(review, &title, &body, now)
+                }));
+            }
+            Ask::GetCalls {
+                pr,
+                center,
+                depth,
+                expand,
+            } if pr == fixture::demo_pr() => {
+                let depth = depth.unwrap_or(model.snapshot.config.diff.calls_depth);
+                tells.push(fixture::demo_calls_graph(center.as_deref(), depth, &expand));
+            }
+            Ask::GetCalls {
+                pr,
+                center,
+                depth,
+                expand,
+            } => tells.push(Tell::Calls(CallsTell::Graph {
+                pr,
+                request: CallsRequest {
+                    center,
+                    depth: depth.unwrap_or(0),
+                    expand,
+                },
+                graph: None,
+                index: CallsIndexState::Idle,
+                unsupported: Vec::new(),
+            })),
+            Ask::FindFunction { pr, query } => {
+                let hits = fixture::demo_find(&query);
+                tells.push(Tell::Calls(CallsTell::Found { pr, query, hits }));
+            }
+            Ask::ReadFunctionCode { pr, function } => {
+                let code = fixture::demo_function_code(&function);
+                tells.push(Tell::Calls(CallsTell::Code { pr, function, code }));
+            }
+            Ask::AddCallsComment {
+                pr,
+                function,
+                body,
+                ticket,
+            } => {
+                let index = fixture::demo_calls();
+                let changed = fixture::demo_changed(&index);
+                let path = index
+                    .functions
+                    .iter()
+                    .find(|f| f.id.0 == function)
+                    .map(|f| f.path.clone());
+                let patch = path.and_then(|p| {
+                    tabs.0
+                        .get(&pr)?
+                        .ready()?
+                        .view
+                        .diff
+                        .iter()
+                        .find(|f| f.path == p)?
+                        .patch
+                        .clone()
+                });
+                tells.extend(demo_edit(&tabs, &pr, ticket, |review| {
+                    crate::screens::review::calls::demo_node_comment(
+                        review,
+                        &index,
+                        &changed,
+                        &function,
+                        patch.as_deref(),
+                        &body,
+                        now,
+                    )
                 }));
             }
             Ask::RemoveItem { pr, id } => {
@@ -3529,6 +4057,8 @@ mod tests {
             .insert_resource(Toasts::default())
             .insert_resource(ReviewTabs::default())
             .init_resource::<Revalidations>()
+            .init_resource::<Stories>()
+            .init_resource::<Calls>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -3576,6 +4106,8 @@ mod tests {
             .insert_resource(Toasts::default())
             .insert_resource(ReviewTabs::default())
             .init_resource::<Revalidations>()
+            .init_resource::<Stories>()
+            .init_resource::<Calls>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -3621,6 +4153,8 @@ mod tests {
             .insert_resource(Toasts::default())
             .insert_resource(tabs)
             .init_resource::<Revalidations>()
+            .init_resource::<Stories>()
+            .init_resource::<Calls>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(demo_queue())
             .insert_resource(outbox)
@@ -3681,6 +4215,8 @@ mod tests {
             .insert_resource(tabs)
             .insert_resource(diagrams)
             .init_resource::<Revalidations>()
+            .init_resource::<Stories>()
+            .init_resource::<Calls>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -4038,6 +4574,8 @@ mod tests {
             .insert_resource(Toasts::default())
             .insert_resource(ReviewTabs::default())
             .init_resource::<Revalidations>()
+            .init_resource::<Stories>()
+            .init_resource::<Calls>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -4197,6 +4735,8 @@ mod tests {
                 .init_resource::<Checks>()
                 .init_resource::<Diagrams>()
                 .init_resource::<Revalidations>()
+                .init_resource::<Stories>()
+                .init_resource::<Calls>()
                 .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
                     mode: Mode::Demo {
@@ -4741,6 +5281,8 @@ mod tests {
             .insert_resource(tabs)
             .insert_resource(diagrams)
             .init_resource::<Revalidations>()
+            .init_resource::<Stories>()
+            .init_resource::<Calls>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -4828,6 +5370,8 @@ mod tests {
             .init_resource::<Checks>()
             .init_resource::<Diagrams>()
             .init_resource::<Revalidations>()
+            .init_resource::<Stories>()
+            .init_resource::<Calls>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .add_systems(Update, pump);
         let _ = outbox
@@ -4966,5 +5510,327 @@ mod tests {
             panic!("the draft changed");
         };
         assert_eq!(review.draft.items.last().unwrap().origin, Origin::Audit);
+    }
+
+    #[test]
+    fn offline_story_and_calls_asks_are_answered_not_dropped() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let pr = fixture::demo_pr();
+        for read in [
+            Ask::GetStory(pr.clone()),
+            Ask::GetStoryVersion {
+                pr: pr.clone(),
+                number: 1,
+            },
+            Ask::GetCalls {
+                pr: pr.clone(),
+                center: None,
+                depth: None,
+                expand: vec![],
+            },
+            Ask::FindFunction {
+                pr: pr.clone(),
+                query: "refresh".into(),
+            },
+        ] {
+            assert!(offline(&read, &teller));
+        }
+        assert!(
+            rx.try_iter().next().is_none(),
+            "a read is not worth a toast"
+        );
+
+        for run in [
+            Ask::WriteStory(pr.clone()),
+            Ask::RewriteStory(pr.clone()),
+            Ask::StopStory(pr.clone()),
+        ] {
+            assert!(offline(&run, &teller));
+        }
+        assert_eq!(
+            rx.try_iter()
+                .filter(|t| matches!(t, Tell::Notice { warning: true, .. }))
+                .count(),
+            3
+        );
+
+        assert!(offline(
+            &Ask::MarkStepRead {
+                pr: pr.clone(),
+                number: 2,
+                step: "safer-saves".into(),
+                read: true
+            },
+            &teller
+        ));
+        let told: Vec<Tell> = rx.try_iter().collect();
+        assert!(
+            told.iter()
+                .any(|t| matches!(t, Tell::Notice { warning: true, .. }))
+        );
+        assert!(told.contains(&Tell::Story(StoryTell::ReadRefused {
+            pr: pr.clone(),
+            step: "safer-saves".into(),
+            read: true
+        })));
+
+        assert!(offline(
+            &Ask::AddStepComment {
+                pr: pr.clone(),
+                number: 2,
+                step: "safer-saves".into(),
+                body: "Why?".into(),
+                ticket: 5
+            },
+            &teller
+        ));
+        assert!(offline(
+            &Ask::AddCallsComment {
+                pr: pr.clone(),
+                function: "f".into(),
+                body: "Why?".into(),
+                ticket: 6
+            },
+            &teller
+        ));
+        assert!(offline(
+            &Ask::ReadFunctionCode {
+                pr: pr.clone(),
+                function: "f".into()
+            },
+            &teller
+        ));
+        let told: Vec<Tell> = rx.try_iter().collect();
+        assert!(
+            told.iter()
+                .any(|t| matches!(t, Tell::Refused { ticket: 5, .. }))
+        );
+        assert!(
+            told.iter()
+                .any(|t| matches!(t, Tell::Refused { ticket: 6, .. }))
+        );
+        assert!(told.iter().any(|t| matches!(
+            t,
+            Tell::Calls(CallsTell::Code { function, code, .. })
+                if function == "f" && code.unavailable.is_some()
+        )));
+    }
+
+    #[test]
+    fn the_demo_answers_story_and_calls() {
+        let pr = fixture::demo_pr();
+        let tells = demo_tells(vec![
+            Ask::GetStory(pr.clone()),
+            Ask::GetStoryVersion {
+                pr: pr.clone(),
+                number: 1,
+            },
+            Ask::GetStoryVersion {
+                pr: pr.clone(),
+                number: 9,
+            },
+            Ask::WriteStory(pr.clone()),
+            Ask::RewriteStory(pr.clone()),
+            Ask::StopStory(pr.clone()),
+            Ask::MarkStepRead {
+                pr: pr.clone(),
+                number: 2,
+                step: "safer-saves".into(),
+                read: true,
+            },
+        ]);
+        let [
+            Tell::Story(StoryTell::Loaded {
+                versions, latest, ..
+            }),
+            Tell::Story(StoryTell::Version { version, .. }),
+            Tell::Story(StoryTell::State { state, .. }),
+        ] = tells.as_slice()
+        else {
+            panic!("loaded, version 1, then the stop: {tells:?}");
+        };
+        assert_eq!(versions.len(), 2);
+        assert_eq!(latest.as_ref().map(|v| v.number), Some(2));
+        assert_eq!(version.number, 1);
+        assert_eq!(*state, StoryState::Idle);
+
+        let other = PrRef::new("acme", "widgets", 7).expect("ref");
+        let tells = demo_tells(vec![
+            Ask::GetStory(other.clone()),
+            Ask::GetCalls {
+                pr: other.clone(),
+                center: None,
+                depth: None,
+                expand: vec![],
+            },
+        ]);
+        assert!(matches!(
+            &tells[0],
+            Tell::Story(StoryTell::Loaded { versions, latest: None, static_steps, .. })
+                if versions.is_empty() && static_steps.is_empty()
+        ));
+        assert!(matches!(
+            &tells[1],
+            Tell::Calls(CallsTell::Graph {
+                graph: None,
+                index: CallsIndexState::Idle,
+                ..
+            })
+        ));
+
+        let tells = demo_tells(vec![
+            Ask::GetCalls {
+                pr: pr.clone(),
+                center: None,
+                depth: Some(2),
+                expand: vec![-1],
+            },
+            Ask::FindFunction {
+                pr: pr.clone(),
+                query: "refresh".into(),
+            },
+            Ask::ReadFunctionCode {
+                pr: pr.clone(),
+                function: "src/auth/refresh.rs#TokenStore::refresh#38".into(),
+            },
+        ]);
+        let [
+            Tell::Calls(CallsTell::Graph { request, graph, .. }),
+            Tell::Calls(CallsTell::Found { query, hits, .. }),
+            Tell::Calls(CallsTell::Code { function, code, .. }),
+        ] = tells.as_slice()
+        else {
+            panic!("graph, found, code: {tells:?}");
+        };
+        assert_eq!((request.depth, request.expand.clone()), (2, vec![-1]));
+        assert!(
+            graph
+                .as_ref()
+                .is_some_and(|g| g.nodes.iter().all(|n| n.level.abs() <= 2))
+        );
+        assert_eq!(query, "refresh");
+        assert!(!hits.is_empty());
+        assert_eq!(function, "src/auth/refresh.rs#TokenStore::refresh#38");
+        assert_eq!(code.start_line, 38);
+    }
+
+    #[test]
+    fn a_step_comment_for_a_review_that_is_not_open_is_refused_in_the_demo() {
+        let tells = demo_tells(vec![Ask::AddStepComment {
+            pr: fixture::demo_pr(),
+            number: 1,
+            step: "refresh-early".into(),
+            body: "Why?".into(),
+            ticket: 3,
+        }]);
+        assert!(matches!(&tells[..], [Tell::Refused { ticket: 3, .. }]));
+    }
+
+    #[test]
+    fn story_and_calls_events_become_tells() {
+        let pr = fixture::demo_pr();
+        assert_eq!(
+            StoryTell::from_event(&Event::StoryChanged {
+                pr: pr.clone(),
+                state: StoryState::Writing
+            }),
+            Some(StoryTell::State {
+                pr: pr.clone(),
+                state: StoryState::Writing
+            })
+        );
+        assert_eq!(
+            CallsTell::from_event(&Event::CallsIndexChanged {
+                pr: pr.clone(),
+                state: CallsIndexState::Building
+            }),
+            Some(CallsTell::Index {
+                pr: pr.clone(),
+                state: CallsIndexState::Building
+            })
+        );
+        assert_eq!(StoryTell::from_event(&Event::Stopping), None);
+        assert_eq!(CallsTell::from_event(&Event::Stopping), None);
+        assert_eq!(
+            CallsTell::Index {
+                pr: pr.clone(),
+                state: CallsIndexState::Idle
+            }
+            .pr(),
+            &pr
+        );
+    }
+
+    #[test]
+    fn a_lost_connection_makes_the_story_and_calls_ask_again() {
+        use crate::screens::review::calls::{Calls, CallsModel};
+        use crate::screens::review::story::model::{Stories, StoryModel};
+        let (inbox, outbox) = local_link();
+        let pr = fixture::demo_pr();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<RequestRedraw>()
+            .add_message::<ReviewEvent>()
+            .add_message::<ShowRequested>()
+            .add_message::<TabsRestored>()
+            .add_message::<AppExit>()
+            .add_message::<GifsArrived>()
+            .insert_resource(inbox)
+            .init_resource::<Asks>()
+            .init_resource::<Model>()
+            .init_resource::<Toasts>()
+            .init_resource::<ReviewTabs>()
+            .init_resource::<MediaCache>()
+            .init_resource::<Chats>()
+            .init_resource::<PermissionQueue>()
+            .init_resource::<Checks>()
+            .init_resource::<Diagrams>()
+            .init_resource::<Revalidations>()
+            .init_resource::<Stories>()
+            .init_resource::<Calls>()
+            .insert_resource(Clock(Some(1_790_000_000)))
+            .add_systems(Update, pump);
+        let _ = outbox.0.send(fixture::demo_story_tell(&pr, 1_790_000_000));
+        let _ = outbox.0.send(fixture::demo_calls_graph(None, 3, &[]));
+        app.update();
+        assert!(app.world().resource::<Stories>().0[&pr].received);
+        assert!(app.world().resource::<Calls>().0[&pr].graph.is_some());
+        {
+            let mut stories = app.world_mut().resource_mut::<Stories>();
+            let m: &mut StoryModel = stories.0.get_mut(&pr).unwrap();
+            m.write_sent = true;
+            m.requested.insert(1);
+            m.failed.insert(1);
+        }
+        {
+            let mut calls = app.world_mut().resource_mut::<Calls>();
+            let m: &mut CallsModel = calls.0.get_mut(&pr).unwrap();
+            m.asking = Some(crate::screens::review::calls::CallsRequest {
+                center: None,
+                depth: 3,
+                expand: vec![],
+            });
+            m.requested_code
+                .insert("src/auth/refresh.rs#TokenStore::refresh#38".into());
+        }
+        let _ = outbox.0.send(Tell::Lost("gone".into()));
+        app.update();
+        let story = &app.world().resource::<Stories>().0[&pr];
+        assert!(
+            !story.asked
+                && !story.write_sent
+                && story.requested.is_empty()
+                && story.failed.is_empty()
+        );
+        let calls = &app.world().resource::<Calls>().0[&pr];
+        assert!(!calls.asked && calls.asking.is_none());
+        assert!(
+            calls.requested_code.is_empty(),
+            "code asked before the loss is asked again"
+        );
     }
 }

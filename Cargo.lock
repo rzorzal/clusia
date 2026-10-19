@@ -1838,6 +1838,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "clap",
+ "clusia-calls",
  "clusia-core",
  "clusia-diagram",
  "clusia-harness",

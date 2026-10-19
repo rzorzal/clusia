@@ -50,6 +50,10 @@ pub fn text_size_value(size: TextSize) -> &'static str {
     }
 }
 
+/// What the *Open the Diff as* row offers. Story and Calls are remembered by the switch on the
+/// review, not chosen here.
+const DIFF_VIEW_OPTIONS: [(&str, &str); 2] = [("Unified", "unified"), ("Split", "split")];
+
 /// The segment of *Open the Diff as* a stored view selects; Story and Calls select none.
 pub fn diff_view_value(view: DiffView) -> &'static str {
     match view {
@@ -134,7 +138,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &AppearanceView) 
         fonts,
         "Open the Diff as",
         "appearance.diff_view",
-        &[("Unified", "unified"), ("Split", "split")],
+        &DIFF_VIEW_OPTIONS,
         diff_view_value(v.diff_view),
         "Each review can switch",
     );
@@ -566,5 +570,28 @@ mod tests {
         assert_eq!(diff_view_value(DiffView::Split), "split");
         assert_eq!(diff_view_value(DiffView::Story), "");
         assert_eq!(diff_view_value(DiffView::Calls), "");
+    }
+
+    #[test]
+    fn the_diff_row_offers_two_views_and_selects_none_for_story_or_calls() {
+        assert_eq!(
+            DIFF_VIEW_OPTIONS,
+            [("Unified", "unified"), ("Split", "split")]
+        );
+        for stored in [DiffView::Story, DiffView::Calls] {
+            let value = diff_view_value(stored);
+            assert_eq!(value, "", "Task 3's value: neither segment is selected");
+            assert!(
+                DIFF_VIEW_OPTIONS.iter().all(|(_, v)| *v != value),
+                "a stored {stored:?} matches no offered segment"
+            );
+        }
+        for (_, offered) in DIFF_VIEW_OPTIONS {
+            assert!(
+                [DiffView::Unified, DiffView::Split]
+                    .iter()
+                    .any(|v| diff_view_value(*v) == offered)
+            );
+        }
     }
 }
