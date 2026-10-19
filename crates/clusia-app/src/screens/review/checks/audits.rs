@@ -29,7 +29,7 @@ use crate::screens::review::shell::{SectionBody, setting_link};
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, card, disabled_button, panel,
-    text,
+    text, wrapped_text,
 };
 
 /// The id of the **All** entry. It is not a valid area id, so no configured area can take it.
@@ -763,6 +763,8 @@ fn finding_card(
     .with_children(|k| {
         k.spawn(Node {
             column_gap: px(10),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })
@@ -774,15 +776,16 @@ fn finding_card(
             }
             t.spawn(Node {
                 flex_grow: 1.0,
+                flex_basis: px(120),
                 min_width: px(0),
                 ..default()
             })
             .with_children(|n| {
-                n.spawn(text(fonts, f.title.clone(), Type::STRONG));
+                n.spawn(wrapped_text(fonts, f.title.clone(), Type::STRONG));
             });
-            t.spawn(text(fonts, f.place.clone(), Type::MONO));
+            t.spawn(wrapped_text(fonts, f.place.clone(), Type::MONO));
         });
-        k.spawn(text(fonts, f.body.clone(), Type::BODY));
+        k.spawn(wrapped_text(fonts, f.body.clone(), Type::BODY));
         if f.general {
             k.spawn(text(
                 fonts,
@@ -804,10 +807,12 @@ fn finding_card(
             Swatch::Chrome,
         ))
         .with_children(|b| {
-            b.spawn(text(fonts, f.comment.clone(), Type::BODY));
+            b.spawn(wrapped_text(fonts, f.comment.clone(), Type::BODY));
         });
         k.spawn(Node {
             column_gap: px(8),
+            row_gap: px(6),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })

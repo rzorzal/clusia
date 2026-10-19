@@ -10,7 +10,7 @@ use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::input_focus::{FocusLost, InputFocus};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::text::{EditableText, TextBackgroundColor, TextCursorStyle};
+use bevy::text::{EditableText, LineBreak, TextBackgroundColor, TextCursorStyle};
 use bevy::ui::Pressed;
 use bevy::ui_widgets::Button as WidgetButton;
 use bevy::window::{CursorIcon, PrimaryWindow, SystemCursorIcon};
@@ -134,6 +134,15 @@ pub fn text(fonts: &UiFonts, s: impl Into<String>, t: Type) -> impl Bundle {
         font(fonts, t),
         TextColor::default(),
         Ink(t.ink),
+    )
+}
+
+/// `text` that breaks at the width of its box: at spaces where it can, between characters for
+/// a token wider than the box (a path or an identifier must still fit).
+pub fn wrapped_text(fonts: &UiFonts, s: impl Into<String>, t: Type) -> impl Bundle {
+    (
+        text(fonts, s, t),
+        TextLayout::linebreak(LineBreak::WordOrCharacter),
     )
 }
 

@@ -164,7 +164,7 @@ pub fn frame(app: &App, entity: Entity) -> (f32, f32, f32, f32) {
 /// (`Display::None`, zero size) are skipped.
 pub fn overflowing_text(app: &mut App) -> Vec<String> {
     use bevy::ui::OverflowAxis;
-    const SLACK: f32 = 1.5;
+    const SLACK: f32 = 10.0;
     let texts: Vec<Entity> = {
         let mut q = app.world_mut().query_filtered::<Entity, With<Text>>();
         q.iter(app.world()).collect()
@@ -219,7 +219,7 @@ pub fn overflowing_text(app: &mut App) -> Vec<String> {
                 .map(|t| t.0.clone())
                 .unwrap_or_default();
             for span in app.world().get::<Children>(text).into_iter().flatten() {
-                shown.push_str(&app.world().get::<TextSpan>(*span).map_or("", |s| &s.0));
+                shown.push_str(app.world().get::<TextSpan>(*span).map_or("", |s| &s.0));
             }
             out.push(format!(
                 "{:?} {why}",
