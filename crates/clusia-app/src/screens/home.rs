@@ -728,6 +728,8 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, headline: &str, sync: &
                 align_items: AlignItems::Center,
                 border: px(1).all(),
                 border_radius: BorderRadius::MAX,
+                flex_shrink: 1.0,
+                min_width: px(0),
                 ..default()
             },
             Swatch::Surface,
@@ -745,7 +747,7 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, headline: &str, sync: &
             },
             dot,
         ));
-        c.spawn(text(fonts, sync.0.clone(), Type::BODY.ink(ink)));
+        c.spawn(wrapped_text(fonts, sync.0.clone(), Type::BODY.ink(ink)));
     });
 }
 
