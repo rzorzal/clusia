@@ -160,13 +160,24 @@ fn lengthen(app: &mut App) {
     }
 }
 
-/// No scene lets the text of long data run out of its box: a long title, path, body or
-/// branch name wraps or shrinks inside the screen it is on, at the default and the largest
-/// text size, in a window of 1280 × 800 and in the smallest one (960 × 640).
-#[test]
-fn long_data_stays_inside_every_scene() {
-    let mut escaped = Vec::new();
-    for size in [UVec2::new(1280, 800), UVec2::new(960, 640)] {
+/// The pickers are placed by the window, which the test app lacks, so their cards are laid out
+/// at the window's corner without the room the app gives them.
+const UNPLACED: [Scene; 2] = [Scene::Emoji, Scene::Gif];
+
+/// Text that leaves its box in the demo on purpose or because of how the test app lays out,
+/// each with the reason. Nothing else may leave its box.
+fn by_design(scene: Scene, line: &str) -> Option<&'static str> {
+    if UNPLACED.contains(&scene) && line.contains(" below by ") {
+        return Some("the bottom of a picker card: the app caps its height by the window");
+    }
+    None
+}
+
+/// Lays out every demo scene at `size`, the default and Large text size, stages it with
+/// `prepare`, and returns every text or scroll box that leaves its box.
+fn escapes(sizes: &[UVec2], prepare: impl Fn(&mut App, Scene)) -> Vec<String> {
+    let mut found = Vec::new();
+    for &size in sizes {
         for large in [false, true] {
             for scene in Scene::value_variants() {
                 if scene.is_keywords() {
@@ -179,20 +190,125 @@ fn long_data_stays_inside_every_scene() {
                 stage_snapshot(app.world_mut(), *scene);
                 stage(app.world_mut(), *scene);
                 testing::settle(&mut app);
-                lengthen(&mut app);
-                lengthen_chat(&mut app, *scene);
-                lengthen_config(&mut app);
-                testing::settle(&mut app);
+                prepare(&mut app, *scene);
                 testing::settle(&mut app);
                 for line in testing::overflowing_text(&mut app) {
-                    if line.contains("refresh_with_retry") {
-                        escaped.push(format!("{size} large={large} {scene:?}: {line}"));
+                    if by_design(*scene, &line).is_none() {
+                        found.push(format!("{size} large={large} {scene:?}: {line}"));
                     }
                 }
             }
         }
     }
-    assert_eq!(escaped, Vec::<String>::new());
+    found
+}
+
+/// A scroll box shelters what is in it only while it fits in what holds it: one taller than its
+/// window cannot be scrolled to its end.
+#[test]
+fn a_scroll_box_bigger_than_its_parent_is_found() {
+    use crate::fonts::UiFonts;
+    use crate::ui::kit::text;
+    let fits = |height: f32| {
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(400, 300));
+        let fonts = app.world().resource::<UiFonts>().clone();
+        app.world_mut()
+            .spawn(Node {
+                position_type: PositionType::Absolute,
+                width: px(200),
+                height: px(100),
+                ..default()
+            })
+            .with_children(|window| {
+                window
+                    .spawn(Node {
+                        width: percent(100),
+                        height: px(height),
+                        flex_shrink: 0.0,
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    })
+                    .with_children(|scroller| {
+                        scroller.spawn(text(&fonts, "inside", crate::ui::kit::Type::BODY));
+                    });
+            });
+        testing::settle(&mut app);
+        testing::overflowing_text(&mut app)
+            .into_iter()
+            .filter(|l| l.starts_with("scroll box") || l.contains("inside"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fits(100.0), Vec::<String>::new(), "a scroll box that fits");
+    let found = fits(500.0);
+    assert!(
+        found
+            .iter()
+            .any(|l| l.starts_with("scroll box") && l.contains("below by")),
+        "{found:?}"
+    );
+}
+
+/// A text that breaks only between words, in a box of fixed width, runs past it when one word
+/// is wider than the box; a text that also breaks inside a word does not.
+#[test]
+fn a_long_word_in_a_fixed_width_box_is_found_unless_the_text_breaks_inside_words() {
+    use crate::fonts::UiFonts;
+    use crate::ui::kit::{Type, text, wrapped_text};
+    let word = "refresh_with_retry_and_a_very_long_identifier_with_no_space";
+    let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(600, 300));
+    let fonts = app.world().resource::<UiFonts>().clone();
+    for (left, breaks_inside) in [(0.0, false), (300.0, true)] {
+        app.world_mut()
+            .spawn(Node {
+                position_type: PositionType::Absolute,
+                left: px(left),
+                width: px(100),
+                height: px(200),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            })
+            .with_children(|cell| {
+                if breaks_inside {
+                    cell.spawn(wrapped_text(&fonts, word, Type::BODY));
+                } else {
+                    cell.spawn(text(&fonts, word, Type::BODY));
+                }
+            });
+    }
+    testing::settle(&mut app);
+    let found: Vec<String> = testing::overflowing_text(&mut app)
+        .into_iter()
+        .filter(|l| l.contains("refresh_with_retry"))
+        .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("right by"), "{found:?}");
+}
+
+const SIZES: [UVec2; 2] = [UVec2::new(1280, 800), UVec2::new(960, 640)];
+
+/// The demo itself, at the default and the largest text, in the window the app opens at and in
+/// its smallest: nothing leaves its box, and every scroll box fits in what holds it.
+#[test]
+fn the_demo_stays_inside_every_scene() {
+    assert_eq!(escapes(&SIZES, |_, _| {}), Vec::<String>::new());
+}
+
+/// Long titles, paths, bodies, branch names, chat lines, a permission question and settings
+/// values wrap or shrink inside the screen they are on.
+#[test]
+fn long_data_stays_inside_every_scene() {
+    let found = escapes(&SIZES, |app, scene| {
+        lengthen(app);
+        lengthen_chat(app, scene);
+        lengthen_config(app);
+    });
+    assert_eq!(found, Vec::<String>::new());
+}
+
+/// Many more rows than a window holds: every region that holds them scrolls.
+#[test]
+fn crowded_scenes_scroll_instead_of_cutting_rows() {
+    assert_eq!(escapes(&SIZES, |app, _| crowd(app)), Vec::<String>::new());
 }
 
 /// Many more rows than a window holds: news, draft comments and findings.
@@ -247,63 +363,4 @@ fn crowd(app: &mut App) {
             dismissed: Vec::new(),
         }),
     );
-}
-
-/// Every region that can hold more than the window shows scrolls: no row of a crowded
-/// scene is cut at the bottom of a box that cannot scroll.
-#[test]
-fn crowded_scenes_scroll_instead_of_cutting_rows() {
-    let mut cut = Vec::new();
-    for size in [UVec2::new(1280, 800), UVec2::new(960, 640)] {
-        for large in [false, true] {
-            for scene in Scene::value_variants() {
-                if scene.is_keywords() {
-                    continue;
-                }
-                let mut app = testing::layout_app(fixture::demo(NOW), size);
-                if large {
-                    testing::set_config_locally(&mut app, "appearance.text_size", "large");
-                }
-                stage_snapshot(app.world_mut(), *scene);
-                stage(app.world_mut(), *scene);
-                testing::settle(&mut app);
-                crowd(&mut app);
-                testing::settle(&mut app);
-                testing::settle(&mut app);
-                for line in testing::overflowing_text(&mut app) {
-                    if line.contains("crowd_item_") {
-                        cut.push(format!("{size} large={large} {scene:?}: {line}"));
-                    }
-                }
-            }
-        }
-    }
-    for c in &cut {
-        eprintln!("CUT {c}");
-    }
-    assert_eq!(cut, Vec::<String>::new());
-}
-
-/// At the smallest window and the largest text, no screen of the demo is cut at the bottom of
-/// a box that cannot scroll. The pickers are placed by the window, which the test app lacks.
-#[test]
-fn every_demo_scene_fits_the_smallest_window_or_scrolls() {
-    let mut cut = Vec::new();
-    for scene in Scene::value_variants() {
-        if scene.is_keywords() || matches!(scene, Scene::Emoji | Scene::Gif) {
-            continue;
-        }
-        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(960, 640));
-        testing::set_config_locally(&mut app, "appearance.text_size", "large");
-        stage_snapshot(app.world_mut(), *scene);
-        stage(app.world_mut(), *scene);
-        testing::settle(&mut app);
-        testing::settle(&mut app);
-        for line in testing::overflowing_text(&mut app) {
-            if line.contains(" below ") {
-                cut.push(format!("{scene:?}: {line}"));
-            }
-        }
-    }
-    assert_eq!(cut, Vec::<String>::new());
 }

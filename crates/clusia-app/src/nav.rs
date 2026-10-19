@@ -25,7 +25,8 @@ use crate::screens::review::revalidation::Revalidations;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
-    Fill, HoverFill, Icon, Stroke, Type, Variant, button, icon_button, panel, text,
+    Fill, HoverFill, Icon, Reveal, SideTrack, Stroke, Type, Variant, button, icon_button, panel,
+    text,
 };
 use crate::ui::spinner::spinner;
 
@@ -477,6 +478,7 @@ fn tab_node(on: bool) -> impl Bundle {
     (
         Node {
             height: px(30),
+            flex_shrink: 0.0,
             padding: UiRect::horizontal(px(12)),
             align_items: AlignItems::Center,
             column_gap: px(8),
@@ -518,48 +520,66 @@ fn rebuild_top_bar(
             continue;
         }
         commands.entity(entity).despawn_related::<Children>();
-        commands.entity(entity).with_children(|p| {
-            for tab in &view.tabs {
-                let label = if tab.on { Type::STRONG } else { Type::MUTED };
-                let mut e = p.spawn((tab_node(tab.on), tab.target.clone(), observe(on_tab)));
-                match &tab.target {
-                    TabTarget::Home => {
-                        e.with_children(|t| {
-                            t.spawn((
-                                Node {
-                                    width: px(16),
-                                    height: px(16),
-                                    ..default()
-                                },
-                                ImageNode::new(leaf.0.clone()),
-                            ));
-                            t.spawn(text(&fonts, tab.label.clone(), label));
-                        });
-                    }
-                    TabTarget::Review(pr) => {
-                        e.with_children(|t| {
-                            if tab.working {
-                                t.spawn(spinner());
-                            }
-                            t.spawn(text(&fonts, tab.label.clone(), label));
-                            t.spawn((
-                                icon_button(Icon::Close, Variant::Ghost, 22.0),
-                                CloseTab(pr.clone()),
-                                observe(on_close),
-                            ));
-                        });
-                    }
-                    TabTarget::Config => {}
-                }
-            }
-            // Buttons sit at the top of their row; this one is centered like the tabs.
-            p.spawn((
-                icon_button(Icon::Plus, Variant::Ghost, 30.0),
-                NewTabButton,
-                observe(on_new_tab),
+        commands.entity(entity).with_children(|bar| {
+            // Many tabs, or long ones at a large text size, scroll sideways; **Config** stays.
+            bar.spawn((
+                Node {
+                    min_width: px(0),
+                    flex_shrink: 1.0,
+                    column_gap: px(4),
+                    align_items: AlignItems::Center,
+                    overflow: Overflow::scroll_x(),
+                    ..default()
+                },
+                SideTrack,
             ))
-            .entry::<Node>()
-            .and_modify(|mut node| node.align_self = AlignSelf::Center);
+            .with_children(|p| {
+                for tab in &view.tabs {
+                    let label = if tab.on { Type::STRONG } else { Type::MUTED };
+                    let mut e = p.spawn((tab_node(tab.on), tab.target.clone(), observe(on_tab)));
+                    if tab.on {
+                        e.insert(Reveal);
+                    }
+                    match &tab.target {
+                        TabTarget::Home => {
+                            e.with_children(|t| {
+                                t.spawn((
+                                    Node {
+                                        width: px(16),
+                                        height: px(16),
+                                        ..default()
+                                    },
+                                    ImageNode::new(leaf.0.clone()),
+                                ));
+                                t.spawn(text(&fonts, tab.label.clone(), label));
+                            });
+                        }
+                        TabTarget::Review(pr) => {
+                            e.with_children(|t| {
+                                if tab.working {
+                                    t.spawn(spinner());
+                                }
+                                t.spawn(text(&fonts, tab.label.clone(), label));
+                                t.spawn((
+                                    icon_button(Icon::Close, Variant::Ghost, 22.0),
+                                    CloseTab(pr.clone()),
+                                    observe(on_close),
+                                ));
+                            });
+                        }
+                        TabTarget::Config => {}
+                    }
+                }
+                // Buttons sit at the top of their row; this one is centered like the tabs.
+                p.spawn((
+                    icon_button(Icon::Plus, Variant::Ghost, 30.0),
+                    NewTabButton,
+                    observe(on_new_tab),
+                ))
+                .entry::<Node>()
+                .and_modify(|mut node| node.align_self = AlignSelf::Center);
+            });
+            let p = bar;
             p.spawn(Node {
                 flex_grow: 1.0,
                 ..default()
@@ -764,6 +784,65 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::testing::{self, NOW};
+
+    /// An app at the smallest window and the largest text with `n` review tabs open, the last
+    /// one open.
+    fn crowded_tabs(n: u64) -> App {
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(960, 640));
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        for number in 1..=n {
+            let pr: PrRef = format!("acme/widgets#{number}").parse().unwrap();
+            app.world_mut()
+                .resource_mut::<Nav>()
+                .go(&WindowTarget::Review { pr });
+            app.update();
+        }
+        testing::settle(&mut app);
+        app
+    }
+
+    fn track_of(app: &mut App) -> Entity {
+        let mut q = app.world_mut().query_filtered::<Entity, With<SideTrack>>();
+        q.iter(app.world()).next().expect("the tab track")
+    }
+
+    #[test]
+    fn many_tabs_scroll_and_the_open_one_is_in_view() {
+        let mut app = crowded_tabs(14);
+        let track = track_of(&mut app);
+        let laid = app.world().get::<ComputedNode>(track).unwrap();
+        assert!(laid.content_size.x > laid.size.x, "the tabs do not fit");
+        let open = testing::find::<CloseTab>(&mut app, |c| c.0.number == 14);
+        let tab = app.world().get::<ChildOf>(open).unwrap().parent();
+        let (tx, _, tw, _) = testing::frame(&app, tab);
+        let (x, _, w, _) = testing::frame(&app, track);
+        assert!(app.world().get::<ScrollPosition>(track).unwrap().x > 0.0);
+        assert!(
+            tx >= x - 1.0 && tx + tw <= x + w + 1.0,
+            "tab {tx}+{tw} in track {x}+{w}"
+        );
+        // The Config button is still in the window.
+        let config = testing::find::<TabTarget>(&mut app, |t| *t == TabTarget::Config);
+        let (cx, _, cw, _) = testing::frame(&app, config);
+        assert!(cx + cw <= 960.0);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_tabs_sideways() {
+        let mut app = crowded_tabs(14);
+        let track = track_of(&mut app);
+        let before = app.world().get::<ScrollPosition>(track).unwrap().x;
+        // A mouse wheel turns vertically: up moves the tabs back towards the first.
+        testing::wheel(&mut app, track, 3.0);
+        let after = app.world().get::<ScrollPosition>(track).unwrap().x;
+        assert!(after < before, "{before} -> {after}");
+        testing::wheel(&mut app, track, -100.0);
+        let max = {
+            let n = app.world().get::<ComputedNode>(track).unwrap();
+            (n.content_size.x - n.size.x) * n.inverse_scale_factor
+        };
+        assert_eq!(app.world().get::<ScrollPosition>(track).unwrap().x, max);
+    }
 
     fn tab_frames(app: &mut App) -> (Entity, Entity, Entity) {
         let pr = testing::open_ready(app, false);

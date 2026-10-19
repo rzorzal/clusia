@@ -477,6 +477,8 @@ fn fill_region(
             p.spawn((
                 Node {
                     flex_shrink: 0.0,
+                    flex_wrap: FlexWrap::Wrap,
+                    row_gap: px(4),
                     align_items: AlignItems::Center,
                     column_gap: px(8),
                     padding: UiRect::axes(px(16), px(10)),
@@ -684,11 +686,12 @@ fn rebuild_header(
             h.spawn(Node {
                 flex_grow: 1.0,
                 flex_shrink: 1.0,
-                min_width: px(0),
+                flex_basis: px(0),
+                min_width: px(60),
                 ..default()
             })
             .with_children(|s| {
-                s.spawn(text(
+                s.spawn(wrapped_text(
                     &fonts,
                     if want.resumed {
                         "session resumed · knows this review"

@@ -18,7 +18,9 @@ use crate::platform_open::{OpenUrls, visit};
 use crate::theme::{Swatch, Theme};
 use crate::ui::code::{spans_for, wrapped_code_line};
 use crate::ui::emoji::EmojiImages;
-use crate::ui::kit::{Clickable, Fill, Ink, Stroke, TextSized, Type, Variant, button, font, text};
+use crate::ui::kit::{
+    Clickable, Fill, Ink, Stroke, TextSized, Type, Variant, font, text, wrapping_button,
+};
 use crate::ui::markdown::parse::{Block, Inline, ListItem, Style};
 
 /// The width of a space, in ems.
@@ -283,7 +285,7 @@ fn set_space(item: &mut Inline, on: bool) {
 /// A **Copy markdown** button for the comment whose source is `source`.
 pub fn copy_button(fonts: &UiFonts, source: &str) -> impl Bundle {
     (
-        button(fonts, "Copy markdown", Variant::Ghost),
+        wrapping_button(fonts, "Copy markdown", Variant::Ghost),
         CopyMarkdown(source.to_string()),
     )
 }

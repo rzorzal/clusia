@@ -579,17 +579,19 @@ fn draw(
             right
                 .spawn(Node {
                     align_items: AlignItems::Center,
+                    flex_wrap: FlexWrap::Wrap,
+                    row_gap: px(8),
                     flex_shrink: 0.0,
                     ..default()
                 })
                 .with_children(|h| {
                     h.spawn(Node {
                         flex_grow: 1.0,
-                        min_width: px(0),
+                        max_width: percent(100),
                         ..default()
                     })
                     .with_children(|n| {
-                        n.spawn(text(fonts, d.name.clone(), Type::HEADING));
+                        n.spawn(wrapped_text(fonts, d.name.clone(), Type::HEADING));
                     });
                     h.spawn((
                         button_ask(fonts),
@@ -639,7 +641,7 @@ fn draw(
 }
 
 fn button_ask(fonts: &UiFonts) -> impl Bundle {
-    crate::ui::kit::button(fonts, "Ask the agent about this", Variant::Secondary)
+    crate::ui::kit::wrapping_button(fonts, "Ask the agent about this", Variant::Secondary)
 }
 
 fn notice_pane(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, n: &Notice) {
@@ -858,10 +860,16 @@ fn pass_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pass: &PassView) {
             ..default()
         })
         .with_children(|n| {
-            n.spawn(text(fonts, pass.text.clone(), Type::BODY));
+            n.spawn(wrapped_text(fonts, pass.text.clone(), Type::BODY));
         });
         if let Some(place) = &pass.place {
-            r.spawn(text(fonts, place.clone(), Type::META));
+            r.spawn((
+                wrapped_text(fonts, place.clone(), Type::META),
+                Node {
+                    max_width: percent(50),
+                    ..default()
+                },
+            ));
         }
     });
 }

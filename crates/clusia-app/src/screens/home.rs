@@ -796,7 +796,9 @@ fn heatmap(
         for &(col, name) in months {
             g.spawn((
                 Node {
-                    grid_column: GridPlacement::start(col as i16 + 1),
+                    // A name is wider than a week's column: it spans three, and the last
+                    // ones start early enough to stay on the grid.
+                    grid_column: GridPlacement::start_span(col.min(WEEKS - 3) as i16 + 1, 3),
                     ..default()
                 },
                 children![text(fonts, name, Type::META)],
@@ -1269,6 +1271,17 @@ mod tests {
         assert_eq!(v.months, [(0, "Sep")]);
     }
 
+    /// The scroll area of Home's lists (the tab bar has one too).
+    fn list_scroll(app: &mut App) -> Entity {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(Entity, &Node), With<ScrollArea>>();
+        q.iter(app.world())
+            .find(|(_, n)| n.overflow == Overflow::scroll_y())
+            .map(|(e, _)| e)
+            .expect("the list scrolls")
+    }
+
     #[test]
     fn home_scroll_area_is_bounded_by_the_window() {
         let mut app = testing::app(fixture::demo(NOW));
@@ -1276,7 +1289,7 @@ mod tests {
         let screen = testing::find::<HomeScreen>(&mut app, |_| true);
         let node = app.world().get::<Node>(screen).unwrap();
         assert_eq!(node.flex_direction, FlexDirection::Column);
-        let scroll = testing::find::<ScrollArea>(&mut app, |_| true);
+        let scroll = list_scroll(&mut app);
         let node = app.world().get::<Node>(scroll).unwrap();
         assert_eq!(node.overflow, Overflow::scroll_y());
         assert_eq!(node.height, percent(100));
@@ -1307,17 +1320,19 @@ mod tests {
                     "{height} large={large}"
                 );
             }
-            let scroll = testing::find::<ScrollArea>(&mut app, |_| true);
+            let scroll = list_scroll(&mut app);
             let (_, y, _, h) = testing::frame(&app, scroll);
             assert!(
                 y + h <= height as f32 + 0.5,
                 "{height}: the list ends in the window"
             );
-            let node = app.world().get::<bevy::ui::ComputedNode>(scroll).unwrap();
-            assert!(
-                node.content_size.y >= node.size.y || height == 800,
-                "{height} large={large}: a short window has more list than room"
-            );
+            if height == 420 {
+                let node = app.world().get::<bevy::ui::ComputedNode>(scroll).unwrap();
+                assert!(
+                    node.content_size.y > node.size.y,
+                    "{height} large={large}: the list is taller than its box and scrolls"
+                );
+            }
         }
     }
 

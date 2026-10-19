@@ -781,6 +781,8 @@ fn post_row(
         .with_children(|c| {
             c.spawn(Node {
                 column_gap: px(8),
+                row_gap: px(4),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Center,
                 ..default()
             })
@@ -843,6 +845,8 @@ fn draft_reply(
     .with_children(|c| {
         c.spawn(Node {
             column_gap: px(8),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })

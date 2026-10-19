@@ -441,6 +441,8 @@ pub fn row(
     .with_children(|c| {
         c.spawn(Node {
             column_gap: px(16),
+            row_gap: px(8),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })
@@ -455,12 +457,12 @@ pub fn row(
             ));
             control(r);
             if !hint.is_empty() {
-                // Beside the control while there is room; wrapping beyond it, even in a word.
+                // Beside the control while there is room, under it when there is not, and
+                // wrapping even inside a word when it is wider than the page.
                 r.spawn((
                     wrapped_text(fonts, hint.to_string(), Type::META),
                     Node {
-                        flex_shrink: 1.0,
-                        min_width: px(0),
+                        max_width: percent(100),
                         ..default()
                     },
                 ));
