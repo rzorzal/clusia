@@ -264,11 +264,17 @@ async fn open_in_editor(shared: &Shared, path: &str, line: Option<u32>) -> Outco
             ));
         }
     };
-    match shared.spawner.spawn(&argv) {
+    let spawner = shared.spawner.clone();
+    let program = argv[0].clone();
+    // Spawning waits briefly for the program to fail, which must not hold up the runtime.
+    let started = tokio::task::spawn_blocking(move || spawner.spawn(&argv))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+    match started {
         Ok(()) => Outcome::Ok(Reply::Ack),
         Err(e) => Outcome::Err(ProtocolError::new(
             ErrorCode::Internal,
-            format!("could not start {}: {e}", argv[0]),
+            format!("could not open the file with {program}: {e}"),
         )),
     }
 }
