@@ -640,6 +640,31 @@ async fn execute(shared: Arc<Shared>, pr: PrRef, job: Arc<Job>) {
     }
 }
 
+/// Keeps the commit of the job's version reachable (best effort).
+async fn pin(shared: &Shared, pr: &PrRef, job: &Job) {
+    if !is_object_id(&job.head) {
+        return;
+    }
+    let pinned = match repo_of_worktree(&shared.paths.worktree_for(pr)).await {
+        Ok(repo) => pin_commit(&repo, &story_ref(pr.number, job.number), &job.head)
+            .await
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = pinned {
+        tracing::warn!(error = %e, pr = %pr, "cannot pin the commit of the story");
+    }
+}
+
+/// Removes every story pin of `pr` (best effort).
+async fn unpin(shared: &Shared, pr: &PrRef) {
+    if let Ok(repo) = repo_of_worktree(&shared.paths.worktree_for(pr)).await
+        && let Err(e) = clusia_git::unpin_stories(&repo, pr.number).await
+    {
+        tracing::warn!(error = %e, "cannot unpin the commits of the stories");
+    }
+}
+
 enum Refused {
     Busy,
     Closing,
@@ -738,23 +763,15 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, rewrite: bool) -> Result<(), Ou
         limit,
         stop,
     });
+    // Pinned before the first write: `forget` and `cleanup_checkout` unpin every ref of the
+    // review, so a pin made after them would be left behind, and one made before is removed.
+    pin(shared, pr, &job).await;
     if !keep(shared, pr, &job, &job.version(StoryVersionState::Writing)).await {
         shared.stories.end_run(pr, run);
+        unpin(shared, pr).await;
         return Err(reviews::invalid_state(format!(
             "no review for {pr}; open it first"
         )));
-    }
-    if is_object_id(&job.head) {
-        let worktree = shared.paths.worktree_for(pr);
-        let pinned = match repo_of_worktree(&worktree).await {
-            Ok(repo) => pin_commit(&repo, &story_ref(pr.number, number), &job.head)
-                .await
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        };
-        if let Err(e) = pinned {
-            tracing::warn!(error = %e, pr = %pr, "cannot pin the commit of the story");
-        }
     }
     tell(shared, pr, StoryState::Writing);
     tokio::spawn(drive(live, shared.clone(), pr.clone(), job));
@@ -1061,6 +1078,10 @@ pub(crate) async fn mark_read(
     };
     let maps = mappings(shared, pr, &load_read_marks(&shared.paths, pr), &commit).await;
     let _guard = reviews::lock(shared, pr).await;
+    // A publish or a discard may have deleted the stories while this waited for the lock.
+    if !matches!(reviews::load_stored(shared, pr), Ok(Some(_))) {
+        return reviews::invalid_state(format!("no review for {pr}; open it first"));
+    }
     let mut marks = load_read_marks(&shared.paths, pr);
     marks.set(&commit, &hunks, read, &|mark| mapped(&maps, mark));
     match save_read_marks(&shared.paths, pr, &marks) {
@@ -1783,6 +1804,61 @@ mod tests {
                 ErrorCode::NotFound
             ]
         );
+    }
+
+    /// A publish that deletes the stories while a mark waits for the review lock.
+    #[tokio::test]
+    async fn a_mark_racing_a_publish_writes_nothing() {
+        let (_home, _fake, shared, _head) = story_lab(Script::one(good()));
+        static_story(&shared, 1).await;
+        let guard = reviews::lock(&shared, &pr(1)).await;
+        let racing = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                mark_read(&shared, &pr(1), STATIC, "TokenStore::refresh", true).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::remove_file(shared.paths.review_file(&pr(1))).unwrap();
+        delete_stories(&shared.paths, &pr(1)).unwrap();
+        drop(guard);
+        assert_eq!(refused(racing.await.unwrap()).code, ErrorCode::InvalidState);
+        assert!(
+            !shared.paths.stories_for(&pr(1)).exists(),
+            "nothing recreated it"
+        );
+    }
+
+    /// A forget that runs while a write is being accepted leaves no pin behind.
+    #[tokio::test]
+    async fn a_forget_during_start_leaves_no_pin() {
+        let (_home, _fake, shared, _head) = story_lab(Script::one(good()));
+        let root = shared.paths.worktree_for(&pr(1));
+        let pins = || {
+            crate::calls::tests::git_in(
+                &root,
+                &["for-each-ref", "--format=%(refname)", "refs/clusia/story"],
+            )
+        };
+        for _ in 0..5 {
+            let starting = {
+                let shared = shared.clone();
+                tokio::spawn(async move { write(&shared, &pr(1)).await })
+            };
+            forget(&shared, &pr(1));
+            let _ = starting.await.unwrap();
+            stop_all(&shared, &pr(1), Why::Ended).await;
+            // A run accepted after the first forget is the review's own: its forget is this one.
+            forget(&shared, &pr(1));
+            // The unpin runs in a task of its own: wait for it.
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while !pins().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("no story ref outlives the forget");
+        }
     }
 
     #[test]
