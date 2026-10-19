@@ -38,7 +38,10 @@ pub enum ClientError {
 enum Incoming {
     Message(ServerMessage),
     /// A response whose reply or error this client cannot decode; only the request id is known.
-    UnreadableResponse(u64),
+    UnreadableResponse {
+        id: u64,
+        message: Option<String>,
+    },
 }
 
 pub struct Client {
@@ -109,12 +112,17 @@ impl Client {
                         Outcome::Err(e) => Err(ClientError::Server(e)),
                     };
                 }
-                Some(Incoming::UnreadableResponse(got)) if got == id => {
-                    return Err(ClientError::Unexpected(
-                        "the daemon answered with a reply this client does not know".into(),
-                    ));
+                Some(Incoming::UnreadableResponse { id: got, message }) if got == id => {
+                    return Err(ClientError::Unexpected(match message {
+                        Some(m) => {
+                            format!("the daemon refused with a code this client does not know: {m}")
+                        }
+                        None => "the daemon answered with a reply this client does not know".into(),
+                    }));
                 }
-                Some(Incoming::UnreadableResponse(_)) => {}
+                // An unreadable response cannot be told from one that belongs to an abandoned
+                // request, so a stray one is skipped; a readable stray one stays an error.
+                Some(Incoming::UnreadableResponse { .. }) => {}
                 Some(Incoming::Message(ServerMessage::Event { topic, event })) => {
                     self.events.push_back((topic, event))
                 }
@@ -140,7 +148,7 @@ impl Client {
                 Some(Incoming::Message(ServerMessage::Event { topic, event })) => {
                     return Ok((topic, event));
                 }
-                Some(Incoming::UnreadableResponse(_)) => {}
+                Some(Incoming::UnreadableResponse { .. }) => {}
                 Some(Incoming::Message(other)) => {
                     return Err(ClientError::Unexpected(format!("{other:?}")));
                 }
@@ -150,10 +158,55 @@ impl Client {
     }
 }
 
+/// Longest tag written to the log.
+const TAG_CAP: usize = 40;
+
+/// The variant name of an event as it came off the wire (the object's only key, or the string
+/// itself), cut to `TAG_CAP` and reduced to `[a-z0-9_]` so a peer cannot put text in the log.
+fn log_tag(event: &serde_json::Value) -> String {
+    let name = match event {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Object(o) if o.len() == 1 => o.keys().next().map_or("", String::as_str),
+        _ => "",
+    };
+    name.chars()
+        .filter(|c| matches!(c, 'a'..='z' | '0'..='9' | '_'))
+        .take(TAG_CAP)
+        .collect()
+}
+
+/// Whether `err` (from decoding `event` as an `Event`) complains about the event's own tag, as
+/// opposed to something inside a tag this client knows. Only the error's shape is read; its
+/// text is never kept.
+fn tag_is_unknown(err: &serde_json::Error, event: &serde_json::Value) -> bool {
+    let name = match event {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Object(o) if o.len() == 1 => o.keys().next().map_or("", String::as_str),
+        _ => return false,
+    };
+    err.to_string()
+        .starts_with(&format!("unknown variant `{name}`"))
+}
+
+/// The `message` of an error response, escaped and capped, for a code this client cannot decode.
+fn readable_message(raw: &serde_json::Value) -> Option<String> {
+    let text = raw.pointer("/result/err/message")?.as_str()?;
+    let shown: String = text.chars().take(200).collect();
+    Some(format!("{shown:?}"))
+}
+
 /// The next message from the daemon. A newer daemon may send an event or a reply this client
-/// has no variant for: an unknown event is skipped (logged at debug) so the connection and its
-/// event stream survive; an unreadable response is reported by id so only its request fails.
-/// Anything else that does not decode is still a broken stream.
+/// has no variant for.
+///
+/// - An event with a tag this client does not know is skipped (debug log): additions to
+///   `Event` are additive.
+/// - An event with a known tag whose body does not decode (say, a new value of a field) is
+///   dropped too, with a warning, so the connection survives; the state that event carried
+///   stays as it was until the next event or reload refreshes it.
+/// - A response that does not decode is reported by id, so only its request fails.
+///
+/// Logs carry the error's class, line, column and a sanitised tag, never payload text. Anything
+/// else that does not decode is a broken stream.
 async fn next_incoming(
     reader: &mut MessageReader<OwnedReadHalf>,
 ) -> Result<Option<Incoming>, ClientError> {
@@ -170,14 +223,31 @@ async fn next_incoming(
         };
         match raw.get("type").and_then(|t| t.as_str()) {
             Some("event") => {
-                tracing::debug!(error = %first, "skipping a daemon event this client does not know");
+                let event = raw.get("event").unwrap_or(&serde_json::Value::Null);
+                let tag = log_tag(event);
+                let (class, at_line, column) = (first.classify(), first.line(), first.column());
+                if tag_is_unknown(&first, event) {
+                    tracing::debug!(%tag, ?class, at_line, column, "skipping a daemon event this client does not know");
+                } else {
+                    tracing::warn!(%tag, ?class, at_line, column, "dropping a daemon event whose body this client cannot read");
+                }
             }
             Some("response") => {
                 let Some(id) = raw.get("id").and_then(|i| i.as_u64()) else {
                     return Err(CodecError::Json(first).into());
                 };
-                tracing::debug!(id, error = %first, "a daemon response could not be read");
-                return Ok(Some(Incoming::UnreadableResponse(id)));
+                let (class, at_line, column) = (first.classify(), first.line(), first.column());
+                tracing::debug!(
+                    id,
+                    ?class,
+                    at_line,
+                    column,
+                    "a daemon response could not be read"
+                );
+                return Ok(Some(Incoming::UnreadableResponse {
+                    id,
+                    message: readable_message(&raw),
+                }));
             }
             _ => return Err(CodecError::Json(first).into()),
         }
@@ -431,15 +501,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_error_code_fails_its_request_and_keeps_the_connection() {
+    async fn an_unknown_error_code_fails_its_request_with_its_message() {
         let (_d, path) = raw_daemon(&[
-            r#"{"type":"response","id":$ID,"result":{"err":{"code":"teleport_failed","message":"x"}}}"#,
+            r#"{"type":"response","id":$ID,"result":{"err":{"code":"teleport_failed","message":"no \"portal\"\nleft"}}}"#,
             KNOWN_EVENT,
         ])
         .await;
         let mut c = Client::connect(&path, "t").await.unwrap();
-        assert!(c.request(Command::GetConfig).await.is_err());
-        assert!(c.next_event().await.is_ok());
+        match c.request(Command::GetConfig).await {
+            Err(ClientError::Unexpected(m)) => {
+                assert!(m.contains(r#"no \"portal\"\nleft"#), "{m}");
+                assert!(!m.contains('\n'), "the message is escaped: {m}");
+            }
+            other => panic!("expected Unexpected, got {other:?}"),
+        }
+        assert!(matches!(
+            c.next_event().await.unwrap().1,
+            Event::ConfigChanged { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn another_ids_unreadable_response_is_skipped() {
+        let (_d, path) = raw_daemon(&[
+            r#"{"type":"response","id":9999,"result":{"ok":{"hologram":1}}}"#,
+            ACK,
+        ])
+        .await;
+        let mut c = Client::connect(&path, "t").await.unwrap();
+        assert_eq!(c.request(Command::GetConfig).await.unwrap(), Reply::Ack);
+    }
+
+    #[tokio::test]
+    async fn a_response_without_an_id_ends_the_read() {
+        let (_d, path) =
+            raw_daemon(&[r#"{"type":"response","result":{"ok":{"hologram":1}}}"#]).await;
+        let mut c = Client::connect(&path, "t").await.unwrap();
+        assert!(matches!(
+            c.request(Command::GetConfig).await,
+            Err(ClientError::Codec(CodecError::Json(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_known_event_with_an_unreadable_body_is_dropped_and_the_stream_goes_on() {
+        let (_d, path) = raw_daemon(&[
+            r#"{"type":"event","topic":"review","event":{"review_changed":{"pr":{"repo":"acme/widgets","number":7},"state":"hibernating","items":2}}}"#,
+            KNOWN_EVENT,
+            ACK,
+        ])
+        .await;
+        let mut c = Client::connect(&path, "t").await.unwrap();
+        assert_eq!(c.request(Command::GetConfig).await.unwrap(), Reply::Ack);
+        let events = c.take_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].1, Event::ConfigChanged { .. }));
+    }
+
+    #[test]
+    fn a_log_tag_keeps_only_a_short_lowercase_alphabet() {
+        assert_eq!(
+            log_tag(&serde_json::json!({"Evil \"tag\"\n!": 1})),
+            "viltag"
+        );
+        let long = "a".repeat(200);
+        assert_eq!(log_tag(&serde_json::json!(long)).len(), TAG_CAP);
+        assert_eq!(log_tag(&serde_json::json!(5)), "");
+    }
+
+    #[test]
+    fn an_unknown_tag_is_told_apart_from_a_known_tag_with_a_bad_body() {
+        let unknown = serde_json::json!({"giphy_rain": {"mm": 3}});
+        let known = serde_json::json!({"review_changed": {"state": "hibernating"}});
+        let err = |v: &serde_json::Value| serde_json::from_value::<Event>(v.clone()).unwrap_err();
+        assert!(tag_is_unknown(&err(&unknown), &unknown));
+        assert!(!tag_is_unknown(&err(&known), &known));
     }
 
     #[tokio::test]
