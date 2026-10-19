@@ -11,7 +11,7 @@ use bevy::picking::backend::HitData;
 use bevy::picking::events::{Click, Drag, DragEnd, Move, Out, Pointer, Press, Scroll};
 use bevy::picking::pointer::{Location, PointerButton, PointerId};
 use bevy::prelude::*;
-use bevy::text::{EditableText, FontCx, LayoutCx, TextEdit};
+use bevy::text::{EditableText, FontCx, LayoutCx, TextEdit, TextSpan};
 use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::ui_widgets::Activate;
 use bevy::window::{RequestRedraw, WindowThemeChanged};
@@ -177,7 +177,12 @@ pub fn overflowing_text(app: &mut App) -> Vec<String> {
         if node.size.x <= 0.0 || node.size.y <= 0.0 {
             continue;
         }
+        // A text can sit in a box stretched to its parent while its lines run past it.
         let (x, y, w, h) = frame(app, text);
+        let (w, h) = (
+            w.max(node.content_size.x * node.inverse_scale_factor),
+            h.max(node.content_size.y * node.inverse_scale_factor),
+        );
         let (mut scrolls_x, mut scrolls_y) = (false, false);
         let mut at = text;
         let mut hidden = false;
@@ -208,8 +213,14 @@ pub fn overflowing_text(app: &mut App) -> Vec<String> {
             continue;
         }
         if let Some(why) = found {
-            let shown = app.world().get::<Text>(text).map(|t| t.0.clone());
-            let shown = shown.unwrap_or_default();
+            let mut shown = app
+                .world()
+                .get::<Text>(text)
+                .map(|t| t.0.clone())
+                .unwrap_or_default();
+            for span in app.world().get::<Children>(text).into_iter().flatten() {
+                shown.push_str(&app.world().get::<TextSpan>(*span).map_or("", |s| &s.0));
+            }
             out.push(format!(
                 "{:?} {why}",
                 shown.chars().take(60).collect::<String>()
