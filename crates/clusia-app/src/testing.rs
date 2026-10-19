@@ -859,7 +859,8 @@ pub fn code_point(app: &App, line: Entity, offset: usize) -> Vec2 {
         .world()
         .get::<ComputedTextBlock>(line)
         .expect("a laid-out text");
-    let layout = block.buffer();
+    let node = app.world().get::<ComputedNode>(line).expect("laid out");
+    let layout = &crate::ui::code_select::drawn_layout(block, node);
     let cursor = parley::editing::Cursor::from_byte_index(
         layout,
         offset,
@@ -920,14 +921,6 @@ pub fn chord(app: &mut App, code: KeyCode) {
             window: Entity::PLACEHOLDER,
         });
     }
-    app.update();
-}
-
-/// Lets the window for a second press of a multi-click pass, and runs a frame.
-pub fn wait_out_multi_click(app: &mut App) {
-    app.world_mut()
-        .resource_mut::<bevy::time::Time<bevy::time::Real>>()
-        .advance_by(crate::ui::code_select::MULTI_CLICK + Duration::from_millis(50));
     app.update();
 }
 

@@ -15,11 +15,11 @@ use bevy::input_focus::InputFocus;
 use bevy::picking::events::{Drag, Pointer, Press};
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
-use bevy::text::{ComputedTextBlock, EditableText, TextLayoutInfo};
+use bevy::text::{ComputedTextBlock, EditableText, TextBrush, TextLayoutInfo};
 use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::ui_widgets::observe;
 use parley::editing::{Cursor, Selection};
-use parley::layout::{Affinity, Cluster, ClusterSide};
+use parley::layout::{Affinity, Alignment, AlignmentOptions, Cluster, ClusterSide, Layout};
 
 use crate::theme::Swatch;
 use crate::ui::kit::Fill;
@@ -206,8 +206,6 @@ pub struct CodeSelection {
     dragged: bool,
     multi: bool,
     pressed: bool,
-    /// A press on code is waiting for the click that ends it.
-    armed: bool,
     /// What the group's lines said when the selection was first seen; a change ends it.
     fingerprint: Option<u64>,
     last: Option<LastPress>,
@@ -216,12 +214,10 @@ pub struct CodeSelection {
 /// What a click on a line that holds code means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClickKind {
-    /// It ended a drag or a multi-click: it selected, and is no click on the line.
-    Selected,
-    /// It follows a press on the code, which may be the first of a double click: act on it once
-    /// no further press (the one at this time) has come.
-    Pending(Option<Duration>),
-    /// It follows no press on the code: act now.
+    /// It ended a drag or a multi-click: it selected, and is no click on the line. `multi` when
+    /// it was the second or third press of a multi-click on one line.
+    Selected { multi: bool },
+    /// It is a click on the line.
     Plain,
 }
 
@@ -235,11 +231,6 @@ impl CodeSelection {
         self.fingerprint = None;
     }
 
-    /// The time of the latest press on code.
-    pub fn last_press(&self) -> Option<Duration> {
-        self.last.map(|l| l.at)
-    }
-
     /// Whether nothing is selected.
     pub fn is_empty(&self) -> bool {
         self.group.is_none() || self.anchor == self.focus
@@ -248,11 +239,12 @@ impl CodeSelection {
     /// Reads the click that ends a press, and consumes what the press left for it: a gesture
     /// that selected (it dragged, or was the second or third of a multi-click) is no click.
     pub fn take_click(&mut self) -> ClickKind {
-        let armed = std::mem::take(&mut self.armed);
-        if std::mem::take(&mut self.dragged) | std::mem::take(&mut self.multi) {
-            ClickKind::Selected
-        } else if armed {
-            ClickKind::Pending(self.last_press())
+        let dragged = std::mem::take(&mut self.dragged);
+        let multi = std::mem::take(&mut self.multi);
+        if dragged || multi {
+            ClickKind::Selected {
+                multi: multi && !dragged,
+            }
         } else {
             ClickKind::Plain
         }
@@ -323,6 +315,16 @@ fn local(node: &ComputedNode, transform: &UiGlobalTransform, window: Vec2) -> Ve
     inside + node.size / 2.0
 }
 
+/// The text's layout as it is drawn: the box's width, broken again. The block's own buffer is
+/// whatever the last size probe of the layout pass left in it (one character wide, say), not
+/// what is on screen.
+pub fn drawn_layout(block: &ComputedTextBlock, node: &ComputedNode) -> Layout<TextBrush> {
+    let mut layout = block.buffer().clone();
+    layout.break_all_lines(Some(node.size.x));
+    layout.align(Alignment::Start, AlignmentOptions::default());
+    layout
+}
+
 /// The byte of a line's text the point `at` (from the top-left corner of its box) is nearest to.
 /// Above the box that is the start; below it, the end.
 fn offset_in(block: &ComputedTextBlock, node: &ComputedNode, at: Vec2, len: usize) -> usize {
@@ -332,7 +334,8 @@ fn offset_in(block: &ComputedTextBlock, node: &ComputedNode, at: Vec2, len: usiz
     if at.y >= node.size.y {
         return len;
     }
-    let offset = match Cluster::from_point(block.buffer(), at.x, at.y) {
+    let layout = drawn_layout(block, node);
+    let offset = match Cluster::from_point(&layout, at.x, at.y) {
         Some((cluster, ClusterSide::Left)) => cluster.text_range().start,
         Some((cluster, ClusterSide::Right)) => cluster.text_range().end,
         None if at.x < node.size.x / 2.0 => 0,
@@ -387,7 +390,6 @@ fn on_press(
     selection.dragged = false;
     selection.multi = count > 1;
     selection.pressed = true;
-    selection.armed = true;
     selection.fingerprint = None;
     selection.last = Some(LastPress {
         at: time.elapsed(),
@@ -446,16 +448,25 @@ fn forget(mouse: Option<Res<ButtonInput<MouseButton>>>, mut selection: ResMut<Co
         selection.group = None;
         selection.dragged = false;
         selection.multi = false;
-        selection.armed = false;
     }
 }
 
 /// Ends a selection whose lines are gone or now say something else: its offsets would point
 /// into other text.
-fn drop_stale(mut selection: ResMut<CodeSelection>, lines: Query<&CodeLine>) {
+fn drop_stale(
+    mut selection: ResMut<CodeSelection>,
+    lines: Query<&CodeLine>,
+    touched: Query<(), Or<(Added<CodeLine>, Changed<CodeLine>)>>,
+    mut removed: RemovedComponents<CodeLine>,
+) {
     let Some(group) = selection.group else {
         return;
     };
+    // Lines that were not touched say what they said when the selection was first seen.
+    let gone = removed.read().count() > 0;
+    if !gone && touched.is_empty() && selection.fingerprint.is_some() {
+        return;
+    }
     let mut own: Vec<&CodeLine> = lines.iter().filter(|l| l.key.group == group).collect();
     if own.is_empty() {
         selection.group = None;
@@ -571,7 +582,7 @@ fn paint(
         }
         commands.entity(line.layer).despawn_related::<Children>();
         if let Some(range) = &now.range {
-            let layout = block.buffer();
+            let layout = &drawn_layout(block, node);
             let selected = Selection::new(
                 Cursor::from_byte_index(layout, range.start, Affinity::Downstream),
                 Cursor::from_byte_index(layout, range.end, Affinity::Upstream),

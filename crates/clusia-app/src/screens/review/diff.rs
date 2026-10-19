@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::time::Duration;
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::ButtonInput;
@@ -36,7 +35,7 @@ use crate::screens::review::revalidation::{Revalidations, reanchor_click};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
 use crate::ui::code::{CodeSpan, plain_text, spans_for, wrapped_code_line};
-use crate::ui::code_select::{ClickKind, CodeSelection, LineKey, MULTI_CLICK, selectable};
+use crate::ui::code_select::{ClickKind, CodeSelection, LineKey, selectable};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, avatar, badge, button, card, panel,
@@ -735,15 +734,12 @@ pub struct DiffPlugin;
 
 impl Plugin for DiffPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<HighlightCache>()
-            .init_resource::<PendingLine>()
-            .add_systems(
-                Update,
-                (fill_region, rebuild_diff, later_hints, reach_focus)
-                    .chain()
-                    .after(ReviewSystems),
-            )
-            .add_systems(Update, open_pending.after(ReviewSystems));
+        app.init_resource::<HighlightCache>().add_systems(
+            Update,
+            (fill_region, rebuild_diff, later_hints, reach_focus)
+                .chain()
+                .after(ReviewSystems),
+        );
     }
 }
 
@@ -1680,29 +1676,24 @@ fn on_line(
     time: Res<Time>,
     mut asks: ResMut<Asks>,
     mut selection: ResMut<CodeSelection>,
-    real: Res<Time<Real>>,
-    mut pending: ResMut<PendingLine>,
 ) {
     let kind = selection.take_click();
     let Ok(b) = buttons.get(activate.entity) else {
         return;
     };
-    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     match kind {
-        // A drag or a double click across the line selected its code; it is not a click on it.
-        ClickKind::Selected => {}
-        // The press may be the first of a double click: the comment waits for a second one.
-        ClickKind::Pending(press) => {
-            pending.0 = Some(PendingClick {
-                line: b.clone(),
-                shift,
-                due: real.elapsed() + MULTI_CLICK,
-                press,
-            });
+        // A drag across the line selected its code; it is not a click on it.
+        ClickKind::Selected { multi: false } => {}
+        // A second press on the line, soon after the click that opened an editor on it: the
+        // click was the start of a double click, so the editor it opened goes.
+        ClickKind::Selected { multi: true } => {
+            if let Some(ui) = ui_of(&mut tabs, &b.pr) {
+                close_untouched(ui, b);
+            }
         }
         ClickKind::Plain => open_line(
             b,
-            shift,
+            keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
             &mut tabs,
             &model,
             &mut rounds,
@@ -1713,52 +1704,21 @@ fn on_line(
     }
 }
 
-/// A click on a line whose comment waits to see whether a second press makes it a double click.
-#[derive(Resource, Default)]
-struct PendingLine(Option<PendingClick>);
-
-struct PendingClick {
-    line: LineButton,
-    shift: bool,
-    due: Duration,
-    /// The latest press on code when the click came; a later one cancels the comment.
-    press: Option<Duration>,
-}
-
-fn open_pending(
-    mut pending: ResMut<PendingLine>,
-    selection: Res<CodeSelection>,
-    real: Res<Time<Real>>,
-    mut tabs: ResMut<ReviewTabs>,
-    model: Res<Model>,
-    mut rounds: ResMut<Revalidations>,
-    mut toasts: ResMut<Toasts>,
-    time: Res<Time>,
-    mut asks: ResMut<Asks>,
-) {
-    let Some(waiting) = &pending.0 else {
-        return;
-    };
-    if selection.last_press() != waiting.press {
-        pending.0 = None;
-        return;
+/// Closes the editor on `b`'s line when nothing was typed in it and nothing came of it.
+fn close_untouched(ui: &mut TabUi, b: &LineButton) {
+    let untouched = ui.editor.as_ref().is_some_and(|e| {
+        e.text.is_empty()
+            && e.error.is_none()
+            && e.ticket.is_none()
+            && matches!(
+                &e.target,
+                EditTarget::Line { path, side, start: None, line }
+                    if *path == b.path && *side == b.side && *line == b.line
+            )
+    });
+    if untouched {
+        ui.editor = None;
     }
-    if real.elapsed() < waiting.due {
-        return;
-    }
-    let Some(PendingClick { line, shift, .. }) = pending.0.take() else {
-        return;
-    };
-    open_line(
-        &line,
-        shift,
-        &mut tabs,
-        &model,
-        &mut rounds,
-        &mut toasts,
-        &time,
-        &mut asks,
-    );
 }
 
 fn open_line(
@@ -3118,7 +3078,6 @@ mod tests {
             .expect("a commentable row");
         assert_eq!((button.side, button.line), (Side::Right, 40));
         click_on(&mut app, text);
-        testing::wait_out_multi_click(&mut app);
         assert_eq!(
             testing::tab(&app, &pr).ui.editor.map(|e| e.target),
             Some(EditTarget::Line {
@@ -3143,7 +3102,6 @@ mod tests {
             .press(KeyCode::ShiftLeft);
         let (text, _) = code_of(&mut app, LONG);
         click_on(&mut app, text);
-        testing::wait_out_multi_click(&mut app);
         assert_eq!(
             testing::tab(&app, &pr).ui.editor.map(|e| e.target),
             Some(EditTarget::Line {
@@ -3300,13 +3258,8 @@ mod tests {
         let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
         click_on(&mut app, text);
         assert!(
-            testing::tab(&app, &pr).ui.editor.is_none(),
-            "it waits for a second press"
-        );
-        testing::wait_out_multi_click(&mut app);
-        assert!(
             testing::tab(&app, &pr).ui.editor.is_some(),
-            "a click comments"
+            "a click comments at once"
         );
         ui_mut(&mut app, &pr).0.get_mut(&pr).unwrap().ui.editor = None;
         testing::settle(&mut app);
@@ -3427,24 +3380,127 @@ mod tests {
         assert_eq!(selected(&app), "", "the new press collapsed it");
     }
 
+    /// The code `Text` that holds `needle` now: a click that opens an editor rebuilds the rows.
+    fn fresh_line(app: &mut App, needle: &str) -> Entity {
+        let lines = code_lines(app);
+        line_with(&lines, needle, 0).0
+    }
+
     #[test]
-    fn a_double_click_selects_the_word_and_never_opens_the_editor() {
+    fn a_single_click_opens_the_editor_with_no_wait() {
         let mut app = wrap_app();
         let pr = fixture::demo_pr();
-        let lines = code_lines(&mut app);
-        let (text, line) = line_with(&lines, "Refresh one minute early", 0).clone();
+        let text = fresh_line(&mut app, "Refresh one minute early");
+        click_on(&mut app, text);
+        assert!(testing::tab(&app, &pr).ui.editor.is_some());
+    }
+
+    #[test]
+    fn a_double_click_ends_with_the_word_selected_copied_and_no_editor() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let needle = "Refresh one minute early";
+        let text = fresh_line(&mut app, needle);
+        let line = code_lines(&mut app)
+            .iter()
+            .find(|(e, _)| *e == text)
+            .unwrap()
+            .1
+            .clone();
         let at = line.text.find("minute").unwrap() + 2;
         let p = testing::code_point(&app, text, at);
         press_on(&mut app, text, p);
         release_on(&mut app, text);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_some(),
+            "the first click"
+        );
+        testing::settle(&mut app);
+        // The pointer has not moved.
+        let text = fresh_line(&mut app, needle);
         press_on(&mut app, text, p);
         release_on(&mut app, text);
-        testing::wait_out_multi_click(&mut app);
         testing::settle(&mut app);
         assert!(testing::tab(&app, &pr).ui.editor.is_none(), "no editor");
         assert_eq!(selected(&app), "minute");
         testing::chord(&mut app, KeyCode::KeyC);
         assert_eq!(app.world().resource::<CopiedText>().0, ["minute"]);
+    }
+
+    #[test]
+    fn a_quick_click_on_another_line_opens_that_line() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let first =
+            testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 39);
+        testing::activate(&mut app, first);
+        testing::settle(&mut app);
+        let text = fresh_line(&mut app, "Refresh one minute early");
+        click_on(&mut app, text);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.editor.map(|e| e.target),
+            Some(EditTarget::Line {
+                path: REFRESH.into(),
+                side: Side::Right,
+                start: None,
+                line: 40
+            })
+        );
+    }
+
+    #[test]
+    fn a_quick_shift_click_extends_the_range_of_the_line_just_clicked() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let lines = code_lines(&mut app);
+        let a = lines
+            .iter()
+            .find(|(_, l)| l.key.column == 0 && l.text.contains("Refresh one minute early"))
+            .unwrap()
+            .0;
+        // A click on the line before it, then a shift-click on this one, right after.
+        let before = lines
+            .iter()
+            .find(|(e, l)| *e != a && l.key.order + 1 == code_order(&lines, a))
+            .unwrap()
+            .0;
+        click_on(&mut app, before);
+        testing::settle(&mut app);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        let a = fresh_line(&mut app, "Refresh one minute early");
+        click_on(&mut app, a);
+        let target = testing::tab(&app, &pr).ui.editor.map(|e| e.target);
+        let Some(EditTarget::Line { start, line, .. }) = target else {
+            panic!("a line editor");
+        };
+        assert_eq!((start.is_some(), line), (true, 40), "{target:?}");
+    }
+
+    fn code_order(lines: &[(Entity, crate::ui::code_select::CodeLine)], of: Entity) -> usize {
+        lines.iter().find(|(e, _)| *e == of).unwrap().1.key.order
+    }
+
+    #[test]
+    fn a_double_click_on_a_line_whose_editor_has_text_keeps_the_editor() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let needle = "Refresh one minute early";
+        let text = fresh_line(&mut app, needle);
+        let p = testing::code_point(&app, text, 4);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |_| true);
+        testing::type_into(&mut app, area, "keep this");
+        testing::settle(&mut app);
+        let text = fresh_line(&mut app, needle);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        testing::settle(&mut app);
+        let editor = testing::tab(&app, &pr).ui.editor;
+        assert!(editor.is_some(), "the editor stays");
     }
 
     #[test]
@@ -3459,7 +3515,6 @@ mod tests {
         testing::left_press(&mut app);
         let row = testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 44);
         testing::activate(&mut app, row);
-        testing::wait_out_multi_click(&mut app);
         assert!(
             testing::tab(&app, &pr).ui.editor.is_some(),
             "the click comments"
