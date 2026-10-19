@@ -229,6 +229,20 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::ReanchorDraftItem { pr, id, anchor } => {
             proposals::reanchor(shared, &pr, &id, anchor).await
         }
+        Command::WriteStory { .. }
+        | Command::RewriteStory { .. }
+        | Command::StopStory { .. }
+        | Command::GetStory { .. }
+        | Command::GetStoryVersion { .. }
+        | Command::MarkStepRead { .. }
+        | Command::AddStepComment { .. }
+        | Command::GetCalls { .. }
+        | Command::FindFunction { .. }
+        | Command::ReadFunctionCode { .. }
+        | Command::AddCallsComment { .. } => Outcome::Err(ProtocolError::new(
+            ErrorCode::InvalidState,
+            "Story and Calls are not available yet",
+        )),
     }
 }
 

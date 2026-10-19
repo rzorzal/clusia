@@ -431,13 +431,14 @@ fn turn_of(entry: &AgentLogEntry) -> u64 {
         | AgentLogEntry::Permission { turn, .. }
         | AgentLogEntry::Check { turn, .. }
         | AgentLogEntry::Revalidation { turn, .. }
-        | AgentLogEntry::Diagrams { turn, .. } => *turn,
+        | AgentLogEntry::Diagrams { turn, .. }
+        | AgentLogEntry::Story { turn, .. } => *turn,
     }
 }
 
-/// The chat as lines: consecutive text entries of one turn are one answer. A turn of a check or
-/// a revalidation (one with a `Check` or `Revalidation` entry) is not part of the chat: none of
-/// its entries is shown.
+/// The chat as lines: consecutive text entries of one turn are one answer. A turn of a check, a
+/// revalidation, a drawing or a story (one with a `Check`, `Revalidation`, `Diagrams` or `Story`
+/// entry) is not part of the chat: none of its entries is shown.
 pub(crate) fn log_lines(
     entries: &[AgentLogEntry],
     harness: HarnessKind,
@@ -453,6 +454,7 @@ pub(crate) fn log_lines(
                 AgentLogEntry::Check { .. }
                     | AgentLogEntry::Revalidation { .. }
                     | AgentLogEntry::Diagrams { .. }
+                    | AgentLogEntry::Story { .. }
             )
         })
         .map(turn_of)
@@ -501,7 +503,8 @@ pub(crate) fn log_lines(
             AgentLogEntry::Text { .. }
             | AgentLogEntry::Check { .. }
             | AgentLogEntry::Revalidation { .. }
-            | AgentLogEntry::Diagrams { .. } => {
+            | AgentLogEntry::Diagrams { .. }
+            | AgentLogEntry::Story { .. } => {
                 unreachable!("handled above")
             }
         });
@@ -1199,6 +1202,41 @@ mod tests {
                 summary: "Read src/a.rs".into(),
             },
             AgentLogEntry::Revalidation {
+                at: 5,
+                turn: 2,
+                state: "done".into(),
+            },
+        ];
+        assert_eq!(
+            log_lines(&entries, HarnessKind::ClaudeCode, "Claude Code"),
+            ["you: hi"]
+        );
+    }
+
+    #[test]
+    fn a_story_turn_is_not_said_in_the_chat() {
+        let entries = [
+            AgentLogEntry::User {
+                at: 1,
+                turn: 1,
+                text: "hi".into(),
+            },
+            AgentLogEntry::Story {
+                at: 2,
+                turn: 2,
+                state: "running".into(),
+            },
+            AgentLogEntry::ToolUse {
+                at: 3,
+                turn: 2,
+                summary: "Read src/a.rs".into(),
+            },
+            AgentLogEntry::Text {
+                at: 4,
+                turn: 2,
+                text: "{\"sentence\":\"s\"}".into(),
+            },
+            AgentLogEntry::Story {
                 at: 5,
                 turn: 2,
                 state: "done".into(),

@@ -1112,6 +1112,9 @@ pub(crate) fn close_unfinished(shared: &Shared) {
                 AgentLogEntry::Diagrams { turn: t, key, .. } if *t == turn => Some(key.clone()),
                 _ => None,
             });
+            let story = entries
+                .iter()
+                .any(|entry| matches!(entry, AgentLogEntry::Story { turn: t, .. } if *t == turn));
             let entry = match check {
                 Some(kind) => AgentLogEntry::Check {
                     at: now_unix(),
@@ -1129,6 +1132,11 @@ pub(crate) fn close_unfinished(shared: &Shared) {
                     turn,
                     state: "stopped".into(),
                     key: drawing.flatten(),
+                },
+                None if story => AgentLogEntry::Story {
+                    at: now_unix(),
+                    turn,
+                    state: "stopped".into(),
                 },
                 None => AgentLogEntry::Error {
                     at: now_unix(),
@@ -2800,6 +2808,39 @@ mod tests {
         assert!(
             !log.iter().any(|e| matches!(e, AgentLogEntry::Error { .. })),
             "the chat never gets an error line for a drawing"
+        );
+        let count = log.len();
+        close_unfinished(&shared);
+        assert_eq!(agent_log::read(&path).len(), count, "closed only once");
+    }
+
+    #[tokio::test]
+    async fn a_story_turn_a_stopped_daemon_left_unfinished_ends_as_a_story() {
+        let home = tempfile::tempdir().unwrap();
+        let shared = shared_for(Paths::new(home.path()), Config::default());
+        let pr = pr(7);
+        let path = shared.paths.agent_log(&pr);
+        agent_log::append(
+            &path,
+            &AgentLogEntry::Story {
+                at: 1,
+                turn: 4,
+                state: "running".into(),
+            },
+        )
+        .unwrap();
+        close_unfinished(&shared);
+        let log = agent_log::read(&path);
+        assert!(
+            matches!(
+                log.last(),
+                Some(AgentLogEntry::Story { turn: 4, state, .. }) if state == "stopped"
+            ),
+            "{log:?}"
+        );
+        assert!(
+            !log.iter().any(|e| matches!(e, AgentLogEntry::Error { .. })),
+            "the chat never gets an error line for a story"
         );
         let count = log.len();
         close_unfinished(&shared);

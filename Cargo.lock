@@ -1964,6 +1964,7 @@ dependencies = [
 name = "clusia-protocol"
 version = "0.1.0"
 dependencies = [
+ "clusia-calls",
  "clusia-core",
  "libc",
  "serde",
@@ -1993,6 +1994,7 @@ dependencies = [
 name = "clusia-store"
 version = "0.1.0"
 dependencies = [
+ "clusia-calls",
  "clusia-core",
  "serde",
  "serde_json",

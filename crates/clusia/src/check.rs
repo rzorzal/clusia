@@ -238,7 +238,9 @@ async fn answered<T>(asked: impl Future<Output = T>, interrupt: &mut Signal) -> 
 /// The check a permission request comes from; `None` for the chat's and the revalidation's.
 fn kind_of(origin: TurnOrigin) -> Option<CheckKind> {
     match origin {
-        TurnOrigin::Chat | TurnOrigin::Revalidation | TurnOrigin::Diagrams => None,
+        TurnOrigin::Chat | TurnOrigin::Revalidation | TurnOrigin::Diagrams | TurnOrigin::Story => {
+            None
+        }
         TurnOrigin::Security => Some(CheckKind::Security),
         TurnOrigin::Audit => Some(CheckKind::Audit),
     }
@@ -485,6 +487,11 @@ pub(crate) async fn check(
 mod tests {
     use super::*;
     use clusia_core::checks::Pass;
+
+    #[test]
+    fn a_story_request_is_no_check() {
+        assert_eq!(kind_of(TurnOrigin::Story), None);
+    }
 
     fn finding(
         area: &str,

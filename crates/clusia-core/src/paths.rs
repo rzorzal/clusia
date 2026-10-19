@@ -132,6 +132,27 @@ impl Paths {
         self.diagrams_dir().join(pr.file_key())
     }
 
+    /// The Stories of every review, one folder per pull request.
+    pub fn stories_dir(&self) -> PathBuf {
+        self.root.join("stories")
+    }
+
+    /// The versions of the Story of `pr` as `v<n>.json` files, and its `read.json`, for as long as
+    /// the review lasts.
+    pub fn stories_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.stories_dir().join(pr.file_key())
+    }
+
+    /// The call indexes of every review, one folder per pull request.
+    pub fn calls_dir(&self) -> PathBuf {
+        self.root.join("calls")
+    }
+
+    /// The call index of the head commit of `pr`, as one `<sha>.json` file.
+    pub fn calls_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.calls_dir().join(pr.file_key())
+    }
+
     /// The comments hidden in each pull request, one file per pull request. They outlive the
     /// review: closing it, even with an empty draft, leaves them.
     pub fn hidden_dir(&self) -> PathBuf {
@@ -248,6 +269,22 @@ mod tests {
         assert_eq!(
             p.diagrams_for(&pr),
             PathBuf::from("/tmp/c/diagrams/acme~widgets~7")
+        );
+    }
+
+    #[test]
+    fn stories_and_calls_are_keyed_by_pull_request() {
+        let p = Paths::new("/tmp/c");
+        let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
+        assert_eq!(p.stories_dir(), PathBuf::from("/tmp/c/stories"));
+        assert_eq!(
+            p.stories_for(&pr),
+            PathBuf::from("/tmp/c/stories/acme~widgets~7")
+        );
+        assert_eq!(p.calls_dir(), PathBuf::from("/tmp/c/calls"));
+        assert_eq!(
+            p.calls_for(&pr),
+            PathBuf::from("/tmp/c/calls/acme~widgets~7")
         );
     }
 

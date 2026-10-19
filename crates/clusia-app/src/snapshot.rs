@@ -171,7 +171,10 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         // The Diagrams section keeps its own model.
         | Event::DiagramsChanged { .. }
         | Event::DiagramsPlanned { .. }
-        | Event::DiagramEntryChanged { .. } => {}
+        | Event::DiagramEntryChanged { .. }
+        // The Story and Calls views keep their own models.
+        | Event::StoryChanged { .. }
+        | Event::CallsIndexChanged { .. } => {}
     }
     (r, None)
 }
