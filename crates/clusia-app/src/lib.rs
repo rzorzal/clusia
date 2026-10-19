@@ -16,6 +16,7 @@ pub mod platform_fonts;
 pub mod platform_open;
 pub mod platform_sound;
 pub mod platform_window;
+pub mod render_check;
 pub mod review_state;
 pub mod scenes;
 pub mod screens;

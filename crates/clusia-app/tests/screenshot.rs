@@ -99,6 +99,9 @@ fn demo_screenshots() {
         assert!(status.success(), "{name}: {status}");
         let size = std::fs::metadata(&out).unwrap().len();
         assert!(size > 20_000, "{name}: only {size} bytes");
+        if let Err(message) = clusia_app::render_check::check_png(&out) {
+            panic!("{name}: {message}");
+        }
         if name.starts_with("diagrams-keywords") || name.starts_with("keywords-") {
             let share = non_background_share(&out, (0.45, 0.40, 0.75, 0.75));
             assert!(share > 0.02, "{name}: the 3D area is empty ({share})");
