@@ -25,7 +25,7 @@ use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Type, Variant, button, card, disabled_button, text,
-    text_field,
+    text_field, wrapped_text,
 };
 
 /// What this window has done with the first-run screen.
@@ -506,13 +506,18 @@ fn callout(
         c.spawn(Node {
             flex_grow: 1.0,
             flex_shrink: 1.0,
+            min_width: px(0),
             flex_direction: FlexDirection::Column,
             row_gap: px(2),
             ..default()
         })
         .with_children(|t| {
-            t.spawn(text(fonts, title.to_string(), Type::STRONG));
-            t.spawn(text(fonts, line.to_string(), Type::MUTED.size(12.0)));
+            t.spawn(wrapped_text(fonts, title.to_string(), Type::STRONG));
+            t.spawn(wrapped_text(
+                fonts,
+                line.to_string(),
+                Type::MUTED.size(12.0),
+            ));
         });
         action(c);
     });
