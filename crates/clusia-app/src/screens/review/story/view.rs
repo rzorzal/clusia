@@ -434,21 +434,23 @@ fn banner(m: &StoryModel, s: &Shown, ctx: &StoryCtx) -> Option<Banner> {
         _ => {}
     }
     let rewrite = !m.versions.is_empty();
-    match s.version.map(|v| &v.state) {
-        Some(StoryVersionState::Failed { message }) => {
-            return Some(Banner::Failed {
-                message: message.clone(),
-                rewrite,
-            });
-        }
-        Some(StoryVersionState::NotWritten) => return Some(Banner::NotWritten),
-        _ => {}
+    if let Some(StoryVersionState::Failed { message }) = s.version.map(|v| &v.state) {
+        return Some(Banner::Failed {
+            message: message.clone(),
+            rewrite,
+        });
     }
     if let StoryState::Failed { message } = &m.state {
         return Some(Banner::Failed {
             message: message.clone(),
             rewrite,
         });
+    }
+    if matches!(
+        s.version.map(|v| &v.state),
+        Some(StoryVersionState::NotWritten)
+    ) {
+        return Some(Banner::NotWritten);
     }
     if let Some(version) = s.version.filter(|_| s.spec.is_some())
         && m.outdated()
@@ -500,7 +502,13 @@ pub fn story_view(
             StepHistory::Same => None,
         }
     };
-    let version_no = s.number.unwrap_or(0);
+    // Marks and comments name the version whose steps are listed: the static order is 0, even
+    // beside a version that is still writing or failed.
+    let version_no = if s.spec.is_some() {
+        s.number.unwrap_or(0)
+    } else {
+        0
+    };
 
     let mut rows: Vec<ListRow> = steps
         .iter()
@@ -965,6 +973,36 @@ mod tests {
     }
 
     #[test]
+    fn a_static_order_beside_a_listed_version_is_version_zero() {
+        let demo = fixture::demo_story(NOW);
+        let mut failed = demo.first.clone();
+        failed.state = StoryVersionState::Failed {
+            message: "bad json".into(),
+        };
+        failed.spec = None;
+        let mut writing = demo.second.clone();
+        writing.number = 3;
+        writing.state = StoryVersionState::Writing;
+        writing.spec = None;
+        for m in [
+            model(vec![failed], StoryState::Idle, &[]),
+            model(
+                vec![demo.first, demo.second, writing],
+                StoryState::Writing,
+                &[],
+            ),
+        ] {
+            let c = view(&tab(), &m).body.card.expect("a card");
+            assert!(c.mono, "the static order");
+            assert_eq!(c.version, 0);
+        }
+        assert_eq!(
+            view(&tab(), &written()).body.card.map(|c| c.version),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn every_banner_has_its_text_its_button_and_its_turn() {
         let t = tab();
         let banner = |m: &StoryModel| view(&t, m).body.banner;
@@ -1001,6 +1039,24 @@ mod tests {
         assert_eq!(
             banner(&model(vec![stopped], StoryState::Idle, &[])),
             Some(Banner::NotWritten)
+        );
+
+        let mut both = fixture::demo_story(NOW).first;
+        both.state = StoryVersionState::NotWritten;
+        both.spec = None;
+        assert_eq!(
+            banner(&model(
+                vec![both],
+                StoryState::Failed {
+                    message: "timed out".into()
+                },
+                &[]
+            )),
+            Some(Banner::Failed {
+                message: "timed out".into(),
+                rewrite: true
+            }),
+            "a failed state wins over a version that was not written"
         );
 
         let mut old = fixture::demo_story(NOW).first;

@@ -3601,10 +3601,10 @@ mod tests {
     }
 
     #[test]
-    fn a_head_gutter_row_has_one_number_cell_and_the_code_and_a_both_row_still_has_four() {
+    fn a_unified_row_still_has_its_two_numbers_the_sign_and_the_code() {
         let mut app = wrap_app();
         let (text, both) = code_of(&mut app, LONG);
         assert_eq!(app.world().get::<Children>(both).unwrap().len(), 4);
-        let _ = text;
+        assert!(!text_of_line(&app, text).is_empty());
     }
 }

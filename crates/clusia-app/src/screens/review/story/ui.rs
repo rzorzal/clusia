@@ -1825,18 +1825,31 @@ mod tests {
     #[test]
     fn the_part_rebuilds_only_when_its_view_changes() {
         let (mut app, pr) = staged(StoryStage::Written);
-        let signature = |app: &App| {
-            let mut q = app
-                .world()
-                .iter_entities()
-                .filter(|e| e.contains::<ListPart>());
-            q.next().map(|e| e.id())
+        let ids = |app: &mut App| {
+            let mut q = app.world_mut().query::<(Entity, &StepButton)>();
+            let mut v: Vec<Entity> = q.iter(app.world()).map(|(e, _)| e).collect();
+            v.sort();
+            v
         };
-        let before = testing::count::<StepButton>(&mut app);
+        let before = ids(&mut app);
+        assert!(!before.is_empty());
         testing::settle(&mut app);
-        assert_eq!(testing::count::<StepButton>(&mut app), before);
-        assert!(signature(&app).is_some());
-        let _ = pr;
+        assert_eq!(ids(&mut app), before, "nothing changed: nothing rebuilt");
+
+        // Typing is in no view: it touches the tab but rebuilds nothing.
+        let comment = testing::find::<CommentStepButton>(&mut app, |_| true);
+        testing::activate(&mut app, comment);
+        testing::settle(&mut app);
+        let with_editor = ids(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |_| true);
+        testing::type_into(&mut app, area, "a thought");
+        testing::settle(&mut app);
+        assert_eq!(ids(&mut app), with_editor, "typing rebuilds nothing");
+        assert!(
+            ui_of(&app, &pr)
+                .editor
+                .is_some_and(|e| e.text == "a thought")
+        );
     }
 
     #[test]
