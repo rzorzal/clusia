@@ -37,7 +37,7 @@ use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Field, FieldCommitted, Fill, HoverFill, Stroke, Type, Variant, button, segment, segments, text,
-    text_field,
+    text_field, wrapped_text,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -455,7 +455,15 @@ pub fn row(
             ));
             control(r);
             if !hint.is_empty() {
-                r.spawn(text(fonts, hint.to_string(), Type::META));
+                // Beside the control while there is room; wrapping beyond it, even in a word.
+                r.spawn((
+                    wrapped_text(fonts, hint.to_string(), Type::META),
+                    Node {
+                        flex_shrink: 1.0,
+                        min_width: px(0),
+                        ..default()
+                    },
+                ));
             }
         });
         if let Some((key, message)) = error {
