@@ -760,7 +760,6 @@ pub(crate) async fn probe(shared: &Shared, harness: &Harness) -> Outcome {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
     use clusia_core::config::HarnessKind;
@@ -966,8 +965,7 @@ mod tests {
     fn custom_env_has_no_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("program");
-        std::fs::write(&program, "#!/bin/sh\nexec /usr/bin/env\n").unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        clusia_core::testkit::write_executable(&program, "exec /usr/bin/env");
         let env: Vec<(OsString, OsString)> = [
             ("GH_TOKEN", "t1"),
             ("GITHUB_TOKEN", "t2"),
