@@ -33,7 +33,7 @@ use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, icon_button,
-    panel, text,
+    panel, text, wrapped_text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown};
@@ -875,7 +875,7 @@ fn chat_line(
                 Swatch::GreenSoft,
             ))
             .with_children(|b| {
-                b.spawn(text(fonts, body.clone(), Type::BODY));
+                b.spawn(wrapped_text(fonts, body.clone(), Type::BODY));
             });
         }
         ChatLine::Text(raw) => {
@@ -940,7 +940,11 @@ fn chat_line(
             }
         }
         ChatLine::Error(message) => {
-            p.spawn(text(fonts, message.clone(), Type::BODY.ink(Swatch::Orange)));
+            p.spawn(wrapped_text(
+                fonts,
+                message.clone(),
+                Type::BODY.ink(Swatch::Orange),
+            ));
         }
         ChatLine::Suggestion { suggestion, state } => {
             super::suggestion::card(p, fonts, pr, suggestion, *state, opts);
@@ -960,7 +964,7 @@ pub(super) fn pill(
 ) {
     p.spawn(panel(pill_node(), fill)).with_children(|r| {
         r.spawn(text(fonts, mark.to_string(), Type::META.ink(mark_ink)));
-        r.spawn(text(fonts, body.to_string(), Type::META.ink(ink)));
+        r.spawn(wrapped_text(fonts, body.to_string(), Type::META.ink(ink)));
     });
 }
 
@@ -969,7 +973,11 @@ fn working_pill(p: &mut ChildSpawnerCommands, fonts: &UiFonts, body: &str) {
     p.spawn(panel(pill_node(), Swatch::Chrome))
         .with_children(|r| {
             r.spawn(spinner());
-            r.spawn(text(fonts, body.to_string(), Type::META.ink(Swatch::Muted)));
+            r.spawn(wrapped_text(
+                fonts,
+                body.to_string(),
+                Type::META.ink(Swatch::Muted),
+            ));
         });
 }
 
@@ -978,7 +986,7 @@ fn pill_node() -> Node {
         align_self: AlignSelf::FlexStart,
         max_width: percent(100),
         column_gap: px(6),
-        align_items: AlignItems::Center,
+        align_items: AlignItems::FlexStart,
         padding: UiRect::axes(px(10), px(5)),
         border_radius: BorderRadius::all(px(14)),
         ..default()
@@ -1045,7 +1053,7 @@ fn rebuild_hints(
                     max_width: percent(50),
                     ..default()
                 },
-                children![text(
+                children![wrapped_text(
                     &fonts,
                     "Can read the worktree · asks before running commands",
                     Type::META
