@@ -29,6 +29,11 @@ pub struct CanvasView {
     pub viewport: Vec2,
     /// The content's size at 100 %.
     pub content: Vec2,
+    /// The smallest zoom `fit` opens at.
+    pub fit_floor: f32,
+    /// A content point `fit` centres on, axis by axis, when the floor stops it short of
+    /// fitting the whole content.
+    pub focus: Option<Vec2>,
 }
 
 impl CanvasView {
@@ -38,10 +43,14 @@ impl CanvasView {
             pan: Vec2::ZERO,
             viewport: Vec2::ZERO,
             content,
+            fit_floor: ZOOM_MIN,
+            focus: None,
         }
     }
 
-    /// Fits the whole content between the header and the legend, never above 100 %, centred.
+    /// Fits the whole content between the header and the legend, never above 100 % nor under
+    /// `fit_floor`, centred. When the floor stops the fit, an axis that still overflows is
+    /// centred on `focus` instead.
     pub fn fit(&mut self) {
         if self.viewport.x <= 0.0 || self.viewport.y <= 0.0 || self.content.min_element() <= 0.0 {
             return;
@@ -50,9 +59,8 @@ impl CanvasView {
             self.viewport.x,
             (self.viewport.y - TOP_INSET - BOTTOM_INSET).max(self.viewport.y * 0.5),
         );
-        self.zoom = (room.x / self.content.x)
-            .min(room.y / self.content.y)
-            .clamp(ZOOM_MIN, 1.0);
+        let fit = (room.x / self.content.x).min(room.y / self.content.y);
+        self.zoom = fit.clamp(self.fit_floor.min(1.0), 1.0);
         let free = room - self.content * self.zoom;
         let top = if room.y < self.viewport.y {
             TOP_INSET
@@ -60,6 +68,14 @@ impl CanvasView {
             0.0
         };
         self.pan = Vec2::new(free.x / 2.0, top + free.y / 2.0);
+        if let Some(focus) = self.focus.filter(|_| fit < self.zoom) {
+            if free.x < 0.0 {
+                self.pan.x = room.x / 2.0 - focus.x * self.zoom;
+            }
+            if free.y < 0.0 {
+                self.pan.y = top + room.y / 2.0 - focus.y * self.zoom;
+            }
+        }
         self.clamp_pan();
     }
 
@@ -195,6 +211,53 @@ mod tests {
         let before = v;
         v.fit();
         assert_eq!(v, before);
+    }
+
+    #[test]
+    fn a_floor_stops_the_fit_and_the_focus_point_is_centred() {
+        let mut v = view((3000.0, 1000.0), (1000.0, 600.0));
+        v.fit_floor = 0.5;
+        v.focus = Some(Vec2::new(1500.0, 300.0));
+        v.fit();
+        assert_eq!(v.zoom, 0.5);
+        assert_eq!(v.pan, Vec2::new(-250.0, 150.0));
+        assert_eq!(
+            drawn(&v, Vec2::new(1500.0, 300.0)),
+            Vec2::new(500.0, 300.0),
+            "the focus sits at the middle of the room between the header and the legend"
+        );
+    }
+
+    #[test]
+    fn an_axis_that_fits_at_the_floor_stays_centred() {
+        let mut v = view((3000.0, 600.0), (1000.0, 600.0));
+        v.fit_floor = 0.5;
+        v.focus = Some(Vec2::new(1500.0, 300.0));
+        v.fit();
+        assert_eq!(v.zoom, 0.5);
+        assert_eq!(
+            v.pan,
+            Vec2::new(-250.0, 150.0),
+            "x follows the focus, y is centred"
+        );
+    }
+
+    #[test]
+    fn a_graph_that_fits_above_the_floor_ignores_the_focus() {
+        let mut v = view((1400.0, 500.0), (1000.0, 600.0));
+        v.fit_floor = 0.5;
+        v.focus = Some(Vec2::new(100.0, 100.0));
+        v.fit();
+        let room_y = 600.0 - TOP_INSET - BOTTOM_INSET;
+        assert!((v.zoom - 1000.0 / 1400.0).abs() < 1e-6);
+        assert!(v.pan.x.abs() < 1e-3);
+        assert!((v.pan.y - (TOP_INSET + (room_y - 500.0 * v.zoom) / 2.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_default_floor_is_the_smallest_zoom_and_there_is_no_focus() {
+        let v = CanvasView::new(Vec2::new(10.0, 10.0));
+        assert_eq!((v.fit_floor, v.focus), (ZOOM_MIN, None));
     }
 
     #[test]

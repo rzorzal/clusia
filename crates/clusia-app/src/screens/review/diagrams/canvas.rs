@@ -60,7 +60,7 @@ const RING_GAP: f32 = 3.0;
 /// The thickness of the dashed ring of a new box.
 const RING_LINE: f32 = 1.0;
 /// The corner radius of a box that is not round.
-const BOX_RADIUS: f32 = 8.0;
+pub(crate) const BOX_RADIUS: f32 = 8.0;
 const DASH_ON: f32 = 5.0;
 const DASH_OFF: f32 = 3.0;
 /// The finer dash of a ring.
@@ -415,6 +415,16 @@ pub struct Pen<'a> {
     measure: FaceMeasure,
 }
 
+impl<'a> Pen<'a> {
+    pub(crate) fn new(fonts: &'a UiFonts, measure: FaceMeasure) -> Pen<'a> {
+        Pen { fonts, measure }
+    }
+
+    pub(crate) fn measure(&self) -> &FaceMeasure {
+        &self.measure
+    }
+}
+
 impl std::ops::Deref for Pen<'_> {
     type Target = UiFonts;
 
@@ -438,6 +448,21 @@ pub struct CanvasState {
     /// The frame `Pointer<DragEnd>` last arrived in.
     pub drag_end_frame: Option<u32>,
     built: Option<Built>,
+}
+
+impl CanvasState {
+    /// A canvas that shows `view`, not yet fitted, with no drag going on.
+    pub(crate) fn new(view: CanvasView) -> Self {
+        Self {
+            view,
+            fitted: false,
+            dragged: 0.0,
+            drag_at: 0.0,
+            dragging: false,
+            drag_end_frame: None,
+            built: None,
+        }
+    }
 }
 
 /// The clipped area the drag, scroll and pinch land on.
@@ -602,10 +627,7 @@ pub(super) fn fill_canvas(
         );
         let shown = shown_spec(spec, compare);
         let geometry = layout(&shown, &measure);
-        let pen = Pen {
-            fonts: &fonts,
-            measure,
-        };
+        let pen = Pen::new(&fonts, measure);
         let mut view = CanvasView::new(Vec2::new(geometry.size.0, geometry.size.1));
         if let Some(old) = state {
             view.viewport = old.view.viewport;
@@ -623,22 +645,17 @@ pub(super) fn fill_canvas(
             spawn_canvas(c, &pen, &theme, dots.as_deref(), &ctx, &shown, &geometry);
         });
         commands.entity(entity).insert(CanvasState {
-            view,
-            fitted: false,
-            dragged: 0.0,
-            drag_at: 0.0,
-            dragging: false,
-            drag_end_frame: None,
             built: Some(built),
+            ..CanvasState::new(view)
         });
     }
 }
 
-fn ignore() -> Pickable {
+pub(crate) fn ignore() -> Pickable {
     Pickable::IGNORE
 }
 
-fn type_of(style: TextStyle, ink: Swatch) -> Type {
+pub(crate) fn type_of(style: TextStyle, ink: Swatch) -> Type {
     let (size, weight, mono) = style_size(style);
     Type {
         size,
@@ -665,7 +682,7 @@ pub fn key_left(measure: &dyn Measure, name: &TextLines) -> f32 {
 
 /// One node per line of `block`, positioned from `origin` (the top-left corner of the node the
 /// lines are children of).
-fn text_block(
+pub(crate) fn text_block(
     p: &mut ChildSpawnerCommands,
     fonts: &Pen,
     block: &TextLines,
@@ -692,7 +709,7 @@ fn text_block(
     }
 }
 
-fn strip(p: &mut ChildSpawnerCommands, x: f32, y: f32, w: f32, h: f32, ink: Swatch) {
+pub(crate) fn strip(p: &mut ChildSpawnerCommands, x: f32, y: f32, w: f32, h: f32, ink: Swatch) {
     p.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -788,7 +805,7 @@ pub fn strip_rect(a: Point, b: Point, grow_a: bool, grow_b: bool) -> (GRect, boo
 }
 
 /// A straight piece of an edge, solid or dashed (one node either way).
-fn segment(
+pub(crate) fn segment(
     p: &mut ChildSpawnerCommands,
     tiles: Option<&Dots>,
     (a, b): (Point, Point),
@@ -811,7 +828,7 @@ fn segment(
     }
 }
 
-fn head(p: &mut ChildSpawnerCommands, fonts: &Pen, tip: Point, dir: Dir, ink: Swatch) {
+pub(crate) fn head(p: &mut ChildSpawnerCommands, fonts: &Pen, tip: Point, dir: Dir, ink: Swatch) {
     let (rect, glyph) = arrow_head(tip, dir);
     p.spawn((
         Node {
@@ -976,31 +993,51 @@ fn spawn_canvas(
     g: &Geometry,
 ) {
     let canvas = ctx.canvas;
-    if let Some(dots) = dots {
-        c.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(0),
-                top: px(0),
-                width: percent(100),
-                height: percent(100),
-                ..default()
+    spawn_ground(c, theme, dots);
+    spawn_viewport(c, canvas, g.size, |content| {
+        spawn_content(content, fonts, ctx, spec, g)
+    });
+    header(c, fonts, spec, g.dropped_texts);
+    zoom_control(c, fonts, canvas);
+    legend(c, fonts, ctx.tiles.as_ref(), ctx.compare);
+}
+
+/// The dotted ground under the whole canvas (none without the tiles).
+pub(crate) fn spawn_ground(c: &mut ChildSpawnerCommands, theme: &Theme, dots: Option<&Dots>) {
+    let Some(dots) = dots else { return };
+    c.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            top: px(0),
+            width: percent(100),
+            height: percent(100),
+            ..default()
+        },
+        ImageNode {
+            image: dots.dot.clone(),
+            color: theme.tokens.canvas_dot,
+            image_mode: NodeImageMode::Tiled {
+                tile_x: true,
+                tile_y: true,
+                stretch_value: 1.0,
             },
-            ImageNode {
-                image: dots.dot.clone(),
-                color: theme.tokens.canvas_dot,
-                image_mode: NodeImageMode::Tiled {
-                    tile_x: true,
-                    tile_y: true,
-                    stretch_value: 1.0,
-                },
-                ..default()
-            },
-            Tint(Swatch::CanvasDot),
-            ignore(),
-            CanvasDots,
-        ));
-    }
+            ..default()
+        },
+        Tint(Swatch::CanvasDot),
+        ignore(),
+        CanvasDots,
+    ));
+}
+
+/// The clipped viewport of `canvas`, which takes the drag, scroll and pinch, and in it the one
+/// `ContentNode` of `size` that `content` fills.
+pub(crate) fn spawn_viewport(
+    c: &mut ChildSpawnerCommands,
+    canvas: Entity,
+    size: (f32, f32),
+    content: impl FnOnce(&mut ChildSpawnerCommands),
+) {
     c.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -1077,8 +1114,8 @@ fn spawn_canvas(
                 position_type: PositionType::Absolute,
                 left: px(0),
                 top: px(0),
-                width: px(g.size.0),
-                height: px(g.size.1),
+                width: px(size.0),
+                height: px(size.1),
                 ..default()
             },
             UiTransform::IDENTITY,
@@ -1087,11 +1124,8 @@ fn spawn_canvas(
             ignore(),
             ContentNode(canvas),
         ))
-        .with_children(|content| spawn_content(content, fonts, ctx, spec, g));
+        .with_children(content);
     });
-    header(c, fonts, spec, g.dropped_texts);
-    zoom_control(c, fonts, canvas);
-    legend(c, fonts, ctx.tiles.as_ref(), ctx.compare);
 }
 
 fn spawn_content(
@@ -1214,7 +1248,7 @@ fn spawn_content(
     }
 }
 
-fn draw_edge(
+pub(crate) fn draw_edge(
     p: &mut ChildSpawnerCommands,
     fonts: &Pen,
     tiles: Option<&Dots>,
@@ -1401,7 +1435,7 @@ fn header(c: &mut ChildSpawnerCommands, fonts: &Pen, spec: &DiagramSpec, dropped
     });
 }
 
-fn zoom_control(c: &mut ChildSpawnerCommands, fonts: &Pen, canvas: Entity) {
+pub(crate) fn zoom_control(c: &mut ChildSpawnerCommands, fonts: &Pen, canvas: Entity) {
     let button = |label: &'static str, factor: f32| {
         (
             Node {
@@ -1452,7 +1486,7 @@ fn zoom_control(c: &mut ChildSpawnerCommands, fonts: &Pen, canvas: Entity) {
 }
 
 /// One swatch of the legend: filled and ringed, or dashed.
-fn legend_item(
+pub(crate) fn legend_item(
     row: &mut ChildSpawnerCommands,
     fonts: &Pen,
     tiles: Option<&Dots>,
@@ -1685,11 +1719,18 @@ fn sync_viewport(
     }
 }
 
-/// The ring of a box that is hovered or has the keyboard focus.
-fn outline_boxes(
+/// The ring of a box that is hovered or has the keyboard focus. A Calls box also rings while it
+/// is selected, so its own system draws it.
+pub(crate) fn outline_boxes(
     focus: Res<InputFocus>,
     theme: Res<Theme>,
-    mut boxes: Query<(Entity, &Hovered, &mut Outline), With<DiagramBox>>,
+    mut boxes: Query<
+        (Entity, &Hovered, &mut Outline),
+        (
+            With<DiagramBox>,
+            Without<crate::screens::review::calls::canvas::CallsMarker>,
+        ),
+    >,
 ) {
     for (entity, hovered, mut outline) in &mut boxes {
         let on = hovered.get() || focus.get() == Some(entity);

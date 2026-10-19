@@ -43,7 +43,7 @@ pub struct CallsModel {
     pub codes: HashMap<String, DiagramCode>,
     /// Functions whose code was asked for and has not arrived; an answer removes the entry.
     pub requested_code: HashSet<String>,
-    code_order: VecDeque<String>,
+    pub(super) code_order: VecDeque<String>,
     /// Why the index failed.
     pub failed: Option<String>,
 }

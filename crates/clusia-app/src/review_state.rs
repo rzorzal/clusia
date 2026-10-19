@@ -272,6 +272,8 @@ pub struct TabUi {
     pub calls_expand: Vec<i8>,
     /// The graph's depth; `None`: `diff.calls_depth` of the config.
     pub calls_depth: Option<u8>,
+    /// The Calls view's Depth menu is open.
+    pub calls_depth_menu: bool,
 }
 
 impl Default for TabUi {
@@ -310,6 +312,7 @@ impl Default for TabUi {
             calls_node: None,
             calls_expand: Vec::new(),
             calls_depth: None,
+            calls_depth_menu: false,
         }
     }
 }
