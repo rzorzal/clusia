@@ -44,8 +44,8 @@ fn main() -> ExitCode {
         scene: args.scene,
     };
     if args.demo {
-        app::run(launch);
-        return ExitCode::SUCCESS;
+        app::run(launch.clone());
+        return screenshot_exit(&launch);
     }
     let _lock = match InstanceLock::acquire(&paths.app_lock()) {
         Ok(Some(lock)) => lock,
@@ -58,8 +58,19 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    app::run(launch);
-    ExitCode::SUCCESS
+    app::run(launch.clone());
+    screenshot_exit(&launch)
+}
+
+/// A screenshot run succeeds only when what it wrote shows content.
+fn screenshot_exit(launch: &Launch) -> ExitCode {
+    match app::check_screenshots(launch) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("clusia-app: {message}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn resolve(args: &Args) -> Result<(Paths, Option<PathBuf>), String> {

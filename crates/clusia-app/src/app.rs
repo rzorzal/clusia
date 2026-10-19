@@ -78,6 +78,21 @@ impl ScreenshotPlan {
     }
 }
 
+/// Checks every frame `--screenshot` wrote, so a black or flat render fails the run instead of
+/// passing as a file. `Ok` when there is no screenshot to check.
+pub fn check_screenshots(launch: &Launch) -> Result<(), String> {
+    let Some(path) = &launch.screenshot else {
+        return Ok(());
+    };
+    let plan = ScreenshotPlan {
+        path: path.clone(),
+        after_frames: 0,
+        frames: launch.frames,
+        needs_3d: false,
+    };
+    (0..launch.frames.max(1)).try_for_each(|i| crate::render_check::check_png(&plan.path(i)))
+}
+
 /// How long the window waits, once closed, for the bridge to deliver what is still queued.
 const BRIDGE_EXIT_WAIT: Duration = Duration::from_secs(3);
 
@@ -280,6 +295,16 @@ mod tests {
             frame_step: None,
             scene: None,
         }
+    }
+
+    #[test]
+    fn a_black_screenshot_fails_the_run_and_no_screenshot_passes() {
+        assert_eq!(check_screenshots(&launch(Mode::Live, None)), Ok(()));
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("black.png");
+        image::RgbImage::new(64, 48).save(&out).unwrap();
+        let err = check_screenshots(&launch(Mode::Live, out.to_str())).unwrap_err();
+        assert!(err.contains("the render is black"), "{err}");
     }
 
     #[test]
