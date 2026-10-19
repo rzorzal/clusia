@@ -1,6 +1,7 @@
 //! UI building blocks shared by every screen.
 
 pub mod code;
+pub mod code_select;
 pub mod composer;
 pub mod emoji;
 pub mod kit;

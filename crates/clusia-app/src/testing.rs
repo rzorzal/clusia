@@ -850,3 +850,88 @@ pub fn pickable(app: &mut App, pr: &PrRef) -> Vec<u32> {
         })
         .collect()
 }
+
+/// Where byte `offset` of the code `Text` on `line` sits, in logical window pixels: on its first
+/// visual line, at the left edge of the character that starts there.
+pub fn code_point(app: &App, line: Entity, offset: usize) -> Vec2 {
+    use bevy::text::ComputedTextBlock;
+    let block = app
+        .world()
+        .get::<ComputedTextBlock>(line)
+        .expect("a laid-out text");
+    let node = app.world().get::<ComputedNode>(line).expect("laid out");
+    let layout = &crate::ui::code_select::drawn_layout(block, node);
+    let cursor = parley::editing::Cursor::from_byte_index(
+        layout,
+        offset,
+        parley::layout::Affinity::Downstream,
+    );
+    let g = cursor.geometry(layout, 1.0);
+    let node = app.world().get::<ComputedNode>(line).expect("laid out");
+    let at = app
+        .world()
+        .get::<UiGlobalTransform>(line)
+        .expect("positioned");
+    let scale = node.inverse_scale_factor;
+    let top_left = at.translation - node.size / 2.0;
+    (top_left + Vec2::new(g.x0 as f32, ((g.y0 + g.y1) / 2.0) as f32)) * scale
+}
+
+/// A primary press on the code `Text` `line` at `at`, and a frame.
+pub fn press_code(app: &mut App, line: Entity, at: Vec2) {
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(at),
+        Press {
+            button: PointerButton::Primary,
+            hit: nowhere(),
+            count: 1,
+        },
+        line,
+    ));
+    app.update();
+}
+
+/// The pointer, held since a press on `line` at `from`, moves to `to`: a drag, and a frame.
+pub fn drag_code(app: &mut App, line: Entity, from: Vec2, to: Vec2) {
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(to),
+        Drag {
+            button: PointerButton::Primary,
+            distance: to - from,
+            delta: to - from,
+        },
+        line,
+    ));
+    app.update();
+}
+
+/// The key `code` goes down with the Cmd key held, as the window sends it, and a frame.
+pub fn chord(app: &mut App, code: KeyCode) {
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    for key in [KeyCode::SuperLeft, code] {
+        app.world_mut().write_message(KeyboardInput {
+            key_code: key,
+            logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+    }
+    app.update();
+}
+
+/// The left mouse button goes down where no code is, as the window sends it, and a frame.
+pub fn left_press(app: &mut App) {
+    use bevy::input::ButtonState;
+    use bevy::input::mouse::{MouseButton, MouseButtonInput};
+    app.world_mut().write_message(MouseButtonInput {
+        button: MouseButton::Left,
+        state: ButtonState::Pressed,
+        window: Entity::PLACEHOLDER,
+    });
+    app.update();
+}

@@ -29,6 +29,7 @@ use crate::screens::open_pr::Palette;
 use crate::screens::review::agent::{Chats, PanelTab, PermissionQueue};
 use crate::screens::review::diagrams::Diagrams;
 use crate::screens::review::diagrams::keywords::render::{focus_pose, view_pose};
+use crate::ui::code_select::{At, CodeLine, CodeSelection};
 use crate::ui::composer::popover::{PopoverKind, Popovers};
 use crate::ui::composer::{ComposerKey, ComposerMode, Slot};
 
@@ -44,7 +45,50 @@ impl Plugin for ScenePlugin {
                 stage_snapshot(world, scene);
             });
         add_scroll(app, scene);
+        if matches!(scene, Scene::DiffSelected | Scene::SplitSelected) {
+            app.add_systems(
+                Update,
+                move |lines: Query<&CodeLine>,
+                      selection: ResMut<CodeSelection>,
+                      done: Local<bool>| {
+                    select_code(scene, lines, selection, done)
+                },
+            );
+        }
     }
+}
+
+/// Selects from the middle of one line to the middle of one three lines below, once the diff
+/// has its lines: on the right-hand side in Split.
+fn select_code(
+    scene: Scene,
+    lines: Query<&CodeLine>,
+    mut selection: ResMut<CodeSelection>,
+    mut done: Local<bool>,
+) {
+    let column = u8::from(scene == Scene::SplitSelected);
+    let mut own: Vec<&CodeLine> = lines
+        .iter()
+        .filter(|l| l.key.column == column && l.text.len() > 24)
+        .collect();
+    if *done || own.len() < 4 {
+        return;
+    }
+    own.sort_by_key(|l| l.key.order);
+    let (from, to) = (own[0], own[3]);
+    selection.select(
+        from.key.group,
+        column,
+        At {
+            order: from.key.order,
+            offset: 6,
+        },
+        At {
+            order: to.key.order,
+            offset: 18,
+        },
+    );
+    *done = true;
 }
 
 /// Only the scene that shows the end of the Notifications page keeps its scroll area scrolled.
@@ -475,7 +519,7 @@ pub fn stage(world: &mut World, scene: Scene) {
     let mut round = None;
     let mut ui = TabUi::default();
     match scene {
-        Scene::Diff | Scene::Loading | Scene::Failed | Scene::Palette => {}
+        Scene::Diff | Scene::DiffSelected | Scene::Loading | Scene::Failed | Scene::Palette => {}
         Scene::FirstRun
         | Scene::FirstRunBoth
         | Scene::FirstRunCustom
@@ -523,7 +567,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         }
         Scene::ComposerPreview => ui.editor = Some(composer_editor(ComposerMode::Preview)),
         Scene::Rendered => ui.section = ReviewSection::Comments,
-        Scene::Split => ui.mode = DiffMode::Split,
+        Scene::Split | Scene::SplitSelected => ui.mode = DiffMode::Split,
         Scene::CommentsHidden => {
             ui.section = ReviewSection::Comments;
             ui.filter = crate::review_state::CommentsFilter::All;
@@ -844,7 +888,10 @@ mod tests {
                         assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
                     }
                 }
-                Scene::Split => {
+                Scene::DiffSelected => {
+                    assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
+                }
+                Scene::Split | Scene::SplitSelected => {
                     assert_eq!(tab.ui.mode, DiffMode::Split);
                     assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
                 }

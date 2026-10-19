@@ -34,7 +34,8 @@ use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
 use crate::screens::review::revalidation::{Revalidations, reanchor_click};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
-use crate::ui::code::{CodeSpan, spans_for, wrapped_code_line};
+use crate::ui::code::{CodeSpan, plain_text, spans_for, wrapped_code_line};
+use crate::ui::code_select::{ClickKind, CodeSelection, LineKey, selectable};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, avatar, badge, button, card, panel,
@@ -1177,7 +1178,13 @@ fn mark(p: &mut ChildSpawnerCommands, fonts: &UiFonts, kind: RowKind, size: f32)
 
 /// The code of a row. It takes the room the number and the sign leave and breaks at its edge, so
 /// a wrapped line continues under its own start, with no number of its own.
-fn code(p: &mut ChildSpawnerCommands, fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>) {
+fn code(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    size: f32,
+    spans: Vec<CodeSpan>,
+    select: Option<LineKey>,
+) {
     p.spawn(Node {
         flex_grow: 1.0,
         flex_basis: px(0),
@@ -1190,8 +1197,16 @@ fn code(p: &mut ChildSpawnerCommands, fonts: &UiFonts, size: f32, spans: Vec<Cod
         },
         ..default()
     })
-    .with_children(|c| {
-        c.spawn(wrapped_code_line(fonts, size, spans));
+    .with_children(|c| match select {
+        Some(key) => selectable(
+            c,
+            key,
+            plain_text(&spans),
+            wrapped_code_line(fonts, size, spans),
+        ),
+        None => {
+            c.spawn(wrapped_code_line(fonts, size, spans));
+        }
     });
 }
 
@@ -1243,6 +1258,7 @@ fn body(
     opts: &RenderOpts,
 ) {
     let size = v.code_size;
+    let group = p.target_entity();
     let line_button = |row: usize, anchor: Option<(Side, u32)>, commentable: bool| {
         let (side, line) = anchor.filter(|_| commentable)?;
         Some(LineButton {
@@ -1277,7 +1293,12 @@ fn body(
                         number(r, fonts, line.old, size);
                         number(r, fonts, line.new, size);
                         mark(r, fonts, line.kind, size);
-                        code(r, fonts, size, line.spans.clone());
+                        let key = LineKey {
+                            group,
+                            order: at,
+                            column: 0,
+                        };
+                        code(r, fonts, size, line.spans.clone(), Some(key));
                     },
                 );
                 if !under.is_empty() {
@@ -1348,19 +1369,25 @@ fn body(
                                         ink: Swatch::Muted,
                                         mark: None,
                                     }],
+                                    None,
                                 );
                             });
                         }
                         return;
                     }
-                    for cell in [&line.left, &line.right] {
+                    for (column, cell) in [&line.left, &line.right].into_iter().enumerate() {
                         match cell {
                             Some(c) => {
                                 let b = line_button(c.row, c.anchor, c.commentable);
                                 line_node(r, percent(50), c.kind, c.selected, b, None, |x| {
                                     number(x, fonts, c.number, size);
                                     mark(x, fonts, c.kind, size);
-                                    code(x, fonts, size, c.spans.clone());
+                                    let key = LineKey {
+                                        group,
+                                        order: at,
+                                        column: column as u8,
+                                    };
+                                    code(x, fonts, size, c.spans.clone(), Some(key));
                                 });
                             }
                             None => {
@@ -1648,10 +1675,62 @@ fn on_line(
     mut toasts: ResMut<Toasts>,
     time: Res<Time>,
     mut asks: ResMut<Asks>,
+    mut selection: ResMut<CodeSelection>,
 ) {
+    let kind = selection.take_click();
     let Ok(b) = buttons.get(activate.entity) else {
         return;
     };
+    match kind {
+        // A drag across the line selected its code; it is not a click on it.
+        ClickKind::Selected { multi: false } => {}
+        // A second press on the line, soon after the click that opened an editor on it: the
+        // click was the start of a double click, so the editor it opened goes.
+        ClickKind::Selected { multi: true } => {
+            if let Some(ui) = ui_of(&mut tabs, &b.pr) {
+                close_untouched(ui, b);
+            }
+        }
+        ClickKind::Plain => open_line(
+            b,
+            keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
+            &mut tabs,
+            &model,
+            &mut rounds,
+            &mut toasts,
+            &time,
+            &mut asks,
+        ),
+    }
+}
+
+/// Closes the editor on `b`'s line when nothing was typed in it and nothing came of it.
+fn close_untouched(ui: &mut TabUi, b: &LineButton) {
+    let untouched = ui.editor.as_ref().is_some_and(|e| {
+        e.text.is_empty()
+            && e.error.is_none()
+            && e.ticket.is_none()
+            && matches!(
+                &e.target,
+                EditTarget::Line { path, side, start: None, line }
+                    if *path == b.path && *side == b.side && *line == b.line
+            )
+    });
+    if untouched {
+        ui.editor = None;
+    }
+}
+
+fn open_line(
+    b: &LineButton,
+    shift: bool,
+    tabs: &mut ReviewTabs,
+    model: &Model,
+    rounds: &mut Revalidations,
+    toasts: &mut Toasts,
+    time: &Time,
+    asks: &mut Asks,
+) {
     // While a comment waits for its new place, a click on a line is that place.
     let place = AnchorInput {
         path: b.path.clone(),
@@ -1659,22 +1738,12 @@ fn on_line(
         start_line: None,
         side: b.side,
     };
-    if reanchor_click(
-        &tabs,
-        &model,
-        &mut rounds,
-        &mut toasts,
-        &time,
-        &mut asks,
-        &b.pr,
-        place,
-    ) {
+    if reanchor_click(tabs, model, rounds, toasts, time, asks, &b.pr, place) {
         return;
     }
-    let Some(ui) = ui_of(&mut tabs, &b.pr) else {
+    let Some(ui) = ui_of(tabs, &b.pr) else {
         return;
     };
-    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     if shift
         && let Some(editor) = &mut ui.editor
         && let EditTarget::Line {
@@ -2957,14 +3026,25 @@ mod tests {
     /// A press and release on `target`, as the picking backend sends them; they bubble up to the
     /// row's button the way a click on a continuation line does.
     fn click_on(app: &mut App, target: Entity) {
-        use bevy::camera::NormalizedRenderTarget;
-        use bevy::picking::backend::HitData;
-        use bevy::picking::events::{Click, Pointer, Press};
-        use bevy::picking::pointer::{Location, PointerButton, PointerId};
+        press_on(app, target, Vec2::ZERO);
+        release_on(app, target);
+    }
+
+    /// A press on `target` at `at`, with the button widgets listening.
+    fn press_on(app: &mut App, target: Entity, at: Vec2) {
         use bevy::ui_widgets::ButtonPlugin;
         if !app.is_plugin_added::<ButtonPlugin>() {
             app.add_plugins(ButtonPlugin);
         }
+        testing::press_code(app, target, at);
+    }
+
+    /// The release that follows a press on `target`: the click the backend sends.
+    fn release_on(app: &mut App, target: Entity) {
+        use bevy::camera::NormalizedRenderTarget;
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::{Click, Pointer};
+        use bevy::picking::pointer::{Location, PointerButton, PointerId};
         let location = Location {
             target: NormalizedRenderTarget::None {
                 width: 1280,
@@ -2973,17 +3053,6 @@ mod tests {
             position: Vec2::ZERO,
         };
         let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location.clone(),
-            Press {
-                button: PointerButton::Primary,
-                hit: hit.clone(),
-                count: 1,
-            },
-            target,
-        ));
-        app.update();
         app.world_mut().trigger(Pointer::new(
             PointerId::Mouse,
             location,
@@ -3042,6 +3111,512 @@ mod tests {
                 line: 40
             })
         );
+    }
+
+    /// The code lines of the screen as (entity, line), top to bottom and left side first.
+    fn code_lines(app: &mut App) -> Vec<(Entity, crate::ui::code_select::CodeLine)> {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &crate::ui::code_select::CodeLine)>();
+        let mut lines: Vec<_> = q.iter(app.world()).map(|(e, l)| (e, l.clone())).collect();
+        lines.sort_by_key(|(_, l)| (l.key.order, l.key.column));
+        lines
+    }
+
+    fn selected(app: &App) -> String {
+        let mut q = app
+            .world()
+            .try_query::<&crate::ui::code_select::CodeLine>()
+            .unwrap();
+        let lines: Vec<_> = q.iter(app.world()).collect();
+        app.world().resource::<CodeSelection>().text(lines)
+    }
+
+    fn drag_between(app: &mut App, from: (Entity, usize), to: (Entity, usize)) {
+        let a = testing::code_point(app, from.0, from.1);
+        let b = testing::code_point(app, to.0, to.1);
+        press_on(app, from.0, a);
+        testing::drag_code(app, from.0, a, b);
+    }
+
+    fn line_with<'a>(
+        lines: &'a [(Entity, crate::ui::code_select::CodeLine)],
+        needle: &str,
+        column: u8,
+    ) -> &'a (Entity, crate::ui::code_select::CodeLine) {
+        lines
+            .iter()
+            .find(|(_, l)| l.key.column == column && l.text.contains(needle))
+            .expect("the code line")
+    }
+
+    #[test]
+    fn dragging_across_lines_selects_their_code_and_nothing_else() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let first = line_with(&lines, "Refresh one minute early", 0).clone();
+        let next = lines
+            .iter()
+            .find(|(_, l)| l.key.order == first.1.key.order + 1)
+            .expect("a line below")
+            .clone();
+        drag_between(&mut app, (first.0, 8), (next.0, 5));
+        let expected = format!(
+            "{}\n{}",
+            &first.1.text[8..],
+            &next.1.text[..5.min(next.1.text.len())]
+        );
+        assert_eq!(selected(&app), expected);
+        assert!(!selected(&app).contains("+"), "no sign: {}", selected(&app));
+    }
+
+    #[test]
+    fn a_selection_made_upwards_reads_top_down() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let first = line_with(&lines, "Refresh one minute early", 0).clone();
+        let next = lines
+            .iter()
+            .find(|(_, l)| l.key.order == first.1.key.order + 1)
+            .unwrap()
+            .clone();
+        drag_between(&mut app, (next.0, 3.min(next.1.text.len())), (first.0, 4));
+        let expected = format!(
+            "{}\n{}",
+            &first.1.text[4..],
+            &next.1.text[..3.min(next.1.text.len())]
+        );
+        assert_eq!(selected(&app), expected);
+    }
+
+    #[test]
+    fn a_split_selection_stays_on_the_side_it_began_on() {
+        let mut app = wrap_app();
+        set_mode(&mut app, DiffMode::Split);
+        let lines = code_lines(&mut app);
+        let right: Vec<_> = lines.iter().filter(|(_, l)| l.key.column == 1).collect();
+        assert!(right.len() >= 3, "the demo has three right-hand rows");
+        let (from, to) = (right[0].clone(), right[2].clone());
+        // The pointer ends over the left side of the last row.
+        let (left_of_to, _) = lines
+            .iter()
+            .find(|(_, l)| l.key.column == 0 && l.key.order == to.1.key.order)
+            .expect("a left-hand line on the last row");
+        let end = testing::code_point(&app, *left_of_to, 2);
+        let start = testing::code_point(&app, from.0, 0);
+        testing::press_code(&mut app, from.0, start);
+        testing::drag_code(&mut app, from.0, start, end);
+        let copied = selected(&app);
+        let own: Vec<&str> = right
+            .iter()
+            .filter(|(_, l)| l.key.order <= to.1.key.order)
+            .map(|(_, l)| l.text.as_str())
+            .collect();
+        let pieces: Vec<&str> = copied.split('\n').collect();
+        assert_eq!(
+            pieces.len(),
+            own.len(),
+            "one piece per right-hand row: {copied:?}"
+        );
+        let last = own.len() - 1;
+        assert_eq!(pieces[..last], own[..last]);
+        assert!(own[last].starts_with(pieces[last]));
+    }
+
+    #[test]
+    fn a_wrapped_line_copies_as_its_one_original_line() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        let (_, _, _, h) = testing::frame(&app, text);
+        assert!(h >= 2.0 * 22.0 - 1.0 - 8.0, "the line wrapped: {h}");
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        assert_eq!(selected(&app), long.text);
+        assert!(!selected(&app).contains('\n'));
+    }
+
+    #[test]
+    fn a_double_click_selects_a_word_and_a_triple_click_the_line() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, line) = line_with(&lines, "Refresh one minute early", 0).clone();
+        let at = line.text.find("minute").unwrap() + 2;
+        let p = testing::code_point(&app, text, at);
+        testing::press_code(&mut app, text, p);
+        assert_eq!(selected(&app), "");
+        testing::press_code(&mut app, text, p);
+        assert_eq!(selected(&app), "minute");
+        testing::press_code(&mut app, text, p);
+        assert_eq!(selected(&app), line.text);
+    }
+
+    #[test]
+    fn a_click_still_comments_but_a_drag_or_a_multi_click_does_not() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        click_on(&mut app, text);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_some(),
+            "a click comments at once"
+        );
+        ui_mut(&mut app, &pr).0.get_mut(&pr).unwrap().ui.editor = None;
+        testing::settle(&mut app);
+
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        release_on(&mut app, text);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_none(),
+            "a drag selects and does not comment"
+        );
+
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        let p = testing::code_point(&app, text, 3);
+        press_on(&mut app, text, p);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_none(),
+            "a double click selects and does not comment"
+        );
+    }
+
+    #[test]
+    fn cmd_c_copies_the_selection_through_the_clipboard_path() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        testing::chord(&mut app, KeyCode::KeyC);
+        assert_eq!(app.world().resource::<CopiedText>().0, [long.text]);
+    }
+
+    #[test]
+    fn cmd_c_with_nothing_selected_copies_nothing() {
+        let mut app = wrap_app();
+        testing::chord(&mut app, KeyCode::KeyC);
+        assert!(app.world().resource::<CopiedText>().0.is_empty());
+    }
+
+    #[test]
+    fn the_selected_text_is_highlighted_in_the_theme_color() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        let rects = |app: &mut App| {
+            let mut q = app.world_mut().query::<(&Fill, &Node)>();
+            q.iter(app.world())
+                .filter(|(f, n)| {
+                    f.0 == Swatch::TextSelect && n.position_type == PositionType::Absolute
+                })
+                .count()
+        };
+        assert_eq!(rects(&mut app), 0);
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        testing::settle(&mut app);
+        assert!(rects(&mut app) >= 1, "the selection is drawn");
+    }
+
+    #[test]
+    fn the_highlight_covers_exactly_the_selected_characters() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        let rect = testing::find::<Fill>(&mut app, |f| f.0 == Swatch::TextSelect);
+        let (left, top, width, height) = testing::frame(&app, rect);
+        let (from, to) = (
+            testing::code_point(&app, text, 7),
+            testing::code_point(&app, text, 15),
+        );
+        let (_, text_top, _, _) = testing::frame(&app, text);
+        assert!((left - from.x).abs() <= 1.0, "left {left} vs {}", from.x);
+        assert!(
+            (left + width - to.x).abs() <= 1.0,
+            "right {} vs {}",
+            left + width,
+            to.x
+        );
+        assert!((top - text_top).abs() <= 1.0, "top {top} vs {text_top}");
+        assert!(height > 8.0 && height < 30.0, "one visual line: {height}");
+    }
+
+    fn highlights(app: &mut App) -> usize {
+        let mut q = app.world_mut().query::<&Fill>();
+        q.iter(app.world())
+            .filter(|f| f.0 == Swatch::TextSelect)
+            .count()
+    }
+
+    #[test]
+    fn a_click_elsewhere_ends_the_selection_and_its_highlight() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        assert_eq!(selected(&app).len(), 8);
+        assert!(highlights(&mut app) >= 1);
+        testing::left_press(&mut app);
+        testing::settle(&mut app);
+        assert_eq!(selected(&app), "");
+        assert_eq!(highlights(&mut app), 0);
+    }
+
+    #[test]
+    fn a_press_on_code_replaces_the_selection() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        assert_eq!(selected(&app).len(), 8);
+        let p = testing::code_point(&app, text, 3);
+        press_on(&mut app, text, p);
+        assert_eq!(selected(&app), "", "the new press collapsed it");
+    }
+
+    /// The code `Text` that holds `needle` now: a click that opens an editor rebuilds the rows.
+    fn fresh_line(app: &mut App, needle: &str) -> Entity {
+        let lines = code_lines(app);
+        line_with(&lines, needle, 0).0
+    }
+
+    #[test]
+    fn a_single_click_opens_the_editor_with_no_wait() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let text = fresh_line(&mut app, "Refresh one minute early");
+        click_on(&mut app, text);
+        assert!(testing::tab(&app, &pr).ui.editor.is_some());
+    }
+
+    #[test]
+    fn a_double_click_ends_with_the_word_selected_copied_and_no_editor() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let needle = "Refresh one minute early";
+        let text = fresh_line(&mut app, needle);
+        let line = code_lines(&mut app)
+            .iter()
+            .find(|(e, _)| *e == text)
+            .unwrap()
+            .1
+            .clone();
+        let at = line.text.find("minute").unwrap() + 2;
+        let p = testing::code_point(&app, text, at);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_some(),
+            "the first click"
+        );
+        testing::settle(&mut app);
+        // The pointer has not moved.
+        let text = fresh_line(&mut app, needle);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ui.editor.is_none(), "no editor");
+        assert_eq!(selected(&app), "minute");
+        testing::chord(&mut app, KeyCode::KeyC);
+        assert_eq!(app.world().resource::<CopiedText>().0, ["minute"]);
+    }
+
+    #[test]
+    fn a_quick_click_on_another_line_opens_that_line() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let first =
+            testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 39);
+        testing::activate(&mut app, first);
+        testing::settle(&mut app);
+        let text = fresh_line(&mut app, "Refresh one minute early");
+        click_on(&mut app, text);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.editor.map(|e| e.target),
+            Some(EditTarget::Line {
+                path: REFRESH.into(),
+                side: Side::Right,
+                start: None,
+                line: 40
+            })
+        );
+    }
+
+    #[test]
+    fn a_quick_shift_click_extends_the_range_of_the_line_just_clicked() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let lines = code_lines(&mut app);
+        let a = lines
+            .iter()
+            .find(|(_, l)| l.key.column == 0 && l.text.contains("Refresh one minute early"))
+            .unwrap()
+            .0;
+        // A click on the line before it, then a shift-click on this one, right after.
+        let before = lines
+            .iter()
+            .find(|(e, l)| *e != a && l.key.order + 1 == code_order(&lines, a))
+            .unwrap()
+            .0;
+        click_on(&mut app, before);
+        testing::settle(&mut app);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        let a = fresh_line(&mut app, "Refresh one minute early");
+        click_on(&mut app, a);
+        let target = testing::tab(&app, &pr).ui.editor.map(|e| e.target);
+        let Some(EditTarget::Line { start, line, .. }) = target else {
+            panic!("a line editor");
+        };
+        assert_eq!((start.is_some(), line), (true, 40), "{target:?}");
+    }
+
+    fn code_order(lines: &[(Entity, crate::ui::code_select::CodeLine)], of: Entity) -> usize {
+        lines.iter().find(|(e, _)| *e == of).unwrap().1.key.order
+    }
+
+    #[test]
+    fn a_double_click_on_a_line_whose_editor_has_text_keeps_the_editor() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let needle = "Refresh one minute early";
+        let text = fresh_line(&mut app, needle);
+        let p = testing::code_point(&app, text, 4);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |_| true);
+        testing::type_into(&mut app, area, "keep this");
+        testing::settle(&mut app);
+        let text = fresh_line(&mut app, needle);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        testing::settle(&mut app);
+        let editor = testing::tab(&app, &pr).ui.editor;
+        assert!(editor.is_some(), "the editor stays");
+    }
+
+    #[test]
+    fn the_flags_of_a_drag_do_not_swallow_a_later_gutter_click() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        // The release is never seen by the line (the pointer left it); a press on a gutter
+        // follows, then the click on the row's button.
+        testing::left_press(&mut app);
+        let row = testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 44);
+        testing::activate(&mut app, row);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_some(),
+            "the click comments"
+        );
+    }
+
+    #[test]
+    fn a_selection_whose_lines_changed_or_are_gone_ends() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        assert!(!selected(&app).is_empty());
+        // One line's text changes under the selection.
+        app.world_mut()
+            .get_mut::<crate::ui::code_select::CodeLine>(text)
+            .unwrap()
+            .text
+            .push('!');
+        testing::settle(&mut app);
+        assert_eq!(selected(&app), "", "changed content");
+        assert_eq!(highlights(&mut app), 0);
+
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        assert!(!selected(&app).is_empty());
+        let all: Vec<Entity> = code_lines(&mut app).iter().map(|(e, _)| *e).collect();
+        for e in all {
+            app.world_mut().entity_mut(e).despawn();
+        }
+        testing::settle(&mut app);
+        assert!(
+            app.world().resource::<CodeSelection>().is_empty(),
+            "gone lines"
+        );
+    }
+
+    #[test]
+    fn a_selection_survives_a_rebuild_that_keeps_the_lines() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        // Opening a comment elsewhere rebuilds the body.
+        ui_mut(&mut app, &pr).0.get_mut(&pr).unwrap().ui.editor = Some(Editor {
+            target: EditTarget::Line {
+                path: REFRESH.into(),
+                side: Side::Right,
+                start: None,
+                line: 44,
+            },
+            text: String::new(),
+            error: None,
+            ticket: None,
+            mode: ComposerMode::Write,
+        });
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ui.editor.is_some());
+        assert_eq!(selected(&app), long.text[7..15]);
+    }
+
+    #[test]
+    fn copy_needs_the_command_key_alone() {
+        use bevy::input::ButtonState;
+        use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        // Cmd-Shift-C is another command.
+        for key in [KeyCode::ShiftLeft, KeyCode::SuperLeft, KeyCode::KeyC] {
+            app.world_mut().write_message(KeyboardInput {
+                key_code: key,
+                logical_key: Key::Unidentified(NativeKey::Unidentified),
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+        }
+        app.update();
+        assert!(app.world().resource::<CopiedText>().0.is_empty());
+    }
+
+    #[test]
+    fn copy_is_left_to_a_focused_text_field() {
+        use bevy::input_focus::InputFocus;
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        let field = app.world_mut().spawn(EditableText::default()).id();
+        app.world_mut()
+            .resource_mut::<InputFocus>()
+            .set(field, bevy::input_focus::FocusCause::Navigated);
+        testing::chord(&mut app, KeyCode::KeyC);
+        assert!(app.world().resource::<CopiedText>().0.is_empty());
     }
 
     #[test]
