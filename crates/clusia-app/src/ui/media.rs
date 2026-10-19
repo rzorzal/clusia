@@ -22,7 +22,7 @@ use image::{
 use crate::bridge::{Ask, Asks, MediaError};
 use crate::fonts::UiFonts;
 use crate::ui::composer::popover::sync_popovers;
-use crate::ui::kit::{Type, text};
+use crate::ui::kit::{Type, wrapped_text};
 use crate::ui::markdown::{MdImage, link_chip};
 
 /// Frames kept from one GIF.
@@ -302,7 +302,7 @@ fn fill_slots(
         match state {
             MediaState::Loading => {
                 e.with_children(|p| {
-                    p.spawn(text(&fonts, "Loading image…", Type::META));
+                    p.spawn(wrapped_text(&fonts, "Loading image…", Type::META));
                 });
             }
             MediaState::Image(handle) => {

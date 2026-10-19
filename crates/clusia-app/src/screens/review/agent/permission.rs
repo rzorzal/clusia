@@ -11,7 +11,7 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::ButtonInput;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, observe};
+use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_core::printable::{printable, printable_lines};
 use clusia_protocol::{PermissionAnswerKind, PermissionOutcome, TurnOrigin};
@@ -24,7 +24,7 @@ use crate::nav::{Nav, Screen};
 use crate::review_state::ReviewTabs;
 use crate::screens::review::ReviewSystems;
 use crate::theme::Swatch;
-use crate::ui::kit::{Type, Variant, button, disabled_button, panel, text};
+use crate::ui::kit::{Type, Variant, button, disabled_button, panel, text, wrapped_text};
 use crate::ui::modal::{escape_pressed, modal_card, modal_root};
 
 /// Enter allows once only after the modal has been on screen this long, so an Enter meant for
@@ -211,11 +211,31 @@ pub fn title_for_origin(tool: &str, origin: TurnOrigin, agent: &str) -> String {
     }
 }
 
+/// The most characters of the prefix the middle button's label shows.
+const LABEL_PREFIX_MAX: usize = 32;
+
 /// The middle button's label; none when the request has nothing to grant for the review.
+/// A label is one line, so a long prefix is cut with one ellipsis: a command keeps its start
+/// (the program is what is granted, and the ellipsis also reads as "and any arguments"), a
+/// path keeps its end (what tells it apart). The question above shows the whole prefix.
 pub fn review_label(tool: &str, prefix: Option<&str>) -> Option<String> {
     let prefix = prefix?;
+    let long = prefix.chars().count() > LABEL_PREFIX_MAX;
     Some(if tool == "Bash" {
-        format!("Allow {prefix} … for this review")
+        if long {
+            let head: String = prefix.chars().take(LABEL_PREFIX_MAX - 1).collect();
+            // Cut between words, so the label never names a half-word.
+            let head = head
+                .rsplit_once(' ')
+                .map_or(head.as_str(), |(words, _)| words);
+            format!("Allow {}… for this review", head.trim_end())
+        } else {
+            format!("Allow {prefix} … for this review")
+        }
+    } else if long {
+        let skip = prefix.chars().count() - (LABEL_PREFIX_MAX - 1);
+        let tail: String = prefix.chars().skip(skip).collect();
+        format!("Allow …{tail} for this review")
     } else {
         format!("Allow {prefix} for this review")
     })
@@ -464,12 +484,18 @@ fn content(
     now_ms: i64,
 ) {
     let id = &pending.request.id;
-    card.spawn(Node {
-        flex_direction: FlexDirection::Column,
-        row_gap: px(14),
-        padding: UiRect::axes(px(24), px(22)),
-        ..default()
-    })
+    // The question scrolls in a short window; the answer buttons below it stay in view.
+    card.spawn((
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(14),
+            min_height: px(0),
+            padding: UiRect::axes(px(24), px(22)),
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+        ScrollArea,
+    ))
     .with_children(|b| {
         b.spawn(Node {
             column_gap: px(14),
@@ -500,9 +526,9 @@ fn content(
                 ..default()
             })
             .with_children(|t| {
-                t.spawn(text(fonts, v.title.clone(), Type::HEADING));
+                t.spawn(wrapped_text(fonts, v.title.clone(), Type::HEADING));
                 if let Some(reason) = &v.reason {
-                    t.spawn(text(fonts, format!("“{reason}”"), Type::MUTED));
+                    t.spawn(wrapped_text(fonts, format!("“{reason}”"), Type::MUTED));
                 }
             });
         });
@@ -515,24 +541,26 @@ fn content(
             Swatch::Chrome,
         ))
         .with_children(|code| {
-            code.spawn(text(fonts, v.code.clone(), Type::MONO));
+            code.spawn(wrapped_text(fonts, v.code.clone(), Type::MONO));
         });
         if let Some(detail) = &v.detail {
             b.spawn((
                 panel(
                     Node {
                         max_height: px(160),
+                        flex_shrink: 0.0,
                         padding: UiRect::axes(px(12), px(10)),
                         border_radius: BorderRadius::all(px(6)),
-                        overflow: Overflow::clip(),
+                        overflow: Overflow::scroll_y(),
                         ..default()
                     },
                     Swatch::Chrome,
                 ),
-                children![text(fonts, detail.clone(), Type::MONO)],
+                ScrollArea,
+                children![wrapped_text(fonts, detail.clone(), Type::MONO)],
             ));
         }
-        b.spawn(text(fonts, v.context.clone(), Type::META));
+        b.spawn(wrapped_text(fonts, v.context.clone(), Type::META));
         b.spawn(Node {
             column_gap: px(12),
             align_items: AlignItems::Center,
@@ -579,6 +607,9 @@ fn content(
     card.spawn((
         Node {
             column_gap: px(8),
+            row_gap: px(8),
+            flex_wrap: FlexWrap::Wrap,
+            flex_shrink: 0.0,
             align_items: AlignItems::Center,
             padding: UiRect::axes(px(24), px(14)),
             border: UiRect::top(px(1)),
@@ -1115,6 +1146,64 @@ mod tests {
             assert!(testing::shows(&mut app, needle), "{needle}");
         }
         assert!(!testing::shows(&mut app, "more waiting"));
+    }
+
+    #[test]
+    fn a_long_prefix_keeps_the_program_of_a_command_and_the_end_of_a_path() {
+        let flags = "--features very_long_feature_name_one,very_long_feature_name_two";
+        let bash = review_label("Bash", Some(&format!("cargo test {flags}"))).unwrap();
+        assert!(bash.starts_with("Allow cargo test "), "{bash}");
+        assert!(bash.ends_with("… for this review"), "{bash}");
+        assert_eq!(bash.matches('…').count(), 1, "one ellipsis: {bash}");
+        assert_eq!(
+            bash, "Allow cargo test --features… for this review",
+            "cut between words"
+        );
+        let path = "/home/mona/work/some/deeply/nested/folder/refresh_token_store.rs";
+        let edit = review_label("Edit", Some(path)).unwrap();
+        assert!(edit.contains("refresh_token_store.rs"), "{edit}");
+        assert!(edit.starts_with("Allow …"), "{edit}");
+        assert_eq!(edit.matches('…').count(), 1, "{edit}");
+        assert_eq!(
+            review_label("Bash", Some("cargo test")).as_deref(),
+            Some("Allow cargo test … for this review")
+        );
+    }
+
+    #[test]
+    fn a_long_question_scrolls_and_keeps_the_answer_buttons_in_a_short_window() {
+        let token = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it";
+        for (height, large) in [(800, false), (420, false), (420, true)] {
+            let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, height));
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            testing::open_ready(&mut app, false);
+            app.world_mut().resource_mut::<Chats>().entry(&pr());
+            let mut request = bash("perm-1");
+            request.summary = format!("{token} {token} {token}");
+            request.reason = Some(format!("{token} {token}"));
+            request.prefix = Some(format!("/home/mona/{token}/{token}"));
+            request.detail = Some(format!(
+                "{token}\n{token}\n{token}\n{token}\n{token}\n{token}"
+            ));
+            ask(&mut app, request);
+            let once =
+                testing::find::<AnswerButton>(&mut app, |b| b.answer == PermissionAnswerKind::Once);
+            let (_, y, _, h) = testing::frame(&app, once);
+            assert!(
+                y + h <= height as f32,
+                "{height} large={large}: Allow once ends at {} in the window",
+                y + h
+            );
+            let modal = testing::find::<PermissionModal>(&mut app, |_| true);
+            assert_eq!(
+                testing::texts_past_right(&mut app, modal),
+                Vec::<String>::new(),
+                "{height} large={large}"
+            );
+        }
     }
 
     #[test]

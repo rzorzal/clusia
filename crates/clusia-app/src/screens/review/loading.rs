@@ -16,7 +16,7 @@ use crate::review_state::{Phase, ReviewTabs};
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::shell::{OpeningRegion, TryAgain, on_try_again};
 use crate::theme::Swatch;
-use crate::ui::kit::{Fill, Stroke, Type, Variant, button, panel, text};
+use crate::ui::kit::{Fill, Stroke, Type, Variant, button, panel, text, wrapped_text};
 use crate::ui::leaf::{LeafState, leaf, pulsing_dot};
 use crate::ui::modal::modal_card;
 
@@ -279,12 +279,20 @@ fn opening(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &Loadin
             .spawn(Node {
                 padding: UiRect::axes(px(20), px(16)),
                 column_gap: px(10),
+                row_gap: px(2),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Baseline,
                 ..default()
             })
             .with_children(|t| {
                 t.spawn(text(fonts, v.skeleton.0.clone(), Type::MUTED));
-                t.spawn(text(fonts, v.skeleton.1.clone(), Type::TITLE.size(17.0)));
+                t.spawn((
+                    wrapped_text(fonts, v.skeleton.1.clone(), Type::TITLE.size(17.0)),
+                    Node {
+                        max_width: percent(100),
+                        ..default()
+                    },
+                ));
             });
         skeleton(under);
     });

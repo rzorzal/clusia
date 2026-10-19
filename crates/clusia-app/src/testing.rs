@@ -11,7 +11,7 @@ use bevy::picking::backend::HitData;
 use bevy::picking::events::{Click, Drag, DragEnd, Move, Out, Pointer, Press, Scroll};
 use bevy::picking::pointer::{Location, PointerButton, PointerId};
 use bevy::prelude::*;
-use bevy::text::{EditableText, FontCx, LayoutCx, TextEdit};
+use bevy::text::{EditableText, FontCx, LayoutCx, TextEdit, TextSpan};
 use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::ui_widgets::Activate;
 use bevy::window::{RequestRedraw, WindowThemeChanged};
@@ -156,6 +156,189 @@ pub fn frame(app: &App, entity: Entity) -> (f32, f32, f32, f32) {
     let scale = node.inverse_scale_factor;
     let (w, h) = (node.size.x * scale, node.size.y * scale);
     (at.x * scale - w / 2.0, at.y * scale - h / 2.0, w, h)
+}
+
+/// The width a text's lines take. A text can sit in a box stretched to its parent while one
+/// line, or one word that cannot break, runs past it, so its widest line counts, without the
+/// space it broke at. Only a text that also breaks inside a word is as wide as its box: it
+/// cannot run past it.
+fn lines_width(app: &App, text: Entity, boxed: f32) -> f32 {
+    let breaks_inside_words = app
+        .world()
+        .get::<TextLayout>(text)
+        .is_some_and(|l| l.linebreak == bevy::text::LineBreak::WordOrCharacter);
+    let (Some(node), Some(block)) = (
+        app.world().get::<ComputedNode>(text),
+        app.world().get::<bevy::text::ComputedTextBlock>(text),
+    ) else {
+        return boxed;
+    };
+    if breaks_inside_words {
+        return boxed;
+    }
+    let widest = block
+        .buffer()
+        .lines()
+        .map(|line| {
+            let m = line.metrics();
+            m.advance - m.trailing_whitespace
+        })
+        .fold(0.0, f32::max);
+    boxed.max(widest * node.inverse_scale_factor)
+}
+
+fn inside_panel_column(app: &App, from: Entity) -> bool {
+    std::iter::successors(Some(from), |&e| {
+        app.world().get::<ChildOf>(e).map(|c| c.parent())
+    })
+    .any(|e| {
+        app.world()
+            .get::<crate::screens::review::agent::PanelColumn>(e)
+            .is_some()
+    })
+}
+
+/// Walks up from `start`, whose lines or box occupy `(x, y, w, h)`, and says how it runs past
+/// an ancestor that does not scroll that way: `Some(Some(why))`, or `Some(None)` when it is
+/// inside all of them. `None` when it is hidden (`Display::None`, or a `Preview`, which cuts
+/// on purpose). The scroll boxes among the ancestors are checked against their own parents by
+/// `overflowing_text`: a scroll box bigger than its parent shelters nothing.
+fn escape(app: &App, start: Entity, (x, y, w, h): (f32, f32, f32, f32)) -> Option<Option<String>> {
+    use bevy::ui::OverflowAxis;
+    // Edges land on whole pixels at each of several nested boxes, and a glyph such as ▶ or ▼ is
+    // 2 px taller than its line box; anything beyond that is a real overrun.
+    const SLACK: f32 = 2.5;
+    let (mut scrolls_x, mut scrolls_y) = (false, false);
+    let mut at = start;
+    let mut found = None;
+    while let Some(parent) = app.world().get::<ChildOf>(at).map(|c| c.parent()) {
+        at = parent;
+        let Some(node) = app.world().get::<Node>(at) else {
+            continue;
+        };
+        // A drawing's texts are placed by the diagram engine, which measures them with its own
+        // font metrics, inside a box the reader pans: they are not laid out by the UI.
+        if node.display == Display::None
+            || app.world().get::<crate::ui::kit::Preview>(at).is_some()
+            || app
+                .world()
+                .get::<crate::screens::review::diagrams::canvas::ContentNode>(at)
+                .is_some()
+        {
+            return None;
+        }
+        scrolls_x |= node.overflow.x == OverflowAxis::Scroll;
+        scrolls_y |= node.overflow.y == OverflowAxis::Scroll;
+        if app.world().get::<ComputedNode>(at).is_none() {
+            continue;
+        }
+        let (px, py, pw, ph) = frame(app, at);
+        // The review's right panel, hidden, has no width and clips what is in it.
+        if pw < 1.0 && inside_panel_column(app, at) {
+            return None;
+        }
+        if found.is_none() && !scrolls_x && x + w > px + pw + SLACK {
+            found = Some(format!(
+                "right by {:.0}px of {at:?} at {x:.0}+{w:.0}, parent {px:.0}+{pw:.0}",
+                x + w - px - pw
+            ));
+        }
+        if found.is_none() && !scrolls_y && y + h > py + ph + SLACK && ph > 0.0 {
+            found = Some(format!("below by {:.0}px of {at:?}", y + h - py - ph));
+        }
+    }
+    Some(found)
+}
+
+/// Every `Text` that runs past the right edge of an ancestor with nothing between them that
+/// scrolls sideways (or past the bottom edge with nothing that scrolls down), as
+/// `"<text> ..."` lines, and every scroll box that is itself bigger than what holds it
+/// (`"scroll box ..."`). Clipped text is lost, so it counts as overflowing too, but a
+/// `Preview` cuts on purpose. Hidden nodes (`Display::None`, zero size) are skipped.
+pub fn overflowing_text(app: &mut App) -> Vec<String> {
+    use bevy::ui::OverflowAxis;
+    let texts: Vec<Entity> = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<Text>>();
+        q.iter(app.world()).collect()
+    };
+    let mut out = Vec::new();
+    for text in texts {
+        let Some(node) = app.world().get::<ComputedNode>(text) else {
+            continue;
+        };
+        if node.size.x <= 0.0 || node.size.y <= 0.0 {
+            continue;
+        }
+        let (x, y, w, h) = frame(app, text);
+        let w = lines_width(app, text, w);
+        let Some(Some(why)) = escape(app, text, (x, y, w, h)) else {
+            continue;
+        };
+        let mut shown = app
+            .world()
+            .get::<Text>(text)
+            .map(|t| t.0.clone())
+            .unwrap_or_default();
+        for span in app.world().get::<Children>(text).into_iter().flatten() {
+            shown.push_str(app.world().get::<TextSpan>(*span).map_or("", |s| &s.0));
+        }
+        out.push(format!(
+            "{:?} {why}",
+            shown.chars().take(60).collect::<String>()
+        ));
+    }
+    let boxes: Vec<Entity> = {
+        let mut q = app.world_mut().query::<(Entity, &Node, &ComputedNode)>();
+        q.iter(app.world())
+            .filter(|(_, n, c)| {
+                c.size.x > 0.0
+                    && c.size.y > 0.0
+                    && (n.overflow.x == OverflowAxis::Scroll
+                        || n.overflow.y == OverflowAxis::Scroll)
+            })
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    for scroller in boxes {
+        if let Some(Some(why)) = escape(app, scroller, frame(app, scroller)) {
+            out.push(format!("scroll box {scroller:?} {why}"));
+        }
+    }
+    out
+}
+
+/// The texts under `root` whose lines run past its right edge (the lines, not the box a
+/// stretched text sits in), as `"<text> by <n>px"`.
+pub fn texts_past_right(app: &mut App, root: Entity) -> Vec<String> {
+    let (rx, _, rw, _) = frame(app, root);
+    let texts: Vec<Entity> = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<Text>>();
+        q.iter(app.world()).collect()
+    };
+    let mut out = Vec::new();
+    for text in texts {
+        let under = std::iter::successors(Some(text), |&e| {
+            app.world().get::<ChildOf>(e).map(|c| c.parent())
+        })
+        .any(|e| e == root);
+        let Some(node) = app.world().get::<ComputedNode>(text) else {
+            continue;
+        };
+        if !under || node.size.x <= 0.0 {
+            continue;
+        }
+        let (x, _, w, _) = frame(app, text);
+        let w = lines_width(app, text, w);
+        let past = x + w - rx - rw;
+        if past > 1.5 {
+            let shown = app.world().get::<Text>(text).map_or("", |t| t.0.as_str());
+            out.push(format!(
+                "{:?} by {past:.0}px",
+                shown.chars().take(40).collect::<String>()
+            ));
+        }
+    }
+    out
 }
 
 /// The centre of `entity`'s laid-out box.
@@ -808,6 +991,23 @@ pub fn drag_by(app: &mut App, pr: &PrRef, from: Vec2, delta: Vec2) {
         image,
     ));
     click_event(app, image, from + delta);
+    settle(app);
+}
+
+/// The wheel turns `lines` (positive: up) over `entity`.
+pub fn wheel(app: &mut App, entity: Entity, lines: f32) {
+    app.world_mut().trigger(Pointer::new(
+        PointerId::Mouse,
+        location(Vec2::ZERO),
+        Scroll {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: lines,
+            hit: nowhere(),
+            phase: TouchPhase::Moved,
+        },
+        entity,
+    ));
     settle(app);
 }
 
