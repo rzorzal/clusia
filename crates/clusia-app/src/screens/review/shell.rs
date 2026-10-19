@@ -41,6 +41,7 @@ use crate::ui::kit::{
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown_line};
+use crate::ui::people::person;
 use crate::ui::spinner::{beat, spinner};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,8 +51,12 @@ pub struct HeaderView {
     /// `#123`
     pub number: String,
     pub title: String,
-    /// `@octo wants to merge`
+    /// `octo`
     pub author: String,
+    /// `Merged ·` or `Closed ·` before the author; empty while the pull request is open.
+    pub author_lead: &'static str,
+    /// `wants to merge` after the author; empty once it is merged or closed.
+    pub author_tail: &'static str,
     /// `octo:auth-refresh → main`
     pub branches: String,
     /// `+120`
@@ -311,12 +316,12 @@ pub(crate) fn file_name(path: &str) -> &str {
 pub fn header_view(view: &ReviewView) -> HeaderView {
     let pr = &view.pr;
     let s = &pr.summary;
-    let author = if pr.merged {
-        format!("Merged · @{}", s.author)
+    let (author_lead, author_tail) = if pr.merged {
+        ("Merged ·", "")
     } else if pr.closed {
-        format!("Closed · @{}", s.author)
+        ("Closed ·", "")
     } else {
-        format!("@{} wants to merge", s.author)
+        ("", "wants to merge")
     };
     let checks = view.checks.and_then(|c| match c.label() {
         "passed" => Some(("✓ Checks passing".to_string(), Tone::Green)),
@@ -328,7 +333,9 @@ pub fn header_view(view: &ReviewView) -> HeaderView {
         repo: s.pr.slug(),
         number: format!("#{}", s.pr.number),
         title: s.title.clone(),
-        author,
+        author: s.author.clone(),
+        author_lead,
+        author_tail,
         branches: format!("{} → {}", pr.head_ref, pr.base_ref),
         additions: format!("+{}", pr.additions),
         deletions: format!("−{}", pr.deletions),
@@ -833,7 +840,22 @@ pub fn header_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, h
                 ..default()
             })
             .with_children(|m| {
-                m.spawn(text(fonts, h.author.clone(), Type::META));
+                m.spawn(Node {
+                    column_gap: px(6),
+                    align_items: AlignItems::Center,
+                    flex_shrink: 1.0,
+                    min_width: px(0),
+                    ..default()
+                })
+                .with_children(|who| {
+                    if !h.author_lead.is_empty() {
+                        who.spawn(text(fonts, h.author_lead, Type::META));
+                    }
+                    person(who, fonts, &h.author, 20.0);
+                    if !h.author_tail.is_empty() {
+                        who.spawn(text(fonts, h.author_tail, Type::META));
+                    }
+                });
                 m.spawn(panel(
                     Node {
                         padding: UiRect::axes(px(6), px(2)),
@@ -1755,7 +1777,10 @@ mod tests {
             (h.repo.as_str(), h.number.as_str(), h.title.as_str()),
             ("rzorzal/clusia", "#123", "feat: auth refresh")
         );
-        assert_eq!(h.author, "@octo wants to merge");
+        assert_eq!(
+            (h.author_lead, h.author.as_str(), h.author_tail),
+            ("", "octo", "wants to merge")
+        );
         assert_eq!(h.branches, "octo:auth-refresh → main");
         assert_eq!(
             (h.additions.as_str(), h.deletions.as_str(), h.files.as_str()),
@@ -1813,6 +1838,36 @@ mod tests {
     }
 
     #[test]
+    fn the_author_in_the_header_is_a_strong_name_with_an_avatar() {
+        use crate::ui::people::{PersonAvatar, PersonTarget};
+        let mut app = testing::demo_review_app();
+        testing::open_ready(&mut app, false);
+        testing::settle(&mut app);
+        let name = testing::entities::<PersonTarget>(&mut app)
+            .into_iter()
+            .find(|e| {
+                app.world()
+                    .get::<PersonTarget>(*e)
+                    .is_some_and(|t| t.0 == "octo")
+                    && app.world().get::<PersonAvatar>(*e).is_none()
+            })
+            .expect("the author's name");
+        let label = app.world().get::<Children>(name).map(|c| c[0]).unwrap();
+        let font = app.world().get::<TextFont>(label).unwrap();
+        assert_eq!(font.weight, FontWeight(600));
+        assert_eq!(
+            app.world().get::<crate::ui::kit::Ink>(label).map(|i| i.0),
+            Some(Swatch::Fg),
+            "the ink colour, not the faint meta colour"
+        );
+        assert!(
+            testing::count::<PersonAvatar>(&mut app) > 0,
+            "a round avatar sits beside the name"
+        );
+        assert!(testing::shows(&mut app, "wants to merge"));
+    }
+
+    #[test]
     fn checks_and_pr_state_in_the_header() {
         let mut tab = ready_tab();
         let Phase::Ready(ready) = &mut tab.phase else {
@@ -1840,7 +1895,15 @@ mod tests {
         assert_eq!(header_view(&ready.view).checks, None);
         ready.view.pr.merged = true;
         ready.view.pr.closed = true;
-        assert_eq!(header_view(&ready.view).author, "Merged · @octo");
+        let merged = header_view(&ready.view);
+        assert_eq!(
+            (
+                merged.author_lead,
+                merged.author.as_str(),
+                merged.author_tail
+            ),
+            ("Merged ·", "octo", "")
+        );
         let v = view_of(&tab, &Connection::Live);
         assert_eq!(
             v.closed.as_deref(),

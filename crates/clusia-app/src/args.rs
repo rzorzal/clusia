@@ -17,6 +17,8 @@ pub enum Scene {
     SplitSelected,
     Comments,
     CommentsHidden,
+    /// The review header with the author's profile card open under the name.
+    PersonCard,
     Finalize,
     WhatsNew,
     Loading,

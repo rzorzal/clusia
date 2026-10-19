@@ -164,9 +164,32 @@ pub fn center(app: &App, entity: Entity) -> Vec2 {
     Vec2::new(x + w / 2.0, y + h / 2.0)
 }
 
-/// Takes the asks recorded since the last call.
+/// Takes the asks recorded since the last call, without the avatar downloads every screen with
+/// an author asks for (`recorded_with_avatars` keeps them).
 pub fn recorded(app: &mut App) -> Vec<Ask> {
+    let mut asks = recorded_with_avatars(app);
+    asks.retain(|ask| !matches!(ask, Ask::FetchMedia(url) if is_avatar(url)));
+    asks
+}
+
+/// Takes every ask recorded since the last call.
+pub fn recorded_with_avatars(app: &mut App) -> Vec<Ask> {
     std::mem::take(&mut app.world_mut().resource_mut::<Asks>().recorded)
+}
+
+fn is_avatar(url: &str) -> bool {
+    url.starts_with("https://avatars.githubusercontent.com/")
+}
+
+/// A primary press and release on `entity` with the button widgets listening, so it becomes the
+/// `Activate` of the nearest button, as in the window.
+pub fn click_button(app: &mut App, entity: Entity) {
+    use bevy::ui_widgets::ButtonPlugin;
+    if !app.is_plugin_added::<ButtonPlugin>() {
+        app.add_plugins(ButtonPlugin);
+    }
+    press_code(app, entity, Vec2::ZERO);
+    click(app, entity);
 }
 
 pub fn count<C: Component>(app: &mut App) -> usize {
