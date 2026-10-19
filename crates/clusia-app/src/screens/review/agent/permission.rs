@@ -215,20 +215,27 @@ pub fn title_for_origin(tool: &str, origin: TurnOrigin, agent: &str) -> String {
 const LABEL_PREFIX_MAX: usize = 32;
 
 /// The middle button's label; none when the request has nothing to grant for the review.
+/// A label is one line, so a long prefix is cut with one ellipsis: a command keeps its start
+/// (the program is what is granted, and the ellipsis also reads as "and any arguments"), a
+/// path keeps its end (what tells it apart). The question above shows the whole prefix.
 pub fn review_label(tool: &str, prefix: Option<&str>) -> Option<String> {
     let prefix = prefix?;
-    // A button's label is one line: a long prefix (a path) keeps its end, the part that
-    // tells it apart. The question above shows the whole command.
-    let tail: String;
-    let prefix = if prefix.chars().count() > LABEL_PREFIX_MAX {
-        let skip = prefix.chars().count() - (LABEL_PREFIX_MAX - 1);
-        tail = format!("…{}", prefix.chars().skip(skip).collect::<String>());
-        tail.as_str()
-    } else {
-        prefix
-    };
+    let long = prefix.chars().count() > LABEL_PREFIX_MAX;
     Some(if tool == "Bash" {
-        format!("Allow {prefix} … for this review")
+        if long {
+            let head: String = prefix.chars().take(LABEL_PREFIX_MAX - 1).collect();
+            // Cut between words, so the label never names a half-word.
+            let head = head
+                .rsplit_once(' ')
+                .map_or(head.as_str(), |(words, _)| words);
+            format!("Allow {}… for this review", head.trim_end())
+        } else {
+            format!("Allow {prefix} … for this review")
+        }
+    } else if long {
+        let skip = prefix.chars().count() - (LABEL_PREFIX_MAX - 1);
+        let tail: String = prefix.chars().skip(skip).collect();
+        format!("Allow …{tail} for this review")
     } else {
         format!("Allow {prefix} for this review")
     })
@@ -1142,6 +1149,28 @@ mod tests {
     }
 
     #[test]
+    fn a_long_prefix_keeps_the_program_of_a_command_and_the_end_of_a_path() {
+        let flags = "--features very_long_feature_name_one,very_long_feature_name_two";
+        let bash = review_label("Bash", Some(&format!("cargo test {flags}"))).unwrap();
+        assert!(bash.starts_with("Allow cargo test "), "{bash}");
+        assert!(bash.ends_with("… for this review"), "{bash}");
+        assert_eq!(bash.matches('…').count(), 1, "one ellipsis: {bash}");
+        assert_eq!(
+            bash, "Allow cargo test --features… for this review",
+            "cut between words"
+        );
+        let path = "/home/mona/work/some/deeply/nested/folder/refresh_token_store.rs";
+        let edit = review_label("Edit", Some(path)).unwrap();
+        assert!(edit.contains("refresh_token_store.rs"), "{edit}");
+        assert!(edit.starts_with("Allow …"), "{edit}");
+        assert_eq!(edit.matches('…').count(), 1, "{edit}");
+        assert_eq!(
+            review_label("Bash", Some("cargo test")).as_deref(),
+            Some("Allow cargo test … for this review")
+        );
+    }
+
+    #[test]
     fn a_long_question_scrolls_and_keeps_the_answer_buttons_in_a_short_window() {
         let token = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it";
         for (height, large) in [(800, false), (420, false), (420, true)] {
@@ -1174,9 +1203,6 @@ mod tests {
                 Vec::<String>::new(),
                 "{height} large={large}"
             );
-            let label = review_label("Edit", Some(&format!("/home/mona/{token}"))).unwrap();
-            assert!(label.chars().count() < 60, "{label}");
-            assert!(label.contains('…'));
         }
     }
 
