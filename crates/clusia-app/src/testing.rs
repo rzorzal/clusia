@@ -158,6 +158,67 @@ pub fn frame(app: &App, entity: Entity) -> (f32, f32, f32, f32) {
     (at.x * scale - w / 2.0, at.y * scale - h / 2.0, w, h)
 }
 
+/// Every `Text` that runs past the right edge of an ancestor with nothing between them that
+/// scrolls sideways (or past the bottom edge with nothing that scrolls down), as
+/// `"<text> ..."` lines. Clipped text is lost, so it counts as overflowing too. Hidden nodes
+/// (`Display::None`, zero size) are skipped.
+pub fn overflowing_text(app: &mut App) -> Vec<String> {
+    use bevy::ui::OverflowAxis;
+    const SLACK: f32 = 1.5;
+    let texts: Vec<Entity> = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<Text>>();
+        q.iter(app.world()).collect()
+    };
+    let mut out = Vec::new();
+    for text in texts {
+        let Some(node) = app.world().get::<ComputedNode>(text) else {
+            continue;
+        };
+        if node.size.x <= 0.0 || node.size.y <= 0.0 {
+            continue;
+        }
+        let (x, y, w, h) = frame(app, text);
+        let (mut scrolls_x, mut scrolls_y) = (false, false);
+        let mut at = text;
+        let mut hidden = false;
+        let mut found = None;
+        while let Some(parent) = app.world().get::<ChildOf>(at).map(|c| c.parent()) {
+            at = parent;
+            let Some(node) = app.world().get::<Node>(at) else {
+                continue;
+            };
+            if node.display == Display::None {
+                hidden = true;
+                break;
+            }
+            scrolls_x |= node.overflow.x == OverflowAxis::Scroll;
+            scrolls_y |= node.overflow.y == OverflowAxis::Scroll;
+            if app.world().get::<ComputedNode>(at).is_none() {
+                continue;
+            }
+            let (px, py, pw, ph) = frame(app, at);
+            if found.is_none() && !scrolls_x && x + w > px + pw + SLACK {
+                found = Some(format!("right by {:.0}px of {at:?}", x + w - px - pw));
+            }
+            if found.is_none() && !scrolls_y && y + h > py + ph + 4.0 && ph > 0.0 {
+                found = Some(format!("below by {:.0}px of {at:?}", y + h - py - ph));
+            }
+        }
+        if hidden {
+            continue;
+        }
+        if let Some(why) = found {
+            let shown = app.world().get::<Text>(text).map(|t| t.0.clone());
+            let shown = shown.unwrap_or_default();
+            out.push(format!(
+                "{:?} {why}",
+                shown.chars().take(60).collect::<String>()
+            ));
+        }
+    }
+    out
+}
+
 /// The centre of `entity`'s laid-out box.
 pub fn center(app: &App, entity: Entity) -> Vec2 {
     let (x, y, w, h) = frame(app, entity);

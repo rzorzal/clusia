@@ -34,7 +34,7 @@ use crate::screens::review::editor::{
 };
 use crate::screens::review::shell::ModalFor;
 use crate::theme::Swatch;
-use crate::ui::code::{CodeSpan, code_line, spans_for};
+use crate::ui::code::{CodeSpan, spans_for, wrapped_code_line};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{Fill, Stroke, Type, Variant, button, disabled_button, panel, text};
 use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
@@ -870,7 +870,8 @@ pub(crate) fn body_block(
                     Node {
                         min_height: px(21),
                         flex_shrink: 0.0,
-                        align_items: AlignItems::Center,
+                        align_items: AlignItems::FlexStart,
+                        padding: UiRect::vertical(px(2)),
                         ..default()
                     },
                     BackgroundColor::default(),
@@ -895,7 +896,16 @@ pub(crate) fn body_block(
                             Type::MONO.size(12.0).ink(Swatch::Faint),
                         ));
                     });
-                    r.spawn(code_line(fonts, 12.0, row.spans.clone()));
+                    r.spawn(Node {
+                        flex_grow: 1.0,
+                        flex_basis: px(0),
+                        min_width: px(0),
+                        padding: UiRect::right(px(12)),
+                        ..default()
+                    })
+                    .with_children(|c| {
+                        c.spawn(wrapped_code_line(fonts, 12.0, row.spans.clone()));
+                    });
                 });
             }
         });
@@ -1455,6 +1465,79 @@ mod tests {
         let around = 64.0 + 32.0 + 196.0 + 62.0;
         assert!(around + CODE_MAX_HEIGHT <= 800.0 * 0.9);
         assert!(testing::shows(&mut app, "Add to draft"));
+    }
+
+    #[test]
+    fn a_long_code_line_wraps_inside_the_dialog_and_loses_nothing() {
+        let long = format!(
+            "let refreshed = store.refresh_with_retry({}).await?;",
+            (1..=14)
+                .map(|n| format!("token_{n}_with_a_long_name"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for large in [false, true] {
+            let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            let pr = open_box(
+                &mut app,
+                test_version(&head(), Some((REFRESH, 38, 48))),
+                "refresh",
+            );
+            let code = DiagramCode {
+                path: REFRESH.into(),
+                commit: head(),
+                start_line: 1,
+                lines: vec![
+                    CodeLine {
+                        number: 1,
+                        text: "fn short() {}".into(),
+                        changed: false,
+                    },
+                    CodeLine {
+                        number: 2,
+                        text: long.clone(),
+                        changed: true,
+                    },
+                ],
+                unavailable: None,
+            };
+            put_code(&mut app, &pr, "refresh", code);
+            testing::settle(&mut app);
+            let block = testing::find::<NodeCode>(&mut app, |_| true);
+            let (_, _, block_w, _) = testing::frame(&app, block);
+            let mut spans = app.world_mut().query::<(&TextSpan, &ChildOf)>();
+            let line = spans
+                .iter(app.world())
+                .find(|(s, _)| s.0.contains("refresh_with_retry"))
+                .map(|(_, p)| p.parent())
+                .expect("the long line");
+            let (x, _, w, h) = testing::frame(&app, line);
+            let (bx, _, _, _) = testing::frame(&app, block);
+            assert!(
+                x + w <= bx + block_w + 1.0,
+                "large={large}: the line ends at {} inside a block ending at {}",
+                x + w,
+                bx + block_w
+            );
+            assert!(h > 24.0, "large={large}: the line wraps onto more rows");
+            let shown: String = app
+                .world()
+                .get::<Children>(line)
+                .unwrap()
+                .iter()
+                .filter_map(|c| app.world().get::<TextSpan>(c))
+                .map(|s| s.0.as_str())
+                .collect();
+            assert!(shown.contains(&long), "large={large}: nothing is lost");
+            assert_eq!(
+                testing::overflowing_text(&mut app),
+                Vec::<String>::new(),
+                "large={large}"
+            );
+        }
     }
 
     #[test]
