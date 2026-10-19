@@ -2,6 +2,8 @@
 
 use std::time::{Duration, Instant};
 
+use clusia_core::hunks::{FileHunks, FileStatus, Hunk, hunk_ref};
+
 use crate::{CallIndex, Indexer, SourceFile};
 
 pub(crate) fn far() -> Instant {
@@ -92,4 +94,56 @@ pub(crate) fn generated_repo(files: usize, per_file: usize) -> Vec<(String, Stri
             (format!("src/m{i}.rs"), text)
         })
         .collect()
+}
+
+/// A file's hunks from `(old_start, old_len, new_start, new_len)` tuples.
+pub(crate) fn file(
+    old: Option<&str>,
+    new: Option<&str>,
+    status: FileStatus,
+    hunks: &[(u32, u32, u32, u32)],
+) -> FileHunks {
+    FileHunks {
+        old_path: old.map(str::to_string),
+        new_path: new.map(str::to_string),
+        status,
+        hunks: hunks
+            .iter()
+            .map(|&(old_start, old_len, new_start, new_len)| Hunk {
+                old_start,
+                old_len,
+                new_start,
+                new_len,
+            })
+            .collect(),
+    }
+}
+
+/// A text lookup over `(path, text)` pairs.
+pub(crate) fn texts(files: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let map: std::collections::HashMap<String, String> = files
+        .iter()
+        .map(|(p, t)| (p.to_string(), t.to_string()))
+        .collect();
+    move |path| map.get(path).cloned()
+}
+
+/// Panics unless every changed head line of `files` lies in a hunk of some step.
+pub(crate) fn assert_covers(steps: &[crate::StaticStep], files: &[FileHunks]) {
+    for f in files {
+        for hunk in &f.hunks {
+            let Some(r) = hunk_ref(f, hunk) else { continue };
+            for line in r.start_line..=r.end_line {
+                assert!(
+                    steps
+                        .iter()
+                        .any(|s| s.hunks.iter().any(|x| x.path == r.path
+                            && x.start_line <= line
+                            && line <= x.end_line)),
+                    "{}:{line} is in no step",
+                    r.path
+                );
+            }
+        }
+    }
 }

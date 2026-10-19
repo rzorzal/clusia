@@ -20,5 +20,5 @@ pub use geometry::{
     Activation, Align, Arrow, BoxGeo, EdgeGeo, Geometry, GroupGeo, Lifeline, MessageGeo, Point,
     Rect, RowGeo, TextLines,
 };
-pub use layout::{MARGIN, layout};
+pub use layout::{MARGIN, layout, layout_ranked};
 pub use measure::{Advances, FaceMeasure, Fonts, Measure, TextStyle, style_size};

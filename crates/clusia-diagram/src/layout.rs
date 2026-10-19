@@ -30,18 +30,48 @@ const SUB_LINES: usize = 2;
 /// same spec and measure always give the same geometry, down to the bit.
 pub fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
     let mut geometry = match spec.kind {
-        DiagramKind::Graph => layered_geometry(spec, measure, Direction::TopToBottom, Arrow::End),
+        DiagramKind::Graph => {
+            layered_geometry(spec, measure, Direction::TopToBottom, Arrow::End, None)
+        }
         DiagramKind::Flow | DiagramKind::DataFlow | DiagramKind::States => {
-            layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End)
+            layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End, None)
         }
         DiagramKind::EntityRelationship => {
-            layered_geometry(spec, measure, Direction::LeftToRight, Arrow::None)
+            layered_geometry(spec, measure, Direction::LeftToRight, Arrow::None, None)
         }
-        DiagramKind::Classes => layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End),
+        DiagramKind::Classes => {
+            layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End, None)
+        }
         DiagramKind::Sequence => sequence::layout(spec, measure),
         DiagramKind::UseCases => usecase::layout(spec, measure),
         DiagramKind::Keywords => Geometry::empty(),
     };
+    geometry.normalise(MARGIN);
+    geometry
+}
+
+/// Lays `spec` out top-down like a `Graph`, but with `ranks[i]` as the rank of `spec.nodes[i]`
+/// instead of the longest-path rank. A missing entry counts as 0 and extra ones are ignored;
+/// the distinct ranks are renumbered densely, so an empty level leaves no blank row. The spec
+/// is not validated.
+pub fn layout_ranked(spec: &DiagramSpec, ranks: &[usize], measure: &dyn Measure) -> Geometry {
+    let given: Vec<usize> = (0..spec.nodes.len())
+        .map(|i| ranks.get(i).copied().unwrap_or(0))
+        .collect();
+    let mut distinct = given.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let dense: Vec<usize> = given
+        .iter()
+        .map(|r| distinct.binary_search(r).unwrap_or(0))
+        .collect();
+    let mut geometry = layered_geometry(
+        spec,
+        measure,
+        Direction::TopToBottom,
+        Arrow::End,
+        Some(&dense),
+    );
     geometry.normalise(MARGIN);
     geometry
 }
@@ -159,6 +189,7 @@ fn layered_geometry(
     measure: &dyn Measure,
     direction: Direction,
     arrow: Arrow,
+    ranks: Option<&[usize]>,
 ) -> Geometry {
     let tables = matches!(
         spec.kind,
@@ -203,6 +234,7 @@ fn layered_geometry(
         arrow,
         top_aligned: tables,
         label_style,
+        ranks,
     };
     let placed = layered::place(spec, &sizes, measure, &options);
 
@@ -1107,5 +1139,95 @@ mod tests {
             stacked >= 60,
             "only {stacked} of 180 diagrams hang a box 72 px under another"
         );
+    }
+
+    fn ranked(nodes: &[&str], edges: &[(&str, &str)]) -> DiagramSpec {
+        spec(
+            "graph",
+            nodes.iter().map(|n| node(n, n, "box")).collect(),
+            edges.iter().map(|(a, b)| edge(a, b, None)).collect(),
+        )
+    }
+
+    #[test]
+    fn ranked_layout_puts_each_node_on_its_rank_top_down() {
+        let s = ranked(&["a", "b", "c", "d"], &[("a", "b"), ("a", "c"), ("b", "d")]);
+        let g = layout_ranked(&s, &[0, 1, 1, 2], &Fonts);
+        check(&s, &g);
+        let (a, b, c, d) = (
+            rect_of(&g, "a"),
+            rect_of(&g, "b"),
+            rect_of(&g, "c"),
+            rect_of(&g, "d"),
+        );
+        assert!(
+            (b.centre().y - c.centre().y).abs() < 1e-3,
+            "one rank, one row"
+        );
+        assert!(b.y >= a.bottom() + 72.0 - 0.01 && d.y >= b.bottom() + 72.0 - 0.01);
+        assert_eq!(g.edges.len(), 3);
+        assert!(
+            (g.edges[0].points[0].y - a.bottom()).abs() < 1e-3,
+            "an edge leaves the bottom side"
+        );
+        for (i, b) in g.boxes.iter().enumerate() {
+            assert_eq!(b.index, i, "boxes keep the spec's order");
+        }
+    }
+
+    #[test]
+    fn explicit_ranks_win_over_the_direction_of_the_edges() {
+        let s = ranked(&["a", "b"], &[("b", "a")]);
+        let g = layout_ranked(&s, &[0, 1], &Fonts);
+        check(&s, &g);
+        assert!(
+            rect_of(&g, "a").bottom() < rect_of(&g, "b").y,
+            "a is above b although b calls a"
+        );
+    }
+
+    #[test]
+    fn empty_ranks_leave_no_blank_row_and_short_ranks_do_not_panic() {
+        let s = ranked(&["a", "b"], &[("a", "b")]);
+        assert_eq!(
+            layout_ranked(&s, &[0, 2], &Fonts),
+            layout_ranked(&s, &[0, 1], &Fonts)
+        );
+        let three = ranked(&["a", "b", "c"], &[("a", "b")]);
+        check(&three, &layout_ranked(&three, &[0, 1], &Fonts));
+        assert_eq!(
+            layout_ranked(&spec("graph", vec![], vec![]), &[], &Fonts).size,
+            (48.0, 48.0)
+        );
+    }
+
+    #[test]
+    fn sixty_ranked_nodes_and_eighty_edges_are_valid_deterministic_and_inside_the_budget() {
+        let names: Vec<String> = (0..60).map(|i| format!("n{i}")).collect();
+        let ranks: Vec<usize> = (0..60).map(|i| i / 10).collect();
+        let edges: Vec<(String, String)> = (0..80)
+            .map(|k| {
+                let a = (k * 7) % 50;
+                let b = (a / 10 + 1) * 10 + (k * 3) % 10;
+                (format!("n{a}"), format!("n{b}"))
+            })
+            .collect();
+        let s = spec(
+            "graph",
+            names
+                .iter()
+                .map(|n| node(n, &format!("Function {n}"), "box"))
+                .collect(),
+            edges.iter().map(|(a, b)| edge(a, b, None)).collect(),
+        );
+        let started = Instant::now();
+        let g = layout_ranked(&s, &ranks, &Fonts);
+        let took = started.elapsed().as_millis();
+        assert!(
+            took <= if cfg!(debug_assertions) { 200 } else { 20 },
+            "{took} ms"
+        );
+        check(&s, &g);
+        assert_eq!(layout_ranked(&s, &ranks, &Fonts), g);
     }
 }

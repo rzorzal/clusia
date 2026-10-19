@@ -2,20 +2,26 @@
 //! `CallIndex` of functions, calls and imports, and calls are resolved by name. The caller
 //! brings the file text; nothing here reads a file or runs a process.
 
+mod changes;
 mod extract;
+mod graph;
 mod index;
 mod packs;
 mod resolve;
+mod story_order;
 
 #[cfg(test)]
 mod testkit;
 
+pub use changes::{ChangeKind, ChangedFunction, changed_functions, signature_text};
+pub use graph::{CallGraph, GraphEdge, GraphNode, NodeKind, find, subgraph};
 pub use index::{
     Call, CallIndex, Function, FunctionId, Import, Indexer, Skipped, SourceFile,
     dependencies_from_manifests,
 };
 pub use packs::{LanguagePack, language_name, pack_for, packs};
 pub use resolve::{Resolved, Target, resolve};
+pub use story_order::{StaticStep, static_order};
 
 /// Seconds the index builder may take before it keeps what it parsed.
 pub const INDEX_BUDGET_SECS: u64 = 10;

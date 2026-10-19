@@ -10,6 +10,7 @@ pub mod diffmap;
 pub mod draft;
 pub mod editor;
 pub mod hidden;
+pub mod hunks;
 pub mod keywords;
 pub mod launch_agent;
 pub mod logging;

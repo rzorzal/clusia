@@ -32,13 +32,15 @@ pub(crate) struct NodeSize {
     pub fixed: bool,
 }
 
-pub(crate) struct Options {
+pub(crate) struct Options<'a> {
     pub direction: Direction,
     pub arrow: Arrow,
     /// Whether the boxes of a row share their top edge rather than their middle line.
     pub top_aligned: bool,
     /// The face of the edge labels.
     pub label_style: TextStyle,
+    /// A rank per node (a missing entry is 0) in place of the longest-path ranks.
+    pub ranks: Option<&'a [usize]>,
 }
 
 pub(crate) struct Placed {
@@ -149,7 +151,7 @@ pub(crate) fn place(
     spec: &DiagramSpec,
     sizes: &[NodeSize],
     measure: &dyn Measure,
-    opts: &Options,
+    opts: &Options<'_>,
 ) -> Placed {
     let n = spec.nodes.len();
     if n == 0 {
@@ -184,7 +186,10 @@ pub(crate) fn place(
         .zip(&reversed)
         .map(|(&(_, a, b), &r)| if r { (b, a) } else { (a, b) })
         .collect();
-    let mut rank = ranks(n, &dag);
+    let mut rank = match opts.ranks {
+        Some(given) => (0..n).map(|i| given.get(i).copied().unwrap_or(0)).collect(),
+        None => ranks(n, &dag),
+    };
     let mut depth = vec![0usize; n];
     if dir == Direction::LeftToRight
         && let Some(plan) = spine::plan(sizes, &dag, &rank)
