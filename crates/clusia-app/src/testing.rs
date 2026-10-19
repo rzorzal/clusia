@@ -54,6 +54,9 @@ use crate::ui::kit::KitPlugin;
 
 pub const NOW: i64 = 1_790_000_000;
 
+/// How far each update of a test app moves its `Time`.
+pub const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
 pub fn app(snapshot: Snapshot) -> App {
     let (inbox, outbox) = bridge::local_link();
     let mut app = App::new();
@@ -77,6 +80,8 @@ pub fn app(snapshot: Snapshot) -> App {
             connection: Connection::Live,
             ..Model::default()
         })
+        // Every update advances `Time` by the same step, whatever the machine's load.
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(FRAME))
         .init_resource::<Asks>()
         .init_resource::<Toasts>()
         .insert_resource(inbox)

@@ -2203,10 +2203,22 @@ async fn fetch_profile(socket: &Path, login: String) -> Tell {
         {
             Ok(Reply::Profile(profile)) => Ok(profile),
             Ok(_) => Err(MediaError::transient("clusiad sent an unexpected reply")),
-            Err(e) => Err(media_error(e)),
+            Err(e) => Err(profile_error(e)),
         },
     };
     Tell::Profile { login, profile }
+}
+
+/// A profile is final only when GitHub has no such user; a rate limit, a refused token or a
+/// failing server can pass, so the next hover asks again.
+fn profile_error(e: ClientError) -> MediaError {
+    match e {
+        ClientError::Server(e) => MediaError {
+            transient: e.code != ErrorCode::NotFound,
+            message: e.message,
+        },
+        e => MediaError::transient(lost(e)),
+    }
 }
 
 /// Only the daemon's error code says whether asking again can help; every other failure is the
@@ -3544,6 +3556,30 @@ mod tests {
         assert!(!class(ErrorCode::NotFound));
         assert!(!class(ErrorCode::NotConfigured));
         assert!(media_error(ClientError::Closed).transient);
+    }
+
+    #[test]
+    fn only_a_missing_user_is_final_for_a_profile() {
+        let class = |code| {
+            profile_error(ClientError::Server(clusia_protocol::ProtocolError {
+                code,
+                message: "m".into(),
+            }))
+            .transient
+        };
+        for code in [
+            ErrorCode::RateLimited,
+            ErrorCode::Upstream,
+            ErrorCode::Unauthorized,
+            ErrorCode::Offline,
+        ] {
+            assert!(
+                class(code),
+                "{code:?} may pass, so the next hover asks again"
+            );
+        }
+        assert!(!class(ErrorCode::NotFound));
+        assert!(profile_error(ClientError::Closed).transient);
     }
 
     #[test]

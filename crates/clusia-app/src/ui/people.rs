@@ -4,7 +4,8 @@
 //! The avatar comes through the media cache, so it keeps that cache's limits and host checks;
 //! until it loads, or when it never does, the initial stays. The profile is asked for the first
 //! time the pointer rests on a person and kept for the session. The card is a layer of its own
-//! at the root of the window, so no scroll area clips it, and it never blocks the pointer.
+//! at the root of the window, so no scroll area clips it, and it takes the pointer over its whole area: a press on its
+//! padding does not reach the diff underneath.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -108,7 +109,10 @@ impl HoverCard {
                 }
             }
             None => {
-                self.pending = None;
+                // The time spent on a name that never opened is not time spent away.
+                if self.pending.take().is_some() {
+                    self.waited = Duration::ZERO;
+                }
                 if self.shown.is_some() {
                     self.waited += dt;
                     if self.waited >= delays.close {
@@ -154,7 +158,9 @@ impl People {
     }
 }
 
-/// A node that stands for `login` under the pointer: the name and the avatar.
+/// A node that stands for `login` under the pointer: the name and the avatar. Only a plain
+/// login (`is_login`) has a card and a profile to open; any other name is a target the hover
+/// ignores.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct PersonTarget(pub String);
 
@@ -336,7 +342,9 @@ fn track_hover(
     // A pinned person counts as hovered; the name is the better anchor than the avatar.
     let on_person = targets
         .iter()
-        .filter(|(_, PersonTarget(login), h, _)| h.get() || card.pinned.as_deref() == Some(login))
+        .filter(|(_, PersonTarget(login), h, _)| {
+            is_login(login) && (h.get() || card.pinned.as_deref() == Some(login))
+        })
         .min_by_key(|(_, _, _, avatar)| *avatar)
         .map(|(anchor, PersonTarget(login), _, _)| Target {
             login: login.clone(),
@@ -499,7 +507,7 @@ fn sync_card(
             // Shown by `place_card` once it has been laid out where it belongs.
             Visibility::Hidden,
             Pickable {
-                should_block_lower: false,
+                should_block_lower: true,
                 is_hoverable: true,
             },
             Hovered::default(),
@@ -878,6 +886,39 @@ mod tests {
         assert!((x - ax).abs() <= 1.0, "left edges line up: {x} vs {ax}");
         assert!(y >= ay + ah && y - (ay + ah) <= 12.0, "just below: {y}");
         assert!(x >= 0.0 && x + w <= 1280.0 && y + h <= 800.0);
+    }
+
+    #[test]
+    fn a_login_that_is_not_plain_has_no_card_and_asks_nothing() {
+        let mut app = app();
+        let (name, face) = spawn(&mut app, "dependabot[bot]");
+        app.update();
+        testing::recorded_with_avatars(&mut app);
+        hover(&mut app, name, true);
+        hover(&mut app, face, true);
+        app.world_mut()
+            .resource_mut::<HoverCard>()
+            .pin("dependabot[bot]");
+        app.update();
+        app.update();
+        assert_eq!(testing::count::<CardRoot>(&mut app), 0);
+        assert!(testing::recorded_with_avatars(&mut app).is_empty());
+    }
+
+    #[test]
+    fn leaving_after_a_brush_of_another_name_keeps_the_full_close_grace() {
+        let delays = Delays {
+            open: 300 * MS,
+            close: 250 * MS,
+        };
+        let mut card = HoverCard::default();
+        let (octo, mona) = (target("octo", 1), target("mona", 2));
+        card.step(Some(octo.clone()), 300 * MS, delays);
+        card.step(Some(mona), 200 * MS, delays);
+        card.step(None, 200 * MS, delays);
+        assert_eq!(card.shown(), Some(&octo), "200 of 250 ms away");
+        card.step(None, 50 * MS, delays);
+        assert_eq!(card.shown(), None);
     }
 
     #[test]

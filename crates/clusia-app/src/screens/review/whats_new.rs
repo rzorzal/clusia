@@ -93,28 +93,21 @@ pub fn news_row(item: &NewsItem) -> NewsRow {
         NewsKind::Moved => ("↻", Tone::Orange, Some(ReviewSection::Diff)),
         NewsKind::Revalidated => ("↻", Tone::Green, None),
     };
-    let people: Vec<String> = match item.source.strip_prefix("You via ") {
-        Some(_) => Vec::new(),
-        None => item
-            .who
-            .as_deref()
-            .map(|w| w.split(", ").map(str::to_string).collect())
-            .unwrap_or_default(),
-    };
-    let (who, source) = match item.source.strip_prefix("You via ") {
-        Some(client) => ("You".to_string(), client_name(client)),
-        None => (
-            item.who
+    let (who, people, source) = match item.source.strip_prefix("You via ") {
+        Some(client) => ("You".to_string(), Vec::new(), client_name(client)),
+        None => {
+            let people: Vec<String> = item
+                .who
                 .as_deref()
-                .map(|w| {
-                    w.split(", ")
-                        .map(|p| format!("@{p}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default(),
-            item.source.clone(),
-        ),
+                .map(|w| w.split(", ").map(str::to_string).collect())
+                .unwrap_or_default();
+            let who = people
+                .iter()
+                .map(|p| format!("@{p}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (who, people, item.source.clone())
+        }
     };
     NewsRow {
         icon,

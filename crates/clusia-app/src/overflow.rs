@@ -106,7 +106,8 @@ fn long() -> String {
     format!("{TOKEN} {TOKEN} {TOKEN}")
 }
 
-/// Replaces every string under a `path`, `body` or `title` key by `long`, and under an `author` key by a login of the longest length.
+/// Replaces every string under a `path`, `body` or `title` key by `long`, and under an
+/// `author` key by a login of the longest length.
 fn stretch(value: &mut serde_json::Value, long: &str) {
     match value {
         serde_json::Value::Object(map) => {
