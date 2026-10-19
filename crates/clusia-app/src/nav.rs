@@ -508,6 +508,7 @@ fn rebuild_top_bar(
     diagrams: Res<Diagrams>,
     revalidations: Res<Revalidations>,
     mut bars: Query<(Entity, &mut TopBar)>,
+    tracks: Query<(&ChildOf, &ScrollPosition), With<SideTrack>>,
 ) {
     let mut view = top_bar_view(&nav, &model.snapshot);
     for tab in &mut view.tabs {
@@ -519,10 +520,18 @@ fn rebuild_top_bar(
         if bar.built.as_ref() == Some(&view) {
             continue;
         }
+        // A rebuild keeps where the user scrolled the tabs, until another tab is open.
+        let open = |v: &TopBarView| v.tabs.iter().find(|t| t.on).map(|t| t.target.clone());
+        let opened = bar.built.as_ref().map(open) != Some(open(&view));
+        let kept = tracks
+            .iter()
+            .find(|(parent, _)| parent.parent() == entity)
+            .map_or(0.0, |(_, at)| at.x);
         commands.entity(entity).despawn_related::<Children>();
         commands.entity(entity).with_children(|bar| {
             // Many tabs, or long ones at a large text size, scroll sideways; **Config** stays.
             bar.spawn((
+                ScrollPosition(Vec2::new(if opened { 0.0 } else { kept }, 0.0)),
                 Node {
                     min_width: px(0),
                     flex_shrink: 1.0,
@@ -537,7 +546,7 @@ fn rebuild_top_bar(
                 for tab in &view.tabs {
                     let label = if tab.on { Type::STRONG } else { Type::MUTED };
                     let mut e = p.spawn((tab_node(tab.on), tab.target.clone(), observe(on_tab)));
-                    if tab.on {
+                    if tab.on && opened {
                         e.insert(Reveal);
                     }
                     match &tab.target {
@@ -842,6 +851,63 @@ mod tests {
             (n.content_size.x - n.size.x) * n.inverse_scale_factor
         };
         assert_eq!(app.world().get::<ScrollPosition>(track).unwrap().x, max);
+    }
+
+    #[test]
+    fn a_wheel_turn_over_a_tab_scrolls_the_track_too() {
+        let mut app = crowded_tabs(14);
+        let track = track_of(&mut app);
+        let before = app.world().get::<ScrollPosition>(track).unwrap().x;
+        // The wheel lands on the label of a tab and bubbles up to the track.
+        let close = testing::find::<CloseTab>(&mut app, |c| c.0.number == 14);
+        let tab = app.world().get::<ChildOf>(close).unwrap().parent();
+        let label = app.world().get::<Children>(tab).unwrap()[0];
+        testing::wheel(&mut app, label, 3.0);
+        let after = app.world().get::<ScrollPosition>(track).unwrap().x;
+        assert!(after < before, "{before} -> {after}");
+    }
+
+    #[test]
+    fn the_sideways_scroll_survives_a_rebuild_until_the_open_tab_changes() {
+        let mut app = crowded_tabs(14);
+        let track = track_of(&mut app);
+        testing::wheel(&mut app, track, 5.0);
+        let scrolled = app.world().get::<ScrollPosition>(track).unwrap().x;
+        // A tab's label changes: the bar is rebuilt, the view of it stays where the user left it.
+        app.world_mut()
+            .resource_mut::<crate::bridge::Model>()
+            .snapshot
+            .mine
+            .push(clusia_core::PrSummary {
+                pr: "acme/widgets#3".parse().unwrap(),
+                title: "A new title".into(),
+                author: "mona".into(),
+                url: String::new(),
+                draft: false,
+                updated_at: String::new(),
+                comments: 0,
+            });
+        testing::settle(&mut app);
+        let track = track_of(&mut app);
+        assert_eq!(
+            app.world().get::<ScrollPosition>(track).unwrap().x,
+            scrolled
+        );
+        // Opening another tab brings it into view.
+        let pr: PrRef = "acme/widgets#1".parse().unwrap();
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Review { pr });
+        testing::settle(&mut app);
+        let open = testing::find::<CloseTab>(&mut app, |c| c.0.number == 1);
+        let tab = app.world().get::<ChildOf>(open).unwrap().parent();
+        let (tx, _, tw, _) = testing::frame(&app, tab);
+        let track = track_of(&mut app);
+        let (x, _, w, _) = testing::frame(&app, track);
+        assert!(
+            tx >= x - 1.0 && tx + tw <= x + w + 1.0,
+            "tab {tx}+{tw} in track {x}+{w}"
+        );
     }
 
     fn tab_frames(app: &mut App) -> (Entity, Entity, Entity) {

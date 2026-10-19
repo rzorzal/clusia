@@ -284,6 +284,58 @@ fn a_long_word_in_a_fixed_width_box_is_found_unless_the_text_breaks_inside_words
     assert!(found[0].contains("right by"), "{found:?}");
 }
 
+/// A word wider than its box by a few pixels is found: a line's trailing space is not counted
+/// as part of the text.
+#[test]
+fn a_word_a_few_pixels_wider_than_its_box_is_found() {
+    use crate::fonts::UiFonts;
+    use crate::ui::kit::{Type, text};
+    let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(600, 300));
+    let fonts = app.world().resource::<UiFonts>().clone();
+    app.world_mut()
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: px(200),
+            width: px(400),
+            flex_direction: FlexDirection::Column,
+            ..default()
+        })
+        .with_children(|c| {
+            c.spawn(text(&fonts, "overrunningword", Type::BODY));
+        });
+    testing::settle(&mut app);
+    let natural = {
+        let mut q = app.world_mut().query::<(&Text, &ComputedNode)>();
+        let (_, n) = q
+            .iter(app.world())
+            .find(|(t, _)| t.0 == "overrunningword")
+            .expect("laid out");
+        n.content_size.x * n.inverse_scale_factor
+    };
+    let found_with = |width: f32| {
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(600, 300));
+        let fonts = app.world().resource::<UiFonts>().clone();
+        app.world_mut()
+            .spawn(Node {
+                position_type: PositionType::Absolute,
+                top: px(200),
+                width: px(width),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            })
+            .with_children(|c| {
+                c.spawn(text(&fonts, "overrunningword", Type::BODY));
+            });
+        testing::settle(&mut app);
+        testing::overflowing_text(&mut app)
+            .into_iter()
+            .filter(|l| l.contains("overrunningword"))
+            .count()
+    };
+    assert_eq!(found_with(natural.ceil()), 0, "a box as wide as the word");
+    assert_eq!(found_with(natural - 8.0), 1, "a box 8 px short of it");
+}
+
 const SIZES: [UVec2; 2] = [UVec2::new(1280, 800), UVec2::new(960, 640)];
 
 /// The demo itself, at the default and the largest text, in the window the app opens at and in

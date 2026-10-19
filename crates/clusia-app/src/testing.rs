@@ -159,27 +159,32 @@ pub fn frame(app: &App, entity: Entity) -> (f32, f32, f32, f32) {
 }
 
 /// The width a text's lines take. A text can sit in a box stretched to its parent while one
-/// line, or one word that cannot break, runs past it, so its measured width counts. Only a
-/// text that also breaks inside a word is as wide as its box: it cannot run past it.
+/// line, or one word that cannot break, runs past it, so its widest line counts, without the
+/// space it broke at. Only a text that also breaks inside a word is as wide as its box: it
+/// cannot run past it.
 fn lines_width(app: &App, text: Entity, boxed: f32) -> f32 {
-    /// The measure of a line that wrapped includes the space it broke at, about 0.7 em: 12 px at
-    /// the largest text size. A word that cannot break overruns by more than that.
-    const TRAILING_SPACE: f32 = 12.0;
-    let layout = app.world().get::<TextLayout>(text);
-    let breaks_inside_words =
-        layout.is_some_and(|l| l.linebreak == bevy::text::LineBreak::WordOrCharacter);
-    let no_wrap = layout.is_some_and(|l| l.linebreak == bevy::text::LineBreak::NoWrap);
-    match app.world().get::<ComputedNode>(text) {
-        Some(node) if !breaks_inside_words => {
-            let measured = node.content_size.x * node.inverse_scale_factor;
-            boxed.max(if no_wrap {
-                measured
-            } else {
-                measured - TRAILING_SPACE
-            })
-        }
-        _ => boxed,
+    let breaks_inside_words = app
+        .world()
+        .get::<TextLayout>(text)
+        .is_some_and(|l| l.linebreak == bevy::text::LineBreak::WordOrCharacter);
+    let (Some(node), Some(block)) = (
+        app.world().get::<ComputedNode>(text),
+        app.world().get::<bevy::text::ComputedTextBlock>(text),
+    ) else {
+        return boxed;
+    };
+    if breaks_inside_words {
+        return boxed;
     }
+    let widest = block
+        .buffer()
+        .lines()
+        .map(|line| {
+            let m = line.metrics();
+            m.advance - m.trailing_whitespace
+        })
+        .fold(0.0, f32::max);
+    boxed.max(widest * node.inverse_scale_factor)
 }
 
 fn inside_panel_column(app: &App, from: Entity) -> bool {
