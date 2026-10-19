@@ -1,7 +1,9 @@
 //! The command that opens a file at a line in the configured editor (spec §8 Editor).
 //!
-//! VS Code, Cursor and Zed are opened through their URL schemes with `/usr/bin/open`. That
-//! works from a launchd daemon whose `PATH` lacks the editors' command-line tools. A custom
+//! VS Code and Cursor are opened through their URL schemes with `/usr/bin/open`. That works
+//! from a launchd daemon whose `PATH` lacks the editors' command-line tools. Zed's URL handler
+//! does not reliably open a file at a line, so Zed runs the `cli` binary inside its app bundle
+//! (also found without `PATH`) with `path:line`. A custom
 //! command is split into words (quotes group words, no escapes, no shell); `{line}` and then
 //! `{path}` are substituted inside each word.
 
@@ -17,13 +19,35 @@ pub enum EditorError {
     NoPath,
     #[error("the custom editor command has an unclosed quote")]
     Quote,
+    #[error(
+        "Zed's command line tool was not found in /Applications or ~/Applications; install Zed there or set a custom command"
+    )]
+    NoZed,
 }
+
+/// Where the app bundles keep Zed's command-line tool, most likely first. `~` is `$HOME`.
+const ZED_CLIS: [&str; 4] = [
+    "/Applications/Zed.app/Contents/MacOS/cli",
+    "~/Applications/Zed.app/Contents/MacOS/cli",
+    "/Applications/Zed Preview.app/Contents/MacOS/cli",
+    "~/Applications/Zed Preview.app/Contents/MacOS/cli",
+];
 
 /// Program and arguments that open `path` at `line` (1 when absent or 0).
 pub fn editor_argv(
     editor: &Editor,
     path: &str,
     line: Option<u32>,
+) -> Result<Vec<String>, EditorError> {
+    editor_argv_where(editor, path, line, |p| std::path::Path::new(p).is_file())
+}
+
+/// [`editor_argv`] with `exists` deciding which Zed command-line tool is installed.
+fn editor_argv_where(
+    editor: &Editor,
+    path: &str,
+    line: Option<u32>,
+    exists: impl Fn(&str) -> bool,
 ) -> Result<Vec<String>, EditorError> {
     let line = line.unwrap_or(1).max(1);
     let open = |scheme: &str| {
@@ -35,7 +59,18 @@ pub fn editor_argv(
     match editor.kind {
         EditorKind::VsCode => open("vscode"),
         EditorKind::Cursor => open("cursor"),
-        EditorKind::Zed => open("zed"),
+        EditorKind::Zed => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let cli = ZED_CLIS
+                .iter()
+                .map(|c| match c.strip_prefix("~/") {
+                    Some(rest) => format!("{home}/{rest}"),
+                    None => (*c).to_string(),
+                })
+                .find(|c| exists(c))
+                .ok_or(EditorError::NoZed)?;
+            Ok(vec![cli, format!("{path}:{line}")])
+        }
         EditorKind::Custom => {
             let words = split_words(&editor.custom_command)?;
             if words.is_empty() {
@@ -123,15 +158,36 @@ mod tests {
             editor_argv(&ed(EditorKind::Cursor, ""), "/w/x.rs", Some(2)).unwrap(),
             ["/usr/bin/open", "cursor://file/w/x.rs:2"]
         );
+    }
+
+    #[test]
+    fn zed_runs_the_cli_in_its_app_bundle_with_path_and_line() {
+        let zed = ed(EditorKind::Zed, "");
+        let installed = |p: &str| p == ZED_CLIS[0];
         assert_eq!(
-            editor_argv(&ed(EditorKind::Zed, ""), "/w/ç.rs", None).unwrap(),
-            ["/usr/bin/open", "zed://file/w/%C3%A7.rs:1"],
-            "no line opens line 1; non-ASCII is percent-encoded"
+            editor_argv_where(&zed, "/w/a b.rs", Some(7), installed).unwrap(),
+            [ZED_CLIS[0], "/w/a b.rs:7"],
+            "the path stays one argument, spaces and all"
         );
         assert_eq!(
-            editor_argv(&ed(EditorKind::Zed, ""), "/w/x.rs", Some(0)).unwrap()[1],
-            "zed://file/w/x.rs:1",
+            editor_argv_where(&zed, "/w/ç.rs", None, installed).unwrap()[1],
+            "/w/ç.rs:1",
+            "no line opens line 1"
+        );
+        assert_eq!(
+            editor_argv_where(&zed, "/w/x.rs", Some(0), installed).unwrap()[1],
+            "/w/x.rs:1",
             "line 0 is treated as 1"
+        );
+        let preview = |p: &str| p == ZED_CLIS[2];
+        assert_eq!(
+            editor_argv_where(&zed, "/w/x.rs", None, preview).unwrap()[0],
+            ZED_CLIS[2],
+            "Zed Preview is used when Zed is not installed"
+        );
+        assert_eq!(
+            editor_argv_where(&zed, "/w/x.rs", None, |_| false),
+            Err(EditorError::NoZed)
         );
     }
 
