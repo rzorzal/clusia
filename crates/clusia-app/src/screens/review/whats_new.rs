@@ -9,7 +9,7 @@ use bevy::input::ButtonInput;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
+use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_protocol::{NewsItem, NewsKind};
 
@@ -231,6 +231,7 @@ fn dialog(
 ) {
     c.spawn(Node {
         flex_direction: FlexDirection::Column,
+        flex_shrink: 0.0,
         row_gap: px(4),
         padding: UiRect {
             left: px(24),
@@ -244,13 +245,26 @@ fn dialog(
         h.spawn(text(fonts, v.title.clone(), Type::HEADING.size(17.0)));
         h.spawn(text(fonts, v.since.clone(), Type::MUTED));
     });
-    for row in &v.rows {
-        news_row_node(c, fonts, pr, row, opts);
-    }
+    // Many rows scroll between the title and the **Got it** button.
+    c.spawn((
+        Node {
+            flex_direction: FlexDirection::Column,
+            min_height: px(0),
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+        ScrollArea,
+    ))
+    .with_children(|rows| {
+        for row in &v.rows {
+            news_row_node(rows, fonts, pr, row, opts);
+        }
+    });
     c.spawn((
         panel(
             Node {
                 column_gap: px(10),
+                flex_shrink: 0.0,
                 align_items: AlignItems::Center,
                 padding: UiRect::axes(px(24), px(14)),
                 border: UiRect::top(px(1)),
@@ -286,6 +300,7 @@ fn news_row_node(
     c.spawn((
         Node {
             column_gap: px(14),
+            flex_shrink: 0.0,
             align_items: AlignItems::Center,
             padding: UiRect::axes(px(24), px(12)),
             border: UiRect::top(px(1)),
@@ -558,6 +573,59 @@ mod tests {
 
     fn modal(app: &App, pr: &PrRef) -> Option<Modal> {
         app.world().resource::<ReviewTabs>().0[pr].ui.modal
+    }
+
+    #[test]
+    fn many_news_rows_scroll_between_the_title_and_got_it() {
+        for (height, large) in [(800, false), (420, false), (420, true)] {
+            let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, height));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            let pr: PrRef = "rzorzal/clusia#123".parse().unwrap();
+            app.world_mut().write_message(crate::bridge::ShowRequested(
+                clusia_protocol::WindowTarget::Review { pr: pr.clone() },
+            ));
+            app.update();
+            let (view, news) = fixture::demo_review(NOW);
+            let many: Vec<NewsItem> = (0..30)
+                .map(|n| {
+                    let mut it = news[n % news.len()].clone();
+                    it.summary = format!("{} {n}", it.summary);
+                    it
+                })
+                .collect();
+            testing::tell(
+                &mut app,
+                crate::bridge::Tell::Opened {
+                    pr: pr.clone(),
+                    view: Box::new(view),
+                    news: many,
+                },
+            );
+            testing::settle(&mut app);
+            let got = testing::find::<GotIt>(&mut app, |_| true);
+            let (_, y, _, h) = testing::frame(&app, got);
+            assert!(
+                y + h <= height as f32,
+                "{height} large={large}: Got it ends at {} in the window",
+                y + h
+            );
+            let rows = testing::entities::<NewsRowButton>(&mut app);
+            assert_eq!(rows.len(), 30);
+            let list = app.world().get::<ChildOf>(rows[0]).unwrap().parent();
+            assert_eq!(
+                app.world().get::<Node>(list).unwrap().overflow,
+                Overflow::scroll_y()
+            );
+            if height == 420 {
+                let laid = app.world().get::<bevy::ui::ComputedNode>(list).unwrap();
+                assert!(
+                    laid.content_size.y > laid.size.y,
+                    "{height}: the rows scroll"
+                );
+            }
+        }
     }
 
     #[test]
