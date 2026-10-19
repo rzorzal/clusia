@@ -9,6 +9,30 @@ use crate::fixture;
 use crate::scenes::{stage, stage_snapshot};
 use crate::testing::{self, NOW};
 
+/// Settings whose values are long: a program path, arguments, a command and a host.
+fn lengthen_config(app: &mut App) {
+    let l = long();
+    for (key, value) in [
+        (
+            "harness.program",
+            format!("/opt/{TOKEN}/{TOKEN}/bin/{TOKEN}"),
+        ),
+        ("harness.extra_args", l.clone()),
+        (
+            "harness.custom_name",
+            "refresh_with_retry_custom_command_name_1".to_string(),
+        ),
+        ("editor.custom_command", l.clone()),
+        ("github.host", format!("{TOKEN}.example.dev")),
+        (
+            "repositories.roots",
+            format!("[\"/Users/mona/{TOKEN}/{TOKEN}\"]"),
+        ),
+    ] {
+        testing::set_config_locally(app, key, &value);
+    }
+}
+
 /// A chat whose every kind of line is long, and a permission question with long details.
 fn lengthen_chat(app: &mut App, scene: Scene) {
     use crate::screens::review::agent::{Chats, PanelTab, PermissionQueue};
@@ -138,11 +162,11 @@ fn lengthen(app: &mut App) {
 
 /// No scene lets the text of long data run out of its box: a long title, path, body or
 /// branch name wraps or shrinks inside the screen it is on, at the default and the largest
-/// text size, in a window of 1280 × 800 and in a short one.
+/// text size, in a window of 1280 × 800 and in the smallest one (960 × 640).
 #[test]
 fn long_data_stays_inside_every_scene() {
     let mut escaped = Vec::new();
-    for size in [UVec2::new(1280, 800), UVec2::new(1280, 420)] {
+    for size in [UVec2::new(1280, 800), UVec2::new(960, 640)] {
         for large in [false, true] {
             for scene in Scene::value_variants() {
                 if scene.is_keywords() {
@@ -157,6 +181,7 @@ fn long_data_stays_inside_every_scene() {
                 testing::settle(&mut app);
                 lengthen(&mut app);
                 lengthen_chat(&mut app, *scene);
+                lengthen_config(&mut app);
                 testing::settle(&mut app);
                 testing::settle(&mut app);
                 for line in testing::overflowing_text(&mut app) {
@@ -229,7 +254,7 @@ fn crowd(app: &mut App) {
 #[test]
 fn crowded_scenes_scroll_instead_of_cutting_rows() {
     let mut cut = Vec::new();
-    for size in [UVec2::new(1280, 800), UVec2::new(1280, 420)] {
+    for size in [UVec2::new(1280, 800), UVec2::new(960, 640)] {
         for large in [false, true] {
             for scene in Scene::value_variants() {
                 if scene.is_keywords() {
@@ -255,6 +280,30 @@ fn crowded_scenes_scroll_instead_of_cutting_rows() {
     }
     for c in &cut {
         eprintln!("CUT {c}");
+    }
+    assert_eq!(cut, Vec::<String>::new());
+}
+
+/// At the smallest window and the largest text, no screen of the demo is cut at the bottom of
+/// a box that cannot scroll. The pickers are placed by the window, which the test app lacks.
+#[test]
+fn every_demo_scene_fits_the_smallest_window_or_scrolls() {
+    let mut cut = Vec::new();
+    for scene in Scene::value_variants() {
+        if scene.is_keywords() || matches!(scene, Scene::Emoji | Scene::Gif) {
+            continue;
+        }
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(960, 640));
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        stage_snapshot(app.world_mut(), *scene);
+        stage(app.world_mut(), *scene);
+        testing::settle(&mut app);
+        testing::settle(&mut app);
+        for line in testing::overflowing_text(&mut app) {
+            if line.contains(" below ") {
+                cut.push(format!("{scene:?}: {line}"));
+            }
+        }
     }
     assert_eq!(cut, Vec::<String>::new());
 }

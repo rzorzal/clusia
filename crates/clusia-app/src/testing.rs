@@ -179,10 +179,7 @@ pub fn overflowing_text(app: &mut App) -> Vec<String> {
         }
         // A text can sit in a box stretched to its parent while its lines run past it.
         let (x, y, w, h) = frame(app, text);
-        let (w, h) = (
-            w.max(node.content_size.x * node.inverse_scale_factor),
-            h.max(node.content_size.y * node.inverse_scale_factor),
-        );
+        let w = w.max(node.content_size.x * node.inverse_scale_factor);
         let (mut scrolls_x, mut scrolls_y) = (false, false);
         let mut at = text;
         let mut hidden = false;
