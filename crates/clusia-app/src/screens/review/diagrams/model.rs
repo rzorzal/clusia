@@ -580,6 +580,34 @@ mod tests {
     }
 
     #[test]
+    fn a_place_reply_is_kept_from_one_line_above_the_place_and_dropped_from_the_place() {
+        let mut m = loaded();
+        let version = m.loaded.get_mut(&2).expect("a version");
+        version.entries.retain(|e| e.plan.key != "keywords");
+        version
+            .entries
+            .push(fixture::keywords_entry_of(fixture::keywords_map_at(
+                "src/auth/refresh.rs",
+                44,
+                true,
+            )));
+        let reply = |start_line| DiagramsTell::Code {
+            pr: pr(),
+            number: 2,
+            key: "keywords".into(),
+            node: "p0".into(),
+            code: DiagramCode {
+                start_line,
+                ..answer(4)
+            },
+        };
+        m.apply(&reply(44));
+        assert!(m.code.is_empty(), "the place's own line is not the window");
+        m.apply(&reply(43));
+        assert_eq!(m.code.len(), 1, "the window opens a line above the place");
+    }
+
+    #[test]
     fn a_redraw_forgets_the_code_of_its_diagram_and_only_of_its_diagram() {
         let mut m = loaded();
         ask(&mut m, 2, "flow", "refresh");
