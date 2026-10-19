@@ -154,9 +154,10 @@ mod tests {
     #[test]
     fn a_program_still_running_after_the_grace_period_counts_as_started() {
         let started = std::time::Instant::now();
-        assert!(ProcessSpawner.spawn(&sh("exec sleep 3")).is_ok());
+        assert!(ProcessSpawner.spawn(&sh("exec sleep 10")).is_ok());
         let took = started.elapsed();
-        assert!(took >= GRACE && took < Duration::from_secs(3), "{took:?}");
+        assert!(took >= GRACE, "{took:?}");
+        assert!(took < Duration::from_secs(8), "{took:?}");
     }
 
     #[test]
@@ -191,17 +192,23 @@ mod tests {
     #[test]
     fn a_grandchild_holding_stderr_does_not_delay_a_success() {
         let started = std::time::Instant::now();
-        assert!(ProcessSpawner.spawn(&sh("(sleep 3 &); exit 0")).is_ok());
-        assert!(started.elapsed() < Duration::from_millis(1500));
+        assert!(ProcessSpawner.spawn(&sh("(sleep 10 &); exit 0")).is_ok());
+        assert!(
+            started.elapsed() < GRACE,
+            "the exit was not awaited on its own"
+        );
     }
 
     #[test]
     fn a_grandchild_holding_stderr_does_not_hide_a_failure() {
         let started = std::time::Instant::now();
         let e = ProcessSpawner
-            .spawn(&sh("(sleep 3 &); echo bad >&2; exit 2"))
+            .spawn(&sh("(sleep 10 &); echo bad >&2; exit 2"))
             .unwrap_err();
         assert!(e.to_string().contains("exit status: 2: bad"), "{e}");
-        assert!(started.elapsed() < Duration::from_millis(1500));
+        assert!(
+            started.elapsed() < GRACE,
+            "the exit was not awaited on its own"
+        );
     }
 }
