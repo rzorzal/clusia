@@ -8,7 +8,7 @@ use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::EditableText;
-use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
+use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_protocol::WindowTarget;
 use clusia_view::lists::is_saved;
@@ -19,7 +19,9 @@ use crate::nav::{Nav, NavSystems, pr_title};
 use crate::screens::review::agent::permission::PermissionModal;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
-use crate::ui::kit::{Clickable, Fill, HoverFill, Stroke, Type, panel, text, text_field};
+use crate::ui::kit::{
+    Clickable, Fill, HoverFill, Stroke, Type, panel, text, text_field, wrapped_text,
+};
 use crate::ui::modal::{escape_pressed, modal_card, modal_root};
 
 pub const MAX_ROWS: usize = 8;
@@ -208,9 +210,12 @@ fn palette_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, query: &str) {
     p.spawn((
         Node {
             flex_direction: FlexDirection::Column,
+            min_height: px(0),
             padding: UiRect::bottom(px(6)),
+            overflow: Overflow::scroll_y(),
             ..default()
         },
+        ScrollArea,
         RowsPart { built: None },
     ));
     p.spawn((
@@ -339,7 +344,7 @@ fn rows_list(
             Node {
                 padding: UiRect::axes(px(18), px(8)),
                 column_gap: px(12),
-                align_items: AlignItems::Center,
+                align_items: AlignItems::FlexStart,
                 ..default()
             },
             WidgetButton,
@@ -357,21 +362,30 @@ fn rows_list(
                 Node {
                     width: px(170),
                     flex_shrink: 0.0,
-                    overflow: Overflow::clip_x(),
                     ..default()
                 },
-                children![text(fonts, row.pr.to_string(), Type::MONO.ink(Swatch::Fg))],
+                children![wrapped_text(
+                    fonts,
+                    row.pr.to_string(),
+                    Type::MONO.ink(Swatch::Fg)
+                )],
             ));
             r.spawn((
                 Node {
                     flex_grow: 1.0,
+                    flex_basis: px(0),
                     min_width: px(0),
-                    overflow: Overflow::clip_x(),
                     ..default()
                 },
-                children![text(fonts, row.title.clone(), Type::BODY)],
+                children![wrapped_text(fonts, row.title.clone(), Type::BODY)],
             ));
-            r.spawn(text(fonts, row.note, Type::META));
+            r.spawn((
+                text(fonts, row.note, Type::META),
+                Node {
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            ));
         });
     }
 }

@@ -1090,6 +1090,50 @@ mod tests {
     }
 
     #[test]
+    fn long_findings_wrap_inside_their_cards_and_keep_their_buttons_in_view() {
+        let token = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it_at_all";
+        let long = format!("{token} {token} {token}");
+        let path =
+            "src/auth/very/deeply/nested/module/with_a_long_name/refresh_token_store_impl.rs";
+        for section in [ReviewSection::Security, ReviewSection::Audits] {
+            for large in [false, true] {
+                let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+                if large {
+                    testing::set_config_locally(&mut app, "appearance.text_size", "large");
+                }
+                let pr = testing::open_ready(&mut app, false);
+                let (mut results, states) = fixture::demo_checks(NOW);
+                for result in &mut results {
+                    for f in &mut result.findings {
+                        f.title = long.clone();
+                        f.body = long.clone();
+                        f.comment = long.clone();
+                        f.file = path.into();
+                        f.code = f.code.as_ref().map(|_| format!("let x = {long};"));
+                    }
+                }
+                testing::tell(
+                    &mut app,
+                    Tell::Checks(ChecksTell::Loaded {
+                        pr: pr.clone(),
+                        results,
+                        states,
+                        accepted: Vec::new(),
+                        dismissed: Vec::new(),
+                    }),
+                );
+                testing::set_section(&mut app, &pr, section);
+                testing::settle(&mut app);
+                assert_eq!(
+                    testing::overflowing_text(&mut app),
+                    Vec::<String>::new(),
+                    "{section:?} large={large}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_ready_tab_asks_for_its_checks_once() {
         let mut app = testing::app(fixture::demo(NOW));
         let pr = testing::open_ready(&mut app, false);

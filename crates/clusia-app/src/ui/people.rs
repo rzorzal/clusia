@@ -24,7 +24,9 @@ use crate::fonts::UiFonts;
 use crate::platform_open::{OpenUrls, visit};
 use crate::theme::Swatch;
 use crate::ui::composer::popover::panel_spot;
-use crate::ui::kit::{Clickable, Fill, HoverFill, Stroke, Type, Variant, button, initial, text};
+use crate::ui::kit::{
+    Clickable, Fill, HoverFill, Stroke, Type, Variant, button, initial, text, wrapped_text,
+};
 use crate::ui::media::{MediaCache, MediaState};
 
 /// The width of the card.
@@ -187,8 +189,10 @@ pub fn person_name(fonts: &UiFonts, login: &str) -> impl Bundle {
         Node {
             padding: UiRect::horizontal(px(3)),
             border_radius: BorderRadius::all(px(4)),
-            // A name is never squeezed into the text beside it.
+            // A login is at most 39 characters: it keeps its width beside other text and breaks
+            // only when it is wider than the box that holds it.
             flex_shrink: 0.0,
+            max_width: percent(100),
             ..default()
         },
         (WidgetButton, Clickable),
@@ -199,8 +203,11 @@ pub fn person_name(fonts: &UiFonts, login: &str) -> impl Bundle {
         PersonTarget(login.to_string()),
         observe(open_profile),
         children![(
-            text(fonts, format!("@{login}"), Type::STRONG),
-            TextLayout::no_wrap(),
+            wrapped_text(fonts, format!("@{login}"), Type::STRONG),
+            Node {
+                max_width: percent(100),
+                ..default()
+            },
         )],
     )
 }
@@ -368,7 +375,7 @@ fn track_hover(
 
 fn card_text(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &str, t: Type) {
     p.spawn((
-        text(fonts, s.to_string(), t),
+        wrapped_text(fonts, s.to_string(), t),
         Node {
             min_width: px(0),
             ..default()

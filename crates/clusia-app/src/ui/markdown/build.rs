@@ -16,10 +16,12 @@ use clusia_highlight::highlight;
 use crate::fonts::UiFonts;
 use crate::platform_open::{OpenUrls, visit};
 use crate::theme::{Swatch, Theme};
-use crate::ui::code::{code_line, plain_text, spans_for};
+use crate::ui::code::{plain_text, spans_for, wrapped_code_line};
 use crate::ui::code_select::{LineKey, selectable};
 use crate::ui::emoji::EmojiImages;
-use crate::ui::kit::{Clickable, Fill, Ink, Stroke, TextSized, Type, Variant, button, font, text};
+use crate::ui::kit::{
+    Clickable, Fill, Ink, Stroke, TextSized, Type, Variant, font, text, wrapping_button,
+};
 use crate::ui::markdown::parse::{Block, Inline, ListItem, Style};
 
 /// The width of a space, in ems.
@@ -284,7 +286,7 @@ fn set_space(item: &mut Inline, on: bool) {
 /// A **Copy markdown** button for the comment whose source is `source`.
 pub fn copy_button(fonts: &UiFonts, source: &str) -> impl Bundle {
     (
-        button(fonts, "Copy markdown", Variant::Ghost),
+        wrapping_button(fonts, "Copy markdown", Variant::Ghost),
         CopyMarkdown(source.to_string()),
     )
 }
@@ -538,7 +540,7 @@ fn code_block(
                 b,
                 key,
                 plain_text(&runs),
-                code_line(fonts, opts.code_size, runs),
+                wrapped_code_line(fonts, opts.code_size, runs),
             );
         }
         if all.len() > shown.len() {
@@ -602,12 +604,20 @@ fn suggestion(c: &mut ChildSpawnerCommands, fonts: &UiFonts, source: &str, opts:
                         column: 0,
                     };
                     order += 1;
-                    selectable(
-                        row,
-                        key,
-                        plain_text(&runs),
-                        code_line(fonts, opts.code_size, runs),
-                    );
+                    row.spawn(Node {
+                        flex_grow: 1.0,
+                        flex_basis: px(0),
+                        min_width: px(0),
+                        ..default()
+                    })
+                    .with_children(|cell| {
+                        selectable(
+                            cell,
+                            key,
+                            plain_text(&runs),
+                            wrapped_code_line(fonts, opts.code_size, runs),
+                        );
+                    });
                 });
             }
             if all.len() > MAX_CODE_LINES {
@@ -970,6 +980,64 @@ mod tests {
                 ..Style::default()
             },
         )
+    }
+
+    /// `md` drawn in a 420 px column of the laid-out app, as the texts that run out of it.
+    fn overflow_of(md: &str, large: bool) -> Vec<String> {
+        let mut app = testing::layout_app(Snapshot::default(), UVec2::new(1280, 800));
+        if large {
+            testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        }
+        let root = app
+            .world_mut()
+            .spawn(Node {
+                width: px(420),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            })
+            .id();
+        let blocks = parse(md);
+        let fonts = app.world().resource::<UiFonts>().clone();
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                commands.entity(root).with_children(|p| {
+                    markdown(
+                        p,
+                        &fonts,
+                        &blocks,
+                        &RenderOpts {
+                            suggestion_base: Some("let old = 1;".into()),
+                            ..RenderOpts::default()
+                        },
+                    );
+                });
+            })
+            .unwrap();
+        testing::settle(&mut app);
+        testing::overflowing_text(&mut app)
+    }
+
+    #[test]
+    fn code_fences_suggestions_and_tables_stay_inside_a_narrow_column() {
+        let long = "refresh_with_retry(token_one_with_a_long_name, token_two_with_a_long_name, token_three_with_a_long_name)";
+        let cases = [
+            ("a code fence", format!("```rust\nlet a = {long};\n```")),
+            ("a suggestion", format!("```suggestion\nlet a = {long};\n```")),
+            (
+                "a table",
+                "| Path | Note |\n| --- | --- |\n| https://github.com/rzorzal/clusia/blob/main/crates/clusia-app/src/screens/review/diagrams/modal.rs | long unbreakable path |\n"
+                    .to_string(),
+            ),
+        ];
+        for (what, md) in cases {
+            for large in [false, true] {
+                assert_eq!(
+                    overflow_of(&md, large),
+                    Vec::<String>::new(),
+                    "{what}, large={large}"
+                );
+            }
+        }
     }
 
     /// Builds `blocks` under a fresh root and runs a frame.

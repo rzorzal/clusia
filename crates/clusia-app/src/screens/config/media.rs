@@ -13,7 +13,7 @@ use crate::bridge::{Ask, Asks, GIPHY_KEY_REFUSAL, Model, Toasts};
 use crate::fonts::UiFonts;
 use crate::snapshot::{GiphyKey, Snapshot};
 use crate::theme::Swatch;
-use crate::ui::kit::{Type, Variant, button, card, text, toggle};
+use crate::ui::kit::{Type, Variant, button, card, text, toggle, wrapped_text};
 
 /// Reads the clipboard into `SetGiphyKey`.
 #[derive(Component, Debug)]
@@ -98,13 +98,17 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &MediaView) {
         |r| {
             r.spawn(Node {
                 flex_direction: FlexDirection::Column,
+                flex_shrink: 1.0,
+                min_width: px(0),
                 row_gap: px(8),
                 ..default()
             })
             .with_children(|c| {
-                c.spawn(text(fonts, line, Type::BODY.ink(ink)));
+                c.spawn(wrapped_text(fonts, line, Type::BODY.ink(ink)));
                 c.spawn(Node {
                     column_gap: px(8),
+                    row_gap: px(8),
+                    flex_wrap: FlexWrap::Wrap,
                     ..default()
                 })
                 .with_children(|b| {

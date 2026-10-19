@@ -29,7 +29,7 @@ use crate::screens::review::shell::{SectionBody, setting_link};
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, card, disabled_button, panel,
-    text,
+    text, wrapped_text,
 };
 
 /// The id of the **All** entry. It is not a valid area id, so no configured area can take it.
@@ -579,17 +579,19 @@ fn draw(
             right
                 .spawn(Node {
                     align_items: AlignItems::Center,
+                    flex_wrap: FlexWrap::Wrap,
+                    row_gap: px(8),
                     flex_shrink: 0.0,
                     ..default()
                 })
                 .with_children(|h| {
                     h.spawn(Node {
                         flex_grow: 1.0,
-                        min_width: px(0),
+                        max_width: percent(100),
                         ..default()
                     })
                     .with_children(|n| {
-                        n.spawn(text(fonts, d.name.clone(), Type::HEADING));
+                        n.spawn(wrapped_text(fonts, d.name.clone(), Type::HEADING));
                     });
                     h.spawn((
                         button_ask(fonts),
@@ -639,7 +641,7 @@ fn draw(
 }
 
 fn button_ask(fonts: &UiFonts) -> impl Bundle {
-    crate::ui::kit::button(fonts, "Ask the agent about this", Variant::Secondary)
+    crate::ui::kit::wrapping_button(fonts, "Ask the agent about this", Variant::Secondary)
 }
 
 fn notice_pane(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, n: &Notice) {
@@ -763,6 +765,8 @@ fn finding_card(
     .with_children(|k| {
         k.spawn(Node {
             column_gap: px(10),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })
@@ -774,15 +778,16 @@ fn finding_card(
             }
             t.spawn(Node {
                 flex_grow: 1.0,
+                flex_basis: px(120),
                 min_width: px(0),
                 ..default()
             })
             .with_children(|n| {
-                n.spawn(text(fonts, f.title.clone(), Type::STRONG));
+                n.spawn(wrapped_text(fonts, f.title.clone(), Type::STRONG));
             });
-            t.spawn(text(fonts, f.place.clone(), Type::MONO));
+            t.spawn(wrapped_text(fonts, f.place.clone(), Type::MONO));
         });
-        k.spawn(text(fonts, f.body.clone(), Type::BODY));
+        k.spawn(wrapped_text(fonts, f.body.clone(), Type::BODY));
         if f.general {
             k.spawn(text(
                 fonts,
@@ -804,10 +809,12 @@ fn finding_card(
             Swatch::Chrome,
         ))
         .with_children(|b| {
-            b.spawn(text(fonts, f.comment.clone(), Type::BODY));
+            b.spawn(wrapped_text(fonts, f.comment.clone(), Type::BODY));
         });
         k.spawn(Node {
             column_gap: px(8),
+            row_gap: px(6),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })
@@ -853,10 +860,16 @@ fn pass_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pass: &PassView) {
             ..default()
         })
         .with_children(|n| {
-            n.spawn(text(fonts, pass.text.clone(), Type::BODY));
+            n.spawn(wrapped_text(fonts, pass.text.clone(), Type::BODY));
         });
         if let Some(place) = &pass.place {
-            r.spawn(text(fonts, place.clone(), Type::META));
+            r.spawn((
+                wrapped_text(fonts, place.clone(), Type::META),
+                Node {
+                    max_width: percent(50),
+                    ..default()
+                },
+            ));
         }
     });
 }

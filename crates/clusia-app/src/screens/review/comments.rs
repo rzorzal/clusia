@@ -26,7 +26,7 @@ use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Stroke, Tone, Type, Variant, badge, button, card, chip, divider, panel, text,
+    Stroke, Tone, Type, Variant, badge, button, card, chip, divider, panel, text, wrapped_text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown};
@@ -601,15 +601,19 @@ fn list(
     for t in &v.threads {
         p.spawn(Node {
             column_gap: px(8),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             margin: UiRect::top(px(6)),
             ..default()
         })
         .with_children(|h| {
-            h.spawn(text(
-                fonts,
-                t.heading.clone(),
-                Type::MONO.ink(Swatch::Muted),
+            h.spawn((
+                wrapped_text(fonts, t.heading.clone(), Type::MONO.ink(Swatch::Muted)),
+                Node {
+                    max_width: percent(100),
+                    ..default()
+                },
             ));
             if t.outdated {
                 h.spawn(badge(fonts, "outdated", Tone::Orange));
@@ -777,6 +781,8 @@ fn post_row(
         .with_children(|c| {
             c.spawn(Node {
                 column_gap: px(8),
+                row_gap: px(4),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Center,
                 ..default()
             })
@@ -839,6 +845,8 @@ fn draft_reply(
     .with_children(|c| {
         c.spawn(Node {
             column_gap: px(8),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })

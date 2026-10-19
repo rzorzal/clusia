@@ -38,8 +38,8 @@ use crate::ui::code::{CodeSpan, plain_text, spans_for, wrapped_code_line};
 use crate::ui::code_select::{ClickKind, CodeSelection, LineKey, selectable};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, card, panel, segment,
-    segment_node, segments, text,
+    Clickable, Fill, HoverFill, Preview, Reveal, SideTrack, Stroke, Tone, Type, Variant, badge,
+    button, card, panel, segment, segment_node, segments, text, wrapped_text, wrapping_button,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
@@ -807,10 +807,12 @@ fn frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
             c.spawn((
                 panel(
                     Node {
-                        height: px(46),
+                        min_height: px(46),
                         flex_shrink: 0.0,
-                        padding: UiRect::horizontal(px(16)),
+                        padding: UiRect::axes(px(16), px(6)),
                         column_gap: px(8),
+                        row_gap: px(4),
+                        flex_wrap: FlexWrap::Wrap,
                         align_items: AlignItems::Center,
                         border: UiRect::bottom(px(1)),
                         ..default()
@@ -1025,11 +1027,15 @@ fn file_list(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, files: &
             r.spawn((
                 Node {
                     flex_grow: 1.0,
+                    flex_basis: px(0),
                     min_width: px(0),
-                    overflow: Overflow::clip_x(),
                     ..default()
                 },
-                children![text(fonts, f.path.clone(), Type::MONO.ink(Swatch::Fg))],
+                children![wrapped_text(
+                    fonts,
+                    f.path.clone(),
+                    Type::MONO.ink(Swatch::Fg)
+                )],
             ));
             r.spawn(text(
                 fonts,
@@ -1047,10 +1053,12 @@ fn file_list(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, files: &
 
 fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffView) {
     if let Some(path) = &v.path {
-        p.spawn(text(
-            fonts,
-            path.clone(),
-            Type::MONO.ink(Swatch::Fg).size(13.0),
+        p.spawn((
+            wrapped_text(fonts, path.clone(), Type::MONO.ink(Swatch::Fg).size(13.0)),
+            Node {
+                max_width: percent(100),
+                ..default()
+            },
         ));
         p.spawn(text(
             fonts,
@@ -1079,10 +1087,14 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
     // The track sits at the start of a column elsewhere; in this row it shares the path's axis.
     track.entry::<Node>().and_modify(|mut n| {
         n.align_self = AlignSelf::Center;
+        // Narrower than its four segments, the track scrolls sideways.
+        n.max_width = percent(100);
+        n.overflow = Overflow::scroll_x();
     });
+    track.insert(SideTrack);
     track.with_children(|s| {
         for (label, mode) in [("Unified", DiffMode::Unified), ("Split", DiffMode::Split)] {
-            s.spawn((
+            let mut e = s.spawn((
                 segment(fonts, label, v.mode == mode),
                 ModeButton {
                     pr: pr.clone(),
@@ -1090,6 +1102,9 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
                 },
                 observe(on_mode),
             ));
+            if v.mode == mode {
+                e.insert(Reveal);
+            }
         }
         for label in ["Story", "Calls"] {
             s.spawn((
@@ -1306,7 +1321,7 @@ fn body(
                     p.spawn(Node {
                         flex_direction: FlexDirection::Column,
                         row_gap: px(8),
-                        padding: UiRect::new(px(2.0 * NUMBER_WIDTH + 18.0), px(16), px(8), px(8)),
+                        padding: UiRect::new(px(2.0 * NUMBER_WIDTH + 18.0), px(8), px(8), px(8)),
                         ..default()
                     })
                     .with_children(|b| {
@@ -1339,7 +1354,7 @@ fn body(
                         ..default()
                     })
                     .with_children(|c| {
-                        c.spawn(text(fonts, label.clone(), Type::META));
+                        c.spawn(wrapped_text(fonts, label.clone(), Type::META));
                     });
                 }
             });
@@ -1416,7 +1431,7 @@ fn body(
                                 width: percent(50),
                                 flex_direction: FlexDirection::Column,
                                 row_gap: px(8),
-                                padding: UiRect::new(px(NUMBER_WIDTH + 10.0), px(16), px(8), px(8)),
+                                padding: UiRect::new(px(NUMBER_WIDTH + 10.0), px(8), px(8), px(8)),
                                 ..default()
                             })
                             .with_children(|b| {
@@ -1466,12 +1481,15 @@ fn below(
             p.spawn(card(Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: px(8),
-                padding: UiRect::axes(px(14), px(10)),
+                padding: UiRect::axes(px(10), px(10)),
                 ..default()
             }))
             .with_children(|c| {
+                // The buttons drop to a second row when the card is narrow (a Split column).
                 c.spawn(Node {
                     column_gap: px(10),
+                    row_gap: px(4),
+                    flex_wrap: FlexWrap::Wrap,
                     align_items: AlignItems::Center,
                     ..default()
                 })
@@ -1480,13 +1498,17 @@ fn below(
                     h.spawn(person_name(fonts, &t.author));
                     // Collapsed, the first comment shows as one line: the box is one text
                     // line high and clips what wraps below it.
-                    let mut line = h.spawn(Node {
-                        flex_grow: 1.0,
-                        min_width: px(0),
-                        max_height: if t.expanded { Val::Auto } else { px(18) },
-                        overflow: Overflow::clip(),
-                        ..default()
-                    });
+                    let mut line = h.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            flex_basis: px(0),
+                            min_width: px(60),
+                            max_height: if t.expanded { Val::Auto } else { px(18) },
+                            overflow: Overflow::clip(),
+                            ..default()
+                        },
+                        Preview,
+                    ));
                     if !t.expanded
                         && let Some(first) = t.posts.first()
                     {
@@ -1513,7 +1535,7 @@ fn below(
                         n => format!("{toggle} · {n} replies"),
                     };
                     h.spawn((
-                        button(fonts, &toggle, Variant::Ghost),
+                        wrapping_button(fonts, &toggle, Variant::Ghost),
                         ThreadToggle {
                             pr: pr.clone(),
                             id: t.thread.id.clone(),
@@ -1521,7 +1543,7 @@ fn below(
                         observe(on_toggle),
                     ));
                     h.spawn((
-                        button(fonts, "Reply", Variant::Ghost),
+                        wrapping_button(fonts, "Reply", Variant::Ghost),
                         ThreadReply {
                             pr: pr.clone(),
                             thread: t.thread.clone(),
@@ -1566,7 +1588,7 @@ fn below(
                     Node {
                         flex_direction: FlexDirection::Column,
                         row_gap: px(8),
-                        padding: UiRect::axes(px(14), px(10)),
+                        padding: UiRect::axes(px(10), px(10)),
                         border: px(1).all(),
                         border_radius: BorderRadius::all(px(8)),
                         ..default()
@@ -1583,6 +1605,8 @@ fn below(
             .with_children(|c| {
                 c.spawn(Node {
                     column_gap: px(8),
+                    row_gap: px(4),
+                    flex_wrap: FlexWrap::Wrap,
                     align_items: AlignItems::Center,
                     ..default()
                 })
@@ -1598,7 +1622,7 @@ fn below(
                     });
                     h.spawn(copy_button(fonts, &d.body));
                     h.spawn((
-                        button(fonts, "Edit", Variant::Ghost),
+                        wrapping_button(fonts, "Edit", Variant::Ghost),
                         DraftEdit {
                             pr: pr.clone(),
                             id: d.id.clone(),
@@ -1606,7 +1630,7 @@ fn below(
                         observe(on_edit),
                     ));
                     h.spawn((
-                        button(fonts, "Remove", Variant::Ghost),
+                        wrapping_button(fonts, "Remove", Variant::Ghost),
                         DraftRemove {
                             pr: pr.clone(),
                             id: d.id.clone(),
@@ -2636,16 +2660,21 @@ mod tests {
     }
 
     #[test]
-    fn the_reply_count_of_a_collapsed_thread_never_wraps_or_shrinks() {
+    fn the_reply_count_of_a_collapsed_thread_only_wraps_when_the_card_is_narrower_than_it() {
         let mut app = review_app();
         let mut q = app.world_mut().query::<(&Text, &TextLayout, &ChildOf)>();
         let (_, layout, parent) = q
             .iter(app.world())
             .find(|(t, _, _)| t.0 == "Expand · 2 replies")
             .expect("the count is part of the toggle's label");
-        assert_eq!(layout.linebreak, LineBreak::NoWrap);
+        assert_eq!(layout.linebreak, LineBreak::WordOrCharacter);
         let button = app.world().get::<Node>(parent.parent()).unwrap();
         assert_eq!(button.flex_shrink, 0.0, "only the preview gives way");
+        assert_eq!(
+            button.max_width,
+            percent(100),
+            "wider than the card, it wraps"
+        );
     }
 
     #[test]
@@ -2944,6 +2973,107 @@ mod tests {
         let pr = fixture::demo_pr();
         ui_mut(app, &pr).0.get_mut(&pr).unwrap().ui.mode = mode;
         testing::settle(app);
+    }
+
+    #[test]
+    fn comment_headers_wrap_their_buttons_in_the_narrow_columns_of_split() {
+        for large in [false, true] {
+            let mut app = wrap_app();
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            set_mode(&mut app, DiffMode::Split);
+            testing::settle(&mut app);
+            let flagged: Vec<String> = testing::overflowing_text(&mut app)
+                .into_iter()
+                .filter(|t| {
+                    ["Expand", "Reply", "Copy markdown", "Edit", "Remove"]
+                        .iter()
+                        .any(|b| t.starts_with(&format!("\"{b}")))
+                })
+                .collect();
+            assert_eq!(flagged, Vec::<String>::new(), "large={large}");
+        }
+    }
+
+    #[test]
+    fn long_paths_wrap_in_the_header_the_file_list_and_the_split_labels() {
+        let token = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it";
+        for (mode, large) in [
+            (DiffMode::Unified, false),
+            (DiffMode::Unified, true),
+            (DiffMode::Split, false),
+            (DiffMode::Split, true),
+        ] {
+            let mut app = wrap_app();
+            let pr = fixture::demo_pr();
+            {
+                let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+                let tab = tabs.0.get_mut(&pr).unwrap();
+                let Phase::Ready(ready) = &mut tab.phase else {
+                    panic!("ready")
+                };
+                for (i, f) in ready.view.files.iter_mut().enumerate() {
+                    f.path = format!("src/{token}/{i}_{token}.rs");
+                }
+                for (i, f) in ready.view.diff.iter_mut().enumerate() {
+                    f.path = format!("src/{token}/{i}_{token}.rs");
+                }
+                ready.view.pr.head_ref = format!("{token}-{token}");
+                tab.ui.mode = mode;
+            }
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            testing::settle(&mut app);
+            let header = testing::find::<HeaderPart>(&mut app, |_| true);
+            let buttons = testing::entities::<FileButton>(&mut app);
+            assert!(!buttons.is_empty());
+            for root in std::iter::once(header).chain(buttons) {
+                assert_eq!(
+                    testing::texts_past_right(&mut app, root),
+                    Vec::<String>::new(),
+                    "{mode:?} large={large}"
+                );
+            }
+            let switch = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
+            let (hx, _, hw, _) = testing::frame(&app, header);
+            let (sx, _, sw, _) = testing::frame(&app, switch);
+            assert!(
+                sx + sw <= hx + hw,
+                "{mode:?} large={large}: the mode switch stays in the header"
+            );
+        }
+    }
+
+    #[test]
+    fn the_mode_track_scrolls_sideways_when_narrow_and_shows_the_selected_mode() {
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(960, 640));
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        testing::open_ready(&mut app, false);
+        testing::settle(&mut app);
+        set_mode(&mut app, DiffMode::Split);
+        testing::settle(&mut app);
+        let selected = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
+        let track = app.world().get::<ChildOf>(selected).unwrap().parent();
+        assert!(
+            app.world()
+                .get::<crate::ui::kit::SideTrack>(track)
+                .is_some()
+        );
+        let laid = app.world().get::<bevy::ui::ComputedNode>(track).unwrap();
+        assert!(
+            laid.content_size.x > laid.size.x,
+            "the four segments do not fit"
+        );
+        let (sx, _, sw, _) = testing::frame(&app, selected);
+        let (tx, _, tw, _) = testing::frame(&app, track);
+        assert!(
+            sx >= tx - 1.0 && sx + sw <= tx + tw + 1.0,
+            "Split is in view"
+        );
+        testing::wheel(&mut app, track, -3.0);
+        assert!(app.world().get::<ScrollPosition>(track).unwrap().x > 0.0);
     }
 
     #[test]

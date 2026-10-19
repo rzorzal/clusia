@@ -37,7 +37,7 @@ use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, disabled_button,
-    icon_button, panel, text,
+    icon_button, panel, text, wrapped_text,
 };
 use crate::ui::markdown::parse::parse;
 use crate::ui::markdown::{RenderOpts, markdown_line};
@@ -826,25 +826,36 @@ pub fn header_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, h
         .with_children(|c| {
             c.spawn(Node {
                 column_gap: px(10),
+                row_gap: px(2),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Baseline,
                 ..default()
             })
             .with_children(|t| {
                 t.spawn(text(fonts, h.repo.clone(), Type::MUTED));
                 t.spawn(text(fonts, h.number.clone(), Type::MUTED));
-                t.spawn(text(fonts, h.title.clone(), Type::TITLE.size(17.0)));
+                t.spawn((
+                    wrapped_text(fonts, h.title.clone(), Type::TITLE.size(17.0)),
+                    Node {
+                        max_width: percent(100),
+                        ..default()
+                    },
+                ));
             });
             c.spawn(Node {
                 column_gap: px(10),
+                row_gap: px(4),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Center,
                 ..default()
             })
             .with_children(|m| {
                 m.spawn(Node {
                     column_gap: px(6),
+                    row_gap: px(2),
+                    flex_wrap: FlexWrap::Wrap,
                     align_items: AlignItems::Center,
-                    flex_shrink: 1.0,
-                    min_width: px(0),
+                    max_width: percent(100),
                     ..default()
                 })
                 .with_children(|who| {
@@ -860,12 +871,13 @@ pub fn header_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, h
                     Node {
                         padding: UiRect::axes(px(6), px(2)),
                         border_radius: BorderRadius::all(px(4)),
+                        max_width: percent(100),
                         ..default()
                     },
                     Swatch::Chrome,
                 ))
                 .with_children(|chip| {
-                    chip.spawn(text(fonts, h.branches.clone(), Type::MONO));
+                    chip.spawn(wrapped_text(fonts, h.branches.clone(), Type::MONO));
                 });
                 m.spawn(Node {
                     column_gap: px(4),
@@ -1230,18 +1242,23 @@ fn draft_card_node(
             h.spawn((
                 Node {
                     flex_grow: 1.0,
+                    flex_basis: px(0),
                     min_width: px(0),
                     column_gap: px(8),
+                    row_gap: px(4),
+                    flex_wrap: FlexWrap::Wrap,
                     align_items: AlignItems::Center,
-                    overflow: Overflow::clip_x(),
                     ..default()
                 },
                 DraftCardPlace,
             ))
             .with_children(|place| {
                 place.spawn((
-                    text(fonts, card.title.clone(), Type::MONO),
-                    TextLayout::no_wrap(),
+                    wrapped_text(fonts, card.title.clone(), Type::MONO),
+                    Node {
+                        max_width: percent(100),
+                        ..default()
+                    },
                 ));
                 if let Some((label, tone)) = &card.badge {
                     place.spawn(badge(fonts, label, *tone));
@@ -2393,7 +2410,7 @@ mod tests {
         let place = testing::find::<DraftCardPlace>(&mut app, |_| true);
         let n = node(&app, place);
         assert_eq!(n.min_width, px(0), "the place may shrink below its text");
-        assert_eq!(n.overflow, Overflow::clip_x(), "and is cut at the edge");
+        assert_eq!(n.flex_wrap, FlexWrap::Wrap, "and wraps its badges under it");
         let row = app.world().get::<ChildOf>(remove).unwrap().parent();
         assert_eq!(app.world().get::<ChildOf>(place).unwrap().parent(), row);
         let mut texts = app.world_mut().query::<(&Text, &TextLayout, &ChildOf)>();
@@ -2401,7 +2418,44 @@ mod tests {
             .iter(app.world())
             .find(|(_, _, parent)| parent.parent() == place)
             .expect("the location text");
-        assert_eq!(layout.linebreak, LineBreak::NoWrap, "one line");
+        assert_eq!(
+            layout.linebreak,
+            LineBreak::WordOrCharacter,
+            "wraps, never cut"
+        );
+    }
+
+    #[test]
+    fn long_draft_cards_wrap_their_place_and_badges_inside_the_card() {
+        let token = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it";
+        for large in [false, true] {
+            let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            let pr = testing::open_ready(&mut app, false);
+            {
+                let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+                let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).unwrap().phase else {
+                    panic!("ready")
+                };
+                for item in &mut ready.view.review.draft.items {
+                    if let Some(a) = &mut item.anchor {
+                        a.path = format!("src/{token}/{token}.rs");
+                    }
+                }
+            }
+            testing::settle(&mut app);
+            let cards = testing::entities::<DraftCardButton>(&mut app);
+            assert!(!cards.is_empty());
+            for card in cards {
+                assert_eq!(
+                    testing::texts_past_right(&mut app, card),
+                    Vec::<String>::new(),
+                    "large={large}"
+                );
+            }
+        }
     }
 
     #[test]

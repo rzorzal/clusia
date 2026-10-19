@@ -31,7 +31,7 @@ use crate::ui::composer::{
 };
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, card, disabled_button,
-    panel, text,
+    panel, text, wrapped_text,
 };
 use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
 
@@ -487,12 +487,20 @@ fn card_content(
     .with_children(|c| {
         c.spawn(Node {
             column_gap: px(10),
+            row_gap: px(2),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Baseline,
             ..default()
         })
         .with_children(|h| {
             h.spawn(text(fonts, v.title, Type::HEADING.size(18.0)));
-            h.spawn(text(fonts, v.subject.clone(), Type::MUTED));
+            h.spawn((
+                wrapped_text(fonts, v.subject.clone(), Type::MUTED),
+                Node {
+                    max_width: percent(100),
+                    ..default()
+                },
+            ));
         });
         c.spawn(text(fonts, v.note, Type::MUTED));
         for (index, item) in v.items.iter().enumerate() {
