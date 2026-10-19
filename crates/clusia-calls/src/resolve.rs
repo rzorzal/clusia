@@ -100,9 +100,30 @@ fn last_segment(path: &str) -> &str {
     segments(path).last().unwrap_or(path)
 }
 
+/// A path-like module string (`./util.js`, as ESM writes the file it imports) loses a trailing
+/// source extension, so it keys on the file's stem rather than on `js`.
+fn without_extension(module: &str) -> &str {
+    if !module.contains('/') && !module.starts_with('.') {
+        return module;
+    }
+    let file = module.rsplit('/').next().unwrap_or(module);
+    match file.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && matches!(
+                    ext,
+                    "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "py" | "pyi"
+                ) =>
+        {
+            &module[..module.len() - ext.len() - 1]
+        }
+        _ => module,
+    }
+}
+
 /// What a module string names once the relative prefixes are gone: its last segment.
 fn module_key(module: &str) -> Option<&str> {
-    segments(module)
+    segments(without_extension(module))
         .skip_while(|s| matches!(*s, "crate" | "self" | "super"))
         .last()
 }
@@ -557,6 +578,20 @@ fn helper() {}
             ]
         );
         assert_eq!(resolved.unresolved, 1);
+    }
+
+    #[test]
+    fn an_esm_import_with_an_extension_finds_the_file() {
+        let a = "import { load } from \"./util.js\";\nexport function run() {\n  load();\n}\n";
+        let index = index_of(&[
+            ("src/a.ts", a),
+            ("src/util.ts", "export function load() {}\n"),
+            ("src/js.ts", "export function load() {}\n"),
+        ]);
+        assert_eq!(
+            resolve(&index).edges,
+            vec![(id("src/a.ts#run#2"), local(&["src/util.ts#load#1"]), 3)]
+        );
     }
 
     #[test]
