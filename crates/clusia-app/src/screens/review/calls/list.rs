@@ -1,5 +1,5 @@
 //! The Calls view's left column: the find box above the functions of the pull request, grouped
-//! as the mockup groups them, or the find box's hits while it holds text. A row re-centres the
+//! by how they changed, or the find box's hits while it holds text. A row re-centres the
 //! graph on its function, or selects a file the call graph cannot read.
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;

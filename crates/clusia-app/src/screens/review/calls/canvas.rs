@@ -1,7 +1,8 @@
-//! The Calls canvas: the call graph drawn top-down with the M1 canvas pieces (dotted ground,
-//! clipped viewport, zoom, pan, pinch), the level labels left of it, the header with the
-//! breadcrumb and the Depth menu, the legend, and the expansion card of the selected node. With
-//! no graph it shows the card of a file the call graph cannot read, or one line that says why.
+//! The Calls canvas: the call graph drawn top-down with the canvas pieces Diagrams draws with
+//! (dotted ground, clipped viewport, zoom, pan, pinch), the level labels left of it, the header
+//! with the breadcrumb and the Depth menu, the legend, and the expansion card of the selected
+//! node. With no graph it shows the card of a file the call graph cannot read, or one line that
+//! says why.
 //!
 //! What the canvas draws is rebuilt only when the graph, the files, or the text measure change:
 //! the selection is in `TabUi`, so its ring (`outline_selected`) and its card (`fill_canvas`,

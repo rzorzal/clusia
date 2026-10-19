@@ -1,4 +1,4 @@
-//! A call graph shaped like the mockup, for the tests of this module.
+//! A call graph with every kind of node, for the tests of this module.
 
 use clusia_calls::FunctionId;
 use clusia_calls::{CallGraph, GraphEdge, GraphNode, NodeKind};
