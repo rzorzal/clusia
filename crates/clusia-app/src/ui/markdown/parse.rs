@@ -139,6 +139,8 @@ struct Builder {
     code: Option<(Option<String>, String)>,
     image: Option<(String, String)>,
     table: Option<TableState>,
+    /// The closing text of the HTML comment or `<script>` / `<style>` body still open.
+    html_skip: Option<&'static str>,
 }
 
 impl Builder {
@@ -257,7 +259,11 @@ impl Builder {
 
     fn end(&mut self, end: TagEnd) {
         match end {
-            TagEnd::Paragraph | TagEnd::HtmlBlock => self.flush_paragraph(),
+            TagEnd::Paragraph => self.flush_paragraph(),
+            TagEnd::HtmlBlock => {
+                self.html_skip = None;
+                self.flush_paragraph();
+            }
             TagEnd::Heading(level) => {
                 let inlines = self.take_inlines();
                 self.push_block(Block::Heading(level as u8, inlines));
@@ -477,17 +483,26 @@ impl Builder {
         }
     }
 
-    /// Pasted images arrive as `<img src="…">`, not as `![](…)`; `<br>` breaks the line; the
-    /// rest of the HTML is dropped.
+    /// Pasted images arrive as `<img src="…">`, not as `![](…)`; `<br>` breaks the line. The
+    /// text between the tags of an HTML block (`<div>hello</div>`) stays; the tags, comments
+    /// and the contents of `<script>` and `<style>` do not.
     fn html(&mut self, html: &str) {
-        for tag in html_tags(html) {
-            match tag {
-                HtmlTag::Img { url, alt } => self.inlines.push(Inline::Image {
-                    url,
-                    alt,
-                    space_after: false,
-                }),
-                HtmlTag::Br => {
+        for part in html_parts(html, &mut self.html_skip) {
+            match part {
+                HtmlPart::Text(t) => {
+                    self.text(&decode_entities(t));
+                    self.flush_text();
+                }
+                HtmlPart::Img { url, alt } => {
+                    self.flush_text();
+                    self.inlines.push(Inline::Image {
+                        url,
+                        alt,
+                        space_after: false,
+                    });
+                }
+                HtmlPart::Br => {
+                    self.flush_text();
                     if !matches!(self.inlines.last(), None | Some(Inline::Break)) {
                         self.mark_space(false);
                         self.inlines.push(Inline::Break);
@@ -598,38 +613,92 @@ fn split_shortcodes(text: &str) -> Vec<Segment<'_>> {
     out
 }
 
-enum HtmlTag {
+enum HtmlPart<'a> {
+    Text(&'a str),
     Img { url: String, alt: String },
     Br,
 }
 
-fn html_tags(html: &str) -> Vec<HtmlTag> {
+/// What an HTML-block line says that the window shows. `skip` is the construct (a comment or
+/// the body of `<script>` / `<style>`) a previous line left open, and the closing text it is
+/// waiting for.
+fn html_parts<'a>(html: &'a str, skip: &mut Option<&'static str>) -> Vec<HtmlPart<'a>> {
     let mut out = Vec::new();
     let mut rest = html;
-    while let Some(open) = rest.find('<') {
-        rest = &rest[open + 1..];
-        let Some(close) = rest.find('>') else { break };
-        let tag = &rest[..close];
+    loop {
+        if let Some(close) = *skip {
+            let lower = rest.to_ascii_lowercase();
+            match lower.find(close) {
+                Some(at) => {
+                    rest = &rest[at + close.len()..];
+                    *skip = None;
+                }
+                None => return out,
+            }
+        }
+        let Some(open) = rest.find('<') else {
+            if !rest.is_empty() {
+                out.push(HtmlPart::Text(rest));
+            }
+            return out;
+        };
+        let after = &rest[open + 1..];
+        let starts_tag = after.starts_with(['!', '/']) || after.starts_with(char::is_alphabetic);
+        if !starts_tag {
+            // A lone `<` is text; the next one starts the search again.
+            let upto = open + 1;
+            out.push(HtmlPart::Text(&rest[..upto]));
+            rest = &rest[upto..];
+            continue;
+        }
+        if open > 0 {
+            out.push(HtmlPart::Text(&rest[..open]));
+        }
+        if let Some(comment) = after.strip_prefix("!--") {
+            *skip = Some("-->");
+            rest = comment;
+            continue;
+        }
+        let Some(close) = after.find('>') else {
+            return out;
+        };
+        let tag = &after[..close];
         let name = tag
             .split(|c: char| c.is_whitespace() || c == '/')
-            .next()
+            .find(|n| !n.is_empty())
             .unwrap_or("")
             .to_ascii_lowercase();
+        let closing = tag.starts_with('/');
         match name.as_str() {
             "img" => {
                 if let Some(url) = attribute(tag, "src") {
-                    out.push(HtmlTag::Img {
+                    out.push(HtmlPart::Img {
                         url,
                         alt: attribute(tag, "alt").unwrap_or_default(),
                     });
                 }
             }
-            "br" => out.push(HtmlTag::Br),
+            "br" => out.push(HtmlPart::Br),
+            "script" if !closing && !tag.ends_with('/') => *skip = Some("</script>"),
+            "style" if !closing && !tag.ends_with('/') => *skip = Some("</style>"),
             _ => {}
         }
-        rest = &rest[close + 1..];
+        rest = &after[close + 1..];
     }
-    out
+}
+
+/// The entities HTML written by hand uses; others stay as written.
+fn decode_entities(text: &str) -> String {
+    [
+        ("&nbsp;", " "),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&amp;", "&"),
+    ]
+    .iter()
+    .fold(text.to_string(), |t, (from, to)| t.replace(from, to))
 }
 
 /// The quoted value of `name="…"` (or `'…'`) inside one tag.
@@ -732,6 +801,68 @@ mod tests {
                 space_after: false,
             }],
             "a link the window cannot open is not a link"
+        );
+    }
+
+    #[test]
+    fn html_blocks_keep_their_text() {
+        assert_eq!(para("<div>hello</div>"), vec![word("hello", false)]);
+        assert_eq!(
+            parse("<details>\n<summary>Details</summary>\n\nmore here\n\n</details>"),
+            vec![
+                Block::Paragraph(vec![word("Details", false)]),
+                Block::Paragraph(vec![word("more", true), word("here", false)]),
+            ]
+        );
+        assert_eq!(
+            para("<p>fish &amp; chips &lt;3</p>"),
+            vec![
+                word("fish", true),
+                word("&", true),
+                word("chips", true),
+                word("<3", false)
+            ]
+        );
+        assert_eq!(
+            para("<div>a < b</div>"),
+            vec![word("a", true), word("<", true), word("b", false)]
+        );
+    }
+
+    #[test]
+    fn html_blocks_drop_comments_scripts_and_styles() {
+        assert_eq!(
+            para("<!-- hidden > note -->\n<div>shown</div>"),
+            vec![word("shown", false)]
+        );
+        assert_eq!(
+            para("<!--\nhidden\n-->\n<div>shown</div>"),
+            vec![word("shown", false)]
+        );
+        assert_eq!(
+            para("<style>\np { color: red }\n</style>\n<div>shown</div>"),
+            vec![word("shown", false)]
+        );
+    }
+
+    #[test]
+    fn html_images_keep_their_place_among_text() {
+        assert_eq!(
+            para("<p>see <img src=\"https://example.com/a.png\" alt=\"a\"> below</p>"),
+            vec![
+                word("see", true),
+                Inline::Image {
+                    url: "https://example.com/a.png".into(),
+                    alt: "a".into(),
+                    space_after: true,
+                },
+                word("below", false),
+            ]
+        );
+        assert_eq!(
+            para("a <b>bold</b> c"),
+            vec![word("a", true), word("bold", true), word("c", false)],
+            "inline tags are dropped, their text is already text"
         );
     }
 
