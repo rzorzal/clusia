@@ -28,7 +28,7 @@ use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Stroke, Tone, Type, Variant, badge, button, card, chip, divider, panel, text, wrapped_text,
 };
-use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::parse::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown};
 use crate::ui::people::{person_avatar, person_name};
 use crate::ui::text_area::set_text;
@@ -814,7 +814,7 @@ fn post_row(
                     observe(on_hide),
                 ));
             });
-            markdown(c, fonts, &parse(&post.body), opts);
+            markdown(c, fonts, &parse_in(&post.body, &opts.github_host, pr), opts);
         });
     });
 }
@@ -875,7 +875,7 @@ fn draft_reply(
                 observe(on_remove),
             ));
         });
-        markdown(c, fonts, &parse(&d.body), opts);
+        markdown(c, fonts, &parse_in(&d.body, &opts.github_host, pr), opts);
     });
 }
 
@@ -1114,6 +1114,7 @@ mod tests {
     use crate::fixture;
     use crate::testing::{self, NOW};
     use crate::ui::kit::Fill;
+    use crate::ui::markdown::parse::parse;
     use crate::ui::markdown::{CopiedText, CopyMarkdown, MdBody, MdImage};
     use bevy::ecs::system::RunSystemOnce;
 

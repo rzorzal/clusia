@@ -35,7 +35,7 @@ use crate::ui::kit::{
     Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, icon_button,
     panel, text, wrapped_text,
 };
-use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::parse::parse_in;
 use crate::ui::markdown::{RenderOpts, markdown};
 use crate::ui::spinner::{beat, spinner};
 use crate::ui::text_area::{Caret, growing_line_area, set_text};
@@ -890,7 +890,7 @@ fn chat_line(
                     ..default()
                 });
             } else {
-                markdown(p, fonts, &parse(&shown), opts);
+                markdown(p, fonts, &parse_in(&shown, &opts.github_host, pr), opts);
             }
         }
         // A call is over once anything follows it; the last one of a running turn is not.

@@ -29,7 +29,7 @@ use crate::ui::kit::{
 };
 use crate::ui::markdown::MdImage;
 use crate::ui::markdown::build::{RenderOpts, is_external, markdown};
-use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::parse::parse_on;
 use crate::ui::text_area::{Caret, TextArea, TextSubmitted, growing_text_area, text_area};
 
 mod emoji_picker;
@@ -607,7 +607,7 @@ fn fill_previews(
             suggestion_base: source_for(&tabs, &body.key),
             ..RenderOpts::from_config(theme.code_size, &model.snapshot.config)
         };
-        let blocks = parse(&text);
+        let blocks = parse_on(&text, &opts.github_host);
         commands
             .entity(entity)
             .despawn_related::<Children>()
