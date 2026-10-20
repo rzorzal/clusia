@@ -27,7 +27,7 @@ use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Ink, Preview, Stroke, Tone, Type, Variant, badge, button, card,
-    checkbox, disabled_button, font, panel, text, wrapped_text,
+    checkbox, disabled_button, font, panel, text, wrapped_text, wrapping_button,
 };
 use crate::ui::markdown::RenderOpts;
 use crate::ui::spinner::spinner;
@@ -487,13 +487,14 @@ fn row_button(
             };
             if removed {
                 c.spawn((
-                    text(fonts, row.title.clone(), t.ink(Swatch::GhostInk)),
+                    wrapped_text(fonts, row.title.clone(), t.ink(Swatch::GhostInk)),
+                    fitted(),
                     Strikethrough,
                 ));
             } else {
-                c.spawn(text(fonts, row.title.clone(), t));
+                c.spawn((wrapped_text(fonts, row.title.clone(), t), fitted()));
             }
-            c.spawn(text(fonts, row.meta.clone(), Type::META));
+            c.spawn((wrapped_text(fonts, row.meta.clone(), Type::META), fitted()));
         });
         if let Some(mark) = row.mark {
             mark_badge(r, fonts, mark);
@@ -804,6 +805,7 @@ fn pill(
             align_items: AlignItems::Center,
             border_radius: BorderRadius::MAX,
             flex_shrink: 0.0,
+            max_width: percent(100),
             ..default()
         },
         BackgroundColor::default(),
@@ -822,7 +824,10 @@ fn pill(
                 Fill(dot),
             ));
         }
-        c.spawn(text(fonts, label.to_string(), Type::BODY.ink(ink)));
+        c.spawn((
+            wrapped_text(fonts, label.to_string(), Type::BODY.ink(ink)),
+            fitted(),
+        ));
     });
 }
 
@@ -1066,7 +1071,7 @@ fn current_card(
                     (false, None) => ("Mark read".to_string(), Variant::Primary),
                 };
                 r.spawn((
-                    button(fonts, &label, variant),
+                    wrapping_button(fonts, &label, variant),
                     MarkReadButton {
                         pr: pr.clone(),
                         step: c.step.clone(),
@@ -1192,7 +1197,9 @@ fn other_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, o: &Oth
         card(Node {
             width: percent(100),
             flex_shrink: 0.0,
+            flex_wrap: FlexWrap::Wrap,
             column_gap: px(10),
+            row_gap: px(4),
             padding: UiRect::axes(px(14), px(9)),
             align_items: AlignItems::Center,
             ..default()
@@ -1219,10 +1226,13 @@ fn other_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, o: &Oth
             o.number.map(|n| n.to_string()).unwrap_or_default(),
             Type::STRONG.ink(ink),
         ));
-        r.spawn(text(
-            fonts,
-            o.title.clone(),
-            if o.mono { Type::MONO } else { Type::STRONG },
+        r.spawn((
+            wrapped_text(
+                fonts,
+                o.title.clone(),
+                if o.mono { Type::MONO } else { Type::STRONG },
+            ),
+            fitted(),
         ));
         if let Some(mark) = o.mark {
             mark_badge(r, fonts, mark);

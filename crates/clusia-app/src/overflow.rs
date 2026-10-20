@@ -154,6 +154,7 @@ fn lengthen(app: &mut App) {
             p.bio = Some(l.clone());
         }
     }
+    lengthen_story_and_calls(app);
     let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
     for tab in tabs.0.values_mut() {
         if let Phase::Ready(ready) = &mut tab.phase {
@@ -176,6 +177,70 @@ fn lengthen(app: &mut App) {
                 n.summary = l.clone();
                 n.who = n.who.as_ref().map(|_| format!("{LOGIN}, {LOGIN}"));
             }
+        }
+    }
+}
+
+/// A long name in the shape of a function's: no space to break at.
+fn long_function() -> String {
+    format!("{TOKEN}::{TOKEN}")
+}
+
+/// Every text of the Story and Calls data long: step titles, subtitles and explanations, the
+/// sentence and its chips, use-case names, function names, node subs, the breadcrumb and the
+/// files whose language has no call graph.
+fn lengthen_story_and_calls(app: &mut App) {
+    use crate::screens::review::calls::Calls;
+    use crate::screens::review::story::Stories;
+    let l = long();
+    for model in app.world_mut().resource_mut::<Stories>().0.values_mut() {
+        for version in model.loaded.values_mut() {
+            let Some(spec) = &mut version.spec else {
+                continue;
+            };
+            spec.sentence = l.clone();
+            for chip in spec.before.iter_mut().chain(spec.after.iter_mut()) {
+                chip.text = l.clone();
+            }
+            for case in &mut spec.use_cases {
+                case.name = l.clone();
+            }
+            for step in &mut spec.steps {
+                step.title = l.clone();
+                step.subtitle = l.clone();
+                step.explanation = l.clone();
+                if step.since_previous.is_some() {
+                    step.since_previous = Some(l.clone());
+                }
+            }
+            for removed in &mut spec.removed {
+                removed.title = l.clone();
+                removed.subtitle = l.clone();
+            }
+        }
+        for step in &mut model.static_steps {
+            step.title = long_function();
+            step.subtitle = l.clone();
+            step.explanation = l.clone();
+        }
+    }
+    for model in app.world_mut().resource_mut::<Calls>().0.values_mut() {
+        if let Some(graph) = &mut model.graph {
+            for node in &mut graph.nodes {
+                node.label = long_function();
+                node.sub = l.clone();
+                node.signature = format!("pub fn {}(&self) -> {TOKEN}", long_function());
+            }
+            for crumb in &mut graph.breadcrumb {
+                *crumb = long_function();
+            }
+        }
+        for hit in &mut model.hits {
+            hit.qualified = long_function();
+            hit.path = format!("src/{TOKEN}/{TOKEN}.rs");
+        }
+        for path in &mut model.unsupported {
+            *path = format!("src/{TOKEN}/{TOKEN}.go");
         }
     }
 }
@@ -365,8 +430,8 @@ fn the_demo_stays_inside_every_scene() {
     assert_eq!(escapes(&SIZES, |_, _| {}), Vec::<String>::new());
 }
 
-/// Long titles, paths, bodies, branch names, chat lines, a permission question and settings
-/// values wrap or shrink inside the screen they are on.
+/// Long titles, paths, bodies, branch names, chat lines, a permission question, settings values
+/// and Story and Calls texts wrap or shrink inside the screen they are on.
 #[test]
 fn long_data_stays_inside_every_scene() {
     let found = escapes(&SIZES, |app, scene| {

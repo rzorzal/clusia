@@ -27,7 +27,9 @@ use crate::screens::review::diff::{in_diff, show_line, unsent};
 use crate::screens::review::editor::{editor_box, not_sent};
 use crate::theme::Swatch;
 use crate::ui::composer::ComposerMode;
-use crate::ui::kit::{Clickable, Fill, Stroke, Type, Variant, button, card, text};
+use crate::ui::kit::{
+    Clickable, Fill, Stroke, Type, Variant, card, text, wrapped_text, wrapping_button,
+};
 
 /// Said when a comment is asked for while another one holds typed text.
 pub const FINISH_FIRST: &str = "Finish or cancel the comment you are writing first";
@@ -432,7 +434,7 @@ pub(super) fn fill_panel(
 
 fn panel_button(fonts: &UiFonts, pr: &PrRef, label: &str, what: PanelAction) -> impl Bundle {
     (
-        button(fonts, label, Variant::Secondary),
+        wrapping_button(fonts, label, Variant::Secondary),
         PanelButton {
             pr: pr.clone(),
             what,
@@ -484,8 +486,19 @@ fn section(
     .with_children(inner);
 }
 
+/// A text box no wider than what holds it.
+fn fitted() -> Node {
+    Node {
+        max_width: percent(100),
+        ..default()
+    }
+}
+
 fn heading(p: &mut ChildSpawnerCommands, fonts: &UiFonts, words: &str) {
-    p.spawn(text(fonts, words.to_uppercase(), Type::META));
+    p.spawn((
+        wrapped_text(fonts, words.to_uppercase(), Type::META),
+        fitted(),
+    ));
 }
 
 fn panel_content(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &PanelView) {
@@ -499,8 +512,11 @@ fn panel_content(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &
         Subject::Nothing => return,
         Subject::Outside { label, detail } => {
             section(p, false, |s| {
-                s.spawn(text(fonts, label.clone(), mono(13.0, Swatch::Fg)));
-                s.spawn(text(fonts, detail.clone(), Type::MUTED));
+                s.spawn((
+                    wrapped_text(fonts, label.clone(), mono(13.0, Swatch::Fg)),
+                    fitted(),
+                ));
+                s.spawn((wrapped_text(fonts, detail.clone(), Type::MUTED), fitted()));
                 if let Some(e) = &v.editor {
                     editor_box(s, fonts, e, pr);
                 }
@@ -509,8 +525,8 @@ fn panel_content(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &
         }
         Subject::File { path, summary } => {
             section(p, false, |s| {
-                s.spawn(text(fonts, path.clone(), Type::MONO));
-                s.spawn(text(fonts, summary.clone(), Type::MUTED));
+                s.spawn((wrapped_text(fonts, path.clone(), Type::MONO), fitted()));
+                s.spawn((wrapped_text(fonts, summary.clone(), Type::MUTED), fitted()));
                 buttons(s, fonts, pr, "Show diff");
             });
             return;
@@ -519,8 +535,11 @@ fn panel_content(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &
             place, signature, ..
         } => {
             section(p, false, |s| {
-                s.spawn(text(fonts, place.clone(), Type::MONO));
-                s.spawn(text(fonts, signature.clone(), mono(13.0, Swatch::Fg)));
+                s.spawn((wrapped_text(fonts, place.clone(), Type::MONO), fitted()));
+                s.spawn((
+                    wrapped_text(fonts, signature.clone(), mono(13.0, Swatch::Fg)),
+                    fitted(),
+                ));
                 buttons(s, fonts, pr, "Show body diff");
                 if let Some(e) = &v.editor {
                     editor_box(s, fonts, e, pr);
@@ -540,7 +559,7 @@ fn panel_content(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &
                 .with_children(|c| body_block(c, fonts, &by.body, 0.0));
             }
             if let Some(note) = &v.note {
-                s.spawn(text(fonts, note.clone(), Type::MUTED));
+                s.spawn((wrapped_text(fonts, note.clone(), Type::MUTED), fitted()));
             }
         });
     }
@@ -573,7 +592,10 @@ fn panel_content(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &
                 }))
                 .insert(Stroke(Swatch::Orange))
                 .with_children(|c| {
-                    c.spawn(text(fonts, a.signature.clone(), mono(13.0, Swatch::Fg)));
+                    c.spawn((
+                        wrapped_text(fonts, a.signature.clone(), mono(13.0, Swatch::Fg)),
+                        fitted(),
+                    ));
                     c.spawn(Node {
                         column_gap: px(6),
                         align_items: AlignItems::Center,
@@ -581,7 +603,10 @@ fn panel_content(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &
                         ..default()
                     })
                     .with_children(|r| {
-                        r.spawn(text(fonts, format!("{} ·", a.detail), Type::MUTED));
+                        r.spawn((
+                            wrapped_text(fonts, format!("{} ·", a.detail), Type::MUTED),
+                            fitted(),
+                        ));
                         r.spawn((
                             Node::default(),
                             WidgetButton,
