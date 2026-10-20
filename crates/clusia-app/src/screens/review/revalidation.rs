@@ -749,7 +749,11 @@ impl Plugin for RevalidationPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (load_revalidations, fill_revalidation, end_reanchor)
+            (
+                load_revalidations,
+                fill_revalidation.run_if(revalidation_changed),
+                end_reanchor,
+            )
                 .chain()
                 .after(ReviewSystems),
         );
@@ -780,6 +784,23 @@ fn load_revalidations(
         rounds.0.entry(pr.clone()).or_default().asked = true;
         asks.send(Ask::GetRevalidation(pr.clone()));
     }
+}
+
+/// Whether the revalidation screen could differ from the one it shows.
+pub(crate) fn revalidation_changed(
+    tabs: Res<ReviewTabs>,
+    rounds: Res<Revalidations>,
+    diagrams: Option<Res<Diagrams>>,
+    model: Res<Model>,
+    fonts: Res<UiFonts>,
+    spawned: Query<(), Added<RevalidationRoot>>,
+) -> bool {
+    tabs.is_changed()
+        || rounds.is_changed()
+        || diagrams.is_some_and(|d| d.is_changed())
+        || model.is_changed()
+        || fonts.is_changed()
+        || !spawned.is_empty()
 }
 
 fn fill_revalidation(

@@ -14,7 +14,9 @@ use crate::review_state::ReviewTabs;
 /// Points each chat at the agent its review is pinned to. It runs before the tells of a frame
 /// are applied, so an error or a replay that creates a line already words it for that agent.
 pub fn name_chats(tabs: Res<ReviewTabs>, model: Res<Model>, mut chats: ResMut<Chats>) {
-    for (pr, chat) in chats.0.iter_mut() {
+    // Every frame looks at every chat; only a write is a change.
+    let mut written = false;
+    for (pr, chat) in chats.bypass_change_detection().0.iter_mut() {
         let (kind, name) = tabs.0.get(pr).map_or_else(
             || {
                 (
@@ -31,10 +33,15 @@ pub fn name_chats(tabs: Res<ReviewTabs>, model: Res<Model>, mut chats: ResMut<Ch
         );
         if chat.kind != kind {
             chat.kind = kind;
+            written = true;
         }
         if chat.name.as_deref() != Some(name.as_str()) {
             chat.name = Some(name);
+            written = true;
         }
+    }
+    if written {
+        chats.set_changed();
     }
 }
 

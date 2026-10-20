@@ -287,12 +287,16 @@ fn open_chats(
     mut chats: ResMut<Chats>,
     mut asks: ResMut<Asks>,
 ) {
+    // Every frame looks at every chat; only a write is a change.
+    let mut written = false;
+    let held = chats.bypass_change_detection();
     for (pr, tab) in &tabs.0 {
         let Some(ready) = tab.ready() else { continue };
         if ready.cached_at.is_some() {
             continue;
         }
-        let chat = chats.entry(pr);
+        written |= !held.0.contains_key(pr);
+        let chat = held.entry(pr);
         if !chat.tab_set && chat.lines.is_empty() {
             let first = if harness_ready(
                 &model.snapshot,
@@ -304,12 +308,17 @@ fn open_chats(
             };
             if chat.tab != first {
                 chat.tab = first;
+                written = true;
             }
         }
         if !chat.log_asked {
             chat.log_asked = true;
+            written = true;
             asks.send(Ask::AgentLog { pr: pr.clone() });
         }
+    }
+    if written {
+        chats.set_changed();
     }
 }
 

@@ -224,7 +224,7 @@ pub struct DraftCardPlace;
 pub struct DraftList;
 
 #[derive(Component)]
-struct ShellTop {
+pub(crate) struct ShellTop {
     pr: PrRef,
     built: Option<TopView>,
 }
@@ -236,7 +236,7 @@ pub(crate) struct RightPanel {
 }
 
 #[derive(Component)]
-struct StatusBar {
+pub(crate) struct StatusBar {
     pr: PrRef,
     built: Option<StatusView>,
 }
@@ -544,10 +544,10 @@ impl Plugin for ShellPlugin {
             (
                 sync_editor_text,
                 mount,
-                rebuild_top,
+                rebuild_top.run_if(shell_views_changed),
                 fill_placeholders,
-                rebuild_right,
-                rebuild_status,
+                rebuild_right.run_if(shell_views_changed),
+                rebuild_status.run_if(shell_views_changed),
                 drop_stale_modals,
             )
                 .chain()
@@ -754,6 +754,35 @@ fn current_view(
     let view = shell_view(tab, &model.snapshot, &model.connection, now)?;
     let cached = tab.ready().is_some_and(|r| r.cached_at.is_some()) && !tab.ui.opening;
     Some((view, cached))
+}
+
+/// Whether the shell's top, right and status views could differ from the ones they show.
+pub(crate) fn shell_views_changed(
+    tabs: Res<ReviewTabs>,
+    model: Res<Model>,
+    fonts: Res<UiFonts>,
+    theme: Res<Theme>,
+    minute: Res<crate::nav::MinuteTick>,
+    chats: Res<Chats>,
+    checks: Res<crate::screens::review::checks::Checks>,
+    diagrams: Res<crate::screens::review::diagrams::Diagrams>,
+    revalidations: Res<Revalidations>,
+    stories: Res<crate::screens::review::story::model::Stories>,
+    calls: Res<crate::screens::review::calls::Calls>,
+    spawned: Query<(), Or<(Added<ShellTop>, Added<RightPanel>, Added<StatusBar>)>>,
+) -> bool {
+    tabs.is_changed()
+        || model.is_changed()
+        || fonts.is_changed()
+        || theme.is_changed()
+        || minute.is_changed()
+        || chats.is_changed()
+        || checks.is_changed()
+        || diagrams.is_changed()
+        || revalidations.is_changed()
+        || stories.is_changed()
+        || calls.is_changed()
+        || !spawned.is_empty()
 }
 
 fn rebuild_top(

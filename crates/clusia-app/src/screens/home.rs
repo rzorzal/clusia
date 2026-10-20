@@ -108,7 +108,7 @@ pub struct AgentConfigButton;
 
 /// The footer line under the lists; `0` is the agent it was built for.
 #[derive(Component, Default)]
-struct FooterPart(Option<String>);
+pub(crate) struct FooterPart(Option<String>);
 
 /// "1 minute", "5 hours", "8 days".
 pub fn long_age(secs: i64) -> String {
@@ -423,19 +423,19 @@ pub struct ChipButton(pub Option<String>);
 pub struct SearchField;
 
 #[derive(Component, Default)]
-struct HeaderPart(Option<(String, (String, bool))>);
+pub(crate) struct HeaderPart(Option<(String, (String, bool))>);
 
 #[derive(Component, Default)]
-struct HeatPart(Option<(Vec<u8>, Vec<(usize, &'static str)>)>);
+pub(crate) struct HeatPart(Option<(Vec<u8>, Vec<(usize, &'static str)>)>);
 
 #[derive(Component, Default)]
-struct StatsPart(Option<Vec<Stat>>);
+pub(crate) struct StatsPart(Option<Vec<Stat>>);
 
 #[derive(Component, Default)]
-struct ChipsPart(Option<Vec<RepoChip>>);
+pub(crate) struct ChipsPart(Option<Vec<RepoChip>>);
 
 #[derive(Component)]
-struct ListPart {
+pub(crate) struct ListPart {
     id: ListId,
     built: Option<ListView>,
 }
@@ -451,7 +451,7 @@ impl Plugin for HomePlugin {
                 build_home,
                 live_query,
                 commit_filter,
-                rebuild_home,
+                rebuild_home.run_if(home_changed),
             )
                 .chain()
                 .after(NavSystems),
@@ -614,6 +614,32 @@ fn commit_filter(
 fn refill(commands: &mut Commands, entity: Entity, build: impl FnOnce(&mut ChildSpawnerCommands)) {
     commands.entity(entity).despawn_related::<Children>();
     commands.entity(entity).with_children(build);
+}
+
+/// Whether Home's view could differ from the one it shows: something it reads changed, the
+/// minute turned (ages), or a part was just spawned.
+pub(crate) fn home_changed(
+    model: Res<Model>,
+    state: Res<HomeState>,
+    fonts: Res<UiFonts>,
+    minute: Res<crate::nav::MinuteTick>,
+    spawned: Query<
+        (),
+        Or<(
+            Added<HeaderPart>,
+            Added<HeatPart>,
+            Added<StatsPart>,
+            Added<ChipsPart>,
+            Added<ListPart>,
+            Added<FooterPart>,
+        )>,
+    >,
+) -> bool {
+    model.is_changed()
+        || state.is_changed()
+        || fonts.is_changed()
+        || minute.is_changed()
+        || !spawned.is_empty()
 }
 
 fn rebuild_home(

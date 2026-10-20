@@ -735,6 +735,23 @@ fn on_show(activate: On<Activate>, buttons: Query<&FindingShow>, mut tabs: ResMu
     }
 }
 
+/// Whether the Security and Audits views could differ from the ones they show.
+pub(crate) fn checks_views_changed(
+    tabs: Res<ReviewTabs>,
+    checks: Res<Checks>,
+    model: Res<Model>,
+    fonts: Res<UiFonts>,
+    minute: Res<crate::nav::MinuteTick>,
+    spawned: Query<(), Added<crate::screens::review::shell::SectionBody>>,
+) -> bool {
+    tabs.is_changed()
+        || checks.is_changed()
+        || model.is_changed()
+        || fonts.is_changed()
+        || minute.is_changed()
+        || !spawned.is_empty()
+}
+
 pub struct ChecksPlugin;
 
 impl Plugin for ChecksPlugin {
@@ -744,8 +761,8 @@ impl Plugin for ChecksPlugin {
             (
                 load_checks,
                 reconcile_finding_editors,
-                security::fill_security,
-                audits::fill_audits,
+                security::fill_security.run_if(checks_views_changed),
+                audits::fill_audits.run_if(checks_views_changed),
             )
                 .chain()
                 .after(ReviewSystems),
