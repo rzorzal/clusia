@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use clusia_core::config::AuthSource;
 use clusia_core::{Config, FileDiff, Paths, PrRef, PrSummary};
+use clusia_git::{LocalClone, RepoId};
 use clusia_platform::SecretStore;
 use clusia_protocol::{Event, PermissionStatus, SyncStatus};
 use clusia_provider::{GitHub, Token, TokenOrigin};
@@ -62,6 +63,64 @@ impl TokenCache {
 
     pub fn forget(&mut self) {
         self.0 = None;
+    }
+}
+
+/// How long "no clone in the folders" is believed before the folders are walked again.
+const NO_CLONE_TTL: Duration = Duration::from_secs(300);
+
+/// Which clone in the user's folders holds each repository, so an open does not walk the
+/// folders to find it again. A found clone is kept until its folder is gone or the folders to
+/// look in change; a repository with no clone there is kept for `NO_CLONE_TTL`.
+#[derive(Default)]
+pub(crate) struct CloneMap {
+    roots: Vec<PathBuf>,
+    found: HashMap<RepoId, (Option<LocalClone>, Instant)>,
+}
+
+impl CloneMap {
+    /// What an earlier look found for `target` in `roots`; `None` when there is nothing to trust.
+    pub fn get(
+        &mut self,
+        roots: &[PathBuf],
+        target: &RepoId,
+        now: Instant,
+    ) -> Option<Option<LocalClone>> {
+        if self.roots != roots {
+            self.roots = roots.to_vec();
+            self.found.clear();
+            return None;
+        }
+        let (clone, at) = self.found.get(target)?;
+        let current = match clone {
+            Some(local) => local.path.join(".git").exists(),
+            None => now.saturating_duration_since(*at) < NO_CLONE_TTL,
+        };
+        if !current {
+            self.found.remove(target);
+            return None;
+        }
+        Some(clone.clone())
+    }
+
+    /// Remembers what a look at `roots` found for `target`.
+    pub fn put(
+        &mut self,
+        roots: &[PathBuf],
+        target: &RepoId,
+        clone: Option<LocalClone>,
+        now: Instant,
+    ) {
+        if self.roots != roots {
+            self.roots = roots.to_vec();
+            self.found.clear();
+        }
+        self.found.insert(target.clone(), (clone, now));
+    }
+
+    /// Drops what is known about `target`, for a clone that turned out not to work.
+    pub fn forget(&mut self, target: &RepoId) {
+        self.found.remove(target);
     }
 }
 
@@ -137,6 +196,8 @@ pub(crate) struct Shared {
     pub client: Mutex<Option<Arc<GitHub>>>,
     /// The token `gh auth token` gave, so a request does not start a process to learn it again.
     pub token_cache: std::sync::Mutex<TokenCache>,
+    /// Where the user's clones of repositories were found.
+    pub clone_map: std::sync::Mutex<CloneMap>,
     pub worktree_lock: Mutex<()>,
     /// Serialises the read-modify-write of the window's open tabs.
     pub tabs_lock: Mutex<()>,
@@ -235,6 +296,7 @@ impl Shared {
             paused: AtomicBool::new(false),
             client: Mutex::new(None),
             token_cache: std::sync::Mutex::new(TokenCache::default()),
+            clone_map: std::sync::Mutex::new(CloneMap::default()),
             worktree_lock: Mutex::new(()),
             tabs_lock: Mutex::new(()),
             hidden_lock: Mutex::new(()),
@@ -385,5 +447,68 @@ mod tests {
         let mut cache = kept(TokenOrigin::GhCli, t0);
         cache.forget();
         assert!(cache.get(AuthSource::GhCli, "github.com", t0).is_none());
+    }
+
+    fn widgets() -> RepoId {
+        RepoId::new("github.com", "acme", "widgets")
+    }
+
+    fn roots() -> Vec<PathBuf> {
+        vec![PathBuf::from("/repos")]
+    }
+
+    #[test]
+    fn a_clone_is_kept_while_its_folder_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let local = LocalClone {
+            path: dir.path().to_path_buf(),
+            remote: "origin".into(),
+        };
+        let t0 = Instant::now();
+        let mut map = CloneMap::default();
+        map.put(&roots(), &widgets(), Some(local.clone()), t0);
+        let much_later = t0 + Duration::from_secs(86_400);
+        assert_eq!(map.get(&roots(), &widgets(), much_later), Some(Some(local)));
+        std::fs::remove_dir(dir.path().join(".git")).unwrap();
+        assert_eq!(map.get(&roots(), &widgets(), much_later), None);
+    }
+
+    #[test]
+    fn no_clone_is_believed_for_five_minutes() {
+        let t0 = Instant::now();
+        let mut map = CloneMap::default();
+        map.put(&roots(), &widgets(), None, t0);
+        let at = |secs| t0 + Duration::from_secs(secs);
+        assert_eq!(map.get(&roots(), &widgets(), at(299)), Some(None));
+        assert_eq!(map.get(&roots(), &widgets(), at(300)), None);
+    }
+
+    #[test]
+    fn other_folders_to_look_in_start_over() {
+        let t0 = Instant::now();
+        let mut map = CloneMap::default();
+        map.put(&roots(), &widgets(), None, t0);
+        assert_eq!(
+            map.get(&[PathBuf::from("/elsewhere")], &widgets(), t0),
+            None
+        );
+        assert_eq!(
+            map.get(&roots(), &widgets(), t0),
+            None,
+            "the old answer is gone"
+        );
+    }
+
+    #[test]
+    fn forgetting_a_repository_leaves_the_others() {
+        let t0 = Instant::now();
+        let other = RepoId::new("github.com", "acme", "gadgets");
+        let mut map = CloneMap::default();
+        map.put(&roots(), &widgets(), None, t0);
+        map.put(&roots(), &other, None, t0);
+        map.forget(&widgets());
+        assert_eq!(map.get(&roots(), &widgets(), t0), None);
+        assert_eq!(map.get(&roots(), &other, t0), Some(None));
     }
 }

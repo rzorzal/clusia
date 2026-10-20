@@ -1,6 +1,7 @@
 //! Preparing a PR worktree: find (or clone) the repository, fetch the PR head, check it out detached.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use clusia_core::{PrDetail, PrRef};
 use clusia_git::{
@@ -53,7 +54,25 @@ pub(crate) async fn checkout(
         .collect();
     let target = RepoId::new(&host, &pr.owner, &pr.repo);
 
-    let (repo, remote, cloned) = match find_local_clone(&roots, DISCOVERY_DEPTH, &target).await? {
+    let remembered = shared
+        .clone_map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&roots, &target, Instant::now());
+    let local = match remembered {
+        Some(local) => local,
+        None => {
+            let found = find_local_clone(&roots, DISCOVERY_DEPTH, &target).await?;
+            shared
+                .clone_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .put(&roots, &target, found.clone(), Instant::now());
+            found
+        }
+    };
+
+    let (repo, remote, cloned) = match local {
         Some(local) => (local.path, local.remote, false),
         None => {
             let dest = shared.paths.repos_dir().join(&pr.owner).join(&pr.repo);
@@ -67,7 +86,18 @@ pub(crate) async fn checkout(
             (dest, "origin".to_string(), true)
         }
     };
-    let sha = fetch_pr(&repo, &remote, pr.number).await?;
+    let sha = match fetch_pr(&repo, &remote, pr.number).await {
+        Ok(sha) => sha,
+        Err(e) => {
+            // The remembered clone may be what is wrong (a renamed remote, say).
+            shared
+                .clone_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(&target);
+            return Err(e);
+        }
+    };
     let path = shared.paths.worktree_for(pr);
     ensure_worktree(&repo, &path, &sha).await?;
     Ok((
