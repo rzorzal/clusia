@@ -8,8 +8,7 @@ use std::path::PathBuf;
 use clusia_core::DraftKind;
 use clusia_protocol::{CachedReview, Command, Reply};
 use clusia_store::review_cache_parses;
-use common::review_world::{World, open, pr7, world};
-use common::{TestDaemon, test_options};
+use common::review_world::{World, open, pr7, restart_after, world};
 
 fn cached(reply: Reply) -> CachedReview {
     match reply {
@@ -28,32 +27,8 @@ fn general(body: &str) -> Command {
     }
 }
 
-/// Stops the daemon of `w` and starts another in the same home, against the same GitHub.
 async fn restart(w: World) -> World {
-    let World {
-        tmp,
-        server,
-        daemon,
-        head,
-        base,
-        origin,
-    } = w;
-    let home = daemon.stop().await;
-    let daemon = TestDaemon::restart_with(home, || {
-        let mut options = test_options();
-        options.github_api = Some(server.uri());
-        options.github_token = Some("tok".into());
-        options
-    })
-    .await;
-    World {
-        tmp,
-        server,
-        daemon,
-        head,
-        base,
-        origin,
-    }
+    restart_after(w, |_| {}).await
 }
 
 #[tokio::test]

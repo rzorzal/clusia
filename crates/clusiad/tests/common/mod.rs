@@ -58,22 +58,9 @@ impl TestDaemon {
         Self::start_in(tempfile::tempdir().unwrap()).await
     }
 
-    /// A restart in a home whose lock or socket a parallel test's forked child still holds (it
-    /// keeps inherited descriptors until it execs) is refused for a moment: retry until it lets go.
+    /// `restart_with` the test options.
     pub async fn start_in(dir: tempfile::TempDir) -> Self {
-        let paths = Paths::new(dir.path());
-        let give_up = std::time::Instant::now() + clusia_core::testkit::HANG_BOUND;
-        let daemon = loop {
-            match Daemon::bind_with(paths.clone(), test_options()).await {
-                Err(clusiad::StartError::AlreadyRunning(_))
-                    if std::time::Instant::now() < give_up =>
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-                other => break other.expect("daemon binds"),
-            }
-        };
-        Self::running(dir, paths, daemon)
+        Self::restart_with(dir, test_options).await
     }
 
     pub async fn start_with(dir: tempfile::TempDir, options: DaemonOptions) -> Self {
@@ -84,7 +71,9 @@ impl TestDaemon {
         Self::running(dir, paths, daemon)
     }
 
-    /// `start_with` for a restart: retries as `start_in` does, with fresh `options` each time.
+    /// `start_with` for a restart, with fresh `options` for each try. A restart in a home whose
+    /// lock or socket a parallel test's forked child still holds (it keeps inherited descriptors
+    /// until it execs) is refused for a moment: retry until it lets go.
     pub async fn restart_with(dir: tempfile::TempDir, options: impl Fn() -> DaemonOptions) -> Self {
         let paths = Paths::new(dir.path());
         let give_up = std::time::Instant::now() + clusia_core::testkit::HANG_BOUND;

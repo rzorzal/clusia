@@ -18,8 +18,9 @@ use clusia_store::{delete_review_cache, load_review_cache, save_review_cache};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-/// How many reviews' caches stay in memory, the least recently used dropped first. A review
-/// whose write is still running is never dropped, so the count can go over this for a moment.
+/// How many reviews' caches stay in memory, the least recently used dropped first, and the
+/// reviews known to have no cache file before any of them. A review whose write is still
+/// running is never dropped, so the count can go over this for a moment.
 pub(crate) const KEPT: usize = 8;
 
 struct Entry {
@@ -63,7 +64,7 @@ impl Kept {
                 .entries
                 .iter()
                 .filter(|(_, e)| e.writing == 0)
-                .min_by_key(|(_, e)| e.used)
+                .min_by_key(|(_, e)| (e.cache.is_some(), e.used))
                 .map(|(pr, _)| pr.clone());
             match oldest {
                 Some(pr) => self.entries.remove(&pr),
@@ -150,7 +151,7 @@ impl ReviewCaches {
             kept.changes
         };
         // A cache that is not in memory has no write queued (those are never dropped), so the
-        // file is current.
+        // file holds the last write that worked; after a failed one that is an older copy.
         let loaded = match load_review_cache(&self.paths, pr) {
             Ok(cache) => cache.map(Arc::new),
             Err(e) => {
@@ -169,8 +170,11 @@ impl ReviewCaches {
 
     /// Makes `cache` the cache of `pr` now and queues the write of its file. The returned task
     /// says whether the write worked; a failure is also logged, and memory keeps `cache`.
-    pub fn put(self: &Arc<Self>, pr: &PrRef, cache: ReviewCache) -> JoinHandle<io::Result<()>> {
-        let cache = Arc::new(cache);
+    pub fn put(
+        self: &Arc<Self>,
+        pr: &PrRef,
+        cache: Arc<ReviewCache>,
+    ) -> JoinHandle<io::Result<()>> {
         let ticket = {
             let mut kept = locked(&self.kept);
             kept.changes += 1;
@@ -331,7 +335,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_last_of_many_racing_writes_is_on_disk_and_in_memory() {
         let (_dir, caches) = caches();
-        let writes: Vec<_> = (1..=40).map(|i| caches.put(&pr(7), cache(7, i))).collect();
+        let writes: Vec<_> = (1..=40)
+            .map(|i| caches.put(&pr(7), Arc::new(cache(7, i))))
+            .collect();
         for write in writes {
             write.await.unwrap().unwrap();
         }
@@ -342,7 +348,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_removal_queued_after_a_write_wins() {
         let (_dir, caches) = caches();
-        let write = caches.put(&pr(7), cache(7, 1));
+        let write = caches.put(&pr(7), Arc::new(cache(7, 1)));
         let removal = caches.forget(&pr(7));
         caches.settled().await;
         write.await.unwrap().unwrap();
@@ -354,7 +360,11 @@ mod tests {
     #[tokio::test]
     async fn a_failed_write_is_reported_and_memory_keeps_the_new_copy() {
         let (_dir, caches) = caches();
-        caches.put(&pr(7), cache(7, 1)).await.unwrap().unwrap();
+        caches
+            .put(&pr(7), Arc::new(cache(7, 1)))
+            .await
+            .unwrap()
+            .unwrap();
         // A file where the folder of the caches should be: nothing can be written there.
         let folder = caches.paths.review_cache_file(&pr(7));
         let folder = folder.parent().unwrap();
@@ -362,7 +372,7 @@ mod tests {
         std::fs::rename(folder, folder.with_extension("moved")).unwrap();
         std::fs::write(folder, "not a folder").unwrap();
 
-        let failed = caches.put(&pr(7), cache(7, 2)).await.unwrap();
+        let failed = caches.put(&pr(7), Arc::new(cache(7, 2))).await.unwrap();
         assert!(failed.is_err());
         let kept = caches.get(&pr(7)).await.unwrap();
         assert_eq!(*kept, cache(7, 2));
@@ -390,11 +400,68 @@ mod tests {
     async fn only_the_most_recently_used_caches_are_kept() {
         let (_dir, caches) = caches();
         for n in 1..=KEPT as u64 + 1 {
-            caches.put(&pr(n), cache(n, 1)).await.unwrap().unwrap();
+            caches
+                .put(&pr(n), Arc::new(cache(n, 1)))
+                .await
+                .unwrap()
+                .unwrap();
         }
         let kept = locked(&caches.kept);
         assert_eq!(kept.entries.len(), KEPT);
         assert!(!kept.entries.contains_key(&pr(1)), "the oldest went first");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_earlier_write_that_reaches_its_file_after_a_later_one_is_skipped() {
+        let (dir, caches) = caches();
+        let target = dir.path().join("notes.md");
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let (started, has_started) = std::sync::mpsc::channel::<()>();
+        // The first write is held before it reaches the file, so the second one gets there first.
+        let held = caches.write_later(dir.path().join("gate"), move || {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+            Ok(())
+        });
+        has_started.recv().unwrap();
+        let file = target.clone();
+        let first = {
+            let caches = caches.clone();
+            let ticket = caches.begin();
+            let gate = held;
+            tokio::spawn(async move {
+                gate.await.unwrap().unwrap();
+                caches
+                    .spawn_write(ticket, file.clone(), None, move || {
+                        std::fs::write(&file, "first")
+                    })
+                    .await
+                    .unwrap()
+            })
+        };
+        let file = target.clone();
+        caches
+            .write_later(target.clone(), move || std::fs::write(&file, "second"))
+            .await
+            .unwrap()
+            .unwrap();
+        go.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "second");
+    }
+
+    #[tokio::test]
+    async fn caches_known_to_be_missing_are_dropped_before_real_ones() {
+        let (_dir, caches) = caches();
+        caches
+            .put(&pr(1), Arc::new(cache(1, 1)))
+            .await
+            .unwrap()
+            .unwrap();
+        for n in 2..=KEPT as u64 + 1 {
+            assert_eq!(caches.get(&pr(n)).await, None);
+        }
+        assert!(locked(&caches.kept).entries.contains_key(&pr(1)));
     }
 
     #[tokio::test]

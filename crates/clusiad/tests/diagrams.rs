@@ -17,7 +17,7 @@ use common::custom::{custom_calls, use_fake_custom};
 use common::git_fixture::{advance_pr, sh};
 use common::github_mock::{PrMock, mount_pr};
 use common::revalidation;
-use common::review_world::{World, open, pr7, world};
+use common::review_world::{World, open, pr7, restart_after, world};
 use serde_json::json;
 
 fn plan() -> Turn {
@@ -248,14 +248,38 @@ async fn a_draw_with_no_version_number_left_is_refused_before_the_agent_runs() {
     );
 }
 
+/// How many times the daemon asked GitHub for the pull request's files.
+async fn files_requests(w: &World) -> usize {
+    w.server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().ends_with("/pulls/7/files"))
+        .count()
+}
+
 #[tokio::test]
 async fn without_the_review_cache_the_code_links_still_know_the_pull_requests_files() {
-    let (w, _dir, mut c, mut watcher) = drawing_world(plan_and_drawings()).await;
-    std::fs::remove_file(w.daemon.paths.review_cache_file(&pr7())).unwrap();
+    let (w, _dir, c, watcher) = drawing_world(plan_and_drawings()).await;
+    drop((c, watcher));
+    // Removed while the daemon is down, so the next one has no copy in memory either.
+    let w = restart_after(w, |paths| {
+        std::fs::remove_file(paths.review_cache_file(&pr7())).unwrap();
+    })
+    .await;
+    let mut watcher = watching(&w).await;
+    let mut c = w.daemon.client().await;
+    let files_before = files_requests(&w).await;
     c.request(Command::DrawDiagrams { pr: pr7() })
         .await
         .unwrap();
     until(&mut watcher, idle).await;
+    assert_eq!(
+        files_requests(&w).await,
+        files_before + 1,
+        "the files are read from GitHub again"
+    );
     let (_, latest, _) = diagrams_of(&mut c).await;
     let latest = latest.expect("a version");
     let EntryState::Ready { spec, notes } = &latest.entry("flow").expect("flow").state else {

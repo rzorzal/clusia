@@ -270,7 +270,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         checks.as_ref(),
         viewer.as_deref(),
     );
-    let cache = ReviewCache {
+    let cache = Arc::new(ReviewCache {
         pr: detail,
         files: files.to_vec(),
         conversation,
@@ -279,7 +279,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         viewer,
         worktree: Some(worktree),
         fetched_at: now,
-    };
+    });
     if !cache_saved {
         // A failed write is logged; the copy in memory still serves this daemon.
         drop(shared.review_caches.put(pr, cache.clone()));
@@ -303,7 +303,11 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         None => (status, note),
     };
     step(shared, pr, LoadStepKind::Agent, status, Some(note));
-    Outcome::Ok(Reply::Review(Box::new(view_of(review, cache))))
+    // The view owns its data: memory keeps the shared copy, the reply gets its own.
+    Outcome::Ok(Reply::Review(Box::new(view_of(
+        review,
+        Arc::unwrap_or_clone(cache),
+    ))))
 }
 
 /// What an open needs from the checkout and from GitHub, however it got them.
@@ -381,7 +385,7 @@ async fn unchanged_open(
         if !on_head(&worktree, &detail.head_sha).await {
             return None;
         }
-        drop(shared.review_caches.put(pr, fresh));
+        drop(shared.review_caches.put(pr, Arc::new(fresh)));
     }
     shared
         .files_cache
