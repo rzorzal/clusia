@@ -544,19 +544,19 @@ impl GitHub {
 
     pub async fn get_conversation(&self, pr: &PrRef) -> Result<PrConversation, ProviderError> {
         let base = Self::repo_path(pr);
-        let threads: Vec<RawThread> = decode_list(
-            self.get_paginated(&format!("{base}/pulls/{}/comments", pr.number))
-                .await?,
-        )?;
-        let comments: Vec<RawIssueComment> = decode_list(
-            self.get_paginated(&format!("{base}/issues/{}/comments", pr.number))
-                .await?,
-        )?;
-        let reviews: Vec<RawReview> = decode_list(
-            self.get_paginated(&format!("{base}/pulls/{}/reviews", pr.number))
-                .await?,
-        )?;
-        let review_threads = self.review_threads(pr).await?;
+        let thread_path = format!("{base}/pulls/{}/comments", pr.number);
+        let comment_path = format!("{base}/issues/{}/comments", pr.number);
+        let review_path = format!("{base}/pulls/{}/reviews", pr.number);
+        let (threads, comments, reviews, review_threads) = tokio::join!(
+            self.get_paginated(&thread_path),
+            self.get_paginated(&comment_path),
+            self.get_paginated(&review_path),
+            self.review_threads(pr),
+        );
+        let threads: Vec<RawThread> = decode_list(threads?)?;
+        let comments: Vec<RawIssueComment> = decode_list(comments?)?;
+        let reviews: Vec<RawReview> = decode_list(reviews?)?;
+        let review_threads = review_threads?;
         Ok(PrConversation {
             threads: threads
                 .into_iter()
@@ -1209,6 +1209,76 @@ mod tests {
                 scopes: vec!["repo".into(), "read:org".into()]
             }
         );
+    }
+
+    /// A server that answers nothing until `hold` requests are waiting at once, then answers
+    /// them all with an empty list or an empty thread page. Gives back its base URL.
+    async fn answers_when_requests_overlap(hold: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(hold));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_len, length) = loop {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        seen.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&seen).to_lowercase();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length = text
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length: "))
+                                .and_then(|n| n.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, length);
+                        }
+                    };
+                    while seen.len() < head_len + length {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        seen.extend_from_slice(&chunk[..n]);
+                    }
+                    barrier.wait().await;
+                    let body = if seen.starts_with(b"POST") {
+                        r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}"#
+                    } else {
+                        "[]"
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn the_four_conversation_calls_are_in_flight_together() {
+        let base = answers_when_requests_overlap(4).await;
+        let client = GitHub::new(&base, Token::new("tok123", TokenOrigin::Pat)).unwrap();
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        // A serial read never has a second request waiting, so it would never be answered.
+        let conversation =
+            tokio::time::timeout(Duration::from_secs(10), client.get_conversation(&pr))
+                .await
+                .expect("the four calls were not made at once")
+                .unwrap();
+        assert!(conversation.threads.is_empty() && conversation.reviews.is_empty());
     }
 
     #[tokio::test]
