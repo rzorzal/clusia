@@ -18,9 +18,11 @@ use skrifa::{FontRef, MetadataProvider};
 
 use crate::bridge::Model;
 
-pub const INTER: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
-pub const INTER_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-Italic[opsz,wght].ttf");
-pub const JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono[wght].ttf");
+// `static`, not `const`: a const is inlined at every use, so each codegen unit may
+// carry its own copy of the font bytes. A static is one object with one address.
+pub static INTER: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
+pub static INTER_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-Italic[opsz,wght].ttf");
+pub static JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono[wght].ttf");
 
 /// A face as text asks for it: a font source and a slant.
 #[derive(Debug, Clone, PartialEq)]
