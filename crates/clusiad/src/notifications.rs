@@ -490,7 +490,7 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
         };
         if let Some(by) = by {
             if viewer.is_none() {
-                viewer = Some(gh.viewer().await.ok().map(|v| v.login));
+                viewer = Some(gh.viewer_login().await.ok());
             }
             let Some(Some(me)) = &viewer else {
                 left_for_later = true;
@@ -1449,6 +1449,7 @@ mod poll_tests {
             harness_env: Vec::new(),
             claude_program: Some("/nonexistent/claude".into()),
             codex_program: Some("/nonexistent/codex".into()),
+            gh_config_dir: None,
         };
         let shared = Shared::new(Paths::new(dir.path()), Config::default(), options);
         (dir, shared)

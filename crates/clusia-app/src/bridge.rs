@@ -898,6 +898,17 @@ pub enum Tell {
         view: Box<ReviewView>,
         news: Vec<NewsItem>,
     },
+    /// Like `Opened`, with the news still on its way: `News` follows, even when it is empty.
+    /// The tab does not mark the review seen or open What's new before then.
+    OpenedAwaitingNews {
+        pr: PrRef,
+        view: Box<ReviewView>,
+    },
+    /// The news of a review whose `OpenedAwaitingNews` came first.
+    News {
+        pr: PrRef,
+        news: Vec<NewsItem>,
+    },
     OpenedFromCache {
         pr: PrRef,
         view: Box<ReviewView>,
@@ -2527,7 +2538,9 @@ fn message_of(e: ClientError) -> String {
     }
 }
 
-/// Sends `OpenedFromCache` when there is a cached copy, so the tab shows it at once; gives back `Opened` or `OpenFailed`.
+/// Sends `OpenedFromCache` when there is a cached copy, so the tab shows it at once. The fresh
+/// copy is sent as `OpenedAwaitingNews` the moment it arrives and the news after it, so the tab
+/// does not wait for the news. Gives back the last tell: `News`, or `OpenFailed`.
 async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
     let mut client = match worker(socket).await {
         Ok(c) => c,
@@ -2554,6 +2567,10 @@ async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
     }
     match client.request(Command::OpenReview { pr: pr.clone() }).await {
         Ok(Reply::Review(view)) => {
+            teller.send(Tell::OpenedAwaitingNews {
+                pr: pr.clone(),
+                view,
+            });
             let news = match client
                 .request(Command::GetWhatsNew { pr: pr.clone() })
                 .await
@@ -2561,7 +2578,7 @@ async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
                 Ok(Reply::WhatsNew(news)) => news,
                 _ => Vec::new(),
             };
-            Tell::Opened { pr, view, news }
+            Tell::News { pr, news }
         }
         Ok(_) => Tell::OpenFailed {
             pr,
@@ -5946,5 +5963,86 @@ mod tests {
             calls.requested_code.is_empty(),
             "code asked before the loss is asked again"
         );
+    }
+
+    /// A one-connection daemon that opens a review but holds back the news until `release`.
+    async fn daemon_holding_the_news(
+        view: ReviewView,
+        news: Vec<NewsItem>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> (tempfile::TempDir, PathBuf) {
+        use clusia_protocol::{
+            ClientMessage, MessageReader, Outcome, PROTOCOL_VERSION, ProtocolError, ServerMessage,
+            write_message,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut r = MessageReader::new(r);
+            let _hello: ClientMessage = r.next().await.unwrap().unwrap();
+            let welcome = ServerMessage::Welcome {
+                protocol: PROTOCOL_VERSION,
+                daemon: "9.9.9".into(),
+            };
+            write_message(&mut w, &welcome).await.unwrap();
+            let mut release = Some(release);
+            while let Ok(Some(ClientMessage::Request { id, cmd })) = r.next::<ClientMessage>().await
+            {
+                let result = match cmd {
+                    Command::OpenReview { .. } => {
+                        Outcome::Ok(Reply::Review(Box::new(view.clone())))
+                    }
+                    Command::GetWhatsNew { .. } => {
+                        if let Some(release) = release.take() {
+                            let _ = release.await;
+                        }
+                        Outcome::Ok(Reply::WhatsNew(news.clone()))
+                    }
+                    _ => Outcome::Err(ProtocolError::new(ErrorCode::NotFound, "none")),
+                };
+                write_message(&mut w, &ServerMessage::Response { id, result })
+                    .await
+                    .unwrap();
+            }
+        });
+        (dir, path)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_copy_is_told_before_the_news_is_asked_for_and_the_news_after() {
+        let (view, news) = crate::fixture::demo_review(crate::testing::NOW);
+        let (release, held) = tokio::sync::oneshot::channel();
+        let (_dir, socket) = daemon_holding_the_news(view, news.clone(), held).await;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let pr: PrRef = "rzorzal/clusia#123".parse().unwrap();
+        let opening = tokio::spawn({
+            let pr = pr.clone();
+            async move { open_review(&socket, &teller, pr).await }
+        });
+
+        // The daemon answers the news only after this: a bridge that waited for it first
+        // would never tell the copy.
+        let first = tokio::task::spawn_blocking(move || {
+            let first = rx.recv_timeout(Duration::from_secs(10));
+            (first, rx)
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(&first.0, Ok(Tell::OpenedAwaitingNews { pr: got, .. }) if *got == pr),
+            "{:?}",
+            first.0.map(|_| ())
+        );
+        release.send(()).unwrap();
+
+        assert_eq!(opening.await.unwrap(), Tell::News { pr, news });
+        assert!(first.1.try_recv().is_err(), "nothing else was told");
     }
 }

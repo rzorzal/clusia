@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clusia_core::{
@@ -73,6 +74,10 @@ pub struct GitHub {
     /// GraphQL endpoint derived from `api`.
     pub(crate) graphql: String,
     pub(crate) token: Token,
+    /// Set when GitHub answered 401 to this client's token: a cached token should be asked for again.
+    rejected: AtomicBool,
+    /// The login the token belongs to; a new token makes a new client, so it cannot go stale.
+    viewer_login: tokio::sync::OnceCell<String>,
     /// Full URL → (ETag, body) for conditional requests.
     cache: Mutex<HashMap<String, CacheEntry>>,
 }
@@ -380,6 +385,8 @@ impl GitHub {
             graphql: crate::graphql::graphql_url(&api),
             api,
             token,
+            rejected: AtomicBool::new(false),
+            viewer_login: tokio::sync::OnceCell::new(),
             cache: Mutex::new(HashMap::new()),
         })
     }
@@ -390,6 +397,17 @@ impl GitHub {
 
     pub fn token(&self) -> &Token {
         &self.token
+    }
+
+    /// Whether GitHub has turned this client's token down since it was made.
+    pub fn was_rejected(&self) -> bool {
+        self.rejected.load(Ordering::Relaxed)
+    }
+
+    /// A 401: remembers it and builds the error (see [`unauthorized`]).
+    pub(crate) fn rejected(&self, text: &str) -> ProviderError {
+        self.rejected.store(true, Ordering::Relaxed);
+        unauthorized(text)
     }
 
     /// Every page of a list endpoint (`per_page=100`, following `Link: rel="next"`).
@@ -465,7 +483,7 @@ impl GitHub {
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
         if status == StatusCode::UNAUTHORIZED {
-            return Err(unauthorized(&text));
+            return Err(self.rejected(&text));
         }
         if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
             return Err(ProviderError::RateLimited { retry_after_secs });
@@ -526,19 +544,19 @@ impl GitHub {
 
     pub async fn get_conversation(&self, pr: &PrRef) -> Result<PrConversation, ProviderError> {
         let base = Self::repo_path(pr);
-        let threads: Vec<RawThread> = decode_list(
-            self.get_paginated(&format!("{base}/pulls/{}/comments", pr.number))
-                .await?,
-        )?;
-        let comments: Vec<RawIssueComment> = decode_list(
-            self.get_paginated(&format!("{base}/issues/{}/comments", pr.number))
-                .await?,
-        )?;
-        let reviews: Vec<RawReview> = decode_list(
-            self.get_paginated(&format!("{base}/pulls/{}/reviews", pr.number))
-                .await?,
-        )?;
-        let review_threads = self.review_threads(pr).await?;
+        let thread_path = format!("{base}/pulls/{}/comments", pr.number);
+        let comment_path = format!("{base}/issues/{}/comments", pr.number);
+        let review_path = format!("{base}/pulls/{}/reviews", pr.number);
+        let (threads, comments, reviews, review_threads) = tokio::join!(
+            self.get_paginated(&thread_path),
+            self.get_paginated(&comment_path),
+            self.get_paginated(&review_path),
+            self.review_threads(pr),
+        );
+        let threads: Vec<RawThread> = decode_list(threads?)?;
+        let comments: Vec<RawIssueComment> = decode_list(comments?)?;
+        let reviews: Vec<RawReview> = decode_list(reviews?)?;
+        let review_threads = review_threads?;
         Ok(PrConversation {
             threads: threads
                 .into_iter()
@@ -705,7 +723,7 @@ impl GitHub {
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
         if status == StatusCode::UNAUTHORIZED {
-            return Err(unauthorized(&text));
+            return Err(self.rejected(&text));
         }
         if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
             return Err(ProviderError::RateLimited { retry_after_secs });
@@ -779,6 +797,14 @@ impl GitHub {
             })
             .unwrap_or_default();
         Ok(Viewer { login, scopes })
+    }
+
+    /// The login of the token's owner, asked for once per client. A failure is not kept.
+    pub async fn viewer_login(&self) -> Result<String, ProviderError> {
+        self.viewer_login
+            .get_or_try_init(|| async { Ok(self.viewer().await?.login) })
+            .await
+            .cloned()
     }
 
     pub async fn list_prs(&self, filter: PrFilter) -> Result<Vec<PrSummary>, ProviderError> {
@@ -1183,6 +1209,110 @@ mod tests {
                 scopes: vec!["repo".into(), "read:org".into()]
             }
         );
+    }
+
+    /// A server that answers nothing until `hold` requests are waiting at once, then answers
+    /// them all with an empty list or an empty thread page. Gives back its base URL.
+    async fn answers_when_requests_overlap(hold: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(hold));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_len, length) = loop {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        seen.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&seen).to_lowercase();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length = text
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length: "))
+                                .and_then(|n| n.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, length);
+                        }
+                    };
+                    while seen.len() < head_len + length {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        seen.extend_from_slice(&chunk[..n]);
+                    }
+                    barrier.wait().await;
+                    let body = if seen.starts_with(b"POST") {
+                        r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}"#
+                    } else {
+                        "[]"
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn the_four_conversation_calls_are_in_flight_together() {
+        let base = answers_when_requests_overlap(4).await;
+        let client = GitHub::new(&base, Token::new("tok123", TokenOrigin::Pat)).unwrap();
+        let pr: PrRef = "acme/widgets#7".parse().unwrap();
+        // A serial read never has a second request waiting, so it would never be answered.
+        let conversation =
+            tokio::time::timeout(Duration::from_secs(10), client.get_conversation(&pr))
+                .await
+                .expect("the four calls were not made at once")
+                .unwrap();
+        assert!(conversation.threads.is_empty() && conversation.reviews.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_viewer_login_is_asked_for_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "login": "octo" })))
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        for _ in 0..3 {
+            assert_eq!(client.viewer_login().await.unwrap(), "octo");
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_viewer_login_is_asked_for_again() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "login": "octo" })))
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        assert!(client.viewer_login().await.is_err());
+        assert_eq!(client.viewer_login().await.unwrap(), "octo");
     }
 
     #[tokio::test]

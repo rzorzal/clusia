@@ -1,11 +1,12 @@
 //! Preparing a PR worktree: find (or clone) the repository, fetch the PR head, check it out detached.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use clusia_core::{PrDetail, PrRef};
 use clusia_git::{
-    DISCOVERY_DEPTH, GitError, RepoId, clone_partial, ensure_worktree, expand_root, fetch_pr,
-    find_local_clone,
+    DISCOVERY_DEPTH, GitError, LocalClone, RepoId, clone_partial, ensure_worktree, expand_root,
+    fetch_pr, find_local_clone, git, parse_remote,
 };
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, Reply, WorktreeInfo};
 
@@ -28,6 +29,22 @@ pub(crate) async fn prepare(shared: &Shared, pr: &PrRef) -> Outcome {
         Ok((info, _)) => Outcome::Ok(Reply::Worktree(info)),
         Err(e) => Outcome::Err(ProtocolError::new(ErrorCode::Git, e.to_string())),
     }
+}
+
+/// Whether `local`'s remote still names `target`: one `git config`, far cheaper than a walk.
+async fn still_points_at(local: &LocalClone, target: &RepoId) -> bool {
+    let key = format!("remote.{}.url", local.remote);
+    git(&local.path, &["config", "--get", &key])
+        .await
+        .is_ok_and(|url| parse_remote(url.trim()).as_ref() == Some(target))
+}
+
+pub(crate) fn forget_clone(shared: &Shared, target: &RepoId) {
+    shared
+        .clone_map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .forget(target);
 }
 
 pub(crate) async fn checkout(
@@ -53,7 +70,33 @@ pub(crate) async fn checkout(
         .collect();
     let target = RepoId::new(&host, &pr.owner, &pr.repo);
 
-    let (repo, remote, cloned) = match find_local_clone(&roots, DISCOVERY_DEPTH, &target).await? {
+    let remembered = shared
+        .clone_map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&roots, &target, Instant::now());
+    // The clone must still point at the repository: its remote may have been re-pointed.
+    let remembered = match remembered {
+        Some(Some(local)) if !still_points_at(&local, &target).await => {
+            forget_clone(shared, &target);
+            None
+        }
+        other => other,
+    };
+    let local = match remembered {
+        Some(local) => local,
+        None => {
+            let found = find_local_clone(&roots, DISCOVERY_DEPTH, &target).await?;
+            shared
+                .clone_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .put(&roots, &target, found.clone(), Instant::now());
+            found
+        }
+    };
+
+    let (repo, remote, cloned) = match local {
         Some(local) => (local.path, local.remote, false),
         None => {
             let dest = shared.paths.repos_dir().join(&pr.owner).join(&pr.repo);
@@ -67,7 +110,14 @@ pub(crate) async fn checkout(
             (dest, "origin".to_string(), true)
         }
     };
-    let sha = fetch_pr(&repo, &remote, pr.number).await?;
+    let sha = match fetch_pr(&repo, &remote, pr.number).await {
+        Ok(sha) => sha,
+        Err(e) => {
+            // The remembered clone may be what is wrong.
+            forget_clone(shared, &target);
+            return Err(e);
+        }
+    };
     let path = shared.paths.worktree_for(pr);
     ensure_worktree(&repo, &path, &sha).await?;
     Ok((

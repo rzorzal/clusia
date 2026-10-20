@@ -264,6 +264,13 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     announce(shared, &review);
 
     let role = role_of(viewer.as_deref(), &detail);
+    crate::news::remember(
+        shared,
+        pr,
+        &conversation,
+        checks.as_ref(),
+        viewer.as_deref(),
+    );
     let cache = ReviewCache {
         pr: detail,
         files: files.to_vec(),
@@ -361,7 +368,7 @@ async fn unchanged_open(
         .ok();
     let viewer = match cache.viewer {
         Some(v) => Some(v),
-        None => gh.viewer().await.ok().map(|v| v.login),
+        None => gh.viewer_login().await.ok(),
     };
     let files = Arc::new(cache.files);
     let fresh = ReviewCache {
@@ -449,6 +456,15 @@ async fn full_open(
         match gh.get_pr(pr).await {
             Ok(d) if d.head_sha == info.head_sha => detail = d,
             _ => {
+                // A clone that fetches another repository's pull request also lands here.
+                crate::worktrees::forget_clone(
+                    shared,
+                    &clusia_git::RepoId::new(
+                        &shared.config.read().await.github.host,
+                        &pr.owner,
+                        &pr.repo,
+                    ),
+                );
                 let msg = "the pull request changed while opening; try again";
                 step(
                     shared,
@@ -513,7 +529,7 @@ async fn full_open(
         Some(format!("{} files", files.len())),
     );
 
-    let viewer = gh.viewer().await.ok().map(|v| v.login);
+    let viewer = gh.viewer_login().await.ok();
     Ok((
         Opened {
             worktree: info.path,

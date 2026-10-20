@@ -40,6 +40,7 @@ pub fn test_options() -> DaemonOptions {
         // would say too.
         claude_program: Some("/nonexistent/claude".into()),
         codex_program: Some("/nonexistent/codex".into()),
+        gh_config_dir: None,
         bridge_program: Some(env!("CARGO_BIN_EXE_clusiad").into()),
         harness_env: Vec::new(),
     }

@@ -11,7 +11,6 @@ use serde_json::{Value, json};
 
 use crate::github::{
     GitHub, MAX_PAGES, ProviderError, PublishedReview, decode, error_message, rate_limit_wait,
-    unauthorized,
 };
 
 /// The GraphQL endpoint next to a REST base: `https://api.github.com` → `…/graphql`,
@@ -239,7 +238,7 @@ impl GitHub {
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
         if status == StatusCode::UNAUTHORIZED {
-            return Err(unauthorized(&text));
+            return Err(self.rejected(&text));
         }
         if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
             return Err(ProviderError::RateLimited { retry_after_secs });

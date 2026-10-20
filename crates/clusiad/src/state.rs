@@ -4,12 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use clusia_core::config::AuthSource;
 use clusia_core::{Config, FileDiff, Paths, PrRef, PrSummary};
+use clusia_git::{LocalClone, RepoId};
 use clusia_platform::SecretStore;
 use clusia_protocol::{Event, PermissionStatus, SyncStatus};
-use clusia_provider::GitHub;
+use clusia_provider::{GitHub, Token, TokenOrigin};
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
 use crate::calls::Indexes;
@@ -34,6 +36,109 @@ pub(crate) struct PrLists {
 
 /// Head SHA and the parsed files fetched for it.
 pub(crate) type CachedFiles = (String, Arc<Vec<FileDiff>>);
+
+/// How long a token from `gh auth token` is used before the CLI is asked again.
+const TOKEN_TTL: Duration = Duration::from_secs(300);
+
+/// What `gh` keeps its accounts in, as `stat` sees it: the modification time and size of
+/// `hosts.yml`, or `None` when there is no such file. `gh auth login`, `logout` and `switch`
+/// all rewrite it.
+pub(crate) type GhStamp = Option<(Option<SystemTime>, u64)>;
+
+/// The last token `gh auth token` gave for a sign-in method and host, as long as `hosts.yml`
+/// is as it was. Tokens from the environment and the Keychain are not kept: they are cheap to
+/// read, and a stored one changes through the daemon, which forgets this entry then.
+#[derive(Default)]
+pub(crate) struct TokenCache(Option<(AuthSource, String, GhStamp, Token, Instant)>);
+
+impl TokenCache {
+    /// The kept token when it is for `auth` and `host`, `hosts.yml` still reads `stamp`, and it
+    /// is less than `TOKEN_TTL` old at `now`.
+    pub fn get(&self, auth: AuthSource, host: &str, stamp: GhStamp, now: Instant) -> Option<Token> {
+        let (kept_auth, kept_host, kept_stamp, token, at) = self.0.as_ref()?;
+        (*kept_auth == auth
+            && kept_host == host
+            && *kept_stamp == stamp
+            && now.saturating_duration_since(*at) < TOKEN_TTL)
+            .then(|| token.clone())
+    }
+
+    /// Keeps `token`, taken at `now` while `hosts.yml` read `stamp`, when it came from the CLI.
+    pub fn put(
+        &mut self,
+        auth: AuthSource,
+        host: &str,
+        stamp: GhStamp,
+        token: &Token,
+        now: Instant,
+    ) {
+        if token.origin == TokenOrigin::GhCli {
+            self.0 = Some((auth, host.to_string(), stamp, token.clone(), now));
+        }
+    }
+
+    pub fn forget(&mut self) {
+        self.0 = None;
+    }
+}
+
+/// How long "no clone in the folders" is believed before the folders are walked again.
+const NO_CLONE_TTL: Duration = Duration::from_secs(300);
+
+/// Which clone in the user's folders holds each repository, so an open does not walk the
+/// folders to find it again. A found clone is kept until its folder is gone or the folders to
+/// look in change; a repository with no clone there is kept for `NO_CLONE_TTL`.
+#[derive(Default)]
+pub(crate) struct CloneMap {
+    roots: Vec<PathBuf>,
+    found: HashMap<RepoId, (Option<LocalClone>, Instant)>,
+}
+
+impl CloneMap {
+    /// What an earlier look found for `target` in `roots`; `None` when there is nothing to trust.
+    pub fn get(
+        &mut self,
+        roots: &[PathBuf],
+        target: &RepoId,
+        now: Instant,
+    ) -> Option<Option<LocalClone>> {
+        if self.roots != roots {
+            self.roots = roots.to_vec();
+            self.found.clear();
+            return None;
+        }
+        let (clone, at) = self.found.get(target)?;
+        let current = match clone {
+            Some(local) => local.path.join(".git").exists(),
+            None => now.saturating_duration_since(*at) < NO_CLONE_TTL,
+        };
+        if !current {
+            self.found.remove(target);
+            return None;
+        }
+        Some(clone.clone())
+    }
+
+    /// Remembers what a look at `roots` found for `target`.
+    pub fn put(
+        &mut self,
+        roots: &[PathBuf],
+        target: &RepoId,
+        clone: Option<LocalClone>,
+        now: Instant,
+    ) {
+        if self.roots != roots {
+            self.roots = roots.to_vec();
+            self.found.clear();
+        }
+        self.found.insert(target.clone(), (clone, now));
+    }
+
+    /// Drops what is known about `target`, for a clone that turned out not to work.
+    pub fn forget(&mut self, target: &RepoId) {
+        self.found.remove(target);
+    }
+}
 
 /// Counts one piece of work in `Shared::busy` while it lives, so a shutdown can wait for it.
 pub(crate) struct Busy(Arc<Shared>);
@@ -70,6 +175,8 @@ pub(crate) struct Shared {
     pub claude_program: Option<PathBuf>,
     /// The `codex` program of `DaemonOptions` (see `turns::program_path`).
     pub codex_program: Option<PathBuf>,
+    /// The folder of `gh`'s `hosts.yml` (see `DaemonOptions::gh_config_dir`).
+    pub gh_config_dir: Option<PathBuf>,
     /// The `clusiad` that runs as the permission bridge; this executable when `None`.
     pub bridge_program: Option<PathBuf>,
     /// Added to the daemon's environment for a custom command's process; empty in production.
@@ -105,6 +212,10 @@ pub(crate) struct Shared {
     pub paused: AtomicBool,
     /// Reused while host and token are unchanged, so ETag caching survives between syncs.
     pub client: Mutex<Option<Arc<GitHub>>>,
+    /// The token `gh auth token` gave, so a request does not start a process to learn it again.
+    pub token_cache: std::sync::Mutex<TokenCache>,
+    /// Where the user's clones of repositories were found.
+    pub clone_map: std::sync::Mutex<CloneMap>,
     pub worktree_lock: Mutex<()>,
     /// Serialises the read-modify-write of the window's open tabs.
     pub tabs_lock: Mutex<()>,
@@ -116,6 +227,8 @@ pub(crate) struct Shared {
     pub review_locks: std::sync::Mutex<HashMap<PrRef, Arc<tokio::sync::Mutex<()>>>>,
     /// Parsed files per PR, keyed by the head SHA they were fetched for.
     pub files_cache: Mutex<HashMap<PrRef, CachedFiles>>,
+    /// What the last open of each PR read from GitHub, so the news right after it asks for less.
+    pub fresh_reads: std::sync::Mutex<HashMap<PrRef, crate::news::FreshRead>>,
     /// When each saved review whose worktree would not update may be tried again.
     pub checkout_backoff: std::sync::Mutex<HashMap<PrRef, Backoff>>,
     /// Held for the whole of a sync, so the loop, `SyncNow` and `ListPrs` never overlap.
@@ -133,6 +246,14 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// Makes the next request ask for the token again.
+    pub fn forget_token(&self) {
+        self.token_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forget();
+    }
+
     pub fn new(paths: Paths, config: Config, options: DaemonOptions) -> Self {
         let (events, _) = broadcast::channel(256);
         let (shutdown, _) = watch::channel(false);
@@ -174,6 +295,7 @@ impl Shared {
             harness_search_paths: options.harness_search_paths,
             claude_program: options.claude_program,
             codex_program: options.codex_program,
+            gh_config_dir: options.gh_config_dir,
             bridge_program: options.bridge_program,
             harness_env: options.harness_env,
             permissions: Permissions::default(),
@@ -192,12 +314,15 @@ impl Shared {
             sync_now: Notify::new(),
             paused: AtomicBool::new(false),
             client: Mutex::new(None),
+            token_cache: std::sync::Mutex::new(TokenCache::default()),
+            clone_map: std::sync::Mutex::new(CloneMap::default()),
             worktree_lock: Mutex::new(()),
             tabs_lock: Mutex::new(()),
             hidden_lock: Mutex::new(()),
             touched: std::sync::Mutex::new(HashSet::new()),
             review_locks: std::sync::Mutex::new(HashMap::new()),
             files_cache: Mutex::new(HashMap::new()),
+            fresh_reads: std::sync::Mutex::new(HashMap::new()),
             checkout_backoff: std::sync::Mutex::new(HashMap::new()),
             sync_lock: Mutex::new(()),
             first_sync_done,
@@ -276,5 +401,150 @@ impl Shared {
     /// Sends `event` to every connection subscribed to `topic`. No listeners is fine.
     pub fn publish(&self, topic: &str, event: Event) {
         let _ = self.events.send((topic.to_string(), event));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kept(origin: TokenOrigin, now: Instant) -> TokenCache {
+        let mut cache = TokenCache::default();
+        cache.put(
+            AuthSource::GhCli,
+            "github.com",
+            None,
+            &Token::new("secret", origin),
+            now,
+        );
+        cache
+    }
+
+    #[test]
+    fn a_cli_token_is_kept_until_it_is_five_minutes_old() {
+        let t0 = Instant::now();
+        let cache = kept(TokenOrigin::GhCli, t0);
+        let at = |secs| t0 + Duration::from_secs(secs);
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "github.com", None, at(299))
+                .is_some()
+        );
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "github.com", None, at(300))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_kept_token_is_for_its_sign_in_method_and_host_only() {
+        let t0 = Instant::now();
+        let cache = kept(TokenOrigin::GhCli, t0);
+        assert!(cache.get(AuthSource::Pat, "github.com", None, t0).is_none());
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "ghe.example.com", None, t0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tokens_that_are_cheap_to_read_are_not_kept() {
+        let t0 = Instant::now();
+        for origin in [TokenOrigin::Env, TokenOrigin::Pat] {
+            assert!(
+                kept(origin, t0)
+                    .get(AuthSource::GhCli, "github.com", None, t0)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn a_kept_token_is_only_good_while_hosts_yml_is_as_it_was() {
+        let t0 = Instant::now();
+        let cache = kept(TokenOrigin::GhCli, t0);
+        let rewritten = Some((Some(SystemTime::UNIX_EPOCH), 40));
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "github.com", rewritten, t0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn forgetting_empties_it() {
+        let t0 = Instant::now();
+        let mut cache = kept(TokenOrigin::GhCli, t0);
+        cache.forget();
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "github.com", None, t0)
+                .is_none()
+        );
+    }
+
+    fn widgets() -> RepoId {
+        RepoId::new("github.com", "acme", "widgets")
+    }
+
+    fn roots() -> Vec<PathBuf> {
+        vec![PathBuf::from("/repos")]
+    }
+
+    #[test]
+    fn a_clone_is_kept_while_its_folder_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let local = LocalClone {
+            path: dir.path().to_path_buf(),
+            remote: "origin".into(),
+        };
+        let t0 = Instant::now();
+        let mut map = CloneMap::default();
+        map.put(&roots(), &widgets(), Some(local.clone()), t0);
+        let much_later = t0 + Duration::from_secs(86_400);
+        assert_eq!(map.get(&roots(), &widgets(), much_later), Some(Some(local)));
+        std::fs::remove_dir(dir.path().join(".git")).unwrap();
+        assert_eq!(map.get(&roots(), &widgets(), much_later), None);
+    }
+
+    #[test]
+    fn no_clone_is_believed_for_five_minutes() {
+        let t0 = Instant::now();
+        let mut map = CloneMap::default();
+        map.put(&roots(), &widgets(), None, t0);
+        let at = |secs| t0 + Duration::from_secs(secs);
+        assert_eq!(map.get(&roots(), &widgets(), at(299)), Some(None));
+        assert_eq!(map.get(&roots(), &widgets(), at(300)), None);
+    }
+
+    #[test]
+    fn other_folders_to_look_in_start_over() {
+        let t0 = Instant::now();
+        let mut map = CloneMap::default();
+        map.put(&roots(), &widgets(), None, t0);
+        assert_eq!(
+            map.get(&[PathBuf::from("/elsewhere")], &widgets(), t0),
+            None
+        );
+        assert_eq!(
+            map.get(&roots(), &widgets(), t0),
+            None,
+            "the old answer is gone"
+        );
+    }
+
+    #[test]
+    fn forgetting_a_repository_leaves_the_others() {
+        let t0 = Instant::now();
+        let other = RepoId::new("github.com", "acme", "gadgets");
+        let mut map = CloneMap::default();
+        map.put(&roots(), &widgets(), None, t0);
+        map.put(&roots(), &other, None, t0);
+        map.forget(&widgets());
+        assert_eq!(map.get(&roots(), &widgets(), t0), None);
+        assert_eq!(map.get(&roots(), &other, t0), Some(None));
     }
 }
