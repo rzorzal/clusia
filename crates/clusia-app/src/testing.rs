@@ -492,6 +492,12 @@ pub fn settle(app: &mut App) {
     }
 }
 
+/// Waits for the pictures being decoded in the background, then settles, so they are shown.
+pub fn decoded(app: &mut App) {
+    crate::ui::media::finish_decodes(app.world_mut());
+    settle(app);
+}
+
 /// Delivers `tell` as the bridge would (through `pump`) and runs a frame.
 pub fn tell(app: &mut App, tell: Tell) {
     let _ = app.world().resource::<Outbox>().0.send(tell);
