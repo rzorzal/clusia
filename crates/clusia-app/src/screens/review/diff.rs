@@ -5,7 +5,9 @@
 //! - a click on a commentable line opens the inline editor (Shift-click extends the range).
 //!
 //! Each region rebuilds only when its pure view changes. The editor's typed text is not part
-//! of any view, so typing never rebuilds the diff.
+//! of any view, so typing never rebuilds the diff. The body keeps its rows: a selection or a
+//! focus is set on the rows that are there, an editor or card is added or removed under its
+//! row alone, a line whose content changed is respawned in its place, and more lines append.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -807,24 +809,101 @@ struct HeaderPart {
     built: Option<(Option<String>, u64, u64)>,
 }
 
+/// What a body is laid out as. Another layout, file, text size or render options draws the body
+/// anew; anything else updates the rows that are there.
 #[derive(Debug, Clone, PartialEq)]
-struct BodyKey {
+enum Layout {
+    Empty(&'static str),
+    Unified,
+    Split,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BodyShape {
     path: Option<String>,
-    body: DiffBody,
-    more: usize,
+    layout: Layout,
     code_size: f32,
-    error: Option<String>,
-    /// The editor waits for the daemon (**Saving…**).
-    saving: bool,
+    opts: RenderOpts,
+}
+
+/// A line as its row draws it: with no selection (a selected fill is set on the row in place)
+/// and nothing under it.
+#[derive(Debug, Clone, PartialEq)]
+enum RowKey {
+    Unified(UnifiedLine),
+    Split(SplitLine),
+}
+
+impl RowKey {
+    /// The kind of the line on side `at` (0 left, 1 right; a Unified row is side 0).
+    fn kind(&self, at: usize) -> Option<RowKind> {
+        match self {
+            RowKey::Unified(l) => (at == 0).then_some(l.kind),
+            RowKey::Split(l) => [&l.left, &l.right][at].as_ref().map(|c| c.kind),
+        }
+    }
+}
+
+/// What sits under a row: one list in Unified, one per side in Split.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct UnderKey {
+    items: [Vec<Below>; 2],
+    /// The editor's target, refusal and **Saving…**, when one of the items is its box: the box
+    /// draws them. Its typed text is not here, so typing never respawns it.
+    editor: Option<(EditTarget, Option<String>, bool)>,
+}
+
+impl UnderKey {
+    fn is_empty(&self) -> bool {
+        self.items.iter().all(Vec::is_empty)
+    }
+}
+
+/// A body line as the view wants it.
+struct Want {
+    row: RowKey,
+    selected: [bool; 2],
+    under: UnderKey,
+}
+
+/// A body line's entities and what they were built from.
+struct Slot {
+    row: RowKey,
+    entity: Entity,
+    /// The nodes whose fill shows the selection: the row in Unified, each side's cell in Split.
+    cells: [Option<Entity>; 2],
+    selected: [bool; 2],
+    /// It carries `FocusRow`.
+    focused: bool,
+    under: UnderKey,
+    /// What sits under the row, placed right after it.
+    below: Option<Under>,
+}
+
+/// The node under a row, its columns (one in Unified, the node itself) and each item's node.
+struct Under {
+    node: Entity,
+    columns: [Option<Entity>; 2],
+    items: [Vec<Entity>; 2],
+}
+
+/// What a body's children are. They are, in order: the Split labels (in Split), each slot's row
+/// and its below node, and the **Show more** footer.
+struct Built {
+    shape: BodyShape,
+    slots: Vec<Slot>,
+    more: usize,
+    footer: Option<Entity>,
+    /// The Split labels and their node, the first child.
+    labels: Option<((String, String), Entity)>,
     /// The line to scroll to.
     focus: Option<(usize, u32)>,
-    opts: RenderOpts,
 }
 
 #[derive(Component)]
 struct BodyPart {
     pr: PrRef,
-    built: Option<BodyKey>,
+    built: Option<Built>,
 }
 
 /// The row that `Open in diff` lit, in the body of the `PrRef` it holds.
@@ -1066,34 +1145,313 @@ fn rebuild_diff(
         let Some((v, editor)) = views.get(&part.pr) else {
             continue;
         };
-        let key = BodyKey {
+        let shape = BodyShape {
             path: v.path.clone(),
-            body: v.body.clone(),
-            more: v.more,
+            layout: match &v.body {
+                DiffBody::Empty(message) => Layout::Empty(message),
+                DiffBody::Unified(_) => Layout::Unified,
+                DiffBody::Split { .. } => Layout::Split,
+            },
             code_size: v.code_size,
-            error: v.editor_error.clone(),
-            saving: editor.as_ref().is_some_and(|e| e.ticket.is_some()),
-            focus: v.focus_row.map(|row| (row, v.focus_seq)),
             opts: opts.clone(),
         };
-        if part.built.as_ref() == Some(&key) {
-            continue;
-        }
-        if part.built.as_ref().map(|b| &b.path) != Some(&key.path) {
+        let focus = v.focus_row.map(|row| (row, v.focus_seq));
+        if part.built.as_ref().map(|b| &b.shape.path) != Some(&shape.path) {
             scroll.0 = Vec2::ZERO; // another file starts at its top
         }
-        if let Some((index, _)) = key.focus
-            && part.built.as_ref().map(|b| b.focus) != Some(key.focus)
+        if let Some((index, _)) = focus
+            && part.built.as_ref().map(|b| b.focus) != Some(focus)
         {
             scroll.0.y = focus_scroll(index);
             commands.entity(entity).insert(FocusPending::at(scroll.0.y));
         }
         let pr = part.pr.clone();
         let path = v.path.clone().unwrap_or_default();
-        refill(&mut commands, entity, |p| {
-            body(p, fonts, &pr, &path, v, editor.as_ref(), &key.opts);
+        let draw = Draw {
+            fonts,
+            pr: &pr,
+            path: &path,
+            group: entity,
+            size: v.code_size,
+            editor: editor.as_ref(),
+            opts: &shape.opts,
+            gutter: Gutter::Both,
+        };
+        let mut built = match part.built.take() {
+            Some(built) if built.shape == shape => built,
+            _ => {
+                refill(&mut commands, entity, |p| {
+                    if let Layout::Empty(message) = &shape.layout {
+                        empty_body(p, fonts, message);
+                    }
+                });
+                Built {
+                    shape: shape.clone(),
+                    slots: Vec::new(),
+                    more: 0,
+                    footer: None,
+                    labels: None,
+                    focus: None,
+                }
+            }
+        };
+        if let DiffBody::Split { before, after, .. } = &v.body {
+            let labels = (before.clone(), after.clone());
+            if built.labels.as_ref().map(|(l, _)| l) != Some(&labels) {
+                if let Some((_, node)) = built.labels.take() {
+                    commands.entity(node).despawn();
+                }
+                let mut node = Entity::PLACEHOLDER;
+                commands.entity(entity).with_children(|p| {
+                    node = split_labels(p, fonts, before, after);
+                });
+                commands.entity(entity).insert_child(0, node);
+                built.labels = Some((labels, node));
+            }
+        }
+        let wants = wants_of(&v.body, editor.as_ref());
+        reconcile(
+            &mut commands,
+            entity,
+            &mut built,
+            &draw,
+            wants,
+            v.more,
+            v.focus_row,
+        );
+        built.focus = focus;
+        part.built = Some(built);
+    }
+}
+
+/// The lines of `body` as rows want them, with what sits under each.
+fn wants_of(body: &DiffBody, editor: Option<&Editor>) -> Vec<Want> {
+    let under = |items: [Vec<Below>; 2]| {
+        let editor = editor
+            .filter(|_| items.iter().flatten().any(|b| *b == Below::Editor))
+            .map(|e| (e.target.clone(), e.error.clone(), e.ticket.is_some()));
+        UnderKey { items, editor }
+    };
+    match body {
+        DiffBody::Empty(_) => Vec::new(),
+        DiffBody::Unified(lines) => lines
+            .iter()
+            .map(|(line, items)| Want {
+                row: RowKey::Unified(UnifiedLine {
+                    selected: false,
+                    ..line.clone()
+                }),
+                selected: [line.selected, false],
+                under: under([items.clone(), Vec::new()]),
+            })
+            .collect(),
+        DiffBody::Split { lines, .. } => lines
+            .iter()
+            .map(|line| {
+                let plain = |cell: &Option<Cell>| {
+                    cell.clone().map(|c| Cell {
+                        selected: false,
+                        ..c
+                    })
+                };
+                let lit = |cell: &Option<Cell>| cell.as_ref().is_some_and(|c| c.selected);
+                Want {
+                    row: RowKey::Split(SplitLine {
+                        hunk: line.hunk.clone(),
+                        left: plain(&line.left),
+                        right: plain(&line.right),
+                        below_left: Vec::new(),
+                        below_right: Vec::new(),
+                    }),
+                    selected: [lit(&line.left), lit(&line.right)],
+                    under: under([line.below_left.clone(), line.below_right.clone()]),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Brings `built`'s children to `wants`: a line whose row changed is respawned in its place, a
+/// new selection or focus is set on the row that is there, what sits under a row is respawned
+/// alone, lines past the end go and new lines are appended.
+#[allow(clippy::too_many_arguments)]
+fn reconcile(
+    commands: &mut Commands,
+    body: Entity,
+    built: &mut Built,
+    draw: &Draw,
+    wants: Vec<Want>,
+    more: usize,
+    focus_row: Option<usize>,
+) {
+    // The footer is the last child: it goes before lines are appended and comes back after.
+    if (built.more != more || built.slots.len() != wants.len())
+        && let Some(footer) = built.footer.take()
+    {
+        commands.entity(footer).despawn();
+    }
+    let keep = built.slots.len().min(wants.len());
+    for slot in built.slots.drain(keep..) {
+        despawn_slot(commands, &slot);
+    }
+    // The index of the current slot's row among the body's children.
+    let mut at = usize::from(built.labels.is_some());
+    for (order, want) in wants.into_iter().enumerate() {
+        let focused = focus_row == Some(order);
+        let Some(slot) = built.slots.get_mut(order) else {
+            built
+                .slots
+                .push(spawn_slot(commands, body, None, draw, order, want, focused));
+            at += 1 + usize::from(built.slots[order].below.is_some());
+            continue;
+        };
+        if slot.row != want.row {
+            despawn_slot(commands, slot);
+            *slot = spawn_slot(commands, body, Some(at), draw, order, want, focused);
+        } else {
+            for side in 0..2 {
+                if slot.selected[side] != want.selected[side]
+                    && let (Some(cell), Some(kind)) = (slot.cells[side], slot.row.kind(side))
+                {
+                    commands
+                        .entity(cell)
+                        .insert(Fill(fill_of(kind, want.selected[side])));
+                }
+            }
+            slot.selected = want.selected;
+            if slot.focused != focused {
+                if focused {
+                    commands
+                        .entity(slot.entity)
+                        .insert(FocusRow(draw.pr.clone()));
+                } else {
+                    commands.entity(slot.entity).remove::<FocusRow>();
+                }
+                slot.focused = focused;
+            }
+            if slot.under != want.under {
+                match &mut slot.below {
+                    Some(under) if want.under.is_empty() => {
+                        commands.entity(under.node).despawn();
+                        slot.below = None;
+                    }
+                    Some(under) => {
+                        let editor = slot.under.editor != want.under.editor;
+                        for side in 0..2 {
+                            if let Some(column) = under.columns[side] {
+                                update_items(
+                                    commands,
+                                    draw,
+                                    column,
+                                    &mut under.items[side],
+                                    (&slot.under.items[side], &want.under.items[side]),
+                                    editor,
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        let mut spawned = None;
+                        commands.entity(body).with_children(|p| {
+                            spawned = under_node(p, draw, &slot.row, &want.under);
+                        });
+                        if let Some(under) = &spawned {
+                            commands.entity(body).insert_child(at + 1, under.node);
+                        }
+                        slot.below = spawned;
+                    }
+                }
+                slot.under = want.under;
+            }
+        }
+        at += 1 + usize::from(built.slots[order].below.is_some());
+    }
+    if built.footer.is_none() && more > 0 {
+        commands.entity(body).with_children(|p| {
+            built.footer = Some(show_more(p, draw.fonts, draw.pr, more));
         });
-        part.built = Some(key);
+    }
+    built.more = more;
+}
+
+fn despawn_slot(commands: &mut Commands, slot: &Slot) {
+    commands.entity(slot.entity).despawn();
+    if let Some(under) = &slot.below {
+        commands.entity(under.node).despawn();
+    }
+}
+
+/// Brings the items of one column from `was` to `want`: an item that changed is respawned in its
+/// place, items past the end go and new ones are appended. With `editor`, the editor's box
+/// counts as changed.
+fn update_items(
+    commands: &mut Commands,
+    draw: &Draw,
+    column: Entity,
+    nodes: &mut Vec<Entity>,
+    (was, want): (&[Below], &[Below]),
+    editor: bool,
+) {
+    let keep = was.len().min(want.len());
+    for node in nodes.drain(keep..) {
+        commands.entity(node).despawn();
+    }
+    for (i, item) in want.iter().enumerate() {
+        if i < keep {
+            if was[i] == *item && !(editor && *item == Below::Editor) {
+                continue;
+            }
+            commands.entity(nodes[i]).despawn();
+        }
+        let mut spawned = Entity::PLACEHOLDER;
+        commands.entity(column).with_children(|p| {
+            spawned = below(p, draw.fonts, draw.pr, item, draw.editor, draw.opts);
+        });
+        if i < keep {
+            commands.entity(column).insert_child(i, spawned);
+            nodes[i] = spawned;
+        } else {
+            nodes.push(spawned);
+        }
+    }
+}
+
+/// Spawns a line's row and what sits under it in `body`, at child index `place` (at the end
+/// without one).
+fn spawn_slot(
+    commands: &mut Commands,
+    body: Entity,
+    place: Option<usize>,
+    draw: &Draw,
+    order: usize,
+    want: Want,
+    focused: bool,
+) -> Slot {
+    let mut spawned = (Entity::PLACEHOLDER, [None; 2], None);
+    commands.entity(body).with_children(|p| {
+        let (entity, cells) = match &want.row {
+            RowKey::Unified(line) => {
+                let row = unified_row(p, draw, order, line, want.selected[0], focused);
+                (row, [Some(row), None])
+            }
+            RowKey::Split(line) => split_row(p, draw, order, line, want.selected, focused),
+        };
+        spawned = (entity, cells, under_node(p, draw, &want.row, &want.under));
+    });
+    let (entity, cells, below) = spawned;
+    if let Some(at) = place {
+        let mut placed = vec![entity];
+        placed.extend(below.as_ref().map(|u| u.node));
+        commands.entity(body).insert_children(at, &placed);
+    }
+    Slot {
+        row: want.row,
+        entity,
+        cells,
+        selected: want.selected,
+        focused,
+        under: want.under,
+        below,
     }
 }
 
@@ -1362,7 +1720,7 @@ fn line_node(
     button: Option<LineButton>,
     focus: Option<FocusRow>,
     build: impl FnOnce(&mut ChildSpawnerCommands),
-) {
+) -> Entity {
     let fill = fill_of(kind, selected);
     let mut e = p.spawn((
         Node {
@@ -1389,6 +1747,7 @@ fn line_node(
         ));
     }
     e.with_children(build);
+    e.id()
 }
 
 /// Which number columns a Unified row draws.
@@ -1398,6 +1757,37 @@ pub(crate) enum Gutter {
     Both,
     /// One column with the head line (a `−` on a removed line) and no sign: a Story step.
     Head,
+}
+
+/// What every row of one body is drawn with.
+struct Draw<'a> {
+    fonts: &'a UiFonts,
+    pr: &'a PrRef,
+    path: &'a str,
+    /// The selection group of the body's code lines.
+    group: Entity,
+    size: f32,
+    editor: Option<&'a Editor>,
+    opts: &'a RenderOpts,
+    gutter: Gutter,
+}
+
+impl Draw<'_> {
+    fn line_button(
+        &self,
+        row: usize,
+        anchor: Option<(Side, u32)>,
+        commentable: bool,
+    ) -> Option<LineButton> {
+        let (side, line) = anchor.filter(|_| commentable)?;
+        Some(LineButton {
+            pr: self.pr.clone(),
+            path: self.path.to_string(),
+            row,
+            side,
+            line,
+        })
+    }
 }
 
 /// The rows of a Unified body, each with what sits under it. `focus_row` is the index among
@@ -1415,244 +1805,276 @@ pub(crate) fn unified_rows(
     gutter: Gutter,
     focus_row: Option<usize>,
 ) {
-    let line_button = |row: usize, anchor: Option<(Side, u32)>, commentable: bool| {
-        let (side, line) = anchor.filter(|_| commentable)?;
-        Some(LineButton {
-            pr: pr.clone(),
-            path: path.to_string(),
-            row,
-            side,
-            line,
-        })
+    let draw = Draw {
+        fonts,
+        pr,
+        path,
+        group: p.target_entity(),
+        size,
+        editor,
+        opts,
+        gutter,
     };
-    let indent = match gutter {
-        Gutter::Both => 2.0 * NUMBER_WIDTH + 18.0,
-        Gutter::Head => NUMBER_WIDTH,
-    };
-    let group = p.target_entity();
     for (at, (line, under)) in lines.iter().enumerate() {
-        line_node(
-            p,
-            percent(100),
-            line.kind,
-            line.selected,
-            line_button(line.row, line.anchor, line.commentable),
-            (focus_row == Some(at)).then(|| FocusRow(pr.clone())),
-            |r| {
-                match gutter {
-                    Gutter::Both => {
-                        number(r, fonts, line.old, size);
-                        number(r, fonts, line.new, size);
-                        mark(r, fonts, line.kind, size);
-                    }
-                    Gutter::Head => {
-                        let head = match (line.new, line.kind) {
-                            (Some(n), _) => n.to_string(),
-                            (None, RowKind::Removed) => "−".to_string(),
-                            (None, _) => String::new(),
-                        };
-                        number_text(r, fonts, head, size);
-                    }
-                }
-                let key = LineKey {
-                    group,
-                    order: at,
-                    column: 0,
-                };
-                code(r, fonts, size, line.spans.clone(), Some(key));
-            },
-        );
+        unified_row(p, &draw, at, line, line.selected, focus_row == Some(at));
         if !under.is_empty() {
-            p.spawn(Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: px(8),
-                padding: UiRect::new(px(indent), px(8), px(8), px(8)),
-                ..default()
-            })
-            .with_children(|b| {
-                for item in under {
-                    below(b, fonts, pr, item, editor, opts);
-                }
-            });
+            unified_below(p, &draw, under);
         }
     }
 }
 
-fn body(
+/// One Unified row, `order`-th of its body.
+fn unified_row(
     p: &mut ChildSpawnerCommands,
-    fonts: &UiFonts,
-    pr: &PrRef,
-    path: &str,
-    v: &DiffView,
-    editor: Option<&Editor>,
-    opts: &RenderOpts,
-) {
-    let size = v.code_size;
-    let group = p.target_entity();
-    let line_button = |row: usize, anchor: Option<(Side, u32)>, commentable: bool| {
-        let (side, line) = anchor.filter(|_| commentable)?;
-        Some(LineButton {
-            pr: pr.clone(),
-            path: path.to_string(),
-            row,
-            side,
-            line,
-        })
+    draw: &Draw,
+    order: usize,
+    line: &UnifiedLine,
+    selected: bool,
+    focused: bool,
+) -> Entity {
+    let (fonts, size) = (draw.fonts, draw.size);
+    line_node(
+        p,
+        percent(100),
+        line.kind,
+        selected,
+        draw.line_button(line.row, line.anchor, line.commentable),
+        focused.then(|| FocusRow(draw.pr.clone())),
+        |r| {
+            match draw.gutter {
+                Gutter::Both => {
+                    number(r, fonts, line.old, size);
+                    number(r, fonts, line.new, size);
+                    mark(r, fonts, line.kind, size);
+                }
+                Gutter::Head => {
+                    let head = match (line.new, line.kind) {
+                        (Some(n), _) => n.to_string(),
+                        (None, RowKind::Removed) => "−".to_string(),
+                        (None, _) => String::new(),
+                    };
+                    number_text(r, fonts, head, size);
+                }
+            }
+            let key = LineKey {
+                group: draw.group,
+                order,
+                column: 0,
+            };
+            code(r, fonts, size, line.spans.clone(), Some(key));
+        },
+    )
+}
+
+/// What sits under a Unified row, indented to its code.
+fn unified_below(p: &mut ChildSpawnerCommands, draw: &Draw, under: &[Below]) -> Under {
+    let indent = match draw.gutter {
+        Gutter::Both => 2.0 * NUMBER_WIDTH + 18.0,
+        Gutter::Head => NUMBER_WIDTH,
     };
-    let focus_of = |at: usize| (v.focus_row == Some(at)).then(|| FocusRow(pr.clone()));
-    match &v.body {
-        DiffBody::Empty(message) => {
-            p.spawn(Node {
-                padding: px(24).all(),
-                ..default()
-            })
-            .with_children(|e| {
-                e.spawn(text(fonts, *message, Type::MUTED));
-            });
+    let mut column = p.spawn(Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: px(8),
+        padding: UiRect::new(px(indent), px(8), px(8), px(8)),
+        ..default()
+    });
+    let node = column.id();
+    let mut items = Vec::new();
+    column.with_children(|b| {
+        for item in under {
+            items.push(below(b, draw.fonts, draw.pr, item, draw.editor, draw.opts));
         }
-        DiffBody::Unified(lines) => {
-            unified_rows(
-                p,
-                fonts,
-                pr,
-                path,
-                lines,
-                size,
-                editor,
-                opts,
-                Gutter::Both,
-                v.focus_row,
-            );
-        }
-        DiffBody::Split {
-            before,
-            after,
-            lines,
-        } => {
-            p.spawn((
-                Node {
-                    flex_shrink: 0.0,
-                    border: UiRect::bottom(px(1)),
-                    ..default()
-                },
-                BorderColor::default(),
-                Stroke(Swatch::Line),
-            ))
-            .with_children(|h| {
-                for label in [before, after] {
-                    h.spawn(Node {
-                        width: percent(50),
-                        padding: UiRect::axes(px(12), px(8)),
-                        ..default()
-                    })
-                    .with_children(|c| {
-                        c.spawn(wrapped_text(fonts, label.clone(), Type::META));
-                    });
-                }
-            });
-            for (at, line) in lines.iter().enumerate() {
-                let mut pair = p.spawn(Node {
-                    width: percent(100),
-                    flex_shrink: 0.0,
-                    ..default()
-                });
-                if let Some(focus) = focus_of(at) {
-                    pair.insert(focus);
-                }
-                pair.with_children(|r| {
-                    if let Some(hunk) = &line.hunk {
-                        for _ in 0..2 {
-                            line_node(r, percent(50), RowKind::Hunk, false, None, None, |c| {
-                                c.spawn(Node {
-                                    width: px(NUMBER_WIDTH + 18.0),
-                                    flex_shrink: 0.0,
-                                    ..default()
-                                });
-                                code(
-                                    c,
-                                    fonts,
-                                    size,
-                                    vec![CodeSpan {
-                                        text: hunk.clone(),
-                                        ink: Swatch::Muted,
-                                        mark: None,
-                                    }],
-                                    None,
-                                );
-                            });
-                        }
-                        return;
-                    }
-                    for (column, cell) in [&line.left, &line.right].into_iter().enumerate() {
-                        match cell {
-                            Some(c) => {
-                                let b = line_button(c.row, c.anchor, c.commentable);
-                                line_node(r, percent(50), c.kind, c.selected, b, None, |x| {
-                                    number(x, fonts, c.number, size);
-                                    mark(x, fonts, c.kind, size);
-                                    let key = LineKey {
-                                        group,
-                                        order: at,
-                                        column: column as u8,
-                                    };
-                                    code(x, fonts, size, c.spans.clone(), Some(key));
-                                });
-                            }
-                            None => {
-                                r.spawn(panel(
-                                    Node {
-                                        width: percent(50),
-                                        min_height: px(ROW_HEIGHT),
-                                        ..default()
-                                    },
-                                    Swatch::Bg,
-                                ));
-                            }
-                        }
-                    }
-                });
-                if !(line.below_left.is_empty() && line.below_right.is_empty()) {
-                    p.spawn(Node {
-                        width: percent(100),
+    });
+    Under {
+        node,
+        columns: [Some(node), None],
+        items: [items, Vec::new()],
+    }
+}
+
+/// The node under a row that holds `under`; none when nothing sits there.
+fn under_node(
+    p: &mut ChildSpawnerCommands,
+    draw: &Draw,
+    row: &RowKey,
+    under: &UnderKey,
+) -> Option<Under> {
+    if under.is_empty() {
+        return None;
+    }
+    Some(match row {
+        RowKey::Unified(_) => unified_below(p, draw, &under.items[0]),
+        RowKey::Split(_) => split_below(p, draw, &under.items),
+    })
+}
+
+/// One Split line, `order`-th of its body: the row and each side's cell.
+fn split_row(
+    p: &mut ChildSpawnerCommands,
+    draw: &Draw,
+    order: usize,
+    line: &SplitLine,
+    selected: [bool; 2],
+    focused: bool,
+) -> (Entity, [Option<Entity>; 2]) {
+    let (fonts, size) = (draw.fonts, draw.size);
+    let mut cells = [None; 2];
+    let mut pair = p.spawn(Node {
+        width: percent(100),
+        flex_shrink: 0.0,
+        ..default()
+    });
+    if focused {
+        pair.insert(FocusRow(draw.pr.clone()));
+    }
+    pair.with_children(|r| {
+        if let Some(hunk) = &line.hunk {
+            for _ in 0..2 {
+                line_node(r, percent(50), RowKind::Hunk, false, None, None, |c| {
+                    c.spawn(Node {
+                        width: px(NUMBER_WIDTH + 18.0),
                         flex_shrink: 0.0,
                         ..default()
-                    })
-                    .with_children(|r| {
-                        for items in [&line.below_left, &line.below_right] {
-                            r.spawn(Node {
-                                width: percent(50),
-                                flex_direction: FlexDirection::Column,
-                                row_gap: px(8),
-                                padding: UiRect::new(px(NUMBER_WIDTH + 10.0), px(8), px(8), px(8)),
-                                ..default()
-                            })
-                            .with_children(|b| {
-                                for item in items {
-                                    below(b, fonts, pr, item, editor, opts);
-                                }
-                            });
-                        }
                     });
+                    code(
+                        c,
+                        fonts,
+                        size,
+                        vec![CodeSpan {
+                            text: hunk.clone(),
+                            ink: Swatch::Muted,
+                            mark: None,
+                        }],
+                        None,
+                    );
+                });
+            }
+            return;
+        }
+        for (column, cell) in [&line.left, &line.right].into_iter().enumerate() {
+            match cell {
+                Some(c) => {
+                    let b = draw.line_button(c.row, c.anchor, c.commentable);
+                    let node = line_node(r, percent(50), c.kind, selected[column], b, None, |x| {
+                        number(x, fonts, c.number, size);
+                        mark(x, fonts, c.kind, size);
+                        let key = LineKey {
+                            group: draw.group,
+                            order,
+                            column: column as u8,
+                        };
+                        code(x, fonts, size, c.spans.clone(), Some(key));
+                    });
+                    cells[column] = Some(node);
+                }
+                None => {
+                    r.spawn(panel(
+                        Node {
+                            width: percent(50),
+                            min_height: px(ROW_HEIGHT),
+                            ..default()
+                        },
+                        Swatch::Bg,
+                    ));
                 }
             }
         }
+    });
+    (pair.id(), cells)
+}
+
+/// What sits under a Split line, each side under its own column.
+fn split_below(p: &mut ChildSpawnerCommands, draw: &Draw, under: &[Vec<Below>; 2]) -> Under {
+    let mut columns = [None; 2];
+    let mut items = [Vec::new(), Vec::new()];
+    let mut line = p.spawn(Node {
+        width: percent(100),
+        flex_shrink: 0.0,
+        ..default()
+    });
+    let node = line.id();
+    line.with_children(|r| {
+        for (side, list) in under.iter().enumerate() {
+            let mut column = r.spawn(Node {
+                width: percent(50),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                padding: UiRect::new(px(NUMBER_WIDTH + 10.0), px(8), px(8), px(8)),
+                ..default()
+            });
+            columns[side] = Some(column.id());
+            column.with_children(|b| {
+                for item in list {
+                    items[side].push(below(b, draw.fonts, draw.pr, item, draw.editor, draw.opts));
+                }
+            });
+        }
+    });
+    Under {
+        node,
+        columns,
+        items,
     }
-    if v.more > 0 {
-        p.spawn(Node {
-            padding: UiRect::axes(px(16), px(12)),
-            column_gap: px(10),
-            align_items: AlignItems::Center,
+}
+
+fn empty_body(p: &mut ChildSpawnerCommands, fonts: &UiFonts, message: &'static str) {
+    p.spawn(Node {
+        padding: px(24).all(),
+        ..default()
+    })
+    .with_children(|e| {
+        e.spawn(text(fonts, message, Type::MUTED));
+    });
+}
+
+/// The *Before* and *After* labels over the Split columns.
+fn split_labels(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    before: &str,
+    after: &str,
+) -> Entity {
+    p.spawn((
+        Node {
+            flex_shrink: 0.0,
+            border: UiRect::bottom(px(1)),
             ..default()
-        })
-        .with_children(|m| {
-            m.spawn((
-                button(fonts, "Show more", Variant::Secondary),
-                ShowMore(pr.clone()),
-                observe(on_more),
-            ));
-            m.spawn(text(fonts, format!("{} more lines", v.more), Type::META));
-        });
-    }
+        },
+        BorderColor::default(),
+        Stroke(Swatch::Line),
+    ))
+    .with_children(|h| {
+        for label in [before, after] {
+            h.spawn(Node {
+                width: percent(50),
+                padding: UiRect::axes(px(12), px(8)),
+                ..default()
+            })
+            .with_children(|c| {
+                c.spawn(wrapped_text(fonts, label.to_string(), Type::META));
+            });
+        }
+    })
+    .id()
+}
+
+/// **Show more** and how many lines it would add.
+fn show_more(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, more: usize) -> Entity {
+    p.spawn(Node {
+        padding: UiRect::axes(px(16), px(12)),
+        column_gap: px(10),
+        align_items: AlignItems::Center,
+        ..default()
+    })
+    .with_children(|m| {
+        m.spawn((
+            button(fonts, "Show more", Variant::Secondary),
+            ShowMore(pr.clone()),
+            observe(on_more),
+        ));
+        m.spawn(text(fonts, format!("{more} more lines"), Type::META));
+    })
+    .id()
 }
 
 fn below(
@@ -1662,15 +2084,14 @@ fn below(
     item: &Below,
     editor: Option<&Editor>,
     opts: &RenderOpts,
-) {
+) -> Entity {
     match item {
-        Below::Editor => {
-            if let Some(editor) = editor {
-                editor_box(p, fonts, editor, pr);
-            }
-        }
-        Below::Thread(t) => {
-            p.spawn(card(Node {
+        Below::Editor => match editor {
+            Some(editor) => editor_box(p, fonts, editor, pr),
+            None => p.spawn(Node::default()).id(),
+        },
+        Below::Thread(t) => p
+            .spawn(card(Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: px(8),
                 padding: UiRect::axes(px(10), px(10)),
@@ -1778,8 +2199,8 @@ fn below(
                         });
                     }
                 }
-            });
-        }
+            })
+            .id(),
         Below::Draft(d) => {
             let obsolete = matches!(&d.status, Some((_, Tone::Orange)));
             p.spawn((
@@ -1838,7 +2259,8 @@ fn below(
                     ));
                 });
                 markdown(c, fonts, &parse_in(&d.body, &opts.github_host, pr), opts);
-            });
+            })
+            .id()
         }
     }
 }
@@ -2107,7 +2529,7 @@ mod tests {
     use crate::bridge::Tell;
     use crate::fixture;
     use crate::screens::review::calls::CallsRoot;
-    use crate::screens::review::editor::{EditorArea, EditorSubmit};
+    use crate::screens::review::editor::{EditorArea, EditorCancel, EditorSubmit};
     use crate::screens::review::shell::SectionTab;
     use crate::screens::review::story::StoryRoot;
     use crate::testing::{self, NOW};
@@ -2116,6 +2538,7 @@ mod tests {
     use clusia_core::FileDiff;
     use clusia_protocol::AnchorInput;
     use clusia_view::diff::{commentable, line_on};
+    use std::collections::HashSet;
 
     const REFRESH: &str = "src/auth/refresh.rs";
 
@@ -4363,5 +4786,320 @@ mod tests {
         let (text, both) = code_of(&mut app, LONG);
         assert_eq!(app.world().get::<Children>(both).unwrap().len(), 4);
         assert!(!text_of_line(&app, text).is_empty());
+    }
+
+    fn descendants(app: &App, root: Entity) -> HashSet<Entity> {
+        let mut out = HashSet::new();
+        let mut todo = vec![root];
+        while let Some(e) = todo.pop() {
+            if let Some(kids) = app.world().get::<Children>(e) {
+                for &k in kids {
+                    out.insert(k);
+                    todo.push(k);
+                }
+            }
+        }
+        out
+    }
+
+    /// The body's rows: what draws a line of code, and the line buttons.
+    fn row_entities(app: &mut App) -> Vec<Entity> {
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let mut lines: Vec<(Entity, crate::ui::code_select::LineKey)> = code_lines(app)
+            .into_iter()
+            .filter(|(_, l)| l.key.group == body)
+            .map(|(e, l)| (e, l.key))
+            .collect();
+        lines.sort_by_key(|(_, k)| (k.order, k.column));
+        let mut out: Vec<Entity> = lines.into_iter().map(|(e, _)| e).collect();
+        let mut q = app.world_mut().query_filtered::<Entity, With<LineButton>>();
+        let mut buttons: Vec<Entity> = q.iter(app.world()).collect();
+        buttons.sort();
+        out.extend(buttons);
+        out
+    }
+
+    /// The nodes under the body that `change` spawned and despawned.
+    fn churn(app: &mut App, change: impl FnOnce(&mut App)) -> (HashSet<Entity>, HashSet<Entity>) {
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let before = descendants(app, body);
+        change(app);
+        let after = descendants(app, body);
+        (
+            after.difference(&before).copied().collect(),
+            before.difference(&after).copied().collect(),
+        )
+    }
+
+    /// Asserts that nothing `churn` saw is a row, and that what it saw hangs under at most
+    /// `slots` containers placed straight under the body.
+    fn only_under_rows(
+        app: &mut App,
+        rows: &[Entity],
+        (spawned, gone): &(HashSet<Entity>, HashSet<Entity>),
+        slots: usize,
+    ) {
+        for &row in rows {
+            assert!(app.world().get_entity(row).is_ok(), "a row was despawned");
+            assert!(!spawned.contains(&row));
+        }
+        assert_eq!(row_entities(app), rows, "no row was spawned or moved");
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let tops = spawned
+            .iter()
+            .filter(|&&e| parent_of(app, e) == body)
+            .count();
+        assert!(tops <= slots, "{tops} containers spawned under the body");
+        assert!(gone.len() < 200, "{} nodes despawned", gone.len());
+    }
+
+    fn fill_of_line(app: &mut App, side: Side, line: u32) -> Swatch {
+        let button = testing::find::<LineButton>(app, |b| b.side == side && b.line == line);
+        app.world().get::<Fill>(button).unwrap().0
+    }
+
+    #[test]
+    fn a_line_click_opens_its_editor_without_respawning_a_row() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = review_app();
+            set_mode(&mut app, mode);
+            let rows = row_entities(&mut app);
+            assert!(!rows.is_empty());
+            let line =
+                testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 44);
+            let seen = churn(&mut app, |app| {
+                testing::activate(app, line);
+                testing::settle(app);
+            });
+            assert!(
+                seen.1.is_empty(),
+                "{mode:?}: opening an editor despawns nothing"
+            );
+            assert!(!seen.0.is_empty(), "{mode:?}: the editor is spawned");
+            only_under_rows(&mut app, &rows, &seen, 1);
+            assert_eq!(testing::count::<EditorArea>(&mut app), 1);
+            assert_eq!(fill_of_line(&mut app, Side::Right, 44), Swatch::Selected);
+        }
+    }
+
+    #[test]
+    fn extending_the_selection_relights_rows_in_place() {
+        let mut app = review_app();
+        let first =
+            testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 39);
+        testing::activate(&mut app, first);
+        testing::settle(&mut app);
+        let rows = row_entities(&mut app);
+        assert_eq!(fill_of_line(&mut app, Side::Right, 40), Swatch::AddedBg);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        let last = testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 41);
+        let seen = churn(&mut app, |app| {
+            testing::activate(app, last);
+            testing::settle(app);
+        });
+        // The editor moves from under line 39 to under line 41; no row is touched.
+        only_under_rows(&mut app, &rows, &seen, 1);
+        for line in [39, 40, 41] {
+            assert_eq!(fill_of_line(&mut app, Side::Right, line), Swatch::Selected);
+        }
+        assert_eq!(testing::count::<EditorArea>(&mut app), 1);
+    }
+
+    #[test]
+    fn closing_the_editor_removes_it_alone_and_unlights_its_row() {
+        let mut app = review_app();
+        let line = testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 44);
+        testing::activate(&mut app, line);
+        testing::settle(&mut app);
+        let rows = row_entities(&mut app);
+        let cancel = testing::find::<EditorCancel>(&mut app, |_| true);
+        let seen = churn(&mut app, |app| {
+            testing::activate(app, cancel);
+            testing::settle(app);
+        });
+        assert!(seen.0.is_empty(), "closing spawns nothing");
+        only_under_rows(&mut app, &rows, &seen, 0);
+        assert_eq!(testing::count::<EditorArea>(&mut app), 0);
+        assert_ne!(fill_of_line(&mut app, Side::Right, 44), Swatch::Selected);
+    }
+
+    #[test]
+    fn a_focus_line_moves_its_light_and_marker_without_respawning_rows() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        let rows = row_entities(&mut app);
+        let seen = churn(&mut app, |app| show_in(app, &pr, REFRESH, Some((44, 44))));
+        assert!(
+            seen.0.is_empty() && seen.1.is_empty(),
+            "nothing is spawned or despawned"
+        );
+        only_under_rows(&mut app, &rows, &seen, 0);
+        assert_eq!(fill_of_line(&mut app, Side::Right, 44), Swatch::Selected);
+        let marked = testing::find::<FocusRow>(&mut app, |_| true);
+        assert_eq!(
+            app.world().get::<LineButton>(marked).map(|b| b.line),
+            Some(44)
+        );
+        show_in(&mut app, &pr, REFRESH, Some((45, 45)));
+        assert_eq!(testing::count::<FocusRow>(&mut app), 1);
+        assert_ne!(fill_of_line(&mut app, Side::Right, 44), Swatch::Selected);
+        assert_eq!(row_entities(&mut app), rows);
+    }
+
+    #[test]
+    fn show_more_appends_rows_and_keeps_the_ones_shown() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = review_app();
+            let pr = fixture::demo_pr();
+            {
+                let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+                let tab = tabs.0.get_mut(&pr).expect("a tab");
+                let Phase::Ready(ready) = &mut tab.phase else {
+                    panic!("ready")
+                };
+                big_file(ready);
+                tab.ui.file = Some("big.txt".into());
+                tab.ui.mode = mode;
+            }
+            testing::settle(&mut app);
+            let rows = row_entities(&mut app);
+            let lines = |rows: &[Entity], app: &mut App| {
+                let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
+                rows.iter()
+                    .filter(|&&e| q.get(app.world(), e).is_ok())
+                    .count()
+            };
+            // A Split hunk header spans both sides and holds no selectable code.
+            let shown = lines(&rows, &mut app);
+            assert!((SHOW_STEP - 1..=SHOW_STEP).contains(&shown), "{mode:?}");
+            let more = testing::find::<ShowMore>(&mut app, |_| true);
+            let (spawned, gone) = churn(&mut app, |app| {
+                testing::activate(app, more);
+                testing::settle(app);
+            });
+            let after = row_entities(&mut app);
+            assert_eq!(lines(&after, &mut app), shown + SHOW_STEP, "{mode:?}");
+            for row in &rows {
+                assert!(after.contains(row), "{mode:?}: a shown row was respawned");
+            }
+            assert!(
+                gone.len() < 10,
+                "{mode:?}: only the Show more footer goes, not {} nodes",
+                gone.len()
+            );
+            assert!(spawned.len() > SHOW_STEP);
+        }
+    }
+
+    /// Asserts that the body's rows sit in the order of their lines.
+    fn rows_in_line_order(app: &mut App) {
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let kids = app.world().get::<Children>(body).unwrap().to_vec();
+        let mut placed: Vec<(usize, usize)> = code_lines(app)
+            .into_iter()
+            .filter(|(_, l)| l.key.group == body)
+            .map(|(mut e, l)| {
+                while parent_of(app, e) != body {
+                    e = parent_of(app, e);
+                }
+                let at = kids.iter().position(|k| *k == e).unwrap();
+                (l.key.order, at)
+            })
+            .collect();
+        placed.sort();
+        // Both sides of a Split line share its row.
+        placed.dedup();
+        assert!(
+            placed
+                .windows(2)
+                .all(|w| w[0].0 < w[1].0 && w[0].1 < w[1].1),
+            "{placed:?}"
+        );
+    }
+
+    #[test]
+    fn a_changed_line_is_respawned_alone_in_its_place() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = review_app();
+            set_mode(&mut app, mode);
+            let pr = fixture::demo_pr();
+            let before = row_entities(&mut app);
+            {
+                let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+                let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).expect("a tab").phase else {
+                    panic!("ready")
+                };
+                let file = ready
+                    .view
+                    .diff
+                    .iter_mut()
+                    .find(|f| f.path == REFRESH)
+                    .unwrap();
+                let patch = file.patch.take().unwrap();
+                assert!(patch.contains(LONG));
+                file.patch = Some(patch.replace(LONG, "Refresh two minutes early"));
+                // A new patch comes with a new head, which highlights it anew.
+                ready.view.pr.head_sha = "4b5c6d7e8f9a0b1c2d3e".into();
+            }
+            testing::settle(&mut app);
+            let after = row_entities(&mut app);
+            assert_eq!(before.len(), after.len(), "{mode:?}");
+            let fresh = after.iter().filter(|e| !before.contains(e)).count();
+            assert!(
+                (1..=4).contains(&fresh),
+                "{mode:?}: only the changed line's row is new, not {fresh} entities"
+            );
+            assert!(
+                code_lines(&mut app)
+                    .iter()
+                    .any(|(_, l)| l.text.contains("Refresh two minutes early")),
+                "{mode:?}"
+            );
+            rows_in_line_order(&mut app);
+        }
+    }
+
+    #[test]
+    fn expanding_a_thread_respawns_its_card_alone() {
+        let mut app = review_app();
+        let rows = row_entities(&mut app);
+        let toggle = testing::find::<ThreadToggle>(&mut app, |_| true);
+        let seen = churn(&mut app, |app| {
+            testing::activate(app, toggle);
+            testing::settle(app);
+        });
+        only_under_rows(&mut app, &rows, &seen, 0);
+        assert!(testing::shows(
+            &mut app,
+            "A minute is safer while the runners drift."
+        ));
+        rows_in_line_order(&mut app);
+    }
+
+    #[test]
+    fn editors_and_cards_keep_rows_in_line_order() {
+        let mut app = review_app();
+        for line in [39, 44, 41] {
+            let b =
+                testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == line);
+            testing::activate(&mut app, b);
+            testing::settle(&mut app);
+            rows_in_line_order(&mut app);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let area = testing::find::<EditorArea>(&mut app, |_| true);
+            let mut slot = area;
+            while parent_of(&app, slot) != body {
+                slot = parent_of(&app, slot);
+            }
+            let kids = app.world().get::<Children>(body).unwrap().to_vec();
+            let at = kids.iter().position(|k| *k == slot).unwrap();
+            let above = app.world().get::<LineButton>(kids[at - 1]).map(|b| b.line);
+            assert_eq!(above, Some(line), "the editor sits right under its line");
+            let cancel = testing::find::<EditorCancel>(&mut app, |_| true);
+            testing::activate(&mut app, cancel);
+            testing::settle(&mut app);
+        }
     }
 }

@@ -63,8 +63,13 @@ impl AreaTarget {
 }
 
 /// Draws `editor` for `pr`: the composer, the daemon's refusal (orange) and the buttons, in one
-/// green frame.
-pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor, pr: &PrRef) {
+/// green frame, and returns the frame.
+pub fn editor_box(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    editor: &Editor,
+    pr: &PrRef,
+) -> Entity {
     let key = ComposerKey(pr.clone(), Slot::Edit(editor.target.clone()));
     let view = ComposerView {
         text: &editor.text,
@@ -148,7 +153,8 @@ pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor
                 }
             });
         });
-    });
+    })
+    .id()
 }
 
 /// Sends `text` for the tab's open editor. Returns whether an `Ask` went out.
