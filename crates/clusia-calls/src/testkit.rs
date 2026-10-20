@@ -6,6 +6,26 @@ use clusia_core::hunks::{FileHunks, FileStatus, Hunk, hunk_ref};
 
 use crate::{CallIndex, Indexer, SourceFile};
 
+/// The calling thread's CPU time. Budgets read this instead of the wall clock so a loaded
+/// machine, where the thread waits for a CPU, does not fail work that is itself fast.
+pub(crate) fn thread_cpu_time() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec for the whole call.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    assert_eq!(rc, 0, "the thread CPU clock is unavailable");
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// The CPU time `work` took on this thread, with what it returned.
+pub(crate) fn cpu_timed<T>(work: impl FnOnce() -> T) -> (T, Duration) {
+    let started = thread_cpu_time();
+    let out = work();
+    (out, thread_cpu_time() - started)
+}
+
 pub(crate) fn far() -> Instant {
     Instant::now() + Duration::from_secs(60)
 }
@@ -145,5 +165,28 @@ pub(crate) fn assert_covers(steps: &[crate::StaticStep], files: &[FileHunks]) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_time_counts_work_and_not_a_sleep() {
+        let ((), busy) = cpu_timed(|| {
+            // Spins until this thread has had 30 ms of CPU, however long a loaded machine takes.
+            let wall = Instant::now();
+            let started = thread_cpu_time();
+            let mut x = 0u64;
+            while thread_cpu_time() - started < Duration::from_millis(30)
+                && wall.elapsed() < Duration::from_secs(30)
+            {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+        });
+        assert!(busy >= Duration::from_millis(30), "{busy:?}");
+        let ((), idle) = cpu_timed(|| std::thread::sleep(Duration::from_millis(100)));
+        assert!(idle < Duration::from_millis(20), "{idle:?}");
     }
 }

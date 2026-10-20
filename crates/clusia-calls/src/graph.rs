@@ -487,7 +487,7 @@ pub fn find(index: &CallIndex, query: &str) -> Vec<FunctionId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{generated_repo, index_of, index_with};
+    use crate::testkit::{cpu_timed, generated_repo, index_of, index_with};
     use crate::{MAX_GRAPH_NODES, resolve};
 
     const API: &str = "pub fn handler() {\n    auth_middleware();\n}\n\npub fn auth_middleware() {\n    token();\n}\n\npub fn token() {\n    refresh();\n    helper();\n    tokio::spawn(1);\n}\n\npub fn refresh() {\n    save();\n    std::fs::read(\"p\");\n}\n\npub fn save() {}\n\npub fn helper() {}\n";
@@ -1026,9 +1026,8 @@ mod tests {
         let index = index_of(&files);
         let resolved = resolve(&index);
         let centre = index.functions[0].id.clone();
-        let started = std::time::Instant::now();
-        let g = subgraph(&index, &resolved, &[], &centre, 5, &[]);
-        assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+        let (g, took) = cpu_timed(|| subgraph(&index, &resolved, &[], &centre, 5, &[]));
+        assert!(took.as_secs() < 2, "{took:?}");
         assert!(g.nodes.len() <= MAX_GRAPH_NODES);
         assert_eq!(subgraph(&index, &resolved, &[], &centre, 5, &[]), g);
     }

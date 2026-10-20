@@ -286,7 +286,7 @@ mod tests {
 
     use super::*;
     use crate::MAX_FILE_BYTES;
-    use crate::testkit::{call_rows, far, import_rows, index_of, rows, shapes};
+    use crate::testkit::{call_rows, cpu_timed, far, import_rows, index_of, rows, shapes};
 
     fn s(v: &str) -> String {
         v.to_string()
@@ -576,12 +576,13 @@ def main():
     fn a_two_megabyte_minified_file_is_skipped_with_a_reason_and_the_rest_is_indexed() {
         let big = format!("var a={};", "1+".repeat(1_000_000) + "1");
         assert!(big.len() > 2_000_000);
-        let started = Instant::now();
-        let index = index_of(&[
-            ("dist/app.min.js", big.as_str()),
-            ("ok.js", "function f() {}\n"),
-        ]);
-        assert!(started.elapsed().as_secs() < 5);
+        let (index, took) = cpu_timed(|| {
+            index_of(&[
+                ("dist/app.min.js", big.as_str()),
+                ("ok.js", "function f() {}\n"),
+            ])
+        });
+        assert!(took.as_secs() < 5, "{took:?}");
         assert_eq!(
             index.skipped,
             vec![Skipped {

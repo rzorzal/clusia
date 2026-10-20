@@ -388,7 +388,7 @@ fn file_keys(path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{generated_repo, index_of, index_with};
+    use crate::testkit::{cpu_timed, generated_repo, index_of, index_with};
     use serde_json::json;
 
     fn id(v: &str) -> FunctionId {
@@ -634,11 +634,13 @@ fn helper() {}
     fn five_thousand_functions_index_and_resolve_inside_the_budget_and_deterministically() {
         let repo = generated_repo(500, 10);
         let files: Vec<(&str, &str)> = repo.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
-        let started = std::time::Instant::now();
-        let index = index_of(&files);
-        let resolved = resolve(&index);
-        // ~0.3 s idle in a dev build with optimised dependencies; the margin covers a loaded machine.
-        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        let ((index, resolved), took) = cpu_timed(|| {
+            let index = index_of(&files);
+            let resolved = resolve(&index);
+            (index, resolved)
+        });
+        // ~0.3 s of CPU in a dev build with optimised dependencies.
+        assert!(took.as_secs() < 5, "{took:?}");
         assert_eq!(index.functions.len(), 5_000);
         assert_eq!(resolved.edges.len(), 10_000);
         assert_eq!(resolved.unresolved, 0);
