@@ -240,6 +240,11 @@ fn decode_gif(bytes: &[u8], images: &mut Assets<Image>) -> Result<MediaState, St
         }
         delays.push(frame_delay(Duration::from(frame.delay())));
         let buffer = frame.into_buffer();
+        // `shown_texture` builds each picture from `width × height` pixels, so a frame the
+        // decoder returned at another size is refused here, not left to panic there.
+        if buffer.dimensions() != (width, height) {
+            return Err(damaged());
+        }
         if first.is_none() {
             first = Some(images.add(Image::from_dynamic(
                 DynamicImage::ImageRgba8(buffer.clone()),
@@ -488,7 +493,6 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
     use bevy::time::TimeUpdateStrategy;
-    use bevy::ui::ContentSize;
     use bevy::window::WindowOccluded;
     use clusia_core::media::MediaKind;
     use image::codecs::gif::GifEncoder;
@@ -924,18 +928,12 @@ mod tests {
 
     #[test]
     fn a_gif_frame_swaps_pixels_without_touching_the_node() {
+        // Bevy recomputes a node's `ContentSize` (and so the layout) only when its `ImageNode`
+        // changed; this app has no UI plugin, so an untouched node is what the test can pin.
         #[derive(Resource, Default)]
-        struct Touched {
-            image_node: u32,
-            content_size: u32,
-        }
-        fn count(
-            mut touched: ResMut<Touched>,
-            image_nodes: Query<(), Changed<ImageNode>>,
-            sizes: Query<(), (Changed<ContentSize>, With<GifAnim>)>,
-        ) {
-            touched.image_node += image_nodes.iter().count() as u32;
-            touched.content_size += sizes.iter().count() as u32;
+        struct Touched(u32);
+        fn count(mut touched: ResMut<Touched>, nodes: Query<(), Changed<ImageNode>>) {
+            touched.0 += nodes.iter().count() as u32;
         }
         let dir = tempfile::tempdir().unwrap();
         let gif = write_gif(dir.path(), "a.gif", 3, 100);
@@ -965,11 +963,10 @@ mod tests {
         assert_eq!(reds.len(), 3, "every frame reached the one picture");
         assert_eq!(app.world().get::<ImageNode>(e).unwrap().image, shown);
         assert_eq!(app.world().resource::<Assets<Image>>().len(), assets);
-        let touched = app.world().resource::<Touched>();
         assert_eq!(
-            (touched.image_node, touched.content_size),
-            (0, 0),
-            "no frame rewrites the node, so no frame relays out the page"
+            app.world().resource::<Touched>().0,
+            0,
+            "no frame rewrites the node, which is what makes Bevy lay the page out again"
         );
     }
 
