@@ -147,7 +147,16 @@ struct ChatHeader {
 #[derive(Component)]
 struct Transcript {
     pr: PrRef,
-    built: Option<Vec<ChatLine>>,
+    /// What each line child was drawn from: the line's stamp and whether it drew as the call
+    /// that runs. `None` until the first draw.
+    built: Option<Vec<(u64, bool)>>,
+    /// The chat's `version` when the transcript was last brought up to date.
+    version: u64,
+    /// `Time::elapsed_secs_f64` of the last time the answer still arriving was redrawn.
+    drawn_at: f64,
+    /// How many times lines were respawned.
+    #[cfg(test)]
+    rebuilds: u32,
     /// The transcript ends with the live row (a turn runs).
     live: bool,
     /// `Time::elapsed_secs_f64` when this window first drew the live row of the running turn, for
@@ -516,6 +525,10 @@ fn fill_region(
                 Transcript {
                     pr: pr.clone(),
                     built: None,
+                    version: 0,
+                    drawn_at: f64::NEG_INFINITY,
+                    #[cfg(test)]
+                    rebuilds: 0,
                     live: false,
                     since: None,
                 },
@@ -735,6 +748,9 @@ fn not_set_up(h: &mut ChildSpawnerCommands, fonts: &UiFonts, name: &str) {
     ));
 }
 
+/// The answer still arriving is parsed again no sooner than this many seconds after the last time.
+const LIVE_REDRAW: f64 = 0.1;
+
 fn rebuild_transcript(
     mut commands: Commands,
     chats: Res<Chats>,
@@ -756,53 +772,73 @@ fn rebuild_transcript(
             continue;
         };
         let live = chat.busy();
-        if part.built.as_ref() == Some(&chat.lines) && part.live == live {
+        if part.built.is_some() && part.version == chat.version() && part.live == live {
+            continue;
+        }
+        let now = time.elapsed_secs_f64();
+        let wanted: Vec<(u64, bool)> = chat
+            .lines
+            .iter()
+            .zip(chat.stamps())
+            .enumerate()
+            .map(|(i, (line, stamp))| {
+                // Only the last line can be the call that is still running.
+                let running =
+                    live && i + 1 == chat.lines.len() && matches!(line, ChatLine::Tool(_));
+                (*stamp, running)
+            })
+            .collect();
+        let built = part.built.as_deref().unwrap_or(&[]);
+        let same = built
+            .iter()
+            .zip(&wanted)
+            .take_while(|(a, b)| a == b)
+            .count();
+        // Only the answer still arriving differs: it is parsed again at most `LIVE_REDRAW`
+        // apart, and at once when it is whole.
+        let growing = same + 1 == built.len()
+            && built.len() == wanted.len()
+            && part.live == live
+            && live
+            && chat.streaming()
+            && matches!(chat.lines.last(), Some(ChatLine::Text(_)));
+        if growing && now - part.drawn_at < LIVE_REDRAW {
             continue;
         }
         let pr = part.pr.clone();
         let follow = part.built.is_none() || at_bottom(node);
-        let now = time.elapsed_secs_f64();
         let since = match (live, part.since) {
             (true, since) => since.unwrap_or(now),
             (false, _) => now,
         };
-        // The live row is the last child, after the lines.
-        let tail = usize::from(part.live);
-        let grew = part.live == live
-            && part
-                .built
-                .as_deref()
-                .is_some_and(|built| only_the_answer_grew(built, &chat.lines));
-        let mut spawn_from = 0;
-        match children {
-            Some(children) if grew && children.len() > tail => {
-                // Each line is one child, so the answer's line is the last one before the row.
-                for child in &children[children.len() - 1 - tail..] {
-                    commands.entity(*child).despawn();
-                }
-                spawn_from = chat.lines.len() - 1;
-            }
-            _ => {
-                commands.entity(entity).despawn_related::<Children>();
+        // Each line is one child; the live row, when there was one, is the last.
+        let kept = same.min(children.map_or(0, |c| c.len()));
+        if let Some(children) = children {
+            for child in &children[kept..] {
+                commands.entity(*child).despawn();
             }
         }
         commands.entity(entity).with_children(|t| {
-            for (i, line) in chat.lines.iter().enumerate().skip(spawn_from) {
-                // Only the last line can be the call that is still running.
-                let running = live && i + 1 == chat.lines.len();
-                chat_line(t, &fonts, &pr, line, &opts, running);
+            for (line, (_, running)) in chat.lines.iter().zip(&wanted).skip(kept) {
+                chat_line(t, &fonts, &pr, line, &opts, *running);
             }
             if live {
                 live_row(t, &fonts, &pr, &chat.agent_name(), since);
             }
         });
+        #[cfg(test)]
+        {
+            part.rebuilds += 1;
+        }
+        part.drawn_at = now;
         if follow {
             // The layout clamps this to the end of the content: the newest line stays in view.
             scroll.y = f32::MAX;
         }
         part.since = live.then_some(since);
         part.live = live;
-        part.built = Some(chat.lines.clone());
+        part.version = chat.version();
+        part.built = Some(wanted);
     }
 }
 
@@ -846,18 +882,6 @@ fn tick_elapsed(time: Res<Time>, mut rows: Query<(&mut Text, &mut LiveElapsed)>)
             text.0 = elapsed_label(secs);
         }
     }
-}
-
-/// The lines differ only in the text of the last one, an answer still arriving.
-fn only_the_answer_grew(built: &[ChatLine], lines: &[ChatLine]) -> bool {
-    let n = lines.len();
-    n > 0
-        && built.len() == n
-        && built[..n - 1] == lines[..n - 1]
-        && matches!(
-            (&built[n - 1], &lines[n - 1]),
-            (ChatLine::Text(_), ChatLine::Text(_))
-        )
 }
 
 /// The view shows the end of its content (or has nothing to scroll), as of the last layout.
@@ -2109,6 +2133,10 @@ mod tests {
             testing::settle(&mut app);
         }
         assert_eq!(live_rows(&mut app), 1, "one row, not one per chunk");
+        // The answer is redrawn at most ten times a second: let the pace pass.
+        for _ in 0..8 {
+            app.update();
+        }
         assert!(testing::shows(&mut app, "The lock is needed."));
         let row = testing::find::<LiveRow>(&mut app, |_| true);
         let transcript = app.world().get::<ChildOf>(row).unwrap().parent();
@@ -2335,6 +2363,126 @@ mod tests {
         let t = transcript(&mut app);
         assert_eq!(app.world().get::<Children>(t).unwrap().len(), 2);
         assert!(testing::shows(&mut app, "The lock is needed."));
+    }
+
+    fn lines_of(app: &mut App) -> Vec<Entity> {
+        let t = transcript(app);
+        app.world().get::<Children>(t).unwrap().to_vec()
+    }
+
+    fn chunk_of(app: &mut App, text: &str) {
+        say(
+            app,
+            AgentTell::Chunk {
+                pr: pr(),
+                turn: 1,
+                text: text.into(),
+            },
+        );
+    }
+
+    #[test]
+    fn frames_with_nothing_new_neither_compare_nor_rebuild_the_transcript() {
+        let mut app = open_chat();
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .push_me("Is the lock needed?".into());
+        chunk_of(&mut app, "Yes.");
+        testing::settle(&mut app);
+        let t = transcript(&mut app);
+        let before = lines_of(&mut app);
+        let passes = app.world().get::<Transcript>(t).unwrap().rebuilds;
+        for _ in 0..30 {
+            app.update();
+        }
+        assert_eq!(app.world().get::<Transcript>(t).unwrap().rebuilds, passes);
+        assert_eq!(lines_of(&mut app), before);
+    }
+
+    #[test]
+    fn a_new_line_is_appended_without_respawning_the_earlier_ones() {
+        let mut app = open_chat();
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .push_me("Is the lock needed?".into());
+        chunk_of(&mut app, "Let me look.");
+        testing::settle(&mut app);
+        let before = lines_of(&mut app);
+        say(
+            &mut app,
+            AgentTell::ToolUse {
+                pr: pr(),
+                turn: 1,
+                summary: "Read src/auth/store.rs".into(),
+            },
+        );
+        testing::settle(&mut app);
+        let after = lines_of(&mut app);
+        assert_eq!(after.len(), 3);
+        assert_eq!(after[..2], before[..2], "the question and the answer stay");
+    }
+
+    #[test]
+    fn a_streaming_answer_is_reparsed_at_most_ten_times_a_second_and_ends_exact() {
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        let mut seen = std::collections::HashSet::new();
+        let mut want = String::new();
+        // Two frames of 16 ms per chunk: 30 chunks in about a second.
+        for i in 0..30 {
+            let word = format!("word{i} ");
+            want.push_str(&word);
+            chunk_of(&mut app, &word);
+            app.update();
+            seen.extend(lines_of(&mut app).first().copied());
+        }
+        assert!(seen.len() <= 11, "{} parses in 30 chunks", seen.len());
+        assert!(seen.len() >= 2, "it still moves");
+        // The turn ends before another tick of the throttle: the tail is not lost.
+        say(
+            &mut app,
+            AgentTell::Done {
+                pr: pr(),
+                turn: 1,
+                duration_ms: 1000,
+            },
+        );
+        run_state(&mut app, SessionStateKind::Ready);
+        assert!(testing::shows(&mut app, want.trim()), "{want}");
+    }
+
+    #[test]
+    fn a_chunk_keeps_the_scroll_and_the_earlier_lines_a_selection_lives_in() {
+        let mut app = open_chat();
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .push_me("Show it".into());
+        chunk_of(&mut app, "```rust\nlet a = 1;\n```");
+        say(
+            &mut app,
+            AgentTell::ToolUse {
+                pr: pr(),
+                turn: 1,
+                summary: "Read src/auth/store.rs".into(),
+            },
+        );
+        chunk_of(&mut app, "The ");
+        testing::settle(&mut app);
+        let t = transcript(&mut app);
+        let before = lines_of(&mut app);
+        app.world_mut().get_mut::<ScrollPosition>(t).unwrap().y = 100.0;
+        let mut node = app.world_mut().get_mut::<ComputedNode>(t).unwrap();
+        node.size = Vec2::new(400.0, 200.0);
+        node.content_size = Vec2::new(400.0, 1000.0);
+        node.scroll_position = Vec2::new(0.0, 100.0);
+        chunk_of(&mut app, "lock.");
+        testing::settle(&mut app);
+        assert_eq!(app.world().get::<ScrollPosition>(t).unwrap().y, 100.0);
+        let after = lines_of(&mut app);
+        assert_eq!(after[..3], before[..3], "the code block is the same entity");
     }
 
     #[test]

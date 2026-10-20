@@ -98,6 +98,12 @@ pub struct ChatModel {
     /// Parallel to `lines`: the lines only this window has, which the log does not replay (a
     /// refused send and why, a handled suggestion the log leaves out).
     local: Vec<bool>,
+    /// Bumped by every change to `lines`, so a view can tell nothing changed without comparing
+    /// them.
+    version: u64,
+    /// Parallel to `lines`: the `version` at which each line last changed, so a view can tell
+    /// which lines to redraw.
+    stamps: Vec<u64>,
 }
 
 impl Default for ChatModel {
@@ -119,11 +125,35 @@ impl Default for ChatModel {
             unfinished: None,
             asked_again: None,
             local: Vec::new(),
+            version: 0,
+            stamps: Vec::new(),
         }
     }
 }
 
 impl ChatModel {
+    /// Changes whenever `lines` does.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// When each line last changed (see `version`).
+    pub fn stamps(&self) -> &[u64] {
+        &self.stamps
+    }
+
+    /// An answer is still arriving in the last line.
+    pub fn streaming(&self) -> bool {
+        self.streaming.is_some()
+    }
+
+    /// Marks line `at` as changed now.
+    fn touch(&mut self, at: usize) {
+        self.version += 1;
+        self.stamps.resize(self.lines.len(), 0);
+        self.stamps[at] = self.version;
+    }
+
     /// The name this chat's agent is called in the pages.
     pub fn agent_name(&self) -> String {
         self.name
@@ -181,6 +211,7 @@ impl ChatModel {
         self.sync_local();
         self.lines.push(line);
         self.local.push(false);
+        self.touch(self.lines.len() - 1);
     }
 
     /// `lines` is public; a line added to it from outside counts as the log's.
@@ -208,15 +239,20 @@ impl ChatModel {
     /// line is kept as this window's own.
     pub fn mark(&mut self, id: &str, to: SuggestionState) {
         self.sync_local();
-        for (line, local) in self.lines.iter_mut().zip(self.local.iter_mut()) {
+        let mut touched = Vec::new();
+        for (at, (line, local)) in self.lines.iter_mut().zip(self.local.iter_mut()).enumerate() {
             if let ChatLine::Suggestion { suggestion, state } = line
                 && suggestion.id == id
             {
                 *state = to;
+                touched.push(at);
                 if to != SuggestionState::Waiting {
                     *local = true;
                 }
             }
+        }
+        for at in touched {
+            self.touch(at);
         }
     }
 
@@ -248,10 +284,12 @@ impl ChatModel {
                 match (self.lines.last_mut(), self.streaming) {
                     (Some(ChatLine::Text(shown)), Some(open)) if open == *turn => {
                         shown.push_str(text);
+                        self.touch(self.lines.len() - 1);
                     }
                     _ => {
                         self.lines.push(ChatLine::Text(text.clone()));
                         self.sync_local();
+                        self.touch(self.lines.len() - 1);
                     }
                 }
                 self.streaming = Some(*turn);
@@ -444,6 +482,9 @@ impl ChatModel {
         }
         self.lines = merged;
         self.local = flags;
+        // Every line is new to a view: a replay may have changed any of them.
+        self.version += 1;
+        self.stamps = vec![self.version; self.lines.len()];
         self.streaming = streaming;
         self.resumed = !entries.is_empty();
     }
