@@ -448,7 +448,7 @@ fn row_button(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row: &R
         Node {
             flex_direction: FlexDirection::Column,
             row_gap: px(2),
-            padding: UiRect::axes(px(8), px(6)),
+            padding: UiRect::axes(px(6), px(6)),
             border_radius: BorderRadius::all(px(6)),
             flex_shrink: 0.0,
             ..default()
@@ -477,7 +477,7 @@ fn row_button(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row: &R
     e.with_children(|r| {
         r.spawn((
             Node {
-                column_gap: px(8),
+                column_gap: px(6),
                 align_items: AlignItems::Center,
                 ..default()
             },

@@ -314,18 +314,7 @@ fn draw_graph(
                 ignore(),
             ));
         }
-        header(c, pen, pr, g);
-        // Over the header's right end, which the header leaves free for it.
-        c.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                right: px(16),
-                top: px(12),
-                ..default()
-            },
-            ignore(),
-        ))
-        .with_children(|corner| zoom_control(corner, pen, entity));
+        header(c, pen, entity, pr, g);
         legend(c, pen, dots);
     });
     view
@@ -466,7 +455,7 @@ fn draw_call_box(
     });
 }
 
-fn header(c: &mut ChildSpawnerCommands, pen: &Pen, pr: &PrRef, g: &CallGraph) {
+fn header(c: &mut ChildSpawnerCommands, pen: &Pen, canvas: Entity, pr: &PrRef, g: &CallGraph) {
     let crumbs = breadcrumb(&g.breadcrumb, CRUMB_CHARS);
     c.spawn((
         Node {
@@ -475,9 +464,9 @@ fn header(c: &mut ChildSpawnerCommands, pen: &Pen, pr: &PrRef, g: &CallGraph) {
             right: px(0),
             top: px(0),
             min_height: px(HEADER_H),
-            // A narrow canvas puts the crumbs, the note and Depth on more lines.
+            // A narrow canvas puts the crumbs, the note, Depth and the zoom on more lines.
             flex_wrap: FlexWrap::Wrap,
-            padding: UiRect::new(px(16), px(150), px(8), px(8)),
+            padding: UiRect::axes(px(16), px(8)),
             column_gap: px(8),
             row_gap: px(4),
             align_items: AlignItems::Center,
@@ -528,6 +517,7 @@ fn header(c: &mut ChildSpawnerCommands, pen: &Pen, pr: &PrRef, g: &CallGraph) {
                 built: None,
             },
         ));
+        zoom_control(h, pen, canvas);
     });
 }
 
@@ -718,42 +708,58 @@ fn draw_blank(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, blank: 
                         ignore()
                     )],
                 ));
-                // Centred while it fits; taller than the canvas, it scrolls from its top.
-                let scrolled = Node {
+                let below = Node {
                     flex_grow: 1.0,
                     min_height: px(0),
                     flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    overflow: Overflow::scroll_y(),
                     padding: UiRect::all(px(16)),
+                    overflow: Overflow::scroll_y(),
                     ..default()
                 };
-                c.spawn((scrolled, ScrollArea, ScrollPosition::default()))
+                c.spawn((below, ScrollArea, ScrollPosition::default()))
                     .with_children(|m| {
                         m.spawn(card(Node {
-                            width: percent(100),
                             max_width: px(440),
                             flex_shrink: 0.0,
-                            margin: UiRect::vertical(Val::Auto),
+                            // Centred by its margins while it fits, as wide as its text or the room
+                            // left; taller than the canvas, it scrolls from its top.
+                            margin: UiRect::all(Val::Auto),
                             flex_direction: FlexDirection::Column,
                             row_gap: px(12),
                             padding: UiRect::all(px(24)),
                             ..default()
                         }))
                         .with_children(|k| {
-                            k.spawn(wrapped_text(fonts, unsupported_title(path), Type::HEADING));
-                            k.spawn(wrapped_text(
-                        fonts,
-                        "Clúsia draws calls for Rust, TypeScript, JavaScript and Python. A plugin \
-                         can add more languages.",
-                        Type::MUTED,
-                    ));
-                            k.spawn(wrapped_text(
-                        fonts,
-                        format!("The change in {path} is still in Story and in the Unified diff."),
-                        Type::MUTED,
-                    ));
+                            let fitted = || Node {
+                                max_width: percent(100),
+                                ..default()
+                            };
+                            k.spawn((
+                                wrapped_text(fonts, unsupported_title(path), Type::HEADING),
+                                fitted(),
+                            ));
+                            k.spawn((
+                                wrapped_text(
+                                    fonts,
+                                    "Clúsia draws calls for Rust, TypeScript, JavaScript and \
+                                     Python. A plugin can add more languages.",
+                                    Type::MUTED,
+                                ),
+                                fitted(),
+                            ));
+                            k.spawn((
+                                wrapped_text(
+                                    fonts,
+                                    format!(
+                                        "The change in {path} is still in Story and in the \
+                                         Unified diff."
+                                    ),
+                                    Type::MUTED,
+                                ),
+                                fitted(),
+                            ));
                             k.spawn(Node {
+                                width: percent(100),
                                 flex_wrap: FlexWrap::Wrap,
                                 column_gap: px(8),
                                 row_gap: px(8),
