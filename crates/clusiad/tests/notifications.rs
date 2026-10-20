@@ -286,6 +286,59 @@ async fn a_review_request_reaches_the_tray_and_the_inbox() {
     d.stop().await;
 }
 
+/// The request events of acme/widgets#7 as GitHub lists them.
+async fn mount_requests(server: &MockServer, ids: &[u64]) {
+    let events: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            json!({ "id": id, "event": "review_requested", "requested_reviewer": { "login": "me" } })
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/issues/7/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(events))
+        .with_priority(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_review_requested_again_is_announced_again() {
+    let server = github(vec![entry("1", "review_requested", None)]).await;
+    mount_requests(&server, &[501]).await;
+    let d = TestDaemon::start_with(tempfile::tempdir().unwrap(), options(&server)).await;
+    let mut listener = tray(&d).await;
+    let mut c = d.client().await;
+    sync(&mut c).await;
+    sync(&mut c).await;
+    assert_eq!(banners(&heard(&mut listener).await).len(), 1);
+    drop(c);
+    let dir = d.stop().await;
+
+    // The same request, read again after a restart, is not news.
+    let d = TestDaemon::start_with(dir, options(&server)).await;
+    let mut listener = tray(&d).await;
+    let mut c = d.client().await;
+    sync(&mut c).await;
+    sync(&mut c).await;
+    assert!(heard(&mut listener).await.is_empty());
+    drop(c);
+    let dir = d.stop().await;
+
+    // Someone asks again: the thread is the same, the request is not.
+    let server = github(vec![entry("1", "review_requested", None)]).await;
+    mount_requests(&server, &[501, 502]).await;
+    let d = TestDaemon::start_with(dir, options(&server)).await;
+    let mut listener = tray(&d).await;
+    let mut c = d.client().await;
+    sync(&mut c).await;
+    sync(&mut c).await;
+    let events = heard(&mut listener).await;
+    assert_eq!(banners(&events).len(), 1, "{events:?}");
+    assert_eq!(inbox(&mut c).await.len(), 2);
+    d.stop().await;
+}
+
 #[tokio::test]
 async fn restart_never_renotifies() {
     let server = github(vec![entry("1", "review_requested", None)]).await;

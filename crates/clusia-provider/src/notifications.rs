@@ -179,6 +179,33 @@ impl GitHub {
         Ok(combine(runs, &status))
     }
 
+    /// The id of the newest event that requested a review of `pr` from `reviewer` (compared
+    /// without regard to case), or `None` when nothing did by name, as when a team was asked.
+    /// Each new request is an event of its own, though the notification thread stays the same.
+    pub async fn latest_review_request(
+        &self,
+        pr: &PrRef,
+        reviewer: &str,
+    ) -> Result<Option<u64>, ProviderError> {
+        let events = self
+            .get_paginated(&format!(
+                "{}/issues/{}/events",
+                Self::repo_path(pr),
+                pr.number
+            ))
+            .await?;
+        Ok(events
+            .iter()
+            .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("review_requested"))
+            .filter(|e| {
+                e.pointer("/requested_reviewer/login")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|login| login.eq_ignore_ascii_case(reviewer))
+            })
+            .filter_map(|e| e.get("id").and_then(|v| v.as_u64()))
+            .max())
+    }
+
     /// The login of whoever wrote the comment at `url`, a `latest_comment_url` of a
     /// notification. Only the path of `url` is used, so the request always goes to this
     /// client's own API host.
@@ -227,6 +254,33 @@ mod tests {
             },
             "repository": { "full_name": "acme/widgets" }
         })
+    }
+
+    #[tokio::test]
+    async fn the_latest_review_request_for_a_reviewer_is_found_by_its_event_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/issues/7/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 11, "event": "review_requested", "requested_reviewer": { "login": "Me" } },
+                { "id": 12, "event": "review_requested", "requested_reviewer": { "login": "ana" } },
+                { "id": 13, "event": "labeled" },
+                { "id": 14, "event": "review_requested", "requested_team": { "slug": "core" } },
+                { "id": 15, "event": "review_requested", "requested_reviewer": { "login": "me" } },
+                { "id": 16, "event": "review_request_removed", "requested_reviewer": { "login": "me" } }
+            ])))
+            .mount(&server)
+            .await;
+        let g = gh(&server);
+        assert_eq!(
+            g.latest_review_request(&pr7(), "me").await.unwrap(),
+            Some(15)
+        );
+        assert_eq!(
+            g.latest_review_request(&pr7(), "ana").await.unwrap(),
+            Some(12)
+        );
+        assert_eq!(g.latest_review_request(&pr7(), "bob").await.unwrap(), None);
     }
 
     #[tokio::test]

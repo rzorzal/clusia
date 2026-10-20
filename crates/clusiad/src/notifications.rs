@@ -79,7 +79,7 @@ pub(crate) fn from_notification(
             &pr,
             &n.title,
             by,
-            format!("review_requested:{pr}:{}", n.id),
+            review_request_key(&pr, &n.id, None),
             at,
         ),
         // A mention outside a comment (the description, say) has no id of its own: the thread
@@ -98,6 +98,15 @@ pub(crate) fn from_notification(
         }
         _ => return None,
     })
+}
+
+/// Each request for a review is told once, though GitHub keeps one notification thread for
+/// the pull request; without a request event of its own, the thread stands in.
+pub(crate) fn review_request_key(pr: &PrRef, thread: &str, request: Option<u64>) -> String {
+    match request {
+        Some(id) => format!("review_requested:{pr}:request-{id}"),
+        None => format!("review_requested:{pr}:{thread}"),
+    }
 }
 
 /// How many commits a pull request has beyond `old_head`; at least one, since a rewritten
@@ -444,7 +453,9 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
         let Some(mut candidate) = from_notification(n, None, now) else {
             continue;
         };
-        if shared.engine.lock().await.data.has_key(&candidate.key) {
+        // A review request is keyed by the request itself, known only after asking GitHub.
+        let rerequestable = candidate.kind == EventKind::ReviewRequested;
+        if !rerequestable && shared.engine.lock().await.data.has_key(&candidate.key) {
             continue;
         }
         let by = match who(gh, n, candidate.kind).await {
@@ -478,6 +489,15 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
             if let Some(named) = from_notification(n, Some(&by), now) {
                 candidate = named;
             }
+            if rerequestable && let Some(pr) = n.pr() {
+                // Without the request's id the thread keys it, so a failed lookup still tells
+                // about the request, once.
+                let request = gh.latest_review_request(&pr, me).await.ok().flatten();
+                candidate.key = review_request_key(&pr, &n.id, request);
+            }
+        }
+        if rerequestable && shared.engine.lock().await.data.has_key(&candidate.key) {
+            continue;
         }
         events.push(candidate);
     }
