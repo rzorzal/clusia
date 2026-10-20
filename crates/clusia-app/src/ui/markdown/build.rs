@@ -1335,6 +1335,27 @@ mod tests {
     }
 
     #[test]
+    fn a_mention_and_an_issue_number_open_their_pages() {
+        let mut app = fresh();
+        let pr = clusia_core::PrRef::new("acme", "widgets", 7).unwrap();
+        let root = render(
+            &mut app,
+            crate::ui::markdown::parse::parse_in("thanks @alice for #12", &pr),
+        );
+        let mention = entity_with_text(&app, root, "@alice");
+        testing::activate(&mut app, mention);
+        let issue = entity_with_text(&app, root, "#12");
+        testing::activate(&mut app, issue);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            [
+                "https://github.com/alice",
+                "https://github.com/acme/widgets/issues/12"
+            ]
+        );
+    }
+
+    #[test]
     fn hovering_one_word_lights_the_whole_link() {
         let mut app = fresh();
         let (a, b) = (

@@ -41,7 +41,7 @@ use crate::ui::kit::{
     Clickable, Fill, HoverFill, Preview, Reveal, SideTrack, Stroke, Tone, Type, Variant, badge,
     button, card, panel, segment, segment_node, segments, text, wrapped_text, wrapping_button,
 };
-use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::parse::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
 use crate::ui::people::{person_avatar, person_name};
 
@@ -1522,7 +1522,14 @@ fn below(
                                 ..default()
                             })
                             .with_children(|w| {
-                                markdown_line(w, fonts, &parse(&first.body), Type::BODY, opts, 120);
+                                markdown_line(
+                                    w,
+                                    fonts,
+                                    &parse_in(&first.body, pr),
+                                    Type::BODY,
+                                    opts,
+                                    120,
+                                );
                             });
                         });
                     }
@@ -1575,7 +1582,7 @@ fn below(
                                 });
                                 r.spawn(copy_button(fonts, &post.body));
                             });
-                            markdown(b, fonts, &parse(&post.body), opts);
+                            markdown(b, fonts, &parse_in(&post.body, pr), opts);
                         });
                     }
                 }
@@ -1638,7 +1645,7 @@ fn below(
                         observe(on_remove),
                     ));
                 });
-                markdown(c, fonts, &parse(&d.body), opts);
+                markdown(c, fonts, &parse_in(&d.body, pr), opts);
             });
         }
     }

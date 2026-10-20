@@ -6,6 +6,8 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
+use clusia_core::PrRef;
+
 use crate::ui::emoji::{self, Piece};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,9 +86,22 @@ impl Inline {
 }
 
 pub fn parse(md: &str) -> Vec<Block> {
+    parse_with(md, None)
+}
+
+/// `parse` for a comment on `pr`, where a bare `#123` names an issue or pull request of the
+/// same repository and so can be a link.
+pub fn parse_in(md: &str, pr: &PrRef) -> Vec<Block> {
+    parse_with(md, Some(pr))
+}
+
+fn parse_with(md: &str, pr: Option<&PrRef>) -> Vec<Block> {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let mut p = Builder::default();
+    let mut p = Builder {
+        repo: pr.map(|pr| (pr.owner.clone(), pr.repo.clone())),
+        ..Builder::default()
+    };
     p.stack.push(Frame::Container(Vec::new()));
     for event in Parser::new_ext(md, options) {
         p.event(event);
@@ -141,6 +156,8 @@ struct Builder {
     table: Option<TableState>,
     /// The closing text of the HTML comment or `<script>` / `<style>` body still open.
     html_skip: Option<&'static str>,
+    /// The owner and name of the repository a bare `#123` refers to.
+    repo: Option<(String, String)>,
 }
 
 impl Builder {
@@ -468,18 +485,37 @@ impl Builder {
                                 link: self.style().link,
                                 space_after: false,
                             }),
-                            Piece::Text(t) => {
-                                let style = self.style();
-                                self.inlines.push(Inline::Word {
-                                    text: t.to_string(),
-                                    style,
-                                    space_after: false,
-                                });
-                            }
+                            Piece::Text(t) => self.references(t),
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Text that may hold `@user`, `#123` and `owner/repo#123`, each of which becomes a link
+    /// unless the text is already inside one.
+    fn references(&mut self, text: &str) {
+        let style = self.style();
+        let repo = self.repo.as_ref().map(|(o, r)| (o.as_str(), r.as_str()));
+        let spans = if self.links.is_empty() {
+            split_references(text, repo)
+        } else {
+            vec![(text, None)]
+        };
+        for (piece, url) in spans {
+            let style = match url {
+                Some(url) => Style {
+                    link: Some(url),
+                    ..style.clone()
+                },
+                None => style.clone(),
+            };
+            self.inlines.push(Inline::Word {
+                text: piece.to_string(),
+                style,
+                space_after: false,
+            });
         }
     }
 
@@ -573,6 +609,112 @@ fn split_url(word: &str) -> (&str, Option<&str>, &str) {
         from = start + scheme;
     }
     (word, None, "")
+}
+
+/// Splits `text` into runs, each with the GitHub address it links to, if any: `@user`,
+/// `@org/team`, `owner/repo#123`, and `#123` when `repo` says which repository it is in.
+fn split_references<'a>(
+    text: &'a str,
+    repo: Option<(&str, &str)>,
+) -> Vec<(&'a str, Option<String>)> {
+    let mut out = Vec::new();
+    let mut plain_from = 0;
+    let mut prev: Option<char> = None;
+    let mut chars = text.char_indices();
+    while let Some((i, c)) = chars.next() {
+        let boundary = !prev.is_some_and(|p| p.is_alphanumeric() || "_-/.@#".contains(p));
+        prev = Some(c);
+        if !boundary {
+            continue;
+        }
+        let rest = &text[i..];
+        let found = match c {
+            '@' => mention(rest),
+            '#' => repo.and_then(|(owner, name)| issue(rest, owner, name)),
+            c if c.is_ascii_alphanumeric() => full_reference(rest),
+            _ => None,
+        };
+        let Some((len, url)) = found else { continue };
+        if plain_from < i {
+            out.push((&text[plain_from..i], None));
+        }
+        out.push((&rest[..len], Some(url)));
+        plain_from = i + len;
+        // The reference's own characters are consumed; the next one starts after it.
+        let skip = text[i..plain_from].chars().count() - 1;
+        chars.by_ref().take(skip).for_each(drop);
+        prev = text[..plain_from].chars().next_back();
+    }
+    if plain_from < text.len() {
+        out.push((&text[plain_from..], None));
+    }
+    out
+}
+
+/// The length of the leading run of `rest` whose characters satisfy `ok`.
+fn run(rest: &str, ok: impl Fn(char) -> bool) -> usize {
+    rest.find(|c: char| !ok(c)).unwrap_or(rest.len())
+}
+
+fn name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-'
+}
+
+/// `@user`, or `@org/team`.
+fn mention(rest: &str) -> Option<(usize, String)> {
+    let body = &rest[1..];
+    let user = run(body, name_char);
+    if user == 0 || user > 39 || body.starts_with('-') || body[..user].ends_with('-') {
+        return None;
+    }
+    if let Some(after) = body[user..].strip_prefix('/') {
+        let team = run(after, |c| name_char(c) || c == '_');
+        if team > 0 && !after[..team].ends_with('-') {
+            let url = format!(
+                "https://github.com/orgs/{}/teams/{}",
+                &body[..user],
+                &after[..team]
+            );
+            return Some((1 + user + 1 + team, url));
+        }
+    }
+    Some((1 + user, format!("https://github.com/{}", &body[..user])))
+}
+
+/// The digits after the `#` of `rest`, when nothing alphanumeric follows them.
+fn number(rest: &str) -> Option<usize> {
+    let digits = run(rest, |c| c.is_ascii_digit());
+    let follows = rest[digits..].chars().next();
+    (digits > 0 && digits <= 9 && !follows.is_some_and(|c| c.is_alphanumeric() || c == '_'))
+        .then_some(digits)
+}
+
+fn issue(rest: &str, owner: &str, repo: &str) -> Option<(usize, String)> {
+    let digits = number(&rest[1..])?;
+    let n = &rest[1..1 + digits];
+    Some((
+        1 + digits,
+        format!("https://github.com/{owner}/{repo}/issues/{n}"),
+    ))
+}
+
+/// `owner/repo#123`.
+fn full_reference(rest: &str) -> Option<(usize, String)> {
+    let owner = run(rest, |c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let after = rest[owner..].strip_prefix('/')?;
+    let repo = run(after, |c| c.is_ascii_alphanumeric() || "._-".contains(c));
+    let tail = after[repo..].strip_prefix('#')?;
+    let digits = number(tail)?;
+    if owner == 0 || repo == 0 || owner > 39 {
+        return None;
+    }
+    let url = format!(
+        "https://github.com/{}/{}/issues/{}",
+        &rest[..owner],
+        &after[..repo],
+        &tail[..digits]
+    );
+    Some((owner + 1 + repo + 1 + digits, url))
 }
 
 enum Segment<'a> {
@@ -863,6 +1005,102 @@ mod tests {
             para("a <b>bold</b> c"),
             vec![word("a", true), word("bold", true), word("c", false)],
             "inline tags are dropped, their text is already text"
+        );
+    }
+
+    fn widgets() -> PrRef {
+        PrRef::new("acme", "widgets", 7).unwrap()
+    }
+
+    fn para_in(md: &str) -> Vec<Inline> {
+        match parse_in(md, &widgets()).as_slice() {
+            [Block::Paragraph(inlines)] => inlines.clone(),
+            other => panic!("not one paragraph: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mentions_and_references_become_links() {
+        assert_eq!(
+            para_in("thanks @alice, see #12 and acme/gadgets#3."),
+            vec![
+                word("thanks", true),
+                styled("@alice", link("https://github.com/alice"), false),
+                word(",", true),
+                word("see", true),
+                styled(
+                    "#12",
+                    link("https://github.com/acme/widgets/issues/12"),
+                    true
+                ),
+                word("and", true),
+                styled(
+                    "acme/gadgets#3",
+                    link("https://github.com/acme/gadgets/issues/3"),
+                    false
+                ),
+                word(".", false),
+            ]
+        );
+        assert_eq!(
+            para_in("ping @acme/reviewers"),
+            vec![
+                word("ping", true),
+                styled(
+                    "@acme/reviewers",
+                    link("https://github.com/orgs/acme/teams/reviewers"),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_that_only_looks_like_a_reference_stays_text() {
+        assert_eq!(
+            para_in("mail bob@example.com, C#, #12abc, @-x, #, @"),
+            vec![
+                word("mail", true),
+                word("bob@example.com,", true),
+                word("C#,", true),
+                word("#12abc,", true),
+                word("@-x,", true),
+                word("#,", true),
+                word("@", false),
+            ]
+        );
+        assert_eq!(
+            para_in("`@alice` [@bob](https://github.com/bob2) <https://example.com/#12>"),
+            vec![
+                Inline::Code {
+                    text: "@alice".into(),
+                    link: None,
+                    space_after: true,
+                },
+                styled("@bob", link("https://github.com/bob2"), true),
+                styled(
+                    "https://example.com/#12",
+                    link("https://example.com/#12"),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_issue_number_needs_the_repository() {
+        assert_eq!(para("see #12"), vec![word("see", true), word("#12", false)]);
+        assert_eq!(
+            para("see @alice acme/widgets#12"),
+            vec![
+                word("see", true),
+                styled("@alice", link("https://github.com/alice"), true),
+                styled(
+                    "acme/widgets#12",
+                    link("https://github.com/acme/widgets/issues/12"),
+                    false
+                ),
+            ]
         );
     }
 

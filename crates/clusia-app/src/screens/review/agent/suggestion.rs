@@ -23,7 +23,7 @@ use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, badge, button, text,
 };
-use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::parse::parse_in;
 use crate::ui::markdown::{RenderOpts, markdown};
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -125,7 +125,7 @@ fn waiting(
                 children![text(fonts, place_of(s), Type::MONO)],
             ));
         });
-        markdown(c, fonts, &parse(&s.body), opts);
+        markdown(c, fonts, &parse_in(&s.body, pr), opts);
         c.spawn(Node {
             column_gap: px(8),
             align_items: AlignItems::Center,
