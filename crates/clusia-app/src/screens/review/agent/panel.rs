@@ -38,6 +38,7 @@ use crate::ui::kit::{
     panel, text, wrapped_text,
 };
 use crate::ui::markdown::cache::parse_in;
+use crate::ui::markdown::parse;
 use crate::ui::markdown::{RenderOpts, markdown};
 use crate::ui::pace::{Pace, Wake};
 use crate::ui::spinner::{beat, spinner};
@@ -846,9 +847,14 @@ fn rebuild_transcript(
                 commands.entity(*child).despawn();
             }
         }
+        let last = chat.lines.len().saturating_sub(1);
+        // The answer still arriving is parsed with no cache: each of its prefixes would be an
+        // entry never asked for again. Once whole, every later build of it uses the cache.
+        let streaming = live && chat.streaming();
         commands.entity(entity).with_children(|t| {
-            for (line, (_, running)) in chat.lines.iter().zip(&wanted).skip(kept) {
-                chat_line(t, &fonts, &pr, line, &opts, *running);
+            for (i, (line, (_, running))) in chat.lines.iter().zip(&wanted).enumerate().skip(kept) {
+                let growing = streaming && i == last;
+                chat_line(t, &fonts, &pr, line, &opts, *running, growing);
             }
             if live {
                 live_row(t, &fonts, &pr, &chat.agent_name(), since);
@@ -921,6 +927,7 @@ fn chat_line(
     line: &ChatLine,
     opts: &RenderOpts,
     running: bool,
+    growing: bool,
 ) {
     match line {
         ChatLine::Me(body) => {
@@ -946,6 +953,13 @@ fn chat_line(
                     display: Display::None,
                     ..default()
                 });
+            } else if growing {
+                let opts = RenderOpts {
+                    cached: false,
+                    ..opts.clone()
+                };
+                let blocks = parse::parse_in(&shown, &opts.github_host, pr);
+                markdown(p, fonts, &blocks, &opts);
             } else {
                 markdown(p, fonts, &parse_in(&shown, &opts.github_host, pr), opts);
             }
@@ -2403,6 +2417,63 @@ mod tests {
                 text: text.into(),
             },
         );
+    }
+
+    #[test]
+    fn the_answer_still_arriving_stays_out_of_the_caches() {
+        use crate::ui::markdown::cache::counts;
+        let marker = "streamprobe";
+        let code = "let streamprobe_a = 1;\nlet streamprobe_b = 2;";
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        let chunks = [
+            "Use a ",
+            "streamprobe lock.\n\n",
+            "```rust\nlet ",
+            "streamprobe_a = 1;\n",
+            "let streamprobe_b = 2;\n",
+            "```\n",
+        ];
+        let mut raw = String::new();
+        for chunk in chunks {
+            raw.push_str(chunk);
+            chunk_of(&mut app, chunk);
+            // Past the ten-a-second pace, so every prefix is drawn.
+            for _ in 0..8 {
+                app.update();
+            }
+            assert_eq!(counts::cached_containing(marker), (0, 0), "after {chunk:?}");
+        }
+        assert!(testing::shows(&mut app, "Use a streamprobe lock."));
+        assert!(
+            counts::highlights(code) >= 1,
+            "the growing code was highlighted"
+        );
+        say(
+            &mut app,
+            AgentTell::Done {
+                pr: pr(),
+                turn: 1,
+                duration_ms: 900,
+            },
+        );
+        run_state(&mut app, SessionStateKind::Ready);
+        testing::settle(&mut app);
+        // A build of the whole answer goes through the caches.
+        let t = transcript(&mut app);
+        app.world_mut().get_mut::<Transcript>(t).unwrap().built = None;
+        testing::settle(&mut app);
+        assert_eq!(
+            counts::cached_containing(marker),
+            (1, 1),
+            "the whole answer only"
+        );
+        let whole = display_text(&raw);
+        let (parses, highlights) = (counts::parses(&whole), counts::highlights(code));
+        app.world_mut().get_mut::<Transcript>(t).unwrap().built = None;
+        testing::settle(&mut app);
+        assert_eq!(counts::parses(&whole), parses, "served from the cache");
+        assert_eq!(counts::highlights(code), highlights);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! (`MdImage`) and emoji are sized boxes (`MdEmoji`) that systems fill in.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use bevy::clipboard::Clipboard;
 use bevy::input_focus::tab_navigation::TabIndex;
@@ -42,6 +43,9 @@ pub struct RenderOpts {
     pub load_external: bool,
     /// The GitHub web host that `@mentions` and `#123` references point at.
     pub github_host: String,
+    /// Fenced blocks highlight through the shared cache. Off for text still growing, whose
+    /// every prefix would be an entry never asked for again.
+    pub cached: bool,
 }
 
 impl RenderOpts {
@@ -63,6 +67,7 @@ impl Default for RenderOpts {
             suggestion_base: None,
             load_external: false,
             github_host: "github.com".into(),
+            cached: true,
         }
     }
 }
@@ -541,7 +546,12 @@ fn code_block(
     let all: Vec<&str> = source.trim_end_matches('\n').split('\n').collect();
     let shown = &all[..all.len().min(MAX_CODE_LINES)];
     let path = lang.map(path_for_lang).unwrap_or_default();
-    let spans = cache::highlighted(&path, &shown.join("\n"));
+    let code = shown.join("\n");
+    let spans = if opts.cached {
+        cache::highlighted(&path, &code)
+    } else {
+        Arc::new(cache::highlight_uncached(&path, &code))
+    };
     c.spawn(block_frame()).with_children(|b| {
         let group = b.target_entity();
         for (i, line) in shown.iter().enumerate() {
@@ -1867,6 +1877,7 @@ mod tests {
                 suggestion_base: None,
                 load_external: false,
                 github_host: "github.com".into(),
+                cached: true,
             }
         );
         config.media.load_external_images = true;

@@ -122,6 +122,8 @@ pub fn parse_in(md: &str, host: &str, pr: &PrRef) -> Vec<Block> {
 }
 
 fn parse_with(md: &str, refs: Option<Refs>) -> Vec<Block> {
+    #[cfg(test)]
+    crate::ui::markdown::cache::counts::parsed(md);
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut p = Builder {

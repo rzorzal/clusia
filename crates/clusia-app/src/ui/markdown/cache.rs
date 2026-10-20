@@ -52,10 +52,25 @@ impl<K: Eq + Hash + Clone, V> Memo<K, V> {
     }
 
     /// Stores `value` for `source` and lets the least recently used entries go past the cap.
+    /// `bytes` is what the value and the key hold on the heap; the entry itself, the `Arc`'s
+    /// allocation and the kept source are added here, so a cache of tiny bodies is bounded too.
     fn store(&mut self, key: (u64, K), source: &str, value: Arc<V>, bytes: usize) {
-        self.lru
-            .insert(key.clone(), (source.into(), value), bytes + source.len());
+        let overhead = size_of::<((u64, K), (Box<str>, Arc<V>))>() + size_of::<(usize, usize, V)>();
+        self.lru.insert(
+            key.clone(),
+            (source.into(), value),
+            bytes + source.len() + overhead,
+        );
         self.lru.evict(|k, _| *k == key);
+    }
+
+    /// The texts kept.
+    #[cfg(test)]
+    fn sources(&self) -> impl Iterator<Item = &str> {
+        self.lru
+            .keys()
+            .filter_map(|k| self.lru.peek(k))
+            .map(|(source, _)| &**source)
     }
 
     #[cfg(test)]
@@ -99,17 +114,8 @@ static CODE: LazyLock<Mutex<Memo<String, Vec<Vec<Span>>>>> =
     LazyLock::new(|| Mutex::new(Memo::new(CODE_CACHE_BYTES)));
 
 fn blocks(md: &str, refs: Refs, make: impl FnOnce() -> Vec<Block>) -> Arc<Vec<Block>> {
-    memoized(
-        &BLOCKS,
-        md,
-        refs,
-        || {
-            #[cfg(test)]
-            counts::parsed(md);
-            make()
-        },
-        blocks_bytes,
-    )
+    let key_bytes = refs.0.len() + refs.1.as_ref().map_or(0, |(o, r)| o.len() + r.len());
+    memoized(&BLOCKS, md, refs, make, |b| blocks_bytes(b) + key_bytes)
 }
 
 /// `parse::parse_on`, parsed once per text and host.
@@ -130,13 +136,17 @@ pub fn highlighted(path: &str, code: &str) -> Arc<Vec<Vec<Span>>> {
         &CODE,
         code,
         path.to_string(),
-        || {
-            #[cfg(test)]
-            counts::highlighted(code);
-            highlight(path, code)
-        },
-        spans_bytes,
+        || highlight_uncached(path, code),
+        |lines| spans_bytes(lines) + path.len(),
     )
+}
+
+/// `clusia_highlight::highlight` with no cache, for text still growing: each of its prefixes
+/// would be an entry never asked for again.
+pub fn highlight_uncached(path: &str, code: &str) -> Vec<Vec<Span>> {
+    #[cfg(test)]
+    counts::highlighted(code);
+    highlight(path, code)
 }
 
 fn spans_bytes(lines: &Vec<Vec<Span>>) -> usize {
@@ -190,8 +200,9 @@ fn inlines_bytes(items: &Vec<Inline>) -> usize {
             .sum::<usize>()
 }
 
-/// How many times each text was parsed or highlighted. Tests run in parallel and share the
-/// caches, so they count per text, with texts no other test uses.
+/// How many times each text was parsed (by `parse`, cached or not) or highlighted (by a fenced
+/// block, cached or not). Tests run in parallel and share the caches, so they count per text,
+/// with texts no other test uses.
 #[cfg(test)]
 pub(crate) mod counts {
     use std::collections::HashMap;
@@ -200,7 +211,7 @@ pub(crate) mod counts {
     static PARSES: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
     static HIGHLIGHTS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
 
-    pub(super) fn parsed(md: &str) {
+    pub(crate) fn parsed(md: &str) {
         *super::lock(&PARSES).entry(md.to_string()).or_default() += 1;
     }
 
@@ -214,17 +225,21 @@ pub(crate) mod counts {
         super::lock(&PARSES).get(md).copied().unwrap_or(0)
     }
 
-    /// The parses of every text that contains `needle`.
-    pub(crate) fn parses_containing(needle: &str) -> usize {
-        super::lock(&PARSES)
-            .iter()
-            .filter(|(md, _)| md.contains(needle))
-            .map(|(_, n)| n)
-            .sum()
-    }
-
     pub(crate) fn highlights(code: &str) -> usize {
         super::lock(&HIGHLIGHTS).get(code).copied().unwrap_or(0)
+    }
+
+    /// The parsed bodies and the highlighted blocks kept whose text contains `needle`.
+    pub(crate) fn cached_containing(needle: &str) -> (usize, usize) {
+        let blocks = super::lock(&super::BLOCKS)
+            .sources()
+            .filter(|s| s.contains(needle))
+            .count();
+        let code = super::lock(&super::CODE)
+            .sources()
+            .filter(|s| s.contains(needle))
+            .count();
+        (blocks, code)
     }
 }
 
@@ -283,23 +298,23 @@ mod tests {
     #[test]
     fn a_host_or_repository_change_parses_again() {
         let md = "cache-test: host change @alice and #5";
-        let on_com = parse_in(md, "github.com", &widgets());
-        let on_ghe = parse_in(md, "ghe.example.com", &widgets());
-        assert_ne!(on_com, on_ghe, "mentions link to the other host");
-        assert_eq!(*on_ghe, parse::parse_in(md, "ghe.example.com", &widgets()));
         let other = PrRef {
             repo: "gadgets".into(),
             ..widgets()
         };
+        let on_com = parse_in(md, "github.com", &widgets());
+        let on_ghe = parse_in(md, "ghe.example.com", &widgets());
         let in_other = parse_in(md, "github.com", &other);
-        assert_eq!(*in_other, parse::parse_in(md, "github.com", &other));
         let bare = parse_on(md, "github.com");
+        assert_eq!(counts::parses(md), 4, "one parse per host and repository");
+        assert_ne!(on_com, on_ghe, "mentions link to the other host");
+        assert_eq!(*on_ghe, parse::parse_in(md, "ghe.example.com", &widgets()));
+        assert_eq!(*in_other, parse::parse_in(md, "github.com", &other));
         assert_eq!(
             *bare,
             parse::parse_on(md, "github.com"),
             "no repo, no #5 link"
         );
-        assert_eq!(counts::parses(md), 4);
     }
 
     #[test]
