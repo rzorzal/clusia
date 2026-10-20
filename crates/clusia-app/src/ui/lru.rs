@@ -86,10 +86,12 @@ impl<K: Eq + Hash + Clone, V> ByteLru<K, V> {
         if self.bytes <= self.cap {
             return Vec::new();
         }
+        // Entries in use are left out before sorting: when they alone pass the cap, a trim
+        // every frame finds nothing to sort.
         let mut order: Vec<(u64, K)> = self
             .entries
             .iter()
-            .filter(|(_, e)| e.bytes > 0)
+            .filter(|(k, e)| e.bytes > 0 && !keep(k, &e.value))
             .map(|(k, e)| (e.used, k.clone()))
             .collect();
         order.sort_unstable_by_key(|(used, _)| *used);
@@ -97,9 +99,6 @@ impl<K: Eq + Hash + Clone, V> ByteLru<K, V> {
         for (_, key) in order {
             if self.bytes <= self.cap {
                 break;
-            }
-            if keep(&key, &self.entries[&key].value) {
-                continue;
             }
             if let Some(value) = self.remove(&key) {
                 gone.push((key, value));

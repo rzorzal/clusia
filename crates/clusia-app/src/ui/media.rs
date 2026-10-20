@@ -71,7 +71,8 @@ pub const MEDIA_CACHE_BYTES: usize = 256 << 20;
 
 /// What the daemon fetched for each URL, decoded. One entry per URL, so a picture used twice is
 /// asked for once. Past `MEDIA_CACHE_BYTES` the least recently used pictures are forgotten,
-/// except the ones on screen: a still whose texture a node holds, a GIF that is visible.
+/// except the ones in use: a still whose texture a node or an avatar holds (on screen or not,
+/// since the node keeps it alive anyway), and a GIF placed on screen.
 #[derive(Resource, Debug)]
 pub struct MediaCache {
     pub by_url: ByteLru<String, MediaState>,
@@ -138,11 +139,11 @@ impl MediaCache {
     /// Forgets what is over the cap and what only closed tabs showed, keeping what is on
     /// screen. Returns the URLs of the GIFs forgotten, whose hidden slots must let go of
     /// their frames.
-    fn trim(&mut self, visible_gifs: &HashSet<&str>) -> Vec<String> {
+    fn trim(&mut self, placed_gifs: &HashSet<&str>) -> Vec<String> {
         let in_use = |url: &String, state: &MediaState| match state {
             MediaState::Image(handle) => held_elsewhere(handle),
             MediaState::Gif(gif) => {
-                held_elsewhere(&gif.first) || visible_gifs.contains(url.as_str())
+                held_elsewhere(&gif.first) || placed_gifs.contains(url.as_str())
             }
             MediaState::Loading | MediaState::Refused(_) | MediaState::Failed(_) => true,
         };
@@ -161,11 +162,10 @@ impl MediaCache {
             }
             self.owners.remove(&url);
         }
+        // An evicted URL keeps its owners: a slot of the same tab may show it again, and
+        // closing that tab must still forget it.
         gone.into_iter()
-            .filter_map(|(url, state)| {
-                self.owners.remove(&url);
-                matches!(state, MediaState::Gif(_)).then_some(url)
-            })
+            .filter_map(|(url, state)| matches!(state, MediaState::Gif(_)).then_some(url))
             .collect()
     }
 }
@@ -202,7 +202,9 @@ struct Dormant {
     visible: bool,
 }
 
-/// An animated picture. `visible` is kept up to date by `track_visibility`. The slot's
+/// An animated picture. `placed` (on screen, whether or not the window is covered) and
+/// `visible` (placed and the window uncovered: it animates) are kept up to date by
+/// `track_visibility`; the cache keeps a placed GIF, so covering the window forgets none. The slot's
 /// `ImageNode` keeps pointing at `shown`; a new frame is written into that texture, because
 /// swapping the handle makes Bevy rewrite the node's `ContentSize` and lay the page out again.
 #[derive(Component, Debug, Clone, PartialEq)]
@@ -212,6 +214,7 @@ pub struct GifAnim {
     pub delays: Vec<Duration>,
     pub i: usize,
     pub t: Duration,
+    pub placed: bool,
     pub visible: bool,
 }
 
@@ -223,6 +226,7 @@ impl GifAnim {
             delays: gif.delays.clone(),
             i: 0,
             t: Duration::ZERO,
+            placed: false,
             visible: false,
         }
     }
@@ -387,10 +391,11 @@ fn decode_gif(bytes: &[u8]) -> Result<Decoded, String> {
 /// The cache entry for a decoded picture and the bytes it holds: the RGBA of a still's texture,
 /// or of every GIF frame plus its first-frame texture.
 fn cache_entry(decoded: Decoded, images: &mut Assets<Image>) -> (MediaState, usize) {
-    let rgba = |size: UVec2| size.x as usize * size.y as usize * 4;
+    let bytes_of = |image: &Image| image.data.as_ref().map_or(0, Vec::len);
     match decoded {
         Decoded::Still(image) => {
-            let bytes = rgba(image.size());
+            // A 16-bit PNG stays `Rgba16`: count the bytes, not the pixels.
+            let bytes = bytes_of(&image);
             (MediaState::Image(images.add(image)), bytes)
         }
         Decoded::Gif {
@@ -399,7 +404,7 @@ fn cache_entry(decoded: Decoded, images: &mut Assets<Image>) -> (MediaState, usi
             delays,
             size,
         } => {
-            let bytes = pixels.iter().map(Vec::len).sum::<usize>() + rgba(size);
+            let bytes = pixels.iter().map(Vec::len).sum::<usize>() + bytes_of(&first);
             let gif = GifFrames {
                 first: images.add(first),
                 pixels: Arc::new(pixels),
@@ -413,9 +418,9 @@ fn cache_entry(decoded: Decoded, images: &mut Assets<Image>) -> (MediaState, usi
 }
 
 /// The URLs of the GIFs on screen, which the cache must keep.
-fn visible_gifs<'a>(gifs: &'a Query<(&MdImage, &GifAnim)>) -> HashSet<&'a str> {
+fn placed_gifs<'a>(gifs: &'a Query<(&MdImage, &GifAnim)>) -> HashSet<&'a str> {
     gifs.iter()
-        .filter(|(_, g)| g.visible)
+        .filter(|(_, g)| g.placed)
         .map(|(slot, _)| slot.0.as_str())
         .collect()
 }
@@ -433,7 +438,7 @@ fn decode_arrived(
     let cache = &mut *cache;
     // Trimmed before this frame's pictures land: their slots take their textures in this
     // frame, and from then on the textures count as held.
-    let forgotten = cache.trim(&visible_gifs(&gifs));
+    let forgotten = cache.trim(&placed_gifs(&gifs));
     if !forgotten.is_empty() {
         for (entity, slot) in &slots {
             if forgotten.contains(&slot.0) {
@@ -525,10 +530,9 @@ fn fill_slots(
             None if showing == Some(&want) => continue,
             None => {}
         }
-        if showing.is_none()
-            && let Some(ReviewScreen(pr)) = parents
-                .iter_ancestors(entity)
-                .find_map(|a| screens.get(a).ok())
+        if let Some(ReviewScreen(pr)) = parents
+            .iter_ancestors(entity)
+            .find_map(|a| screens.get(a).ok())
         {
             cache
                 .owners
@@ -590,9 +594,6 @@ fn size_slot(e: &mut EntityCommands, size: Option<UVec2>) {
     });
 }
 
-/// Marks each GIF as visible when it is shown, inside the window and inside its scroll
-/// areas' clip. Pictures that are hidden (another section, another tab) have no size, and
-/// none counts while the window is covered.
 /// Where a slot sits, for `on_screen`.
 type Placed<'a> = (
     &'a ComputedNode,
@@ -601,6 +602,9 @@ type Placed<'a> = (
     &'a InheritedVisibility,
 );
 
+/// Marks each GIF as visible when it is shown, inside the window and inside its scroll
+/// areas' clip. Pictures that are hidden (another section, another tab) have no size, and
+/// none counts while the window is covered.
 fn track_visibility(
     covered: Res<WindowCovered>,
     window: Query<&Window, With<PrimaryWindow>>,
@@ -611,24 +615,25 @@ fn track_visibility(
         .single()
         .ok()
         .map(|w| Vec2::new(w.physical_width() as f32, w.physical_height() as f32));
-    let seen = |(node, transform, clip, inherited): Placed| {
-        !covered.0
-            && on_screen(
-                inherited.get(),
-                transform.affine().translation,
-                node.size,
-                clip.map(|c| c.clip),
-                window,
-            )
+    let placed = |(node, transform, clip, inherited): Placed| {
+        on_screen(
+            inherited.get(),
+            transform.affine().translation,
+            node.size,
+            clip.map(|c| c.clip),
+            window,
+        )
     };
-    for (mut gif, placed) in &mut gifs {
-        let visible = seen(placed);
-        if gif.visible != visible {
+    for (mut gif, at) in &mut gifs {
+        let on = placed(at);
+        let visible = on && !covered.0;
+        if (gif.placed, gif.visible) != (on, visible) {
+            gif.placed = on;
             gif.visible = visible;
         }
     }
-    for (mut slot, placed) in &mut dormant {
-        let visible = seen(placed);
+    for (mut slot, at) in &mut dormant {
+        let visible = placed(at) && !covered.0;
         if slot.visible != visible {
             slot.visible = visible;
         }
@@ -1477,6 +1482,7 @@ mod tests {
             delays: vec![Duration::from_millis(100); 3],
             i: 0,
             t: Duration::ZERO,
+            placed: true,
             visible: true,
         };
         assert!(!gif.advance(Duration::from_millis(60)));
@@ -1623,7 +1629,7 @@ mod tests {
         assert_ne!(
             frame_index(&app, moving),
             before,
-            "the GIF ticks on while the picture decodes"
+            "the GIF's frames keep ticking while the decode is in flight"
         );
         testing::decoded(&mut app);
         assert!(matches!(state(&app, &other), Some(MediaState::Image(_))));
@@ -1777,5 +1783,90 @@ mod tests {
         let urls = cached(&app);
         assert!(!urls.contains(&mine), "the closed tab's picture is gone");
         assert!(urls.contains(&elsewhere), "a picture of no tab stays");
+    }
+
+    #[test]
+    fn a_covered_window_keeps_the_gifs_it_hides() {
+        let dir = tempfile::tempdir().unwrap();
+        let gif = write_gif(dir.path(), "a.gif", 3, 32);
+        let mut app = app();
+        // One GIF alone is over this cap: only being on screen keeps it.
+        capped(&mut app, 100);
+        let g = slot(&mut app, URL);
+        show(&mut app, g);
+        deliver(&mut app, URL, Ok(file(&gif, MediaKind::Gif)));
+        assert!(app.world().get::<GifAnim>(g).unwrap().visible);
+        testing::recorded(&mut app);
+        let occlude = |app: &mut App, occluded: bool| {
+            app.world_mut().write_message(WindowOccluded {
+                window: Entity::PLACEHOLDER,
+                occluded,
+            });
+        };
+        occlude(&mut app, true);
+        for _ in 0..10 {
+            app.update();
+        }
+        let anim = app
+            .world()
+            .get::<GifAnim>(g)
+            .expect("still animating, just paused");
+        assert!(!anim.visible, "a covered window does not animate");
+        assert_eq!(cached(&app), [URL.to_string()], "but keeps what it shows");
+        occlude(&mut app, false);
+        let mut seen = HashSet::new();
+        for _ in 0..10 {
+            app.update();
+            seen.insert(frame_index(&app, g));
+        }
+        assert!(seen.len() > 1, "uncovered, it moves at once");
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "nothing is asked for again"
+        );
+    }
+
+    #[test]
+    fn a_closed_tab_drops_a_gif_it_showed_again_after_an_eviction() {
+        use crate::nav::ReviewScreen;
+        use crate::review_state::ReviewTabs;
+        let dir = tempfile::tempdir().unwrap();
+        let gif = write_gif(dir.path(), "a.gif", 3, 32);
+        let mut app = testing::demo_review_app();
+        // The GIF (384 bytes) or the still (400), not both.
+        capped(&mut app, 400);
+        let pr = crate::fixture::demo_pr();
+        let screen = {
+            let mut q = app.world_mut().query::<(Entity, &ReviewScreen)>();
+            q.iter(app.world())
+                .find(|(_, s)| s.0 == pr)
+                .map(|(e, _)| e)
+                .expect("the review's screen")
+        };
+        let g = app
+            .world_mut()
+            .spawn((Node::default(), MdImage(URL.to_string()), ChildOf(screen)))
+            .id();
+        app.update();
+        deliver(&mut app, URL, Ok(file(&gif, MediaKind::Gif)));
+        // Scrolled away, then pushed out by a still of no tab.
+        let other = png_url(1);
+        let big = write_png(dir.path(), "big.png", 10, 10);
+        let e = slot(&mut app, &other);
+        deliver(&mut app, &other, Ok(file(&big, MediaKind::Png)));
+        assert!(app.world().get::<GifAnim>(g).is_none(), "evicted");
+        app.world_mut().despawn(e);
+        show(&mut app, g);
+        testing::settle(&mut app);
+        deliver(&mut app, URL, Ok(file(&gif, MediaKind::Gif)));
+        assert!(app.world().get::<GifAnim>(g).is_some(), "shown again");
+        assert!(cached(&app).contains(&URL.to_string()));
+        app.world_mut().despawn(g);
+        app.world_mut().resource_mut::<ReviewTabs>().0.remove(&pr);
+        app.update();
+        assert!(
+            !cached(&app).contains(&URL.to_string()),
+            "the closed tab's GIF is gone"
+        );
     }
 }
