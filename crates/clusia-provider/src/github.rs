@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clusia_core::{
     ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, PrDetail, PrFilter, PrRef,
-    PrSummary, ReviewInfo, Side, ThreadComment,
+    PrSummary, Profile, ReviewInfo, Side, ThreadComment,
 };
 use reqwest::{StatusCode, header};
 use serde::Deserialize;
@@ -738,6 +738,29 @@ impl GitHub {
         Ok((body, headers))
     }
 
+    /// The public profile of `login`. A name that is not an ordinary login is refused before
+    /// any request, so it cannot change the path.
+    pub async fn get_profile(&self, login: &str) -> Result<Profile, ProviderError> {
+        if !clusia_core::people::is_login(login) {
+            return Err(ProviderError::NotFound(format!("user {login}")));
+        }
+        let (body, _) = self.get(&format!("/users/{login}"), &[]).await?;
+        let field = |key: &str| {
+            body.get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        Ok(Profile {
+            login: field("login").unwrap_or_else(|| login.to_string()),
+            name: field("name"),
+            company: field("company"),
+            bio: field("bio"),
+            avatar_url: field("avatar_url"),
+        })
+    }
+
     pub async fn viewer(&self) -> Result<Viewer, ProviderError> {
         let (body, headers) = self.get_uncached("/user", &[]).await?;
         let login = body
@@ -877,6 +900,46 @@ mod tests {
             "comments": 3,
             "repository_url": format!("https://api.github.com/repos/{repo}")
         })
+    }
+
+    #[tokio::test]
+    async fn a_profile_carries_the_public_fields_and_the_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/octo"))
+            .and(h("authorization", "Bearer tok123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": "octo", "name": "Octo Cat", "company": null, "bio": "",
+                "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4"
+            })))
+            .mount(&server)
+            .await;
+        let profile = gh(&server).get_profile("octo").await.unwrap();
+        assert_eq!(profile.login, "octo");
+        assert_eq!(profile.name.as_deref(), Some("Octo Cat"));
+        assert_eq!(profile.company, None);
+        assert_eq!(profile.bio, None, "an empty bio is no bio");
+        assert_eq!(
+            profile.avatar_url.as_deref(),
+            Some("https://avatars.githubusercontent.com/u/1?v=4")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_user_is_not_found_and_a_bad_login_never_asks() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/ghost"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        assert!(matches!(
+            client.get_profile("ghost").await,
+            Err(ProviderError::NotFound(_))
+        ));
+        assert!(client.get_profile("../user").await.is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[test]

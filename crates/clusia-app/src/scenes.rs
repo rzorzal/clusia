@@ -31,6 +31,7 @@ use crate::screens::review::calls::CallsRequest;
 use crate::screens::review::diagrams::Diagrams;
 use crate::screens::review::diagrams::keywords::render::{focus_pose, view_pose};
 use crate::screens::review::story::{self, StoryStage};
+use crate::ui::code_select::{At, CodeLine, CodeSelection};
 use crate::ui::composer::popover::{PopoverKind, Popovers};
 use crate::ui::composer::{ComposerKey, ComposerMode, Slot};
 
@@ -46,7 +47,50 @@ impl Plugin for ScenePlugin {
                 stage_snapshot(world, scene);
             });
         add_scroll(app, scene);
+        if matches!(scene, Scene::DiffSelected | Scene::SplitSelected) {
+            app.add_systems(
+                Update,
+                move |lines: Query<&CodeLine>,
+                      selection: ResMut<CodeSelection>,
+                      done: Local<bool>| {
+                    select_code(scene, lines, selection, done)
+                },
+            );
+        }
     }
+}
+
+/// Selects from the middle of one line to the middle of one three lines below, once the diff
+/// has its lines: on the right-hand side in Split.
+fn select_code(
+    scene: Scene,
+    lines: Query<&CodeLine>,
+    mut selection: ResMut<CodeSelection>,
+    mut done: Local<bool>,
+) {
+    let column = u8::from(scene == Scene::SplitSelected);
+    let mut own: Vec<&CodeLine> = lines
+        .iter()
+        .filter(|l| l.key.column == column && l.text.len() > 24)
+        .collect();
+    if *done || own.len() < 4 {
+        return;
+    }
+    own.sort_by_key(|l| l.key.order);
+    let (from, to) = (own[0], own[3]);
+    selection.select(
+        from.key.group,
+        column,
+        At {
+            order: from.key.order,
+            offset: 6,
+        },
+        At {
+            order: to.key.order,
+            offset: 18,
+        },
+    );
+    *done = true;
 }
 
 /// Only the scene that shows the end of the Notifications page keeps its scroll area scrolled.
@@ -184,7 +228,7 @@ fn accept_demo_finding(ready: &mut Ready, now: i64) {
 }
 
 /// Signs the demo out and gives the first-run screen its answers.
-fn stage_snapshot(world: &mut World, scene: Scene) {
+pub(crate) fn stage_snapshot(world: &mut World, scene: Scene) {
     match scene {
         Scene::ConfigGeneral => set_demo_config(world, &[("general.start_at_login", "true")]),
         Scene::ConfigNotifications | Scene::ConfigNotificationsBottom => {
@@ -501,6 +545,16 @@ pub fn stage(world: &mut World, scene: Scene) {
             .send(Tell::Restored(restored_tabs()));
         return;
     }
+    if scene == Scene::PersonCard {
+        use crate::ui::people::{HoverCard, People, ProfileState};
+        world.resource_mut::<HoverCard>().pin("octo");
+        if let Some(profile) = fixture::demo_profile("octo") {
+            world
+                .resource_mut::<People>()
+                .by_login
+                .insert("octo".into(), ProfileState::Loaded(profile));
+        }
+    }
     let now = world.resource::<Clock>().now();
     let (view, news) = fixture::demo_review(now);
     let pr = view.review.pr.clone();
@@ -517,7 +571,12 @@ pub fn stage(world: &mut World, scene: Scene) {
     let mut round = None;
     let mut ui = TabUi::default();
     match scene {
-        Scene::Diff | Scene::Loading | Scene::Failed | Scene::Palette => {}
+        Scene::Diff
+        | Scene::DiffSelected
+        | Scene::Loading
+        | Scene::Failed
+        | Scene::Palette
+        | Scene::PersonCard => {}
         Scene::FirstRun
         | Scene::FirstRunBoth
         | Scene::FirstRunCustom
@@ -565,7 +624,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         }
         Scene::ComposerPreview => ui.editor = Some(composer_editor(ComposerMode::Preview)),
         Scene::Rendered => ui.section = ReviewSection::Comments,
-        Scene::Split => ui.mode = DiffMode::Split,
+        Scene::Split | Scene::SplitSelected => ui.mode = DiffMode::Split,
         Scene::DiffStory
         | Scene::DiffStoryStatic
         | Scene::DiffStoryOutdated
@@ -903,7 +962,21 @@ mod tests {
                         assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
                     }
                 }
-                Scene::Split => {
+                Scene::DiffSelected => {
+                    assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
+                }
+                Scene::PersonCard => {
+                    for _ in 0..4 {
+                        app.update();
+                    }
+                    assert_eq!(
+                        testing::count::<crate::ui::people::CardRoot>(&mut app),
+                        1,
+                        "the author's card is open"
+                    );
+                    assert!(testing::shows(&mut app, "Octo Cat"));
+                }
+                Scene::Split | Scene::SplitSelected => {
                     assert_eq!(tab.ui.mode, DiffMode::Split);
                     assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
                 }

@@ -493,12 +493,10 @@ mod tests {
                 })
                 .collect();
             let s = spec(kind, nodes, edges);
-            let started = std::time::Instant::now();
-            let g = layout(&s, &Fonts);
-            let took = started.elapsed().as_millis();
+            let (g, took) = crate::testkit::cpu_timed(|| layout(&s, &Fonts));
             assert!(
-                took <= if cfg!(debug_assertions) { 200 } else { 20 },
-                "{kind}: {took} ms"
+                took.as_millis() <= crate::testkit::BUDGET_MS,
+                "{kind}: {took:?}"
             );
             check(&s, &g);
             assert_eq!(layout(&s, &Fonts), g);

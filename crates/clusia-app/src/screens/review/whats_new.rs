@@ -9,7 +9,7 @@ use bevy::input::ButtonInput;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
+use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_protocol::{NewsItem, NewsKind};
 
@@ -23,11 +23,12 @@ use crate::screens::review::ReviewSystems;
 use crate::screens::review::shell::ModalFor;
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, button, panel, text,
+    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, button, panel, text, wrapped_text,
 };
-use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::parse::parse_on;
 use crate::ui::markdown::{RenderOpts, markdown_line};
 use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
+use crate::ui::people::person_name;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewsRow {
@@ -39,6 +40,8 @@ pub struct NewsRow {
     pub detail: String,
     /// `@mona, @hubot` or `You`
     pub who: String,
+    /// The logins in `who`, each opening a profile; empty for `You`.
+    pub people: Vec<String>,
     /// `GitHub`, `GitHub Actions`, `Clúsia`, `CLI`
     pub source: String,
     /// Where a click goes (`None`: nowhere, e.g. checks).
@@ -90,20 +93,21 @@ pub fn news_row(item: &NewsItem) -> NewsRow {
         NewsKind::Moved => ("↻", Tone::Orange, Some(ReviewSection::Diff)),
         NewsKind::Revalidated => ("↻", Tone::Green, None),
     };
-    let (who, source) = match item.source.strip_prefix("You via ") {
-        Some(client) => ("You".to_string(), client_name(client)),
-        None => (
-            item.who
+    let (who, people, source) = match item.source.strip_prefix("You via ") {
+        Some(client) => ("You".to_string(), Vec::new(), client_name(client)),
+        None => {
+            let people: Vec<String> = item
+                .who
                 .as_deref()
-                .map(|w| {
-                    w.split(", ")
-                        .map(|p| format!("@{p}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default(),
-            item.source.clone(),
-        ),
+                .map(|w| w.split(", ").map(str::to_string).collect())
+                .unwrap_or_default();
+            let who = people
+                .iter()
+                .map(|p| format!("@{p}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (who, people, item.source.clone())
+        }
     };
     NewsRow {
         icon,
@@ -111,6 +115,7 @@ pub fn news_row(item: &NewsItem) -> NewsRow {
         what,
         detail,
         who,
+        people,
         source,
         go,
     }
@@ -231,6 +236,7 @@ fn dialog(
 ) {
     c.spawn(Node {
         flex_direction: FlexDirection::Column,
+        flex_shrink: 0.0,
         row_gap: px(4),
         padding: UiRect {
             left: px(24),
@@ -244,13 +250,26 @@ fn dialog(
         h.spawn(text(fonts, v.title.clone(), Type::HEADING.size(17.0)));
         h.spawn(text(fonts, v.since.clone(), Type::MUTED));
     });
-    for row in &v.rows {
-        news_row_node(c, fonts, pr, row, opts);
-    }
+    // Many rows scroll between the title and the **Got it** button.
+    c.spawn((
+        Node {
+            flex_direction: FlexDirection::Column,
+            min_height: px(0),
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+        ScrollArea,
+    ))
+    .with_children(|rows| {
+        for row in &v.rows {
+            news_row_node(rows, fonts, pr, row, opts);
+        }
+    });
     c.spawn((
         panel(
             Node {
                 column_gap: px(10),
+                flex_shrink: 0.0,
                 align_items: AlignItems::Center,
                 padding: UiRect::axes(px(24), px(14)),
                 border: UiRect::top(px(1)),
@@ -286,6 +305,7 @@ fn news_row_node(
     c.spawn((
         Node {
             column_gap: px(14),
+            flex_shrink: 0.0,
             align_items: AlignItems::Center,
             padding: UiRect::axes(px(24), px(12)),
             border: UiRect::top(px(1)),
@@ -339,9 +359,16 @@ fn news_row_node(
             ..default()
         })
         .with_children(|t| {
-            t.spawn(text(fonts, row.what.clone(), Type::BODY.size(13.0)));
+            t.spawn(wrapped_text(fonts, row.what.clone(), Type::BODY.size(13.0)));
             if !row.detail.is_empty() {
-                markdown_line(t, fonts, &parse(&row.detail), Type::META, opts, 140);
+                markdown_line(
+                    t,
+                    fonts,
+                    &parse_on(&row.detail, &opts.github_host),
+                    Type::META,
+                    opts,
+                    140,
+                );
             }
         });
         r.spawn(Node {
@@ -352,7 +379,22 @@ fn news_row_node(
             ..default()
         })
         .with_children(|w| {
-            if !row.who.is_empty() {
+            if !row.people.is_empty() {
+                w.spawn(Node {
+                    flex_wrap: FlexWrap::Wrap,
+                    justify_content: JustifyContent::FlexEnd,
+                    max_width: px(220),
+                    ..default()
+                })
+                .with_children(|names| {
+                    for (i, login) in row.people.iter().enumerate() {
+                        names.spawn(person_name(fonts, login));
+                        if i + 1 < row.people.len() {
+                            names.spawn(text(fonts, ",", Type::MUTED.size(12.0)));
+                        }
+                    }
+                });
+            } else if !row.who.is_empty() {
                 w.spawn(text(fonts, row.who.clone(), Type::MUTED.size(12.0)));
             }
             w.spawn(text(fonts, row.source.clone(), Type::META));
@@ -435,6 +477,52 @@ mod tests {
             summary: summary.into(),
             url: None,
         }
+    }
+
+    #[test]
+    fn people_in_a_row_open_their_profiles_and_not_the_row() {
+        use crate::platform_open::OpenUrls;
+        use crate::ui::people::{PersonAvatar, PersonTarget};
+        let row = news_row(&item(
+            NewsKind::Comment,
+            "GitHub",
+            Some("mona, hubot"),
+            "3 comments",
+        ));
+        assert_eq!(row.people, ["mona", "hubot"]);
+        assert!(
+            news_row(&item(
+                NewsKind::Comment,
+                "You via clusia",
+                None,
+                "1 comment"
+            ))
+            .people
+            .is_empty()
+        );
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, true);
+        testing::recorded(&mut app);
+        let named = testing::entities::<PersonTarget>(&mut app)
+            .into_iter()
+            .filter(|e| app.world().get::<PersonAvatar>(*e).is_none())
+            .filter(|e| {
+                app.world()
+                    .get::<PersonTarget>(*e)
+                    .is_some_and(|t| t.0 == "mona")
+            })
+            .collect::<Vec<_>>();
+        assert!(!named.is_empty(), "mona is named in What's new");
+        testing::click_button(&mut app, named[0]);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            ["https://github.com/mona"]
+        );
+        assert!(
+            testing::recorded(&mut app).is_empty(),
+            "the row behind it was not pressed"
+        );
+        assert!(testing::tab(&app, &pr).ui.modal.is_some());
     }
 
     #[test]
@@ -558,6 +646,59 @@ mod tests {
 
     fn modal(app: &App, pr: &PrRef) -> Option<Modal> {
         app.world().resource::<ReviewTabs>().0[pr].ui.modal
+    }
+
+    #[test]
+    fn many_news_rows_scroll_between_the_title_and_got_it() {
+        for (height, large) in [(800, false), (420, false), (420, true)] {
+            let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, height));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            let pr: PrRef = "rzorzal/clusia#123".parse().unwrap();
+            app.world_mut().write_message(crate::bridge::ShowRequested(
+                clusia_protocol::WindowTarget::Review { pr: pr.clone() },
+            ));
+            app.update();
+            let (view, news) = fixture::demo_review(NOW);
+            let many: Vec<NewsItem> = (0..30)
+                .map(|n| {
+                    let mut it = news[n % news.len()].clone();
+                    it.summary = format!("{} {n}", it.summary);
+                    it
+                })
+                .collect();
+            testing::tell(
+                &mut app,
+                crate::bridge::Tell::Opened {
+                    pr: pr.clone(),
+                    view: Box::new(view),
+                    news: many,
+                },
+            );
+            testing::settle(&mut app);
+            let got = testing::find::<GotIt>(&mut app, |_| true);
+            let (_, y, _, h) = testing::frame(&app, got);
+            assert!(
+                y + h <= height as f32,
+                "{height} large={large}: Got it ends at {} in the window",
+                y + h
+            );
+            let rows = testing::entities::<NewsRowButton>(&mut app);
+            assert_eq!(rows.len(), 30);
+            let list = app.world().get::<ChildOf>(rows[0]).unwrap().parent();
+            assert_eq!(
+                app.world().get::<Node>(list).unwrap().overflow,
+                Overflow::scroll_y()
+            );
+            if height == 420 {
+                let laid = app.world().get::<bevy::ui::ComputedNode>(list).unwrap();
+                assert!(
+                    laid.content_size.y > laid.size.y,
+                    "{height}: the rows scroll"
+                );
+            }
+        }
     }
 
     #[test]

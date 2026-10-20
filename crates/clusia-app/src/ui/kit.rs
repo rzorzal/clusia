@@ -6,12 +6,14 @@ use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::spawn::SpawnIter;
 use bevy::ecs::world::DeferredWorld;
 use bevy::input::ButtonInput;
+use bevy::input::mouse::MouseScrollUnit;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::input_focus::{FocusLost, InputFocus};
+use bevy::picking::events::{Pointer, Scroll};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::text::{EditableText, TextBackgroundColor, TextCursorStyle};
-use bevy::ui::Pressed;
+use bevy::text::{EditableText, LineBreak, TextBackgroundColor, TextCursorStyle};
+use bevy::ui::{ComputedNode, Pressed, UiGlobalTransform};
 use bevy::ui_widgets::Button as WidgetButton;
 use bevy::window::{CursorIcon, PrimaryWindow, SystemCursorIcon};
 
@@ -134,6 +136,19 @@ pub fn text(fonts: &UiFonts, s: impl Into<String>, t: Type) -> impl Bundle {
         font(fonts, t),
         TextColor::default(),
         Ink(t.ink),
+    )
+}
+
+/// A box that cuts its content on purpose: a one-line preview whose full text a click shows.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Preview;
+
+/// `text` that breaks at the width of its box: at spaces where it can, between characters for
+/// a token wider than the box (a path or an identifier must still fit).
+pub fn wrapped_text(fonts: &UiFonts, s: impl Into<String>, t: Type) -> impl Bundle {
+    (
+        text(fonts, s, t),
+        TextLayout::linebreak(LineBreak::WordOrCharacter),
     )
 }
 
@@ -316,10 +331,22 @@ fn resize_with_text(theme: Res<Theme>, mut sized: Query<(&TextSized, &mut Node)>
 
 /// A 30 px button. Attach `observe(|_: On<Activate>, …| …)` for the action.
 pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
+    button_with(fonts, label, v, false)
+}
+
+/// A button whose label breaks onto more lines, and the button grows with it, when its room is
+/// narrower than the label: for a card in a narrow column.
+pub fn wrapping_button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
+    button_with(fonts, label, v, true)
+}
+
+fn button_with(fonts: &UiFonts, label: &str, v: Variant, wrap: bool) -> impl Bundle {
     let (fill, hover, ink, stroke) = variant_swatches(v);
     (
         Node {
-            height: px(30),
+            height: if wrap { auto() } else { px(30) },
+            min_height: if wrap { px(30) } else { auto() },
+            max_width: if wrap { percent(100) } else { auto() },
             padding: label_padding(12.0, Type::STRONG.size),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
@@ -341,7 +368,11 @@ pub fn button(fonts: &UiFonts, label: &str, v: Variant) -> impl Bundle {
         Stroke(stroke),
         children![(
             text(fonts, label.to_string(), Type::STRONG.ink(ink)),
-            TextLayout::no_wrap(),
+            if wrap {
+                TextLayout::linebreak(LineBreak::WordOrCharacter)
+            } else {
+                TextLayout::no_wrap()
+            },
         )],
     )
 }
@@ -781,6 +812,70 @@ pub fn text_field(fonts: &UiFonts, value: &str, width: f32, mono: bool) -> impl 
     )
 }
 
+/// A row that scrolls sideways when its items do not fit: the wheel moves it (a vertical wheel
+/// too, as a mouse has no other), and the item marked `Reveal` is brought into view.
+#[derive(Component, Debug, Clone, Copy, Default)]
+#[require(ScrollPosition)]
+pub struct SideTrack;
+
+/// The item of a `SideTrack` to bring into view, once, when it has been laid out: the open tab,
+/// the selected mode.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Reveal;
+
+/// The wheel over a `SideTrack`: either axis of the wheel scrolls it along.
+fn wheel_sideways(
+    mut scroll: On<Pointer<Scroll>>,
+    mut tracks: Query<(&ComputedNode, &mut ScrollPosition), With<SideTrack>>,
+) {
+    let Ok((node, mut at)) = tracks.get_mut(scroll.entity) else {
+        return;
+    };
+    scroll.propagate(false);
+    let unit = match scroll.unit {
+        MouseScrollUnit::Line => MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR,
+        MouseScrollUnit::Pixel => 1.0,
+    };
+    let view = node.size().x * node.inverse_scale_factor;
+    let content = node.content_size().x * node.inverse_scale_factor;
+    at.x = (at.x - (scroll.x + scroll.y) * unit).clamp(0.0, (content - view).max(0.0));
+}
+
+/// Scrolls the track that holds a `Reveal` item just far enough to show it.
+fn reveal_in_track(
+    mut commands: Commands,
+    items: Query<(Entity, &ComputedNode, &UiGlobalTransform), With<Reveal>>,
+    parents: Query<&ChildOf>,
+    mut tracks: Query<(&ComputedNode, &UiGlobalTransform, &mut ScrollPosition), With<SideTrack>>,
+) {
+    for (item, node, at) in &items {
+        if node.size.x <= 0.0 {
+            continue;
+        }
+        let Some(track) = parents.iter_ancestors(item).find(|e| tracks.contains(*e)) else {
+            commands.entity(item).remove::<Reveal>();
+            continue;
+        };
+        let Ok((view, view_at, mut scroll)) = tracks.get_mut(track) else {
+            continue;
+        };
+        if view.size.x <= 0.0 {
+            continue;
+        }
+        let scale = node.inverse_scale_factor;
+        let (w, view_w) = (node.size.x * scale, view.size.x * view.inverse_scale_factor);
+        let left =
+            (at.translation.x - view_at.translation.x) * scale + view_w / 2.0 - w / 2.0 + scroll.x;
+        let max = ((view.content_size().x - view.size.x) * view.inverse_scale_factor).max(0.0);
+        if left < scroll.x {
+            scroll.x = left.clamp(0.0, max);
+        } else if left + w > scroll.x + view_w {
+            scroll.x = (left + w - view_w).clamp(0.0, max);
+        }
+        commands.entity(item).remove::<Reveal>();
+    }
+}
+
 pub struct KitPlugin;
 
 impl Plugin for KitPlugin {
@@ -791,9 +886,16 @@ impl Plugin for KitPlugin {
             crate::ui::spinner::SpinnerPlugin,
             crate::ui::markdown::MarkdownPlugin,
             crate::ui::media::MediaPlugin,
+            crate::ui::people::PeoplePlugin,
+            crate::ui::code_select::CodeSelectPlugin,
         ))
         .add_message::<FieldCommitted>()
         .add_observer(commit_on_blur)
+        .add_observer(wheel_sideways)
+        .add_systems(
+            PostUpdate,
+            reveal_in_track.after(bevy::ui::UiSystems::Layout),
+        )
         .add_systems(Update, (commit_on_enter, pointer_cursor))
         .add_systems(PostUpdate, (restyle, hover).chain())
         .add_systems(PostUpdate, (relift_labels, resize_with_text));

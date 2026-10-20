@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use clusia_harness::testkit::{Call, FakeClaude, Script};
 use clusia_protocol::{Client, ClientError, Command, Event, Reply, SessionStateKind, topics};
@@ -103,7 +102,7 @@ pub fn session_ended(event: &Event) -> bool {
 pub async fn calls(dir: &Path, count: usize) -> Vec<Call> {
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        FakeClaude::wait_for_calls(&dir, count, Duration::from_secs(5))
+        FakeClaude::wait_for_calls(&dir, count, clusia_core::testkit::HANG_BOUND)
     })
     .await
     .unwrap()

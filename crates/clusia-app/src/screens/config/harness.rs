@@ -19,7 +19,7 @@ use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Fill, Stroke, Type, Variant, button, checkbox, disabled_button, disabled_checkbox, text,
-    text_field,
+    text_field, wrapped_text,
 };
 
 /// The warning under a custom command: Clúsia cannot sandbox what it does not own.
@@ -499,7 +499,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
             ))
             .with_children(|c| {
                 title_with_radio(c, fonts, kind.name(), Type::STRONG, selected);
-                c.spawn(text(fonts, about, Type::META));
+                c.spawn(wrapped_text(fonts, about, Type::META));
             });
         }
     });
@@ -537,7 +537,7 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
                     min_width: px(0),
                     ..default()
                 },
-                children![text(fonts, SANDBOX_NOTICE, Type::BODY)],
+                children![wrapped_text(fonts, SANDBOX_NOTICE, Type::BODY)],
             ));
             c.spawn(link(fonts, "How to write one", PROTOCOL_DOCS_URL));
         });

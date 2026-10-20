@@ -37,7 +37,7 @@ use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Field, FieldCommitted, Fill, HoverFill, Stroke, Type, Variant, button, segment, segments, text,
-    text_field,
+    text_field, wrapped_text,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -441,6 +441,8 @@ pub fn row(
     .with_children(|c| {
         c.spawn(Node {
             column_gap: px(16),
+            row_gap: px(8),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })
@@ -455,7 +457,15 @@ pub fn row(
             ));
             control(r);
             if !hint.is_empty() {
-                r.spawn(text(fonts, hint.to_string(), Type::META));
+                // Beside the control while there is room, under it when there is not, and
+                // wrapping even inside a word when it is wider than the page.
+                r.spawn((
+                    wrapped_text(fonts, hint.to_string(), Type::META),
+                    Node {
+                        max_width: percent(100),
+                        ..default()
+                    },
+                ));
             }
         });
         if let Some((key, message)) = error {

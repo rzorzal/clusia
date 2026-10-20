@@ -22,7 +22,7 @@ use crate::review_state::{EditTarget, Editor, ReviewTabs, Tab, Tickets};
 use crate::screens::review::ReviewSystems;
 use crate::theme::Swatch;
 use crate::ui::composer::{AreaSize, ComposerKey, ComposerView, Slot, composer};
-use crate::ui::kit::{Stroke, Type, Variant, button, card, disabled_button, text};
+use crate::ui::kit::{Stroke, Type, Variant, button, card, disabled_button, text, wrapping_button};
 use crate::ui::text_area::TextSubmitted;
 
 /// The `TextArea::id` of every comment editor.
@@ -109,6 +109,8 @@ pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor
             }
             f.spawn(Node {
                 column_gap: px(8),
+                row_gap: px(6),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Center,
                 ..default()
             })
@@ -120,7 +122,7 @@ pub fn editor_box(p: &mut ChildSpawnerCommands, fonts: &UiFonts, editor: &Editor
                 });
                 if matches!(editor.target, EditTarget::Line { .. }) {
                     row.spawn((
-                        button(fonts, "Ask the agent about this line", Variant::Ghost),
+                        wrapping_button(fonts, "Ask the agent about this line", Variant::Ghost),
                         AskAgentButton(pr.clone()),
                         observe(on_ask_agent),
                     ));

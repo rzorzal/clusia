@@ -316,23 +316,16 @@ async fn sync_changes_are_published() {
 
 #[tokio::test]
 async fn changing_a_github_setting_syncs_again_at_once() {
-    use std::os::unix::fs::PermissionsExt;
-
     let server = MockServer::start().await;
     mount_lists(&server, vec![issue(7, "acme/widgets")], vec![], None).await;
     // A `gh` that has a token only once the flag file exists.
     let tools = tempfile::tempdir().unwrap();
     let flag = tools.path().join("signed-in");
     let gh = tools.path().join("gh");
-    std::fs::write(
+    clusia_core::testkit::write_executable(
         &gh,
-        format!(
-            "#!/bin/sh\n[ -f '{}' ] && echo tok || exit 1\n",
-            flag.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("[ -f '{}' ] && echo tok || exit 1", flag.display()),
+    );
     let mut options = test_options();
     options.github_api = Some(server.uri());
     options.gh_program = gh;

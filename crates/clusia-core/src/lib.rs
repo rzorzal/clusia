@@ -17,6 +17,7 @@ pub mod logging;
 pub mod media;
 pub mod notify;
 pub mod paths;
+pub mod people;
 pub mod permissions;
 pub mod pr;
 pub mod prdata;
@@ -26,6 +27,8 @@ pub mod revalidation;
 pub mod review;
 pub mod story;
 pub mod tabs;
+#[cfg(any(test, feature = "test-kit"))]
+pub mod testkit;
 pub mod time;
 
 pub use activity::{Activity, ActivityKind, ActivitySummary, DayCount};
@@ -50,6 +53,7 @@ pub use hidden::{HiddenComments, HiddenState};
 pub use media::{MAX_MEDIA_BYTES, MediaKind};
 pub use notify::OpenTarget;
 pub use paths::{LAUNCH_AGENT_FILE, Paths, PathsError};
+pub use people::Profile;
 pub use pr::{PrDetail, PrFilter, PrRef, PrRefError, PrSummary};
 pub use prdata::{
     ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, ReviewCache, ReviewInfo,

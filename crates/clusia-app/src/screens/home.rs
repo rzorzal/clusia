@@ -29,7 +29,7 @@ use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Field, FieldCommitted, Fill, HoverFill, Stroke, Type, Variant, button, card, chip, panel, text,
-    text_field,
+    text_field, wrapped_text,
 };
 
 pub const PAGE_SIZE: usize = 4;
@@ -728,6 +728,8 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, headline: &str, sync: &
                 align_items: AlignItems::Center,
                 border: px(1).all(),
                 border_radius: BorderRadius::MAX,
+                flex_shrink: 1.0,
+                min_width: px(0),
                 ..default()
             },
             Swatch::Surface,
@@ -745,7 +747,7 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, headline: &str, sync: &
             },
             dot,
         ));
-        c.spawn(text(fonts, sync.0.clone(), Type::BODY.ink(ink)));
+        c.spawn(wrapped_text(fonts, sync.0.clone(), Type::BODY.ink(ink)));
     });
 }
 
@@ -794,7 +796,9 @@ fn heatmap(
         for &(col, name) in months {
             g.spawn((
                 Node {
-                    grid_column: GridPlacement::start(col as i16 + 1),
+                    // A name is wider than a week's column: it spans three, and the last
+                    // ones start early enough to stay on the grid.
+                    grid_column: GridPlacement::start_span(col.min(WEEKS - 3) as i16 + 1, 3),
                     ..default()
                 },
                 children![text(fonts, name, Type::META)],
@@ -918,10 +922,24 @@ fn list_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, list: &ListView) {
                     ..default()
                 })
                 .with_children(|line| {
-                    line.spawn(text(fonts, row.number.clone(), Type::MONO));
-                    line.spawn(text(fonts, row.title.clone(), Type::BODY));
+                    line.spawn((
+                        text(fonts, row.number.clone(), Type::MONO),
+                        Node {
+                            flex_shrink: 0.0,
+                            ..default()
+                        },
+                    ));
+                    line.spawn(Node {
+                        flex_grow: 1.0,
+                        flex_basis: px(0),
+                        min_width: px(0),
+                        ..default()
+                    })
+                    .with_children(|title| {
+                        title.spawn(wrapped_text(fonts, row.title.clone(), Type::BODY));
+                    });
                 });
-                t.spawn(text(fonts, row.meta.clone(), Type::META));
+                t.spawn(wrapped_text(fonts, row.meta.clone(), Type::META));
             });
             if let Some((badge, warning)) = row.badge {
                 let (fill, ink) = if warning {
@@ -933,6 +951,7 @@ fn list_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, list: &ListView) {
                     Node {
                         padding: UiRect::axes(px(8), px(2)),
                         border_radius: BorderRadius::MAX,
+                        flex_shrink: 0.0,
                         ..default()
                     },
                     fill,
@@ -1252,6 +1271,17 @@ mod tests {
         assert_eq!(v.months, [(0, "Sep")]);
     }
 
+    /// The scroll area of Home's lists (the tab bar has one too).
+    fn list_scroll(app: &mut App) -> Entity {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(Entity, &Node), With<ScrollArea>>();
+        q.iter(app.world())
+            .find(|(_, n)| n.overflow == Overflow::scroll_y())
+            .map(|(e, _)| e)
+            .expect("the list scrolls")
+    }
+
     #[test]
     fn home_scroll_area_is_bounded_by_the_window() {
         let mut app = testing::app(fixture::demo(NOW));
@@ -1259,12 +1289,51 @@ mod tests {
         let screen = testing::find::<HomeScreen>(&mut app, |_| true);
         let node = app.world().get::<Node>(screen).unwrap();
         assert_eq!(node.flex_direction, FlexDirection::Column);
-        let scroll = testing::find::<ScrollArea>(&mut app, |_| true);
+        let scroll = list_scroll(&mut app);
         let node = app.world().get::<Node>(scroll).unwrap();
         assert_eq!(node.overflow, Overflow::scroll_y());
         assert_eq!(node.height, percent(100));
         assert_eq!(node.min_height, px(0));
         assert_eq!(node.flex_grow, 1.0);
+    }
+
+    #[test]
+    fn long_titles_wrap_inside_their_rows_and_the_list_scrolls_in_a_short_window() {
+        let token = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it";
+        for (height, large) in [(800, false), (800, true), (420, false), (420, true)] {
+            let mut snap = fixture::demo(NOW);
+            for p in snap.assigned.iter_mut().chain(snap.mine.iter_mut()) {
+                p.title = format!("{token} {token} {token}");
+                p.author = token.into();
+            }
+            let mut app = testing::layout_app(snap, UVec2::new(1280, height));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            testing::settle(&mut app);
+            let rows = testing::entities::<HomeRow>(&mut app);
+            assert!(!rows.is_empty());
+            for row in rows {
+                assert_eq!(
+                    testing::texts_past_right(&mut app, row),
+                    Vec::<String>::new(),
+                    "{height} large={large}"
+                );
+            }
+            let scroll = list_scroll(&mut app);
+            let (_, y, _, h) = testing::frame(&app, scroll);
+            assert!(
+                y + h <= height as f32 + 0.5,
+                "{height}: the list ends in the window"
+            );
+            if height == 420 {
+                let node = app.world().get::<bevy::ui::ComputedNode>(scroll).unwrap();
+                assert!(
+                    node.content_size.y > node.size.y,
+                    "{height} large={large}: the list is taller than its box and scrolls"
+                );
+            }
+        }
     }
 
     #[test]

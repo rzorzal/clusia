@@ -11,7 +11,7 @@ use std::time::Duration;
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::ui::{CalculatedClip, ComputedNode, UiGlobalTransform, UiSystems};
-use bevy::window::PrimaryWindow;
+use bevy::window::{PrimaryWindow, WindowOccluded};
 use bevy::winit::{UpdateMode, WinitSettings};
 use clusia_core::media::MediaKind;
 use clusia_protocol::MediaFile;
@@ -22,7 +22,7 @@ use image::{
 use crate::bridge::{Ask, Asks, MediaError};
 use crate::fonts::UiFonts;
 use crate::ui::composer::popover::sync_popovers;
-use crate::ui::kit::{Type, text};
+use crate::ui::kit::{Type, wrapped_text};
 use crate::ui::markdown::{MdImage, link_chip};
 
 /// Frames kept from one GIF.
@@ -302,7 +302,7 @@ fn fill_slots(
         match state {
             MediaState::Loading => {
                 e.with_children(|p| {
-                    p.spawn(text(&fonts, "Loading image…", Type::META));
+                    p.spawn(wrapped_text(&fonts, "Loading image…", Type::META));
                 });
             }
             MediaState::Image(handle) => {
@@ -335,9 +335,25 @@ fn size_slot(e: &mut EntityCommands, size: Option<UVec2>) {
     });
 }
 
+/// Whether the window is minimized or fully covered. Winit reports it as an occlusion, and a
+/// minimized window can keep its size, so the layout alone cannot tell.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct WindowCovered(bool);
+
+fn track_occlusion(mut events: MessageReader<WindowOccluded>, mut covered: ResMut<WindowCovered>) {
+    // The app has a single window, so the last report is the state.
+    if let Some(last) = events.read().last()
+        && covered.0 != last.occluded
+    {
+        covered.0 = last.occluded;
+    }
+}
+
 /// Marks each GIF as visible when it is shown, inside the window and inside its scroll
-/// areas' clip. Pictures that are hidden (another section, another tab) have no size.
+/// areas' clip. Pictures that are hidden (another section, another tab) have no size, and
+/// none counts while the window is covered.
 fn track_visibility(
+    covered: Res<WindowCovered>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut gifs: Query<(
         &mut GifAnim,
@@ -352,13 +368,14 @@ fn track_visibility(
         .ok()
         .map(|w| Vec2::new(w.physical_width() as f32, w.physical_height() as f32));
     for (mut gif, node, transform, clip, inherited) in &mut gifs {
-        let visible = on_screen(
-            inherited.get(),
-            transform.affine().translation,
-            node.size,
-            clip.map(|c| c.clip),
-            window,
-        );
+        let visible = !covered.0
+            && on_screen(
+                inherited.get(),
+                transform.affine().translation,
+                node.size,
+                clip.map(|c| c.clip),
+                window,
+            );
         if gif.visible != visible {
             gif.visible = visible;
         }
@@ -427,6 +444,8 @@ pub struct MediaPlugin;
 impl Plugin for MediaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MediaCache>()
+            .add_message::<WindowOccluded>()
+            .init_resource::<WindowCovered>()
             .init_resource::<GifClock>()
             .add_systems(
                 Update,
@@ -440,7 +459,7 @@ impl Plugin for MediaPlugin {
             // it gets a size, before the event loop settles on how long to wait.
             .add_systems(
                 PostUpdate,
-                (track_visibility, gif_clock)
+                (track_occlusion, track_visibility, gif_clock)
                     .chain()
                     .after(UiSystems::PostLayout),
             );
@@ -913,6 +932,107 @@ mod tests {
         }
         assert!(app.world().get::<GifAnim>(e).unwrap().visible);
         assert_eq!(seen, HashSet::from([0, 1, 2]), "on screen it moves again");
+    }
+
+    #[test]
+    fn an_occluded_window_stops_its_gifs_and_the_clock_until_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let gif = write_gif(dir.path(), "a.gif", 3, 100);
+        let mut app = app();
+        app.insert_resource(WinitSettings::desktop_app());
+        let e = slot(&mut app, URL);
+        deliver(&mut app, URL, Ok(file(&gif, MediaKind::Gif)));
+        show(&mut app, e);
+        stepping(&mut app, 16);
+        for _ in 0..10 {
+            app.update();
+        }
+        assert!(app.world().resource::<GifClock>().waiting.is_some());
+        let occlude = |app: &mut App, occluded: bool| {
+            app.world_mut().write_message(WindowOccluded {
+                window: Entity::PLACEHOLDER,
+                occluded,
+            });
+        };
+        occlude(&mut app, true);
+        for _ in 0..3 {
+            app.update();
+        }
+        let frozen = frame_index(&app, e);
+        let switches = app.world().resource::<GifClock>().switches;
+        for _ in 0..40 {
+            app.update();
+        }
+        assert_eq!(frame_index(&app, e), frozen, "no frame while occluded");
+        assert!(!app.world().get::<GifAnim>(e).unwrap().visible);
+        let clock = app.world().resource::<GifClock>().clone();
+        assert_eq!(clock.waiting, None, "the window goes back to sleeping");
+        assert_eq!(clock.switches, switches, "and stays there");
+        occlude(&mut app, false);
+        let mut seen = HashSet::new();
+        for _ in 0..40 {
+            app.update();
+            seen.insert(frame_index(&app, e));
+        }
+        assert!(seen.len() > 1, "restored, it moves again");
+        assert!(app.world().resource::<GifClock>().waiting.is_some());
+    }
+
+    #[test]
+    fn occlusion_leaves_the_spinners_pace_in_place() {
+        use crate::ui::spinner::{Pace, spinner};
+        let dir = tempfile::tempdir().unwrap();
+        let gif = write_gif(dir.path(), "a.gif", 3, 100);
+        let mut app = app();
+        app.insert_resource(WinitSettings::desktop_app());
+        app.world_mut().spawn(spinner());
+        let e = slot(&mut app, URL);
+        deliver(&mut app, URL, Ok(file(&gif, MediaKind::Gif)));
+        show(&mut app, e);
+        stepping(&mut app, 16);
+        for _ in 0..10 {
+            app.update();
+        }
+        let spin = Duration::from_millis(100);
+        let gif_wait = Duration::from_millis(50);
+        let focused = |app: &App| app.world().resource::<WinitSettings>().focused_mode;
+        assert_eq!(
+            focused(&app),
+            UpdateMode::reactive(gif_wait),
+            "the GIF wakes sooner than the spinner"
+        );
+        app.world_mut().write_message(WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: true,
+        });
+        for _ in 0..10 {
+            app.update();
+        }
+        let switches = app.world().resource::<GifClock>().switches;
+        assert_eq!(app.world().resource::<GifClock>().waiting, None);
+        assert_eq!(
+            focused(&app),
+            UpdateMode::reactive(spin),
+            "the spinner keeps its own wake-up"
+        );
+        assert_eq!(
+            app.world().resource::<WinitSettings>().unfocused_mode,
+            UpdateMode::reactive(spin)
+        );
+        assert_eq!(app.world().resource::<Pace>().0, Some(spin));
+        for _ in 0..40 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<GifClock>().switches, switches);
+        assert_eq!(focused(&app), UpdateMode::reactive(spin), "no tug of war");
+        app.world_mut().write_message(WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: false,
+        });
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(focused(&app), UpdateMode::reactive(gif_wait));
     }
 
     #[test]

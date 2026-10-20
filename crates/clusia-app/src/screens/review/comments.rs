@@ -26,10 +26,11 @@ use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Stroke, Tone, Type, Variant, avatar, badge, button, card, chip, divider, panel, text,
+    Stroke, Tone, Type, Variant, badge, button, card, chip, divider, panel, text, wrapped_text,
 };
-use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::parse::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown};
+use crate::ui::people::{person_avatar, person_name};
 use crate::ui::text_area::set_text;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -600,15 +601,19 @@ fn list(
     for t in &v.threads {
         p.spawn(Node {
             column_gap: px(8),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             margin: UiRect::top(px(6)),
             ..default()
         })
         .with_children(|h| {
-            h.spawn(text(
-                fonts,
-                t.heading.clone(),
-                Type::MONO.ink(Swatch::Muted),
+            h.spawn((
+                wrapped_text(fonts, t.heading.clone(), Type::MONO.ink(Swatch::Muted)),
+                Node {
+                    max_width: percent(100),
+                    ..default()
+                },
             ));
             if t.outdated {
                 h.spawn(badge(fonts, "outdated", Tone::Orange));
@@ -765,7 +770,7 @@ fn post_row(
         ..default()
     })
     .with_children(|r| {
-        r.spawn(avatar(fonts, &post.author));
+        r.spawn(person_avatar(fonts, &post.author, 22.0));
         r.spawn(Node {
             flex_direction: FlexDirection::Column,
             row_gap: px(4),
@@ -776,11 +781,13 @@ fn post_row(
         .with_children(|c| {
             c.spawn(Node {
                 column_gap: px(8),
+                row_gap: px(4),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Center,
                 ..default()
             })
             .with_children(|h| {
-                h.spawn(text(fonts, format!("@{}", post.author), Type::STRONG));
+                h.spawn(person_name(fonts, &post.author));
                 let meta = [post.verb, post.age.as_str()]
                     .into_iter()
                     .filter(|s| !s.is_empty())
@@ -807,7 +814,7 @@ fn post_row(
                     observe(on_hide),
                 ));
             });
-            markdown(c, fonts, &parse(&post.body), opts);
+            markdown(c, fonts, &parse_in(&post.body, &opts.github_host, pr), opts);
         });
     });
 }
@@ -838,6 +845,8 @@ fn draft_reply(
     .with_children(|c| {
         c.spawn(Node {
             column_gap: px(8),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })
@@ -866,7 +875,7 @@ fn draft_reply(
                 observe(on_remove),
             ));
         });
-        markdown(c, fonts, &parse(&d.body), opts);
+        markdown(c, fonts, &parse_in(&d.body, &opts.github_host, pr), opts);
     });
 }
 
@@ -1105,6 +1114,7 @@ mod tests {
     use crate::fixture;
     use crate::testing::{self, NOW};
     use crate::ui::kit::Fill;
+    use crate::ui::markdown::parse::parse;
     use crate::ui::markdown::{CopiedText, CopyMarkdown, MdBody, MdImage};
     use bevy::ecs::system::RunSystemOnce;
 
@@ -1170,6 +1180,38 @@ mod tests {
     fn has_text(app: &mut App, needle: &str) -> bool {
         let mut q = app.world_mut().query::<&Text>();
         q.iter(app.world()).any(|t| t.0.contains(needle))
+    }
+
+    #[test]
+    fn comment_authors_open_their_profiles() {
+        use crate::platform_open::OpenUrls;
+        use crate::ui::people::{PersonAvatar, PersonTarget};
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        testing::set_section(&mut app, &pr, ReviewSection::Comments);
+        testing::settle(&mut app);
+        let names = |app: &mut App, login: &str| {
+            testing::entities::<PersonTarget>(app)
+                .into_iter()
+                .filter(|e| {
+                    app.world()
+                        .get::<PersonTarget>(*e)
+                        .is_some_and(|t| t.0 == login)
+                        && app.world().get::<PersonAvatar>(*e).is_none()
+                })
+                .collect::<Vec<_>>()
+        };
+        let faces = testing::count::<PersonAvatar>(&mut app);
+        assert!(faces > 0, "every post has its avatar");
+        for login in ["mona", "hubot"] {
+            assert!(!names(&mut app, login).is_empty(), "{login} has a name");
+        }
+        let hubot = names(&mut app, "hubot")[0];
+        testing::click_button(&mut app, hubot);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            ["https://github.com/hubot"]
+        );
     }
 
     #[test]

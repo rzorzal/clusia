@@ -44,8 +44,8 @@ fn main() -> ExitCode {
         scene: args.scene,
     };
     if args.demo {
-        app::run(launch);
-        return ExitCode::SUCCESS;
+        app::run(launch.clone());
+        return screenshot_exit(&launch);
     }
     let _lock = match InstanceLock::acquire(&paths.app_lock()) {
         Ok(Some(lock)) => lock,
@@ -58,8 +58,19 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    app::run(launch);
-    ExitCode::SUCCESS
+    app::run(launch.clone());
+    screenshot_exit(&launch)
+}
+
+/// A screenshot run succeeds only when what it wrote shows content.
+fn screenshot_exit(launch: &Launch) -> ExitCode {
+    match app::check_screenshots(launch) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("clusia-app: {message}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn resolve(args: &Args) -> Result<(Paths, Option<PathBuf>), String> {
@@ -75,7 +86,9 @@ fn resolve(args: &Args) -> Result<(Paths, Option<PathBuf>), String> {
     }
 }
 
-/// Another window owns this home: ask it to show the target, then leave.
+/// Another window owns this home: ask it to show the target, then leave. Nothing is rendered
+/// here and the other window takes no screenshot for this run, so it relies on no check of its
+/// own: there is no file to check.
 fn hand_over(launch: &Launch) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

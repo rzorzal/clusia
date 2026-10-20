@@ -6,6 +6,8 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
+use clusia_core::PrRef;
+
 use crate::ui::emoji::{self, Piece};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,11 +48,13 @@ pub enum Inline {
     },
     Code {
         text: String,
+        link: Option<String>,
         space_after: bool,
     },
     /// A Twemoji file name such as `1f680.png`.
     Emoji {
         file: &'static str,
+        link: Option<String>,
         space_after: bool,
     },
     Image {
@@ -81,10 +85,49 @@ impl Inline {
     }
 }
 
+/// Where `@user`, `@org/team` and `owner/repo#123` point, and which repository a bare
+/// `#123` belongs to.
+struct Refs {
+    host: String,
+    repo: Option<(String, String)>,
+}
+
+/// `md` with no references: `@user` and `#123` stay text, because there is no GitHub host to
+/// link them to.
 pub fn parse(md: &str) -> Vec<Block> {
+    parse_with(md, None)
+}
+
+/// `parse`, with `@user`, `@org/team` and `owner/repo#123` linked to the GitHub web `host`.
+pub fn parse_on(md: &str, host: &str) -> Vec<Block> {
+    parse_with(
+        md,
+        Some(Refs {
+            host: host.to_string(),
+            repo: None,
+        }),
+    )
+}
+
+/// `parse_on` for a comment on `pr`, where a bare `#123` names an issue or pull request of the
+/// same repository and so can be a link.
+pub fn parse_in(md: &str, host: &str, pr: &PrRef) -> Vec<Block> {
+    parse_with(
+        md,
+        Some(Refs {
+            host: host.to_string(),
+            repo: Some((pr.owner.clone(), pr.repo.clone())),
+        }),
+    )
+}
+
+fn parse_with(md: &str, refs: Option<Refs>) -> Vec<Block> {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let mut p = Builder::default();
+    let mut p = Builder {
+        refs,
+        ..Builder::default()
+    };
     p.stack.push(Frame::Container(Vec::new()));
     for event in Parser::new_ext(md, options) {
         p.event(event);
@@ -137,6 +180,9 @@ struct Builder {
     code: Option<(Option<String>, String)>,
     image: Option<(String, String)>,
     table: Option<TableState>,
+    /// The closing text of the HTML comment or `<script>` / `<style>` body still open.
+    html_skip: Option<&'static str>,
+    refs: Option<Refs>,
 }
 
 impl Builder {
@@ -162,6 +208,7 @@ impl Builder {
                 Some((_, alt)) => alt.push_str(&t),
                 None => self.inlines.push(Inline::Code {
                     text: t.to_string(),
+                    link: self.style().link,
                     space_after: false,
                 }),
             },
@@ -254,7 +301,11 @@ impl Builder {
 
     fn end(&mut self, end: TagEnd) {
         match end {
-            TagEnd::Paragraph | TagEnd::HtmlBlock => self.flush_paragraph(),
+            TagEnd::Paragraph => self.flush_paragraph(),
+            TagEnd::HtmlBlock => {
+                self.html_skip = None;
+                self.flush_paragraph();
+            }
             TagEnd::Heading(level) => {
                 let inlines = self.take_inlines();
                 self.push_block(Block::Heading(level as u8, inlines));
@@ -448,6 +499,7 @@ impl Builder {
             match segment {
                 Segment::Emoji(file) => self.inlines.push(Inline::Emoji {
                     file,
+                    link: self.style().link,
                     space_after: false,
                 }),
                 Segment::Text(t) => {
@@ -455,16 +507,10 @@ impl Builder {
                         match piece {
                             Piece::Emoji(file) => self.inlines.push(Inline::Emoji {
                                 file,
+                                link: self.style().link,
                                 space_after: false,
                             }),
-                            Piece::Text(t) => {
-                                let style = self.style();
-                                self.inlines.push(Inline::Word {
-                                    text: t.to_string(),
-                                    style,
-                                    space_after: false,
-                                });
-                            }
+                            Piece::Text(t) => self.references(t),
                         }
                     }
                 }
@@ -472,17 +518,50 @@ impl Builder {
         }
     }
 
-    /// Pasted images arrive as `<img src="…">`, not as `![](…)`; `<br>` breaks the line; the
-    /// rest of the HTML is dropped.
+    /// Text that may hold `@user`, `#123` and `owner/repo#123`, each of which becomes a link
+    /// unless the text is already inside one.
+    fn references(&mut self, text: &str) {
+        let style = self.style();
+        let spans = match &self.refs {
+            Some(refs) if self.links.is_empty() => split_references(text, refs),
+            _ => vec![(text, None)],
+        };
+        for (piece, url) in spans {
+            let style = match url {
+                Some(url) => Style {
+                    link: Some(url),
+                    ..style.clone()
+                },
+                None => style.clone(),
+            };
+            self.inlines.push(Inline::Word {
+                text: piece.to_string(),
+                style,
+                space_after: false,
+            });
+        }
+    }
+
+    /// Pasted images arrive as `<img src="…">`, not as `![](…)`; `<br>` breaks the line. The
+    /// text between the tags of an HTML block (`<div>hello</div>`) stays; the tags, comments
+    /// and the contents of `<script>` and `<style>` do not.
     fn html(&mut self, html: &str) {
-        for tag in html_tags(html) {
-            match tag {
-                HtmlTag::Img { url, alt } => self.inlines.push(Inline::Image {
-                    url,
-                    alt,
-                    space_after: false,
-                }),
-                HtmlTag::Br => {
+        for part in html_parts(html, &mut self.html_skip) {
+            match part {
+                HtmlPart::Text(t) => {
+                    self.text(&decode_entities(t));
+                    self.flush_text();
+                }
+                HtmlPart::Img { url, alt } => {
+                    self.flush_text();
+                    self.inlines.push(Inline::Image {
+                        url,
+                        alt,
+                        space_after: false,
+                    });
+                }
+                HtmlPart::Br => {
+                    self.flush_text();
                     if !matches!(self.inlines.last(), None | Some(Inline::Break)) {
                         self.mark_space(false);
                         self.inlines.push(Inline::Break);
@@ -555,6 +634,112 @@ fn split_url(word: &str) -> (&str, Option<&str>, &str) {
     (word, None, "")
 }
 
+/// Splits `text` into runs, each with the GitHub address it links to, if any: `@user`,
+/// `@org/team`, `owner/repo#123`, and `#123` when `refs` says which repository it is in.
+fn split_references<'a>(text: &'a str, refs: &Refs) -> Vec<(&'a str, Option<String>)> {
+    let host = refs.host.as_str();
+    let mut out = Vec::new();
+    let mut plain_from = 0;
+    let mut prev: Option<char> = None;
+    let mut chars = text.char_indices();
+    while let Some((i, c)) = chars.next() {
+        let boundary = !prev.is_some_and(|p| p.is_alphanumeric() || "_-/.@#".contains(p));
+        prev = Some(c);
+        if !boundary {
+            continue;
+        }
+        let rest = &text[i..];
+        let found = match c {
+            '@' => mention(rest, host),
+            '#' => refs
+                .repo
+                .as_ref()
+                .and_then(|(owner, name)| issue(rest, host, owner, name)),
+            c if c.is_ascii_alphanumeric() => full_reference(rest, host),
+            _ => None,
+        };
+        let Some((len, url)) = found else { continue };
+        if plain_from < i {
+            out.push((&text[plain_from..i], None));
+        }
+        out.push((&rest[..len], Some(url)));
+        plain_from = i + len;
+        // The reference's own characters are consumed; the next one starts after it.
+        let skip = text[i..plain_from].chars().count() - 1;
+        chars.by_ref().take(skip).for_each(drop);
+        prev = text[..plain_from].chars().next_back();
+    }
+    if plain_from < text.len() {
+        out.push((&text[plain_from..], None));
+    }
+    out
+}
+
+/// The length of the leading run of `rest` whose characters satisfy `ok`.
+fn run(rest: &str, ok: impl Fn(char) -> bool) -> usize {
+    rest.find(|c: char| !ok(c)).unwrap_or(rest.len())
+}
+
+fn name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-'
+}
+
+/// `@user`, or `@org/team`. A hyphen at the end of a name is not part of it.
+fn mention(rest: &str, host: &str) -> Option<(usize, String)> {
+    let body = &rest[1..];
+    let user = run(body, name_char);
+    let name = body[..user].trim_end_matches('-');
+    if name.is_empty() || user > 39 || body.starts_with('-') {
+        return None;
+    }
+    if name.len() == user
+        && let Some(after) = body[user..].strip_prefix('/')
+    {
+        let team = run(after, |c| name_char(c) || c == '_');
+        if team > 0 && !after[..team].ends_with('-') {
+            let url = format!("https://{host}/orgs/{name}/teams/{}", &after[..team]);
+            return Some((1 + user + 1 + team, url));
+        }
+    }
+    Some((1 + name.len(), format!("https://{host}/{name}")))
+}
+
+/// The digits after the `#` of `rest`, when nothing alphanumeric follows them.
+fn number(rest: &str) -> Option<usize> {
+    let digits = run(rest, |c| c.is_ascii_digit());
+    let follows = rest[digits..].chars().next();
+    (digits > 0 && digits <= 9 && !follows.is_some_and(|c| c.is_alphanumeric() || c == '_'))
+        .then_some(digits)
+}
+
+fn issue(rest: &str, host: &str, owner: &str, repo: &str) -> Option<(usize, String)> {
+    let digits = number(&rest[1..])?;
+    let n = &rest[1..1 + digits];
+    Some((
+        1 + digits,
+        format!("https://{host}/{owner}/{repo}/issues/{n}"),
+    ))
+}
+
+/// `owner/repo#123`.
+fn full_reference(rest: &str, host: &str) -> Option<(usize, String)> {
+    let owner = run(rest, |c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let after = rest[owner..].strip_prefix('/')?;
+    let repo = run(after, |c| c.is_ascii_alphanumeric() || "._-".contains(c));
+    let tail = after[repo..].strip_prefix('#')?;
+    let digits = number(tail)?;
+    if owner == 0 || repo == 0 || owner > 39 {
+        return None;
+    }
+    let url = format!(
+        "https://{host}/{}/{}/issues/{}",
+        &rest[..owner],
+        &after[..repo],
+        &tail[..digits]
+    );
+    Some((owner + 1 + repo + 1 + digits, url))
+}
+
 enum Segment<'a> {
     Text(&'a str),
     Emoji(&'static str),
@@ -593,38 +778,131 @@ fn split_shortcodes(text: &str) -> Vec<Segment<'_>> {
     out
 }
 
-enum HtmlTag {
+enum HtmlPart<'a> {
+    Text(&'a str),
     Img { url: String, alt: String },
     Br,
 }
 
-fn html_tags(html: &str) -> Vec<HtmlTag> {
+/// What an HTML-block line says that the window shows. `skip` is the construct (a comment or
+/// the body of `<script>` / `<style>`) a previous line left open, and the closing text it is
+/// waiting for.
+fn html_parts<'a>(html: &'a str, skip: &mut Option<&'static str>) -> Vec<HtmlPart<'a>> {
     let mut out = Vec::new();
     let mut rest = html;
-    while let Some(open) = rest.find('<') {
-        rest = &rest[open + 1..];
-        let Some(close) = rest.find('>') else { break };
-        let tag = &rest[..close];
+    loop {
+        if let Some(close) = *skip {
+            match find_ignoring_case(rest, close) {
+                Some(at) => {
+                    rest = &rest[at + close.len()..];
+                    *skip = None;
+                }
+                None => return out,
+            }
+        }
+        let Some(open) = rest.find('<') else {
+            if !rest.is_empty() {
+                out.push(HtmlPart::Text(rest));
+            }
+            return out;
+        };
+        let after = &rest[open + 1..];
+        let starts_tag = after.starts_with(['!', '/']) || after.starts_with(char::is_alphabetic);
+        if !starts_tag {
+            // A lone `<` is text; the next one starts the search again.
+            let upto = open + 1;
+            out.push(HtmlPart::Text(&rest[..upto]));
+            rest = &rest[upto..];
+            continue;
+        }
+        if open > 0 {
+            out.push(HtmlPart::Text(&rest[..open]));
+        }
+        if let Some(comment) = after.strip_prefix("!--") {
+            *skip = Some("-->");
+            rest = comment;
+            continue;
+        }
+        let Some(close) = after.find('>') else {
+            return out;
+        };
+        let tag = &after[..close];
         let name = tag
             .split(|c: char| c.is_whitespace() || c == '/')
-            .next()
+            .find(|n| !n.is_empty())
             .unwrap_or("")
             .to_ascii_lowercase();
+        let closing = tag.starts_with('/');
         match name.as_str() {
             "img" => {
                 if let Some(url) = attribute(tag, "src") {
-                    out.push(HtmlTag::Img {
+                    out.push(HtmlPart::Img {
                         url,
                         alt: attribute(tag, "alt").unwrap_or_default(),
                     });
                 }
             }
-            "br" => out.push(HtmlTag::Br),
+            "br" => out.push(HtmlPart::Br),
+            "script" if !closing && !tag.ends_with('/') => *skip = Some("</script>"),
+            "style" if !closing && !tag.ends_with('/') => *skip = Some("</style>"),
             _ => {}
         }
-        rest = &rest[close + 1..];
+        rest = &after[close + 1..];
     }
+}
+
+/// The byte offset of the first `needle` (lowercase ASCII) in `hay`, whatever its case.
+fn find_ignoring_case(hay: &str, needle: &str) -> Option<usize> {
+    hay.as_bytes()
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// The entities HTML written by hand uses: the five named ones and numeric ones. Anything
+/// else (an unknown name, a number that is no character) stays as written.
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        match entity(rest) {
+            Some((c, len)) => {
+                out.push(c);
+                rest = &rest[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
     out
+}
+
+/// The character the entity at the start of `s` (which begins with `&`) stands for, and its
+/// length in bytes.
+fn entity(s: &str) -> Option<(char, usize)> {
+    // Longer than any entity worth decoding, so a stray `&` never scans far.
+    let end = s.bytes().take(12).position(|b| b == b';')?;
+    let name = &s[1..end];
+    let c = match name {
+        "nbsp" => ' ',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "amp" => '&',
+        _ => {
+            let digits = name.strip_prefix('#')?;
+            let code = match digits.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => digits.parse().ok()?,
+            };
+            char::from_u32(code).filter(|c| *c != '\0')?
+        }
+    };
+    Some((c, end + 1))
 }
 
 /// The quoted value of `name="…"` (or `'…'`) inside one tag.
@@ -679,6 +957,313 @@ mod tests {
             [Block::Paragraph(inlines)] => inlines.clone(),
             other => panic!("not one paragraph: {other:?}"),
         }
+    }
+
+    #[test]
+    fn code_and_emoji_inside_a_link_keep_it() {
+        let url = "https://github.com/acme/widgets";
+        assert_eq!(
+            para("[`parse()` :rocket: 🚀](https://github.com/acme/widgets)"),
+            vec![
+                Inline::Code {
+                    text: "parse()".into(),
+                    link: Some(url.into()),
+                    space_after: true,
+                },
+                Inline::Emoji {
+                    file: "1f680.png",
+                    link: Some(url.into()),
+                    space_after: true,
+                },
+                Inline::Emoji {
+                    file: "1f680.png",
+                    link: Some(url.into()),
+                    space_after: false,
+                },
+            ]
+        );
+        assert_eq!(
+            para("`a` :rocket:"),
+            vec![
+                Inline::Code {
+                    text: "a".into(),
+                    link: None,
+                    space_after: true,
+                },
+                Inline::Emoji {
+                    file: "1f680.png",
+                    link: None,
+                    space_after: false,
+                },
+            ]
+        );
+        assert_eq!(
+            para("[`a`](http://insecure.example)"),
+            vec![Inline::Code {
+                text: "a".into(),
+                link: None,
+                space_after: false,
+            }],
+            "a link the window cannot open is not a link"
+        );
+    }
+
+    #[test]
+    fn html_blocks_keep_their_text() {
+        assert_eq!(para("<div>hello</div>"), vec![word("hello", false)]);
+        assert_eq!(
+            parse("<details>\n<summary>Details</summary>\n\nmore here\n\n</details>"),
+            vec![
+                Block::Paragraph(vec![word("Details", false)]),
+                Block::Paragraph(vec![word("more", true), word("here", false)]),
+            ]
+        );
+        assert_eq!(
+            para("<p>fish &amp; chips &lt;3</p>"),
+            vec![
+                word("fish", true),
+                word("&", true),
+                word("chips", true),
+                word("<3", false)
+            ]
+        );
+        assert_eq!(
+            para("<div>a < b</div>"),
+            vec![word("a", true), word("<", true), word("b", false)]
+        );
+    }
+
+    #[test]
+    fn html_blocks_drop_comments_scripts_and_styles() {
+        assert_eq!(
+            para("<!-- hidden > note -->\n<div>shown</div>"),
+            vec![word("shown", false)]
+        );
+        assert_eq!(
+            para("<!--\nhidden\n-->\n<div>shown</div>"),
+            vec![word("shown", false)]
+        );
+        assert_eq!(
+            para("<style>\np { color: red }\n</style>\n<div>shown</div>"),
+            vec![word("shown", false)]
+        );
+    }
+
+    #[test]
+    fn html_images_keep_their_place_among_text() {
+        assert_eq!(
+            para("<p>see <img src=\"https://example.com/a.png\" alt=\"a\"> below</p>"),
+            vec![
+                word("see", true),
+                Inline::Image {
+                    url: "https://example.com/a.png".into(),
+                    alt: "a".into(),
+                    space_after: true,
+                },
+                word("below", false),
+            ]
+        );
+        assert_eq!(
+            para("a <b>bold</b> c"),
+            vec![word("a", true), word("bold", true), word("c", false)],
+            "inline tags are dropped, their text is already text"
+        );
+    }
+
+    fn widgets() -> PrRef {
+        PrRef::new("acme", "widgets", 7).unwrap()
+    }
+
+    fn para_in(md: &str) -> Vec<Inline> {
+        match parse_in(md, "github.com", &widgets()).as_slice() {
+            [Block::Paragraph(inlines)] => inlines.clone(),
+            other => panic!("not one paragraph: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mentions_and_references_become_links() {
+        assert_eq!(
+            para_in("thanks @alice, see #12 and acme/gadgets#3."),
+            vec![
+                word("thanks", true),
+                styled("@alice", link("https://github.com/alice"), false),
+                word(",", true),
+                word("see", true),
+                styled(
+                    "#12",
+                    link("https://github.com/acme/widgets/issues/12"),
+                    true
+                ),
+                word("and", true),
+                styled(
+                    "acme/gadgets#3",
+                    link("https://github.com/acme/gadgets/issues/3"),
+                    false
+                ),
+                word(".", false),
+            ]
+        );
+        assert_eq!(
+            para_in("ping @acme/reviewers"),
+            vec![
+                word("ping", true),
+                styled(
+                    "@acme/reviewers",
+                    link("https://github.com/orgs/acme/teams/reviewers"),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_that_only_looks_like_a_reference_stays_text() {
+        assert_eq!(
+            para_in("mail bob@example.com, C#, #12abc, @-x, #, @"),
+            vec![
+                word("mail", true),
+                word("bob@example.com,", true),
+                word("C#,", true),
+                word("#12abc,", true),
+                word("@-x,", true),
+                word("#,", true),
+                word("@", false),
+            ]
+        );
+        assert_eq!(
+            para_in("`@alice` [@bob](https://github.com/bob2) <https://example.com/#12>"),
+            vec![
+                Inline::Code {
+                    text: "@alice".into(),
+                    link: None,
+                    space_after: true,
+                },
+                styled("@bob", link("https://github.com/bob2"), true),
+                styled(
+                    "https://example.com/#12",
+                    link("https://example.com/#12"),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_issue_number_needs_the_repository() {
+        let on = |md: &str| match parse_on(md, "github.com").as_slice() {
+            [Block::Paragraph(inlines)] => inlines.clone(),
+            other => panic!("not one paragraph: {other:?}"),
+        };
+        assert_eq!(
+            on("see #12 @alice acme/widgets#12"),
+            vec![
+                word("see", true),
+                word("#12", true),
+                styled("@alice", link("https://github.com/alice"), true),
+                styled(
+                    "acme/widgets#12",
+                    link("https://github.com/acme/widgets/issues/12"),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_host_nothing_is_a_reference() {
+        assert_eq!(
+            para("see @alice #12 acme/widgets#12"),
+            vec![
+                word("see", true),
+                word("@alice", true),
+                word("#12", true),
+                word("acme/widgets#12", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn references_follow_the_configured_host() {
+        let host = "ghe.acme.test";
+        let in_pr = |md: &str| match parse_in(md, host, &widgets()).as_slice() {
+            [Block::Paragraph(inlines)] => inlines.clone(),
+            other => panic!("not one paragraph: {other:?}"),
+        };
+        assert_eq!(
+            in_pr("@alice @acme/reviewers #12 acme/gadgets#3"),
+            vec![
+                styled("@alice", link("https://ghe.acme.test/alice"), true),
+                styled(
+                    "@acme/reviewers",
+                    link("https://ghe.acme.test/orgs/acme/teams/reviewers"),
+                    true
+                ),
+                styled(
+                    "#12",
+                    link("https://ghe.acme.test/acme/widgets/issues/12"),
+                    true
+                ),
+                styled(
+                    "acme/gadgets#3",
+                    link("https://ghe.acme.test/acme/gadgets/issues/3"),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_trailing_hyphen_is_not_part_of_the_mention() {
+        assert_eq!(
+            para_in("@alice- hi"),
+            vec![
+                styled("@alice", link("https://github.com/alice"), false),
+                word("-", true),
+                word("hi", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn numeric_entities_decode_and_others_stay() {
+        assert_eq!(
+            para("<p>it&#39;s &#x27;ok&#x27; &#128512; &copy; &#0; &#xD800; &amp;lt;</p>"),
+            vec![
+                word("it's", true),
+                word("'ok'", true),
+                Inline::Emoji {
+                    file: "1f600.png",
+                    link: None,
+                    space_after: true,
+                },
+                word("&copy;", true),
+                word("&#0;", true),
+                word("&#xD800;", true),
+                word("&lt;", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn many_script_pairs_on_one_line_stay_linear() {
+        let line = format!("<div>{}</div>", "<script>x</script>".repeat(20_000));
+        let start = cpu_time();
+        let blocks = parse(&line);
+        let spent = cpu_time() - start;
+        assert!(blocks.is_empty(), "{blocks:?}");
+        assert!(spent < std::time::Duration::from_secs(1), "{spent:?}");
+    }
+
+    /// CPU time of this thread, so a busy machine does not fail the budget.
+    fn cpu_time() -> std::time::Duration {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `ts` is a valid timespec for the call to fill in.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+        std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
     }
 
     #[test]
@@ -753,6 +1338,7 @@ mod tests {
                 word("call", true),
                 Inline::Code {
                     text: "a  b".into(),
+                    link: None,
                     space_after: true
                 },
                 word("now", false)
@@ -855,6 +1441,7 @@ mod tests {
                 word("it", true),
                 Inline::Emoji {
                     file: "1f680.png",
+                    link: None,
                     space_after: false
                 },
                 word("!", false)
@@ -865,6 +1452,7 @@ mod tests {
             vec![
                 Inline::Code {
                     text: ":tada:".into(),
+                    link: None,
                     space_after: true
                 },
                 word(":nope:", true),
@@ -880,10 +1468,12 @@ mod tests {
             vec![
                 Inline::Emoji {
                     file: "1f44d.png",
+                    link: None,
                     space_after: false
                 },
                 Inline::Emoji {
                     file: "1f389.png",
+                    link: None,
                     space_after: false
                 }
             ]
@@ -899,14 +1489,17 @@ mod tests {
                 word("ok", true),
                 Inline::Emoji {
                     file: "1f44d-1f3fd.png",
+                    link: None,
                     space_after: true
                 },
                 Inline::Emoji {
                     file: family,
+                    link: None,
                     space_after: true
                 },
                 Inline::Emoji {
                     file: "1f1e7-1f1f7.png",
+                    link: None,
                     space_after: false
                 },
                 word("done", false)
@@ -1030,6 +1623,7 @@ mod tests {
             rows[0][1],
             vec![Inline::Code {
                 text: "2".into(),
+                link: None,
                 space_after: false
             }]
         );

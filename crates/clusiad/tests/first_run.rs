@@ -1,6 +1,5 @@
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use clusia_protocol::{Command, FirstRun, GithubLogin, Harness, HarnessKind, Reply};
@@ -8,8 +7,7 @@ use common::{TestDaemon, test_options};
 
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let p = dir.join(name);
-    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    clusia_core::testkit::write_executable(&p, body);
     p
 }
 

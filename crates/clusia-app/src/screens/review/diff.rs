@@ -35,14 +35,16 @@ use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
 use crate::screens::review::revalidation::{Revalidations, reanchor_click};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
-use crate::ui::code::{CodeSpan, spans_for, wrapped_code_line};
+use crate::ui::code::{CodeSpan, plain_text, spans_for, wrapped_code_line};
+use crate::ui::code_select::{ClickKind, CodeSelection, LineKey, selectable};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, avatar, badge, button, card, panel,
-    segment, segments, text,
+    Clickable, Fill, HoverFill, Preview, Reveal, SideTrack, Stroke, Tone, Type, Variant, badge,
+    button, card, panel, segment, segments, text, wrapped_text, wrapping_button,
 };
-use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::parse::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
+use crate::ui::people::{person_avatar, person_name};
 
 const NO_DIFF: &str = "No diff to show for this file";
 
@@ -956,10 +958,12 @@ fn frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
             c.spawn((
                 panel(
                     Node {
-                        height: px(46),
+                        min_height: px(46),
                         flex_shrink: 0.0,
-                        padding: UiRect::horizontal(px(16)),
+                        padding: UiRect::axes(px(16), px(6)),
                         column_gap: px(8),
+                        row_gap: px(4),
+                        flex_wrap: FlexWrap::Wrap,
                         align_items: AlignItems::Center,
                         border: UiRect::bottom(px(1)),
                         ..default()
@@ -1173,11 +1177,15 @@ fn file_list(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, files: &
             r.spawn((
                 Node {
                     flex_grow: 1.0,
+                    flex_basis: px(0),
                     min_width: px(0),
-                    overflow: Overflow::clip_x(),
                     ..default()
                 },
-                children![text(fonts, f.path.clone(), Type::MONO.ink(Swatch::Fg))],
+                children![wrapped_text(
+                    fonts,
+                    f.path.clone(),
+                    Type::MONO.ink(Swatch::Fg)
+                )],
             ));
             r.spawn(text(
                 fonts,
@@ -1195,10 +1203,12 @@ fn file_list(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, files: &
 
 fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &DiffView) {
     if let Some(path) = &v.path {
-        p.spawn(text(
-            fonts,
-            path.clone(),
-            Type::MONO.ink(Swatch::Fg).size(13.0),
+        p.spawn((
+            wrapped_text(fonts, path.clone(), Type::MONO.ink(Swatch::Fg).size(13.0)),
+            Node {
+                max_width: percent(100),
+                ..default()
+            },
         ));
         p.spawn(text(
             fonts,
@@ -1224,7 +1234,11 @@ pub(crate) fn mode_switch(
     let mut track = p.spawn(segments());
     track.entry::<Node>().and_modify(|mut n| {
         n.align_self = AlignSelf::Center;
+        // Narrower than its four segments, the track scrolls sideways.
+        n.max_width = percent(100);
+        n.overflow = Overflow::scroll_x();
     });
+    track.insert(SideTrack);
     track.with_children(|s| {
         for (label, mode) in [
             ("Unified", DiffMode::Unified),
@@ -1232,7 +1246,7 @@ pub(crate) fn mode_switch(
             ("Story", DiffMode::Story),
             ("Calls", DiffMode::Calls),
         ] {
-            s.spawn((
+            let mut e = s.spawn((
                 segment(fonts, label, current == mode),
                 ModeButton {
                     pr: pr.clone(),
@@ -1240,6 +1254,9 @@ pub(crate) fn mode_switch(
                 },
                 observe(on_mode),
             ));
+            if current == mode {
+                e.insert(Reveal);
+            }
         }
     });
 }
@@ -1304,7 +1321,13 @@ fn mark(p: &mut ChildSpawnerCommands, fonts: &UiFonts, kind: RowKind, size: f32)
 
 /// The code of a row. It takes the room the number and the sign leave and breaks at its edge, so
 /// a wrapped line continues under its own start, with no number of its own.
-fn code(p: &mut ChildSpawnerCommands, fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>) {
+fn code(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    size: f32,
+    spans: Vec<CodeSpan>,
+    select: Option<LineKey>,
+) {
     p.spawn(Node {
         flex_grow: 1.0,
         flex_basis: px(0),
@@ -1317,8 +1340,16 @@ fn code(p: &mut ChildSpawnerCommands, fonts: &UiFonts, size: f32, spans: Vec<Cod
         },
         ..default()
     })
-    .with_children(|c| {
-        c.spawn(wrapped_code_line(fonts, size, spans));
+    .with_children(|c| match select {
+        Some(key) => selectable(
+            c,
+            key,
+            plain_text(&spans),
+            wrapped_code_line(fonts, size, spans),
+        ),
+        None => {
+            c.spawn(wrapped_code_line(fonts, size, spans));
+        }
     });
 }
 
@@ -1398,6 +1429,7 @@ pub(crate) fn unified_rows(
         Gutter::Both => 2.0 * NUMBER_WIDTH + 18.0,
         Gutter::Head => NUMBER_WIDTH,
     };
+    let group = p.target_entity();
     for (at, (line, under)) in lines.iter().enumerate() {
         line_node(
             p,
@@ -1422,14 +1454,19 @@ pub(crate) fn unified_rows(
                         number_text(r, fonts, head, size);
                     }
                 }
-                code(r, fonts, size, line.spans.clone());
+                let key = LineKey {
+                    group,
+                    order: at,
+                    column: 0,
+                };
+                code(r, fonts, size, line.spans.clone(), Some(key));
             },
         );
         if !under.is_empty() {
             p.spawn(Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: px(8),
-                padding: UiRect::new(px(indent), px(16), px(8), px(8)),
+                padding: UiRect::new(px(indent), px(8), px(8), px(8)),
                 ..default()
             })
             .with_children(|b| {
@@ -1451,6 +1488,7 @@ fn body(
     opts: &RenderOpts,
 ) {
     let size = v.code_size;
+    let group = p.target_entity();
     let line_button = |row: usize, anchor: Option<(Side, u32)>, commentable: bool| {
         let (side, line) = anchor.filter(|_| commentable)?;
         Some(LineButton {
@@ -1508,7 +1546,7 @@ fn body(
                         ..default()
                     })
                     .with_children(|c| {
-                        c.spawn(text(fonts, label.clone(), Type::META));
+                        c.spawn(wrapped_text(fonts, label.clone(), Type::META));
                     });
                 }
             });
@@ -1539,19 +1577,25 @@ fn body(
                                         ink: Swatch::Muted,
                                         mark: None,
                                     }],
+                                    None,
                                 );
                             });
                         }
                         return;
                     }
-                    for cell in [&line.left, &line.right] {
+                    for (column, cell) in [&line.left, &line.right].into_iter().enumerate() {
                         match cell {
                             Some(c) => {
                                 let b = line_button(c.row, c.anchor, c.commentable);
                                 line_node(r, percent(50), c.kind, c.selected, b, None, |x| {
                                     number(x, fonts, c.number, size);
                                     mark(x, fonts, c.kind, size);
-                                    code(x, fonts, size, c.spans.clone());
+                                    let key = LineKey {
+                                        group,
+                                        order: at,
+                                        column: column as u8,
+                                    };
+                                    code(x, fonts, size, c.spans.clone(), Some(key));
                                 });
                             }
                             None => {
@@ -1579,7 +1623,7 @@ fn body(
                                 width: percent(50),
                                 flex_direction: FlexDirection::Column,
                                 row_gap: px(8),
-                                padding: UiRect::new(px(NUMBER_WIDTH + 10.0), px(16), px(8), px(8)),
+                                padding: UiRect::new(px(NUMBER_WIDTH + 10.0), px(8), px(8), px(8)),
                                 ..default()
                             })
                             .with_children(|b| {
@@ -1629,27 +1673,34 @@ fn below(
             p.spawn(card(Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: px(8),
-                padding: UiRect::axes(px(14), px(10)),
+                padding: UiRect::axes(px(10), px(10)),
                 ..default()
             }))
             .with_children(|c| {
+                // The buttons drop to a second row when the card is narrow (a Split column).
                 c.spawn(Node {
                     column_gap: px(10),
+                    row_gap: px(4),
+                    flex_wrap: FlexWrap::Wrap,
                     align_items: AlignItems::Center,
                     ..default()
                 })
                 .with_children(|h| {
-                    h.spawn(avatar(fonts, &t.author));
-                    h.spawn(text(fonts, format!("@{}", t.author), Type::STRONG));
+                    h.spawn(person_avatar(fonts, &t.author, 22.0));
+                    h.spawn(person_name(fonts, &t.author));
                     // Collapsed, the first comment shows as one line: the box is one text
                     // line high and clips what wraps below it.
-                    let mut line = h.spawn(Node {
-                        flex_grow: 1.0,
-                        min_width: px(0),
-                        max_height: if t.expanded { Val::Auto } else { px(18) },
-                        overflow: Overflow::clip(),
-                        ..default()
-                    });
+                    let mut line = h.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            flex_basis: px(0),
+                            min_width: px(60),
+                            max_height: if t.expanded { Val::Auto } else { px(18) },
+                            overflow: Overflow::clip(),
+                            ..default()
+                        },
+                        Preview,
+                    ));
                     if !t.expanded
                         && let Some(first) = t.posts.first()
                     {
@@ -1663,7 +1714,14 @@ fn below(
                                 ..default()
                             })
                             .with_children(|w| {
-                                markdown_line(w, fonts, &parse(&first.body), Type::BODY, opts, 120);
+                                markdown_line(
+                                    w,
+                                    fonts,
+                                    &parse_in(&first.body, &opts.github_host, pr),
+                                    Type::BODY,
+                                    opts,
+                                    120,
+                                );
                             });
                         });
                     }
@@ -1676,7 +1734,7 @@ fn below(
                         n => format!("{toggle} · {n} replies"),
                     };
                     h.spawn((
-                        button(fonts, &toggle, Variant::Ghost),
+                        wrapping_button(fonts, &toggle, Variant::Ghost),
                         ThreadToggle {
                             pr: pr.clone(),
                             id: t.thread.id.clone(),
@@ -1684,7 +1742,7 @@ fn below(
                         observe(on_toggle),
                     ));
                     h.spawn((
-                        button(fonts, "Reply", Variant::Ghost),
+                        wrapping_button(fonts, "Reply", Variant::Ghost),
                         ThreadReply {
                             pr: pr.clone(),
                             thread: t.thread.clone(),
@@ -1708,7 +1766,7 @@ fn below(
                             })
                             .with_children(|r| {
                                 if i > 0 {
-                                    r.spawn(text(fonts, format!("@{}", post.author), Type::STRONG));
+                                    r.spawn(person_name(fonts, &post.author));
                                 }
                                 r.spawn(Node {
                                     flex_grow: 1.0,
@@ -1716,7 +1774,7 @@ fn below(
                                 });
                                 r.spawn(copy_button(fonts, &post.body));
                             });
-                            markdown(b, fonts, &parse(&post.body), opts);
+                            markdown(b, fonts, &parse_in(&post.body, &opts.github_host, pr), opts);
                         });
                     }
                 }
@@ -1729,7 +1787,7 @@ fn below(
                     Node {
                         flex_direction: FlexDirection::Column,
                         row_gap: px(8),
-                        padding: UiRect::axes(px(14), px(10)),
+                        padding: UiRect::axes(px(10), px(10)),
                         border: px(1).all(),
                         border_radius: BorderRadius::all(px(8)),
                         ..default()
@@ -1746,6 +1804,8 @@ fn below(
             .with_children(|c| {
                 c.spawn(Node {
                     column_gap: px(8),
+                    row_gap: px(4),
+                    flex_wrap: FlexWrap::Wrap,
                     align_items: AlignItems::Center,
                     ..default()
                 })
@@ -1761,7 +1821,7 @@ fn below(
                     });
                     h.spawn(copy_button(fonts, &d.body));
                     h.spawn((
-                        button(fonts, "Edit", Variant::Ghost),
+                        wrapping_button(fonts, "Edit", Variant::Ghost),
                         DraftEdit {
                             pr: pr.clone(),
                             id: d.id.clone(),
@@ -1769,7 +1829,7 @@ fn below(
                         observe(on_edit),
                     ));
                     h.spawn((
-                        button(fonts, "Remove", Variant::Ghost),
+                        wrapping_button(fonts, "Remove", Variant::Ghost),
                         DraftRemove {
                             pr: pr.clone(),
                             id: d.id.clone(),
@@ -1777,7 +1837,7 @@ fn below(
                         observe(on_remove),
                     ));
                 });
-                markdown(c, fonts, &parse(&d.body), opts);
+                markdown(c, fonts, &parse_in(&d.body, &opts.github_host, pr), opts);
             });
         }
     }
@@ -1850,10 +1910,62 @@ fn on_line(
     mut toasts: ResMut<Toasts>,
     time: Res<Time>,
     mut asks: ResMut<Asks>,
+    mut selection: ResMut<CodeSelection>,
 ) {
+    let kind = selection.take_click();
     let Ok(b) = buttons.get(activate.entity) else {
         return;
     };
+    match kind {
+        // A drag across the line selected its code; it is not a click on it.
+        ClickKind::Selected { multi: false } => {}
+        // A second press on the line, soon after the click that opened an editor on it: the
+        // click was the start of a double click, so the editor it opened goes.
+        ClickKind::Selected { multi: true } => {
+            if let Some(ui) = ui_of(&mut tabs, &b.pr) {
+                close_untouched(ui, b);
+            }
+        }
+        ClickKind::Plain => open_line(
+            b,
+            keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
+            &mut tabs,
+            &model,
+            &mut rounds,
+            &mut toasts,
+            &time,
+            &mut asks,
+        ),
+    }
+}
+
+/// Closes the editor on `b`'s line when nothing was typed in it and nothing came of it.
+fn close_untouched(ui: &mut TabUi, b: &LineButton) {
+    let untouched = ui.editor.as_ref().is_some_and(|e| {
+        e.text.is_empty()
+            && e.error.is_none()
+            && e.ticket.is_none()
+            && matches!(
+                &e.target,
+                EditTarget::Line { path, side, start: None, line }
+                    if *path == b.path && *side == b.side && *line == b.line
+            )
+    });
+    if untouched {
+        ui.editor = None;
+    }
+}
+
+fn open_line(
+    b: &LineButton,
+    shift: bool,
+    tabs: &mut ReviewTabs,
+    model: &Model,
+    rounds: &mut Revalidations,
+    toasts: &mut Toasts,
+    time: &Time,
+    asks: &mut Asks,
+) {
     // While a comment waits for its new place, a click on a line is that place.
     let place = AnchorInput {
         path: b.path.clone(),
@@ -1861,22 +1973,12 @@ fn on_line(
         start_line: None,
         side: b.side,
     };
-    if reanchor_click(
-        &tabs,
-        &model,
-        &mut rounds,
-        &mut toasts,
-        &time,
-        &mut asks,
-        &b.pr,
-        place,
-    ) {
+    if reanchor_click(tabs, model, rounds, toasts, time, asks, &b.pr, place) {
         return;
     }
-    let Some(ui) = ui_of(&mut tabs, &b.pr) else {
+    let Some(ui) = ui_of(tabs, &b.pr) else {
         return;
     };
-    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     if shift
         && let Some(editor) = &mut ui.editor
         && let EditTarget::Line {
@@ -2707,6 +2809,44 @@ mod tests {
     }
 
     #[test]
+    fn thread_authors_in_the_diff_open_their_profiles() {
+        use crate::platform_open::OpenUrls;
+        use crate::ui::people::{PersonAvatar, PersonTarget};
+        let mut app = review_app();
+        testing::settle(&mut app);
+        let name = testing::entities::<PersonTarget>(&mut app)
+            .into_iter()
+            .find(|e| {
+                app.world()
+                    .get::<PersonTarget>(*e)
+                    .is_some_and(|t| t.0 == "mona")
+                    && app.world().get::<PersonAvatar>(*e).is_none()
+            })
+            .expect("mona's name on her thread");
+        assert!(
+            testing::entities::<PersonAvatar>(&mut app)
+                .iter()
+                .any(|e| app
+                    .world()
+                    .get::<PersonAvatar>(*e)
+                    .is_some_and(|a| a.0 == "mona")),
+            "and her avatar"
+        );
+        testing::click_button(&mut app, name);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            ["https://github.com/mona"]
+        );
+        assert!(
+            testing::tab(&app, &fixture::demo_pr())
+                .ui
+                .expanded
+                .is_empty(),
+            "the click did not also toggle the thread"
+        );
+    }
+
+    #[test]
     fn thread_cards_collapse_to_a_line_and_expand_to_the_full_thread() {
         let mut app = review_app();
         let pr = fixture::demo_pr();
@@ -2734,16 +2874,21 @@ mod tests {
     }
 
     #[test]
-    fn the_reply_count_of_a_collapsed_thread_never_wraps_or_shrinks() {
+    fn the_reply_count_of_a_collapsed_thread_only_wraps_when_the_card_is_narrower_than_it() {
         let mut app = review_app();
         let mut q = app.world_mut().query::<(&Text, &TextLayout, &ChildOf)>();
         let (_, layout, parent) = q
             .iter(app.world())
             .find(|(t, _, _)| t.0 == "Expand · 2 replies")
             .expect("the count is part of the toggle's label");
-        assert_eq!(layout.linebreak, LineBreak::NoWrap);
+        assert_eq!(layout.linebreak, LineBreak::WordOrCharacter);
         let button = app.world().get::<Node>(parent.parent()).unwrap();
         assert_eq!(button.flex_shrink, 0.0, "only the preview gives way");
+        assert_eq!(
+            button.max_width,
+            percent(100),
+            "wider than the card, it wraps"
+        );
     }
 
     #[test]
@@ -3049,6 +3194,112 @@ mod tests {
     }
 
     #[test]
+    fn comment_headers_wrap_their_buttons_in_the_narrow_columns_of_split() {
+        for large in [false, true] {
+            let mut app = wrap_app();
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            set_mode(&mut app, DiffMode::Split);
+            testing::settle(&mut app);
+            let flagged: Vec<String> = testing::overflowing_text(&mut app)
+                .into_iter()
+                .filter(|t| {
+                    ["Expand", "Reply", "Copy markdown", "Edit", "Remove"]
+                        .iter()
+                        .any(|b| t.starts_with(&format!("\"{b}")))
+                })
+                .collect();
+            assert_eq!(flagged, Vec::<String>::new(), "large={large}");
+        }
+    }
+
+    #[test]
+    fn long_paths_wrap_in_the_header_the_file_list_and_the_split_labels() {
+        let token = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it";
+        for (mode, large) in [
+            (DiffMode::Unified, false),
+            (DiffMode::Unified, true),
+            (DiffMode::Split, false),
+            (DiffMode::Split, true),
+        ] {
+            let mut app = wrap_app();
+            let pr = fixture::demo_pr();
+            {
+                let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+                let tab = tabs.0.get_mut(&pr).unwrap();
+                let Phase::Ready(ready) = &mut tab.phase else {
+                    panic!("ready")
+                };
+                for (i, f) in ready.view.files.iter_mut().enumerate() {
+                    f.path = format!("src/{token}/{i}_{token}.rs");
+                }
+                for (i, f) in ready.view.diff.iter_mut().enumerate() {
+                    f.path = format!("src/{token}/{i}_{token}.rs");
+                }
+                ready.view.pr.head_ref = format!("{token}-{token}");
+                tab.ui.mode = mode;
+            }
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            testing::settle(&mut app);
+            let header = testing::find::<HeaderPart>(&mut app, |_| true);
+            let buttons = testing::entities::<FileButton>(&mut app);
+            assert!(!buttons.is_empty());
+            for root in std::iter::once(header).chain(buttons) {
+                assert_eq!(
+                    testing::texts_past_right(&mut app, root),
+                    Vec::<String>::new(),
+                    "{mode:?} large={large}"
+                );
+            }
+            let switch = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
+            let row = parent_of(&app, parent_of(&app, switch));
+            let (rx, _, rw, _) = testing::frame(&app, row);
+            let (sx, _, sw, _) = testing::frame(&app, switch);
+            assert!(
+                sx + sw <= rx + rw,
+                "{mode:?} large={large}: the mode switch stays on the section row"
+            );
+        }
+    }
+
+    #[test]
+    fn the_mode_track_scrolls_sideways_when_narrow_and_shows_the_selected_mode() {
+        // Narrower than the smallest window, so the section tabs leave the track less room than
+        // its four segments take, though more than one.
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(760, 640));
+        testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        testing::open_ready(&mut app, false);
+        testing::settle(&mut app);
+        set_mode(&mut app, DiffMode::Calls);
+        testing::settle(&mut app);
+        let selected = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Calls);
+        let track = app.world().get::<ChildOf>(selected).unwrap().parent();
+        assert!(
+            app.world()
+                .get::<crate::ui::kit::SideTrack>(track)
+                .is_some()
+        );
+        let laid = app.world().get::<bevy::ui::ComputedNode>(track).unwrap();
+        assert!(
+            laid.content_size.x > laid.size.x,
+            "the four segments do not fit"
+        );
+        let (sx, _, sw, _) = testing::frame(&app, selected);
+        let (tx, _, tw, _) = testing::frame(&app, track);
+        assert!(
+            sx >= tx - 1.0 && sx + sw <= tx + tw + 1.0,
+            "Calls is in view"
+        );
+        let scrolled = app.world().get::<ScrollPosition>(track).unwrap().x;
+        assert!(scrolled > 0.0, "the track scrolled to the last mode");
+        testing::wheel(&mut app, track, 3.0);
+        assert!(app.world().get::<ScrollPosition>(track).unwrap().x < scrolled);
+    }
+
+    #[test]
     fn the_switch_sits_on_the_section_row_at_the_right() {
         let mut app = wrap_app();
         let story = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Story);
@@ -3246,14 +3497,25 @@ mod tests {
     /// A press and release on `target`, as the picking backend sends them; they bubble up to the
     /// row's button the way a click on a continuation line does.
     fn click_on(app: &mut App, target: Entity) {
-        use bevy::camera::NormalizedRenderTarget;
-        use bevy::picking::backend::HitData;
-        use bevy::picking::events::{Click, Pointer, Press};
-        use bevy::picking::pointer::{Location, PointerButton, PointerId};
+        press_on(app, target, Vec2::ZERO);
+        release_on(app, target);
+    }
+
+    /// A press on `target` at `at`, with the button widgets listening.
+    fn press_on(app: &mut App, target: Entity, at: Vec2) {
         use bevy::ui_widgets::ButtonPlugin;
         if !app.is_plugin_added::<ButtonPlugin>() {
             app.add_plugins(ButtonPlugin);
         }
+        testing::press_code(app, target, at);
+    }
+
+    /// The release that follows a press on `target`: the click the backend sends.
+    fn release_on(app: &mut App, target: Entity) {
+        use bevy::camera::NormalizedRenderTarget;
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::{Click, Pointer};
+        use bevy::picking::pointer::{Location, PointerButton, PointerId};
         let location = Location {
             target: NormalizedRenderTarget::None {
                 width: 1280,
@@ -3262,17 +3524,6 @@ mod tests {
             position: Vec2::ZERO,
         };
         let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location.clone(),
-            Press {
-                button: PointerButton::Primary,
-                hit: hit.clone(),
-                count: 1,
-            },
-            target,
-        ));
-        app.update();
         app.world_mut().trigger(Pointer::new(
             PointerId::Mouse,
             location,
@@ -3331,6 +3582,512 @@ mod tests {
                 line: 40
             })
         );
+    }
+
+    /// The code lines of the screen as (entity, line), top to bottom and left side first.
+    fn code_lines(app: &mut App) -> Vec<(Entity, crate::ui::code_select::CodeLine)> {
+        let mut q = app
+            .world_mut()
+            .query::<(Entity, &crate::ui::code_select::CodeLine)>();
+        let mut lines: Vec<_> = q.iter(app.world()).map(|(e, l)| (e, l.clone())).collect();
+        lines.sort_by_key(|(_, l)| (l.key.order, l.key.column));
+        lines
+    }
+
+    fn selected(app: &App) -> String {
+        let mut q = app
+            .world()
+            .try_query::<&crate::ui::code_select::CodeLine>()
+            .unwrap();
+        let lines: Vec<_> = q.iter(app.world()).collect();
+        app.world().resource::<CodeSelection>().text(lines)
+    }
+
+    fn drag_between(app: &mut App, from: (Entity, usize), to: (Entity, usize)) {
+        let a = testing::code_point(app, from.0, from.1);
+        let b = testing::code_point(app, to.0, to.1);
+        press_on(app, from.0, a);
+        testing::drag_code(app, from.0, a, b);
+    }
+
+    fn line_with<'a>(
+        lines: &'a [(Entity, crate::ui::code_select::CodeLine)],
+        needle: &str,
+        column: u8,
+    ) -> &'a (Entity, crate::ui::code_select::CodeLine) {
+        lines
+            .iter()
+            .find(|(_, l)| l.key.column == column && l.text.contains(needle))
+            .expect("the code line")
+    }
+
+    #[test]
+    fn dragging_across_lines_selects_their_code_and_nothing_else() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let first = line_with(&lines, "Refresh one minute early", 0).clone();
+        let next = lines
+            .iter()
+            .find(|(_, l)| l.key.order == first.1.key.order + 1)
+            .expect("a line below")
+            .clone();
+        drag_between(&mut app, (first.0, 8), (next.0, 5));
+        let expected = format!(
+            "{}\n{}",
+            &first.1.text[8..],
+            &next.1.text[..5.min(next.1.text.len())]
+        );
+        assert_eq!(selected(&app), expected);
+        assert!(!selected(&app).contains("+"), "no sign: {}", selected(&app));
+    }
+
+    #[test]
+    fn a_selection_made_upwards_reads_top_down() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let first = line_with(&lines, "Refresh one minute early", 0).clone();
+        let next = lines
+            .iter()
+            .find(|(_, l)| l.key.order == first.1.key.order + 1)
+            .unwrap()
+            .clone();
+        drag_between(&mut app, (next.0, 3.min(next.1.text.len())), (first.0, 4));
+        let expected = format!(
+            "{}\n{}",
+            &first.1.text[4..],
+            &next.1.text[..3.min(next.1.text.len())]
+        );
+        assert_eq!(selected(&app), expected);
+    }
+
+    #[test]
+    fn a_split_selection_stays_on_the_side_it_began_on() {
+        let mut app = wrap_app();
+        set_mode(&mut app, DiffMode::Split);
+        let lines = code_lines(&mut app);
+        let right: Vec<_> = lines.iter().filter(|(_, l)| l.key.column == 1).collect();
+        assert!(right.len() >= 3, "the demo has three right-hand rows");
+        let (from, to) = (right[0].clone(), right[2].clone());
+        // The pointer ends over the left side of the last row.
+        let (left_of_to, _) = lines
+            .iter()
+            .find(|(_, l)| l.key.column == 0 && l.key.order == to.1.key.order)
+            .expect("a left-hand line on the last row");
+        let end = testing::code_point(&app, *left_of_to, 2);
+        let start = testing::code_point(&app, from.0, 0);
+        testing::press_code(&mut app, from.0, start);
+        testing::drag_code(&mut app, from.0, start, end);
+        let copied = selected(&app);
+        let own: Vec<&str> = right
+            .iter()
+            .filter(|(_, l)| l.key.order <= to.1.key.order)
+            .map(|(_, l)| l.text.as_str())
+            .collect();
+        let pieces: Vec<&str> = copied.split('\n').collect();
+        assert_eq!(
+            pieces.len(),
+            own.len(),
+            "one piece per right-hand row: {copied:?}"
+        );
+        let last = own.len() - 1;
+        assert_eq!(pieces[..last], own[..last]);
+        assert!(own[last].starts_with(pieces[last]));
+    }
+
+    #[test]
+    fn a_wrapped_line_copies_as_its_one_original_line() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        let (_, _, _, h) = testing::frame(&app, text);
+        assert!(h >= 2.0 * 22.0 - 1.0 - 8.0, "the line wrapped: {h}");
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        assert_eq!(selected(&app), long.text);
+        assert!(!selected(&app).contains('\n'));
+    }
+
+    #[test]
+    fn a_double_click_selects_a_word_and_a_triple_click_the_line() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, line) = line_with(&lines, "Refresh one minute early", 0).clone();
+        let at = line.text.find("minute").unwrap() + 2;
+        let p = testing::code_point(&app, text, at);
+        testing::press_code(&mut app, text, p);
+        assert_eq!(selected(&app), "");
+        testing::press_code(&mut app, text, p);
+        assert_eq!(selected(&app), "minute");
+        testing::press_code(&mut app, text, p);
+        assert_eq!(selected(&app), line.text);
+    }
+
+    #[test]
+    fn a_click_still_comments_but_a_drag_or_a_multi_click_does_not() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        click_on(&mut app, text);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_some(),
+            "a click comments at once"
+        );
+        ui_mut(&mut app, &pr).0.get_mut(&pr).unwrap().ui.editor = None;
+        testing::settle(&mut app);
+
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        release_on(&mut app, text);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_none(),
+            "a drag selects and does not comment"
+        );
+
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        let p = testing::code_point(&app, text, 3);
+        press_on(&mut app, text, p);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_none(),
+            "a double click selects and does not comment"
+        );
+    }
+
+    #[test]
+    fn cmd_c_copies_the_selection_through_the_clipboard_path() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        testing::chord(&mut app, KeyCode::KeyC);
+        assert_eq!(app.world().resource::<CopiedText>().0, [long.text]);
+    }
+
+    #[test]
+    fn cmd_c_with_nothing_selected_copies_nothing() {
+        let mut app = wrap_app();
+        testing::chord(&mut app, KeyCode::KeyC);
+        assert!(app.world().resource::<CopiedText>().0.is_empty());
+    }
+
+    #[test]
+    fn the_selected_text_is_highlighted_in_the_theme_color() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        let rects = |app: &mut App| {
+            let mut q = app.world_mut().query::<(&Fill, &Node)>();
+            q.iter(app.world())
+                .filter(|(f, n)| {
+                    f.0 == Swatch::TextSelect && n.position_type == PositionType::Absolute
+                })
+                .count()
+        };
+        assert_eq!(rects(&mut app), 0);
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        testing::settle(&mut app);
+        assert!(rects(&mut app) >= 1, "the selection is drawn");
+    }
+
+    #[test]
+    fn the_highlight_covers_exactly_the_selected_characters() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        let rect = testing::find::<Fill>(&mut app, |f| f.0 == Swatch::TextSelect);
+        let (left, top, width, height) = testing::frame(&app, rect);
+        let (from, to) = (
+            testing::code_point(&app, text, 7),
+            testing::code_point(&app, text, 15),
+        );
+        let (_, text_top, _, _) = testing::frame(&app, text);
+        assert!((left - from.x).abs() <= 1.0, "left {left} vs {}", from.x);
+        assert!(
+            (left + width - to.x).abs() <= 1.0,
+            "right {} vs {}",
+            left + width,
+            to.x
+        );
+        assert!((top - text_top).abs() <= 1.0, "top {top} vs {text_top}");
+        assert!(height > 8.0 && height < 30.0, "one visual line: {height}");
+    }
+
+    fn highlights(app: &mut App) -> usize {
+        let mut q = app.world_mut().query::<&Fill>();
+        q.iter(app.world())
+            .filter(|f| f.0 == Swatch::TextSelect)
+            .count()
+    }
+
+    #[test]
+    fn a_click_elsewhere_ends_the_selection_and_its_highlight() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        assert_eq!(selected(&app).len(), 8);
+        assert!(highlights(&mut app) >= 1);
+        testing::left_press(&mut app);
+        testing::settle(&mut app);
+        assert_eq!(selected(&app), "");
+        assert_eq!(highlights(&mut app), 0);
+    }
+
+    #[test]
+    fn a_press_on_code_replaces_the_selection() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        assert_eq!(selected(&app).len(), 8);
+        let p = testing::code_point(&app, text, 3);
+        press_on(&mut app, text, p);
+        assert_eq!(selected(&app), "", "the new press collapsed it");
+    }
+
+    /// The code `Text` that holds `needle` now: a click that opens an editor rebuilds the rows.
+    fn fresh_line(app: &mut App, needle: &str) -> Entity {
+        let lines = code_lines(app);
+        line_with(&lines, needle, 0).0
+    }
+
+    #[test]
+    fn a_single_click_opens_the_editor_with_no_wait() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let text = fresh_line(&mut app, "Refresh one minute early");
+        click_on(&mut app, text);
+        assert!(testing::tab(&app, &pr).ui.editor.is_some());
+    }
+
+    #[test]
+    fn a_double_click_ends_with_the_word_selected_copied_and_no_editor() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let needle = "Refresh one minute early";
+        let text = fresh_line(&mut app, needle);
+        let line = code_lines(&mut app)
+            .iter()
+            .find(|(e, _)| *e == text)
+            .unwrap()
+            .1
+            .clone();
+        let at = line.text.find("minute").unwrap() + 2;
+        let p = testing::code_point(&app, text, at);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_some(),
+            "the first click"
+        );
+        testing::settle(&mut app);
+        // The pointer has not moved.
+        let text = fresh_line(&mut app, needle);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ui.editor.is_none(), "no editor");
+        assert_eq!(selected(&app), "minute");
+        testing::chord(&mut app, KeyCode::KeyC);
+        assert_eq!(app.world().resource::<CopiedText>().0, ["minute"]);
+    }
+
+    #[test]
+    fn a_quick_click_on_another_line_opens_that_line() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let first =
+            testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 39);
+        testing::activate(&mut app, first);
+        testing::settle(&mut app);
+        let text = fresh_line(&mut app, "Refresh one minute early");
+        click_on(&mut app, text);
+        assert_eq!(
+            testing::tab(&app, &pr).ui.editor.map(|e| e.target),
+            Some(EditTarget::Line {
+                path: REFRESH.into(),
+                side: Side::Right,
+                start: None,
+                line: 40
+            })
+        );
+    }
+
+    #[test]
+    fn a_quick_shift_click_extends_the_range_of_the_line_just_clicked() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let lines = code_lines(&mut app);
+        let a = lines
+            .iter()
+            .find(|(_, l)| l.key.column == 0 && l.text.contains("Refresh one minute early"))
+            .unwrap()
+            .0;
+        // A click on the line before it, then a shift-click on this one, right after.
+        let before = lines
+            .iter()
+            .find(|(e, l)| *e != a && l.key.order + 1 == code_order(&lines, a))
+            .unwrap()
+            .0;
+        click_on(&mut app, before);
+        testing::settle(&mut app);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        let a = fresh_line(&mut app, "Refresh one minute early");
+        click_on(&mut app, a);
+        let target = testing::tab(&app, &pr).ui.editor.map(|e| e.target);
+        let Some(EditTarget::Line { start, line, .. }) = target else {
+            panic!("a line editor");
+        };
+        assert_eq!((start.is_some(), line), (true, 40), "{target:?}");
+    }
+
+    fn code_order(lines: &[(Entity, crate::ui::code_select::CodeLine)], of: Entity) -> usize {
+        lines.iter().find(|(e, _)| *e == of).unwrap().1.key.order
+    }
+
+    #[test]
+    fn a_double_click_on_a_line_whose_editor_has_text_keeps_the_editor() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let needle = "Refresh one minute early";
+        let text = fresh_line(&mut app, needle);
+        let p = testing::code_point(&app, text, 4);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |_| true);
+        testing::type_into(&mut app, area, "keep this");
+        testing::settle(&mut app);
+        let text = fresh_line(&mut app, needle);
+        press_on(&mut app, text, p);
+        release_on(&mut app, text);
+        testing::settle(&mut app);
+        let editor = testing::tab(&app, &pr).ui.editor;
+        assert!(editor.is_some(), "the editor stays");
+    }
+
+    #[test]
+    fn the_flags_of_a_drag_do_not_swallow_a_later_gutter_click() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        // The release is never seen by the line (the pointer left it); a press on a gutter
+        // follows, then the click on the row's button.
+        testing::left_press(&mut app);
+        let row = testing::find::<LineButton>(&mut app, |b| b.side == Side::Right && b.line == 44);
+        testing::activate(&mut app, row);
+        assert!(
+            testing::tab(&app, &pr).ui.editor.is_some(),
+            "the click comments"
+        );
+    }
+
+    #[test]
+    fn a_selection_whose_lines_changed_or_are_gone_ends() {
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        assert!(!selected(&app).is_empty());
+        // One line's text changes under the selection.
+        app.world_mut()
+            .get_mut::<crate::ui::code_select::CodeLine>(text)
+            .unwrap()
+            .text
+            .push('!');
+        testing::settle(&mut app);
+        assert_eq!(selected(&app), "", "changed content");
+        assert_eq!(highlights(&mut app), 0);
+
+        let lines = code_lines(&mut app);
+        let (text, _) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        assert!(!selected(&app).is_empty());
+        let all: Vec<Entity> = code_lines(&mut app).iter().map(|(e, _)| *e).collect();
+        for e in all {
+            app.world_mut().entity_mut(e).despawn();
+        }
+        testing::settle(&mut app);
+        assert!(
+            app.world().resource::<CodeSelection>().is_empty(),
+            "gone lines"
+        );
+    }
+
+    #[test]
+    fn a_selection_survives_a_rebuild_that_keeps_the_lines() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 7), (text, 15));
+        testing::settle(&mut app);
+        // Opening a comment elsewhere rebuilds the body.
+        ui_mut(&mut app, &pr).0.get_mut(&pr).unwrap().ui.editor = Some(Editor {
+            target: EditTarget::Line {
+                path: REFRESH.into(),
+                side: Side::Right,
+                start: None,
+                line: 44,
+            },
+            text: String::new(),
+            error: None,
+            ticket: None,
+            mode: ComposerMode::Write,
+        });
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ui.editor.is_some());
+        assert_eq!(selected(&app), long.text[7..15]);
+    }
+
+    #[test]
+    fn copy_needs_the_command_key_alone() {
+        use bevy::input::ButtonState;
+        use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        // Cmd-Shift-C is another command.
+        for key in [KeyCode::ShiftLeft, KeyCode::SuperLeft, KeyCode::KeyC] {
+            app.world_mut().write_message(KeyboardInput {
+                key_code: key,
+                logical_key: Key::Unidentified(NativeKey::Unidentified),
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+        }
+        app.update();
+        assert!(app.world().resource::<CopiedText>().0.is_empty());
+    }
+
+    #[test]
+    fn copy_is_left_to_a_focused_text_field() {
+        use bevy::input_focus::InputFocus;
+        let mut app = wrap_app();
+        let lines = code_lines(&mut app);
+        let (text, long) = line_with(&lines, "Refresh one minute early", 0).clone();
+        drag_between(&mut app, (text, 0), (text, long.text.len()));
+        let field = app.world_mut().spawn(EditableText::default()).id();
+        app.world_mut()
+            .resource_mut::<InputFocus>()
+            .set(field, bevy::input_focus::FocusCause::Navigated);
+        testing::chord(&mut app, KeyCode::KeyC);
+        assert!(app.world().resource::<CopiedText>().0.is_empty());
     }
 
     #[test]

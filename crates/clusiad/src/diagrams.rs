@@ -135,6 +135,7 @@ impl Diagrams {
         })
     }
 
+    /// Whether a run is live for `pr`; `start` reads it before it spends GitHub calls.
     fn running(&self, pr: &PrRef) -> bool {
         self.with(pr, |entry| entry.run.is_some())
     }
@@ -1077,6 +1078,9 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, mode: Mode) -> Result<(), Outco
             return Err(reviews::invalid_state(NO_NUMBER_LEFT));
         }
         Mode::All => {}
+    }
+    if shared.diagrams.running(pr) {
+        return Err(reviews::invalid_state("Diagrams are already being drawn"));
     }
     let (limit, keywords) = {
         let harness = &shared.config.read().await.harness;

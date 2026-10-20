@@ -36,6 +36,7 @@ clusia-harness.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+clusia-core = { workspace = true, features = ["test-kit"] }
 tokio = { workspace = true, features = ["test-util"] }
 clusia-harness = { workspace = true, features = ["test-kit"] }
 tempfile.workspace = true

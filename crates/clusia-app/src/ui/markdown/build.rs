@@ -16,9 +16,12 @@ use clusia_highlight::highlight;
 use crate::fonts::UiFonts;
 use crate::platform_open::{OpenUrls, visit};
 use crate::theme::{Swatch, Theme};
-use crate::ui::code::{code_line, spans_for};
+use crate::ui::code::{plain_text, spans_for, wrapped_code_line};
+use crate::ui::code_select::{LineKey, selectable};
 use crate::ui::emoji::EmojiImages;
-use crate::ui::kit::{Clickable, Fill, Ink, Stroke, TextSized, Type, Variant, button, font, text};
+use crate::ui::kit::{
+    Clickable, Fill, Ink, Stroke, TextSized, Type, Variant, font, text, wrapping_button,
+};
 use crate::ui::markdown::parse::{Block, Inline, ListItem, Style};
 
 /// The width of a space, in ems.
@@ -37,6 +40,8 @@ pub struct RenderOpts {
     pub suggestion_base: Option<String>,
     /// Draw images from other sites (otherwise they become link chips).
     pub load_external: bool,
+    /// The GitHub web host that `@mentions` and `#123` references point at.
+    pub github_host: String,
 }
 
 impl RenderOpts {
@@ -45,6 +50,7 @@ impl RenderOpts {
         Self {
             code_size,
             load_external: config.media.load_external_images,
+            github_host: config.github.host.clone(),
             ..Self::default()
         }
     }
@@ -56,6 +62,7 @@ impl Default for RenderOpts {
             code_size: 12.0,
             suggestion_base: None,
             load_external: false,
+            github_host: "github.com".into(),
         }
     }
 }
@@ -182,6 +189,7 @@ impl Line {
                     let first = text.lines().next().unwrap_or("").to_string();
                     self.items(&[Inline::Code {
                         text: first,
+                        link: None,
                         space_after: false,
                     }]);
                 }
@@ -222,8 +230,10 @@ impl Line {
                 }
                 other => other.clone(),
             };
-            if let Inline::Word { style, .. } = &mut item {
-                style.link = None;
+            match &mut item {
+                Inline::Word { style, .. } => style.link = None,
+                Inline::Code { link, .. } | Inline::Emoji { link, .. } => *link = None,
+                _ => {}
             }
             let room = self.max - self.used;
             if let Inline::Word { text, .. } | Inline::Code { text, .. } = &mut item {
@@ -283,7 +293,7 @@ fn set_space(item: &mut Inline, on: bool) {
 /// A **Copy markdown** button for the comment whose source is `source`.
 pub fn copy_button(fonts: &UiFonts, source: &str) -> impl Bundle {
     (
-        button(fonts, "Copy markdown", Variant::Ghost),
+        wrapping_button(fonts, "Copy markdown", Variant::Ghost),
         CopyMarkdown(source.to_string()),
     )
 }
@@ -317,6 +327,15 @@ pub fn link_chip(
         Stroke(Swatch::Line),
     ));
     chip.insert((link_parts(url), TabIndex(0)));
+}
+
+/// The address an inline opens, when it is part of a link.
+fn link_of(item: &Inline) -> Option<&str> {
+    match item {
+        Inline::Word { style, .. } => style.link.as_deref(),
+        Inline::Code { link, .. } | Inline::Emoji { link, .. } => link.as_deref(),
+        Inline::Image { .. } | Inline::Break => None,
+    }
 }
 
 fn link_parts(url: &str) -> impl Bundle {
@@ -524,13 +543,21 @@ fn code_block(
     let path = lang.map(path_for_lang).unwrap_or_default();
     let spans = highlight(&path, &shown.join("\n"));
     c.spawn(block_frame()).with_children(|b| {
+        let group = b.target_entity();
         for (i, line) in shown.iter().enumerate() {
             let line_spans = spans.get(i).map(Vec::as_slice).unwrap_or_default();
-            b.spawn(code_line(
-                fonts,
-                opts.code_size,
-                spans_for(line, line_spans, None),
-            ));
+            let runs = spans_for(line, line_spans, None);
+            let key = LineKey {
+                group,
+                order: i,
+                column: 0,
+            };
+            selectable(
+                b,
+                key,
+                plain_text(&runs),
+                wrapped_code_line(fonts, opts.code_size, runs),
+            );
         }
         if all.len() > shown.len() {
             b.spawn(text(
@@ -566,6 +593,8 @@ fn suggestion(c: &mut ChildSpawnerCommands, fonts: &UiFonts, source: &str, opts:
             children![text(fonts, "Suggested change", Type::META)],
         ));
         let removed = opts.suggestion_base.as_deref().unwrap_or("");
+        let group = s.target_entity();
+        let mut order = 0;
         for (sign, fill, body) in [
             ("−", Swatch::RemovedBg, removed),
             ("+", Swatch::AddedBg, source),
@@ -584,7 +613,27 @@ fn suggestion(c: &mut ChildSpawnerCommands, fonts: &UiFonts, source: &str, opts:
                 ))
                 .with_children(|row| {
                     row.spawn(text(fonts, sign, Type::MONO.size(opts.code_size)));
-                    row.spawn(code_line(fonts, opts.code_size, spans_for(line, &[], None)));
+                    let runs = spans_for(line, &[], None);
+                    let key = LineKey {
+                        group,
+                        order,
+                        column: 0,
+                    };
+                    order += 1;
+                    row.spawn(Node {
+                        flex_grow: 1.0,
+                        flex_basis: px(0),
+                        min_width: px(0),
+                        ..default()
+                    })
+                    .with_children(|cell| {
+                        selectable(
+                            cell,
+                            key,
+                            plain_text(&runs),
+                            wrapped_code_line(fonts, opts.code_size, runs),
+                        );
+                    });
                 });
             }
             if all.len() > MAX_CODE_LINES {
@@ -722,7 +771,7 @@ fn inlines(
                     // The space between two words of one link stays inside the text, so the
                     // underline runs across it.
                     let joined = *space_after && same_link(items.get(k + 1));
-                    let first = !(k > 0 && same_link(items.get(k - 1)));
+                    let first = !(k > 0 && link_of(&items[k - 1]) == style.link.as_deref());
                     let label = if joined {
                         format!("{text} ")
                     } else {
@@ -751,9 +800,13 @@ fn inlines(
                         }
                     }
                 }
-                Inline::Code { text, space_after } => {
+                Inline::Code {
+                    text,
+                    link,
+                    space_after,
+                } => {
                     let t = Type::MONO.size((base.size - 1.0).max(10.0)).ink(Swatch::Fg);
-                    row.spawn((
+                    let mut e = row.spawn((
                         Text::new(text.clone()),
                         font(fonts, t),
                         TextColor::default(),
@@ -769,9 +822,19 @@ fn inlines(
                         BackgroundColor::default(),
                         Fill(Swatch::Line),
                     ));
+                    if let Some(url) = link {
+                        e.insert(link_parts(url));
+                        if k == 0 || link_of(&items[k - 1]) != Some(url) {
+                            e.insert(TabIndex(0));
+                        }
+                    }
                 }
-                Inline::Emoji { file, space_after } => {
-                    row.spawn((
+                Inline::Emoji {
+                    file,
+                    link,
+                    space_after,
+                } => {
+                    let mut e = row.spawn((
                         Node {
                             margin: UiRect::right(px(if *space_after { 4.0 } else { 1.0 })),
                             flex_shrink: 0.0,
@@ -780,6 +843,19 @@ fn inlines(
                         TextSized::Square(base.size * EMOJI_SCALE),
                         MdEmoji(file.to_string()),
                     ));
+                    // No underline: the picture is the link, and `group_hover` only restyles
+                    // what has ink.
+                    if let Some(url) = link {
+                        e.insert((
+                            MdLink(url.clone()),
+                            Clickable,
+                            Hovered::default(),
+                            WidgetButton,
+                        ));
+                        if k == 0 || link_of(&items[k - 1]) != Some(url) {
+                            e.insert(TabIndex(0));
+                        }
+                    }
                 }
                 Inline::Image {
                     url, space_after, ..
@@ -835,10 +911,19 @@ fn on_copy(
     let Ok(copy) = copies.get(activate.entity) else {
         return;
     };
+    copy_text(recorder, clipboard, &copy.0);
+}
+
+/// Puts `text` on the clipboard, or records it where `CopiedText` stands in for the clipboard.
+pub fn copy_text(
+    recorder: Option<ResMut<CopiedText>>,
+    clipboard: Option<ResMut<Clipboard>>,
+    text: &str,
+) {
     match (recorder, clipboard) {
-        (Some(mut recorded), _) => recorded.0.push(copy.0.clone()),
+        (Some(mut recorded), _) => recorded.0.push(text.to_string()),
         (None, Some(mut clipboard)) => {
-            if let Err(e) = clipboard.set_text(copy.0.clone()) {
+            if let Err(e) = clipboard.set_text(text.to_string()) {
                 tracing::warn!(error = %e, "cannot copy to the clipboard");
             }
         }
@@ -938,6 +1023,64 @@ mod tests {
                 ..Style::default()
             },
         )
+    }
+
+    /// `md` drawn in a 420 px column of the laid-out app, as the texts that run out of it.
+    fn overflow_of(md: &str, large: bool) -> Vec<String> {
+        let mut app = testing::layout_app(Snapshot::default(), UVec2::new(1280, 800));
+        if large {
+            testing::set_config_locally(&mut app, "appearance.text_size", "large");
+        }
+        let root = app
+            .world_mut()
+            .spawn(Node {
+                width: px(420),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            })
+            .id();
+        let blocks = parse(md);
+        let fonts = app.world().resource::<UiFonts>().clone();
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                commands.entity(root).with_children(|p| {
+                    markdown(
+                        p,
+                        &fonts,
+                        &blocks,
+                        &RenderOpts {
+                            suggestion_base: Some("let old = 1;".into()),
+                            ..RenderOpts::default()
+                        },
+                    );
+                });
+            })
+            .unwrap();
+        testing::settle(&mut app);
+        testing::overflowing_text(&mut app)
+    }
+
+    #[test]
+    fn code_fences_suggestions_and_tables_stay_inside_a_narrow_column() {
+        let long = "refresh_with_retry(token_one_with_a_long_name, token_two_with_a_long_name, token_three_with_a_long_name)";
+        let cases = [
+            ("a code fence", format!("```rust\nlet a = {long};\n```")),
+            ("a suggestion", format!("```suggestion\nlet a = {long};\n```")),
+            (
+                "a table",
+                "| Path | Note |\n| --- | --- |\n| https://github.com/rzorzal/clusia/blob/main/crates/clusia-app/src/screens/review/diagrams/modal.rs | long unbreakable path |\n"
+                    .to_string(),
+            ),
+        ];
+        for (what, md) in cases {
+            for large in [false, true] {
+                assert_eq!(
+                    overflow_of(&md, large),
+                    Vec::<String>::new(),
+                    "{what}, large={large}"
+                );
+            }
+        }
     }
 
     /// Builds `blocks` under a fresh root and runs a frame.
@@ -1078,6 +1221,7 @@ mod tests {
                 styled("gone", true, strike),
                 Inline::Code {
                     text: "expires_at".into(),
+                    link: None,
                     space_after: false,
                 },
             ])],
@@ -1159,6 +1303,60 @@ mod tests {
         let second = entity_with_text(&app, root, "race ");
         testing::activate(&mut app, second);
         assert_eq!(app.world().resource::<OpenUrls>().0, [url]);
+    }
+
+    #[test]
+    fn code_and_emoji_inside_a_link_open_it() {
+        let mut app = fresh();
+        let url = "https://github.com/acme/widgets";
+        let root = render(
+            &mut app,
+            vec![Block::Paragraph(vec![
+                Inline::Code {
+                    text: "widgets".into(),
+                    link: Some(url.into()),
+                    space_after: true,
+                },
+                Inline::Emoji {
+                    file: "1f680.png",
+                    link: Some(url.into()),
+                    space_after: false,
+                },
+            ])],
+        );
+        assert_eq!(
+            count::<TabIndex>(&mut app, root),
+            1,
+            "one Tab stop per link"
+        );
+        let code = entity_with_text(&app, root, "widgets");
+        assert_eq!(app.world().get::<MdLink>(code).unwrap().0, url);
+        testing::activate(&mut app, code);
+        let mut boxes = app.world_mut().query::<(Entity, &MdEmoji)>();
+        let emoji = boxes.single(app.world()).unwrap().0;
+        testing::activate(&mut app, emoji);
+        assert_eq!(app.world().resource::<OpenUrls>().0, [url, url]);
+    }
+
+    #[test]
+    fn a_mention_and_an_issue_number_open_their_pages() {
+        let mut app = fresh();
+        let pr = clusia_core::PrRef::new("acme", "widgets", 7).unwrap();
+        let root = render(
+            &mut app,
+            crate::ui::markdown::parse::parse_in("thanks @alice for #12", "github.com", &pr),
+        );
+        let mention = entity_with_text(&app, root, "@alice");
+        testing::activate(&mut app, mention);
+        let issue = entity_with_text(&app, root, "#12");
+        testing::activate(&mut app, issue);
+        assert_eq!(
+            app.world().resource::<OpenUrls>().0,
+            [
+                "https://github.com/alice",
+                "https://github.com/acme/widgets/issues/12"
+            ]
+        );
     }
 
     #[test]
@@ -1380,6 +1578,40 @@ mod tests {
     }
 
     #[test]
+    fn the_lines_of_a_code_block_are_selectable_without_signs() {
+        let mut app = fresh();
+        render(
+            &mut app,
+            vec![Block::Code {
+                lang: Some("rust".into()),
+                text: "let x = 1;\nlet y = 2;\n".into(),
+            }],
+        );
+        let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
+        let mut lines: Vec<_> = q.iter(app.world()).collect();
+        lines.sort_by_key(|l| l.key.order);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["let x = 1;", "let y = 2;"]);
+        assert_eq!(lines[0].key.group, lines[1].key.group);
+    }
+
+    #[test]
+    fn the_rows_of_a_suggestion_are_selectable_in_one_group() {
+        let mut app = fresh();
+        let opts = RenderOpts {
+            suggestion_base: Some("let a = 1;".into()),
+            ..RenderOpts::default()
+        };
+        let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
+        render_with(&mut app, vec![Block::Suggestion("let a = 2;".into())], opts);
+        let mut lines: Vec<_> = q.iter(app.world()).collect();
+        lines.sort_by_key(|l| l.key.order);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["let a = 1;", "let a = 2;"]);
+        assert_eq!(lines[0].key.group, lines[1].key.group);
+    }
+
+    #[test]
     fn suggestions_are_a_two_row_mini_diff() {
         let mut app = fresh();
         let opts = RenderOpts {
@@ -1579,9 +1811,15 @@ mod tests {
                 code_size: 13.0,
                 suggestion_base: None,
                 load_external: false,
+                github_host: "github.com".into(),
             }
         );
         config.media.load_external_images = true;
         assert!(RenderOpts::from_config(14.0, &config).load_external);
+        config.github.host = "ghe.acme.test".into();
+        assert_eq!(
+            RenderOpts::from_config(14.0, &config).github_host,
+            "ghe.acme.test"
+        );
     }
 }

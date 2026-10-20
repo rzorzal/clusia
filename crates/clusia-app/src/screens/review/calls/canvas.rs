@@ -314,7 +314,17 @@ fn draw_graph(
             ));
         }
         header(c, pen, pr, g);
-        zoom_control(c, pen, entity);
+        // Over the header's right end, which the header leaves free for it.
+        c.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(16),
+                top: px(12),
+                ..default()
+            },
+            ignore(),
+        ))
+        .with_children(|corner| zoom_control(corner, pen, entity));
         legend(c, pen, dots);
     });
     view

@@ -21,7 +21,7 @@ use crate::screens::review::agent::harness_ready;
 use crate::screens::review::editor::editor_box;
 use crate::screens::review::shell::{SectionBody, setting_link};
 use crate::theme::Swatch;
-use crate::ui::kit::{Stroke, Tone, Type, Variant, badge, card, panel, text};
+use crate::ui::kit::{Stroke, Tone, Type, Variant, badge, card, panel, text, wrapped_text};
 
 /// One finding as its card shows it. Every text is already printable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,6 +378,8 @@ fn finding_card(
     .with_children(|k| {
         k.spawn(Node {
             column_gap: px(10),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })
@@ -385,15 +387,16 @@ fn finding_card(
             t.spawn(badge(fonts, &c.severity, c.tone));
             t.spawn(Node {
                 flex_grow: 1.0,
+                flex_basis: px(120),
                 min_width: px(0),
                 ..default()
             })
             .with_children(|n| {
-                n.spawn(text(fonts, c.title.clone(), Type::STRONG));
+                n.spawn(wrapped_text(fonts, c.title.clone(), Type::STRONG));
             });
-            t.spawn(text(fonts, c.place.clone(), Type::MONO));
+            t.spawn(wrapped_text(fonts, c.place.clone(), Type::MONO));
         });
-        k.spawn(text(fonts, c.body.clone(), Type::BODY));
+        k.spawn(wrapped_text(fonts, c.body.clone(), Type::BODY));
         if let Some(code) = &c.code {
             k.spawn(panel(
                 Node {
@@ -404,7 +407,7 @@ fn finding_card(
                 Swatch::Chrome,
             ))
             .with_children(|b| {
-                b.spawn(text(fonts, code.clone(), Type::MONO));
+                b.spawn(wrapped_text(fonts, code.clone(), Type::MONO));
             });
         }
         if c.general {
@@ -428,10 +431,12 @@ fn finding_card(
             Swatch::Chrome,
         ))
         .with_children(|b| {
-            b.spawn(text(fonts, c.comment.clone(), Type::BODY));
+            b.spawn(wrapped_text(fonts, c.comment.clone(), Type::BODY));
         });
         k.spawn(Node {
             column_gap: px(8),
+            row_gap: px(6),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         })

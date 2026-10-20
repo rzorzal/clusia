@@ -282,6 +282,7 @@ pub async fn ensure_daemon(
 mod tests {
     use super::*;
     use crate::{ClientMessage, MessageReader, PROTOCOL_VERSION, ServerMessage, write_message};
+    use clusia_core::testkit::patient;
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -304,8 +305,7 @@ mod tests {
 
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        clusia_core::testkit::write_executable(&p, body);
         p
     }
 
@@ -329,7 +329,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path());
         let bin = script(dir.path(), "fake", "echo boom >&2; exit 7");
-        match start_daemon_with(&paths, None, &bin, Duration::from_secs(5)).await {
+        match start_daemon_with(&paths, None, &bin, patient(Duration::from_secs(5))).await {
             Err(LaunchError::Exited { status, log }) => {
                 assert_eq!(status.code(), Some(7));
                 assert!(log.ends_with("daemon.start.log"));
@@ -359,7 +359,7 @@ mod tests {
             &paths,
             Some(Path::new("/x/home")),
             &bin,
-            Duration::from_secs(5),
+            patient(Duration::from_secs(5)),
         )
         .await;
         assert_eq!(
@@ -379,7 +379,7 @@ mod tests {
             "fake",
             r#"d="$(dirname "$0")"; ps -o tty= -p $$ > "$d/tty.tmp"; pwd > "$d/cwd.tmp"; mv "$d/tty.tmp" "$d/tty"; mv "$d/cwd.tmp" "$d/cwd""#,
         );
-        let _ = start_daemon_with(&paths, None, &bin, Duration::from_secs(5)).await;
+        let _ = start_daemon_with(&paths, None, &bin, patient(Duration::from_secs(5))).await;
         let tty = std::fs::read_to_string(dir.path().join("tty")).unwrap();
         assert!(
             matches!(tty.trim(), "?" | "??"),
@@ -472,7 +472,7 @@ mod tests {
         // Our child steps aside at once; the winner only starts listening a moment later.
         let bin = script(dir.path(), "fake", "exit 3");
         serve_pid(paths.socket(), 4242, Duration::from_millis(400));
-        let pid = start_daemon_with(&paths, None, &bin, Duration::from_secs(5))
+        let pid = start_daemon_with(&paths, None, &bin, patient(Duration::from_secs(5)))
             .await
             .unwrap();
         assert_eq!(pid, Some(4242));
@@ -575,7 +575,7 @@ mod tests {
         let paths = Paths::new(dir.path());
         for word in ["first", "second"] {
             let bin = script(dir.path(), "fake", &format!("echo {word} >&2; exit 7"));
-            let _ = start_daemon_with(&paths, None, &bin, Duration::from_secs(5)).await;
+            let _ = start_daemon_with(&paths, None, &bin, patient(Duration::from_secs(5))).await;
         }
         let log = paths.logs_dir().join("daemon.start.log");
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "first\nsecond\n");
@@ -591,7 +591,7 @@ mod tests {
         std::fs::create_dir_all(paths.logs_dir()).unwrap();
         std::fs::write(&log, vec![b'x'; START_LOG_LIMIT as usize + 1]).unwrap();
         let bin = script(dir.path(), "fake", "echo fresh >&2; exit 7");
-        let _ = start_daemon_with(&paths, None, &bin, Duration::from_secs(5)).await;
+        let _ = start_daemon_with(&paths, None, &bin, patient(Duration::from_secs(5))).await;
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "fresh\n");
     }
 
@@ -626,9 +626,15 @@ mod tests {
         let bin = script(dir.path(), "fake", r#"touch "$(dirname "$0")/spawned""#);
         // The daemon launchd starts.
         serve_pid(paths.socket(), 4242, Duration::from_millis(200));
-        let pid = start_daemon_via(&paths, None, &bin, Duration::from_secs(5), Some(&job))
-            .await
-            .unwrap();
+        let pid = start_daemon_via(
+            &paths,
+            None,
+            &bin,
+            patient(Duration::from_secs(5)),
+            Some(&job),
+        )
+        .await
+        .unwrap();
         assert_eq!(pid, Some(4242));
         assert_eq!(
             calls(dir.path()),
@@ -647,14 +653,28 @@ mod tests {
             r#"touch "$(dirname "$0")/spawned"; exit 7"#,
         );
         let job = fake_job(dir.path(), false);
-        let _ = start_daemon_via(&paths, None, &bin, Duration::from_secs(5), Some(&job)).await;
+        let _ = start_daemon_via(
+            &paths,
+            None,
+            &bin,
+            patient(Duration::from_secs(5)),
+            Some(&job),
+        )
+        .await;
         assert!(dir.path().join("spawned").exists());
         assert!(!calls(dir.path()).contains("kickstart"));
 
         // No agent file: launchd is not even asked.
         std::fs::remove_file(dir.path().join("launchctl.calls")).unwrap();
         std::fs::remove_file(&job.agent).unwrap();
-        let _ = start_daemon_via(&paths, None, &bin, Duration::from_secs(5), Some(&job)).await;
+        let _ = start_daemon_via(
+            &paths,
+            None,
+            &bin,
+            patient(Duration::from_secs(5)),
+            Some(&job),
+        )
+        .await;
         assert_eq!(calls(dir.path()), "");
     }
 

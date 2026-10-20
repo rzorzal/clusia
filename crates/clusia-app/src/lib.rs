@@ -16,6 +16,7 @@ pub mod platform_fonts;
 pub mod platform_open;
 pub mod platform_sound;
 pub mod platform_window;
+pub mod render_check;
 pub mod review_state;
 pub mod scenes;
 pub mod screens;
@@ -27,6 +28,9 @@ pub mod window_frame;
 
 #[cfg(test)]
 pub(crate) mod testing;
+
+#[cfg(test)]
+mod overflow;
 
 /// How the window introduces itself to the daemon.
 pub const CLIENT_NAME: &str = "clusia-app";

@@ -8,7 +8,8 @@ use clusia_core::story::{StoryVersion, StoryVersionState};
 use clusia_core::{
     ActivitySummary, CheckKind, CheckResult, ChecksSummary, Config, DraftItem, DraftKind,
     EventKind, FileDiff, Finding, HiddenComments, MediaKind, OpenTabs, Pass, PrConversation,
-    PrDetail, PrFilter, PrRef, PrSummary, Review, ReviewState, Role, Side, ThreadRef, Verdict,
+    PrDetail, PrFilter, PrRef, PrSummary, Profile, Review, ReviewState, Role, Side, ThreadRef,
+    Verdict,
 };
 use serde::{Deserialize, Serialize};
 
@@ -181,6 +182,10 @@ pub enum Command {
     /// Download an image or GIF into the media cache and answer with its local file.
     FetchMedia {
         url: String,
+    },
+    /// The public profile of a GitHub user, for the hover card.
+    GetProfile {
+        login: String,
     },
     /// Giphy search (`query` empty: trending), 24 results from `offset`.
     SearchGifs {
@@ -502,6 +507,7 @@ pub enum Reply {
     Activity(ActivitySummary),
     Delivered(usize),
     Media(MediaFile),
+    Profile(Profile),
     Gifs(GifPage),
     FirstRun(FirstRun),
     GiphyKeyStatus(GiphyKeyStatus),
@@ -2569,6 +2575,36 @@ mod tests {
             }),
             r#"{"type":"event","topic":"config","event":"giphy_key_changed"}"#
         );
+    }
+
+    #[test]
+    fn profile_messages_wire_format_and_round_trip() {
+        let request = Command::GetProfile {
+            login: "octo".into(),
+        };
+        assert_eq!(
+            wire(&ClientMessage::Request {
+                id: 1,
+                cmd: request.clone()
+            }),
+            r#"{"type":"request","id":1,"cmd":{"get_profile":{"login":"octo"}}}"#
+        );
+        round_trip(request);
+        let profile = Profile {
+            login: "octo".into(),
+            name: Some("Octo Cat".into()),
+            company: None,
+            bio: Some("Builds things".into()),
+            avatar_url: None,
+        };
+        assert_eq!(
+            wire(&ServerMessage::Response {
+                id: 2,
+                result: Outcome::Ok(Reply::Profile(profile.clone()))
+            }),
+            r#"{"type":"response","id":2,"result":{"ok":{"profile":{"login":"octo","name":"Octo Cat","bio":"Builds things"}}}}"#
+        );
+        round_trip(Reply::Profile(profile));
     }
 
     #[test]

@@ -19,6 +19,7 @@ use crate::giphy;
 use crate::media;
 use crate::news;
 use crate::notifications;
+use crate::people;
 use crate::permissions;
 use crate::proposals;
 use crate::publish;
@@ -128,6 +129,7 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::GetActivity => activity::summary(shared).await,
         Command::GiphyKeyStatus => giphy::key_status(shared),
         Command::FetchMedia { url } => media::fetch(shared, &url).await,
+        Command::GetProfile { login } => people::profile(shared, &login).await,
         Command::SearchGifs { query, offset } => giphy::search(shared, &query, offset).await,
         Command::SetGiphyKey { key } => giphy::set_key(shared, key.expose()).await,
         Command::ClearGiphyKey => giphy::clear_key(shared).await,
@@ -296,11 +298,17 @@ async fn open_in_editor(shared: &Shared, path: &str, line: Option<u32>) -> Outco
             ));
         }
     };
-    match shared.spawner.spawn(&argv) {
+    let spawner = shared.spawner.clone();
+    let program = argv[0].clone();
+    // Spawning waits briefly for the program to fail, which must not hold up the runtime.
+    let started = tokio::task::spawn_blocking(move || spawner.spawn(&argv))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+    match started {
         Ok(()) => Outcome::Ok(Reply::Ack),
         Err(e) => Outcome::Err(ProtocolError::new(
             ErrorCode::Internal,
-            format!("could not start {}: {e}", argv[0]),
+            format!("could not open the file with {program}: {e}"),
         )),
     }
 }

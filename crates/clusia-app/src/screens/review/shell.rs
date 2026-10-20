@@ -37,10 +37,11 @@ use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, disabled_button,
-    icon_button, panel, text,
+    icon_button, panel, text, wrapped_text,
 };
-use crate::ui::markdown::parse::parse;
+use crate::ui::markdown::parse::parse_in;
 use crate::ui::markdown::{RenderOpts, markdown_line};
+use crate::ui::people::person;
 use crate::ui::spinner::{beat, spinner};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,8 +51,12 @@ pub struct HeaderView {
     /// `#123`
     pub number: String,
     pub title: String,
-    /// `@octo wants to merge`
+    /// `octo`
     pub author: String,
+    /// `Merged ·` or `Closed ·` before the author; empty while the pull request is open.
+    pub author_lead: &'static str,
+    /// `wants to merge` after the author; empty once it is merged or closed.
+    pub author_tail: &'static str,
     /// `octo:auth-refresh → main`
     pub branches: String,
     /// `+120`
@@ -313,12 +318,12 @@ pub(crate) fn file_name(path: &str) -> &str {
 pub fn header_view(view: &ReviewView) -> HeaderView {
     let pr = &view.pr;
     let s = &pr.summary;
-    let author = if pr.merged {
-        format!("Merged · @{}", s.author)
+    let (author_lead, author_tail) = if pr.merged {
+        ("Merged ·", "")
     } else if pr.closed {
-        format!("Closed · @{}", s.author)
+        ("Closed ·", "")
     } else {
-        format!("@{} wants to merge", s.author)
+        ("", "wants to merge")
     };
     let checks = view.checks.and_then(|c| match c.label() {
         "passed" => Some(("✓ Checks passing".to_string(), Tone::Green)),
@@ -330,7 +335,9 @@ pub fn header_view(view: &ReviewView) -> HeaderView {
         repo: s.pr.slug(),
         number: format!("#{}", s.pr.number),
         title: s.title.clone(),
-        author,
+        author: s.author.clone(),
+        author_lead,
+        author_tail,
         branches: format!("{} → {}", pr.head_ref, pr.base_ref),
         additions: format!("+{}", pr.additions),
         deletions: format!("−{}", pr.deletions),
@@ -822,31 +829,58 @@ pub fn header_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, h
         .with_children(|c| {
             c.spawn(Node {
                 column_gap: px(10),
+                row_gap: px(2),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Baseline,
                 ..default()
             })
             .with_children(|t| {
                 t.spawn(text(fonts, h.repo.clone(), Type::MUTED));
                 t.spawn(text(fonts, h.number.clone(), Type::MUTED));
-                t.spawn(text(fonts, h.title.clone(), Type::TITLE.size(17.0)));
+                t.spawn((
+                    wrapped_text(fonts, h.title.clone(), Type::TITLE.size(17.0)),
+                    Node {
+                        max_width: percent(100),
+                        ..default()
+                    },
+                ));
             });
             c.spawn(Node {
                 column_gap: px(10),
+                row_gap: px(4),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Center,
                 ..default()
             })
             .with_children(|m| {
-                m.spawn(text(fonts, h.author.clone(), Type::META));
+                m.spawn(Node {
+                    column_gap: px(6),
+                    row_gap: px(2),
+                    flex_wrap: FlexWrap::Wrap,
+                    align_items: AlignItems::Center,
+                    max_width: percent(100),
+                    ..default()
+                })
+                .with_children(|who| {
+                    if !h.author_lead.is_empty() {
+                        who.spawn(text(fonts, h.author_lead, Type::META));
+                    }
+                    person(who, fonts, &h.author, 20.0);
+                    if !h.author_tail.is_empty() {
+                        who.spawn(text(fonts, h.author_tail, Type::META));
+                    }
+                });
                 m.spawn(panel(
                     Node {
                         padding: UiRect::axes(px(6), px(2)),
                         border_radius: BorderRadius::all(px(4)),
+                        max_width: percent(100),
                         ..default()
                     },
                     Swatch::Chrome,
                 ))
                 .with_children(|chip| {
-                    chip.spawn(text(fonts, h.branches.clone(), Type::MONO));
+                    chip.spawn(wrapped_text(fonts, h.branches.clone(), Type::MONO));
                 });
                 m.spawn(Node {
                     column_gap: px(4),
@@ -1220,18 +1254,23 @@ fn draft_card_node(
             h.spawn((
                 Node {
                     flex_grow: 1.0,
+                    flex_basis: px(0),
                     min_width: px(0),
                     column_gap: px(8),
+                    row_gap: px(4),
+                    flex_wrap: FlexWrap::Wrap,
                     align_items: AlignItems::Center,
-                    overflow: Overflow::clip_x(),
                     ..default()
                 },
                 DraftCardPlace,
             ))
             .with_children(|place| {
                 place.spawn((
-                    text(fonts, card.title.clone(), Type::MONO),
-                    TextLayout::no_wrap(),
+                    wrapped_text(fonts, card.title.clone(), Type::MONO),
+                    Node {
+                        max_width: percent(100),
+                        ..default()
+                    },
                 ));
                 if let Some((label, tone)) = &card.badge {
                     place.spawn(badge(fonts, label, *tone));
@@ -1275,7 +1314,14 @@ fn draft_card_node(
             }
         });
         if !card.body.is_empty() {
-            markdown_line(c, fonts, &parse(&card.body), Type::BODY, opts, 80);
+            markdown_line(
+                c,
+                fonts,
+                &parse_in(&card.body, &opts.github_host, pr),
+                Type::BODY,
+                opts,
+                80,
+            );
         }
     });
 }
@@ -1790,7 +1836,10 @@ mod tests {
             (h.repo.as_str(), h.number.as_str(), h.title.as_str()),
             ("rzorzal/clusia", "#123", "feat: auth refresh")
         );
-        assert_eq!(h.author, "@octo wants to merge");
+        assert_eq!(
+            (h.author_lead, h.author.as_str(), h.author_tail),
+            ("", "octo", "wants to merge")
+        );
         assert_eq!(h.branches, "octo:auth-refresh → main");
         assert_eq!(
             (h.additions.as_str(), h.deletions.as_str(), h.files.as_str()),
@@ -1848,6 +1897,36 @@ mod tests {
     }
 
     #[test]
+    fn the_author_in_the_header_is_a_strong_name_with_an_avatar() {
+        use crate::ui::people::{PersonAvatar, PersonTarget};
+        let mut app = testing::demo_review_app();
+        testing::open_ready(&mut app, false);
+        testing::settle(&mut app);
+        let name = testing::entities::<PersonTarget>(&mut app)
+            .into_iter()
+            .find(|e| {
+                app.world()
+                    .get::<PersonTarget>(*e)
+                    .is_some_and(|t| t.0 == "octo")
+                    && app.world().get::<PersonAvatar>(*e).is_none()
+            })
+            .expect("the author's name");
+        let label = app.world().get::<Children>(name).map(|c| c[0]).unwrap();
+        let font = app.world().get::<TextFont>(label).unwrap();
+        assert_eq!(font.weight, FontWeight(600));
+        assert_eq!(
+            app.world().get::<crate::ui::kit::Ink>(label).map(|i| i.0),
+            Some(Swatch::Fg),
+            "the ink colour, not the faint meta colour"
+        );
+        assert!(
+            testing::count::<PersonAvatar>(&mut app) > 0,
+            "a round avatar sits beside the name"
+        );
+        assert!(testing::shows(&mut app, "wants to merge"));
+    }
+
+    #[test]
     fn checks_and_pr_state_in_the_header() {
         let mut tab = ready_tab();
         let Phase::Ready(ready) = &mut tab.phase else {
@@ -1875,7 +1954,15 @@ mod tests {
         assert_eq!(header_view(&ready.view).checks, None);
         ready.view.pr.merged = true;
         ready.view.pr.closed = true;
-        assert_eq!(header_view(&ready.view).author, "Merged · @octo");
+        let merged = header_view(&ready.view);
+        assert_eq!(
+            (
+                merged.author_lead,
+                merged.author.as_str(),
+                merged.author_tail
+            ),
+            ("Merged ·", "octo", "")
+        );
         let v = view_of(&tab, &Connection::Live);
         assert_eq!(
             v.closed.as_deref(),
@@ -2365,7 +2452,7 @@ mod tests {
         let place = testing::find::<DraftCardPlace>(&mut app, |_| true);
         let n = node(&app, place);
         assert_eq!(n.min_width, px(0), "the place may shrink below its text");
-        assert_eq!(n.overflow, Overflow::clip_x(), "and is cut at the edge");
+        assert_eq!(n.flex_wrap, FlexWrap::Wrap, "and wraps its badges under it");
         let row = app.world().get::<ChildOf>(remove).unwrap().parent();
         assert_eq!(app.world().get::<ChildOf>(place).unwrap().parent(), row);
         let mut texts = app.world_mut().query::<(&Text, &TextLayout, &ChildOf)>();
@@ -2373,7 +2460,44 @@ mod tests {
             .iter(app.world())
             .find(|(_, _, parent)| parent.parent() == place)
             .expect("the location text");
-        assert_eq!(layout.linebreak, LineBreak::NoWrap, "one line");
+        assert_eq!(
+            layout.linebreak,
+            LineBreak::WordOrCharacter,
+            "wraps, never cut"
+        );
+    }
+
+    #[test]
+    fn long_draft_cards_wrap_their_place_and_badges_inside_the_card() {
+        let token = "refresh_with_retry_and_a_very_long_identifier_that_has_no_space_in_it";
+        for large in [false, true] {
+            let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            let pr = testing::open_ready(&mut app, false);
+            {
+                let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+                let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).unwrap().phase else {
+                    panic!("ready")
+                };
+                for item in &mut ready.view.review.draft.items {
+                    if let Some(a) = &mut item.anchor {
+                        a.path = format!("src/{token}/{token}.rs");
+                    }
+                }
+            }
+            testing::settle(&mut app);
+            let cards = testing::entities::<DraftCardButton>(&mut app);
+            assert!(!cards.is_empty());
+            for card in cards {
+                assert_eq!(
+                    testing::texts_past_right(&mut app, card),
+                    Vec::<String>::new(),
+                    "large={large}"
+                );
+            }
+        }
     }
 
     #[test]

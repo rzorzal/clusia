@@ -34,7 +34,8 @@ use crate::screens::review::editor::{
 };
 use crate::screens::review::shell::ModalFor;
 use crate::theme::Swatch;
-use crate::ui::code::{CodeSpan, code_line, spans_for};
+use crate::ui::code::{CodeSpan, plain_text, spans_for, wrapped_code_line};
+use crate::ui::code_select::{LineKey, selectable};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{Fill, Stroke, Type, Variant, button, disabled_button, panel, text};
 use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
@@ -625,6 +626,8 @@ fn rebuild_modal(
     diagrams: Res<Diagrams>,
     model: Res<Model>,
     fonts: Res<UiFonts>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
     mut parts: Query<(Entity, &mut NodePart)>,
 ) {
     let mut gone = Vec::new();
@@ -682,7 +685,15 @@ fn rebuild_modal(
     }
     for pr in gone {
         if let Some(tab) = tabs.0.get_mut(&pr) {
+            let typed = tab
+                .ui
+                .editor
+                .as_ref()
+                .is_some_and(|e| !e.text.trim().is_empty());
             close(&mut tab.ui);
+            if typed {
+                not_sent(&mut toasts, &time, "The box is gone after the redraw");
+            }
         }
     }
 }
@@ -865,12 +876,14 @@ pub(crate) fn body_block(
     };
     p.spawn((panel(scrolled, Swatch::Bg), ScrollArea, NodeCode))
         .with_children(|b| {
-            for row in rows {
+            let group = b.target_entity();
+            for (order, row) in rows.iter().enumerate() {
                 b.spawn((
                     Node {
                         min_height: px(21),
                         flex_shrink: 0.0,
-                        align_items: AlignItems::Center,
+                        align_items: AlignItems::FlexStart,
+                        padding: UiRect::vertical(px(2)),
                         ..default()
                     },
                     BackgroundColor::default(),
@@ -895,7 +908,26 @@ pub(crate) fn body_block(
                             Type::MONO.size(12.0).ink(Swatch::Faint),
                         ));
                     });
-                    r.spawn(code_line(fonts, 12.0, row.spans.clone()));
+                    let key = LineKey {
+                        group,
+                        order,
+                        column: 0,
+                    };
+                    r.spawn(Node {
+                        flex_grow: 1.0,
+                        flex_basis: px(0),
+                        min_width: px(0),
+                        padding: UiRect::right(px(12)),
+                        ..default()
+                    })
+                    .with_children(|c| {
+                        selectable(
+                            c,
+                            key,
+                            plain_text(&row.spans),
+                            wrapped_code_line(fonts, 12.0, row.spans.clone()),
+                        );
+                    });
                 });
             }
         });
@@ -1458,6 +1490,153 @@ mod tests {
     }
 
     #[test]
+    fn the_code_of_a_box_is_selectable_line_by_line_without_numbers() {
+        let (mut app, pr) = app_with_box();
+        let code = DiagramCode {
+            path: REFRESH.into(),
+            commit: head(),
+            start_line: 1,
+            lines: (1..=3)
+                .map(|number| CodeLine {
+                    number,
+                    text: format!("let line_{number} = {number};"),
+                    changed: false,
+                })
+                .collect(),
+            unavailable: None,
+        };
+        put_code(&mut app, &pr, "refresh", code);
+        testing::settle(&mut app);
+        let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
+        let mut lines: Vec<_> = q.iter(app.world()).collect();
+        lines.sort_by_key(|l| l.key.order);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["let line_1 = 1;", "let line_2 = 2;", "let line_3 = 3;"]
+        );
+    }
+
+    #[test]
+    fn a_wrapped_code_line_is_selected_across_its_wrap_and_copies_as_one_line() {
+        let long = format!(
+            "let refreshed = store.refresh_with_retry({}).await?;",
+            (1..=14)
+                .map(|n| format!("token_{n}_with_a_long_name"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+        let pr = open_box(
+            &mut app,
+            test_version(&head(), Some((REFRESH, 38, 48))),
+            "refresh",
+        );
+        let code = DiagramCode {
+            path: REFRESH.into(),
+            commit: head(),
+            start_line: 1,
+            lines: vec![CodeLine {
+                number: 1,
+                text: long.clone(),
+                changed: false,
+            }],
+            unavailable: None,
+        };
+        put_code(&mut app, &pr, "refresh", code);
+        testing::settle(&mut app);
+        let line = testing::find::<crate::ui::code_select::CodeLine>(&mut app, |_| true);
+        let (_, _, _, h) = testing::frame(&app, line);
+        assert!(h > 24.0, "the line wraps onto more rows: {h}");
+        let from = testing::code_point(&app, line, 0);
+        let to = testing::code_point(&app, line, long.len());
+        assert!(to.y > from.y, "the end sits on a lower row than the start");
+        testing::press_code(&mut app, line, from);
+        testing::drag_code(&mut app, line, from, to);
+        let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
+        let lines: Vec<_> = q.iter(app.world()).collect();
+        let copied = app
+            .world()
+            .resource::<crate::ui::code_select::CodeSelection>()
+            .text(lines);
+        assert_eq!(copied, long);
+        assert!(!copied.contains('\n'));
+    }
+
+    #[test]
+    fn a_long_code_line_wraps_inside_the_dialog_and_loses_nothing() {
+        let long = format!(
+            "let refreshed = store.refresh_with_retry({}).await?;",
+            (1..=14)
+                .map(|n| format!("token_{n}_with_a_long_name"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for large in [false, true] {
+            let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            let pr = open_box(
+                &mut app,
+                test_version(&head(), Some((REFRESH, 38, 48))),
+                "refresh",
+            );
+            let code = DiagramCode {
+                path: REFRESH.into(),
+                commit: head(),
+                start_line: 1,
+                lines: vec![
+                    CodeLine {
+                        number: 1,
+                        text: "fn short() {}".into(),
+                        changed: false,
+                    },
+                    CodeLine {
+                        number: 2,
+                        text: long.clone(),
+                        changed: true,
+                    },
+                ],
+                unavailable: None,
+            };
+            put_code(&mut app, &pr, "refresh", code);
+            testing::settle(&mut app);
+            let block = testing::find::<NodeCode>(&mut app, |_| true);
+            let (_, _, block_w, _) = testing::frame(&app, block);
+            let mut spans = app.world_mut().query::<(&TextSpan, &ChildOf)>();
+            let line = spans
+                .iter(app.world())
+                .find(|(s, _)| s.0.contains("refresh_with_retry"))
+                .map(|(_, p)| p.parent())
+                .expect("the long line");
+            let (x, _, w, h) = testing::frame(&app, line);
+            let (bx, _, _, _) = testing::frame(&app, block);
+            assert!(
+                x + w <= bx + block_w + 1.0,
+                "large={large}: the line ends at {} inside a block ending at {}",
+                x + w,
+                bx + block_w
+            );
+            assert!(h > 24.0, "large={large}: the line wraps onto more rows");
+            let shown: String = app
+                .world()
+                .get::<Children>(line)
+                .unwrap()
+                .iter()
+                .filter_map(|c| app.world().get::<TextSpan>(c))
+                .map(|s| s.0.as_str())
+                .collect();
+            assert!(shown.contains(&long), "large={large}: nothing is lost");
+            assert_eq!(
+                testing::overflowing_text(&mut app),
+                Vec::<String>::new(),
+                "large={large}"
+            );
+        }
+    }
+
+    #[test]
     fn opening_asks_for_the_code_once_and_then_shows_it() {
         let (mut app, pr) = app_with_box();
         assert_eq!(
@@ -1837,6 +2016,39 @@ mod tests {
         let tab = testing::tab(&app, &pr);
         assert_eq!((tab.ui.modal, tab.ui.diagram_node), (None, None));
         assert_eq!(testing::count::<NodeModal>(&mut app), 0);
+    }
+
+    fn take_box_away(app: &mut App, pr: &PrRef) {
+        let mut diagrams = app.world_mut().resource_mut::<Diagrams>();
+        let model = diagrams.0.get_mut(pr).expect("a model");
+        for e in model.loaded.get_mut(&2).unwrap().entries.iter_mut() {
+            if let EntryState::Ready { spec, .. } = &mut e.state {
+                spec.nodes.retain(|n| n.id != "refresh");
+            }
+        }
+    }
+
+    #[test]
+    fn a_redraw_that_takes_the_box_away_says_so_when_a_comment_was_being_typed() {
+        let (mut app, pr) = app_with_box();
+        put_code(&mut app, &pr, "refresh", code_at(&head(), true));
+        testing::settle(&mut app);
+        let area = testing::find::<EditorArea>(&mut app, |a| a.0 == pr);
+        testing::type_into(&mut app, area, "Why this?");
+        testing::settle(&mut app);
+        take_box_away(&mut app, &pr);
+        testing::settle(&mut app);
+        let toasts = &app.world().resource::<Toasts>().0;
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].text, "The box is gone after the redraw");
+    }
+
+    #[test]
+    fn a_redraw_that_takes_the_box_away_is_quiet_when_nothing_was_typed() {
+        let (mut app, pr) = app_with_box();
+        take_box_away(&mut app, &pr);
+        testing::settle(&mut app);
+        assert!(app.world().resource::<Toasts>().0.is_empty());
     }
 
     #[test]

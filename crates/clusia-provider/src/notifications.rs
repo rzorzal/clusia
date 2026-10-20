@@ -179,6 +179,42 @@ impl GitHub {
         Ok(combine(runs, &status))
     }
 
+    /// The id of the event behind the review of `pr` still requested from `reviewer` (compared
+    /// without regard to case), or `None` when none is: it was never asked by name, as when a
+    /// team was asked, or the request was taken back. Each new request is an event of its own,
+    /// though the notification thread stays the same.
+    pub async fn latest_review_request(
+        &self,
+        pr: &PrRef,
+        reviewer: &str,
+    ) -> Result<Option<u64>, ProviderError> {
+        let events = self
+            .get_paginated(&format!(
+                "{}/issues/{}/events",
+                Self::repo_path(pr),
+                pr.number
+            ))
+            .await?;
+        let mut about_reviewer: Vec<(u64, bool)> = events
+            .iter()
+            .filter_map(|e| {
+                let asked = match e.get("event")?.as_str()? {
+                    "review_requested" => true,
+                    "review_request_removed" => false,
+                    _ => return None,
+                };
+                let login = e.pointer("/requested_reviewer/login")?.as_str()?;
+                login
+                    .eq_ignore_ascii_case(reviewer)
+                    .then_some((e.get("id")?.as_u64()?, asked))
+            })
+            .collect();
+        about_reviewer.sort_unstable();
+        Ok(about_reviewer
+            .last()
+            .and_then(|&(id, asked)| asked.then_some(id)))
+    }
+
     /// The login of whoever wrote the comment at `url`, a `latest_comment_url` of a
     /// notification. Only the path of `url` is used, so the request always goes to this
     /// client's own API host.
@@ -227,6 +263,42 @@ mod tests {
             },
             "repository": { "full_name": "acme/widgets" }
         })
+    }
+
+    #[tokio::test]
+    async fn the_latest_review_request_for_a_reviewer_is_found_by_its_event_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/issues/7/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 11, "event": "review_requested", "requested_reviewer": { "login": "Me" } },
+                { "id": 12, "event": "review_requested", "requested_reviewer": { "login": "ana" } },
+                { "id": 13, "event": "labeled" },
+                { "id": 14, "event": "review_requested", "requested_team": { "slug": "core" } },
+                { "id": 15, "event": "review_requested", "requested_reviewer": { "login": "me" } },
+                { "id": 16, "event": "review_request_removed", "requested_reviewer": { "login": "ana" } },
+                { "id": 17, "event": "review_request_removed", "requested_reviewer": { "login": "bob" } },
+                { "id": 18, "event": "review_requested", "requested_reviewer": { "login": "bob" } },
+                { "id": 19, "event": "review_request_removed", "requested_reviewer": { "login": "BOB" } }
+            ])))
+            .mount(&server)
+            .await;
+        let g = gh(&server);
+        assert_eq!(
+            g.latest_review_request(&pr7(), "me").await.unwrap(),
+            Some(15)
+        );
+        assert_eq!(
+            g.latest_review_request(&pr7(), "ana").await.unwrap(),
+            None,
+            "a later removal cancels the request"
+        );
+        assert_eq!(
+            g.latest_review_request(&pr7(), "bob").await.unwrap(),
+            None,
+            "asked again and removed again"
+        );
+        assert_eq!(g.latest_review_request(&pr7(), "zed").await.unwrap(), None);
     }
 
     #[tokio::test]

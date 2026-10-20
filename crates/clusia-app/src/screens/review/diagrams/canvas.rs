@@ -997,8 +997,23 @@ fn spawn_canvas(
     spawn_viewport(c, canvas, g.size, |content| {
         spawn_content(content, fonts, ctx, spec, g)
     });
-    header(c, fonts, spec, g.dropped_texts);
-    zoom_control(c, fonts, canvas);
+    // One row over the canvas: the header takes what the zoom control leaves, whatever its width.
+    c.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(20),
+            right: px(16),
+            top: px(12),
+            column_gap: px(16),
+            align_items: AlignItems::FlexStart,
+            ..default()
+        },
+        ignore(),
+    ))
+    .with_children(|bar| {
+        header(bar, fonts, spec, g.dropped_texts);
+        zoom_control(bar, fonts, canvas);
+    });
     legend(c, fonts, ctx.tiles.as_ref(), ctx.compare);
 }
 
@@ -1393,10 +1408,13 @@ fn hidden_note(dropped: u32) -> Option<String> {
 fn header(c: &mut ChildSpawnerCommands, fonts: &Pen, spec: &DiagramSpec, dropped: u32) {
     c.spawn((
         Node {
-            position_type: PositionType::Absolute,
-            left: px(20),
-            top: px(16),
+            flex_grow: 1.0,
+            flex_basis: px(0),
+            min_width: px(0),
+            margin: UiRect::top(px(4)),
             column_gap: px(10),
+            row_gap: px(4),
+            flex_wrap: FlexWrap::Wrap,
             align_items: AlignItems::Center,
             ..default()
         },
@@ -1423,6 +1441,10 @@ fn header(c: &mut ChildSpawnerCommands, fonts: &Pen, spec: &DiagramSpec, dropped
             ));
         });
         h.spawn((
+            Node {
+                max_width: percent(100),
+                ..default()
+            },
             text(fonts, spec.caption.clone(), Type::MUTED.ink(Swatch::Faint)),
             ignore(),
         ));
@@ -1460,9 +1482,7 @@ pub(crate) fn zoom_control(c: &mut ChildSpawnerCommands, fonts: &Pen, canvas: En
     };
     c.spawn((
         Node {
-            position_type: PositionType::Absolute,
-            right: px(16),
-            top: px(12),
+            flex_shrink: 0.0,
             column_gap: px(4),
             align_items: AlignItems::Center,
             border: px(1).all(),
@@ -1604,7 +1624,7 @@ fn legend(c: &mut ChildSpawnerCommands, fonts: &Pen, tiles: Option<&Dots>, compa
                     r,
                     fonts,
                     tiles,
-                    "Changed",
+                    "Moved on",
                     Swatch::AmberSoft,
                     Swatch::Amber,
                     false,
@@ -2287,6 +2307,48 @@ mod tests {
         );
     }
 
+    const LONG_CAPTION: &str = "How an expired access token is refreshed one minute early, retried once with a fresh \
+        refresh token, and written back to the store before the next request goes out";
+
+    #[test]
+    fn a_long_caption_wraps_and_stays_clear_of_the_zoom_control() {
+        for large in [false, true] {
+            let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+            if large {
+                testing::set_config_locally(&mut app, "appearance.text_size", "large");
+            }
+            let pr = testing::open_ready(&mut app, false);
+            let mut versions = fixture::demo_diagrams(NOW, &pr);
+            for entry in &mut versions.last_mut().unwrap().entries {
+                if let EntryState::Ready { spec, .. } = &mut entry.state
+                    && spec.key == "flow"
+                {
+                    spec.caption = LONG_CAPTION.into();
+                }
+            }
+            testing::tell(&mut app, fixture::diagrams_tell_of(&pr, versions));
+            testing::set_section(&mut app, &pr, ReviewSection::Diagrams);
+            testing::settle(&mut app);
+            let caption = testing::find::<Text>(&mut app, |t| t.0 == LONG_CAPTION);
+            let plus = testing::find::<ZoomButton>(&mut app, |b| b.factor > 1.0);
+            let zoom = app.world().get::<ChildOf>(plus).unwrap().parent();
+            let (cx, cy, cw, ch) = testing::frame(&app, caption);
+            let (zx, zy, zw, zh) = testing::frame(&app, zoom);
+            let apart = cx + cw <= zx || cy + ch <= zy || zy + zh <= cy;
+            assert!(
+                apart,
+                "large={large}: caption {:?} overlaps the zoom control {:?}",
+                (cx, cy, cw, ch),
+                (zx, zy, zw, zh)
+            );
+            let node = app.world().get::<ComputedNode>(caption).unwrap();
+            assert!(
+                node.size.y * node.inverse_scale_factor > 24.0,
+                "large={large}: a caption this long takes more than one line"
+            );
+        }
+    }
+
     // ---- with the demo drawings on screen
 
     fn open(app: &mut App) -> (PrRef, Entity) {
@@ -2792,6 +2854,12 @@ mod tests {
             "the legend gains its second row"
         );
         assert!(shown.iter().any(|t| t == "Added"));
+        assert_eq!(
+            shown.iter().filter(|t| *t == "Changed").count(),
+            1,
+            "the history swatch has a name of its own"
+        );
+        assert!(shown.iter().any(|t| t == "Moved on"));
         assert!(
             shown.iter().any(|t| t == "save()"),
             "the label of the removed arrow"

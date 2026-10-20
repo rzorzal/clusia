@@ -81,3 +81,40 @@ async fn open_in_editor_refuses_outside_paths() {
     assert!(spawner.calls().is_empty(), "nothing was launched");
     d.stop().await;
 }
+
+/// Fails every launch the way `open` does when no program handles the URL.
+struct FailingSpawner;
+
+impl clusiad::Spawner for FailingSpawner {
+    fn spawn(&self, _argv: &[String]) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "exit status: 1: no application knows how to open the URL",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn open_in_editor_reports_a_launch_that_fails() {
+    let mut options = test_options();
+    options.spawner = Arc::new(FailingSpawner);
+    let d = TestDaemon::start_with(tempfile::tempdir().unwrap(), options).await;
+    let file = d.paths.root().join("notes.txt");
+    std::fs::write(&file, "x").unwrap();
+    let mut c = d.client().await;
+    let err = c
+        .request(Command::OpenInEditor {
+            path: file.display().to_string(),
+            line: Some(1),
+        })
+        .await
+        .unwrap_err();
+    match err {
+        ClientError::Server(e) => {
+            assert_eq!(e.code, ErrorCode::Internal);
+            assert!(e.message.contains("no application knows"), "{}", e.message);
+            assert!(e.message.contains("/usr/bin/open"), "{}", e.message);
+        }
+        other => panic!("expected a server error, got {other:?}"),
+    }
+    d.stop().await;
+}
