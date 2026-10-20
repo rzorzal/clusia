@@ -2981,7 +2981,16 @@ pub(crate) fn pump(
             }
             Tell::Diagrams(tell) => diagrams.apply(&tell),
             Tell::Story(tell) => stories.apply(&tell),
-            Tell::Calls(tell) => calls.apply(&tell),
+            Tell::Calls(tell) => {
+                if let CallsTell::Index {
+                    pr,
+                    state: CallsIndexState::Ready { .. } | CallsIndexState::Failed { .. },
+                } = &tell
+                {
+                    stories.index_finished(pr);
+                }
+                calls.apply(&tell);
+            }
             Tell::Revalidation(tell) => {
                 // A round that starts again shows its screen again, even after *Back to review*.
                 if let RevalidationTell::Round {

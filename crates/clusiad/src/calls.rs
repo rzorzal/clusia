@@ -94,11 +94,6 @@ impl Built {
         })
     }
 
-    #[allow(dead_code)] // interface for other daemon modules
-    pub(crate) fn is_changed(&self, id: &FunctionId) -> bool {
-        self.changed.iter().any(|c| &c.id == id)
-    }
-
     /// The pull request's files whose language no pack reads.
     pub(crate) fn unsupported(&self) -> Vec<String> {
         let touched: BTreeSet<&str> = self
@@ -920,8 +915,10 @@ pub(crate) async fn read_function_code(
     } else {
         BTreeSet::new()
     };
+    // Lines count from 1: a function a damaged cache puts at line 0 shows no code.
     let lines: Vec<CodeLine> = (f.start_line..=last)
-        .zip(text.lines().skip(f.start_line as usize - 1))
+        .filter(|_| f.start_line > 0)
+        .zip(text.lines().skip((f.start_line as usize).saturating_sub(1)))
         .map(|(number, line)| {
             let kept = cut(line, LINE_MAX);
             let shown = printable_lines(&kept);
@@ -1631,6 +1628,39 @@ pub fn untouched_helper() -> u32 {
             refused(read_function_code(&shared, &pr(1), "nope").await).code,
             ErrorCode::NotFound
         );
+    }
+
+    #[tokio::test]
+    async fn a_function_at_line_zero_has_no_code_instead_of_a_panic() {
+        let (_home, _fake, shared, _head) = lab_with_code();
+        let old = built(&shared, 1).await;
+        let mut index = old.index.clone();
+        index
+            .functions
+            .iter_mut()
+            .find(|f| f.id.0 == REFRESH)
+            .expect("the function")
+            .start_line = 0;
+        shared.indexes.insert(
+            &pr(1),
+            Arc::new(Built {
+                index,
+                base: old.base.clone(),
+                base_index: old.base_index.clone(),
+                resolved: old.resolved.clone(),
+                changed: old.changed.clone(),
+                hunks: old.hunks.clone(),
+                oids: old.oids.clone(),
+                signatures: Mutex::new(HashMap::new()),
+            }),
+        );
+        let Outcome::Ok(Reply::FunctionCode(code)) =
+            read_function_code(&shared, &pr(1), REFRESH).await
+        else {
+            panic!("code");
+        };
+        assert!(code.lines.is_empty());
+        assert!(code.unavailable.is_some());
     }
 
     #[tokio::test]

@@ -544,8 +544,10 @@ impl ReadMarks {
     }
 }
 
-/// Whether every hunk of a step is marked read at `commit`, or by a mark of another commit
-/// that `map` sends onto exactly that hunk. A step with no hunks is never read.
+/// Whether every hunk of a step is read: the marks on its path at `commit`, and those of other
+/// commits that `map` sends onto that path, together cover all its lines. A hunk marked in
+/// pieces (the static story clips a hunk to each function) reads as read once the pieces meet.
+/// A step with no hunks is never read.
 pub fn step_read(
     marks: &ReadMarks,
     commit: &str,
@@ -554,9 +556,28 @@ pub fn step_read(
 ) -> bool {
     !step_hunks.is_empty()
         && step_hunks.iter().all(|hunk| {
-            marks.hunks.iter().any(|m| {
-                is_mark(m, commit, hunk) || (m.commit != commit && map(m).as_ref() == Some(hunk))
-            })
+            let mut spans: Vec<(u32, u32)> = marks
+                .hunks
+                .iter()
+                .filter_map(|m| {
+                    if m.commit == commit {
+                        (m.path == hunk.path).then_some((m.start_line, m.end_line))
+                    } else {
+                        map(m)
+                            .filter(|to| to.path == hunk.path)
+                            .map(|to| (to.start_line, to.end_line))
+                    }
+                })
+                .collect();
+            spans.sort_unstable();
+            let mut next = hunk.start_line;
+            for (start, end) in spans {
+                if start > next {
+                    break;
+                }
+                next = next.max(end.saturating_add(1));
+            }
+            next > hunk.end_line
         })
 }
 
@@ -1282,6 +1303,34 @@ mod tests {
         assert!(
             !step_read(&marks, "c1", &[r("a.rs", 20, 22)], &map),
             "it moved"
+        );
+    }
+
+    #[test]
+    fn a_hunk_marked_in_pieces_is_read_once_the_pieces_cover_it() {
+        let marks = ReadMarks {
+            hunks: vec![mark("c1", "a.rs", 10, 12), mark("c1", "a.rs", 13, 20)],
+        };
+        assert!(step_read(&marks, "c1", &[r("a.rs", 10, 20)], &nothing));
+        assert!(
+            !step_read(&marks, "c1", &[r("a.rs", 10, 21)], &nothing),
+            "a line left over"
+        );
+        let gap = ReadMarks {
+            hunks: vec![mark("c1", "a.rs", 10, 12), mark("c1", "a.rs", 14, 20)],
+        };
+        assert!(!step_read(&gap, "c1", &[r("a.rs", 10, 20)], &nothing));
+        let other = ReadMarks {
+            hunks: vec![mark("c1", "b.rs", 10, 20)],
+        };
+        assert!(!step_read(&other, "c1", &[r("a.rs", 10, 20)], &nothing));
+        let moved = ReadMarks {
+            hunks: vec![mark("c0", "a.rs", 7, 9), mark("c1", "a.rs", 13, 20)],
+        };
+        let map = |m: &ReadHunk| Some(r("a.rs", m.start_line + 3, m.end_line + 3));
+        assert!(
+            step_read(&moved, "c1", &[r("a.rs", 10, 20)], &map),
+            "a mapped piece and a piece at the commit"
         );
     }
 

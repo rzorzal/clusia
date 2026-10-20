@@ -19,6 +19,7 @@ use super::view::*;
 use crate::bridge::{Ask, Asks, Connection, Model, Toasts};
 use crate::fonts::UiFonts;
 use crate::review_state::{DiffMode, EditTarget, Editor, ReviewTabs};
+use crate::screens::review::agent::harness_ready;
 use crate::screens::review::checks::Checks;
 use crate::screens::review::diagrams::canvas::{Dots, dashed_ring};
 use crate::screens::review::diff::{Gutter, HighlightCache, show_line, unified_rows, unsent};
@@ -168,9 +169,15 @@ pub(super) fn add_systems(app: &mut App) {
     );
 }
 
-fn ctx_of<'a>(model: &Model, harness: &'a str, code_size: f32) -> StoryCtx<'a> {
+fn ctx_of<'a>(
+    model: &Model,
+    harness: &'a str,
+    harness_ready: bool,
+    code_size: f32,
+) -> StoryCtx<'a> {
     StoryCtx {
         harness,
+        harness_ready,
         story_setting: model.snapshot.config.harness.story,
         live: model.connection == Connection::Live,
         code_size,
@@ -218,7 +225,11 @@ fn rebuild_story(
         }
         let Some(tab) = tabs.0.get(&pr) else { continue };
         let harness = crate::agent_name::of_tab(&model.snapshot, tab);
-        let ctx = ctx_of(&model, &harness, theme.code_size);
+        let ready = harness_ready(
+            &model.snapshot,
+            crate::agent_name::kind_of_tab(&model.snapshot, tab),
+        );
+        let ctx = ctx_of(&model, &harness, ready, theme.code_size);
         let view = story_view(tab, stories.0.get(&pr), checks.0.get(&pr), &ctx, &mut cache);
         views.insert(pr, (view, tab.ui.editor.clone()));
     }
@@ -691,6 +702,12 @@ fn banner_strip(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, banne
             Swatch::Chrome,
             false,
             format!("{harness} is not available. Showing the static order."),
+            None,
+        ),
+        Banner::NoHarness => (
+            Swatch::Chrome,
+            false,
+            "No harness is set up. Showing the static order.".to_string(),
             None,
         ),
         Banner::Manual { harness } => (
@@ -1756,6 +1773,7 @@ mod tests {
 
         // harness.story off, no version: the view offers the write.
         let (mut app, pr) = staged(StoryStage::Static);
+        testing::set_config_locally(&mut app, "harness.program", "/opt/homebrew/bin/claude");
         testing::set_config_locally(&mut app, "harness.story", "false");
         testing::tell(
             &mut app,

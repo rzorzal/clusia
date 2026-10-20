@@ -142,6 +142,8 @@ pub enum Banner {
     Unavailable {
         harness: String,
     },
+    /// No harness is set up at all.
+    NoHarness,
     Manual {
         harness: String,
     },
@@ -202,6 +204,8 @@ pub struct StoryCtx<'a> {
     /// `harness.story`: the agent writes when the view opens.
     pub story_setting: bool,
     pub live: bool,
+    /// A harness is set up to write with.
+    pub harness_ready: bool,
     pub code_size: f32,
 }
 
@@ -464,6 +468,9 @@ fn banner(m: &StoryModel, s: &Shown, ctx: &StoryCtx) -> Option<Banner> {
     if m.versions.is_empty() && m.state == StoryState::Idle {
         if !ctx.live {
             return Some(Banner::Unavailable { harness });
+        }
+        if !ctx.harness_ready {
+            return Some(Banner::NoHarness);
         }
         if !ctx.story_setting {
             return Some(Banner::Manual { harness });
@@ -762,6 +769,7 @@ mod tests {
             harness: "Claude Code",
             story_setting: true,
             live: true,
+            harness_ready: true,
             code_size: 13.0,
         }
     }

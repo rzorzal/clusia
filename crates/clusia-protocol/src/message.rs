@@ -374,8 +374,9 @@ pub enum Command {
         node: String,
         body: String,
     },
-    /// Write the Story of this review's head commit. It answers `InvalidState` while a story is
-    /// being written, and does nothing when the head already has a written version.
+    /// Write the Story of this review's head commit. It answers `Busy` while a story is being
+    /// written, and `InvalidState` ("A story already exists; use Rewrite") when the review holds
+    /// a version of any state.
     WriteStory {
         pr: PrRef,
     },
@@ -406,9 +407,8 @@ pub enum Command {
         read: bool,
     },
     /// Comment on step `step` of version `number` (0 is the static Story): the comment joins the
-    /// draft on the step's first hunk, or as a general comment naming the step when GitHub cannot
-    /// take it there. The hunks come from the stored Story, never from the client. Answers like
-    /// `AddDraftItem`.
+    /// draft as a general comment that names the step (`On "<title>": …`), never on a hunk. The
+    /// title comes from the stored Story, never from the client. Answers like `AddDraftItem`.
     AddStepComment {
         pr: PrRef,
         number: u32,
@@ -417,7 +417,8 @@ pub enum Command {
     },
     /// The call graph around a function. `center` is a function id (none: the first changed
     /// function), `depth` how many levels it shows and `expand` the levels (negative: callers,
-    /// positive: callees) that show all their neighbours.
+    /// positive: callees) that raise their level's limit of shown neighbours: each entry adds
+    /// `PER_LEVEL` more.
     GetCalls {
         pr: PrRef,
         #[serde(default)]
@@ -432,7 +433,8 @@ pub enum Command {
         pr: PrRef,
         query: String,
     },
-    /// The code of `function`, at the review's head commit.
+    /// The code of `function`, at the review's head commit; a function the change removed is read
+    /// at the merge base.
     ReadFunctionCode {
         pr: PrRef,
         function: String,

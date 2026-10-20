@@ -17,6 +17,8 @@ use crate::bridge::StoryTell;
 pub struct StoryModel {
     /// `GetStory` was asked for.
     pub asked: bool,
+    /// The review's head when `GetStory` was last asked; a different head asks again.
+    pub asked_head: String,
     /// The daemon's answer arrived.
     pub received: bool,
     /// The daemon answered at least once: what the model holds is worth drawing, even while the
@@ -47,6 +49,7 @@ impl Default for StoryModel {
     fn default() -> Self {
         Self {
             asked: false,
+            asked_head: String::new(),
             received: false,
             known: false,
             versions: Vec::new(),
@@ -89,6 +92,11 @@ impl StoryModel {
         } else {
             self.read.remove(step);
         }
+    }
+
+    /// A finished index replaces the static order the last answer carried.
+    pub fn index_finished(&mut self) {
+        self.asked = false;
     }
 
     pub fn apply(&mut self, tell: &StoryTell) {
@@ -157,6 +165,13 @@ impl StoryModel {
 pub struct Stories(pub HashMap<PrRef, StoryModel>);
 
 impl Stories {
+    /// The index of `pr` finished (built or failed): its static order is worth asking for again.
+    pub fn index_finished(&mut self, pr: &PrRef) {
+        if let Some(m) = self.0.get_mut(pr) {
+            m.index_finished();
+        }
+    }
+
     pub fn apply(&mut self, tell: &StoryTell) {
         self.0.entry(tell.pr().clone()).or_default().apply(tell);
     }

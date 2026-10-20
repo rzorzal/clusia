@@ -8,6 +8,7 @@ use clusia_core::{PrRef, Review};
 use crate::bridge::{Ask, Asks, Connection, Model};
 use crate::review_state::{DiffMode, ReviewSection, ReviewTabs, TabUi};
 use crate::screens::review::ReviewSystems;
+use crate::screens::review::agent::harness_ready;
 
 pub mod model;
 pub mod ui;
@@ -161,6 +162,15 @@ fn load_story(
         if !shows_story(&tab.ui) || !tab.ready().is_some_and(|r| r.cached_at.is_none()) {
             continue;
         }
+        let head = tab.ready().map_or("", |r| r.view.review.head_sha.as_str());
+        if let Some(m) = stories.0.get_mut(pr)
+            && m.asked
+            && !m.asked_head.is_empty()
+            && m.asked_head != head
+        {
+            m.asked = false;
+            m.received = false;
+        }
         match stories.0.get_mut(pr) {
             Some(m) if m.asked => {
                 let Some(number) = tab.ui.story_version else {
@@ -180,7 +190,9 @@ fn load_story(
                 }
             }
             _ => {
-                stories.0.entry(pr.clone()).or_default().asked = true;
+                let m = stories.0.entry(pr.clone()).or_default();
+                m.asked = true;
+                m.asked_head = head.to_string();
                 asks.send(Ask::GetStory(pr.clone()));
             }
         }
@@ -200,7 +212,13 @@ pub(super) fn trigger_write(
         return;
     }
     for (pr, tab) in &tabs.0 {
-        if !shows_story(&tab.ui) || !tab.ready().is_some_and(|r| r.cached_at.is_none()) {
+        if !shows_story(&tab.ui)
+            || !tab.ready().is_some_and(|r| r.cached_at.is_none())
+            || !harness_ready(
+                &model.snapshot,
+                crate::agent_name::kind_of_tab(&model.snapshot, tab),
+            )
+        {
             continue;
         }
         let Some(m) = stories.0.get_mut(pr) else {
@@ -242,17 +260,39 @@ pub(crate) fn demo_step_comment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::{Connection, StoryTell, Tell};
+    use crate::bridge::{CallsTell, Connection, StoryTell, Tell};
     use crate::fixture;
     use crate::review_state::ReviewSection;
     use crate::testing::{self, NOW};
     use clusia_protocol::StoryState;
 
+    /// The demo has no harness program; a Story is written only once one is set up.
     fn story_app() -> (App, PrRef) {
         let mut app = testing::app(fixture::demo(NOW));
+        testing::set_config_locally(&mut app, "harness.program", "/opt/homebrew/bin/claude");
         let pr = testing::open_ready(&mut app, false);
         set_mode(&mut app, &pr, DiffMode::Story);
         (app, pr)
+    }
+
+    fn move_head(app: &mut App, pr: &PrRef, sha: &str) {
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(pr)
+            .unwrap()
+            .ready_mut()
+            .unwrap()
+            .view
+            .review
+            .head_sha = sha.into();
+        testing::settle(app);
+    }
+
+    fn gets(asks: &[Ask], pr: &PrRef) -> usize {
+        asks.iter()
+            .filter(|a| **a == Ask::GetStory(pr.clone()))
+            .count()
     }
 
     fn set_mode(app: &mut App, pr: &PrRef, mode: DiffMode) {
@@ -581,6 +621,118 @@ mod tests {
                     && !asks.contains(&Ask::WriteStory(pr.clone()))
             );
         }
+    }
+
+    #[test]
+    fn a_finished_index_reads_the_story_again_so_the_static_order_appears() {
+        let (mut app, pr) = story_app();
+        let Tell::Story(StoryTell::Loaded {
+            versions,
+            latest,
+            state,
+            read,
+            head,
+            new_commits,
+            ..
+        }) = empty(&pr, StoryState::Idle)
+        else {
+            panic!("a loaded story");
+        };
+        testing::tell(
+            &mut app,
+            Tell::Story(StoryTell::Loaded {
+                pr: pr.clone(),
+                versions,
+                latest,
+                state,
+                static_steps: Vec::new(),
+                read,
+                head,
+                new_commits,
+            }),
+        );
+        testing::settle(&mut app);
+        testing::recorded(&mut app);
+        let index = |state| {
+            Tell::Calls(CallsTell::Index {
+                pr: pr.clone(),
+                state,
+            })
+        };
+        testing::tell(&mut app, index(clusia_protocol::CallsIndexState::Building));
+        testing::settle(&mut app);
+        assert_eq!(gets(&testing::recorded(&mut app), &pr), 0, "still building");
+        testing::tell(
+            &mut app,
+            index(clusia_protocol::CallsIndexState::Ready {
+                commit: "9be1d07c3a2f4e5d6c7b8a9f0e1d2c3b4a5f6e7d".into(),
+                cut: false,
+            }),
+        );
+        testing::settle(&mut app);
+        assert_eq!(gets(&testing::recorded(&mut app), &pr), 1);
+        testing::tell(
+            &mut app,
+            index(clusia_protocol::CallsIndexState::Failed {
+                message: "x".into(),
+            }),
+        );
+        testing::settle(&mut app);
+        assert_eq!(gets(&testing::recorded(&mut app), &pr), 1, "a failure too");
+    }
+
+    #[test]
+    fn a_new_head_asks_again_and_the_story_then_says_it_is_outdated() {
+        let (mut app, pr) = story_app();
+        testing::tell(&mut app, fixture::demo_story_tell(&pr, NOW));
+        testing::settle(&mut app);
+        testing::recorded(&mut app);
+        assert!(!testing::shows(&mut app, "Rewrite"));
+        let moved = "aaaaaaa3a2f4e5d6c7b8a9f0e1d2c3b4a5f6e7d0";
+        move_head(&mut app, &pr, moved);
+        assert_eq!(gets(&testing::recorded(&mut app), &pr), 1);
+        let Tell::Story(StoryTell::Loaded {
+            versions,
+            latest,
+            state,
+            static_steps,
+            read,
+            ..
+        }) = fixture::demo_story_tell(&pr, NOW)
+        else {
+            panic!("a loaded story");
+        };
+        testing::tell(
+            &mut app,
+            Tell::Story(StoryTell::Loaded {
+                pr: pr.clone(),
+                versions,
+                latest,
+                state,
+                static_steps,
+                read,
+                head: moved.into(),
+                new_commits: 1,
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Rewrite"));
+        assert_eq!(gets(&testing::recorded(&mut app), &pr), 0, "once per head");
+    }
+
+    #[test]
+    fn with_no_harness_the_static_order_says_so_and_nothing_is_written() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        set_mode(&mut app, &pr, DiffMode::Story);
+        testing::recorded(&mut app);
+        testing::tell(&mut app, empty(&pr, StoryState::Idle));
+        testing::settle(&mut app);
+        assert_eq!(writes(&testing::recorded(&mut app)), 0);
+        assert!(testing::shows(
+            &mut app,
+            "No harness is set up. Showing the static order."
+        ));
     }
 
     #[test]

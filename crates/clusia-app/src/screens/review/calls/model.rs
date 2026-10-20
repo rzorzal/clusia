@@ -28,6 +28,8 @@ pub struct CallsRequest {
 pub struct CallsModel {
     /// `GetCalls` was asked for.
     pub asked: bool,
+    /// The review's head when `GetCalls` was last asked; a different head asks again.
+    pub asked_head: String,
     pub graph: Option<CallGraph>,
     pub index: CallsIndexState,
     /// Changed source files whose language has no pack.
@@ -52,6 +54,7 @@ impl Default for CallsModel {
     fn default() -> Self {
         Self {
             asked: false,
+            asked_head: String::new(),
             graph: None,
             index: CallsIndexState::Idle,
             unsupported: Vec::new(),

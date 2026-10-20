@@ -173,16 +173,20 @@ fn load_calls(
             continue;
         }
         let want = wanted_request(&tab.ui, config_depth);
-        let stale = calls
-            .0
-            .get(pr)
-            .is_none_or(|m| !m.asked || m.shown.as_ref() != Some(&want));
+        let head = tab.ready().map_or("", |r| r.view.review.head_sha.as_str());
+        let stale = calls.0.get(pr).is_none_or(|m| {
+            !m.asked
+                || m.shown.as_ref() != Some(&want)
+                || (!m.asked_head.is_empty() && m.asked_head != head)
+        });
         let asking = calls
             .0
             .get(pr)
             .is_some_and(|m| m.asking.as_ref() == Some(&want));
         if stale && !asking {
-            calls.0.entry(pr.clone()).or_default().asking = Some(want.clone());
+            let m = calls.0.entry(pr.clone()).or_default();
+            m.asking = Some(want.clone());
+            m.asked_head = head.to_string();
             asks.send(Ask::GetCalls {
                 pr: pr.clone(),
                 center: want.center,
@@ -573,5 +577,41 @@ mod tests {
             None,
             "only on the Diff section"
         );
+    }
+
+    #[test]
+    fn a_new_head_asks_for_the_graph_again() {
+        let mut app = crate::testing::app(fixture::demo(NOW));
+        let pr = crate::testing::open_ready(&mut app, false);
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .mode = crate::review_state::DiffMode::Calls;
+        crate::testing::settle(&mut app);
+        let graphs = |app: &mut App| {
+            crate::testing::recorded(app)
+                .iter()
+                .filter(|a| matches!(a, Ask::GetCalls { .. }))
+                .count()
+        };
+        assert_eq!(graphs(&mut app), 1);
+        crate::testing::tell(&mut app, fixture::demo_calls_graph(None, 3, &[]));
+        crate::testing::settle(&mut app);
+        assert_eq!(graphs(&mut app), 0, "the graph matches the head");
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ready_mut()
+            .unwrap()
+            .view
+            .review
+            .head_sha = "aaaaaaa3a2f4e5d6c7b8a9f0e1d2c3b4a5f6e7d0".into();
+        crate::testing::settle(&mut app);
+        assert_eq!(graphs(&mut app), 1, "the head moved");
     }
 }
