@@ -689,7 +689,7 @@ pub(crate) fn apply(
     }
 }
 
-/// Whether the tab was there to be marked.
+/// Whether the tab was busy, and so changed.
 fn not_busy(tabs: &mut ReviewTabs, pr: &PrRef) -> bool {
     let Some(tab) = tabs.0.get_mut(pr) else {
         return false;
@@ -1659,5 +1659,204 @@ mod tests {
         edit_in_frame(&mut app, EditTarget::Finding("f1".into()), None);
         assert!(tab_changes(&mut app, settled("f1")) >= 1);
         assert!(testing::tab(&app, &pr()).ui.editor.is_none());
+    }
+
+    fn ready_tabs(busy: bool) -> ReviewTabs {
+        let mut tab = Tab::loading(DiffMode::Unified);
+        tab.phase = Phase::Ready(Box::new(Ready {
+            view: fixture::demo_review(NOW).0,
+            news: Vec::new(),
+            cached_at: None,
+        }));
+        tab.ui.finalize.busy = busy;
+        let mut tabs = ReviewTabs::default();
+        tabs.0.insert(pr(), tab);
+        tabs
+    }
+
+    fn applied(tabs: &mut ReviewTabs, tell: Tell) -> bool {
+        apply(tabs, &mut Asks::default(), tell, &mut Vec::new()).changed
+    }
+
+    #[test]
+    fn a_publish_outcome_or_a_leave_changes_the_tabs_only_when_the_tab_was_busy() {
+        let result = || PublishResult {
+            url: None,
+            closed: false,
+            unresolved: Vec::new(),
+            close_error: None,
+        };
+        let tells = || {
+            [
+                Tell::Published {
+                    pr: pr(),
+                    result: result(),
+                },
+                Tell::PublishFailed {
+                    pr: pr(),
+                    code: ErrorCode::Internal,
+                    message: "no".into(),
+                },
+                Tell::Left(pr()),
+            ]
+        };
+        for (busy_tell, quiet_tell) in tells().into_iter().zip(tells()) {
+            let label = format!("{busy_tell:?}");
+            let mut busy = ready_tabs(true);
+            assert!(applied(&mut busy, busy_tell), "{label}");
+            assert!(!busy.0[&pr()].ui.finalize.busy, "{label}");
+            let mut idle = ready_tabs(false);
+            assert!(!applied(&mut idle, quiet_tell), "{label} when not busy");
+            let mut missing = ReviewTabs::default();
+            assert!(!applied(&mut missing, tells().into_iter().next().unwrap()));
+        }
+    }
+
+    #[test]
+    fn a_publish_outcome_marks_the_tabs_changed_through_pump_while_busy() {
+        let mut app = watched_app();
+        let set_busy = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<ReviewTabs>()
+                .0
+                .get_mut(&pr())
+                .unwrap()
+                .ui
+                .finalize
+                .busy = true;
+            app.update();
+            app.world_mut().resource_mut::<TabsChanged>().0 = 0;
+        };
+        set_busy(&mut app);
+        let failed = Tell::PublishFailed {
+            pr: pr(),
+            code: ErrorCode::Internal,
+            message: "no".into(),
+        };
+        assert!(tab_changes(&mut app, failed) >= 1);
+        set_busy(&mut app);
+        let published = Tell::Published {
+            pr: pr(),
+            result: PublishResult {
+                url: None,
+                closed: false,
+                unresolved: Vec::new(),
+                close_error: None,
+            },
+        };
+        assert!(tab_changes(&mut app, published) >= 1);
+    }
+
+    #[test]
+    fn a_cached_copy_changes_the_tabs_unless_a_fresh_copy_is_there() {
+        let cached = || Tell::OpenedFromCache {
+            pr: pr(),
+            view: view(),
+            fetched_at: NOW,
+        };
+        let mut tab = Tab::loading(DiffMode::Unified);
+        tab.phase = Phase::Loading { steps: Vec::new() };
+        let mut loading = ReviewTabs::default();
+        loading.0.insert(pr(), tab);
+        assert!(applied(&mut loading, cached()), "over a loading tab");
+        assert!(applied(&mut loading, cached()), "over an older cached copy");
+        let mut fresh = ready_tabs(false);
+        assert!(!applied(&mut fresh, cached()), "a fresh copy stays");
+        let mut missing = ReviewTabs::default();
+        assert!(!applied(&mut missing, cached()), "no tab");
+    }
+
+    fn round_app(state: clusia_core::revalidation::RoundState) -> App {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_round(&mut app, state);
+        app.init_resource::<TabsChanged>()
+            .add_systems(PostUpdate, count_tab_changes);
+        testing::settle(&mut app);
+        app.world_mut().resource_mut::<TabsChanged>().0 = 0;
+        app
+    }
+
+    fn a_round(app: &mut App, state: clusia_core::revalidation::RoundState) -> Tell {
+        let mut review = testing::ready(app, &pr()).view.review;
+        Tell::Revalidation(bridge::RevalidationTell::Round {
+            pr: pr(),
+            round: Some(testing::demo_round(&mut review, state)),
+        })
+    }
+
+    #[test]
+    fn a_round_that_comes_back_changes_the_tabs_and_one_that_does_not_leaves_them() {
+        use clusia_core::revalidation::RoundState;
+        let mut app = round_app(RoundState::Done);
+        let again = a_round(&mut app, RoundState::Done);
+        assert_eq!(tab_changes(&mut app, again), 0, "the same state again");
+        let waiting = a_round(&mut app, RoundState::Waiting);
+        assert!(
+            tab_changes(&mut app, waiting) >= 1,
+            "a new round shows its screen"
+        );
+        assert_eq!(testing::tab(&app, &pr()).ui.revalidation, RevalView::Auto);
+    }
+
+    #[test]
+    fn a_settled_reanchor_changes_the_tabs_only_for_the_item_that_waited() {
+        use clusia_core::revalidation::RoundState;
+        let mut app = round_app(RoundState::Done);
+        let settled = |item: &str| {
+            Tell::Revalidation(bridge::RevalidationTell::Settled {
+                pr: pr(),
+                item: Some(item.into()),
+            })
+        };
+        assert_eq!(
+            tab_changes(&mut app, settled("i2")),
+            0,
+            "nothing waited on it"
+        );
+        app.world_mut()
+            .resource_mut::<crate::screens::review::revalidation::Revalidations>()
+            .0
+            .entry(pr())
+            .or_default()
+            .reanchor
+            .insert("i2".into());
+        assert!(tab_changes(&mut app, settled("i2")) >= 1);
+        assert_eq!(testing::tab(&app, &pr()).ui.reanchor.as_deref(), Some("i2"));
+    }
+
+    #[test]
+    fn a_reanchored_item_changes_the_tabs_only_for_the_item_being_placed() {
+        use clusia_core::revalidation::RoundState;
+        let mut app = round_app(RoundState::Done);
+        let reanchored = |item: &str| {
+            Tell::Revalidation(bridge::RevalidationTell::Reanchored {
+                pr: pr(),
+                item: item.into(),
+            })
+        };
+        assert_eq!(
+            tab_changes(&mut app, reanchored("i2")),
+            0,
+            "none is being placed"
+        );
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr())
+            .unwrap()
+            .ui
+            .reanchor = Some("i2".into());
+        app.update();
+        app.world_mut().resource_mut::<TabsChanged>().0 = 0;
+        assert!(tab_changes(&mut app, reanchored("i2")) >= 1);
+        assert_eq!(testing::tab(&app, &pr()).ui.reanchor, None);
+    }
+
+    #[test]
+    fn a_lost_connection_is_quiet_for_tabs_with_nothing_asked_or_saving() {
+        let mut app = watched_app();
+        // The first loss resets `hidden_asked` (a change); the second finds nothing to reset.
+        let _ = tab_changes(&mut app, Tell::Lost("gone".into()));
+        assert_eq!(tab_changes(&mut app, Tell::Lost("gone".into())), 0);
     }
 }

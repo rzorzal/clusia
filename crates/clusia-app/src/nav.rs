@@ -501,6 +501,7 @@ fn tab_node(on: bool) -> impl Bundle {
 }
 
 /// The minute of the clock, so age labels ("5m") are rebuilt once a minute, not every frame.
+/// It turns on the clock's minute boundaries, so a label can lag its true age by up to 59 s.
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
 pub struct MinuteTick(pub i64);
 
