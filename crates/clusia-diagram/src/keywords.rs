@@ -953,11 +953,8 @@ mod tests {
     #[test]
     fn the_same_map_gives_the_same_scene_bit_for_bit_within_the_budget() {
         let m = at_the_caps();
-        let started = std::time::Instant::now();
-        let first = scene(&m);
-        let took = started.elapsed();
-        let limit = if cfg!(debug_assertions) { 200 } else { 20 };
-        assert!(took.as_millis() <= limit, "{took:?}");
+        let (first, took) = crate::testkit::cpu_timed(|| scene(&m));
+        assert!(took.as_millis() <= crate::testkit::BUDGET_MS, "{took:?}");
         assert_eq!(first.points.len(), MAX_POINTS);
         let second = scene(&m.clone());
         assert_eq!(first, second);

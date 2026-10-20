@@ -1220,13 +1220,8 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
         );
-        let started = std::time::Instant::now();
-        let g = layout(&s, &Fonts);
-        let took = started.elapsed();
-        assert!(
-            took.as_millis() <= if cfg!(debug_assertions) { 200 } else { 20 },
-            "{took:?}"
-        );
+        let (g, took) = crate::testkit::cpu_timed(|| layout(&s, &Fonts));
+        assert!(took.as_millis() <= crate::testkit::BUDGET_MS, "{took:?}");
         // At 78 routes on one actor two of them still share a line, so only the time and the
         // routes' count are held here.
         assert_eq!(g.edges.len(), 78);
@@ -1266,9 +1261,8 @@ mod tests {
             let members: Vec<String> = (0..cases).map(|i| format!("u{i}")).collect();
             let refs: Vec<&str> = members.iter().map(String::as_str).collect();
             let s = with_boundary(&spec("use_cases", nodes, edges), &refs);
-            let started = std::time::Instant::now();
-            let g = layout(&s, &Fonts);
-            assert!(started.elapsed().as_millis() <= if cfg!(debug_assertions) { 200 } else { 20 });
+            let (g, took) = crate::testkit::cpu_timed(|| layout(&s, &Fonts));
+            assert!(took.as_millis() <= crate::testkit::BUDGET_MS, "{took:?}");
             check(&s, &g);
             assert_eq!(layout(&s, &Fonts), g);
         }
@@ -1295,9 +1289,8 @@ mod tests {
             })
             .collect();
         let s = spec("use_cases", nodes, edges);
-        let started = std::time::Instant::now();
-        let g = layout(&s, &Fonts);
-        assert!(started.elapsed().as_millis() <= if cfg!(debug_assertions) { 200 } else { 20 });
+        let (g, took) = crate::testkit::cpu_timed(|| layout(&s, &Fonts));
+        assert!(took.as_millis() <= crate::testkit::BUDGET_MS, "{took:?}");
         check(&s, &g);
     }
 
