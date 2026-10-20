@@ -124,3 +124,40 @@ async fn changing_the_github_settings_asks_gh_again() {
     assert_eq!(gh_runs(&runs), 2);
     d.stop().await;
 }
+
+#[tokio::test]
+async fn a_gh_account_switch_is_followed_at_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "login": "maria" })))
+        .mount(&server)
+        .await;
+    let tools = tempfile::tempdir().unwrap();
+    let (gh, runs) = counting_gh(tools.path());
+    let config = tempfile::tempdir().unwrap();
+    let hosts = config.path().join("hosts.yml");
+    std::fs::write(&hosts, "github.com:\n    user: maria\n").unwrap();
+    let mut options = test_options();
+    options.github_api = Some(server.uri());
+    options.gh_program = gh;
+    options.gh_config_dir = Some(config.path().to_path_buf());
+    let d = TestDaemon::start_with(tempfile::tempdir().unwrap(), options).await;
+    let mut c = d.client().await;
+
+    auth(&mut c).await;
+    auth(&mut c).await;
+    assert_eq!(gh_runs(&runs), 1, "nothing changed: the token is kept");
+
+    // `gh auth switch` rewrites the file; the size differs, so the stamp does whatever the clock says.
+    std::fs::write(&hosts, "github.com:\n    user: maria-work\n").unwrap();
+    auth(&mut c).await;
+    assert_eq!(gh_runs(&runs), 2);
+
+    std::fs::remove_file(&hosts).unwrap();
+    auth(&mut c).await;
+    assert_eq!(gh_runs(&runs), 3, "a missing file is a key of its own");
+    auth(&mut c).await;
+    assert_eq!(gh_runs(&runs), 3);
+    d.stop().await;
+}

@@ -1,5 +1,7 @@
 //! Keeping the PR lists in sync with GitHub (spec §5.1).
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -8,7 +10,7 @@ use clusia_core::PrFilter;
 use clusia_protocol::{Event, SyncState, SyncStatus, topics};
 use clusia_provider::{GitHub, ProviderError, TokenSources, api_base_for_host, resolve_token};
 
-use crate::state::{PrLists, Shared};
+use crate::state::{GhStamp, PrLists, Shared};
 
 pub(crate) const NO_TOKEN: &str =
     "no GitHub token: run `gh auth login`, or pipe a token into `clusia auth login`";
@@ -36,11 +38,12 @@ pub(crate) async fn github_client(shared: &Shared) -> Result<Option<Arc<GitHub>>
             shared.forget_token();
         }
     }
+    let stamp = gh_stamp(shared.gh_config_dir.as_deref());
     let kept = shared
         .token_cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(github.auth, &github.host, Instant::now());
+        .get(github.auth, &github.host, stamp, Instant::now());
     let token = match kept {
         Some(token) => token,
         None => {
@@ -55,7 +58,7 @@ pub(crate) async fn github_client(shared: &Shared) -> Result<Option<Arc<GitHub>>
                         .token_cache
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .put(github.auth, &github.host, &token, Instant::now());
+                        .put(github.auth, &github.host, stamp, &token, Instant::now());
                     token
                 }
                 Ok(None) => return Ok(None),
@@ -80,6 +83,24 @@ pub(crate) async fn github_client(shared: &Shared) -> Result<Option<Arc<GitHub>>
     let client = Arc::new(GitHub::new(&api, token)?);
     *cached = Some(client.clone());
     Ok(Some(client))
+}
+
+/// Where `gh` keeps `hosts.yml`: `dir` when given, else `GH_CONFIG_DIR`, `XDG_CONFIG_HOME/gh`,
+/// then `~/.config/gh`.
+fn gh_config_dir(dir: Option<&Path>, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    if let Some(dir) = dir {
+        return Some(dir.to_path_buf());
+    }
+    let set = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    set("GH_CONFIG_DIR")
+        .or_else(|| set("XDG_CONFIG_HOME").map(|d| d.join("gh")))
+        .or_else(|| set("HOME").map(|d| d.join(".config").join("gh")))
+}
+
+fn gh_stamp(dir: Option<&Path>) -> GhStamp {
+    let dir = gh_config_dir(dir, |name| std::env::var_os(name))?;
+    let meta = std::fs::metadata(dir.join("hosts.yml")).ok()?;
+    Some((meta.modified().ok(), meta.len()))
 }
 
 pub(crate) fn status_for_error(
@@ -282,6 +303,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gh_finds_its_folder_as_gh_does() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| OsString::from(v))
+            }
+        };
+        let all = &[
+            ("GH_CONFIG_DIR", "/own"),
+            ("XDG_CONFIG_HOME", "/xdg"),
+            ("HOME", "/home/maria"),
+        ];
+        assert_eq!(gh_config_dir(None, env(all)), Some("/own".into()));
+        assert_eq!(gh_config_dir(None, env(&all[1..])), Some("/xdg/gh".into()));
+        assert_eq!(
+            gh_config_dir(None, env(&all[2..])),
+            Some("/home/maria/.config/gh".into())
+        );
+        assert_eq!(gh_config_dir(None, env(&[])), None);
+        assert_eq!(
+            gh_config_dir(Some(Path::new("/given")), env(all)),
+            Some("/given".into())
+        );
+    }
+
+    #[test]
     fn status_for_error_maps_states_and_next_sync() {
         let s = status_for_error(&ProviderError::Unauthorized, Some(5), 100, 60);
         assert_eq!(
@@ -347,6 +396,7 @@ mod tests {
             harness_env: Vec::new(),
             claude_program: Some("/nonexistent/claude".into()),
             codex_program: Some("/nonexistent/codex".into()),
+            gh_config_dir: None,
         };
         let shared = Arc::new(Shared::new(
             clusia_core::Paths::new(dir.path()),

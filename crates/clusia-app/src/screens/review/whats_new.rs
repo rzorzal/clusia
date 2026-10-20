@@ -837,6 +837,33 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_open_stops_waiting_for_news() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (pr, _) = open_awaiting_news(&mut app);
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::OpenFailed {
+                pr: pr.clone(),
+                message: "offline".into(),
+                cache: true,
+            },
+        );
+        testing::settle(&mut app);
+        assert!(!testing::tab(&app, &pr).ui.news_pending);
+    }
+
+    #[test]
+    fn trying_again_stops_waiting_for_news() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (pr, _) = open_awaiting_news(&mut app);
+        app.world_mut()
+            .resource_scope(|world, mut tabs: Mut<ReviewTabs>| {
+                tabs.retry(&pr, &mut world.resource_mut::<Asks>());
+            });
+        assert!(!testing::tab(&app, &pr).ui.news_pending);
+    }
+
+    #[test]
     fn news_for_a_tab_that_is_not_waiting_for_it_is_dropped() {
         let mut app = testing::app(fixture::demo(NOW));
         let pr = testing::open_ready(&mut app, false);

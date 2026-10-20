@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use clusia_core::config::AuthSource;
 use clusia_core::{Config, FileDiff, Paths, PrRef, PrSummary};
@@ -40,24 +40,40 @@ pub(crate) type CachedFiles = (String, Arc<Vec<FileDiff>>);
 /// How long a token from `gh auth token` is used before the CLI is asked again.
 const TOKEN_TTL: Duration = Duration::from_secs(300);
 
-/// The last token `gh auth token` gave for a sign-in method and host. Tokens from the
-/// environment and the Keychain are not kept: they are cheap to read, and a stored one changes
-/// through the daemon, which forgets this entry then.
+/// What `gh` keeps its accounts in, as `stat` sees it: the modification time and size of
+/// `hosts.yml`, or `None` when there is no such file. `gh auth login`, `logout` and `switch`
+/// all rewrite it.
+pub(crate) type GhStamp = Option<(Option<SystemTime>, u64)>;
+
+/// The last token `gh auth token` gave for a sign-in method and host, as long as `hosts.yml`
+/// is as it was. Tokens from the environment and the Keychain are not kept: they are cheap to
+/// read, and a stored one changes through the daemon, which forgets this entry then.
 #[derive(Default)]
-pub(crate) struct TokenCache(Option<(AuthSource, String, Token, Instant)>);
+pub(crate) struct TokenCache(Option<(AuthSource, String, GhStamp, Token, Instant)>);
 
 impl TokenCache {
-    /// The kept token when it is for `auth` and `host` and less than `TOKEN_TTL` old at `now`.
-    pub fn get(&self, auth: AuthSource, host: &str, now: Instant) -> Option<Token> {
-        let (kept_auth, kept_host, token, at) = self.0.as_ref()?;
-        (*kept_auth == auth && kept_host == host && now.saturating_duration_since(*at) < TOKEN_TTL)
+    /// The kept token when it is for `auth` and `host`, `hosts.yml` still reads `stamp`, and it
+    /// is less than `TOKEN_TTL` old at `now`.
+    pub fn get(&self, auth: AuthSource, host: &str, stamp: GhStamp, now: Instant) -> Option<Token> {
+        let (kept_auth, kept_host, kept_stamp, token, at) = self.0.as_ref()?;
+        (*kept_auth == auth
+            && kept_host == host
+            && *kept_stamp == stamp
+            && now.saturating_duration_since(*at) < TOKEN_TTL)
             .then(|| token.clone())
     }
 
-    /// Keeps `token`, taken at `now`, when it came from the CLI.
-    pub fn put(&mut self, auth: AuthSource, host: &str, token: &Token, now: Instant) {
+    /// Keeps `token`, taken at `now` while `hosts.yml` read `stamp`, when it came from the CLI.
+    pub fn put(
+        &mut self,
+        auth: AuthSource,
+        host: &str,
+        stamp: GhStamp,
+        token: &Token,
+        now: Instant,
+    ) {
         if token.origin == TokenOrigin::GhCli {
-            self.0 = Some((auth, host.to_string(), token.clone(), now));
+            self.0 = Some((auth, host.to_string(), stamp, token.clone(), now));
         }
     }
 
@@ -159,6 +175,8 @@ pub(crate) struct Shared {
     pub claude_program: Option<PathBuf>,
     /// The `codex` program of `DaemonOptions` (see `turns::program_path`).
     pub codex_program: Option<PathBuf>,
+    /// The folder of `gh`'s `hosts.yml` (see `DaemonOptions::gh_config_dir`).
+    pub gh_config_dir: Option<PathBuf>,
     /// The `clusiad` that runs as the permission bridge; this executable when `None`.
     pub bridge_program: Option<PathBuf>,
     /// Added to the daemon's environment for a custom command's process; empty in production.
@@ -277,6 +295,7 @@ impl Shared {
             harness_search_paths: options.harness_search_paths,
             claude_program: options.claude_program,
             codex_program: options.codex_program,
+            gh_config_dir: options.gh_config_dir,
             bridge_program: options.bridge_program,
             harness_env: options.harness_env,
             permissions: Permissions::default(),
@@ -394,6 +413,7 @@ mod tests {
         cache.put(
             AuthSource::GhCli,
             "github.com",
+            None,
             &Token::new("secret", origin),
             now,
         );
@@ -407,12 +427,12 @@ mod tests {
         let at = |secs| t0 + Duration::from_secs(secs);
         assert!(
             cache
-                .get(AuthSource::GhCli, "github.com", at(299))
+                .get(AuthSource::GhCli, "github.com", None, at(299))
                 .is_some()
         );
         assert!(
             cache
-                .get(AuthSource::GhCli, "github.com", at(300))
+                .get(AuthSource::GhCli, "github.com", None, at(300))
                 .is_none()
         );
     }
@@ -421,10 +441,10 @@ mod tests {
     fn a_kept_token_is_for_its_sign_in_method_and_host_only() {
         let t0 = Instant::now();
         let cache = kept(TokenOrigin::GhCli, t0);
-        assert!(cache.get(AuthSource::Pat, "github.com", t0).is_none());
+        assert!(cache.get(AuthSource::Pat, "github.com", None, t0).is_none());
         assert!(
             cache
-                .get(AuthSource::GhCli, "ghe.example.com", t0)
+                .get(AuthSource::GhCli, "ghe.example.com", None, t0)
                 .is_none()
         );
     }
@@ -435,10 +455,22 @@ mod tests {
         for origin in [TokenOrigin::Env, TokenOrigin::Pat] {
             assert!(
                 kept(origin, t0)
-                    .get(AuthSource::GhCli, "github.com", t0)
+                    .get(AuthSource::GhCli, "github.com", None, t0)
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn a_kept_token_is_only_good_while_hosts_yml_is_as_it_was() {
+        let t0 = Instant::now();
+        let cache = kept(TokenOrigin::GhCli, t0);
+        let rewritten = Some((Some(SystemTime::UNIX_EPOCH), 40));
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "github.com", rewritten, t0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -446,7 +478,11 @@ mod tests {
         let t0 = Instant::now();
         let mut cache = kept(TokenOrigin::GhCli, t0);
         cache.forget();
-        assert!(cache.get(AuthSource::GhCli, "github.com", t0).is_none());
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "github.com", None, t0)
+                .is_none()
+        );
     }
 
     fn widgets() -> RepoId {

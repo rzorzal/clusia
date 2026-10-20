@@ -433,6 +433,7 @@ impl ReviewTabs {
             return;
         }
         tab.ui.opening = true;
+        tab.ui.news_pending = false;
         tab.ui.open_error = None;
         if !tab.ready().is_some_and(|r| r.cached_at.is_some()) {
             tab.phase = Phase::Loading { steps: Vec::new() };
@@ -617,6 +618,7 @@ pub(crate) fn apply(
         Tell::OpenFailed { pr, message, .. } => match tabs.0.get_mut(&pr) {
             Some(tab) => {
                 tab.ui.opening = false;
+                tab.ui.news_pending = false;
                 // A copy opened from the cache stays; it offers *Try again*.
                 let failed = match &mut tab.phase {
                     Phase::Loading { steps } => Some(Phase::Failed {

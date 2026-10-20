@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use clusia_core::{PrDetail, PrRef};
 use clusia_git::{
-    DISCOVERY_DEPTH, GitError, RepoId, clone_partial, ensure_worktree, expand_root, fetch_pr,
-    find_local_clone,
+    DISCOVERY_DEPTH, GitError, LocalClone, RepoId, clone_partial, ensure_worktree, expand_root,
+    fetch_pr, find_local_clone, git, parse_remote,
 };
 use clusia_protocol::{ErrorCode, Outcome, ProtocolError, Reply, WorktreeInfo};
 
@@ -29,6 +29,22 @@ pub(crate) async fn prepare(shared: &Shared, pr: &PrRef) -> Outcome {
         Ok((info, _)) => Outcome::Ok(Reply::Worktree(info)),
         Err(e) => Outcome::Err(ProtocolError::new(ErrorCode::Git, e.to_string())),
     }
+}
+
+/// Whether `local`'s remote still names `target`: one `git config`, far cheaper than a walk.
+async fn still_points_at(local: &LocalClone, target: &RepoId) -> bool {
+    let key = format!("remote.{}.url", local.remote);
+    git(&local.path, &["config", "--get", &key])
+        .await
+        .is_ok_and(|url| parse_remote(url.trim()).as_ref() == Some(target))
+}
+
+pub(crate) fn forget_clone(shared: &Shared, target: &RepoId) {
+    shared
+        .clone_map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .forget(target);
 }
 
 pub(crate) async fn checkout(
@@ -59,6 +75,14 @@ pub(crate) async fn checkout(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&roots, &target, Instant::now());
+    // The clone must still point at the repository: its remote may have been re-pointed.
+    let remembered = match remembered {
+        Some(Some(local)) if !still_points_at(&local, &target).await => {
+            forget_clone(shared, &target);
+            None
+        }
+        other => other,
+    };
     let local = match remembered {
         Some(local) => local,
         None => {
@@ -89,12 +113,8 @@ pub(crate) async fn checkout(
     let sha = match fetch_pr(&repo, &remote, pr.number).await {
         Ok(sha) => sha,
         Err(e) => {
-            // The remembered clone may be what is wrong (a renamed remote, say).
-            shared
-                .clone_map
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .forget(&target);
+            // The remembered clone may be what is wrong.
+            forget_clone(shared, &target);
             return Err(e);
         }
     };

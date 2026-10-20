@@ -725,6 +725,7 @@ mod tests {
         let options = crate::options::DaemonOptions {
             claude_program: Some("/nonexistent/claude".into()),
             codex_program: Some("/nonexistent/codex".into()),
+            gh_config_dir: None,
             bridge_program: None,
             harness_env: Vec::new(),
             github_api: Some("http://127.0.0.1:9".into()),

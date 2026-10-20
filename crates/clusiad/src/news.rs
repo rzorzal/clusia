@@ -218,18 +218,15 @@ pub(crate) fn remember(
     );
 }
 
+/// Takes what an open read, so only the news right after it uses it.
 fn fresh_read(shared: &Shared, pr: &PrRef) -> Option<FreshRead> {
-    let reads = shared
+    let mut reads = shared
         .fresh_reads
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let read = reads.get(pr).filter(|read| read.at.elapsed() < FRESH_FOR)?;
-    Some(FreshRead {
-        at: read.at,
-        conversation: read.conversation.clone(),
-        checks_label: read.checks_label.clone(),
-        viewer: read.viewer.clone(),
-    })
+    reads
+        .remove(pr)
+        .filter(|read| read.at.elapsed() < FRESH_FOR)
 }
 
 pub(crate) async fn whats_new(shared: &Shared, pr: &PrRef) -> Outcome {

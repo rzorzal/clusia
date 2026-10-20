@@ -43,6 +43,9 @@ pub struct DaemonOptions {
     pub claude_program: Option<PathBuf>,
     /// The `codex` program used when `harness.program` is empty. Env: `CLUSIA_CODEX_BIN`.
     pub codex_program: Option<PathBuf>,
+    /// The folder of the `gh` CLI's `hosts.yml`; `None` finds it as `gh` does, through
+    /// `GH_CONFIG_DIR`, `XDG_CONFIG_HOME` and `HOME`.
+    pub gh_config_dir: Option<PathBuf>,
     /// The `clusiad` that `claude` starts as the permission bridge. Env: `CLUSIA_BRIDGE_BIN`;
     /// default: this executable.
     pub bridge_program: Option<PathBuf>,
@@ -79,6 +82,7 @@ impl DaemonOptions {
             harness_search_paths: search_paths,
             claude_program: var("CLUSIA_CLAUDE_BIN").map(PathBuf::from),
             codex_program: var("CLUSIA_CODEX_BIN").map(PathBuf::from),
+            gh_config_dir: None,
             bridge_program: var("CLUSIA_BRIDGE_BIN").map(PathBuf::from),
             harness_env: Vec::new(),
         }

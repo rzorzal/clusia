@@ -227,3 +227,65 @@ async fn changing_the_folders_to_look_in_looks_again() {
     );
     d.stop().await;
 }
+
+#[tokio::test]
+async fn a_remembered_clone_whose_remote_moved_elsewhere_is_looked_for_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = origin_with_pr(tmp.path(), 7);
+    let roots = tmp.path().join("Repos");
+    let first = user_clone(&origin, &roots.join("a-widgets"), WIDGETS);
+    let second = user_clone(&origin, &roots.join("b-widgets"), WIDGETS);
+    let server = MockServer::start().await;
+    github_pull(&server, &origin.pr_sha, WIDGETS).await;
+    let d = daemon(&server).await;
+    let mut c = d.client().await;
+    assert_eq!(
+        clone_used(&mut c, &roots).await.clone,
+        first.display().to_string()
+    );
+
+    sh(
+        &first,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/gadgets.git",
+        ],
+    );
+
+    assert_eq!(prepare(&mut c).await.clone, second.display().to_string());
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn a_failed_fetch_makes_the_next_open_look_for_the_clone_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = origin_with_pr(tmp.path(), 7);
+    let roots = tmp.path().join("Repos");
+    let first = user_clone(&origin, &roots.join("m-widgets"), WIDGETS);
+    let server = MockServer::start().await;
+    github_pull(&server, &origin.pr_sha, WIDGETS).await;
+    let d = daemon(&server).await;
+    let mut c = d.client().await;
+    assert_eq!(
+        clone_used(&mut c, &roots).await.clone,
+        first.display().to_string()
+    );
+    // A walk would find this one first.
+    let earlier = user_clone(&origin, &roots.join("a-widgets"), WIDGETS);
+
+    // The clone's remote is gone for a moment, so the fetch fails.
+    let aside = tmp.path().join("origin-aside");
+    std::fs::rename(&origin.path, &aside).unwrap();
+    let failed = c
+        .request(Command::PrepareWorktree {
+            pr: "acme/widgets#7".parse().unwrap(),
+        })
+        .await;
+    assert!(failed.is_err());
+    std::fs::rename(&aside, &origin.path).unwrap();
+
+    assert_eq!(prepare(&mut c).await.clone, earlier.display().to_string());
+    d.stop().await;
+}

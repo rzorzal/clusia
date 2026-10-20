@@ -456,6 +456,15 @@ async fn full_open(
         match gh.get_pr(pr).await {
             Ok(d) if d.head_sha == info.head_sha => detail = d,
             _ => {
+                // A clone that fetches another repository's pull request also lands here.
+                crate::worktrees::forget_clone(
+                    shared,
+                    &clusia_git::RepoId::new(
+                        &shared.config.read().await.github.host,
+                        &pr.owner,
+                        &pr.repo,
+                    ),
+                );
                 let msg = "the pull request changed while opening; try again";
                 step(
                     shared,

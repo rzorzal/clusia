@@ -290,3 +290,24 @@ async fn opening_twice_asks_github_who_the_viewer_is_once() {
     assert_eq!(seen(&w.server).await.get("/user"), Some(&1));
     w.daemon.stop().await;
 }
+
+#[tokio::test]
+async fn a_second_whats_new_reads_the_conversation_again() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(Command::MarkSeen { pr: pr7() }).await.unwrap();
+    c.request(Command::GetWhatsNew { pr: pr7() }).await.unwrap();
+    let before = seen(&w.server).await;
+
+    c.request(Command::GetWhatsNew { pr: pr7() }).await.unwrap();
+
+    let after = seen(&w.server).await;
+    let comments = "/repos/acme/widgets/issues/7/comments";
+    assert_eq!(
+        after.get(comments).copied().unwrap_or(0),
+        before.get(comments).copied().unwrap_or(0) + 1,
+        "the read made by the open was used up by the first news"
+    );
+    w.daemon.stop().await;
+}

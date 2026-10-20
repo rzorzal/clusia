@@ -1449,6 +1449,7 @@ mod poll_tests {
             harness_env: Vec::new(),
             claude_program: Some("/nonexistent/claude".into()),
             codex_program: Some("/nonexistent/codex".into()),
+            gh_config_dir: None,
         };
         let shared = Shared::new(Paths::new(dir.path()), Config::default(), options);
         (dir, shared)
