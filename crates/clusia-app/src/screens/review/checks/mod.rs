@@ -257,10 +257,11 @@ pub fn badge_sections(sections: &mut [(ReviewSection, String, bool)], model: Opt
     }
 }
 
-/// A finding accepted or dismissed closes the editor that was editing it.
-pub(crate) fn close_edited(tabs: &mut ReviewTabs, tell: &ChecksTell) {
+/// A finding accepted or dismissed closes the editor that was editing it. Says whether one
+/// was closed.
+pub(crate) fn close_edited(tabs: &mut ReviewTabs, tell: &ChecksTell) -> bool {
     let ChecksTell::Settled { pr, id, .. } = tell else {
-        return;
+        return false;
     };
     if let Some(tab) = tabs.0.get_mut(pr)
         && matches!(
@@ -269,7 +270,9 @@ pub(crate) fn close_edited(tabs: &mut ReviewTabs, tell: &ChecksTell) {
         )
     {
         tab.ui.editor = None;
+        return true;
     }
+    false
 }
 
 /// What a closed finding editor says: its text was not added.
@@ -278,13 +281,14 @@ pub const EDIT_DROPPED: &str = "The finding changed; your edit was not added.";
 /// Closes every finding editor whose card is no longer drawn with its buttons (a new run, a
 /// stale result, a finding dismissed or accepted elsewhere, or a new id for it), and says so.
 /// Such an editor could be neither finished nor cancelled, and an unsent editor holds the tab
-/// and the window open. A tab that edits nothing is not touched, so nothing redraws.
+/// and the window open. A tab that edits nothing is not touched, so nothing redraws; says
+/// whether an editor was closed.
 pub(crate) fn reconcile_editors(
     tabs: &mut ReviewTabs,
     checks: &Checks,
     toasts: &mut Toasts,
     now: f64,
-) {
+) -> bool {
     let orphaned: Vec<PrRef> = tabs
         .0
         .iter()
@@ -297,6 +301,7 @@ pub(crate) fn reconcile_editors(
         })
         .map(|(pr, _)| pr.clone())
         .collect();
+    let any = !orphaned.is_empty();
     for pr in orphaned {
         if let Some(tab) = tabs.0.get_mut(&pr) {
             tab.ui.editor = None;
@@ -307,6 +312,7 @@ pub(crate) fn reconcile_editors(
             until: now + crate::bridge::TOAST_SECS,
         });
     }
+    any
 }
 
 /// `reconcile_editors` after `load_checks`, which forgets the checks of closed tabs.

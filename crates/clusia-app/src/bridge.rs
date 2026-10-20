@@ -2911,11 +2911,16 @@ pub(crate) fn pump(
         mut calls,
         mut people,
     } = models;
+    // Tells are mostly about other things than the tabs, and every rebuild system wakes for a
+    // tab change: the tabs are marked changed only for the tells that wrote one.
+    let mut changed = false;
+    let tabs_in = tabs.bypass_change_detection();
     for tell in inbox.0.try_iter() {
         let mut events = Vec::new();
-        let rest = review_state::apply(&mut tabs, &mut asks, tell, &mut events);
+        let applied = review_state::apply(tabs_in, &mut asks, tell, &mut events);
+        changed |= applied.changed;
         reviews.write_batch(events);
-        let Some(tell) = rest else { continue };
+        let Some(tell) = applied.rest else { continue };
         match tell {
             Tell::Snapshot(s) => {
                 if matches!(model.connection, Connection::Lost(_)) {
@@ -2968,8 +2973,8 @@ pub(crate) fn pump(
                 for model in checks.0.values_mut() {
                     model.asked = false;
                 }
-                for tab in tabs.0.values_mut() {
-                    tab.ui.hidden_asked = false;
+                for tab in tabs_in.0.values_mut() {
+                    changed |= std::mem::take(&mut tab.ui.hidden_asked);
                 }
                 for model in diagrams.0.values_mut() {
                     model.asked = false;
@@ -3010,7 +3015,7 @@ pub(crate) fn pump(
             Tell::Media { url, file } => media.arrive(url, file),
             Tell::Profile { login, profile } => people.arrive(login, profile),
             Tell::Agent(agent) => {
-                crate::screens::review::agent::suggestion::close_edited(&mut tabs, &agent);
+                changed |= crate::screens::review::agent::suggestion::close_edited(tabs_in, &agent);
                 if chats.apply(&agent) {
                     asks.send(Ask::AgentLog {
                         pr: agent.pr().clone(),
@@ -3020,14 +3025,20 @@ pub(crate) fn pump(
             Tell::AgentLog { pr, entries } => chats.replay(&pr, &entries),
             Tell::Permission(tell) => permissions.apply(tell, &mut chats, clock.now_ms()),
             Tell::Checks(tell) => {
-                checks::close_edited(&mut tabs, &tell);
+                changed |= checks::close_edited(tabs_in, &tell);
                 checks.apply(&tell);
-                checks::reconcile_editors(&mut tabs, &checks, &mut toasts, time.elapsed_secs_f64());
+                changed |= checks::reconcile_editors(
+                    tabs_in,
+                    &checks,
+                    &mut toasts,
+                    time.elapsed_secs_f64(),
+                );
             }
             Tell::Hidden { pr, set } => {
-                if let Some(tab) = tabs.0.get_mut(&pr) {
+                if let Some(tab) = tabs_in.0.get_mut(&pr) {
                     tab.ui.hidden = set;
                     tab.ui.hidden_asked = true;
+                    changed = true;
                 }
             }
             Tell::Diagrams(tell) => diagrams.apply(&tell),
@@ -3052,9 +3063,10 @@ pub(crate) fn pump(
                         revalidations.0.get(pr).and_then(|m| m.round.as_ref()),
                         new,
                     )
-                    && let Some(tab) = tabs.0.get_mut(pr)
+                    && let Some(tab) = tabs_in.0.get_mut(pr)
                 {
                     tab.ui.revalidation = crate::review_state::RevalView::Auto;
+                    changed = true;
                 }
                 // *Keep and re-anchor* leaves for the Diff only once the daemon took the decision.
                 if let RevalidationTell::Settled {
@@ -3062,16 +3074,18 @@ pub(crate) fn pump(
                     item: Some(item),
                 } = &tell
                     && revalidations.take_reanchor(pr, item)
-                    && let Some(tab) = tabs.0.get_mut(pr)
+                    && let Some(tab) = tabs_in.0.get_mut(pr)
                 {
                     crate::screens::review::revalidation::enter_reanchor(tab, item);
+                    changed = true;
                 }
                 // The item has its new place: the Diff stops asking for one.
                 if let RevalidationTell::Reanchored { pr, item } = &tell
-                    && let Some(tab) = tabs.0.get_mut(pr)
+                    && let Some(tab) = tabs_in.0.get_mut(pr)
                     && tab.ui.reanchor.as_deref() == Some(item)
                 {
                     tab.ui.reanchor = None;
+                    changed = true;
                 }
                 revalidations.apply(&tell);
             }
@@ -3081,6 +3095,9 @@ pub(crate) fn pump(
             }
             _ => {} // the other review tells were applied above
         }
+    }
+    if changed {
+        tabs.set_changed();
     }
 }
 
