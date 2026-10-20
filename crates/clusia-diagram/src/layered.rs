@@ -41,6 +41,10 @@ pub(crate) struct Options<'a> {
     pub label_style: TextStyle,
     /// A rank per node (a missing entry is 0) in place of the longest-path ranks.
     pub ranks: Option<&'a [usize]>,
+    /// The least space between two ranks, in place of the direction's.
+    pub rank_gap: Option<f32>,
+    /// The space between two boxes of one rank, in place of `NODE_GAP`.
+    pub node_gap: Option<f32>,
 }
 
 pub(crate) struct Placed {
@@ -295,7 +299,13 @@ pub(crate) fn place(
         gather_columns(&mut layers, &verts, &depth);
         column_positions(&layers, &verts, opts.top_aligned)
     } else {
-        cross_positions(&layers, &verts, &up, &down)
+        cross_positions(
+            &layers,
+            &verts,
+            &up,
+            &down,
+            opts.node_gap.unwrap_or(NODE_GAP),
+        )
     };
 
     // Ports along the cross axis, for the start and the end of every chain.
@@ -440,7 +450,11 @@ pub(crate) fn place(
                 .filter(|&i| loops_at[i] > 0)
                 .map(|i| loop_reach(loops_at[i]) + 4.0)
                 .fold(0.0, f32::max);
-            dir.lead().max(reach)
+            // A tighter rank gap starts its runs sooner, so one run still fits in it.
+            let lead = opts
+                .rank_gap
+                .map_or(dir.lead(), |g| dir.lead().min(g / 2.0));
+            lead.max(reach)
         })
         .collect();
     let mut slot_of: HashMap<(usize, usize), usize> = HashMap::new();
@@ -471,7 +485,8 @@ pub(crate) fn place(
             slot_of.insert((k, i), slot);
         }
         gap.push(
-            dir.base_gap()
+            opts.rank_gap
+                .unwrap_or(dir.base_gap())
                 .max(lead_of[l] + slot_ends.len() as f32 * STEP + END_PAD)
                 .max(label_room[l]),
         );
@@ -1300,12 +1315,13 @@ fn cross_positions(
     verts: &[Vertex],
     up: &[Vec<usize>],
     down: &[Vec<usize>],
+    node_gap: f32,
 ) -> Vec<f32> {
     let gap_between = |a: usize, b: usize| {
         if verts[a].real.is_none() || verts[b].real.is_none() {
-            LANE_GAP
+            LANE_GAP.min(node_gap)
         } else {
-            NODE_GAP
+            node_gap
         }
     };
     let extent = |layer: &[usize]| -> f32 {

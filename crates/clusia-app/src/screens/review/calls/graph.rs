@@ -7,14 +7,22 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use bevy::math::Vec2;
 use clusia_calls::{CallGraph, GraphEdge, GraphNode, NodeKind};
 use clusia_core::diagram::{Change, DiagramKind, DiagramSpec, Edge, Node, Shape};
-use clusia_diagram::Rect;
+use clusia_diagram::{Packing, Rect};
 
 use crate::review_state::TabUi;
 use crate::screens::review::diagrams::view::CanvasView;
 use crate::theme::Swatch;
 
 /// The room left of the graph for the level labels.
-pub const LABEL_W: f32 = 76.0;
+pub const LABEL_W: f32 = 64.0;
+/// How the graph is packed: tighter than a diagram, with boxes as wide as their text, so a graph
+/// of a few levels still reads at the zoom it opens at.
+pub const PACKING: Packing = Packing {
+    rank_gap: 36.0,
+    node_gap: 14.0,
+    margin: 16.0,
+    fit_text: true,
+};
 /// Space between the expansion card and its node, and between the card and the canvas edge.
 pub const CARD_GAP: f32 = 8.0;
 
@@ -456,7 +464,7 @@ mod tests {
     #[test]
     fn the_ranked_layout_keeps_the_levels_in_rows_and_every_node_in_place() {
         let b = build(&sample());
-        let geometry = layout_ranked(&b.spec, &b.ranks, &FaceMeasure::default());
+        let geometry = layout_ranked(&b.spec, &b.ranks, &FaceMeasure::default(), &PACKING);
         assert_eq!(geometry.boxes.len(), 9);
         let rank = |r: usize| -> (f32, f32) {
             let rects = geometry

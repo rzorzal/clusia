@@ -391,25 +391,36 @@ pub fn subgraph(
     });
     let edges: Vec<GraphEdge> = edges.into_iter().map(|(_, e)| e).collect();
 
-    // From the centre up, the first visible caller of each level that calls the one below.
-    let mut breadcrumb = vec![functions[center.0.as_str()].qualified.clone()];
-    let mut current = center.0.as_str();
-    for level in (1..=depth as i8).map(|k| -k) {
-        let Some(next) = visible.get(&level).and_then(|keys| {
-            keys.iter().find(|k| {
-                callees
-                    .get(k.as_str())
-                    .is_some_and(|set| set.contains(current))
-            })
-        }) else {
-            break;
-        };
-        if let Some(function) = functions.get(next.as_str()) {
-            breadcrumb.push(function.qualified.clone());
+    // The longest chain of visible callers, one per level, that ends at the centre; the first
+    // caller in level order wins a tie. Worked out from the top level down, so each node keeps
+    // only the best chain above it.
+    let mut above: HashMap<&str, Vec<&str>> = HashMap::new();
+    for level in -(depth as i8)..=0 {
+        for key in visible.get(&level).into_iter().flatten() {
+            let mut best: Option<Vec<&str>> = None;
+            for caller in visible.get(&(level - 1)).into_iter().flatten() {
+                let calls_key = callees
+                    .get(caller.as_str())
+                    .is_some_and(|set| set.contains(key));
+                let Some(chain) = above.get(caller.as_str()).filter(|_| calls_key) else {
+                    continue;
+                };
+                if best.as_ref().is_none_or(|b| chain.len() + 1 > b.len()) {
+                    let mut longer = chain.clone();
+                    longer.push(caller.as_str());
+                    best = Some(longer);
+                }
+            }
+            above.insert(key.as_str(), best.unwrap_or_default());
         }
-        current = next.as_str();
     }
-    breadcrumb.reverse();
+    let mut breadcrumb: Vec<String> = above
+        .get(center.0.as_str())
+        .into_iter()
+        .flatten()
+        .filter_map(|k| functions.get(k).map(|f| f.qualified.clone()))
+        .collect();
+    breadcrumb.push(functions[center.0.as_str()].qualified.clone());
 
     let mut touched: HashSet<&str> = HashSet::new();
     for (from, target, _) in &resolved.edges {
@@ -676,6 +687,28 @@ mod tests {
         assert_eq!(g.breadcrumb, vec!["token", "refresh"]);
         assert_eq!(api_graph(9).depth, 5);
         assert_eq!(api_graph(0).depth, 1);
+    }
+
+    #[test]
+    fn the_breadcrumb_follows_the_longest_visible_chain_of_callers() {
+        const SRC: &str = "pub fn race() {\n    refresh();\n}\n\npub fn handler() {\n    token();\n}\n\npub fn token() {\n    refresh();\n}\n\npub fn refresh() {}\n";
+        let changes = [
+            changed("src/a.rs#refresh#13", ChangeKind::Changed, 1, 1),
+            changed("src/a.rs#race#1", ChangeKind::New, 3, 0),
+        ];
+        let g = graph(
+            &[("src/a.rs", SRC)],
+            &[],
+            &changes,
+            "src/a.rs#refresh#13",
+            3,
+            &[],
+        );
+        assert_eq!(
+            g.breadcrumb,
+            vec!["handler", "token", "refresh"],
+            "the changed caller that nothing calls is a dead end"
+        );
     }
 
     #[test]

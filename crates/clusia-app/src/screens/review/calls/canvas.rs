@@ -26,7 +26,7 @@ use clusia_diagram::{BoxGeo, FaceMeasure, Geometry, Rect as GRect, layout_ranked
 
 use super::effective_depth;
 use super::graph::{
-    How, LABEL_W, bands, breadcrumb, build, call_look, card_origin, pick, set_depth,
+    How, LABEL_W, PACKING, bands, breadcrumb, build, call_look, card_origin, pick, set_depth,
 };
 use super::list::{Tone, selected_file};
 use super::model::{Calls, CallsModel};
@@ -54,9 +54,11 @@ const CARD_WIDTH: f32 = 340.0;
 /// The size the card is placed with until it has been laid out.
 const CARD_GUESS: Vec2 = Vec2::new(CARD_WIDTH, 220.0);
 /// The breadcrumb's length before it drops its top.
-const CRUMB_CHARS: usize = 60;
+const CRUMB_CHARS: usize = 44;
 /// The height of the header strip.
 const HEADER_H: f32 = 48.0;
+/// The height of a level label's line, which centres it on its band.
+const LEVEL_LABEL_H: f32 = 14.0;
 
 /// The area of `pr`'s Calls view the graph is drawn in.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -65,6 +67,15 @@ pub struct CallsCanvas(pub PrRef);
 /// A box of the call graph (with its `DiagramBox`), so Diagrams' systems tell the two apart.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CallsMarker;
+
+/// A level label (**UP 2**, **DOWN 1**): a sibling of the viewport, so the zoom does not scale
+/// its text, kept at the left of the canvas level with the middle of its band (`mid`, in
+/// content pixels).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LevelLabel {
+    canvas: Entity,
+    mid: f32,
+}
 
 /// The expansion card of the selected node: a sibling of the viewport, so the zoom does not
 /// scale its text.
@@ -79,7 +90,7 @@ pub struct CardFull(pub PrRef);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CardClose(pub PrRef);
 
-/// **Depth n ▾**.
+/// **Depth n ▼**.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct DepthButton(pub PrRef);
 
@@ -263,7 +274,7 @@ fn draw_graph(
     g: &CallGraph,
 ) -> CanvasView {
     let built = build(g);
-    let geometry = layout_ranked(&built.spec, &built.ranks, pen.measure());
+    let geometry = layout_ranked(&built.spec, &built.ranks, pen.measure(), &PACKING);
     let size = (geometry.size.0 + LABEL_W, geometry.size.1);
     let mut view = CanvasView::new(Vec2::new(size.0, size.1));
     view.fit_floor = FIT_FLOOR;
@@ -273,11 +284,35 @@ fn draw_graph(
             b.rect.y + b.rect.h / 2.0,
         )
     });
+    let level_of = |b: &BoxGeo| g.nodes.get(b.index).map_or(0, |n| n.level);
+    let boxes: Vec<(i8, GRect)> = geometry
+        .boxes
+        .iter()
+        .map(|b| (level_of(b), b.rect))
+        .collect();
     commands.entity(entity).with_children(|c| {
         spawn_ground(c, theme, dots);
         spawn_viewport(c, entity, size, |content| {
             spawn_content(content, pen, entity, pr, dots, g, &geometry)
         });
+        // Under the header and the legend, which are drawn after them.
+        for band in bands(&boxes) {
+            c.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(10),
+                    ..default()
+                },
+                text(pen, band.label.to_uppercase(), Type::META.size(11.0)),
+                TextLayout::new(Justify::Left, LineBreak::NoWrap),
+                Visibility::Hidden,
+                LevelLabel {
+                    canvas: entity,
+                    mid: band.y + band.h / 2.0,
+                },
+                ignore(),
+            ));
+        }
         header(c, pen, pr, g);
         zoom_control(c, pen, entity);
         legend(c, pen, dots);
@@ -285,7 +320,7 @@ fn draw_graph(
     view
 }
 
-/// The level labels at the left, and the graph beside them.
+/// The graph, right of the room the level labels take.
 fn spawn_content(
     p: &mut ChildSpawnerCommands,
     pen: &Pen,
@@ -295,25 +330,6 @@ fn spawn_content(
     g: &CallGraph,
     geometry: &Geometry,
 ) {
-    let level_of = |b: &BoxGeo| g.nodes.get(b.index).map_or(0, |n| n.level);
-    let boxes: Vec<(i8, GRect)> = geometry
-        .boxes
-        .iter()
-        .map(|b| (level_of(b), b.rect))
-        .collect();
-    for band in bands(&boxes) {
-        p.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(16),
-                top: px(band.y + band.h / 2.0 - 7.0),
-                ..default()
-            },
-            text(pen, band.label.to_uppercase(), Type::META.size(11.0)),
-            TextLayout::new(Justify::Left, LineBreak::NoWrap),
-            ignore(),
-        ));
-    }
     p.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -478,7 +494,7 @@ fn header(c: &mut ChildSpawnerCommands, pen: &Pen, pr: &PrRef, g: &CallGraph) {
                 1 => "· 1 edge not shown".to_string(),
                 n => format!("· {n} edges not shown"),
             };
-            h.spawn((text(pen, note, Type::META), ignore()));
+            h.spawn((text(pen, note, Type::META), TextLayout::no_wrap(), ignore()));
         }
         h.spawn((
             Node {
@@ -497,9 +513,14 @@ fn header(c: &mut ChildSpawnerCommands, pen: &Pen, pr: &PrRef, g: &CallGraph) {
     });
 }
 
+/// The Depth button's label, with the dropdown mark.
+fn depth_label(depth: u8) -> String {
+    format!("Depth {depth} ▼")
+}
+
 fn depth_control(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, depth: u8, open: bool) {
     p.spawn((
-        button(fonts, &format!("Depth {depth} ▾"), Variant::Ghost),
+        button(fonts, &depth_label(depth), Variant::Ghost),
         DepthButton(pr.clone()),
         observe(on_depth_button),
     ));
@@ -948,6 +969,31 @@ pub(super) fn place_card(
     }
 }
 
+/// Keeps each level label level with its band as the view draws it now, and shows it once its
+/// canvas has been fitted.
+pub(super) fn place_level_labels(
+    canvases: Query<&CanvasState, With<CallsCanvas>>,
+    mut labels: Query<(&LevelLabel, &mut Node, &mut Visibility)>,
+) {
+    for (label, mut node, mut visibility) in &mut labels {
+        let Ok(state) = canvases.get(label.canvas) else {
+            continue;
+        };
+        let top = px(state.view.pan.y + label.mid * state.view.zoom - LEVEL_LABEL_H / 2.0);
+        if node.top != top {
+            node.top = top;
+        }
+        let want = if state.fitted {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != want {
+            *visibility = want;
+        }
+    }
+}
+
 /// The green ring of a call box: hovered, focused, or the selected node.
 pub(super) fn outline_selected(
     focus: Res<InputFocus>,
@@ -1051,6 +1097,42 @@ mod tests {
 
     fn node(app: &mut App, key: &str) -> Entity {
         testing::find::<DiagramBox>(app, |b| b.node == key)
+    }
+
+    #[test]
+    fn the_level_labels_sit_outside_the_zoomed_content_at_their_band() {
+        let (mut app, pr) = shown_graph();
+        let canvas = testing::find::<CallsCanvas>(&mut app, |c| c.0 == pr);
+        let view = {
+            let mut state = app.world_mut().get_mut::<CanvasState>(canvas).unwrap();
+            state.view.zoom = 0.5;
+            state.view.pan = Vec2::new(10.0, 40.0);
+            state.fitted = true;
+            state.view
+        };
+        app.update();
+        let labels = testing::entities::<LevelLabel>(&mut app);
+        assert_eq!(labels.len(), 3, "Up 2, Up 1, Down 1");
+        for e in labels {
+            let world = app.world();
+            assert_eq!(world.get::<ChildOf>(e).unwrap().parent(), canvas);
+            let label = world.get::<LevelLabel>(e).unwrap();
+            let node = world.get::<Node>(e).unwrap();
+            assert_eq!(
+                node.top,
+                px(view.pan.y + label.mid * view.zoom - LEVEL_LABEL_H / 2.0)
+            );
+            assert_eq!(world.get::<Visibility>(e), Some(&Visibility::Inherited));
+        }
+    }
+
+    #[test]
+    fn the_depth_label_has_only_glyphs_the_bundled_font_has() {
+        let label = depth_label(3);
+        assert!(label.starts_with("Depth 3 "));
+        for ch in label.chars() {
+            assert!(crate::fonts::covers(crate::fonts::INTER, ch), "{ch:?}");
+        }
     }
 
     #[test]

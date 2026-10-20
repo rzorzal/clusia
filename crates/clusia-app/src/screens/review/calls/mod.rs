@@ -56,6 +56,7 @@ impl Plugin for CallsPlugin {
                 list::sync_hint,
                 canvas::fill_canvas,
                 canvas::place_card,
+                canvas::place_level_labels,
                 canvas::outline_selected,
                 panel::fill_panel,
                 full::open_full,

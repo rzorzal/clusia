@@ -3,7 +3,6 @@
 
 use bevy::prelude::*;
 use bevy::ui_widgets::ScrollArea;
-use clusia_calls::{ChangeKind, NodeKind};
 use clusia_core::checks::{AuditArea, default_areas};
 use clusia_core::diagram::{Change, DiagramKind, DiagramVersion, EntryState, VersionPhase};
 use clusia_core::draft::{DraftKind, ThreadRef};
@@ -12,8 +11,8 @@ use clusia_core::keywords::KeywordMap;
 use clusia_core::{Anchor, Origin, PrRef, ReviewState, Side, Verdict};
 use clusia_diagram::keywords::{Point3, PointShape, Scene3D};
 use clusia_protocol::{
-    AuthInfo, CallsIndexState, DiagramsState, FunctionHit, LoadStep, LoadStepKind,
-    SessionStateKind, StepStatus, SyncState, SyncStatus, WindowTarget,
+    AuthInfo, CallsIndexState, DiagramsState, LoadStep, LoadStepKind, SessionStateKind, StepStatus,
+    SyncState, SyncStatus, WindowTarget,
 };
 
 use crate::args::Scene;
@@ -434,7 +433,7 @@ fn stage_calls(world: &mut World, pr: &PrRef, scene: Scene) {
     let Tell::Calls(demo) = fixture::demo_calls_graph(None, 3, &[]) else {
         unreachable!("the demo answers GetCalls with a Calls tell")
     };
-    let hits = changed_hits(&demo);
+    let hits = fixture::demo_find("");
     let graph = if scene == Scene::DiffCallsUnsupported {
         let commit = match &demo {
             CallsTell::Graph {
@@ -460,40 +459,6 @@ fn stage_calls(world: &mut World, pr: &PrRef, scene: Scene) {
         query: String::new(),
         hits,
     }));
-}
-
-/// The changed functions of a graph tell as `FindFunction("")` answers them: each with
-/// its `ChangeKind`, sorted by path then line.
-fn changed_hits(tell: &CallsTell) -> Vec<FunctionHit> {
-    let CallsTell::Graph {
-        graph: Some(graph), ..
-    } = tell
-    else {
-        return Vec::new();
-    };
-    let mut hits: Vec<FunctionHit> = graph
-        .nodes
-        .iter()
-        .filter_map(|n| {
-            let kind = match n.kind {
-                NodeKind::Changed => ChangeKind::Changed,
-                NodeKind::Signature => ChangeKind::Signature,
-                NodeKind::Moved => ChangeKind::Moved,
-                NodeKind::New => ChangeKind::New,
-                _ => return None,
-            };
-            Some(FunctionHit {
-                id: n.key.clone(),
-                qualified: n.label.clone(),
-                path: n.path.clone()?,
-                line: n.line?,
-                changed: true,
-                kind: Some(kind),
-            })
-        })
-        .collect();
-    hits.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
-    hits
 }
 
 /// Puts the demo review `rzorzal/clusia#123` in the state `scene` shows (Config pages and
@@ -2139,27 +2104,73 @@ mod tests {
     }
 
     #[test]
-    fn the_changed_hits_are_the_changed_nodes_with_their_kinds_and_places() {
-        let Tell::Calls(graph) = fixture::demo_calls_graph(None, 3, &[]) else {
-            panic!("a Calls tell")
+    fn the_story_chips_carry_their_tone_in_ink_and_an_opaque_tint() {
+        use crate::theme::Swatch;
+        use crate::ui::kit::{Fill, Ink};
+        let mut app = staged(Scene::DiffStory);
+        let mut look = |label: &str| {
+            let world = app.world_mut();
+            let mut texts = world.query::<(&Text, &Ink, &ChildOf)>();
+            let (ink, parent) = texts
+                .iter(world)
+                .find(|(t, ..)| t.0 == label)
+                .map(|(_, ink, of)| (ink.0, of.parent()))
+                .unwrap_or_else(|| panic!("no chip {label}"));
+            (world.get::<Fill>(parent).expect("a filled pill").0, ink)
         };
-        let hits = changed_hits(&graph);
-        assert!(!hits.is_empty() && hits.iter().all(|h| h.changed && h.kind.is_some()));
-        let places: Vec<(&str, u32)> = hits.iter().map(|h| (h.path.as_str(), h.line)).collect();
-        let mut sorted = places.clone();
-        sorted.sort();
-        assert_eq!(places, sorted, "path, then line, as the daemon sorts them");
-        assert!(
-            hits.iter().any(|h| h.qualified == "TokenStore::refresh"),
-            "{hits:?}"
+        assert_eq!(look("lock"), (Swatch::ChangedBg, Swatch::Green));
+        assert_eq!(
+            look("reuses the new token"),
+            (Swatch::ChangedBg, Swatch::Green)
         );
-        let CallsTell::Graph { graph: Some(g), .. } = &graph else {
-            panic!("a graph")
-        };
-        for hit in &hits {
-            let node = g.nodes.iter().find(|n| n.key == hit.id).expect("a node");
-            assert_eq!(Some(hit.path.as_str()), node.path.as_deref());
-            assert_eq!(Some(hit.line), node.line);
+        assert_eq!(
+            look("exchange again · rejected"),
+            (Swatch::RiskBg, Swatch::Orange)
+        );
+        assert_eq!(look("waits"), (Swatch::Chrome, Swatch::Fg));
+    }
+
+    #[test]
+    fn the_calls_scene_opens_the_demo_graph_readable_in_the_screenshot_window() {
+        use crate::screens::review::calls::CallsCanvas;
+        use crate::screens::review::diagrams::canvas::CanvasState;
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+        stage(app.world_mut(), Scene::DiffCalls);
+        stage_snapshot(app.world_mut(), Scene::DiffCalls);
+        testing::settle(&mut app);
+        for _ in 0..4 {
+            app.update();
         }
+        let canvas = testing::find::<CallsCanvas>(&mut app, |_| true);
+        let state = app.world().get::<CanvasState>(canvas).expect("a graph");
+        assert!(state.fitted, "fitted to {:?}", state.view.viewport);
+        assert!(
+            (0.75..=1.0).contains(&state.view.zoom),
+            "{} in a {:?} canvas for a {:?} graph",
+            state.view.zoom,
+            state.view.viewport,
+            state.view.content
+        );
+    }
+
+    #[test]
+    fn the_calls_scene_lists_as_many_changed_functions_as_the_status_counts() {
+        use crate::screens::review::calls::list::left_view;
+        use crate::screens::review::calls::{Calls, status_text};
+        let app = staged(Scene::DiffCalls);
+        let pr = fixture::demo_pr();
+        let ui = testing::tab(&app, &pr).ui.clone();
+        let m = app.world().resource::<Calls>().0.get(&pr).expect("a model");
+        let g = m.graph.as_ref().expect("a graph");
+        let view = left_view(m, &ui);
+        let titles: Vec<&str> = view.groups.iter().map(|g| g.title.as_str()).collect();
+        assert_eq!(titles[..2], ["Changed in this PR · 4", "Added · 1"]);
+        let listed: u32 = view.groups[..2]
+            .iter()
+            .map(|g| g.rows.len() as u32 + g.more)
+            .sum();
+        assert_eq!(listed, g.changed, "both count the PR's non-removed changes");
+        let status = status_text(&ui, Some(m), "").expect("a status");
+        assert!(status.contains(&format!("· {listed} changed,")), "{status}");
     }
 }

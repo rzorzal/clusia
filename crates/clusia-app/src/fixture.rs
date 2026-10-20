@@ -3023,23 +3023,39 @@ pub fn demo_calls_graph(center: Option<&str>, depth: u8, expand: &[i8]) -> Tell 
 }
 
 /// What the demo daemon answers `FindFunction` with: the functions whose qualified name holds
-/// `query`, changed ones first, at most 20.
+/// `query`, changed ones first, at most 20. The empty query, as the daemon answers it, gives
+/// every function the PR changed but did not remove, by path then line.
 pub fn demo_find(query: &str) -> Vec<FunctionHit> {
     let index = demo_calls();
     let changed = demo_changed(&index);
-    let needle = query.to_lowercase();
+    let needle = query.trim().to_lowercase();
+    let hit = |f: &Function| FunctionHit {
+        id: f.id.0.clone(),
+        qualified: f.qualified.clone(),
+        path: f.path.clone(),
+        line: f.start_line,
+        kind: changed.iter().find(|c| c.id == f.id).map(|c| c.kind),
+        changed: changed.iter().any(|c| c.id == f.id),
+    };
+    if needle.is_empty() {
+        let mut hits: Vec<FunctionHit> = index
+            .functions
+            .iter()
+            .filter(|f| {
+                changed
+                    .iter()
+                    .any(|c| c.id == f.id && c.kind != ChangeKind::Removed)
+            })
+            .map(hit)
+            .collect();
+        hits.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
+        return hits;
+    }
     let mut hits: Vec<FunctionHit> = index
         .functions
         .iter()
-        .filter(|f| !needle.is_empty() && f.qualified.to_lowercase().contains(&needle))
-        .map(|f| FunctionHit {
-            id: f.id.0.clone(),
-            qualified: f.qualified.clone(),
-            path: f.path.clone(),
-            line: f.start_line,
-            kind: changed.iter().find(|c| c.id == f.id).map(|c| c.kind),
-            changed: changed.iter().any(|c| c.id == f.id),
-        })
+        .filter(|f| f.qualified.to_lowercase().contains(&needle))
+        .map(hit)
         .collect();
     hits.sort_by(|a, b| {
         b.changed
@@ -4157,6 +4173,28 @@ mod tests {
         );
         assert!(hits.iter().any(|h| h.changed));
         assert!(demo_find("no such function").is_empty());
+    }
+
+    #[test]
+    fn the_empty_demo_search_lists_every_change_but_a_removal_by_place() {
+        let index = demo_calls();
+        let hits = demo_find("");
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        let mut want: Vec<&Function> = demo_changed(&index)
+            .iter()
+            .filter(|c| c.kind != ChangeKind::Removed)
+            .map(|c| {
+                index
+                    .functions
+                    .iter()
+                    .find(|f| f.id == c.id)
+                    .expect("indexed")
+            })
+            .collect();
+        want.sort_by(|a, b| (&a.path, a.start_line).cmp(&(&b.path, b.start_line)));
+        let want: Vec<&str> = want.iter().map(|f| f.id.0.as_str()).collect();
+        assert_eq!(ids, want);
+        assert!(hits.iter().all(|h| h.changed && h.kind.is_some()));
     }
 
     #[test]

@@ -813,7 +813,7 @@ fn pill(
     p: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
     label: &str,
-    fill: Swatch,
+    (fill, ink): (Swatch, Swatch),
     dot: Option<Swatch>,
 ) {
     p.spawn((
@@ -841,13 +841,19 @@ fn pill(
                 Fill(dot),
             ));
         }
-        c.spawn(text(fonts, label.to_string(), Type::BODY));
+        c.spawn(text(fonts, label.to_string(), Type::BODY.ink(ink)));
     });
 }
 
 fn use_case_chips(p: &mut ChildSpawnerCommands, fonts: &UiFonts, chips: &[UseCaseChip]) {
     for chip in chips {
-        pill(p, fonts, &chip.name, Swatch::Chrome, Some(chip.swatch));
+        pill(
+            p,
+            fonts,
+            &chip.name,
+            (Swatch::Chrome, Swatch::Fg),
+            Some(chip.swatch),
+        );
     }
 }
 
@@ -871,12 +877,14 @@ fn chip_row(
             if at > 0 {
                 r.spawn(text(fonts, "→", Type::META));
             }
-            let fill = match chip.tone {
-                ChipTone::Good => Swatch::GreenSoft,
-                ChipTone::Bad => Swatch::OrangeSoft,
-                _ => Swatch::Chrome,
+            // The tints of changed and risky boxes, which are opaque in light: the translucent
+            // soft tints blend too pale there to tell from a neutral chip.
+            let look = match chip.tone {
+                ChipTone::Good => (Swatch::ChangedBg, Swatch::Green),
+                ChipTone::Bad => (Swatch::RiskBg, Swatch::Orange),
+                _ => (Swatch::Chrome, Swatch::Fg),
             };
-            pill(r, fonts, &chip.text, fill, None);
+            pill(r, fonts, &chip.text, look, None);
         }
     });
 }
