@@ -897,8 +897,11 @@ impl Plugin for KitPlugin {
             PostUpdate,
             reveal_in_track.after(bevy::ui::UiSystems::Layout),
         )
-        .add_systems(Update, (commit_on_enter, pointer_cursor))
-        .add_systems(PostUpdate, (restyle, hover).chain())
+        .add_systems(Update, (commit_on_enter, pointer_cursor.run_if(cursor_due)))
+        .add_systems(
+            PostUpdate,
+            (restyle.run_if(restyle_due), hover.run_if(hover_due)).chain(),
+        )
         .add_systems(PostUpdate, (relift_labels, resize_with_text));
     }
 }
@@ -933,6 +936,52 @@ fn commit_on_blur(
             value,
         });
     }
+}
+
+/// Whether the pointer may have moved on or off a `Clickable`: the cursor only needs another
+/// look then (and once at the start, to set the default).
+fn cursor_due(
+    changed: Query<(), (With<Clickable>, Changed<Hovered>)>,
+    mut gone: RemovedComponents<Clickable>,
+    mut released: RemovedComponents<Hovered>,
+    mut started: Local<bool>,
+) -> bool {
+    let gone = gone.read().count() + released.read().count();
+    let first = !std::mem::replace(&mut *started, true);
+    first || gone > 0 || !changed.is_empty()
+}
+
+/// Whether a swatch may need resolving: a theme change or a new or changed marker. A frame
+/// where only something else moved (a GIF's pixels) has nothing to do.
+fn restyle_due(
+    theme: Res<Theme>,
+    fills: Query<(), Changed<Fill>>,
+    inks: Query<(), Changed<Ink>>,
+    strokes: Query<(), Changed<Stroke>>,
+    marks: Query<(), Changed<Mark>>,
+) -> bool {
+    theme.is_changed()
+        || !fills.is_empty()
+        || !inks.is_empty()
+        || !strokes.is_empty()
+        || !marks.is_empty()
+}
+
+/// Whether a widget's hover or press color may need repainting: a theme change, a hover or a
+/// fill that changed, or a press that began or ended (the end leaves nothing to compare).
+fn hover_due(
+    theme: Res<Theme>,
+    changed: Query<
+        (),
+        (
+            With<HoverFill>,
+            Or<(Changed<Hovered>, Changed<Fill>, Added<Pressed>)>,
+        ),
+    >,
+    mut unpressed: RemovedComponents<Pressed>,
+) -> bool {
+    let unpressed = unpressed.read().count();
+    theme.is_changed() || unpressed > 0 || !changed.is_empty()
 }
 
 /// The pointing hand while any `Clickable` is hovered. Writes the window's cursor only when it
@@ -1265,6 +1314,100 @@ mod tests {
         assert_eq!(initial("@octo"), "O");
         assert_eq!(initial(""), "?");
         assert_eq!(initial("élan"), "É");
+    }
+
+    /// Counts the frames a gate lets through.
+    #[derive(Resource, Default)]
+    struct Ran(u32, u32, u32);
+
+    fn count_restyle(mut ran: ResMut<Ran>) {
+        ran.0 += 1;
+    }
+    fn count_hover(mut ran: ResMut<Ran>) {
+        ran.1 += 1;
+    }
+    fn count_cursor(mut ran: ResMut<Ran>) {
+        ran.2 += 1;
+    }
+
+    fn gated_app() -> App {
+        let mut app = testing::app(Snapshot::default());
+        app.init_resource::<Ran>();
+        app.add_systems(PostUpdate, count_restyle.run_if(restyle_due));
+        app.add_systems(PostUpdate, count_hover.run_if(hover_due));
+        app.add_systems(Update, count_cursor.run_if(cursor_due));
+        app
+    }
+
+    fn ran(app: &App) -> (u32, u32, u32) {
+        let r = app.world().resource::<Ran>();
+        (r.0, r.1, r.2)
+    }
+
+    #[test]
+    fn a_frame_where_only_a_gif_advanced_runs_none_of_the_per_widget_systems() {
+        let mut app = gated_app();
+        let fonts = UiFonts::default();
+        for _ in 0..20 {
+            app.world_mut()
+                .spawn(button(&fonts, "Reply", Variant::Ghost));
+        }
+        let gif = app.world_mut().spawn(Text::new("gif")).id();
+        for _ in 0..3 {
+            app.update();
+        }
+        let settled = ran(&app);
+        for _ in 0..10 {
+            // What a GIF frame does: the animation component and its texture move.
+            app.world_mut().entity_mut(gif).insert(Text::new("gif"));
+            app.update();
+        }
+        assert_eq!(ran(&app), settled, "restyle, hover and cursor stay out");
+    }
+
+    #[test]
+    fn the_gates_open_for_the_changes_each_system_cares_about() {
+        use bevy::ui::Pressed;
+        let mut app = gated_app();
+        let fonts = UiFonts::default();
+        let b = app
+            .world_mut()
+            .spawn(button(&fonts, "Reply", Variant::Ghost))
+            .id();
+        for _ in 0..3 {
+            app.update();
+        }
+        let base = ran(&app);
+        app.world_mut().entity_mut(b).insert(Fill(Swatch::Surface));
+        app.update();
+        let after_fill = ran(&app);
+        assert_eq!((after_fill.0, after_fill.1), (base.0 + 1, base.1 + 1));
+        app.world_mut().entity_mut(b).insert(Hovered(true));
+        app.update();
+        let after_hover = ran(&app);
+        assert_eq!(
+            (after_hover.1, after_hover.2),
+            (after_fill.1 + 1, after_fill.2 + 1)
+        );
+        app.world_mut().entity_mut(b).insert(Pressed);
+        app.update();
+        let pressed = ran(&app);
+        assert_eq!(pressed.1, after_hover.1 + 1);
+        app.world_mut().entity_mut(b).remove::<Pressed>();
+        app.update();
+        assert_eq!(ran(&app).1, pressed.1 + 1, "the end of a press repaints");
+        app.world_mut().resource_mut::<Theme>().set_changed();
+        let before = ran(&app);
+        app.update();
+        let after = ran(&app);
+        assert_eq!((after.0, after.1), (before.0 + 1, before.1 + 1));
+        app.world_mut().entity_mut(b).despawn();
+        app.update();
+        assert_eq!(
+            ran(&app).2,
+            after.2 + 1,
+            "a gone clickable frees the cursor"
+        );
     }
 
     #[test]
