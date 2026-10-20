@@ -882,6 +882,7 @@ impl Plugin for KitPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             crate::ui::text_area::TextAreaPlugin,
+            crate::ui::pace::PacePlugin,
             crate::ui::leaf::LeafPlugin,
             crate::ui::spinner::SpinnerPlugin,
             crate::ui::markdown::MarkdownPlugin,

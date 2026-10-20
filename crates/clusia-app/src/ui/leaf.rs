@@ -7,14 +7,18 @@
 use bevy::prelude::*;
 use bevy::ui::UiSystems;
 use bevy::window::RequestRedraw;
+use std::time::Duration;
 
 use crate::theme::Swatch;
 use crate::ui::kit::Fill;
+use crate::ui::pace::{Asking, Pace, Wake, WindowCovered};
 
 /// How long a growing stalk takes to reach its height.
 pub const GROW_SECS: f32 = 0.6;
 /// One sway and pulse loop of a running leaf.
 pub const SWAY_SECS: f64 = 1.2;
+/// How long the loop sleeps between two steps of the sway.
+const SWAY_WAKE: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LeafState {
@@ -188,7 +192,10 @@ pub struct LeafPlugin;
 impl Plugin for LeafPlugin {
     fn build(&self, app: &mut App) {
         // After Update, so a leaf a screen spawns is seen in the frame that spawns it.
-        app.add_systems(PostUpdate, (grow, sway).before(UiSystems::Layout));
+        app.add_systems(
+            PostUpdate,
+            (grow, sway.in_set(Asking)).before(UiSystems::Layout),
+        );
     }
 }
 
@@ -197,6 +204,7 @@ impl Plugin for LeafPlugin {
 /// `desktop_app`): it asks for the next frame and starts from there.
 fn grow(
     time: Res<Time>,
+    covered: Res<WindowCovered>,
     mut stalks: Query<(&mut Stalk, &mut Node)>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
@@ -214,21 +222,23 @@ fn grow(
         node.height = px(stalk.height * eased);
         moving |= stalk.progress < 1.0;
     }
-    if moving {
+    if moving && !covered.0 {
         redraw.write(RequestRedraw);
     }
 }
 
-/// Moves every running sprout, leaf and dot along one shared loop; asks for redraws only while
-/// one is alive, so the reactive loop idles once every step has ended.
+/// Moves every running sprout, leaf and dot along one shared loop; asks the loop to wake at
+/// `SWAY_WAKE` only while one is alive, so it idles once every step has ended. A covered window
+/// shows nothing to move.
 fn sway(
     time: Res<Time>,
+    covered: Res<WindowCovered>,
     mut sprouts: Query<(&Sway, &mut UiTransform), Without<Pulse>>,
     mut pulses: Query<(&Pulse, &mut UiTransform), Without<Sway>>,
     mut blinks: Query<(&Blink, &mut Fill)>,
-    mut redraw: MessageWriter<RequestRedraw>,
+    mut pace: ResMut<Pace>,
 ) {
-    if sprouts.is_empty() && pulses.is_empty() && blinks.is_empty() {
+    if covered.0 || (sprouts.is_empty() && pulses.is_empty() && blinks.is_empty()) {
         return;
     }
     let phase = (time.elapsed_secs_f64() % SWAY_SECS / SWAY_SECS) as f32 * std::f32::consts::TAU;
@@ -250,7 +260,7 @@ fn sway(
     for (blink, mut fill) in &mut blinks {
         fill.set_if_neq(Fill(if beat >= 0.0 { blink.high } else { blink.low }));
     }
-    redraw.write(RequestRedraw);
+    pace.ask(Wake::paced(SWAY_WAKE));
 }
 
 #[cfg(test)]
@@ -259,7 +269,10 @@ mod tests {
     use crate::snapshot::Snapshot;
     use crate::testing;
     use crate::theme::LIGHT;
+    use crate::ui::pace::UNFOCUSED_WAIT;
     use bevy::time::TimeUpdateStrategy;
+    use bevy::window::WindowOccluded;
+    use bevy::winit::{UpdateMode, WinitSettings};
     use std::time::Duration;
 
     fn redraws(app: &mut App) -> usize {
@@ -325,8 +338,27 @@ mod tests {
     }
 
     #[test]
+    fn a_covered_window_is_not_redrawn_for_a_growing_stalk() {
+        let mut app = testing::app(Snapshot::default());
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            50,
+        )));
+        app.world_mut().write_message(WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: true,
+        });
+        app.update();
+        app.world_mut().spawn(leaf(LeafState::Growing));
+        for _ in 0..4 {
+            app.update();
+            assert_eq!(redraws(&mut app), 0, "nothing to draw for");
+        }
+    }
+
+    #[test]
     fn growing_animates_then_stops_redrawing() {
         let mut app = testing::app(Snapshot::default());
+        app.insert_resource(WinitSettings::desktop_app());
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
             100,
         )));
@@ -355,7 +387,16 @@ mod tests {
         redraws(&mut app);
         app.update();
         assert_eq!(height(&app), 40.0, "the stalk stays grown");
-        assert!(redraws(&mut app) > 0, "the leaf still sways while running");
+        assert_eq!(
+            redraws(&mut app),
+            0,
+            "a wake at a pace, not a redraw per frame"
+        );
+        assert_eq!(
+            app.world().resource::<WinitSettings>().focused_mode,
+            UpdateMode::reactive(SWAY_WAKE),
+            "the leaf still sways while running"
+        );
         let blade = parts(&mut app, growing)[0];
         assert_eq!(
             app.world().get::<BackgroundColor>(blade).unwrap().0,
@@ -382,6 +423,7 @@ mod tests {
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
             100,
         )));
+        app.insert_resource(WinitSettings::desktop_app());
         app.update();
         let growing = app.world_mut().spawn(leaf(LeafState::Growing)).id();
         app.update();
@@ -391,9 +433,12 @@ mod tests {
         let mut seen = vec![(transform(&app, growing), transform(&app, blade))];
         let (mut widest, mut smallest, mut largest) = (0.0f32, f32::MAX, 0.0f32);
         // Well past the growth: the sway goes on.
-        for _ in 0..20 {
+        for frame in 0..20 {
             app.update();
-            assert!(redraws(&mut app) > 0, "a redraw every frame while running");
+            let asked = redraws(&mut app);
+            if frame >= 8 {
+                assert_eq!(asked, 0, "grown, it is paced and does not redraw per frame");
+            }
             let now = (transform(&app, growing), transform(&app, blade));
             assert_ne!(Some(&now), seen.last(), "moves every frame");
             let (sprout, leaf) = now;
@@ -418,11 +463,60 @@ mod tests {
             largest - smallest >= 0.15,
             "a real pulse: {smallest}..{largest}"
         );
+        assert_eq!(
+            app.world().resource::<WinitSettings>().focused_mode,
+            UpdateMode::reactive(SWAY_WAKE)
+        );
+        assert_eq!(
+            app.world().resource::<WinitSettings>().unfocused_mode,
+            UpdateMode::reactive(UNFOCUSED_WAIT),
+            "slower without focus"
+        );
         app.world_mut().entity_mut(growing).despawn();
         app.update();
         redraws(&mut app);
         app.update();
         assert_eq!(redraws(&mut app), 0, "idle once no leaf is alive");
+        assert_eq!(
+            app.world().resource::<WinitSettings>().focused_mode,
+            WinitSettings::desktop_app().focused_mode
+        );
+    }
+
+    #[test]
+    fn a_covered_window_neither_moves_nor_wakes_for_a_leaf() {
+        let mut app = testing::app(Snapshot::default());
+        app.insert_resource(WinitSettings::desktop_app());
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )));
+        app.update();
+        let growing = app.world_mut().spawn(leaf(LeafState::Growing)).id();
+        for _ in 0..3 {
+            app.update();
+        }
+        app.world_mut().write_message(WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: true,
+        });
+        app.update();
+        let blade = parts(&mut app, growing)[0];
+        let still = transform(&app, blade);
+        for _ in 0..10 {
+            app.update();
+            assert_eq!(transform(&app, blade), still, "nothing moves unseen");
+            assert_eq!(
+                app.world().resource::<WinitSettings>().focused_mode,
+                WinitSettings::desktop_app().focused_mode
+            );
+        }
+        app.world_mut().write_message(WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: false,
+        });
+        app.update();
+        app.update();
+        assert_ne!(transform(&app, blade), still, "it carries on when shown");
     }
 
     #[test]

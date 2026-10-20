@@ -9,6 +9,7 @@ pub mod leaf;
 pub mod markdown;
 pub mod media;
 pub mod modal;
+pub mod pace;
 pub mod people;
 pub mod spinner;
 pub mod text_area;
