@@ -37,7 +37,7 @@ use crate::ui::kit::{
     Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, icon_button,
     panel, text, wrapped_text,
 };
-use crate::ui::markdown::parse::parse_in;
+use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, markdown};
 use crate::ui::pace::{Pace, Wake};
 use crate::ui::spinner::{beat, spinner};
@@ -2403,6 +2403,28 @@ mod tests {
                 text: text.into(),
             },
         );
+    }
+
+    #[test]
+    fn a_rebuilt_transcript_parses_no_line_again() {
+        use crate::ui::markdown::cache::counts;
+        let mut app = open_chat();
+        let answer = "Chat respawn probe: the **lock** is needed.";
+        chunk_of(&mut app, answer);
+        testing::settle(&mut app);
+        let parses = counts::parses(answer);
+        assert!(parses >= 1, "the answer was built");
+        let before = lines_of(&mut app);
+        // As a panel opened again: nothing of the transcript is built yet.
+        let t = transcript(&mut app);
+        app.world_mut().get_mut::<Transcript>(t).unwrap().built = None;
+        testing::settle(&mut app);
+        let after = lines_of(&mut app);
+        assert!(
+            !after.is_empty() && after != before,
+            "the lines were respawned"
+        );
+        assert_eq!(counts::parses(answer), parses, "no parse on a respawn");
     }
 
     #[test]

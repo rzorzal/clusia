@@ -25,7 +25,7 @@ use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Tone, Type, Variant, button, panel, text, wrapped_text,
 };
-use crate::ui::markdown::parse::parse_on;
+use crate::ui::markdown::cache::parse_on;
 use crate::ui::markdown::{RenderOpts, markdown_line};
 use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
 use crate::ui::people::person_name;

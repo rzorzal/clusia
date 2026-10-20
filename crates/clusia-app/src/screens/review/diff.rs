@@ -44,7 +44,7 @@ use crate::ui::kit::{
     Clickable, Fill, HoverFill, Preview, Reveal, SideTrack, Stroke, Tone, Type, Variant, badge,
     button, card, panel, segment, segments, text, wrapped_text, wrapping_button,
 };
-use crate::ui::markdown::parse::parse_in;
+use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
 use crate::ui::people::{person_avatar, person_name};
 
@@ -5192,6 +5192,31 @@ mod tests {
             "A minute is safer while the runners drift."
         ));
         rows_in_line_order(&mut app);
+    }
+
+    #[test]
+    fn a_thread_card_respawned_with_the_same_text_is_not_parsed_again() {
+        use crate::ui::markdown::cache::counts;
+        let reply = "A minute is safer while the runners drift.";
+        let mut app = review_app();
+        let toggle = testing::find::<ThreadToggle>(&mut app, |_| true);
+        testing::activate(&mut app, toggle);
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, reply));
+        let parses = counts::parses_containing(reply);
+        assert!(parses >= 1, "the expanded thread was built");
+        // Collapse and expand again: the card is spawned anew with the same comments.
+        for _ in 0..2 {
+            let toggle = testing::find::<ThreadToggle>(&mut app, |_| true);
+            testing::activate(&mut app, toggle);
+            testing::settle(&mut app);
+        }
+        assert!(testing::shows(&mut app, reply));
+        assert_eq!(
+            counts::parses_containing(reply),
+            parses,
+            "no parse on a respawn"
+        );
     }
 
     #[test]
