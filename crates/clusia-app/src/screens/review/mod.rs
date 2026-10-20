@@ -20,6 +20,7 @@ pub mod highlight;
 pub mod leave;
 pub mod loading;
 pub mod revalidation;
+pub mod rows;
 pub mod shell;
 pub mod story;
 pub mod whats_new;
