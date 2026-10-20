@@ -185,6 +185,7 @@ impl Line {
                     let first = text.lines().next().unwrap_or("").to_string();
                     self.items(&[Inline::Code {
                         text: first,
+                        link: None,
                         space_after: false,
                     }]);
                 }
@@ -225,8 +226,10 @@ impl Line {
                 }
                 other => other.clone(),
             };
-            if let Inline::Word { style, .. } = &mut item {
-                style.link = None;
+            match &mut item {
+                Inline::Word { style, .. } => style.link = None,
+                Inline::Code { link, .. } | Inline::Emoji { link, .. } => *link = None,
+                _ => {}
             }
             let room = self.max - self.used;
             if let Inline::Word { text, .. } | Inline::Code { text, .. } = &mut item {
@@ -320,6 +323,15 @@ pub fn link_chip(
         Stroke(Swatch::Line),
     ));
     chip.insert((link_parts(url), TabIndex(0)));
+}
+
+/// The address an inline opens, when it is part of a link.
+fn link_of(item: &Inline) -> Option<&str> {
+    match item {
+        Inline::Word { style, .. } => style.link.as_deref(),
+        Inline::Code { link, .. } | Inline::Emoji { link, .. } => link.as_deref(),
+        Inline::Image { .. } | Inline::Break => None,
+    }
 }
 
 fn link_parts(url: &str) -> impl Bundle {
@@ -755,7 +767,7 @@ fn inlines(
                     // The space between two words of one link stays inside the text, so the
                     // underline runs across it.
                     let joined = *space_after && same_link(items.get(k + 1));
-                    let first = !(k > 0 && same_link(items.get(k - 1)));
+                    let first = !(k > 0 && link_of(&items[k - 1]) == style.link.as_deref());
                     let label = if joined {
                         format!("{text} ")
                     } else {
@@ -784,9 +796,13 @@ fn inlines(
                         }
                     }
                 }
-                Inline::Code { text, space_after } => {
+                Inline::Code {
+                    text,
+                    link,
+                    space_after,
+                } => {
                     let t = Type::MONO.size((base.size - 1.0).max(10.0)).ink(Swatch::Fg);
-                    row.spawn((
+                    let mut e = row.spawn((
                         Text::new(text.clone()),
                         font(fonts, t),
                         TextColor::default(),
@@ -802,9 +818,19 @@ fn inlines(
                         BackgroundColor::default(),
                         Fill(Swatch::Line),
                     ));
+                    if let Some(url) = link {
+                        e.insert(link_parts(url));
+                        if k == 0 || link_of(&items[k - 1]) != Some(url) {
+                            e.insert(TabIndex(0));
+                        }
+                    }
                 }
-                Inline::Emoji { file, space_after } => {
-                    row.spawn((
+                Inline::Emoji {
+                    file,
+                    link,
+                    space_after,
+                } => {
+                    let mut e = row.spawn((
                         Node {
                             margin: UiRect::right(px(if *space_after { 4.0 } else { 1.0 })),
                             flex_shrink: 0.0,
@@ -813,6 +839,19 @@ fn inlines(
                         TextSized::Square(base.size * EMOJI_SCALE),
                         MdEmoji(file.to_string()),
                     ));
+                    // No underline: the picture is the link, and `group_hover` only restyles
+                    // what has ink.
+                    if let Some(url) = link {
+                        e.insert((
+                            MdLink(url.clone()),
+                            Clickable,
+                            Hovered::default(),
+                            WidgetButton,
+                        ));
+                        if k == 0 || link_of(&items[k - 1]) != Some(url) {
+                            e.insert(TabIndex(0));
+                        }
+                    }
                 }
                 Inline::Image {
                     url, space_after, ..
@@ -1178,6 +1217,7 @@ mod tests {
                 styled("gone", true, strike),
                 Inline::Code {
                     text: "expires_at".into(),
+                    link: None,
                     space_after: false,
                 },
             ])],
@@ -1259,6 +1299,39 @@ mod tests {
         let second = entity_with_text(&app, root, "race ");
         testing::activate(&mut app, second);
         assert_eq!(app.world().resource::<OpenUrls>().0, [url]);
+    }
+
+    #[test]
+    fn code_and_emoji_inside_a_link_open_it() {
+        let mut app = fresh();
+        let url = "https://github.com/acme/widgets";
+        let root = render(
+            &mut app,
+            vec![Block::Paragraph(vec![
+                Inline::Code {
+                    text: "widgets".into(),
+                    link: Some(url.into()),
+                    space_after: true,
+                },
+                Inline::Emoji {
+                    file: "1f680.png",
+                    link: Some(url.into()),
+                    space_after: false,
+                },
+            ])],
+        );
+        assert_eq!(
+            count::<TabIndex>(&mut app, root),
+            1,
+            "one Tab stop per link"
+        );
+        let code = entity_with_text(&app, root, "widgets");
+        assert_eq!(app.world().get::<MdLink>(code).unwrap().0, url);
+        testing::activate(&mut app, code);
+        let mut boxes = app.world_mut().query::<(Entity, &MdEmoji)>();
+        let emoji = boxes.single(app.world()).unwrap().0;
+        testing::activate(&mut app, emoji);
+        assert_eq!(app.world().resource::<OpenUrls>().0, [url, url]);
     }
 
     #[test]

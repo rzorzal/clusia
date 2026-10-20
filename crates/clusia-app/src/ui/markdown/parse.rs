@@ -46,11 +46,13 @@ pub enum Inline {
     },
     Code {
         text: String,
+        link: Option<String>,
         space_after: bool,
     },
     /// A Twemoji file name such as `1f680.png`.
     Emoji {
         file: &'static str,
+        link: Option<String>,
         space_after: bool,
     },
     Image {
@@ -162,6 +164,7 @@ impl Builder {
                 Some((_, alt)) => alt.push_str(&t),
                 None => self.inlines.push(Inline::Code {
                     text: t.to_string(),
+                    link: self.style().link,
                     space_after: false,
                 }),
             },
@@ -448,6 +451,7 @@ impl Builder {
             match segment {
                 Segment::Emoji(file) => self.inlines.push(Inline::Emoji {
                     file,
+                    link: self.style().link,
                     space_after: false,
                 }),
                 Segment::Text(t) => {
@@ -455,6 +459,7 @@ impl Builder {
                         match piece {
                             Piece::Emoji(file) => self.inlines.push(Inline::Emoji {
                                 file,
+                                link: self.style().link,
                                 space_after: false,
                             }),
                             Piece::Text(t) => {
@@ -682,6 +687,55 @@ mod tests {
     }
 
     #[test]
+    fn code_and_emoji_inside_a_link_keep_it() {
+        let url = "https://github.com/acme/widgets";
+        assert_eq!(
+            para("[`parse()` :rocket: 🚀](https://github.com/acme/widgets)"),
+            vec![
+                Inline::Code {
+                    text: "parse()".into(),
+                    link: Some(url.into()),
+                    space_after: true,
+                },
+                Inline::Emoji {
+                    file: "1f680.png",
+                    link: Some(url.into()),
+                    space_after: true,
+                },
+                Inline::Emoji {
+                    file: "1f680.png",
+                    link: Some(url.into()),
+                    space_after: false,
+                },
+            ]
+        );
+        assert_eq!(
+            para("`a` :rocket:"),
+            vec![
+                Inline::Code {
+                    text: "a".into(),
+                    link: None,
+                    space_after: true,
+                },
+                Inline::Emoji {
+                    file: "1f680.png",
+                    link: None,
+                    space_after: false,
+                },
+            ]
+        );
+        assert_eq!(
+            para("[`a`](http://insecure.example)"),
+            vec![Inline::Code {
+                text: "a".into(),
+                link: None,
+                space_after: false,
+            }],
+            "a link the window cannot open is not a link"
+        );
+    }
+
+    #[test]
     fn paragraphs_and_spaces() {
         assert_eq!(
             para("hello  big\nworld"),
@@ -753,6 +807,7 @@ mod tests {
                 word("call", true),
                 Inline::Code {
                     text: "a  b".into(),
+                    link: None,
                     space_after: true
                 },
                 word("now", false)
@@ -855,6 +910,7 @@ mod tests {
                 word("it", true),
                 Inline::Emoji {
                     file: "1f680.png",
+                    link: None,
                     space_after: false
                 },
                 word("!", false)
@@ -865,6 +921,7 @@ mod tests {
             vec![
                 Inline::Code {
                     text: ":tada:".into(),
+                    link: None,
                     space_after: true
                 },
                 word(":nope:", true),
@@ -880,10 +937,12 @@ mod tests {
             vec![
                 Inline::Emoji {
                     file: "1f44d.png",
+                    link: None,
                     space_after: false
                 },
                 Inline::Emoji {
                     file: "1f389.png",
+                    link: None,
                     space_after: false
                 }
             ]
@@ -899,14 +958,17 @@ mod tests {
                 word("ok", true),
                 Inline::Emoji {
                     file: "1f44d-1f3fd.png",
+                    link: None,
                     space_after: true
                 },
                 Inline::Emoji {
                     file: family,
+                    link: None,
                     space_after: true
                 },
                 Inline::Emoji {
                     file: "1f1e7-1f1f7.png",
+                    link: None,
                     space_after: false
                 },
                 word("done", false)
@@ -1030,6 +1092,7 @@ mod tests {
             rows[0][1],
             vec![Inline::Code {
                 text: "2".into(),
+                link: None,
                 space_after: false
             }]
         );
