@@ -222,6 +222,7 @@ impl Daemon {
         if !self.shared.wait_idle(SHUTDOWN_GRACE).await {
             tracing::warn!("stopping with requests still running after {SHUTDOWN_GRACE:?}");
         }
+        self.shared.review_caches.settled().await;
         tokio::join!(
             crate::checks::shutdown(&self.shared),
             crate::diagrams::shutdown(&self.shared),

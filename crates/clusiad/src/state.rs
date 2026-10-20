@@ -24,6 +24,7 @@ use crate::notifications::Engine;
 use crate::options::DaemonOptions;
 use crate::permissions::Permissions;
 use crate::revalidate::Revalidations;
+use crate::review_cache::ReviewCaches;
 use crate::sessions::Sessions;
 use crate::spawner::Spawner;
 use crate::story::Stories;
@@ -225,6 +226,8 @@ pub(crate) struct Shared {
     pub touched: std::sync::Mutex<HashSet<String>>,
     /// One mutex per PR serialises review mutations.
     pub review_locks: std::sync::Mutex<HashMap<PrRef, Arc<tokio::sync::Mutex<()>>>>,
+    /// The parsed review caches and the writes behind them.
+    pub review_caches: Arc<ReviewCaches>,
     /// Parsed files per PR, keyed by the head SHA they were fetched for.
     pub files_cache: Mutex<HashMap<PrRef, CachedFiles>>,
     /// What the last open of each PR read from GitHub, so the news right after it asks for less.
@@ -272,6 +275,7 @@ impl Shared {
             })
             .collect();
         Self {
+            review_caches: Arc::new(ReviewCaches::new(paths.clone())),
             paths,
             config: RwLock::new(config),
             started: Instant::now(),

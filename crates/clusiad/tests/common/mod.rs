@@ -84,6 +84,23 @@ impl TestDaemon {
         Self::running(dir, paths, daemon)
     }
 
+    /// `start_with` for a restart: retries as `start_in` does, with fresh `options` each time.
+    pub async fn restart_with(dir: tempfile::TempDir, options: impl Fn() -> DaemonOptions) -> Self {
+        let paths = Paths::new(dir.path());
+        let give_up = std::time::Instant::now() + clusia_core::testkit::HANG_BOUND;
+        let daemon = loop {
+            match Daemon::bind_with(paths.clone(), options()).await {
+                Err(clusiad::StartError::AlreadyRunning(_))
+                    if std::time::Instant::now() < give_up =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                other => break other.expect("daemon binds"),
+            }
+        };
+        Self::running(dir, paths, daemon)
+    }
+
     fn running(dir: tempfile::TempDir, paths: Paths, daemon: Daemon) -> Self {
         let handle = daemon.shutdown_handle();
         let task = tokio::spawn(daemon.run());

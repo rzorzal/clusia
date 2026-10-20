@@ -18,7 +18,7 @@ use clusia_protocol::{
     ProtocolError, Reply, topics,
 };
 use clusia_store::agent::load_agent_state;
-use clusia_store::{delete_checks, load_checks, load_review_cache, save_checks};
+use clusia_store::{delete_checks, load_checks, save_checks};
 use tokio::sync::{Semaphore, watch};
 
 use crate::agent_log;
@@ -327,8 +327,8 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, kind: CheckKind) -> Result<(), 
             "no audit area is on; switch one on in Config › Harness",
         ));
     }
-    let (title, files) = match load_review_cache(&shared.paths, pr) {
-        Ok(Some(cache)) => (cache.pr.summary.title, cache.files),
+    let (title, files) = match shared.review_caches.get(pr).await {
+        Some(cache) => (cache.pr.summary.title.clone(), cache.files.clone()),
         _ => (review.title.clone(), Vec::new()),
     };
     let names: Vec<String> = files.iter().map(|file| file.path.clone()).collect();

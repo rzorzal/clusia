@@ -210,6 +210,8 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                 let task = tokio::spawn(async move {
                     let _working = working;
                     let outcome = handlers::handle(&task_shared, &client, cmd).await;
+                    // What the answer reports is on disk before the client reads it.
+                    task_shared.review_caches.settled().await;
                     if let (Outcome::Ok(_), Some((pr, held))) = (&outcome, hold) {
                         task_shared.holds.set(&pr, holder_id, held);
                     }

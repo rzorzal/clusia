@@ -15,7 +15,7 @@ pub mod tabs;
 
 pub use activity::{append_activity, read_activity};
 pub use agent::{load_agent_state, save_agent_state};
-pub use cache::{delete_review_cache, load_review_cache, save_review_cache};
+pub use cache::{delete_review_cache, load_review_cache, review_cache_parses, save_review_cache};
 pub use calls::{delete_calls, load_index, save_index};
 pub use checks::{delete_checks, load_checks, save_checks};
 pub use config::{ConfigKeyError, Loaded, get_value, load_config, save_config, set_value};

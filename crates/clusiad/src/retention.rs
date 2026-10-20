@@ -66,6 +66,8 @@ pub(crate) async fn sweep(shared: &Shared) -> usize {
     sweep_diagrams(shared, cutoff).await;
     sweep_calls(shared, cutoff).await;
     sweep_stories(shared, cutoff).await;
+    // The cache removals run on the blocking pool; the sweep is over once they are.
+    shared.review_caches.settled().await;
     removed
 }
 

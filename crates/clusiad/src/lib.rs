@@ -31,6 +31,7 @@ mod publish;
 mod relocate;
 mod retention;
 mod revalidate;
+mod review_cache;
 mod reviews;
 mod server;
 mod sessions;

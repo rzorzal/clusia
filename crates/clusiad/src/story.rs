@@ -27,7 +27,6 @@ use clusia_protocol::{
     StoryVersionInfo, TurnOrigin, topics,
 };
 use clusia_store::diagrams::load_latest_diagram_version;
-use clusia_store::load_review_cache;
 use clusia_store::stories::{
     delete_stories, load_read_marks, load_story_version, load_story_versions, next_story_number,
     save_read_marks, save_story_version,
@@ -716,8 +715,8 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, rewrite: bool) -> Result<(), Ou
             .ok_or_else(|| reviews::invalid_state(NO_NUMBER_LEFT))?,
     };
     let limit = Duration::from_secs(u64::from(harness.check_timeout_secs));
-    let (pr_title, pr_body) = match load_review_cache(&shared.paths, pr) {
-        Ok(Some(cache)) => (cache.pr.summary.title, cache.pr.body),
+    let (pr_title, pr_body) = match shared.review_caches.get(pr).await {
+        Some(cache) => (cache.pr.summary.title.clone(), cache.pr.body.clone()),
         _ => (review.title.clone(), String::new()),
     };
     let stop = Stop::new();
