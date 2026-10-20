@@ -307,7 +307,7 @@ fn fill_avatars(
         }
         let handle = match &cache.by_url[&url] {
             MediaState::Image(handle) => handle.clone(),
-            MediaState::Gif(gif) => gif.frames[0].clone(),
+            MediaState::Gif(gif) => gif.first.clone(),
             _ => continue,
         };
         commands
