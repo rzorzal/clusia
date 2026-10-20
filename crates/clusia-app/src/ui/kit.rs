@@ -941,12 +941,12 @@ fn commit_on_blur(
 /// Whether the pointer may have moved on or off a `Clickable`: the cursor only needs another
 /// look then (and once at the start, to set the default).
 fn cursor_due(
-    changed: Query<(), (With<Clickable>, Changed<Hovered>)>,
+    changed: Query<(), (With<Clickable>, Or<(Changed<Hovered>, Added<Clickable>)>)>,
     mut gone: RemovedComponents<Clickable>,
-    mut released: RemovedComponents<Hovered>,
+    mut unhovered: RemovedComponents<Hovered>,
     mut started: Local<bool>,
 ) -> bool {
-    let gone = gone.read().count() + released.read().count();
+    let gone = gone.read().count() + unhovered.read().count();
     let first = !std::mem::replace(&mut *started, true);
     first || gone > 0 || !changed.is_empty()
 }
@@ -975,7 +975,13 @@ fn hover_due(
         (),
         (
             With<HoverFill>,
-            Or<(Changed<Hovered>, Changed<Fill>, Added<Pressed>)>,
+            Or<(
+                Changed<Hovered>,
+                Changed<Fill>,
+                Changed<HoverFill>,
+                Changed<PressFill>,
+                Added<Pressed>,
+            )>,
         ),
     >,
     mut unpressed: RemovedComponents<Pressed>,
@@ -1035,9 +1041,10 @@ fn restyle(
     }
 }
 
-/// Runs after `restyle`: pressed widgets show `PressFill`, hovered ones `HoverFill`, the others
-/// their `Fill`. The press ends without a change the system could see, so it compares colors.
-/// A new `Fill` repaints too: `restyle` writes it without knowing the widget is hovered.
+/// Runs after `restyle`, on the frames `hover_due` lets through: pressed widgets show
+/// `PressFill`, hovered ones `HoverFill`, the others their `Fill`. It compares colors, since a
+/// press ends without a change it could see. A new `Fill` repaints too: `restyle` writes it
+/// without knowing the widget is hovered.
 fn hover(
     theme: Res<Theme>,
     mut widgets: Query<(
@@ -1050,10 +1057,6 @@ fn hover(
     )>,
 ) {
     for (hovered, fill, over, press, pressed, mut color) in &mut widgets {
-        // Only widgets with a `PressFill` need the check every frame.
-        if press.is_none() && !theme.is_changed() && !hovered.is_changed() && !fill.is_changed() {
-            continue;
-        }
         let swatch = match press {
             Some(press) if pressed => press.0,
             _ if hovered.get() => over.0,
@@ -1072,6 +1075,7 @@ mod tests {
     use crate::snapshot::Snapshot;
     use crate::testing;
     use crate::theme::{DARK, LIGHT};
+    use bevy::ecs::schedule::ScheduleLabel;
     use bevy::text::RemSize;
     use bevy::window::{WindowTheme, WindowThemeChanged};
 
@@ -1316,59 +1320,40 @@ mod tests {
         assert_eq!(initial("élan"), "É");
     }
 
-    /// Counts the frames a gate lets through.
-    #[derive(Resource, Default)]
-    struct Ran(u32, u32, u32);
+    /// When the system `which` (a system function, passed by value) last ran in `schedule`; a
+    /// system held back by its run condition keeps the tick of the frame it last ran in.
+    fn last_run<M>(
+        app: &App,
+        schedule: impl ScheduleLabel,
+        which: impl IntoSystem<(), (), M>,
+    ) -> u32 {
+        use bevy::ecs::system::System;
+        let want = IntoSystem::into_system(which).system_type();
+        let schedules = app.world().resource::<Schedules>();
+        let (_, system) = schedules
+            .get(schedule)
+            .unwrap()
+            .systems()
+            .unwrap()
+            .find(|(_, s)| s.system_type() == want)
+            .expect("the system is in the schedule");
+        system.get_last_run().get()
+    }
 
-    fn count_restyle(mut ran: ResMut<Ran>) {
-        ran.0 += 1;
-    }
-    fn count_hover(mut ran: ResMut<Ran>) {
-        ran.1 += 1;
-    }
-    fn count_cursor(mut ran: ResMut<Ran>) {
-        ran.2 += 1;
+    fn runs(app: &App) -> [u32; 3] {
+        [
+            last_run(app, PostUpdate, restyle),
+            last_run(app, PostUpdate, hover),
+            last_run(app, Update, pointer_cursor),
+        ]
     }
 
-    fn gated_app() -> App {
+    fn kit_app() -> (App, Entity, Entity) {
         let mut app = testing::app(Snapshot::default());
-        app.init_resource::<Ran>();
-        app.add_systems(PostUpdate, count_restyle.run_if(restyle_due));
-        app.add_systems(PostUpdate, count_hover.run_if(hover_due));
-        app.add_systems(Update, count_cursor.run_if(cursor_due));
-        app
-    }
-
-    fn ran(app: &App) -> (u32, u32, u32) {
-        let r = app.world().resource::<Ran>();
-        (r.0, r.1, r.2)
-    }
-
-    #[test]
-    fn a_frame_where_only_a_gif_advanced_runs_none_of_the_per_widget_systems() {
-        let mut app = gated_app();
-        let fonts = UiFonts::default();
-        for _ in 0..20 {
-            app.world_mut()
-                .spawn(button(&fonts, "Reply", Variant::Ghost));
-        }
-        let gif = app.world_mut().spawn(Text::new("gif")).id();
-        for _ in 0..3 {
-            app.update();
-        }
-        let settled = ran(&app);
-        for _ in 0..10 {
-            // What a GIF frame does: the animation component and its texture move.
-            app.world_mut().entity_mut(gif).insert(Text::new("gif"));
-            app.update();
-        }
-        assert_eq!(ran(&app), settled, "restyle, hover and cursor stay out");
-    }
-
-    #[test]
-    fn the_gates_open_for_the_changes_each_system_cares_about() {
-        use bevy::ui::Pressed;
-        let mut app = gated_app();
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
         let fonts = UiFonts::default();
         let b = app
             .world_mut()
@@ -1377,37 +1362,84 @@ mod tests {
         for _ in 0..3 {
             app.update();
         }
-        let base = ran(&app);
-        app.world_mut().entity_mut(b).insert(Fill(Swatch::Surface));
-        app.update();
-        let after_fill = ran(&app);
-        assert_eq!((after_fill.0, after_fill.1), (base.0 + 1, base.1 + 1));
+        (app, window, b)
+    }
+
+    #[test]
+    fn a_frame_where_only_a_gif_advanced_runs_none_of_the_per_widget_systems() {
+        let (mut app, _, _) = kit_app();
+        let texture = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        let settled = runs(&app);
+        for _ in 0..10 {
+            // What a GIF frame touches: pixels in an image asset, nothing on the widgets.
+            let _ = app
+                .world_mut()
+                .resource_mut::<Assets<Image>>()
+                .get_mut(&texture);
+            app.update();
+        }
+        assert_eq!(runs(&app), settled, "restyle, hover and cursor stay out");
+    }
+
+    #[test]
+    fn a_gif_frame_does_not_repaint_widgets_or_reset_the_cursor() {
+        let (mut app, window, b) = kit_app();
+        let sentinel = Color::srgb(0.1, 0.2, 0.3);
+        app.world_mut()
+            .entity_mut(b)
+            .insert(BackgroundColor(sentinel));
+        app.world_mut().entity_mut(window).remove::<CursorIcon>();
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(bg(&mut app, b), sentinel, "hover did not run");
+        assert!(app.world().get::<CursorIcon>(window).is_none());
         app.world_mut().entity_mut(b).insert(Hovered(true));
         app.update();
-        let after_hover = ran(&app);
+        assert_ne!(bg(&mut app, b), sentinel, "a hover repaints it");
         assert_eq!(
-            (after_hover.1, after_hover.2),
-            (after_fill.1 + 1, after_fill.2 + 1)
+            app.world().get::<CursorIcon>(window).cloned(),
+            Some(SystemCursorIcon::Pointer.into())
         );
+    }
+
+    #[test]
+    fn the_gates_open_for_the_changes_each_system_cares_about() {
+        use bevy::ui::Pressed;
+        let (mut app, _, b) = kit_app();
+        let [restyled, hovered, cursor] = runs(&app);
+        app.world_mut().entity_mut(b).insert(Fill(Swatch::Surface));
+        app.update();
+        let [r, h, c] = runs(&app);
+        assert!(r > restyled && h > hovered && c == cursor, "a new fill");
+        app.world_mut().entity_mut(b).insert(Hovered(true));
+        app.update();
+        let [r2, h2, c2] = runs(&app);
+        assert!(h2 > h && c2 > c && r2 == r, "a hover");
         app.world_mut().entity_mut(b).insert(Pressed);
         app.update();
-        let pressed = ran(&app);
-        assert_eq!(pressed.1, after_hover.1 + 1);
+        let h3 = runs(&app)[1];
+        assert!(h3 > h2, "a press");
         app.world_mut().entity_mut(b).remove::<Pressed>();
         app.update();
-        assert_eq!(ran(&app).1, pressed.1 + 1, "the end of a press repaints");
+        let h4 = runs(&app)[1];
+        assert!(h4 > h3, "the end of a press repaints");
         app.world_mut().resource_mut::<Theme>().set_changed();
-        let before = ran(&app);
         app.update();
-        let after = ran(&app);
-        assert_eq!((after.0, after.1), (before.0 + 1, before.1 + 1));
+        let [r5, h5, _] = runs(&app);
+        assert!(r5 > r2 && h5 > h4, "a theme change");
+        app.world_mut()
+            .entity_mut(b)
+            .insert(HoverFill(Swatch::Raised));
+        app.update();
+        assert!(runs(&app)[1] > h5, "a new hover fill");
         app.world_mut().entity_mut(b).despawn();
+        let before = runs(&app)[2];
         app.update();
-        assert_eq!(
-            ran(&app).2,
-            after.2 + 1,
-            "a gone clickable frees the cursor"
-        );
+        assert!(runs(&app)[2] > before, "a gone clickable frees the cursor");
     }
 
     #[test]
