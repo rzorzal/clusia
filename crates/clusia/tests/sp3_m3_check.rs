@@ -469,3 +469,58 @@ fn the_readme_names_the_check_the_two_commands_and_the_setting() {
         assert!(readme.contains(needle), "{needle} is not in the README");
     }
 }
+
+/// Runs the script to the end of the static step with `clusia` printing `story`, every question
+/// answered yes, and returns what it printed.
+fn static_step_output(story: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let log = dir.path().join("clusia.log");
+    recording_clusia(&bin, &log);
+    let clusia = std::fs::read_to_string(bin.join("clusia")).unwrap();
+    let story_line = "  \"story \"*) printf '1  TokenStore::refresh\\n2  Other files\\nWritten by Claude Code from commit 9be1d07\\n' ;;";
+    assert!(clusia.contains(story_line), "the fake changed");
+    fake(
+        &bin,
+        "clusia",
+        &clusia.replace(story_line, &format!("  \"story \"*) printf '{story}' ;;")),
+    );
+    let mut child = Command::new(script())
+        .args(["--yes", "--pr", "rzorzal/clusia#123"])
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("SP3_CHECK_WAIT", "1")
+        .env("SP3_CHECK_APP", dir.path().join("no-such-window"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all("y\n".repeat(60).as_bytes())
+        .unwrap();
+    String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).to_string()
+}
+
+#[test]
+fn an_other_files_step_passes_and_its_absence_asks_the_owner() {
+    let with = static_step_output("1  A\\n2  Other files\\nStatic order\\n");
+    assert!(
+        with.lines()
+            .any(|l| l.contains("PASS") && l.contains("an Other files step")),
+        "{with}"
+    );
+    assert!(!with.contains("No Other files step"), "{with}");
+    let without = static_step_output("1  A\\nStatic order\\n");
+    assert!(
+        without
+            .lines()
+            .any(|l| l.contains("No Other files step: did this PR change only source files?")),
+        "{without}"
+    );
+}

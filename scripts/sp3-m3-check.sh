@@ -249,7 +249,11 @@ step_static() {
   echo "  Nothing here asks your agent: both are built from the repository with tree-sitter. The check"
   echo "  expects the first changed function to have a caller (the demo pull request does)."
   check "clusia story lists steps and ends with Static order" sh -c 'clusia story "$0" | tail -n 1 | grep -Eq "^Static order"' "$PR"
-  check "clusia story names an Other files step when the change has non-code files" sh -c 'clusia story "$0" | grep -Eq "Other files" || true' "$PR"
+  if clusia story "$PR" 2>/dev/null | grep -Eq "Other files"; then
+    pass "clusia story names an Other files step"
+  else
+    ask "No Other files step: did this PR change only source files?"
+  fi
   check "clusia calls prints the centre and its callers at depth 3" sh -c 'clusia calls "$0" --depth 3 | grep -Eq "^●" && clusia calls "$0" --depth 3 | grep -Eq "^↑1"' "$PR"
   check "clusia calls --depth 1 prints no second level" sh -c '! clusia calls "$0" --depth 1 | grep -Eq "^(↑2|↓2)"' "$PR"
 }
