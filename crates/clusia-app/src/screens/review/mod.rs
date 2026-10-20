@@ -16,6 +16,7 @@ pub mod diagrams;
 pub mod diff;
 pub mod editor;
 pub mod finalize;
+pub mod highlight;
 pub mod leave;
 pub mod loading;
 pub mod revalidation;
@@ -39,6 +40,7 @@ impl Plugin for ReviewPlugin {
                 shell::ShellPlugin,
                 comments::CommentsPlugin,
                 diff::DiffPlugin,
+                highlight::HighlightPlugin,
                 editor::EditorPlugin,
                 loading::LoadingPlugin,
                 whats_new::WhatsNewPlugin,

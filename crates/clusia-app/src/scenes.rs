@@ -508,6 +508,9 @@ fn stage_calls(world: &mut World, pr: &PrRef, scene: Scene) {
 /// Puts the demo review `rzorzal/clusia#123` in the state `scene` shows (Config pages and
 /// the first run need no review).
 pub fn stage(world: &mut World, scene: Scene) {
+    // A scene is a still render: its diff is highlighted in the frame it is built, so the saved
+    // frames never catch it plain.
+    world.insert_resource(crate::screens::review::highlight::HighlightCache::default());
     let section = match scene {
         Scene::ConfigGeneral => Some(Section::General),
         Scene::ConfigNotifications | Scene::ConfigNotificationsBottom => {
@@ -2183,10 +2186,11 @@ mod tests {
         let mut app = staged(Scene::DiffStory);
         let mut look = |label: &str| {
             let world = app.world_mut();
+            // The label can also be a word of the story's prose; the chip is the one in a pill.
             let mut texts = world.query::<(&Text, &Ink, &ChildOf)>();
             let (ink, parent) = texts
                 .iter(world)
-                .find(|(t, ..)| t.0 == label)
+                .find(|(t, _, of)| t.0 == label && world.get::<Fill>(of.parent()).is_some())
                 .map(|(_, ink, of)| (ink.0, of.parent()))
                 .unwrap_or_else(|| panic!("no chip {label}"));
             (world.get::<Fill>(parent).expect("a filled pill").0, ink)

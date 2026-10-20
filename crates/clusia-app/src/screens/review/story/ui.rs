@@ -21,8 +21,9 @@ use crate::review_state::{DiffMode, EditTarget, Editor, ReviewTabs};
 use crate::screens::review::agent::harness_ready;
 use crate::screens::review::checks::Checks;
 use crate::screens::review::diagrams::canvas::{Dots, stretched_dashed_ring};
-use crate::screens::review::diff::{Gutter, HighlightCache, show_line, unified_rows, unsent};
+use crate::screens::review::diff::{Gutter, show_line, unified_rows, unsent};
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
+use crate::screens::review::highlight::{HighlightCache, HighlightsLanded};
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
@@ -191,6 +192,7 @@ fn rebuild_story(
     checks: Res<Checks>,
     fonts: Res<UiFonts>,
     mut cache: ResMut<HighlightCache>,
+    landed: Res<HighlightsLanded>,
     dots: Option<Res<Dots>>,
     mut last_opts: Local<Option<RenderOpts>>,
     mut lists: Query<(Entity, &mut ListPart)>,
@@ -206,6 +208,7 @@ fn rebuild_story(
         || model.is_changed()
         || stories.is_changed()
         || checks.is_changed()
+        || landed.is_changed()
         || opts_changed)
     {
         return;

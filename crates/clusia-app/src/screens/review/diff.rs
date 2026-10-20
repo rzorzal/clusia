@@ -19,10 +19,9 @@ use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_core::commentable_lines;
 use clusia_core::draft::{DraftKind, ItemStatus, Side, ThreadRef};
-use clusia_highlight::{Span, highlight};
 use clusia_protocol::AnchorInput;
 use clusia_view::diff::{
-    Row, RowKind, anchor_of, intraline, line_on, parse_patch, row_of, side_text, split_rows,
+    Row, RowKind, anchor_of, intraline, line_on, parse_patch, row_of, split_rows,
 };
 
 use crate::bridge::{Ask, Asks, Model, Toasts, set_config};
@@ -32,6 +31,7 @@ use crate::review_state::{
 };
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
+use crate::screens::review::highlight::{HighlightCache, Highlighted, HighlightsLanded};
 use crate::screens::review::revalidation::{Revalidations, reanchor_click};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
@@ -163,51 +163,6 @@ pub struct DiffView {
     pub focus_seq: u32,
 }
 
-/// One file's rows highlighted per side, indexed by row.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Highlighted {
-    left: Vec<Option<Vec<Span>>>,
-    right: Vec<Option<Vec<Span>>>,
-}
-
-/// Highlighted files by `(head_sha, path)`: a new head re-highlights, a file switch does not.
-#[derive(Resource, Default)]
-pub struct HighlightCache(HashMap<(String, String), Highlighted>);
-
-impl HighlightCache {
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub(crate) fn get(&mut self, head: &str, path: &str, rows: &[Row]) -> &Highlighted {
-        self.0
-            .entry((head.to_string(), path.to_string()))
-            .or_insert_with(|| {
-                let mut lit = Highlighted {
-                    left: vec![None; rows.len()],
-                    right: vec![None; rows.len()],
-                };
-                for side in [Side::Left, Side::Right] {
-                    // Each side is highlighted as one text, so multi-line constructs color right.
-                    let text = side_text(rows, side);
-                    let lines = highlight(path, &text.text);
-                    let out = match side {
-                        Side::Left => &mut lit.left,
-                        Side::Right => &mut lit.right,
-                    };
-                    for (i, &row) in text.rows.iter().enumerate() {
-                        out[row] = lines.get(i).cloned();
-                    }
-                }
-                lit
-            })
-    }
-}
-
 fn patch_of<'a>(ready: &'a Ready, path: &str) -> Option<&'a str> {
     ready
         .view
@@ -290,7 +245,7 @@ pub(crate) fn excerpt(
     };
     let sel = selection(ui, path);
     let mut below = placements(ready, ui, path, &rows);
-    let lit = cache.get(&ready.view.pr.head_sha, path, &rows);
+    let lit = &cache.get(&ready.view.pr.head_sha, path, &rows);
     let lines = picked
         .iter()
         .take(STEP_ROWS)
@@ -628,7 +583,7 @@ pub fn diff_view(
         .focus_line
         .and_then(|(side, line)| display_index(&rows, ui.mode, side, line));
     let mut below = placements(ready, ui, &path, &rows);
-    let lit = cache.get(&view.pr.head_sha, &path, &rows);
+    let lit = &cache.get(&view.pr.head_sha, &path, &rows);
     let limit = ui.shown.max(SHOW_STEP);
     match ui.mode {
         DiffMode::Unified => {
@@ -1014,6 +969,7 @@ fn rebuild_diff(
     model: Res<Model>,
     fonts: Res<UiFonts>,
     mut cache: ResMut<HighlightCache>,
+    landed: Res<HighlightsLanded>,
     mut last_opts: Local<Option<RenderOpts>>,
     mut files: Query<(Entity, &mut FilesPart)>,
     mut headers: Query<(Entity, &mut HeaderPart)>,
@@ -1024,7 +980,7 @@ fn rebuild_diff(
         || headers.iter().any(|(_, p)| p.built.is_none())
         || bodies.iter().any(|(_, p, _)| p.built.is_none());
     let opts_changed = last_opts.as_ref() != Some(&opts);
-    if !(fresh || tabs.is_changed() || theme.is_changed() || opts_changed) {
+    if !(fresh || tabs.is_changed() || theme.is_changed() || landed.is_changed() || opts_changed) {
         return;
     }
     *last_opts = Some(opts.clone());
