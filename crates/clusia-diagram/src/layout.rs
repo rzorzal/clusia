@@ -288,10 +288,9 @@ mod tests {
     use super::*;
     use crate::measure::Fonts;
     use crate::testkit::{
-        assert_no_text_clash, check, data_flow_mockup, deps_mockup, edge, flow_mockup, node,
-        node_sub, random_graph, sparse_graph, spec, states_mockup,
+        BUDGET_MS, assert_no_text_clash, check, cpu_timed, data_flow_mockup, deps_mockup, edge,
+        flow_mockup, node, node_sub, random_graph, sparse_graph, spec, states_mockup,
     };
-    use std::time::Instant;
 
     fn run(spec: &DiagramSpec) -> Geometry {
         let g = layout(spec, &Fonts);
@@ -913,18 +912,14 @@ mod tests {
     fn awkward_random_graphs_keep_every_invariant_inside_the_budget() {
         for (kind, seed) in [("flow", 1), ("graph", 2), ("data_flow", 3), ("states", 4)] {
             let s = random_graph(kind, 40, 80, seed);
-            let started = Instant::now();
-            let g = layout(&s, &Fonts);
-            let took = started.elapsed();
-            let budget = if cfg!(debug_assertions) { 200 } else { 20 };
-            assert!(took.as_millis() <= budget, "{kind}: {took:?}");
+            let (g, took) = cpu_timed(|| layout(&s, &Fonts));
+            assert!(took.as_millis() <= BUDGET_MS, "{kind}: {took:?}");
             check(&s, &g);
         }
     }
 
     #[test]
     fn a_hub_with_every_edge_and_eighty_edges_between_two_boxes_stay_inside_the_budget() {
-        let budget = if cfg!(debug_assertions) { 200 } else { 20 };
         let hub = |kind: &str, shape: &str| {
             let nodes: Vec<_> = (0..40)
                 .map(|i| node(&format!("n{i}"), &format!("Part {i}"), shape))
@@ -973,10 +968,8 @@ mod tests {
             ("circle hub", hub("data_flow", "circle"), false),
             ("table hub", hub("entity_relationship", "table"), false),
         ] {
-            let started = Instant::now();
-            let g = layout(&s, &Fonts);
-            let took = started.elapsed();
-            assert!(took.as_millis() <= budget, "{name}: {took:?}");
+            let (g, took) = cpu_timed(|| layout(&s, &Fonts));
+            assert!(took.as_millis() <= BUDGET_MS, "{name}: {took:?}");
             if valid {
                 check(&s, &g);
             }

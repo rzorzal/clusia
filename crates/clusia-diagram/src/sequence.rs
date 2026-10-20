@@ -453,10 +453,8 @@ mod tests {
             })
             .collect();
         let s = with_messages(nodes, messages);
-        let started = std::time::Instant::now();
-        let g = layout(&s, &Fonts);
-        let budget = if cfg!(debug_assertions) { 200 } else { 20 };
-        assert!(started.elapsed().as_millis() <= budget);
+        let (g, took) = crate::testkit::cpu_timed(|| layout(&s, &Fonts));
+        assert!(took.as_millis() <= crate::testkit::BUDGET_MS, "{took:?}");
         assert_sequence(&s, &g);
         assert_eq!(layout(&s, &Fonts), g, "deterministic");
     }

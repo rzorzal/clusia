@@ -6,6 +6,29 @@ use serde_json::{Value, json};
 use crate::geometry::{ActorEnd, share_past_trunk, touches};
 use crate::{Arrow, EdgeGeo, Geometry, MARGIN, Point, Rect, TextLines};
 
+/// The calling thread's CPU time. Budgets read this instead of the wall clock so a loaded
+/// machine, where the thread waits for a CPU, does not fail work that is itself fast.
+pub(crate) fn thread_cpu_time() -> std::time::Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec for the whole call.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    assert_eq!(rc, 0, "the thread CPU clock is unavailable");
+    std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// The CPU time one layout may take, in milliseconds.
+pub(crate) const BUDGET_MS: u128 = if cfg!(debug_assertions) { 200 } else { 20 };
+
+/// The CPU time `work` took on this thread, with what it returned.
+pub(crate) fn cpu_timed<T>(work: impl FnOnce() -> T) -> (T, std::time::Duration) {
+    let started = thread_cpu_time();
+    let out = work();
+    (out, thread_cpu_time() - started)
+}
+
 /// A node as JSON with every field spelled out.
 pub(crate) fn node(id: &str, label: &str, shape: &str) -> Value {
     json!({
@@ -414,4 +437,42 @@ pub(crate) fn check(spec: &DiagramSpec, geometry: &Geometry) {
     );
     assert!((bounds.right() + MARGIN - geometry.size.0).abs() < 1e-3);
     assert!((bounds.bottom() + MARGIN - geometry.size.1).abs() < 1e-3);
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Busy work that stops once the thread has had `ms` of CPU, however long the wall clock
+    /// takes to give it; the wall bound only keeps a dead clock from hanging the test.
+    fn spin(ms: u64) {
+        let wall = std::time::Instant::now();
+        let started = thread_cpu_time();
+        let mut x = 0u64;
+        while thread_cpu_time() - started < Duration::from_millis(ms)
+            && wall.elapsed() < Duration::from_secs(30)
+        {
+            x = std::hint::black_box(x.wrapping_add(1));
+        }
+    }
+
+    #[test]
+    fn cpu_time_grows_with_busy_work() {
+        let ((), took) = cpu_timed(|| spin(40));
+        assert!(took >= Duration::from_millis(40), "{took:?}");
+    }
+
+    #[test]
+    fn cpu_time_barely_moves_during_a_sleep() {
+        let ((), took) = cpu_timed(|| std::thread::sleep(Duration::from_millis(100)));
+        assert!(took < Duration::from_millis(20), "{took:?}");
+    }
+
+    #[test]
+    fn cpu_time_never_goes_backwards() {
+        let a = thread_cpu_time();
+        spin(5);
+        assert!(thread_cpu_time() >= a);
+    }
 }
