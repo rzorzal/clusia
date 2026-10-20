@@ -160,7 +160,7 @@ struct BatchSizes {
     last: Option<(String, bool)>,
 }
 
-fn spawn_error(e: io::Error) -> GitError {
+pub(crate) fn spawn_error(e: io::Error) -> GitError {
     if e.kind() == io::ErrorKind::NotFound {
         GitError::Missing
     } else {
@@ -190,7 +190,7 @@ impl BatchSizes {
     }
 }
 
-fn piped_missing() -> GitError {
+pub(crate) fn piped_missing() -> GitError {
     GitError::Io(io::Error::other("a piped stream of git is missing"))
 }
 
@@ -232,7 +232,7 @@ impl FileSizes for BatchSizes {
     }
 }
 
-enum Record {
+pub(crate) enum Record {
     Line,
     TooLong,
     Eof,
@@ -240,7 +240,7 @@ enum Record {
 
 /// Reads up to the next `\n` (or the end) into `record`, never holding more than `limit` bytes:
 /// a longer record is consumed and reported as `TooLong`.
-async fn next_record<R: AsyncBufRead + Unpin>(
+pub(crate) async fn next_record<R: AsyncBufRead + Unpin>(
     out: &mut R,
     record: &mut Vec<u8>,
     limit: usize,

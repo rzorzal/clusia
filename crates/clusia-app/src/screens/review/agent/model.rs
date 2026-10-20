@@ -391,7 +391,8 @@ impl ChatModel {
                 | AgentLogEntry::Text { .. }
                 | AgentLogEntry::Check { .. }
                 | AgentLogEntry::Revalidation { .. }
-                | AgentLogEntry::Diagrams { .. } => {}
+                | AgentLogEntry::Diagrams { .. }
+                | AgentLogEntry::Story { .. } => {}
             }
         }
         let unfinished = match entries.last() {
@@ -400,7 +401,8 @@ impl ChatModel {
             | Some(AgentLogEntry::Error { .. })
             | Some(AgentLogEntry::Check { .. })
             | Some(AgentLogEntry::Revalidation { .. })
-            | Some(AgentLogEntry::Diagrams { .. }) => None,
+            | Some(AgentLogEntry::Diagrams { .. })
+            | Some(AgentLogEntry::Story { .. }) => None,
             Some(
                 AgentLogEntry::User { turn, .. }
                 | AgentLogEntry::Text { turn, .. }
@@ -797,6 +799,35 @@ mod tests {
         assert!(!chat.open);
         chat.toggle();
         assert!(chat.open);
+    }
+
+    #[test]
+    fn a_story_turn_in_the_log_is_not_part_of_the_chat() {
+        let entries = vec![
+            AgentLogEntry::User {
+                at: 1,
+                turn: 1,
+                text: "Is the lock needed?".into(),
+            },
+            AgentLogEntry::Done {
+                at: 2,
+                turn: 1,
+                duration_ms: 10,
+            },
+            AgentLogEntry::Story {
+                at: 3,
+                turn: 2,
+                state: "running".into(),
+            },
+        ];
+        let mut replayed = chats();
+        replayed.replay(&pr(), &entries);
+        let chat = &replayed.0[&pr()];
+        assert_eq!(chat.lines, [ChatLine::Me("Is the lock needed?".into())]);
+        assert_eq!(
+            chat.unfinished, None,
+            "a story run is not an unfinished chat turn"
+        );
     }
 
     #[test]

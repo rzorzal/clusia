@@ -9,6 +9,7 @@ use crate::review_state::open_new_tabs;
 
 pub mod activity;
 pub mod agent;
+pub mod calls;
 pub mod checks;
 pub mod comments;
 pub mod diagrams;
@@ -19,6 +20,7 @@ pub mod leave;
 pub mod loading;
 pub mod revalidation;
 pub mod shell;
+pub mod story;
 pub mod whats_new;
 
 pub use shell::ModalFor;
@@ -50,6 +52,8 @@ impl Plugin for ReviewPlugin {
                 diagrams::modal::NodeModalPlugin,
                 diagrams::DiagramsPlugin,
                 revalidation::RevalidationPlugin,
+                calls::CallsPlugin,
+                story::StoryPlugin,
                 crate::ui::composer::ComposerPlugin,
                 crate::ui::modal::ModalPlugin,
             ));

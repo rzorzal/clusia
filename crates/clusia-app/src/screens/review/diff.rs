@@ -1,5 +1,6 @@
 //! Diff (spec §7.2, mockups `Review.png` and `DiffSplit.png`):
 //! - the file list, then one file's diff in Unified or Split with syntax colors;
+//! - the switch to Story and Calls, which have their own frames (`story`, `calls`);
 //! - open review threads and draft line comments under their lines;
 //! - a click on a commentable line opens the inline editor (Shift-click extends the range).
 //!
@@ -39,7 +40,7 @@ use crate::ui::code_select::{ClickKind, CodeSelection, LineKey, selectable};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Preview, Reveal, SideTrack, Stroke, Tone, Type, Variant, badge,
-    button, card, panel, segment, segment_node, segments, text, wrapped_text, wrapping_button,
+    button, card, panel, segment, segments, text, wrapped_text, wrapping_button,
 };
 use crate::ui::markdown::parse::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
@@ -164,7 +165,7 @@ pub struct DiffView {
 
 /// One file's rows highlighted per side, indexed by row.
 #[derive(Debug, Clone, Default)]
-struct Highlighted {
+pub(crate) struct Highlighted {
     left: Vec<Option<Vec<Span>>>,
     right: Vec<Option<Vec<Span>>>,
 }
@@ -182,7 +183,7 @@ impl HighlightCache {
         self.0.is_empty()
     }
 
-    fn get(&mut self, head: &str, path: &str, rows: &[Row]) -> &Highlighted {
+    pub(crate) fn get(&mut self, head: &str, path: &str, rows: &[Row]) -> &Highlighted {
         self.0
             .entry((head.to_string(), path.to_string()))
             .or_insert_with(|| {
@@ -216,6 +217,97 @@ fn patch_of<'a>(ready: &'a Ready, path: &str) -> Option<&'a str> {
         .and_then(|f| f.patch.as_deref())
 }
 
+/// Rows a step shows at most; the rest is counted, not drawn.
+pub(crate) const STEP_ROWS: usize = 60;
+
+/// The rows of a file's patch that a step's head-side `ranges` select: the added and context
+/// lines whose head line is in a range, and each run of removed lines right before a selected
+/// row (or right after one, at the end of a hunk). Indices ascend.
+pub(crate) fn rows_in_ranges(rows: &[Row], ranges: &[(u32, u32)]) -> Vec<usize> {
+    let hit = |row: &Row| {
+        row.kind != RowKind::Hunk
+            && row.kind != RowKind::Removed
+            && row
+                .new
+                .is_some_and(|n| ranges.iter().any(|&(a, b)| a <= n && n <= b.max(a)))
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        if rows[i].kind != RowKind::Removed {
+            if hit(&rows[i]) {
+                out.push(i);
+            }
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < rows.len() && rows[i].kind == RowKind::Removed {
+            i += 1;
+        }
+        let after = rows.get(i).filter(|r| r.kind != RowKind::Hunk);
+        let take = match after {
+            Some(next) => hit(next),
+            None => start > 0 && hit(&rows[start - 1]),
+        };
+        if take {
+            out.extend(start..i);
+        }
+    }
+    out
+}
+
+/// A step's lines of one file.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Excerpt {
+    pub path: String,
+    pub lines: Vec<(UnifiedLine, Vec<Below>)>,
+    /// Rows past `STEP_ROWS`.
+    pub hidden: usize,
+}
+
+/// The rows of `path` that `ranges` select, built as the Unified view builds them. Threads and
+/// the open editor sit under their rows; draft comments do not (a step lists them apart).
+/// `None` when the file is not in the diff or no row is in a range.
+pub(crate) fn excerpt(
+    ready: &Ready,
+    ui: &TabUi,
+    cache: &mut HighlightCache,
+    path: &str,
+    ranges: &[(u32, u32)],
+) -> Option<Excerpt> {
+    let patch = patch_of(ready, path)?;
+    let rows = parse_patch(patch);
+    let picked = rows_in_ranges(&rows, ranges);
+    if picked.is_empty() {
+        return None;
+    }
+    let (left_ok, right_ok) = commentable_lines(patch);
+    let can = |anchor: Option<(Side, u32)>| match anchor {
+        Some((Side::Left, n)) => left_ok.contains(&n),
+        Some((Side::Right, n)) => right_ok.contains(&n),
+        None => false,
+    };
+    let sel = selection(ui, path);
+    let mut below = placements(ready, ui, path, &rows);
+    let lit = cache.get(&ready.view.pr.head_sha, path, &rows);
+    let lines = picked
+        .iter()
+        .take(STEP_ROWS)
+        .map(|&i| {
+            let mut under = below.take(Side::Left, i);
+            under.extend(below.take(Side::Right, i));
+            under.retain(|b| !matches!(b, Below::Draft(_)));
+            (unified_line(&rows, i, lit, &can, sel), under)
+        })
+        .collect();
+    Some(Excerpt {
+        path: path.to_string(),
+        lines,
+        hidden: picked.len().saturating_sub(STEP_ROWS),
+    })
+}
+
 fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
@@ -238,6 +330,7 @@ fn display_index(rows: &[Row], mode: DiffMode, side: Side, line: u32) -> Option<
         DiffMode::Split => split_rows(rows)
             .iter()
             .position(|p| p.left == Some(row) || p.right == Some(row)),
+        DiffMode::Story | DiffMode::Calls => None,
     }
 }
 
@@ -414,6 +507,33 @@ fn placements(ready: &Ready, ui: &TabUi, path: &str, rows: &[Row]) -> Placements
 }
 
 /// A row's colored spans from one side's highlighting.
+/// One Unified row as the view lists it: its numbers, colored spans, anchor and whether a click
+/// can comment on it.
+pub(crate) fn unified_line(
+    rows: &[Row],
+    index: usize,
+    lit: &Highlighted,
+    can: &dyn Fn(Option<(Side, u32)>) -> bool,
+    sel: Option<(Side, u32, u32)>,
+) -> UnifiedLine {
+    let row = &rows[index];
+    let side = if row.kind == RowKind::Removed {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    UnifiedLine {
+        row: index,
+        kind: row.kind,
+        old: row.old,
+        new: row.new,
+        spans: row_spans(row, index, side, lit, None),
+        anchor: anchor_of(row),
+        commentable: can(anchor_of(row)),
+        selected: is_selected(sel, anchor_of(row)),
+    }
+}
+
 fn row_spans(
     row: &Row,
     index: usize,
@@ -517,25 +637,10 @@ pub fn diff_view(
                 .iter()
                 .enumerate()
                 .take(limit)
-                .map(|(i, row)| {
-                    let side = if row.kind == RowKind::Removed {
-                        Side::Left
-                    } else {
-                        Side::Right
-                    };
+                .map(|(i, _)| {
                     let mut under = below.take(Side::Left, i);
                     under.extend(below.take(Side::Right, i));
-                    let line = UnifiedLine {
-                        row: i,
-                        kind: row.kind,
-                        old: row.old,
-                        new: row.new,
-                        spans: row_spans(row, i, side, lit, None),
-                        anchor: anchor_of(row),
-                        commentable: can(anchor_of(row)),
-                        selected: is_selected(sel, anchor_of(row)),
-                    };
-                    (line, under)
+                    (unified_line(&rows, i, lit, &can, sel), under)
                 })
                 .collect();
             out.body = DiffBody::Unified(lines);
@@ -608,13 +713,38 @@ pub fn diff_view(
                 lines,
             };
         }
+        // Story and Calls draw in frames of their own; this body stays empty.
+        DiffMode::Story | DiffMode::Calls => {}
     }
     out
 }
 
-/// The Diff section's root inside `SectionBody`; its absence means "fill me".
+/// What a Diff region is made of: the file list and one file's diff (Unified and Split), the
+/// Story, or the Calls graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    Files,
+    Story,
+    Calls,
+}
+
+impl From<DiffMode> for FrameKind {
+    fn from(mode: DiffMode) -> Self {
+        match mode {
+            DiffMode::Unified | DiffMode::Split => FrameKind::Files,
+            DiffMode::Story => FrameKind::Story,
+            DiffMode::Calls => FrameKind::Calls,
+        }
+    }
+}
+
+/// The Diff section's root inside `SectionBody`; its absence, or another kind than the mode
+/// wants, means "fill me".
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub struct DiffRegion(pub PrRef);
+pub struct DiffRegion {
+    pub pr: PrRef,
+    pub kind: FrameKind,
+}
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct FileButton {
@@ -665,13 +795,6 @@ pub struct DraftRemove {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ShowMore(pub PrRef);
 
-/// Story and Calls: shown, not usable yet.
-#[derive(Component, Debug)]
-struct LaterSegment;
-
-#[derive(Component, Debug)]
-struct LaterHint;
-
 #[derive(Component)]
 struct FilesPart {
     pr: PrRef,
@@ -681,7 +804,7 @@ struct FilesPart {
 #[derive(Component)]
 struct HeaderPart {
     pr: PrRef,
-    built: Option<(Option<String>, u64, u64, DiffMode)>,
+    built: Option<(Option<String>, u64, u64)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -737,19 +860,20 @@ impl Plugin for DiffPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HighlightCache>().add_systems(
             Update,
-            (fill_region, rebuild_diff, later_hints, reach_focus)
+            (fill_region, rebuild_diff, reach_focus)
                 .chain()
                 .after(ReviewSystems),
         );
     }
 }
 
-/// When the Diff section shows and `SectionBody` has no `DiffRegion`, spawn a `DiffRegion` for it.
-fn fill_region(
+/// Fills the Diff section's body with the frame the mode wants, and again when the mode asks for
+/// another one. Unified and Split share the Files frame.
+pub(crate) fn fill_region(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
     bodies: Query<(Entity, &SectionBody)>,
-    regions: Query<&ChildOf, With<DiffRegion>>,
+    regions: Query<(&ChildOf, &DiffRegion)>,
 ) {
     for (entity, body) in &bodies {
         let Some(tab) = tabs.0.get(&body.pr) else {
@@ -758,12 +882,36 @@ fn fill_region(
         if tab.ui.section != ReviewSection::Diff || !matches!(tab.phase, Phase::Ready(_)) {
             continue;
         }
-        if regions.iter().any(|child_of| child_of.parent() == entity) {
+        let kind = FrameKind::from(tab.ui.mode);
+        if regions
+            .iter()
+            .any(|(child_of, region)| child_of.parent() == entity && region.kind == kind)
+        {
             continue;
         }
         commands.entity(entity).despawn_related::<Children>();
         let pr = body.pr.clone();
-        commands.entity(entity).with_children(|p| frame(p, &pr));
+        commands.entity(entity).with_children(|p| match kind {
+            FrameKind::Files => frame(p, &pr),
+            other => {
+                p.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        width: percent(100),
+                        min_height: px(0),
+                        ..default()
+                    },
+                    DiffRegion {
+                        pr: pr.clone(),
+                        kind: other,
+                    },
+                ))
+                .with_children(|r| match other {
+                    FrameKind::Story => super::story::frame(r, &pr),
+                    _ => super::calls::frame(r, &pr),
+                });
+            }
+        });
     }
 }
 
@@ -775,7 +923,10 @@ fn frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
             min_height: px(0),
             ..default()
         },
-        DiffRegion(pr.clone()),
+        DiffRegion {
+            pr: pr.clone(),
+            kind: FrameKind::Files,
+        },
     ))
     .with_children(|r| {
         r.spawn((
@@ -904,12 +1055,11 @@ fn rebuild_diff(
         let Some((v, _)) = views.get(&part.pr) else {
             continue;
         };
-        let key = (v.path.clone(), v.additions, v.deletions, v.mode);
+        let key = (v.path.clone(), v.additions, v.deletions);
         if part.built.as_ref() == Some(&key) {
             continue;
         }
-        let pr = part.pr.clone();
-        refill(&mut commands, entity, |p| header(p, fonts, &pr, v));
+        refill(&mut commands, entity, |p| header(p, fonts, v));
         part.built = Some(key);
     }
     for (entity, mut part, mut scroll) in &mut bodies {
@@ -1051,7 +1201,7 @@ fn file_list(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, files: &
     }
 }
 
-fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffView) {
+fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &DiffView) {
     if let Some(path) = &v.path {
         p.spawn((
             wrapped_text(fonts, path.clone(), Type::MONO.ink(Swatch::Fg).size(13.0)),
@@ -1071,20 +1221,17 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
             Type::MONO.ink(Swatch::Orange),
         ));
     }
-    p.spawn(Node {
-        flex_grow: 1.0,
-        ..default()
-    });
-    p.spawn((
-        text(fonts, "Arrives with SP3 (#71)", Type::META),
-        Node {
-            display: Display::None,
-            ..default()
-        },
-        LaterHint,
-    ));
+}
+
+/// The *Unified | Split | Story | Calls* switch, with `current` on. It sits at the right of the
+/// section row while the Diff section shows.
+pub(crate) fn mode_switch(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    current: DiffMode,
+) {
     let mut track = p.spawn(segments());
-    // The track sits at the start of a column elsewhere; in this row it shares the path's axis.
     track.entry::<Node>().and_modify(|mut n| {
         n.align_self = AlignSelf::Center;
         // Narrower than its four segments, the track scrolls sideways.
@@ -1093,45 +1240,25 @@ fn header(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &DiffVie
     });
     track.insert(SideTrack);
     track.with_children(|s| {
-        for (label, mode) in [("Unified", DiffMode::Unified), ("Split", DiffMode::Split)] {
+        for (label, mode) in [
+            ("Unified", DiffMode::Unified),
+            ("Split", DiffMode::Split),
+            ("Story", DiffMode::Story),
+            ("Calls", DiffMode::Calls),
+        ] {
             let mut e = s.spawn((
-                segment(fonts, label, v.mode == mode),
+                segment(fonts, label, current == mode),
                 ModeButton {
                     pr: pr.clone(),
                     mode,
                 },
                 observe(on_mode),
             ));
-            if v.mode == mode {
+            if current == mode {
                 e.insert(Reveal);
             }
         }
-        for label in ["Story", "Calls"] {
-            s.spawn((
-                segment_node(),
-                Hovered::default(),
-                LaterSegment,
-                children![text(fonts, label, Type::MUTED.ink(Swatch::Faint))],
-            ));
-        }
     });
-}
-
-/// Shows the 'arrives later' hint while Story or Calls is hovered.
-fn later_hints(
-    segments: Query<&Hovered, With<LaterSegment>>,
-    mut hints: Query<&mut Node, With<LaterHint>>,
-) {
-    let want = if segments.iter().any(|h| h.get()) {
-        Display::Flex
-    } else {
-        Display::None
-    };
-    for mut node in &mut hints {
-        if node.display != want {
-            node.display = want;
-        }
-    }
 }
 
 const NUMBER_WIDTH: f32 = 44.0;
@@ -1155,6 +1282,10 @@ fn marker(kind: RowKind) -> (&'static str, Swatch) {
 }
 
 fn number(p: &mut ChildSpawnerCommands, fonts: &UiFonts, n: Option<u32>, size: f32) {
+    number_text(p, fonts, n.map(|n| n.to_string()).unwrap_or_default(), size);
+}
+
+fn number_text(p: &mut ChildSpawnerCommands, fonts: &UiFonts, text_: String, size: f32) {
     p.spawn(Node {
         width: px(NUMBER_WIDTH),
         min_height: px(ROW_HEIGHT),
@@ -1169,11 +1300,7 @@ fn number(p: &mut ChildSpawnerCommands, fonts: &UiFonts, n: Option<u32>, size: f
         ..default()
     })
     .with_children(|c| {
-        c.spawn(text(
-            fonts,
-            n.map(|n| n.to_string()).unwrap_or_default(),
-            Type::MONO.size(size).ink(Swatch::Faint),
-        ));
+        c.spawn(text(fonts, text_, Type::MONO.size(size).ink(Swatch::Faint)));
     });
 }
 
@@ -1264,6 +1391,93 @@ fn line_node(
     e.with_children(build);
 }
 
+/// Which number columns a Unified row draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gutter {
+    /// The old and the new number and a sign: the Diff.
+    Both,
+    /// One column with the head line (a `−` on a removed line) and no sign: a Story step.
+    Head,
+}
+
+/// The rows of a Unified body, each with what sits under it. `focus_row` is the index among
+/// `lines` that `Open in diff` lit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn unified_rows(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    path: &str,
+    lines: &[(UnifiedLine, Vec<Below>)],
+    size: f32,
+    editor: Option<&Editor>,
+    opts: &RenderOpts,
+    gutter: Gutter,
+    focus_row: Option<usize>,
+) {
+    let line_button = |row: usize, anchor: Option<(Side, u32)>, commentable: bool| {
+        let (side, line) = anchor.filter(|_| commentable)?;
+        Some(LineButton {
+            pr: pr.clone(),
+            path: path.to_string(),
+            row,
+            side,
+            line,
+        })
+    };
+    let indent = match gutter {
+        Gutter::Both => 2.0 * NUMBER_WIDTH + 18.0,
+        Gutter::Head => NUMBER_WIDTH,
+    };
+    let group = p.target_entity();
+    for (at, (line, under)) in lines.iter().enumerate() {
+        line_node(
+            p,
+            percent(100),
+            line.kind,
+            line.selected,
+            line_button(line.row, line.anchor, line.commentable),
+            (focus_row == Some(at)).then(|| FocusRow(pr.clone())),
+            |r| {
+                match gutter {
+                    Gutter::Both => {
+                        number(r, fonts, line.old, size);
+                        number(r, fonts, line.new, size);
+                        mark(r, fonts, line.kind, size);
+                    }
+                    Gutter::Head => {
+                        let head = match (line.new, line.kind) {
+                            (Some(n), _) => n.to_string(),
+                            (None, RowKind::Removed) => "−".to_string(),
+                            (None, _) => String::new(),
+                        };
+                        number_text(r, fonts, head, size);
+                    }
+                }
+                let key = LineKey {
+                    group,
+                    order: at,
+                    column: 0,
+                };
+                code(r, fonts, size, line.spans.clone(), Some(key));
+            },
+        );
+        if !under.is_empty() {
+            p.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                padding: UiRect::new(px(indent), px(8), px(8), px(8)),
+                ..default()
+            })
+            .with_children(|b| {
+                for item in under {
+                    below(b, fonts, pr, item, editor, opts);
+                }
+            });
+        }
+    }
+}
+
 fn body(
     p: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -1297,40 +1511,18 @@ fn body(
             });
         }
         DiffBody::Unified(lines) => {
-            for (at, (line, under)) in lines.iter().enumerate() {
-                line_node(
-                    p,
-                    percent(100),
-                    line.kind,
-                    line.selected,
-                    line_button(line.row, line.anchor, line.commentable),
-                    focus_of(at),
-                    |r| {
-                        number(r, fonts, line.old, size);
-                        number(r, fonts, line.new, size);
-                        mark(r, fonts, line.kind, size);
-                        let key = LineKey {
-                            group,
-                            order: at,
-                            column: 0,
-                        };
-                        code(r, fonts, size, line.spans.clone(), Some(key));
-                    },
-                );
-                if !under.is_empty() {
-                    p.spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(8),
-                        padding: UiRect::new(px(2.0 * NUMBER_WIDTH + 18.0), px(8), px(8), px(8)),
-                        ..default()
-                    })
-                    .with_children(|b| {
-                        for item in under {
-                            below(b, fonts, pr, item, editor, opts);
-                        }
-                    });
-                }
-            }
+            unified_rows(
+                p,
+                fonts,
+                pr,
+                path,
+                lines,
+                size,
+                editor,
+                opts,
+                Gutter::Both,
+                v.focus_row,
+            );
         }
         DiffBody::Split {
             before,
@@ -1690,11 +1882,22 @@ fn on_mode(
     }
     ui.mode = b.mode;
     ui.shown = SHOW_STEP;
-    let value = match b.mode {
+    set_config(
+        &mut asks,
+        &mut model,
+        "appearance.diff_view",
+        diff_view_key(b.mode),
+    );
+}
+
+/// The value `appearance.diff_view` takes for a mode.
+pub(crate) fn diff_view_key(mode: DiffMode) -> &'static str {
+    match mode {
         DiffMode::Unified => "unified",
         DiffMode::Split => "split",
-    };
-    set_config(&mut asks, &mut model, "appearance.diff_view", value);
+        DiffMode::Story => "story",
+        DiffMode::Calls => "calls",
+    }
 }
 
 fn on_line(
@@ -1903,7 +2106,10 @@ mod tests {
     use super::*;
     use crate::bridge::Tell;
     use crate::fixture;
+    use crate::screens::review::calls::CallsRoot;
     use crate::screens::review::editor::{EditorArea, EditorSubmit};
+    use crate::screens::review::shell::SectionTab;
+    use crate::screens::review::story::StoryRoot;
     use crate::testing::{self, NOW};
     use crate::ui::markdown::{CopiedText, CopyMarkdown};
     use bevy::text::EditableText;
@@ -2239,6 +2445,7 @@ mod tests {
                     .filter(|&(side, n)| clusia_core::can_comment(&patch, side, n))
                     .map(|(side, n)| (side == Side::Right, n))
                     .collect(),
+                DiffMode::Story | DiffMode::Calls => unreachable!("only the file views list lines"),
             };
             want.sort();
             want.dedup();
@@ -2982,6 +3189,10 @@ mod tests {
         testing::settle(app);
     }
 
+    fn parent_of(app: &App, entity: Entity) -> Entity {
+        app.world().get::<ChildOf>(entity).unwrap().parent()
+    }
+
     #[test]
     fn comment_headers_wrap_their_buttons_in_the_narrow_columns_of_split() {
         for large in [false, true] {
@@ -3044,24 +3255,27 @@ mod tests {
                 );
             }
             let switch = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
-            let (hx, _, hw, _) = testing::frame(&app, header);
+            let row = parent_of(&app, parent_of(&app, switch));
+            let (rx, _, rw, _) = testing::frame(&app, row);
             let (sx, _, sw, _) = testing::frame(&app, switch);
             assert!(
-                sx + sw <= hx + hw,
-                "{mode:?} large={large}: the mode switch stays in the header"
+                sx + sw <= rx + rw,
+                "{mode:?} large={large}: the mode switch stays on the section row"
             );
         }
     }
 
     #[test]
     fn the_mode_track_scrolls_sideways_when_narrow_and_shows_the_selected_mode() {
-        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(960, 640));
+        // Narrower than the smallest window, so the section tabs leave the track less room than
+        // its four segments take, though more than one.
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(760, 640));
         testing::set_config_locally(&mut app, "appearance.text_size", "large");
         testing::open_ready(&mut app, false);
         testing::settle(&mut app);
-        set_mode(&mut app, DiffMode::Split);
+        set_mode(&mut app, DiffMode::Calls);
         testing::settle(&mut app);
-        let selected = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
+        let selected = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Calls);
         let track = app.world().get::<ChildOf>(selected).unwrap().parent();
         assert!(
             app.world()
@@ -3077,52 +3291,133 @@ mod tests {
         let (tx, _, tw, _) = testing::frame(&app, track);
         assert!(
             sx >= tx - 1.0 && sx + sw <= tx + tw + 1.0,
-            "Split is in view"
+            "Calls is in view"
         );
-        testing::wheel(&mut app, track, -3.0);
-        assert!(app.world().get::<ScrollPosition>(track).unwrap().x > 0.0);
+        let scrolled = app.world().get::<ScrollPosition>(track).unwrap().x;
+        assert!(scrolled > 0.0, "the track scrolled to the last mode");
+        testing::wheel(&mut app, track, 3.0);
+        assert!(app.world().get::<ScrollPosition>(track).unwrap().x < scrolled);
     }
 
     #[test]
-    fn the_mode_switch_shares_the_axis_of_the_path_and_the_counts() {
+    fn the_switch_sits_on_the_section_row_at_the_right() {
         let mut app = wrap_app();
-        let split = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Split);
-        let track = app.world().get::<ChildOf>(split).unwrap().parent();
-        let row = app.world().get::<ChildOf>(track).unwrap().parent();
-        // The file list names the same path; only the header's own is on this row.
-        let path = {
-            let mut q = app.world_mut().query::<(Entity, &Text)>();
-            let named: Vec<Entity> = q
-                .iter(app.world())
-                .filter(|(_, t)| t.0 == REFRESH)
-                .map(|(e, _)| e)
-                .collect();
-            named
-                .into_iter()
-                .find(|&e| {
-                    std::iter::successors(Some(e), |&c| {
-                        app.world().get::<ChildOf>(c).map(|p| p.parent())
-                    })
-                    .any(|a| a == row)
-                })
-                .expect("the header's path")
+        let story = testing::find::<ModeButton>(&mut app, |b| b.mode == DiffMode::Story);
+        let track = parent_of(&app, story);
+        let row = parent_of(&app, track);
+        let diff = testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Diff);
+        let tests = testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Tests);
+        assert_eq!(
+            parent_of(&app, diff),
+            row,
+            "the tabs and the switch share a row"
+        );
+        assert!(testing::center(&app, track).x > testing::center(&app, tests).x);
+        let (diff_y, track_y) = (
+            testing::center(&app, diff).y,
+            testing::center(&app, track).y,
+        );
+        assert!(
+            (diff_y - track_y).abs() <= 1.0,
+            "tab axis {diff_y}, switch axis {track_y}"
+        );
+        let (tx, _, tw, _) = testing::frame(&app, track);
+        let (rx, _, rw, _) = testing::frame(&app, row);
+        assert!(
+            ((tx + tw) - (rx + rw - 20.0)).abs() <= 1.0,
+            "20 px from the right edge"
+        );
+        let modes: Vec<DiffMode> = {
+            let mut q = app.world_mut().query::<&ModeButton>();
+            let mut found: Vec<DiffMode> = q.iter(app.world()).map(|b| b.mode).collect();
+            found.sort_by_key(|m| *m as u8);
+            found
         };
-        let (_, ry, _, rh) = testing::frame(&app, row);
-        let axis = ry + (rh - 1.0) / 2.0;
-        let at = testing::center(&app, track).y;
-        assert!(
-            (at - axis).abs() <= 0.5,
-            "switch at {at}, row axis at {axis}"
+        assert_eq!(
+            modes,
+            [
+                DiffMode::Unified,
+                DiffMode::Split,
+                DiffMode::Story,
+                DiffMode::Calls
+            ]
         );
-        let (_, ty, _, th) = testing::frame(&app, track);
-        assert!(
-            (ty - ry) > 4.0 && (ry + rh - 1.0) - (ty + th) > 4.0,
-            "room above and below"
+        assert!(!testing::shows(&mut app, "Arrives with SP3"));
+    }
+
+    #[test]
+    fn each_mode_writes_its_own_config_value() {
+        assert_eq!(diff_view_key(DiffMode::Unified), "unified");
+        assert_eq!(diff_view_key(DiffMode::Split), "split");
+        assert_eq!(diff_view_key(DiffMode::Story), "story");
+        assert_eq!(diff_view_key(DiffMode::Calls), "calls");
+    }
+
+    #[test]
+    fn the_switch_is_only_on_the_diff_section() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        testing::set_section(&mut app, &pr, ReviewSection::Comments);
+        assert_eq!(testing::count::<ModeButton>(&mut app), 0);
+        testing::set_section(&mut app, &pr, ReviewSection::Diff);
+        assert_eq!(testing::count::<ModeButton>(&mut app), 4);
+    }
+
+    #[test]
+    fn story_and_calls_get_their_own_frame_and_unified_and_split_share_one() {
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        let files = testing::find::<DiffRegion>(&mut app, |r| r.kind == FrameKind::Files);
+        let split = testing::find::<ModeButton>(&mut app, |m| m.mode == DiffMode::Split);
+        testing::activate(&mut app, split);
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::find::<DiffRegion>(&mut app, |r| r.kind == FrameKind::Files),
+            files,
+            "Unified and Split keep one frame"
         );
-        let path_at = testing::center(&app, path).y;
-        assert!(
-            (path_at - at).abs() <= 2.0,
-            "path at {path_at}, switch at {at}"
+
+        let story = testing::find::<ModeButton>(&mut app, |m| m.mode == DiffMode::Story);
+        testing::activate(&mut app, story);
+        testing::settle(&mut app);
+        assert_eq!(testing::tab(&app, &pr).ui.mode, DiffMode::Story);
+        assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
+        assert_eq!(testing::count::<StoryRoot>(&mut app), 1);
+        assert_eq!(
+            testing::count::<FileButton>(&mut app),
+            0,
+            "no file list on Story"
+        );
+
+        let calls = testing::find::<ModeButton>(&mut app, |m| m.mode == DiffMode::Calls);
+        testing::activate(&mut app, calls);
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<StoryRoot>(&mut app), 0);
+        assert_eq!(testing::count::<CallsRoot>(&mut app), 1);
+        assert_eq!(testing::count::<DiffRegion>(&mut app), 1);
+
+        let unified = testing::find::<ModeButton>(&mut app, |m| m.mode == DiffMode::Unified);
+        testing::activate(&mut app, unified);
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<CallsRoot>(&mut app), 0);
+        assert_eq!(testing::count::<FileButton>(&mut app), 7);
+
+        let stored: Vec<Ask> = testing::recorded(&mut app)
+            .into_iter()
+            .filter(|a| matches!(a, Ask::SetConfig { .. }))
+            .collect();
+        let value = |v: &str| Ask::SetConfig {
+            key: "appearance.diff_view".into(),
+            value: v.into(),
+        };
+        assert_eq!(
+            stored,
+            [
+                value("split"),
+                value("story"),
+                value("calls"),
+                value("unified")
+            ]
         );
     }
 
@@ -3951,5 +4246,122 @@ mod tests {
             ly + lh,
             by + bh
         );
+    }
+
+    fn rows_of(path: &str) -> Vec<Row> {
+        parse_patch(&patch(&ready(), path))
+    }
+
+    #[test]
+    fn a_step_takes_the_head_lines_in_its_range_and_the_removed_run_before_them() {
+        let rows = rows_of(REFRESH);
+        let picked = rows_in_ranges(&rows, &[(39, 41)]);
+        let kinds: Vec<RowKind> = picked.iter().map(|&i| rows[i].kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                RowKind::Removed,
+                RowKind::Removed,
+                RowKind::Added,
+                RowKind::Added,
+                RowKind::Added
+            ]
+        );
+        let news: Vec<Option<u32>> = picked.iter().map(|&i| rows[i].new).collect();
+        assert_eq!(news, [None, None, Some(39), Some(40), Some(41)]);
+        assert!(picked.windows(2).all(|w| w[0] < w[1]), "in file order");
+    }
+
+    #[test]
+    fn a_range_keeps_context_lines_and_skips_the_hunk_header() {
+        let rows = rows_of(REFRESH);
+        let picked = rows_in_ranges(&rows, &[(42, 44)]);
+        let news: Vec<Option<u32>> = picked.iter().map(|&i| rows[i].new).collect();
+        assert_eq!(news, [Some(42), Some(43), Some(44)]);
+        assert!(picked.iter().all(|&i| rows[i].kind != RowKind::Hunk));
+    }
+
+    #[test]
+    fn several_ranges_join_and_a_range_outside_the_patch_picks_nothing() {
+        let rows = rows_of(REFRESH);
+        let both = rows_in_ranges(&rows, &[(44, 44), (67, 67)]);
+        let news: Vec<Option<u32>> = both.iter().map(|&i| rows[i].new).collect();
+        assert_eq!(news, [Some(44), Some(67)]);
+        assert!(rows_in_ranges(&rows, &[(500, 510)]).is_empty());
+        assert!(rows_in_ranges(&[], &[(1, 5)]).is_empty());
+    }
+
+    #[test]
+    fn an_excerpt_is_built_like_the_unified_rows_and_leaves_drafts_to_the_notes() {
+        let r = ready();
+        let mut ui = TabUi::default();
+        let mut cache = HighlightCache::default();
+        let ex = excerpt(&r, &ui, &mut cache, REFRESH, &[(43, 45)]).expect("an excerpt");
+        assert_eq!(ex.path, REFRESH);
+        assert_eq!(ex.hidden, 0);
+        let news: Vec<Option<u32>> = ex.lines.iter().map(|(l, _)| l.new).collect();
+        assert_eq!(news, [Some(43), Some(44), Some(45)]);
+        let (line44, under) = &ex.lines[1];
+        assert_eq!(line44.kind, RowKind::Added);
+        assert!(line44.commentable && line44.anchor == Some((Side::Right, 44)));
+        assert!(
+            under.iter().all(|b| !matches!(b, Below::Draft(_))),
+            "the draft comment on line 44 is a note, not a card under the row"
+        );
+        // An open line editor still shows under its row.
+        ui.editor = Some(Editor {
+            target: EditTarget::Line {
+                path: REFRESH.into(),
+                side: Side::Right,
+                start: None,
+                line: 44,
+            },
+            text: String::new(),
+            error: None,
+            ticket: None,
+            mode: ComposerMode::Write,
+        });
+        let ex = excerpt(&r, &ui, &mut cache, REFRESH, &[(43, 45)]).expect("an excerpt");
+        assert!(ex.lines[1].0.selected);
+        assert!(ex.lines[1].1.contains(&Below::Editor));
+        // mona's thread is on line 41.
+        let ex = excerpt(&r, &ui, &mut cache, REFRESH, &[(41, 41)]).expect("an excerpt");
+        assert!(ex.lines[0].1.iter().any(|b| matches!(b, Below::Thread(_))));
+    }
+
+    #[test]
+    fn an_excerpt_is_cut_at_the_cap_and_says_how_many_lines_it_left_out() {
+        let r = ready();
+        let ex = excerpt(
+            &r,
+            &TabUi::default(),
+            &mut HighlightCache::default(),
+            "src/auth/store.rs",
+            &[(1, 500)],
+        )
+        .expect("an excerpt");
+        assert_eq!(ex.lines.len(), STEP_ROWS);
+        assert!(
+            ex.hidden > 0,
+            "the store.rs hunk has more than {STEP_ROWS} rows"
+        );
+        assert!(
+            excerpt(
+                &r,
+                &TabUi::default(),
+                &mut HighlightCache::default(),
+                "nope.rs",
+                &[(1, 5)]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_unified_row_still_has_its_two_numbers_the_sign_and_the_code() {
+        let mut app = wrap_app();
+        let (text, both) = code_of(&mut app, LONG);
+        assert_eq!(app.world().get::<Children>(both).unwrap().len(), 4);
+        assert!(!text_of_line(&app, text).is_empty());
     }
 }

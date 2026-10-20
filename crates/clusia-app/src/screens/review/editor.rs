@@ -243,6 +243,19 @@ pub fn submit_editor(
                 body: Some(body),
             }
         }
+        EditTarget::StoryStep { number, step } => Ask::AddStepComment {
+            pr,
+            number: *number,
+            step: step.clone(),
+            body,
+            ticket,
+        },
+        EditTarget::CallsNode { function } => Ask::AddCallsComment {
+            pr,
+            function: function.clone(),
+            body,
+            ticket,
+        },
         EditTarget::DiagramNode { number, key, node } => Ask::AddDiagramComment {
             pr,
             number: *number,
@@ -597,6 +610,61 @@ mod tests {
             }]
         );
         assert_eq!(tab.ui.editor.as_ref().unwrap().ticket, Some(1));
+    }
+
+    #[test]
+    fn a_step_comment_sends_the_version_and_the_step_not_the_title() {
+        let mut tab = tab_with(EditTarget::StoryStep {
+            number: 2,
+            step: "one-at-a-time".into(),
+        });
+        let mut tickets = Tickets::default();
+        let mut asks = Asks::default();
+        assert!(submit_editor(
+            &mut tab,
+            &pr(),
+            " Why a lock here?\n",
+            true,
+            &mut tickets,
+            &mut asks
+        ));
+        assert_eq!(
+            asks.recorded,
+            [Ask::AddStepComment {
+                pr: pr(),
+                number: 2,
+                step: "one-at-a-time".into(),
+                body: "Why a lock here?".into(),
+                ticket: 1,
+            }]
+        );
+        assert_eq!(tab.ui.editor.as_ref().unwrap().ticket, Some(1));
+    }
+
+    #[test]
+    fn a_calls_node_comment_sends_the_function_id() {
+        let mut tab = tab_with(EditTarget::CallsNode {
+            function: "src/auth/refresh.rs#TokenStore::refresh#38".into(),
+        });
+        let mut tickets = Tickets::default();
+        let mut asks = Asks::default();
+        assert!(submit_editor(
+            &mut tab,
+            &pr(),
+            "Who else calls this?",
+            true,
+            &mut tickets,
+            &mut asks
+        ));
+        assert_eq!(
+            asks.recorded,
+            [Ask::AddCallsComment {
+                pr: pr(),
+                function: "src/auth/refresh.rs#TokenStore::refresh#38".into(),
+                body: "Who else calls this?".into(),
+                ticket: 1,
+            }]
+        );
     }
 
     #[test]

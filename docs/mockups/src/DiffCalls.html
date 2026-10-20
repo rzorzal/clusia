@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Diff · Calls</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#F6F7F5; --chrome:#EEF1EE; --surface:#FFFFFF; --code:#F6F7F5; --line:#E2E6E2; --fg:#1B1F1C; --muted:#5D665F; --faint:#8A938C;
+  --green:#2F9E44; --onGreen:#FFFFFF; --orange:#D9572B; --greenSoft:rgba(47,158,68,0.12); --orangeSoft:rgba(217,87,43,0.12);
+  --sel:#E9F6EB; --dot:#DDE2DD; --edge:#A4ACA6; --callHl:rgba(47,158,68,0.10);
+}
+:root[data-theme="dark"]{
+  --bg:#121514; --chrome:#181C1A; --surface:#1A1E1C; --code:#121514; --line:#2A302C; --fg:#E9ECE9; --muted:#9AA49C; --faint:#6B746D;
+  --green:#4CC35F; --onGreen:#0C1A0F; --orange:#F07A4A; --greenSoft:rgba(76,195,95,0.14); --orangeSoft:rgba(240,122,74,0.16);
+  --sel:rgba(76,195,95,0.12); --dot:#2A302C; --edge:#59625B; --callHl:rgba(76,195,95,0.12);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg)}
+.win{width:1280px;height:800px;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:13px Inter,-apple-system,system-ui,sans-serif;overflow:hidden}
+.mono{font-family:'JetBrains Mono',monospace}
+.title{height:44px;flex:none;display:flex;align-items:center;gap:6px;padding:0 12px 0 16px;background:var(--chrome);border-bottom:1px solid var(--line)}
+.lights{display:flex;gap:8px;margin-right:14px}.lights i{width:12px;height:12px;border-radius:6px;display:block}
+.wtab{height:30px;display:flex;align-items:center;gap:8px;padding:0 12px;border-radius:6px}
+.wtab.on{background:var(--surface);box-shadow:0 0 0 1px var(--line)}
+.head{flex:none;display:flex;align-items:baseline;gap:10px;padding:14px 20px 10px}
+.sections{flex:none;display:flex;align-items:center;gap:4px;padding:0 20px;border-bottom:1px solid var(--line)}
+.sec{height:36px;padding:0 12px;display:flex;align-items:center;color:var(--muted)}
+.sec.on{color:var(--fg);font-weight:600;box-shadow:inset 0 -2px 0 var(--green)}
+.switch{display:flex;border-radius:6px;box-shadow:0 0 0 1px var(--line);overflow:hidden}
+.switch span{height:26px;padding:0 10px;display:flex;align-items:center;background:var(--surface);font-size:12px;color:var(--muted)}
+.switch span.on{background:var(--chrome);color:var(--fg);font-weight:600}
+.body{flex:1;min-height:0;display:flex}
+aside.list{width:250px;flex:none;display:flex;flex-direction:column;gap:2px;padding:12px 10px;border-right:1px solid var(--line);overflow:hidden}
+.search{height:30px;border-radius:6px;box-shadow:0 0 0 1px var(--line);background:var(--surface);display:flex;align-items:center;gap:8px;padding:0 10px;color:var(--faint);margin-bottom:10px}
+.cap{color:var(--faint);font-size:11px;letter-spacing:.04em;text-transform:uppercase;padding:8px 8px 4px}
+.fn{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;font:12.5px 'JetBrains Mono',monospace}
+.fn.on{background:var(--sel);font-weight:600}.fn.called{color:var(--muted)}
+.tg{margin-left:auto;font:500 11px Inter,sans-serif;padding:1px 7px;border-radius:4px}
+.tg.g{background:var(--greenSoft);color:var(--green)}.tg.o{background:var(--orangeSoft);color:var(--orange)}.tg.m{background:var(--chrome);color:var(--muted)}
+.canvaswrap{flex:1;min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line)}
+.chead{height:42px;flex:none;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--line);font:12px 'JetBrains Mono',monospace;color:var(--muted)}
+.ctl{white-space:nowrap;display:flex;align-items:center;gap:6px;font:12px Inter,sans-serif;color:var(--muted)}
+.sel{white-space:nowrap;height:24px;padding:0 8px;border-radius:5px;background:var(--chrome);display:flex;align-items:center;gap:6px;color:var(--fg);font-weight:600}
+.canvas{position:relative;flex:1;min-height:0;background-image:radial-gradient(var(--dot) 1px,transparent 1px);background-size:16px 16px;overflow:hidden}
+.rows{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;padding:18px 10px 64px 64px}
+.row{display:flex;justify-content:center;gap:9px;position:static;z-index:1}
+.rowwrap{position:relative}
+.lvl{position:absolute;left:-54px;top:13px;width:48px;font:10px Inter,sans-serif;color:var(--faint);letter-spacing:.04em;text-transform:uppercase}
+.node{height:40px;padding:4px 8px;border-radius:6px;background:var(--bg);box-shadow:0 0 0 1px var(--line);display:flex;flex-direction:column;justify-content:center;gap:1px;font:11.5px 'JetBrains Mono',monospace;white-space:nowrap}
+.node .m{font:10.5px Inter,sans-serif;color:var(--faint)}
+.node.untouched{opacity:.7}
+.node.outside{opacity:.6;box-shadow:0 0 0 1px var(--line);background:transparent;border:1px dashed var(--edge)}
+.node.changed{background:var(--greenSoft);box-shadow:0 0 0 1.5px var(--green)}.node.changed .m{color:var(--green)}
+.node.added{box-shadow:0 0 0 1.5px var(--green)}
+.node.sig{box-shadow:0 0 0 1.5px var(--orange)}
+.node.center{height:50px;background:var(--greenSoft);box-shadow:0 0 0 2px var(--green);font-weight:600;font-size:12.5px}
+.node.more{background:var(--surface);box-shadow:0 0 0 1px var(--line);color:var(--muted);font:500 11.5px Inter,sans-serif;justify-content:center}
+svg.edges{position:absolute;inset:0;width:100%;height:100%;z-index:0}
+.legend{position:absolute;left:14px;bottom:14px;z-index:2;display:flex;gap:14px;align-items:center;padding:7px 12px;border-radius:6px;background:var(--surface);box-shadow:0 0 0 1px var(--line);font-size:11.5px;color:var(--muted)}
+.legend i{display:inline-block;width:12px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+aside.panel{width:330px;flex:none;display:flex;flex-direction:column;overflow:hidden}
+.ps{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:10px}
+.btn{height:28px;padding:0 10px;border-radius:6px;display:inline-flex;align-items:center;background:var(--chrome);font-size:12px}
+.code{background:var(--code);border-radius:6px;box-shadow:0 0 0 1px var(--line);padding:6px 0;font:11.5px/1.7 'JetBrains Mono',monospace;overflow:hidden}
+.code div{display:flex;gap:12px;padding:0 10px;white-space:pre}.code .n{color:var(--faint);width:18px;text-align:right;flex:none}
+.status{height:50px;flex:none;display:flex;align-items:center;gap:16px;padding:0 12px 0 20px;background:var(--chrome);border-top:1px solid var(--line)}
+.p{height:34px;padding:0 16px;border-radius:6px;display:inline-flex;align-items:center;background:var(--green);color:var(--onGreen);font-weight:600}
+.empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;z-index:2}
+.emptycard{width:440px;background:var(--surface);border-radius:8px;box-shadow:0 0 0 1px var(--line);padding:22px 24px;display:flex;flex-direction:column;gap:10px;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="win" id="win"></div>
+<script>
+const q = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = q.get('theme') || 'light';
+const state = q.get('state') || 'graph'; // graph | unsupported
+
+const N = (id, name, meta, kind) => ({ id, name, meta, kind });
+const rows = [
+  ['Up 3', [N('mw', 'auth_middleware', 'not touched', 'untouched'), N('main', 'cli::main', 'not touched', 'untouched'), N('m1', '+6 more callers', '', 'more')]],
+  ['Up 2', [N('send', 'ApiClient::send', 'not touched · api.rs:30', 'untouched'), N('stream', 'ApiClient::stream', 'not touched', 'untouched'), N('run', 'cli::run', 'not touched', 'untouched')]],
+  ['Up 1', [N('token', 'TokenStore::token', 'not touched · 4 callers', 'untouched'), N('race', 'tests::refresh_race', 'new test', 'added'), N('status', 'cli::auth_status', 'not touched', 'untouched')]],
+  ['', [N('refresh', 'TokenStore::refresh', '+9 −2 · body changed · 1 draft comment', 'center')]],
+  ['Down 1', [N('load', 'TokenStore::load', 'not touched', 'untouched'), N('now', 'now', 'not touched', 'untouched'), N('lock', 'Mutex::lock', 'tokio · new call', 'outside'), N('ex', 'HttpClient::exchange', '+4 −1 · body changed', 'changed'), N('save', 'TokenStore::save', 'moved · +6 −1', 'changed')]],
+  ['Down 2', [N('m2', '+2 more calls', '', 'more'), N('hsend', 'HttpClient::send', 'not touched', 'untouched'), N('wa', 'write_atomic', 'not touched', 'untouched')]],
+  ['Down 3', [N('exec', 'reqwest::Client::execute', 'outside this repo', 'outside'), N('ren', 'fs::rename', 'std', 'outside')]],
+];
+const edges = [['mw', 'send'], ['main', 'run'], ['m1', 'stream'], ['send', 'token'], ['stream', 'token'], ['run', 'status'],
+  ['token', 'refresh'], ['race', 'refresh'], ['status', 'refresh'],
+  ['refresh', 'load'], ['refresh', 'now'], ['refresh', 'lock'], ['refresh', 'ex'], ['refresh', 'save'],
+  ['load', 'm2'], ['ex', 'hsend'], ['save', 'wa'], ['hsend', 'exec'], ['wa', 'ren']];
+const green = new Set(['token>refresh', 'race>refresh', 'status>refresh', 'refresh>ex', 'refresh>save']);
+
+const fn = (name, tag, cls, on) => `<div class="fn ${on ? 'on' : ''} ${cls || ''}">${name}${tag ? `<span class="tg ${tag[1]}">${tag[0]}</span>` : ''}</div>`;
+const list = state === 'unsupported' ? `
+  <div class="search"><span>⌕</span>Find any function</div>
+  <div class="cap">Changed in this PR · 4</div>
+  ${fn('TokenStore::refresh', ['changed', 'g'])}${fn('TokenStore::new', ['signature', 'o'])}${fn('TokenStore::save', ['moved', 'm'])}${fn('HttpClient::exchange', ['changed', 'g'])}
+  <div class="cap">No call graph yet · 2 files</div>
+  <div class="fn on" style="font-family:'JetBrains Mono',monospace">server/handler.go<span class="tg m">Go</span></div>
+  <div class="fn called">server/limits.go<span class="tg m">Go</span></div>`
+  : `
+  <div class="search"><span>⌕</span>Find any function</div>
+  <div class="cap">Changed in this PR · 4</div>
+  ${fn('TokenStore::refresh', ['changed', 'g'], '', true)}${fn('TokenStore::new', ['signature', 'o'])}${fn('TokenStore::save', ['moved', 'm'])}${fn('HttpClient::exchange', ['changed', 'g'])}
+  <div class="cap">Added · 1</div>${fn('tests::refresh_race', ['new', 'g'])}
+  <div class="cap">Called, not changed · 21</div>
+  ${['TokenStore::token', 'TokenStore::load', 'auth_middleware', 'ApiClient::send', 'ApiClient::stream', 'cli::auth_status', 'write_atomic'].map((n) => fn(n, null, 'called')).join('')}
+  <div class="fn called" style="font-family:Inter;color:var(--faint)">+14 more</div>`;
+
+const canvas = state === 'unsupported' ? `
+  <div class="chead"><span style="color:var(--fg);font-weight:600">server/handler.go</span><span style="flex:1"></span></div>
+  <div class="canvas"><div class="empty"><div class="emptycard">
+    <b style="font-size:15px">Call graph not available for Go yet</b>
+    <span style="color:var(--muted)">Clúsia draws calls for Rust, TypeScript, JavaScript and Python. A plugin can add more languages.</span>
+    <span style="color:var(--muted)">The change in <span class="mono">server/handler.go</span> is still in <b style="color:var(--fg)">Story</b> and in the <b style="color:var(--fg)">Unified</b> diff.</span>
+    <div style="display:flex;gap:8px;margin-top:4px"><span class="btn">Show in Unified</span><span class="btn">Open in Story</span></div>
+  </div></div></div>`
+  : `
+  <div class="chead"><span>…</span>›<span>TokenStore::token</span>›<span style="color:var(--fg);font-weight:600">TokenStore::refresh</span><span style="flex:1"></span>
+    <span class="ctl">Depth<span class="sel">3 ▾</span></span><span class="ctl" style="margin-left:10px">−<span class="sel" style="font-weight:500">82%</span>+</span></div>
+  <div class="canvas" id="cv">
+    <svg class="edges" id="svg"></svg>
+    <div class="rows">${rows.map(([lbl, ns]) => `<div class="row" style="position:relative"><span class="lvl">${lbl}</span>${ns.map((n) => `<div class="node ${n.kind}" data-id="${n.id}"><span>${n.name}</span>${n.meta ? `<span class="m">${n.meta}</span>` : ''}</div>`).join('')}</div>`).join('')}</div>
+    <div class="legend"><span><i style="box-shadow:inset 0 0 0 1.5px var(--green)"></i>Changed</span><span><i style="box-shadow:inset 0 0 0 1.5px var(--orange)"></i>Signature changed</span><span><i style="box-shadow:inset 0 0 0 1px var(--line);opacity:.7"></i>Not touched</span><span><i style="border:1px dashed var(--edge)"></i>Outside this repo</span><span>+N · click to expand</span></div>
+  </div>`;
+
+const panel = state === 'unsupported' ? `
+  <div class="ps"><span class="mono" style="color:var(--muted);font-size:12px">server/handler.go</span><span style="color:var(--muted)">+18 −4 · 2 hunks</span><div style="display:flex;gap:8px"><span class="btn">Show diff</span><span class="btn">Open in editor</span><span class="btn">Comment</span></div></div>`
+  : `
+  <div class="ps"><span class="mono" style="color:var(--muted);font-size:12px">auth/refresh.rs:38</span>
+    <span class="mono" style="font-size:12.5px;line-height:1.5">pub async fn refresh(&amp;self) → Result&lt;Token, AuthError&gt;</span>
+    <div style="display:flex;gap:8px"><span class="btn">Show body diff</span><span class="btn">Open in editor</span><span class="btn">Comment</span></div></div>
+  <div class="ps" style="border:none"><span class="cap" style="padding:0">Called by · TokenStore::token (not changed)</span>
+    <div class="code">
+      <div><span class="n">21</span>pub async fn token(&amp;self) → Result&lt;Token&gt; {</div>
+      <div><span class="n">22</span>    if let Some(t) = self.cached() {</div>
+      <div><span class="n">23</span>        return Ok(t);</div>
+      <div><span class="n">24</span>    }</div>
+      <div style="background:var(--callHl)"><span class="n">25</span>    self.refresh().await</div>
+      <div><span class="n">26</span>}</div>
+    </div>
+    <span style="color:var(--muted);line-height:1.5">Reached from 9 callers in 3 levels, up to <span class="mono">auth_middleware</span>. <span class="mono">TokenStore::token</span> calls it at store.rs:25.</span>
+    <span class="cap" style="padding:0">Also affected · signature changed</span>
+    <div style="border-radius:8px;box-shadow:0 0 0 1.5px var(--orange);padding:10px 12px;line-height:1.5"><span class="mono">TokenStore::new(path, <span style="background:var(--orangeSoft)">client: HttpClient</span>)</span><br><span style="color:var(--muted)">4 callers outside this PR · </span><span style="text-decoration:underline;color:var(--muted)">show them</span></div>
+  </div>`;
+
+document.getElementById('win').innerHTML = `
+<div class="title"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+  <span class="wtab" style="color:var(--muted)">Home</span><span class="wtab on"><span class="mono" style="font-size:12px;color:var(--muted)">#123</span><b style="font-weight:600">auth refresh</b></span></div>
+<div class="head"><span style="color:var(--muted)">rzorzal/clusia</span><span class="mono" style="color:var(--muted)">#123</span><span style="font-size:17px;font-weight:600">feat: auth refresh</span><span style="color:var(--faint);font-size:12px">@octo · <span style="color:var(--green)">+120</span> <span style="color:var(--orange)">−34</span> · 7 files</span></div>
+<div class="sections">${['Diagrams', 'Security', 'Diff', 'Audits', 'Comments', 'Tests'].map((s) => `<span class="sec ${s === 'Diff' ? 'on' : ''}">${s}</span>`).join('')}<span style="flex:1"></span>
+  <div class="switch"><span>Unified</span><span>Split</span><span>Story</span><span class="on">Calls</span></div></div>
+<div class="body"><aside class="list">${list}</aside><div class="canvaswrap">${canvas}</div><aside class="panel">${panel}</aside></div>
+<div class="status"><span style="width:8px;height:8px;border-radius:4px;background:var(--green)"></span><span>Claude Code · session active</span><span style="color:var(--muted)">${state === 'unsupported' ? 'Call graph from the worktree · Rust, TypeScript, JavaScript, Python' : 'Call graph from the worktree at 9b0c7de · 4 changed, 21 touched by calls · depth 3'}</span><span style="flex:1"></span><span class="p">Finalize review</span></div>`;
+
+function draw() {
+  const cv = document.getElementById('cv');
+  if (!cv) return;
+  const base = cv.getBoundingClientRect();
+  const box = (id) => cv.querySelector(`[data-id="${id}"]`).getBoundingClientRect();
+  let paths = '';
+  for (const [a, b] of edges) {
+    const A = box(a), B = box(b);
+    const x1 = A.left + A.width / 2 - base.left, y1 = A.bottom - base.top;
+    const x2 = B.left + B.width / 2 - base.left, y2 = B.top - base.top;
+    const ym = (y1 + y2) / 2;
+    const c = green.has(`${a}>${b}`) ? 'var(--green)' : 'var(--edge)';
+    paths += `<path d="M${x1} ${y1} V${ym} H${x2} V${y2}" fill="none" stroke="${c}" stroke-width="1.25"/>`;
+  }
+  document.getElementById('svg').innerHTML = paths;
+}
+document.fonts.ready.then(draw);
+</script>
+</body>
+</html>

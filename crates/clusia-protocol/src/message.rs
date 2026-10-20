@@ -1,8 +1,10 @@
 //! Every message that crosses the socket.
 
+use clusia_calls::{CallGraph, StaticStep};
 pub use clusia_core::OpenTarget;
 use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::revalidation::Revalidation;
+use clusia_core::story::{StoryVersion, StoryVersionState};
 use clusia_core::{
     ActivitySummary, CheckKind, CheckResult, ChecksSummary, Config, DraftItem, DraftKind,
     EventKind, FileDiff, Finding, HiddenComments, MediaKind, OpenTabs, Pass, PrConversation,
@@ -377,6 +379,79 @@ pub enum Command {
         node: String,
         body: String,
     },
+    /// Write the Story of this review's head commit. It answers `Busy` while a story is being
+    /// written, and `InvalidState` ("A story already exists; use Rewrite") when the review holds
+    /// a version of any state.
+    WriteStory {
+        pr: PrRef,
+    },
+    /// Write the Story again as a new version, even when the head already has one.
+    RewriteStory {
+        pr: PrRef,
+    },
+    /// Stop the story if it runs or waits.
+    StopStory {
+        pr: PrRef,
+    },
+    /// Every version of the review's Story without its steps, the latest in full, the static
+    /// order of the changed functions, what the reviewer has read, and what the daemon is doing.
+    GetStory {
+        pr: PrRef,
+    },
+    /// One version of the review's Story in full.
+    GetStoryVersion {
+        pr: PrRef,
+        number: u32,
+    },
+    /// Mark step `step` of version `number` as read or unread. `number` 0 is the static Story.
+    /// Only the latest version takes marks.
+    MarkStepRead {
+        pr: PrRef,
+        number: u32,
+        step: String,
+        read: bool,
+    },
+    /// Comment on step `step` of version `number` (0 is the static Story): the comment joins the
+    /// draft as a general comment that names the step (`On "<title>": …`), never on a hunk. The
+    /// title comes from the stored Story, never from the client. Answers like `AddDraftItem`.
+    AddStepComment {
+        pr: PrRef,
+        number: u32,
+        step: String,
+        body: String,
+    },
+    /// The call graph around a function. `center` is a function id (none: the first changed
+    /// function), `depth` how many levels it shows and `expand` the levels (negative: callers,
+    /// positive: callees) that raise their level's limit of shown neighbours: each entry adds
+    /// `PER_LEVEL` more.
+    GetCalls {
+        pr: PrRef,
+        #[serde(default)]
+        center: Option<String>,
+        #[serde(default)]
+        depth: Option<u8>,
+        #[serde(default)]
+        expand: Vec<i8>,
+    },
+    /// The functions of the review's head commit whose name matches `query`.
+    FindFunction {
+        pr: PrRef,
+        query: String,
+    },
+    /// The code of `function`, at the review's head commit; a function the change removed is read
+    /// at the merge base.
+    ReadFunctionCode {
+        pr: PrRef,
+        function: String,
+    },
+    /// Comment on `function`: the comment joins the draft on the function's changed lines when
+    /// GitHub can take them there, as a general comment naming the function otherwise. Answers
+    /// like `AddDraftItem`.
+    AddCallsComment {
+        pr: PrRef,
+        function: String,
+        body: String,
+    },
     /// Accept or reject what the revalidation proposed for one draft item.
     DecideProposal {
         pr: PrRef,
@@ -406,6 +481,7 @@ pub enum Outcome {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // a story and a call graph are moved out whole, never copied around
 pub enum Reply {
     Ack,
     Status(DaemonStatus),
@@ -478,6 +554,31 @@ pub enum Reply {
     DiagramVersion(Box<DiagramVersion>),
     /// The code of a box, for `ReadDiagramCode`.
     DiagramCode(DiagramCode),
+    /// What `GetStory` knows. `read` holds the ids of the steps read in `latest` (in the static
+    /// steps when there is no version), `head` the commit the review is at, and `new_commits`
+    /// how many commits `head` is ahead of `latest` (0 when there is no version).
+    Story {
+        versions: Vec<StoryVersionInfo>,
+        latest: Option<StoryVersion>,
+        state: StoryState,
+        static_steps: Vec<StaticStep>,
+        read: Vec<String>,
+        head: String,
+        new_commits: u32,
+    },
+    /// One version, for `GetStoryVersion`.
+    StoryVersion(StoryVersion),
+    /// What `GetCalls` knows: the graph (none while the index is not ready), the state of the
+    /// index, and the files of languages Clúsia does not read.
+    Calls {
+        graph: Option<CallGraph>,
+        index: CallsIndexState,
+        unsupported: Vec<String>,
+    },
+    /// The functions `FindFunction` found.
+    Functions(Vec<FunctionHit>),
+    /// The code of a function, for `ReadFunctionCode`.
+    FunctionCode(DiagramCode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -825,6 +926,16 @@ pub enum Event {
         number: u32,
         key: String,
         state: EntryState,
+    },
+    /// What the daemon does for the review's Story changed (topic `agent`).
+    StoryChanged {
+        pr: PrRef,
+        state: StoryState,
+    },
+    /// The call index of the review's head commit changed state (topic `agent`).
+    CallsIndexChanged {
+        pr: PrRef,
+        state: CallsIndexState,
     },
 }
 
@@ -1188,6 +1299,13 @@ pub enum AgentLogEntry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key: Option<String>,
     },
+    /// The story turn changed state: `waiting`, `running`, `done`, `failed` or `stopped`. Not
+    /// part of the chat: `GetAgentLog` leaves these out.
+    Story {
+        at: i64,
+        turn: u64,
+        state: String,
+    },
 }
 
 /// A permission request waiting for the reviewer: the fields of `Event::PermissionRequested`.
@@ -1208,8 +1326,8 @@ pub struct PermissionRequest {
     pub origin: TurnOrigin,
 }
 
-/// Who runs a turn of the agent: the review chat, one of the two checks, the revalidation, or
-/// the drawing of diagrams.
+/// Who runs a turn of the agent: the review chat, one of the two checks, the revalidation, the
+/// drawing of diagrams, or the writing of the Story.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOrigin {
@@ -1219,6 +1337,7 @@ pub enum TurnOrigin {
     Audit,
     Revalidation,
     Diagrams,
+    Story,
 }
 
 impl TurnOrigin {
@@ -1275,6 +1394,64 @@ pub enum DiagramsState {
     },
     /// The run could not go on: the plan could not be made, or the run broke.
     Failed { message: String },
+}
+
+/// What the daemon does for a review's Story.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StoryState {
+    /// Nothing runs.
+    Idle,
+    /// The story turn waits for the agent.
+    Waiting,
+    /// The story is being written.
+    Writing,
+    /// The story could not be written.
+    Failed { message: String },
+}
+
+/// What the daemon does for a review's call index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CallsIndexState {
+    /// No index was asked for.
+    Idle,
+    /// The head commit is being read.
+    Building,
+    /// The index of `commit` is ready; `cut` when the repository was too big to read whole.
+    Ready { commit: String, cut: bool },
+    /// The index could not be built.
+    Failed { message: String },
+}
+
+/// A version of a Story without its steps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoryVersionInfo {
+    pub number: u32,
+    pub commit: String,
+    pub state: StoryVersionState,
+}
+
+impl From<&StoryVersion> for StoryVersionInfo {
+    fn from(v: &StoryVersion) -> Self {
+        Self {
+            number: v.number,
+            commit: v.commit.clone(),
+            state: v.state.clone(),
+        }
+    }
+}
+
+/// A function `FindFunction` found. `kind` is how the pull request changed it, `None` (always on
+/// the wire, as `null`) for a function it did not touch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionHit {
+    pub id: String,
+    pub qualified: String,
+    pub path: String,
+    pub line: u32,
+    pub changed: bool,
+    pub kind: Option<clusia_calls::ChangeKind>,
 }
 
 /// The code a diagram box points at, at the commit the diagram was drawn from.
@@ -3902,5 +4079,338 @@ mod tests {
             r#"{"type":"diagrams","at":9,"turn":2,"state":"done"}"#
         );
         round_trip(plan);
+    }
+
+    fn story_spec() -> clusia_core::story::StorySpec {
+        serde_json::from_value(serde_json::json!({
+            "sentence": "Tokens refresh once.",
+            "steps": [{"id": "a", "title": "The lock", "hunks": [{"path": "src/a.rs", "start_line": 1, "end_line": 3}]}]
+        }))
+        .expect("a minimal story")
+    }
+
+    fn story_version(
+        number: u32,
+        state: clusia_core::story::StoryVersionState,
+    ) -> clusia_core::story::StoryVersion {
+        clusia_core::story::StoryVersion {
+            number,
+            commit: "a".repeat(40),
+            harness: "Claude Code".into(),
+            started_at: "2026-10-19T12:00:00Z".into(),
+            state,
+            spec: Some(story_spec()),
+            notes: vec!["one note".into()],
+        }
+    }
+
+    fn static_step() -> clusia_calls::StaticStep {
+        clusia_calls::StaticStep {
+            id: "TokenStore::refresh".into(),
+            title: "TokenStore::refresh".into(),
+            subtitle: "src/store.rs".into(),
+            hunks: vec![clusia_core::hunks::HunkRef { path: "src/store.rs".into(), start_line: 12, end_line: 30 }],
+            other: false,
+            explanation: "Changed body · called by AuthMiddleware::check (+3) · comes first because nothing it calls changed".into(),
+        }
+    }
+
+    fn call_graph() -> clusia_calls::CallGraph {
+        let key = "src/store.rs#TokenStore::refresh#12".to_string();
+        clusia_calls::CallGraph {
+            center: key.clone(),
+            depth: 3,
+            nodes: vec![clusia_calls::GraphNode {
+                key: key.clone(),
+                label: "TokenStore::refresh".into(),
+                sub: "+4 −1 · body changed".into(),
+                kind: clusia_calls::NodeKind::Changed,
+                level: 0,
+                function: Some(clusia_calls::FunctionId(key.clone())),
+                path: Some("src/store.rs".into()),
+                line: Some(12),
+                signature: "pub fn refresh(&self) -> Result<Token>".into(),
+                more: 0,
+                ambiguous: Vec::new(),
+                callers: 4,
+            }],
+            edges: vec![clusia_calls::GraphEdge {
+                from: key,
+                to: "outside:tokio::sleep".into(),
+                line: 20,
+                changed: true,
+            }],
+            hidden_edges: 0,
+            breadcrumb: vec!["TokenStore::refresh".into()],
+            changed: 1,
+            touched: 0,
+            cut: false,
+        }
+    }
+
+    #[test]
+    fn story_commands_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        assert_eq!(
+            request(Command::WriteStory { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"write_story":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::RewriteStory { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"rewrite_story":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::StopStory { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"stop_story":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetStory { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"get_story":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetStoryVersion {
+                pr: acme(),
+                number: 2
+            }),
+            r#"{"type":"request","id":5,"cmd":{"get_story_version":{"pr":"acme/widgets#7","number":2}}}"#
+        );
+        assert_eq!(
+            request(Command::MarkStepRead {
+                pr: acme(),
+                number: 2,
+                step: "auth".into(),
+                read: true
+            }),
+            r#"{"type":"request","id":5,"cmd":{"mark_step_read":{"pr":"acme/widgets#7","number":2,"step":"auth","read":true}}}"#
+        );
+        assert_eq!(
+            request(Command::AddStepComment {
+                pr: acme(),
+                number: 2,
+                step: "auth".into(),
+                body: "Why?".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"add_step_comment":{"pr":"acme/widgets#7","number":2,"step":"auth","body":"Why?"}}}"#
+        );
+    }
+
+    #[test]
+    fn calls_commands_wire_format_and_get_calls_may_leave_its_options_out() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        assert_eq!(
+            request(Command::GetCalls {
+                pr: acme(),
+                center: Some("src/a.rs#f#1".into()),
+                depth: Some(2),
+                expand: vec![-1, 2]
+            }),
+            r#"{"type":"request","id":5,"cmd":{"get_calls":{"pr":"acme/widgets#7","center":"src/a.rs#f#1","depth":2,"expand":[-1,2]}}}"#
+        );
+        let bare: Command =
+            serde_json::from_str(r#"{"get_calls":{"pr":"acme/widgets#7"}}"#).unwrap();
+        assert_eq!(
+            bare,
+            Command::GetCalls {
+                pr: acme(),
+                center: None,
+                depth: None,
+                expand: Vec::new()
+            }
+        );
+        assert_eq!(
+            request(Command::FindFunction {
+                pr: acme(),
+                query: "refresh".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"find_function":{"pr":"acme/widgets#7","query":"refresh"}}}"#
+        );
+        assert_eq!(
+            request(Command::ReadFunctionCode {
+                pr: acme(),
+                function: "src/a.rs#f#1".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"read_function_code":{"pr":"acme/widgets#7","function":"src/a.rs#f#1"}}}"#
+        );
+        assert_eq!(
+            request(Command::AddCallsComment {
+                pr: acme(),
+                function: "src/a.rs#f#1".into(),
+                body: "Why?".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"add_calls_comment":{"pr":"acme/widgets#7","function":"src/a.rs#f#1","body":"Why?"}}}"#
+        );
+    }
+
+    #[test]
+    fn story_and_calls_states_wire_format() {
+        assert_eq!(wire(&StoryState::Idle), r#"{"state":"idle"}"#);
+        assert_eq!(wire(&StoryState::Waiting), r#"{"state":"waiting"}"#);
+        assert_eq!(wire(&StoryState::Writing), r#"{"state":"writing"}"#);
+        assert_eq!(
+            wire(&StoryState::Failed {
+                message: "no block".into()
+            }),
+            r#"{"state":"failed","message":"no block"}"#
+        );
+        assert_eq!(wire(&CallsIndexState::Idle), r#"{"state":"idle"}"#);
+        assert_eq!(wire(&CallsIndexState::Building), r#"{"state":"building"}"#);
+        assert_eq!(
+            wire(&CallsIndexState::Ready {
+                commit: "abc1234".into(),
+                cut: true
+            }),
+            r#"{"state":"ready","commit":"abc1234","cut":true}"#
+        );
+        assert_eq!(
+            wire(&CallsIndexState::Failed {
+                message: "no git".into()
+            }),
+            r#"{"state":"failed","message":"no git"}"#
+        );
+    }
+
+    #[test]
+    fn story_and_calls_replies_and_events_round_trip() {
+        use clusia_core::story::StoryVersionState::{Failed, NotWritten, Written};
+        let written = story_version(2, Written);
+        round_trip(Reply::Story {
+            versions: vec![
+                StoryVersionInfo::from(&story_version(1, NotWritten)),
+                StoryVersionInfo::from(&written),
+                StoryVersionInfo::from(&story_version(
+                    3,
+                    Failed {
+                        message: "no block".into(),
+                    },
+                )),
+            ],
+            latest: Some(written.clone()),
+            state: StoryState::Writing,
+            static_steps: vec![static_step()],
+            read: vec!["TokenStore::refresh".into()],
+            head: "b".repeat(40),
+            new_commits: 3,
+        });
+        round_trip(Reply::Story {
+            versions: Vec::new(),
+            latest: None,
+            state: StoryState::Idle,
+            static_steps: Vec::new(),
+            read: Vec::new(),
+            head: String::new(),
+            new_commits: 0,
+        });
+        round_trip(Reply::StoryVersion(written.clone()));
+        round_trip(Reply::Calls {
+            graph: Some(call_graph()),
+            index: CallsIndexState::Ready {
+                commit: "abc1234".into(),
+                cut: false,
+            },
+            unsupported: vec!["main.go".into()],
+        });
+        round_trip(Reply::Calls {
+            graph: None,
+            index: CallsIndexState::Building,
+            unsupported: Vec::new(),
+        });
+        round_trip(Reply::Functions(vec![FunctionHit {
+            id: "src/store.rs#TokenStore::refresh#12".into(),
+            qualified: "TokenStore::refresh".into(),
+            path: "src/store.rs".into(),
+            line: 12,
+            changed: true,
+            kind: Some(clusia_calls::ChangeKind::Signature),
+        }]));
+        round_trip(Reply::Functions(vec![FunctionHit {
+            id: "src/auth.rs#check#4".into(),
+            qualified: "check".into(),
+            path: "src/auth.rs".into(),
+            line: 4,
+            changed: false,
+            kind: None,
+        }]));
+        assert_eq!(
+            wire(&FunctionHit {
+                id: "a#f#1".into(),
+                qualified: "f".into(),
+                path: "a".into(),
+                line: 1,
+                changed: true,
+                kind: Some(clusia_calls::ChangeKind::Moved)
+            }),
+            r#"{"id":"a#f#1","qualified":"f","path":"a","line":1,"changed":true,"kind":"moved"}"#
+        );
+        assert_eq!(
+            wire(&FunctionHit {
+                id: "a#f#1".into(),
+                qualified: "f".into(),
+                path: "a".into(),
+                line: 1,
+                changed: false,
+                kind: None
+            }),
+            r#"{"id":"a#f#1","qualified":"f","path":"a","line":1,"changed":false,"kind":null}"#
+        );
+        round_trip(Reply::FunctionCode(DiagramCode {
+            path: "src/store.rs".into(),
+            commit: "a".repeat(40),
+            start_line: 12,
+            lines: vec![CodeLine {
+                number: 12,
+                text: "pub fn refresh(&self) {".into(),
+                changed: true,
+            }],
+            unavailable: None,
+        }));
+        round_trip(Event::StoryChanged {
+            pr: acme(),
+            state: StoryState::Waiting,
+        });
+        round_trip(Event::CallsIndexChanged {
+            pr: acme(),
+            state: CallsIndexState::Failed {
+                message: "x".into(),
+            },
+        });
+        assert_eq!(
+            wire(&Event::StoryChanged {
+                pr: acme(),
+                state: StoryState::Idle
+            }),
+            r#"{"story_changed":{"pr":"acme/widgets#7","state":{"state":"idle"}}}"#
+        );
+    }
+
+    #[test]
+    fn a_version_info_keeps_the_number_the_commit_and_the_state() {
+        let info = StoryVersionInfo::from(&story_version(
+            4,
+            clusia_core::story::StoryVersionState::Written,
+        ));
+        assert_eq!(
+            info,
+            StoryVersionInfo {
+                number: 4,
+                commit: "a".repeat(40),
+                state: clusia_core::story::StoryVersionState::Written
+            }
+        );
+    }
+
+    #[test]
+    fn a_story_turn_is_not_a_chat_turn() {
+        assert_eq!(wire(&TurnOrigin::Story), r#""story""#);
+        assert!(!TurnOrigin::Story.is_chat());
+        let entry = AgentLogEntry::Story {
+            at: 9,
+            turn: 3,
+            state: "running".into(),
+        };
+        assert_eq!(
+            wire(&entry),
+            r#"{"type":"story","at":9,"turn":3,"state":"running"}"#
+        );
+        round_trip(entry);
     }
 }

@@ -97,6 +97,9 @@ pub struct HarnessView {
     /// *3D keyword view*: add the keyword map to every set of diagrams.
     pub keywords_3d: bool,
     pub keywords_3d_error: Option<String>,
+    /// *Write the story when I open Story*.
+    pub story: bool,
+    pub story_error: Option<String>,
     /// Seconds without a new commit before the check starts.
     pub quiet: String,
     pub quiet_error: Option<String>,
@@ -211,7 +214,7 @@ pub fn ok_title(name: &str, version: &str, seconds: &str, account: Option<&str>)
     }
 }
 
-/// A *When I open a review* checkbox (and *Revalidate my draft* and *3D keyword view*): the key
+/// A *When I open a review* checkbox (and *Revalidate my draft*, *3D keyword view* and *Story*): the key
 /// it flips.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct OpenToggle(pub &'static str);
@@ -236,6 +239,7 @@ fn on_open_toggle(
         "harness.diagrams" => (!h.diagrams).to_string(),
         "harness.revalidate" => (!h.revalidate).to_string(),
         "harness.keywords_3d" => (!h.keywords_3d).to_string(),
+        "harness.story" => (!h.story).to_string(),
         _ => return,
     };
     set_config(&mut asks, &mut model, key, value);
@@ -335,6 +339,8 @@ pub fn view(
         revalidate_error: refusal("harness.revalidate"),
         keywords_3d: h.keywords_3d,
         keywords_3d_error: refusal("harness.keywords_3d"),
+        story: h.story,
+        story_error: refusal("harness.story"),
         quiet: h.revalidate_quiet_secs.to_string(),
         quiet_error: refusal("harness.revalidate_quiet_secs"),
         areas: h.audit_areas.clone(),
@@ -608,6 +614,21 @@ pub fn build(p: &mut ChildSpawnerCommands, fonts: &UiFonts, v: &HarnessView) {
         v.keywords_3d_error
             .as_deref()
             .map(|m| ("harness.keywords_3d", m)),
+    );
+    row(
+        p,
+        fonts,
+        "Story",
+        |r| {
+            r.spawn((
+                checkbox(v.story),
+                OpenToggle("harness.story"),
+                observe(on_open_toggle),
+            ));
+            r.spawn(text(fonts, "Write the story when I open Story", Type::BODY));
+        },
+        "One more turn when the Story opens",
+        v.story_error.as_deref().map(|m| ("harness.story", m)),
     );
     field_row(
         p,
@@ -1860,5 +1881,69 @@ mod tests {
                 .contains("at most 40")
         );
         assert_eq!(program_hint(&v), "Required. Runs once per turn");
+    }
+
+    #[test]
+    fn the_story_is_its_own_row_that_starts_on() {
+        let mut app = harness_app();
+        assert!(crate::testing::shows(
+            &mut app,
+            "Write the story when I open Story"
+        ));
+        assert!(crate::testing::shows(
+            &mut app,
+            "One more turn when the Story opens"
+        ));
+        let toggle = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.story");
+        crate::testing::activate(&mut app, toggle);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.story".into(),
+                value: "false".into()
+            }]
+        );
+        crate::testing::set_config_locally(&mut app, "harness.story", "false");
+        crate::testing::settle(&mut app);
+        let toggle = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.story");
+        crate::testing::activate(&mut app, toggle);
+        assert_eq!(
+            crate::testing::recorded(&mut app),
+            [Ask::SetConfig {
+                key: "harness.story".into(),
+                value: "true".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_story_row_is_not_one_of_the_four_open_checkboxes() {
+        let h = clusia_core::config::Harness::default();
+        assert!(h.story, "on by default");
+        assert_eq!(
+            open_checks(&h),
+            OpenChecks {
+                summarize: true,
+                security: h.check_security,
+                audit: h.audit,
+                diagrams: h.diagrams,
+            }
+        );
+        let mut app = harness_app();
+        let toggles = crate::testing::count::<OpenToggle>(&mut app);
+        let story = crate::testing::find::<OpenToggle>(&mut app, |t| t.0 == "harness.story");
+        assert!(story != Entity::PLACEHOLDER && toggles >= 2);
+    }
+
+    #[test]
+    fn the_view_shows_the_story_setting_and_a_refused_write_shows_why() {
+        let mut snap = crate::fixture::demo(crate::testing::NOW);
+        assert!(view(&snap, &HashMap::new(), &ProbeState::Idle).story);
+        snap.config.harness.story = false;
+        let mut rejected = HashMap::new();
+        rejected.insert("harness.story".to_string(), "not a boolean".to_string());
+        let v = view(&snap, &rejected, &ProbeState::Idle);
+        assert!(!v.story);
+        assert_eq!(v.story_error.as_deref(), Some("not a boolean"));
     }
 }

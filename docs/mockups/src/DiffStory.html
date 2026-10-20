@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Diff · Story</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#F6F7F5; --chrome:#EEF1EE; --surface:#FFFFFF; --code:#F6F7F5; --line:#E2E6E2; --fg:#1B1F1C; --muted:#5D665F; --faint:#8A938C;
+  --green:#2F9E44; --onGreen:#FFFFFF; --orange:#D9572B; --amber:#C98A04; --amberSoft:rgba(201,138,4,0.12);
+  --greenSoft:rgba(47,158,68,0.12); --orangeSoft:rgba(217,87,43,0.12); --sel:#E9F6EB; --addHl:rgba(47,158,68,0.24);
+}
+:root[data-theme="dark"]{
+  --bg:#121514; --chrome:#181C1A; --surface:#1A1E1C; --code:#121514; --line:#2A302C; --fg:#E9ECE9; --muted:#9AA49C; --faint:#6B746D;
+  --green:#4CC35F; --onGreen:#0C1A0F; --orange:#F07A4A; --amber:#E5AC2E; --amberSoft:rgba(229,172,46,0.14);
+  --greenSoft:rgba(76,195,95,0.14); --orangeSoft:rgba(240,122,74,0.16); --sel:rgba(76,195,95,0.12); --addHl:rgba(76,195,95,0.34);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg)}
+.win{width:1280px;height:800px;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:13px Inter,-apple-system,system-ui,sans-serif;overflow:hidden}
+.mono{font-family:'JetBrains Mono',monospace}
+.title{height:44px;flex:none;display:flex;align-items:center;gap:6px;padding:0 12px 0 16px;background:var(--chrome);border-bottom:1px solid var(--line)}
+.lights{display:flex;gap:8px;margin-right:14px}.lights i{width:12px;height:12px;border-radius:6px;display:block}
+.wtab{height:30px;display:flex;align-items:center;gap:8px;padding:0 12px;border-radius:6px}
+.wtab.on{background:var(--surface);box-shadow:0 0 0 1px var(--line)}
+.head{flex:none;display:flex;align-items:baseline;gap:10px;padding:14px 20px 10px}
+.sections{flex:none;display:flex;align-items:center;gap:4px;padding:0 20px;border-bottom:1px solid var(--line)}
+.sec{height:36px;padding:0 12px;display:flex;align-items:center;color:var(--muted)}
+.sec.on{color:var(--fg);font-weight:600;box-shadow:inset 0 -2px 0 var(--green)}
+.switch{display:flex;border-radius:6px;box-shadow:0 0 0 1px var(--line);overflow:hidden}
+.switch span{height:26px;padding:0 10px;display:flex;align-items:center;background:var(--surface);font-size:12px;color:var(--muted)}
+.switch span.on{background:var(--chrome);color:var(--fg);font-weight:600}
+.body{flex:1;min-height:0;display:flex}
+nav{width:248px;flex:none;display:flex;flex-direction:column;gap:4px;padding:14px 10px;border-right:1px solid var(--line)}
+.cap{color:var(--faint);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
+.ch{display:flex;gap:10px;padding:8px 10px;border-radius:6px}
+.ch.now{background:var(--sel)}
+.ch .dot{width:20px;height:20px;flex:none;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;background:var(--chrome);color:var(--muted)}
+.ch.read .dot{background:var(--green);color:var(--onGreen)}
+.ch.now .dot{background:var(--greenSoft);color:var(--green)}
+.ch .t{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ch .meta{color:var(--faint);font-size:11px}
+.ch.mech .name{color:var(--muted)}
+.ch.added{box-shadow:inset 0 0 0 1px var(--green);background-image:none;outline:1px dashed var(--green);outline-offset:-1px;box-shadow:none}
+.ch.changed{box-shadow:inset 0 0 0 1.5px var(--amber)}
+.ch.removed{opacity:.5}.ch.removed .name{text-decoration:line-through}
+.hist{font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;margin-left:6px}
+.hist.a{background:var(--greenSoft);color:var(--green)}.hist.c{background:var(--amberSoft);color:var(--amber)}.hist.r{background:var(--chrome);color:var(--faint)}
+.foot{padding:8px;color:var(--faint);font-size:11px;line-height:1.45}
+.ver{display:flex;align-items:center;gap:6px;padding:8px;border-top:1px solid var(--line);margin:0 -10px -14px;padding:10px 18px 12px;flex-direction:column;align-items:stretch}
+.ver .row{display:flex;align-items:center;gap:6px;font-size:12px}
+.arrow{width:22px;height:22px;border-radius:5px;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px var(--line);background:var(--surface);color:var(--muted);font-size:10px}
+.arrow.off{opacity:.4}
+.check{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.box{width:14px;height:14px;border-radius:3px;box-shadow:inset 0 0 0 1px var(--faint);display:flex;align-items:center;justify-content:center;font-size:10px}
+.box.on{background:var(--green);box-shadow:none;color:var(--onGreen)}
+main{flex:1;min-width:0;padding:16px 22px;display:flex;flex-direction:column;gap:12px;overflow:hidden}
+.card{background:var(--surface);border-radius:8px;box-shadow:0 0 0 1px var(--line);padding:14px 16px}
+.card.cur{box-shadow:0 0 0 1.5px var(--green)}
+.card.cur.changed{box-shadow:0 0 0 1.5px var(--amber)}
+.pill{height:22px;padding:0 8px;border-radius:4px;display:inline-flex;align-items:center;background:var(--chrome);font-size:12px}
+.pill.g{background:var(--greenSoft);color:var(--green);font-weight:500}.pill.o{background:var(--orangeSoft);color:var(--orange);font-weight:500}
+.flow{display:flex;align-items:center;gap:8px;color:var(--faint);font-size:12px}
+.uc{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px}
+.ucchip{height:22px;padding:0 9px;border-radius:11px;display:inline-flex;align-items:center;gap:6px;box-shadow:inset 0 0 0 1px var(--line);color:var(--fg);background:var(--bg)}
+.ucchip i{width:7px;height:7px;border-radius:4px;display:block}
+.code{background:var(--code);border-radius:6px;padding:8px 0;font:12.5px/1.65 'JetBrains Mono',monospace}
+.code div{display:flex;gap:18px;padding:0 16px;white-space:pre}.code .n{color:var(--faint);width:22px;text-align:right}
+.hl{background:var(--addHl)}
+.linked{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;background:var(--bg)}
+.tag{font-size:10px;font-weight:700;letter-spacing:.03em;padding:2px 6px;border-radius:4px}
+.btn{height:30px;padding:0 12px;border-radius:6px;display:inline-flex;align-items:center;background:var(--surface);box-shadow:0 0 0 1px var(--line)}
+.btn.p{background:var(--green);color:var(--onGreen);box-shadow:none;font-weight:600}
+.banner{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;font-size:12.5px}
+.banner.warn{background:var(--amberSoft);color:var(--fg)}
+.banner.info{background:var(--chrome);color:var(--muted)}
+.spin{width:12px;height:12px;border-radius:6px;border:2px solid var(--line);border-top-color:var(--green)}
+.status{height:50px;flex:none;display:flex;align-items:center;gap:16px;padding:0 12px 0 20px;background:var(--chrome);border-top:1px solid var(--line)}
+.ghost{color:var(--faint);text-decoration:line-through}
+</style>
+</head>
+<body>
+<div class="win" id="win"></div>
+<script>
+const q = new URLSearchParams(location.search);
+const theme = q.get('theme') || 'light';
+const state = q.get('state') || 'written'; // written | compare | outdated | static
+document.documentElement.dataset.theme = theme;
+const UC = {
+  expired: ['Request with an expired token', '#2F9E44'],
+  twotabs: ['Two requests refresh at once', '#3B82C4'],
+  restart: ['Restart keeps the login', '#9B59B6'],
+};
+const chip = (k) => `<span class="ucchip"><i style="background:${UC[k][1]}"></i>${UC[k][0]}</span>`;
+
+const chapters = {
+  written: [
+    ['read', '✓', 'Refresh one minute early', 'refresh.rs · 3 lines · 1 thread'],
+    ['now', '2', 'One refresh at a time', 'refresh.rs, store.rs · 1 draft comment'],
+    ['', '3', 'Safer saves', 'store.rs · moved block'],
+    ['', '4', 'Tests for the race', 'tests/refresh.rs · new'],
+    ['mech', '5', 'Small and mechanical', 'renames, imports, changelog · 4 files'],
+  ],
+  compare: [
+    ['read', '✓', 'Refresh one minute early', 'refresh.rs · 3 lines · 1 thread', ''],
+    ['now changed', '2', 'One refresh at a time', 'refresh.rs, store.rs · lock released early', 'c'],
+    ['', '3', 'Safer saves', 'store.rs · moved block', ''],
+    ['added', '4', 'Retry with a limit', 'client/http.rs · new in version 2', 'a'],
+    ['', '5', 'Tests for the race', 'tests/refresh.rs · new', ''],
+    ['removed', '–', 'Retry forever on 5xx', 'client/http.rs · gone in version 2', 'r'],
+    ['mech', '6', 'Small and mechanical', 'renames, imports, changelog · 4 files', ''],
+  ],
+  static: [
+    ['now', '1', 'HttpClient::exchange', 'client/http.rs · +4 −1'],
+    ['', '2', 'TokenStore::save', 'auth/store.rs · moved, +6 −1'],
+    ['', '3', 'TokenStore::new', 'auth/store.rs · signature'],
+    ['', '4', 'TokenStore::refresh', 'auth/refresh.rs · +9 −2'],
+    ['', '5', 'tests::refresh_race', 'tests/refresh.rs · new'],
+    ['mech', '6', 'Other files', 'CHANGELOG.md, mod.rs, Cargo.toml · 4 files'],
+  ],
+};
+chapters.outdated = chapters.written;
+const list = chapters[state];
+const histLabel = { a: 'added', c: 'changed', r: 'removed' };
+const navItems = list.map(([cls, mark, name, meta, h]) => `
+  <div class="ch ${cls}"><span class="dot">${mark}</span><span class="t">
+    <span class="name" style="font-weight:${cls.includes('now') ? 600 : 400}">${name}${h ? `<span class="hist ${h}">${histLabel[h]}</span>` : ''}</span>
+    <span class="meta">${meta}</span></span></div>`).join('');
+
+const verBlock = state === 'static' ? `
+  <div class="foot">Ordered from the code: each function comes after the ones it calls. Claude Code is writing names, a summary and the use cases.</div>`
+  : `
+  <div class="foot">Steps are ordered so each one only needs the ones before it. Written by Claude Code from commit <span class="mono">${state === 'compare' ? '9b0c7de' : '3f2a91c'}</span>; every line still links to the real diff.</div>
+  <div class="ver">
+    ${state === 'compare'
+      ? '<div class="row"><span class="arrow">◀</span><span style="flex:1;text-align:center">Version 2 of 2</span><span class="arrow off">▶</span></div><div class="check"><span class="box on">✓</span>Show changes since version 1</div>'
+      : '<div class="row"><span class="arrow off">◀</span><span style="flex:1;text-align:center">Version 1 of 1</span><span class="arrow off">▶</span></div>'}
+  </div>`;
+
+const summary = state === 'static' ? '' : `
+  <div class="card" style="display:flex;flex-direction:column;gap:10px">
+    <div style="line-height:1.5"><b>In one sentence:</b> tokens are now refreshed a minute before they expire, and only one request refreshes at a time; the others wait and reuse the new token.</div>
+    <div class="flow"><span style="width:44px">Before</span><span class="pill">request A</span>→<span class="pill">exchange</span><span style="width:12px"></span><span class="pill">request B</span>→<span class="pill o">exchange again · rejected</span></div>
+    <div class="flow"><span style="width:44px">After</span><span class="pill">request A</span>→<span class="pill g">lock</span>→<span class="pill">exchange</span><span style="width:12px"></span><span class="pill">request B</span>→<span class="pill">waits</span>→<span class="pill g">reuses the new token</span></div>
+    <div class="uc"><span style="color:var(--faint);width:${state === 'outdated' ? 'auto' : 'auto'}">Use cases it touches</span>${chip('expired')}${chip('twotabs')}${chip('restart')}</div>
+  </div>`;
+
+const banners = {
+  outdated: `<div class="banner warn"><span style="color:var(--amber);font-weight:700">●</span><span style="flex:1">Written for commit <span class="mono">3f2a91c</span>. The pull request is now at <span class="mono">9b0c7de</span> (2 new commits); the steps on the left still follow the old commit.</span><span class="btn p" style="height:26px">Rewrite</span></div>`,
+  static: `<div class="banner info"><span class="spin"></span><span style="flex:1">Claude Code is writing the story: names, a summary and the use cases. Meanwhile the steps follow the code, each function after the ones it calls.</span><span class="btn" style="height:26px">Stop</span></div>`,
+  compare: `<div class="banner info" style="gap:14px"><b style="color:var(--fg)">Changes since version 1</b>
+     <span style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:10px;border-radius:2px;outline:1px dashed var(--green)"></span>Added</span>
+     <span style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:10px;border-radius:2px;box-shadow:inset 0 0 0 1.5px var(--amber)"></span>Changed</span>
+     <span style="display:flex;align-items:center;gap:6px"><span class="ghost">Removed</span></span>
+     <span style="flex:1"></span><span>1 added · 1 changed · 1 removed</span></div>`,
+};
+
+const stepCode = state === 'compare'
+  ? [[12, '    refresh_lock: Mutex<()>,', 0], [44, '    let fresh = {', 1], [45, '        let _guard = self.refresh_lock.lock().await;', 1], [46, '        self.reuse_or_exchange(&token).await?', 1], [47, '    };', 1]]
+  : [[12, '    refresh_lock: Mutex<()>,', 1], [43, '    }', 0], [44, '    let _guard = self.refresh_lock.lock().await;', 1], [45, '    let fresh = self.client.exchange(&token.refresh).await?;', 0]];
+const code = stepCode.map(([n, c, h]) => `<div><span class="n">${n}</span><span class="${h ? 'hl' : ''}">${c.replace(/</g, '&lt;')}</span></div>`).join('');
+
+const step = state === 'static' ? `
+  <div class="card cur" style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:baseline;gap:10px"><span style="color:var(--green);font-weight:700">1</span><span style="font-size:15px;font-weight:600" class="mono">HttpClient::exchange</span><span style="flex:1"></span><span class="mono" style="font-size:11px;color:var(--muted)">http.rs:18</span></div>
+    <div style="color:var(--muted)">Changed body · called by <span class="mono">TokenStore::refresh</span> · comes first because nothing it calls changed.</div>
+    <div class="code">
+      <div><span class="n">18</span><span>pub async fn exchange(&amp;self, refresh: &amp;str) -&gt; Result&lt;Token&gt; {</span></div>
+      <div><span class="n">20</span><span class="hl">    loop {</span></div>
+      <div><span class="n">21</span><span class="hl">        match self.send(&amp;req).await {</span></div>
+      <div><span class="n">22</span><span class="hl">            Err(e) if e.is_server() =&gt; sleep(BACKOFF).await,</span></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px"><span class="btn">Comment on this step</span><span style="text-decoration:underline;color:var(--muted)">Show the full diff</span><span style="flex:1"></span><span class="btn p">Mark read · next: TokenStore::save →</span></div>
+  </div>
+  <div class="card" style="display:flex;align-items:center;gap:10px;padding:12px 16px"><span style="color:var(--faint);font-weight:700">2</span><span class="mono" style="font-weight:600">TokenStore::save</span><span style="color:var(--muted)">moved from store.rs:20 to :88 · 34 lines only moved, 6 changed.</span></div>`
+  : `
+  <div class="card cur ${state === 'compare' ? 'changed' : ''}" style="display:flex;flex-direction:column;gap:10px">
+    <div style="display:flex;align-items:baseline;gap:10px"><span style="color:var(--green);font-weight:700">2</span><span style="font-size:15px;font-weight:600">One refresh at a time</span>${state === 'compare' ? '<span class="hist c">changed</span>' : ''}<span style="flex:1"></span><span class="mono" style="font-size:11px;color:var(--muted)">refresh.rs:44 · store.rs:12</span></div>
+    <div style="color:var(--muted);line-height:1.5">${state === 'compare'
+      ? 'A new lock makes concurrent callers queue behind the first one. <b style="color:var(--fg)">Since version 1:</b> the lock is released before the token is saved, so a slow disk no longer blocks requests.'
+      : 'A new lock makes concurrent callers queue behind the first one. From the commit <i>“serialize refreshes so the token is exchanged once”</i>.'}</div>
+    <div class="uc"><span style="color:var(--faint)">Use cases</span>${chip('twotabs')}${chip('expired')}</div>
+    <div class="code">${code}</div>
+    <div class="linked"><span class="tag" style="background:var(--greenSoft);color:var(--green)">YOUR DRAFT</span><span style="flex:1">Holding the lock across the network call means a slow exchange blocks every request.</span><span style="color:var(--faint)">You</span></div>
+    <div class="linked"><span class="tag" style="background:var(--orangeSoft);color:var(--orange)">AUDIT</span><span style="flex:1">The refresh lock is held across a network call (Concurrency)</span><span style="color:var(--faint)">Claude Code</span></div>
+    <div style="display:flex;align-items:center;gap:12px"><span class="btn">Comment on this step</span><span style="text-decoration:underline;color:var(--muted)">Show the full diff</span><span style="flex:1"></span><span class="btn p">Mark read · next: Safer saves →</span></div>
+  </div>
+  <div class="card" style="display:flex;align-items:center;gap:10px;padding:12px 16px"><span style="color:var(--faint);font-weight:700">3</span><b>Safer saves</b><span style="color:var(--muted)">save() moved from store.rs:20 to :88 and now writes to a temp file first.</span><span style="flex:1"></span>${chip('restart')}</div>`;
+
+const statusText = {
+  written: 'Draft saved · 4 items · 1 of 5 steps read',
+  outdated: 'Draft saved · 4 items · story from an older commit',
+  compare: 'Draft saved · 4 items · comparing story versions 1 → 2',
+  static: 'Draft saved · 4 items · writing the story',
+}[state];
+const steps = state === 'compare' ? 6 : state === 'static' ? 6 : 5;
+
+document.getElementById('win').innerHTML = `
+<div class="title"><div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+  <span class="wtab" style="color:var(--muted)">Home</span><span class="wtab on"><span class="mono" style="font-size:12px;color:var(--muted)">#123</span><b style="font-weight:600">auth refresh</b></span></div>
+<div class="head"><span style="color:var(--muted)">rzorzal/clusia</span><span class="mono" style="color:var(--muted)">#123</span><span style="font-size:17px;font-weight:600">feat: auth refresh</span><span style="color:var(--faint);font-size:12px">@octo · <span style="color:var(--green)">+120</span> <span style="color:var(--orange)">−34</span> · 7 files</span></div>
+<div class="sections">${['Diagrams', 'Security', 'Diff', 'Audits', 'Comments', 'Tests'].map((s) => `<span class="sec ${s === 'Diff' ? 'on' : ''}">${s}</span>`).join('')}<span style="flex:1"></span>
+  <div class="switch"><span>Unified</span><span>Split</span><span class="on">Story</span><span>Calls</span></div></div>
+<div class="body">
+  <nav><div style="display:flex;align-items:center;gap:8px;padding:0 8px 8px"><span class="cap" style="flex:1">The change in ${steps} steps</span><span class="cap" style="text-transform:none">${state === 'static' ? '0' : '1'} of ${steps} read</span></div>
+    ${navItems}<div style="flex:1"></div>${verBlock}</nav>
+  <main>${banners[state] || ''}${summary}${step}</main>
+</div>
+<div class="status"><span style="width:8px;height:8px;border-radius:4px;background:var(--green)"></span><span>Claude Code · ${state === 'static' ? 'writing the story' : 'session active'}</span><span style="color:var(--muted)">${statusText}</span><span style="flex:1"></span><span class="btn p" style="height:34px;padding:0 16px">Finalize review</span></div>`;
+</script>
+</body>
+</html>

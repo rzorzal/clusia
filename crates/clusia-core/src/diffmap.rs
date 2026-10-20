@@ -3,15 +3,10 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::draft::{Anchor, Draft, ItemStatus, Side};
+use crate::hunks::{parse_hunk_header, split_git_paths};
 use crate::prdata::FileDiff;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hunk {
-    pub old_start: u32,
-    pub old_len: u32,
-    pub new_start: u32,
-    pub new_len: u32,
-}
+pub use crate::hunks::Hunk;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileChange {
@@ -37,47 +32,6 @@ pub enum LineMap {
 pub struct Relocation {
     pub moved: usize,
     pub obsolete: usize,
-}
-
-fn parse_range(s: &str) -> Option<(u32, u32)> {
-    match s.split_once(',') {
-        Some((start, len)) => Some((start.parse().ok()?, len.parse().ok()?)),
-        None => Some((s.parse().ok()?, 1)),
-    }
-}
-
-/// `@@ -a[,b] +c[,d] @@ …`
-fn parse_hunk_header(line: &str) -> Option<Hunk> {
-    let rest = line.strip_prefix("@@ -")?;
-    let (old, rest) = rest.split_once(" +")?;
-    let (new, _) = rest.split_once(" @@")?;
-    let (old_start, old_len) = parse_range(old)?;
-    let (new_start, new_len) = parse_range(new)?;
-    Some(Hunk {
-        old_start,
-        old_len,
-        new_start,
-        new_len,
-    })
-}
-
-/// `a/<path> b/<path>`: without a rename both halves are equal, so split in the middle.
-/// Renames are corrected by the `rename from/to` lines that follow.
-fn split_git_paths(rest: &str) -> (String, String) {
-    let n = rest.len();
-    if n >= 5 && (n - 5).is_multiple_of(2) {
-        let half = (n - 5) / 2;
-        if rest.starts_with("a/")
-            && rest.get(2 + half..5 + half) == Some(" b/")
-            && let (Some(a), Some(b)) = (rest.get(2..2 + half), rest.get(5 + half..))
-        {
-            return (a.to_string(), b.to_string());
-        }
-    }
-    match rest.split_once(" b/") {
-        Some((a, b)) => (a.trim_start_matches("a/").to_string(), b.to_string()),
-        None => (rest.to_string(), rest.to_string()),
-    }
 }
 
 struct Pending {

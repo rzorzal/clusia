@@ -24,6 +24,7 @@ pub struct Config {
     pub media: Media,
     pub composer: Composer,
     pub harness: Harness,
+    pub diff: Diff,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +98,8 @@ pub enum DiffView {
     #[default]
     Unified,
     Split,
+    Story,
+    Calls,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -559,6 +562,20 @@ pub const MIN_PERMISSION_TIMEOUT_SECS: u32 = 30;
 pub const MAX_PERMISSION_TIMEOUT_SECS: u32 = 600;
 pub const DEFAULT_CHECK_TIMEOUT_SECS: u32 = 600;
 pub const CHECK_TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 60..=1800;
+pub const CALLS_DEPTH_RANGE: std::ops::RangeInclusive<u8> = 1..=5;
+
+/// How the Diff's Call graph is drawn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Diff {
+    pub calls_depth: u8,
+}
+
+impl Default for Diff {
+    fn default() -> Self {
+        Self { calls_depth: 3 }
+    }
+}
 
 /// The agent behind the review chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -597,6 +614,8 @@ pub struct Harness {
     pub revalidate: bool,
     /// How long no push may arrive before the draft is revalidated.
     pub revalidate_quiet_secs: u32,
+    /// Write the Diff's Story with the agent when the Story view opens.
+    pub story: bool,
 }
 
 impl Harness {
@@ -648,6 +667,7 @@ impl Default for Harness {
             check_timeout_secs: DEFAULT_CHECK_TIMEOUT_SECS,
             revalidate: true,
             revalidate_quiet_secs: QUIET_DEFAULT_SECS,
+            story: true,
         }
     }
 }
@@ -1093,6 +1113,14 @@ impl Config {
                 "harness.revalidate_quiet_secs must be between {} and {}, got {quiet}",
                 QUIET_RANGE.start(),
                 QUIET_RANGE.end()
+            ));
+        }
+        let depth = self.diff.calls_depth;
+        if !CALLS_DEPTH_RANGE.contains(&depth) {
+            return Err(format!(
+                "diff.calls_depth must be between {} and {}, got {depth}",
+                CALLS_DEPTH_RANGE.start(),
+                CALLS_DEPTH_RANGE.end()
             ));
         }
         let mut seen = BTreeSet::new();
@@ -2086,5 +2114,54 @@ mod tests {
         assert!(c.harness.keywords_3d);
         let off: Config = serde_json::from_str(r#"{"harness":{"keywords_3d":false}}"#).unwrap();
         assert!(!off.harness.keywords_3d && !off.harness.diagrams);
+    }
+
+    #[test]
+    fn the_diff_section_defaults_to_depth_three_and_is_validated() {
+        assert_eq!(CALLS_DEPTH_RANGE, 1..=5);
+        assert_eq!(Config::default().diff.calls_depth, 3);
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.diff, Diff { calls_depth: 3 });
+        let c: Config = serde_json::from_str(r#"{"diff":{}}"#).unwrap();
+        assert_eq!(c.diff.calls_depth, 3);
+        for depth in 1..=5 {
+            let mut c = Config::default();
+            c.diff.calls_depth = depth;
+            assert_eq!(c.validate(), Ok(()));
+        }
+        for (depth, text) in [(0, "got 0"), (6, "got 6")] {
+            let mut c = Config::default();
+            c.diff.calls_depth = depth;
+            assert_eq!(
+                c.validate(),
+                Err(format!("diff.calls_depth must be between 1 and 5, {text}"))
+            );
+        }
+    }
+
+    #[test]
+    fn the_story_is_written_by_default_and_a_config_without_the_key_gets_that() {
+        assert!(Config::default().harness.story);
+        let c: Config = serde_json::from_str(r#"{"harness":{"diagrams":true}}"#).unwrap();
+        assert!(c.harness.story);
+        let off: Config = serde_json::from_str(r#"{"harness":{"story":false}}"#).unwrap();
+        assert!(!off.harness.story);
+        assert_eq!(off.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_diff_view_remembers_story_and_calls() {
+        for (view, text) in [
+            (DiffView::Unified, "unified"),
+            (DiffView::Split, "split"),
+            (DiffView::Story, "story"),
+            (DiffView::Calls, "calls"),
+        ] {
+            assert_eq!(serde_json::to_string(&view).unwrap(), format!("\"{text}\""));
+            let c: Config =
+                serde_json::from_str(&format!(r#"{{"appearance":{{"diff_view":"{text}"}}}}"#))
+                    .unwrap();
+            assert_eq!(c.appearance.diff_view, view);
+        }
     }
 }

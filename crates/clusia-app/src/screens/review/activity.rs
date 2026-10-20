@@ -6,13 +6,14 @@
 use clusia_core::PrRef;
 use clusia_core::checks::CheckKind;
 use clusia_core::revalidation::RoundState;
-use clusia_protocol::SessionStateKind;
+use clusia_protocol::{SessionStateKind, StoryState};
 
 use super::agent::model::{ChatModel, Chats};
 use super::checks::{Checks, ChecksModel};
 use super::diagrams::{Diagrams, DiagramsModel};
 use super::revalidation::{RevalidationModel, Revalidations};
 use super::shell::{agent_status, drawing_status};
+use super::story::StoryModel;
 
 /// What a tab label carries in place of a count while its run goes on; the tab strip draws a
 /// spinner for it.
@@ -34,6 +35,7 @@ pub struct Work<'a> {
     pub checks: Option<&'a ChecksModel>,
     pub diagrams: Option<&'a DiagramsModel>,
     pub revalidation: Option<&'a RevalidationModel>,
+    pub story: Option<&'a StoryModel>,
 }
 
 impl<'a> Work<'a> {
@@ -49,7 +51,19 @@ impl<'a> Work<'a> {
             checks: checks.0.get(pr),
             diagrams: diagrams.0.get(pr),
             revalidation: revalidations.0.get(pr),
+            story: None,
         }
+    }
+
+    /// The Story's run is on: `Writing`, or `Waiting` for a place.
+    pub fn with_story(mut self, story: Option<&'a StoryModel>) -> Self {
+        self.story = story;
+        self
+    }
+
+    /// The agent is writing the story, or waits for a place to.
+    pub fn writing_story(&self) -> bool {
+        self.story.is_some_and(StoryModel::busy)
     }
 
     /// A chat turn runs or waits for its turn.
@@ -79,6 +93,7 @@ impl<'a> Work<'a> {
         self.turn()
             || self.drawing()
             || self.revalidating()
+            || self.writing_story()
             || self.check(CheckKind::Security)
             || self.check(CheckKind::Audit)
     }
@@ -88,6 +103,13 @@ impl<'a> Work<'a> {
     pub fn status(&self, name: &str) -> (String, bool) {
         if let Some(drawing) = self.diagrams.and_then(|m| drawing_status(&m.state, name)) {
             return (drawing, true);
+        }
+        if let Some(story) = self.story {
+            match story.state {
+                StoryState::Writing => return (format!("{name} · writing the story"), true),
+                StoryState::Waiting => return (format!("{name} · waiting for its turn"), true),
+                _ => {}
+            }
         }
         let state = self.chat.map_or(SessionStateKind::None, |c| c.state);
         if self.turn() {
@@ -311,5 +333,40 @@ mod tests {
             "Claude Code · drawing diagrams 3 of 5"
         );
         assert!(work.any());
+    }
+
+    #[test]
+    fn writing_the_story_is_work_and_names_itself() {
+        use clusia_protocol::StoryState;
+
+        use crate::bridge::StoryTell;
+        use crate::screens::review::story::model::StoryModel;
+
+        let (chats, checks, diagrams, revals) = Default::default();
+        let mut story = StoryModel::default();
+        let work = Work::of(&pr(), &chats, &checks, &diagrams, &revals).with_story(Some(&story));
+        assert!(!work.writing_story() && !work.any());
+        for (state, label, working) in [
+            (StoryState::Writing, "Claude Code · writing the story", true),
+            (
+                StoryState::Waiting,
+                "Claude Code · waiting for its turn",
+                true,
+            ),
+            (StoryState::Idle, "Claude Code · no session yet", false),
+            (
+                StoryState::Failed {
+                    message: "x".into(),
+                },
+                "Claude Code · no session yet",
+                false,
+            ),
+        ] {
+            story.apply(&StoryTell::State { pr: pr(), state });
+            let work =
+                Work::of(&pr(), &chats, &checks, &diagrams, &revals).with_story(Some(&story));
+            assert_eq!(work.any(), working);
+            assert_eq!(work.status("Claude Code").0, label);
+        }
     }
 }

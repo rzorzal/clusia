@@ -8,15 +8,15 @@ use clusia_core::diagram::{Change, DiagramKind, DiagramVersion, EntryState, Vers
 use clusia_core::draft::{DraftKind, ThreadRef};
 use clusia_core::hidden::{issue_comment_key, thread_key};
 use clusia_core::keywords::KeywordMap;
-use clusia_core::{Anchor, Origin, ReviewState, Side, Verdict};
+use clusia_core::{Anchor, Origin, PrRef, ReviewState, Side, Verdict};
 use clusia_diagram::keywords::{Point3, PointShape, Scene3D};
 use clusia_protocol::{
-    AuthInfo, DiagramsState, LoadStep, LoadStepKind, SessionStateKind, StepStatus, SyncState,
-    SyncStatus, WindowTarget,
+    AuthInfo, CallsIndexState, DiagramsState, LoadStep, LoadStepKind, SessionStateKind, StepStatus,
+    SyncState, SyncStatus, WindowTarget,
 };
 
 use crate::args::Scene;
-use crate::bridge::{DiagramsTell, Model, Outbox, ProbeState, RevalidationTell, Tell};
+use crate::bridge::{CallsTell, DiagramsTell, Model, Outbox, ProbeState, RevalidationTell, Tell};
 use crate::clock::Clock;
 use crate::fixture;
 use crate::nav::{Nav, Section};
@@ -27,8 +27,10 @@ use crate::review_state::{
 use crate::screens::config::areas::areas_value;
 use crate::screens::open_pr::Palette;
 use crate::screens::review::agent::{Chats, PanelTab, PermissionQueue};
+use crate::screens::review::calls::CallsRequest;
 use crate::screens::review::diagrams::Diagrams;
 use crate::screens::review::diagrams::keywords::render::{focus_pose, view_pose};
+use crate::screens::review::story::{self, StoryStage};
 use crate::ui::code_select::{At, CodeLine, CodeSelection};
 use crate::ui::composer::popover::{PopoverKind, Popovers};
 use crate::ui::composer::{ComposerKey, ComposerMode, Slot};
@@ -463,6 +465,46 @@ fn put_diagrams(
     }
 }
 
+/// The Calls scenes: the tells the daemon would answer `GetCalls` and `FindFunction` with,
+/// carrying the request the load system itself computes for a fresh tab (the centre the
+/// daemon picks, the configured depth, nothing expanded), so the view asks for nothing.
+fn stage_calls(world: &mut World, pr: &PrRef, scene: Scene) {
+    let request = CallsRequest {
+        center: None,
+        depth: 3,
+        expand: Vec::new(),
+    };
+    let Tell::Calls(demo) = fixture::demo_calls_graph(None, 3, &[]) else {
+        unreachable!("the demo answers GetCalls with a Calls tell")
+    };
+    let hits = fixture::demo_find("");
+    let graph = if scene == Scene::DiffCallsUnsupported {
+        let commit = match &demo {
+            CallsTell::Graph {
+                index: CallsIndexState::Ready { commit, .. },
+                ..
+            } => commit.clone(),
+            _ => String::new(),
+        };
+        CallsTell::Graph {
+            pr: pr.clone(),
+            request,
+            graph: None,
+            index: CallsIndexState::Ready { commit, cut: false },
+            unsupported: vec!["server/handler.go".into(), "server/limits.go".into()],
+        }
+    } else {
+        demo
+    };
+    let outbox = &world.resource::<Outbox>().0;
+    let _ = outbox.send(Tell::Calls(graph));
+    let _ = outbox.send(Tell::Calls(CallsTell::Found {
+        pr: pr.clone(),
+        query: String::new(),
+        hits,
+    }));
+}
+
 /// Puts the demo review `rzorzal/clusia#123` in the state `scene` shows (Config pages and
 /// the first run need no review).
 pub fn stage(world: &mut World, scene: Scene) {
@@ -583,6 +625,11 @@ pub fn stage(world: &mut World, scene: Scene) {
         Scene::ComposerPreview => ui.editor = Some(composer_editor(ComposerMode::Preview)),
         Scene::Rendered => ui.section = ReviewSection::Comments,
         Scene::Split | Scene::SplitSelected => ui.mode = DiffMode::Split,
+        Scene::DiffStory
+        | Scene::DiffStoryStatic
+        | Scene::DiffStoryOutdated
+        | Scene::DiffStoryCompare => ui.mode = DiffMode::Story,
+        Scene::DiffCalls | Scene::DiffCallsUnsupported => ui.mode = DiffMode::Calls,
         Scene::CommentsHidden => {
             ui.section = ReviewSection::Comments;
             ui.filter = crate::review_state::CommentsFilter::All;
@@ -719,6 +766,18 @@ pub fn stage(world: &mut World, scene: Scene) {
         put_diagrams(world, &pr, versions, state);
         // The mockups of the Diagrams tab have no right panel.
         world.resource_mut::<Chats>().entry(&pr).open = false;
+    }
+    if scene.diff_view().is_some() {
+        // The mockups of Story and Calls have no right panel.
+        world.resource_mut::<Chats>().entry(&pr).open = false;
+    }
+    match scene {
+        Scene::DiffStory => story::stage(world, &pr, StoryStage::Written, now),
+        Scene::DiffStoryStatic => story::stage(world, &pr, StoryStage::Static, now),
+        Scene::DiffStoryOutdated => story::stage(world, &pr, StoryStage::Outdated, now),
+        Scene::DiffStoryCompare => story::stage(world, &pr, StoryStage::Compare, now),
+        Scene::DiffCalls | Scene::DiffCallsUnsupported => stage_calls(world, &pr, scene),
+        _ => {}
     }
     if matches!(
         scene,
@@ -1036,6 +1095,14 @@ mod tests {
                 }
                 Scene::DiagramsNoHarness | Scene::DiagramsNoAutoDraw => {
                     assert_eq!(tab.ui.section, ReviewSection::Diagrams, "{scene:?}");
+                }
+                Scene::DiffStory
+                | Scene::DiffStoryStatic
+                | Scene::DiffStoryOutdated
+                | Scene::DiffStoryCompare
+                | Scene::DiffCalls
+                | Scene::DiffCallsUnsupported => {
+                    assert_eq!(tab.ui.section, ReviewSection::Diff, "{scene:?}");
                 }
                 Scene::Loading => {
                     let Phase::Loading { steps } = &tab.phase else {
@@ -2005,5 +2072,178 @@ mod tests {
             "the drawing is in version 1 too"
         );
         assert!(testing::tab(&app, &pr).ui.diagram_compare);
+    }
+
+    use crate::screens::review::calls::CallsRoot;
+
+    /// The six scenes of the Diff's Story and Calls views.
+    const DIFF_VIEW_SCENES: [Scene; 6] = [
+        Scene::DiffStory,
+        Scene::DiffStoryStatic,
+        Scene::DiffStoryOutdated,
+        Scene::DiffStoryCompare,
+        Scene::DiffCalls,
+        Scene::DiffCallsUnsupported,
+    ];
+
+    #[test]
+    fn the_story_and_calls_scenes_hide_the_right_panel_and_keep_the_config_alone() {
+        for scene in DIFF_VIEW_SCENES {
+            let app = staged(scene);
+            let pr = fixture::demo_pr();
+            let chats = app
+                .world()
+                .resource::<crate::screens::review::agent::Chats>();
+            assert!(
+                chats.0.get(&pr).is_some_and(|c| !c.open),
+                "{scene:?} shows the Draft/Agent panel"
+            );
+            let want = scene.diff_view().expect("a diff view");
+            let mode = testing::tab(&app, &pr).ui.mode;
+            assert_eq!(
+                mode,
+                match want {
+                    clusia_core::config::DiffView::Story => DiffMode::Story,
+                    _ => DiffMode::Calls,
+                },
+                "{scene:?}"
+            );
+            let config = &app
+                .world()
+                .resource::<crate::bridge::Model>()
+                .snapshot
+                .config;
+            assert_eq!(
+                config.appearance.diff_view,
+                clusia_core::config::DiffView::Unified,
+                "{scene:?} wrote the view into the config"
+            );
+        }
+    }
+
+    #[test]
+    fn the_calls_scene_shows_the_demo_graph_and_asks_for_nothing_more() {
+        let mut app = staged(Scene::DiffCalls);
+        assert_eq!(testing::count::<CallsRoot>(&mut app), 1);
+        for needle in ["CHANGED IN THIS PR", "TokenStore::refresh", "Depth", "UP 1"] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+        assert!(
+            !testing::recorded(&mut app)
+                .iter()
+                .any(|a| matches!(a, Ask::GetCalls { .. })),
+            "the scene already holds the answer"
+        );
+    }
+
+    #[test]
+    fn the_unsupported_scene_shows_the_card_and_the_changed_functions() {
+        let mut app = staged(Scene::DiffCallsUnsupported);
+        for needle in [
+            "Call graph not available for Go yet",
+            "NO CALL GRAPH YET",
+            "server/handler.go",
+            "server/limits.go",
+            "CHANGED IN THIS PR",
+            "Show in Unified",
+            "Open in Story",
+        ] {
+            assert!(testing::shows(&mut app, needle), "{needle}");
+        }
+    }
+
+    #[test]
+    fn each_story_scene_shows_its_own_banner() {
+        for (scene, needles) in [
+            (Scene::DiffStory, &["In one sentence", "Mark read"][..]),
+            (
+                Scene::DiffStoryStatic,
+                &["is writing the story", "Stop"][..],
+            ),
+            (
+                Scene::DiffStoryOutdated,
+                &["Written for commit", "Rewrite"][..],
+            ),
+            (
+                Scene::DiffStoryCompare,
+                &["Show changes since version 1"][..],
+            ),
+        ] {
+            let mut app = staged(scene);
+            for needle in needles {
+                assert!(testing::shows(&mut app, needle), "{scene:?}: {needle}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_story_chips_carry_their_tone_in_ink_and_an_opaque_tint() {
+        use crate::theme::Swatch;
+        use crate::ui::kit::{Fill, Ink};
+        let mut app = staged(Scene::DiffStory);
+        let mut look = |label: &str| {
+            let world = app.world_mut();
+            let mut texts = world.query::<(&Text, &Ink, &ChildOf)>();
+            let (ink, parent) = texts
+                .iter(world)
+                .find(|(t, ..)| t.0 == label)
+                .map(|(_, ink, of)| (ink.0, of.parent()))
+                .unwrap_or_else(|| panic!("no chip {label}"));
+            (world.get::<Fill>(parent).expect("a filled pill").0, ink)
+        };
+        assert_eq!(look("lock"), (Swatch::ChangedBg, Swatch::Green));
+        assert_eq!(
+            look("reuses the new token"),
+            (Swatch::ChangedBg, Swatch::Green)
+        );
+        assert_eq!(
+            look("exchange again · rejected"),
+            (Swatch::RiskBg, Swatch::Orange)
+        );
+        assert_eq!(look("waits"), (Swatch::Chrome, Swatch::Fg));
+    }
+
+    #[test]
+    fn the_calls_scene_opens_the_demo_graph_readable_in_the_screenshot_window() {
+        use crate::screens::review::calls::CallsCanvas;
+        use crate::screens::review::diagrams::canvas::CanvasState;
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(1280, 800));
+        stage(app.world_mut(), Scene::DiffCalls);
+        stage_snapshot(app.world_mut(), Scene::DiffCalls);
+        testing::settle(&mut app);
+        for _ in 0..4 {
+            app.update();
+        }
+        let canvas = testing::find::<CallsCanvas>(&mut app, |_| true);
+        let state = app.world().get::<CanvasState>(canvas).expect("a graph");
+        assert!(state.fitted, "fitted to {:?}", state.view.viewport);
+        assert!(
+            (0.75..=1.0).contains(&state.view.zoom),
+            "{} in a {:?} canvas for a {:?} graph",
+            state.view.zoom,
+            state.view.viewport,
+            state.view.content
+        );
+    }
+
+    #[test]
+    fn the_calls_scene_lists_as_many_changed_functions_as_the_status_counts() {
+        use crate::screens::review::calls::list::left_view;
+        use crate::screens::review::calls::{Calls, status_text};
+        let app = staged(Scene::DiffCalls);
+        let pr = fixture::demo_pr();
+        let ui = testing::tab(&app, &pr).ui.clone();
+        let m = app.world().resource::<Calls>().0.get(&pr).expect("a model");
+        let g = m.graph.as_ref().expect("a graph");
+        let view = left_view(m, &ui);
+        let titles: Vec<&str> = view.groups.iter().map(|g| g.title.as_str()).collect();
+        assert_eq!(titles[..2], ["Changed in this PR · 4", "Added · 1"]);
+        let listed: u32 = view.groups[..2]
+            .iter()
+            .map(|g| g.rows.len() as u32 + g.more)
+            .sum();
+        assert_eq!(listed, g.changed, "both count the PR's non-removed changes");
+        let status = status_text(&ui, Some(m), "").expect("a status");
+        assert!(status.contains(&format!("· {listed} changed,")), "{status}");
     }
 }

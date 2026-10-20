@@ -399,8 +399,9 @@ pub fn activate(app: &mut App, entity: Entity) {
     app.update();
 }
 
-/// A primary-button click on `entity` that bubbles as a real one does, and a frame.
-pub fn click(app: &mut App, entity: Entity) {
+/// A primary-button click with `count` clicks in a row (2 is a double-click) on `entity`, that
+/// bubbles as a real one does, and a frame.
+pub fn click_n(app: &mut App, entity: Entity, count: u8) {
     use bevy::camera::NormalizedRenderTarget;
     use bevy::picking::backend::HitData;
     use bevy::picking::events::{Click, Pointer};
@@ -420,11 +421,16 @@ pub fn click(app: &mut App, entity: Entity) {
             button: PointerButton::Primary,
             hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
             duration: std::time::Duration::ZERO,
-            count: 1,
+            count,
         },
         entity,
     ));
     app.update();
+}
+
+/// A primary-button click on `entity` that bubbles as a real one does, and a frame.
+pub fn click(app: &mut App, entity: Entity) {
+    click_n(app, entity, 1);
 }
 
 /// Changes the config as the daemon would and runs a frame.

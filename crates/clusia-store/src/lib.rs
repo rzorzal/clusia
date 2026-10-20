@@ -4,16 +4,19 @@ pub mod activity;
 pub mod agent;
 pub mod atomic;
 pub mod cache;
+pub mod calls;
 pub mod checks;
 pub mod config;
 pub mod diagrams;
 pub mod hidden;
 pub mod reviews;
+pub mod stories;
 pub mod tabs;
 
 pub use activity::{append_activity, read_activity};
 pub use agent::{load_agent_state, save_agent_state};
 pub use cache::{delete_review_cache, load_review_cache, save_review_cache};
+pub use calls::{delete_calls, load_index, save_index};
 pub use checks::{delete_checks, load_checks, save_checks};
 pub use config::{ConfigKeyError, Loaded, get_value, load_config, save_config, set_value};
 pub use diagrams::{
@@ -22,6 +25,10 @@ pub use diagrams::{
 };
 pub use hidden::{delete_hidden, load_hidden, save_hidden};
 pub use reviews::{ReviewLoad, delete_review, list_reviews, load_review, save_review};
+pub use stories::{
+    delete_stories, load_latest_story_version, load_read_marks, load_story_version,
+    load_story_versions, next_story_number, save_read_marks, save_story_version,
+};
 pub use tabs::{load_open_tabs, save_open_tabs};
 
 /// Seconds since the Unix epoch, for quarantine suffixes.

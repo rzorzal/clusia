@@ -76,6 +76,8 @@ pub enum DiffMode {
     #[default]
     Unified,
     Split,
+    Story,
+    Calls,
 }
 
 impl From<DiffView> for DiffMode {
@@ -83,6 +85,8 @@ impl From<DiffView> for DiffMode {
         match view {
             DiffView::Unified => DiffMode::Unified,
             DiffView::Split => DiffMode::Split,
+            DiffView::Story => DiffMode::Story,
+            DiffView::Calls => DiffMode::Calls,
         }
     }
 }
@@ -115,6 +119,8 @@ pub enum Modal {
     Leave,
     /// The dialog of a diagram box, for `TabUi.diagram_node`.
     DiagramNode,
+    /// The Full view of a Calls node, for `TabUi.calls_node`.
+    CallsNode,
 }
 
 /// What the comment editor writes.
@@ -148,6 +154,17 @@ pub enum EditTarget {
         number: u32,
         key: String,
         node: String,
+    },
+    /// A comment on a Story step: the version's number and the step's id. It is written in the
+    /// step's card; the daemon builds the body with the step's title.
+    StoryStep {
+        number: u32,
+        step: String,
+    },
+    /// A comment on a Calls node, by `FunctionId.0`. It is written in the node's panel or
+    /// its Full view.
+    CallsNode {
+        function: String,
     },
 }
 
@@ -241,6 +258,22 @@ pub struct TabUi {
     pub hidden: clusia_core::HiddenComments,
     /// `GetHiddenComments` was asked for.
     pub hidden_asked: bool,
+    /// The Story step shown as current (its id); `None`: the first.
+    pub story_step: Option<String>,
+    /// The Story version shown; `None`: the latest.
+    pub story_version: Option<u32>,
+    /// *Show changes since version n-1* is on.
+    pub story_compare: bool,
+    /// The function (`FunctionId.0`) the call graph is centred on; `None`: the first changed one.
+    pub calls_center: Option<String>,
+    /// The selected node's key; the Full view modal reads it.
+    pub calls_node: Option<String>,
+    /// The levels whose *+N more* was clicked.
+    pub calls_expand: Vec<i8>,
+    /// The graph's depth; `None`: `diff.calls_depth` of the config.
+    pub calls_depth: Option<u8>,
+    /// The Calls view's Depth menu is open.
+    pub calls_depth_menu: bool,
 }
 
 impl Default for TabUi {
@@ -272,6 +305,14 @@ impl Default for TabUi {
             keywords: KeywordsUi::default(),
             hidden: clusia_core::HiddenComments::default(),
             hidden_asked: false,
+            story_step: None,
+            story_version: None,
+            story_compare: false,
+            calls_center: None,
+            calls_node: None,
+            calls_expand: Vec::new(),
+            calls_depth: None,
+            calls_depth_menu: false,
         }
     }
 }
@@ -435,6 +476,8 @@ impl Plugin for ReviewStatePlugin {
             .init_resource::<crate::screens::review::checks::Checks>()
             .init_resource::<crate::screens::review::diagrams::Diagrams>()
             .init_resource::<crate::screens::review::revalidation::Revalidations>()
+            .init_resource::<crate::screens::review::story::model::Stories>()
+            .init_resource::<crate::screens::review::calls::Calls>()
             .add_message::<ReviewEvent>()
             .add_systems(Update, open_new_tabs.after(NavSystems));
     }
@@ -714,6 +757,57 @@ mod tests {
                 &testing::tab(&app, &pr())
             ),
             "Echo"
+        );
+    }
+
+    #[test]
+    fn every_stored_view_has_its_own_mode() {
+        for (view, mode) in [
+            (DiffView::Unified, DiffMode::Unified),
+            (DiffView::Split, DiffMode::Split),
+            (DiffView::Story, DiffMode::Story),
+            (DiffView::Calls, DiffMode::Calls),
+        ] {
+            assert_eq!(DiffMode::from(view), mode);
+        }
+    }
+
+    #[test]
+    fn a_new_tab_opens_in_the_story_or_calls_view_the_config_stores() {
+        for (stored, want) in [
+            (DiffView::Story, DiffMode::Story),
+            (DiffView::Calls, DiffMode::Calls),
+        ] {
+            let mut app = testing::app(fixture::demo(NOW));
+            app.world_mut()
+                .resource_mut::<Model>()
+                .snapshot
+                .config
+                .appearance
+                .diff_view = stored;
+            app.world_mut()
+                .resource_mut::<Nav>()
+                .go(&WindowTarget::Review { pr: pr() });
+            app.update();
+            assert_eq!(testing::tab(&app, &pr()).ui.mode, want);
+        }
+    }
+
+    #[test]
+    fn the_story_and_calls_state_starts_empty() {
+        let ui = TabUi::default();
+        assert_eq!(
+            (ui.story_step, ui.story_version, ui.story_compare),
+            (None, None, false)
+        );
+        assert_eq!(
+            (
+                ui.calls_center,
+                ui.calls_node,
+                ui.calls_expand,
+                ui.calls_depth
+            ),
+            (None, None, Vec::new(), None)
         );
     }
 

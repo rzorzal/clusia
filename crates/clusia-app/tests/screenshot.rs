@@ -1,6 +1,7 @@
 //! Renders the demo screens with the real binary. It opens a window, so it is ignored by default:
 //! `cargo test -p clusia-app --test screenshot -- --ignored`. Set `CLUSIA_SCREENSHOTS=<dir>` to
-//! keep the PNGs.
+//! keep the PNGs. Set `CLUSIA_SCREENSHOT_ONLY=diff-calls,diff-story` to render only those scenes
+//! (both themes).
 
 use std::path::Path;
 use std::process::Command;
@@ -73,6 +74,12 @@ fn demo_screenshots() {
         "diagrams-keywords-usecase",
         "keywords-card",
         "keywords-xy",
+        "diff-story",
+        "diff-story-static",
+        "diff-story-outdated",
+        "diff-story-compare",
+        "diff-calls",
+        "diff-calls-unsupported",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((
@@ -80,7 +87,12 @@ fn demo_screenshots() {
             vec!["--demo", "--dark", "--scene", scene],
         ));
     }
+    let only = std::env::var("CLUSIA_SCREENSHOT_ONLY").ok();
+    let mut rendered = 0;
     for (name, args) in &shots {
+        if !wanted(name, only.as_deref()) {
+            continue;
+        }
         // Only a shot that forces --dark may differ from light, so none follows the macOS appearance.
         let light = (!args.contains(&"--dark")).then_some("--light");
         let out = dir.path().join(format!("{name}.png"));
@@ -102,14 +114,37 @@ fn demo_screenshots() {
         if let Err(message) = clusia_app::render_check::check_png(&out) {
             panic!("{name}: {message}");
         }
+        rendered += 1;
         if name.starts_with("diagrams-keywords") || name.starts_with("keywords-") {
             let share = non_background_share(&out, (0.45, 0.40, 0.75, 0.75));
             assert!(share > 0.02, "{name}: the 3D area is empty ({share})");
+        }
+        if name.starts_with("diff-calls-") && !name.starts_with("diff-calls-unsupported") {
+            let share = non_background_share(&out, (0.28, 0.25, 0.72, 0.85));
+            assert!(share > 0.02, "{name}: the call graph is empty");
         }
         if let Ok(keep) = std::env::var("CLUSIA_SCREENSHOTS") {
             std::fs::copy(&out, Path::new(&keep).join(format!("{name}.png"))).unwrap();
         }
     }
+    assert!(
+        rendered > 0,
+        "CLUSIA_SCREENSHOT_ONLY={only:?} matched no scene"
+    );
+}
+
+/// Whether the shot `name` is wanted under `only` (`CLUSIA_SCREENSHOT_ONLY`: scene names
+/// separated by commas). A shot's scene is its name without `-light` or `-dark`; none, or an
+/// empty list, wants every shot.
+fn wanted(name: &str, only: Option<&str>) -> bool {
+    let Some(only) = only.map(str::trim).filter(|o| !o.is_empty()) else {
+        return true;
+    };
+    let scene = name
+        .strip_suffix("-light")
+        .or_else(|| name.strip_suffix("-dark"))
+        .unwrap_or(name);
+    only.split(',').map(str::trim).any(|s| s == scene)
 }
 
 /// The share of pixels in `crop` (left, top, right, bottom as fractions of the image) that
@@ -136,4 +171,30 @@ fn non_background_share(png: &Path, crop: (f32, f32, f32, f32)) -> f32 {
     let total: u32 = counts.values().sum();
     let other: u32 = counts.iter().filter(|(c, _)| far(c)).map(|(_, n)| *n).sum();
     other as f32 / total as f32
+}
+
+#[test]
+fn the_filter_keeps_every_shot_without_a_list() {
+    for only in [None, Some(""), Some("  ")] {
+        for name in ["home-light", "split", "diff-calls-dark"] {
+            assert!(wanted(name, only), "{name} under {only:?}");
+        }
+    }
+}
+
+#[test]
+fn the_filter_matches_a_scene_in_both_themes_and_nothing_else() {
+    assert!(wanted("diff-calls-light", Some("diff-calls")));
+    assert!(wanted("diff-calls-dark", Some("diff-story, diff-calls")));
+    assert!(
+        !wanted("diff-calls-unsupported-light", Some("diff-calls")),
+        "a longer scene name is another scene"
+    );
+    assert!(!wanted("diff-story-light", Some("diff-calls")));
+    assert!(
+        wanted("split", Some("split")),
+        "a base shot has no theme suffix"
+    );
+    assert!(wanted("review-dark", Some("review")));
+    assert!(!wanted("review-dark", Some("diff")));
 }

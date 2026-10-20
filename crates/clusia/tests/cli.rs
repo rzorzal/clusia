@@ -524,7 +524,7 @@ mod review_flow {
     use super::*;
     use clusia_harness::testkit::{
         FakeClaude, Script, Turn, diagram_block, diagram_plan_block, finding_block,
-        keyword_placement_block, keyword_plan_block, pass_block, revalidation_block,
+        keyword_placement_block, keyword_plan_block, pass_block, revalidation_block, story_block,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -1335,6 +1335,171 @@ mod review_flow {
             "it prints the listing the run ended with"
         );
         assert_eq!(first.wait().unwrap().code(), Some(130), "Ctrl-C exits 130");
+    }
+
+    /// A story of the one file of acme/widgets#7: its three lines in one step.
+    fn story_answer(sentence: &str, history: Option<&str>) -> Turn {
+        let mut step = json!({
+            "id": "feature", "title": "The feature file", "subtitle": "feature.txt",
+            "explanation": "It adds three lines.",
+            "hunks": [{"path": "feature.txt", "start_line": 1, "end_line": 3}]
+        });
+        if let Some(history) = history {
+            step["history"] = json!(history);
+        }
+        Turn::answer_blocks(
+            "Written.",
+            &[story_block(json!({"sentence": sentence, "steps": [step]}))],
+        )
+    }
+
+    #[test]
+    fn story_with_no_flag_lists_the_static_order_and_runs_no_agent() {
+        let w = AgentWorld::new(Script::one(Turn::answer("unused")));
+        let o = w.run(&["story", "acme/widgets#7"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = stdout(&o);
+        assert!(
+            out.lines().next().unwrap().starts_with("1. Other files"),
+            "{out}"
+        );
+        assert_eq!(out.lines().last(), Some("Static order"), "{out}");
+        let json = w.run(&["--json", "story", "acme/widgets#7"]);
+        let printed: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+        assert_eq!(printed["latest"], json!(null));
+        assert_eq!(printed["static_steps"][0]["other"], json!(true));
+        assert_eq!(printed["state"], json!({"state": "idle"}));
+        assert_eq!(printed["read"], json!([]));
+        assert!(FakeClaude::calls(&w.fake_dir()).is_empty());
+    }
+
+    #[test]
+    fn story_write_follows_the_run_lists_the_story_and_a_second_write_makes_version_two() {
+        let w = AgentWorld::new(Script::turns(vec![
+            story_answer("Adds the feature file.", None),
+            story_answer("Adds the feature file, again.", Some("same")),
+        ]));
+        let o = w.run(&["story", "acme/widgets#7", "--write"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = stdout(&o);
+        assert!(
+            out.starts_with("1. The feature file · feature.txt"),
+            "{out}"
+        );
+        assert!(
+            out.lines()
+                .last()
+                .unwrap()
+                .starts_with("Written by Claude Code from commit "),
+            "{out}"
+        );
+        assert!(stderr(&o).contains("writing the story"), "{}", stderr(&o));
+        assert_eq!(FakeClaude::calls(&w.fake_dir()).len(), 1);
+
+        let again = w.run(&["story", "acme/widgets#7"]);
+        assert_eq!(stdout(&again), out, "the listing says the same later");
+        let json = w.run(&["--json", "story", "acme/widgets#7"]);
+        let printed: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+        assert_eq!(printed["latest"]["state"], json!({"state": "written"}));
+        assert_eq!(
+            printed["latest"]["spec"]["steps"][0]["id"],
+            json!("feature")
+        );
+        assert_eq!(printed["versions"].as_array().map(Vec::len), Some(1));
+
+        let second = w.run(&["story", "acme/widgets#7", "--write"]);
+        assert!(second.status.success(), "{}", stderr(&second));
+        let json = w.run(&["--json", "story", "acme/widgets#7"]);
+        let printed: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+        assert_eq!(printed["versions"].as_array().map(Vec::len), Some(2));
+        assert_eq!(printed["latest"]["number"], json!(2));
+        assert_eq!(FakeClaude::calls(&w.fake_dir()).len(), 2);
+    }
+
+    #[test]
+    fn story_write_that_fails_prints_the_static_order_and_exits_1() {
+        let w = AgentWorld::new(Script::turns(vec![
+            Turn::answer("No block."),
+            Turn::answer("Still no block."),
+        ]));
+        let o = w.run(&["story", "acme/widgets#7", "--write"]);
+        assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+        let out = stdout(&o);
+        assert!(out.contains("Static order"), "{out}");
+        assert!(
+            out.lines()
+                .last()
+                .unwrap()
+                .starts_with("The story could not be written: "),
+            "{out}"
+        );
+        assert!(
+            stderr(&o).contains("the story could not be written"),
+            "{}",
+            stderr(&o)
+        );
+        assert_eq!(FakeClaude::calls(&w.fake_dir()).len(), 2, "one repair turn");
+    }
+
+    #[test]
+    fn calls_with_no_supported_language_says_so_and_json_is_null() {
+        let w = AgentWorld::new(Script::one(Turn::answer("unused")));
+        let o = w.run(&["calls", "acme/widgets#7"]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert_eq!(
+            stdout(&o).lines().next(),
+            Some(
+                "No call graph for this pull request: no changed function in a supported language."
+            )
+        );
+        let json = w.run(&["--json", "calls", "acme/widgets#7"]);
+        assert_eq!(stdout(&json), "null");
+        assert!(FakeClaude::calls(&w.fake_dir()).is_empty());
+    }
+
+    #[test]
+    fn calls_for_a_function_that_does_not_exist_fails() {
+        let w = AgentWorld::new(Script::one(Turn::answer("unused")));
+        let o = w.run(&["calls", "acme/widgets#7", "ghost_fn"]);
+        assert_eq!(o.status.code(), Some(1));
+        assert!(
+            stderr(&o).contains("no function matches \"ghost_fn\""),
+            "{}",
+            stderr(&o)
+        );
+    }
+
+    #[test]
+    fn calls_with_a_depth_out_of_range_fails_before_the_daemon() {
+        let h = Home::new();
+        for depth in ["0", "6"] {
+            let o = h.clusia(&["calls", "acme/widgets#7", "--depth", depth]);
+            assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+            assert!(
+                stderr(&o).contains(&format!("--depth must be between 1 and 5, got {depth}")),
+                "{}",
+                stderr(&o)
+            );
+        }
+        assert_eq!(
+            h.clusia(&["daemon", "status"]).status.code(),
+            Some(3),
+            "no daemon was started"
+        );
+    }
+
+    #[test]
+    fn story_and_calls_with_a_bad_pull_request_fail_before_the_daemon() {
+        let h = Home::new();
+        for args in [["story", "nope"], ["calls", "nope"]] {
+            let o = h.clusia(&args);
+            assert!(!o.status.success());
+        }
+        assert_eq!(
+            h.clusia(&["daemon", "status"]).status.code(),
+            Some(3),
+            "no daemon was started"
+        );
     }
 
     /// The id a `review comment` or `review note` prints: `<id> added`.

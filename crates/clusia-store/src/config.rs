@@ -914,4 +914,19 @@ mod tests {
         assert_eq!(set.harness.check_timeout_secs, 300);
         assert!(set_value(&c, "harness.check_timeout_secs", "30").is_err());
     }
+
+    #[test]
+    fn the_diff_depth_and_the_story_switch_are_read_and_set_by_name() {
+        let c = Config::default();
+        assert_eq!(get_value(&c, "diff.calls_depth").unwrap(), "3");
+        assert_eq!(get_value(&c, "harness.story").unwrap(), "true");
+        let c = set_value(&c, "diff.calls_depth", "5").unwrap();
+        assert_eq!(c.diff.calls_depth, 5);
+        let c = set_value(&c, "harness.story", "false").unwrap();
+        assert!(!c.harness.story);
+        assert!(set_value(&c, "diff.calls_depth", "6").is_err());
+        assert!(set_value(&c, "diff.calls_depth", "0").is_err());
+        let c = set_value(&c, "appearance.diff_view", "story").unwrap();
+        assert_eq!(c.appearance.diff_view, clusia_core::DiffView::Story);
+    }
 }

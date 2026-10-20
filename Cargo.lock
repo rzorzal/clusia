@@ -1809,6 +1809,7 @@ name = "clusia"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clusia-calls",
  "clusia-core",
  "clusia-harness",
  "clusia-protocol",
@@ -1837,6 +1838,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "clap",
+ "clusia-calls",
  "clusia-core",
  "clusia-diagram",
  "clusia-harness",
@@ -1863,6 +1865,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "clusia-calls"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "libc",
+ "serde",
+ "serde_json",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
 ]
 
 [[package]]
@@ -1951,6 +1969,7 @@ dependencies = [
 name = "clusia-protocol"
 version = "0.1.0"
 dependencies = [
+ "clusia-calls",
  "clusia-core",
  "libc",
  "serde",
@@ -1981,6 +2000,7 @@ dependencies = [
 name = "clusia-store"
 version = "0.1.0"
 dependencies = [
+ "clusia-calls",
  "clusia-core",
  "serde",
  "serde_json",
@@ -2026,6 +2046,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clusia-analytics",
+ "clusia-calls",
  "clusia-core",
  "clusia-git",
  "clusia-harness",

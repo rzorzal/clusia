@@ -18,7 +18,7 @@ use crate::fonts::UiFonts;
 use crate::nav::{Nav, ReviewScreen, Screen, Section};
 use crate::platform_open::{OpenUrls, visit};
 use crate::review_state::{
-    EditTarget, Editor, Modal, Phase, Ready, ReviewSection, ReviewTabs, Tab,
+    DiffMode, EditTarget, Editor, Modal, Phase, Ready, ReviewSection, ReviewTabs, Tab,
 };
 use crate::screens::home::long_age;
 use crate::screens::review::ReviewSystems;
@@ -252,6 +252,8 @@ struct TopView {
     suggestions: usize,
     /// The comment the Diff asks a place for: (id, its place and start).
     reanchor: Option<(String, String)>,
+    /// The Diff view mode, shown as a switch on the section row while the Diff section is open.
+    mode: Option<DiffMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -792,6 +794,7 @@ fn rebuild_top(
             closed: v.closed,
             suggestions: pending_of(tab, revalidations.0.get(&top.pr)),
             reanchor,
+            mode: (tab.ui.section == ReviewSection::Diff).then_some(tab.ui.mode),
         };
         if top.built.as_ref() == Some(&want) {
             continue;
@@ -962,7 +965,7 @@ fn top_region(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, v: &Top
     if let Some((id, preview)) = &v.reanchor {
         reanchor_strip(p, fonts, pr, id, preview);
     }
-    section_tabs(p, fonts, pr, &v.sections, true);
+    section_tabs(p, fonts, pr, &v.sections, true, v.mode);
 }
 
 /// The section tab row. `live: false` draws it inert (under the loading card).
@@ -972,10 +975,12 @@ pub fn section_tabs(
     pr: &PrRef,
     sections: &[(ReviewSection, String, bool)],
     live: bool,
+    switch: Option<DiffMode>,
 ) {
     p.spawn(Node {
         padding: UiRect::horizontal(px(20)),
         column_gap: px(4),
+        align_items: AlignItems::Center,
         ..default()
     })
     .with_children(|row| {
@@ -1022,6 +1027,13 @@ pub fn section_tabs(
                     t.spawn(text(fonts, count, Type::META));
                 }
             });
+        }
+        if let Some(mode) = switch {
+            row.spawn(Node {
+                flex_grow: 1.0,
+                ..default()
+            });
+            crate::screens::review::diff::mode_switch(row, fonts, pr, mode);
         }
     });
 }
@@ -1324,6 +1336,8 @@ fn rebuild_status(
     checks: Res<crate::screens::review::checks::Checks>,
     diagrams: Res<crate::screens::review::diagrams::Diagrams>,
     revalidations: Res<Revalidations>,
+    stories: Res<crate::screens::review::story::model::Stories>,
+    calls: Res<crate::screens::review::calls::Calls>,
     mut bars: Query<(Entity, &mut StatusBar)>,
 ) {
     for (entity, mut bar) in &mut bars {
@@ -1334,7 +1348,8 @@ fn rebuild_status(
             || crate::agent_name::active(&model.snapshot),
             |t| crate::agent_name::of_tab(&model.snapshot, t),
         );
-        let work = Work::of(&bar.pr, &chats, &checks, &diagrams, &revalidations);
+        let work = Work::of(&bar.pr, &chats, &checks, &diagrams, &revalidations)
+            .with_story(stories.0.get(&bar.pr));
         let (agent, agent_live) = work.status(&name);
         let mut status = v.status.clone();
         status.agent = agent;
@@ -1344,6 +1359,26 @@ fn rebuild_status(
         let waiting = checks.0.get(&bar.pr).map_or(0, |m| m.waiting_ok());
         if waiting > 0 {
             status.draft = format!("{} · {waiting} waiting for your OK", status.draft);
+        }
+        if let Some(tab) = tabs.0.get(&bar.pr)
+            && tab.ui.section == ReviewSection::Diff
+        {
+            let note = match tab.ui.mode {
+                DiffMode::Story => crate::screens::review::story::status_text(
+                    &tab.ui,
+                    stories.0.get(&bar.pr),
+                    &status.draft,
+                ),
+                DiffMode::Calls => crate::screens::review::calls::status_text(
+                    &tab.ui,
+                    calls.0.get(&bar.pr),
+                    &status.draft,
+                ),
+                _ => None,
+            };
+            if let Some(note) = note {
+                status.draft = note;
+            }
         }
         if bar.built.as_ref() == Some(&status) {
             continue;

@@ -23,6 +23,11 @@ const PILL_HEIGHT: f32 = 56.0;
 const CIRCLE: f32 = 140.0;
 const CIRCLE_INSET: f32 = 20.0;
 const DOT: f32 = 18.0;
+/// The padding and the narrowest box of a text-fitted box (`Packing::fit_text`).
+const FIT_PAD: f32 = 8.0;
+const FIT_MIN_WIDTH: f32 = 72.0;
+/// How far a subtitle may widen a text-fitted box past its title before it wraps.
+const FIT_SUB_WIDTH: f32 = 120.0;
 const TITLE_LINES: usize = 3;
 const SUB_LINES: usize = 2;
 
@@ -30,19 +35,101 @@ const SUB_LINES: usize = 2;
 /// same spec and measure always give the same geometry, down to the bit.
 pub fn layout(spec: &DiagramSpec, measure: &dyn Measure) -> Geometry {
     let mut geometry = match spec.kind {
-        DiagramKind::Graph => layered_geometry(spec, measure, Direction::TopToBottom, Arrow::End),
-        DiagramKind::Flow | DiagramKind::DataFlow | DiagramKind::States => {
-            layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End)
-        }
-        DiagramKind::EntityRelationship => {
-            layered_geometry(spec, measure, Direction::LeftToRight, Arrow::None)
-        }
-        DiagramKind::Classes => layered_geometry(spec, measure, Direction::LeftToRight, Arrow::End),
+        DiagramKind::Graph => layered_geometry(
+            spec,
+            measure,
+            Direction::TopToBottom,
+            Arrow::End,
+            None,
+            None,
+        ),
+        DiagramKind::Flow | DiagramKind::DataFlow | DiagramKind::States => layered_geometry(
+            spec,
+            measure,
+            Direction::LeftToRight,
+            Arrow::End,
+            None,
+            None,
+        ),
+        DiagramKind::EntityRelationship => layered_geometry(
+            spec,
+            measure,
+            Direction::LeftToRight,
+            Arrow::None,
+            None,
+            None,
+        ),
+        DiagramKind::Classes => layered_geometry(
+            spec,
+            measure,
+            Direction::LeftToRight,
+            Arrow::End,
+            None,
+            None,
+        ),
         DiagramKind::Sequence => sequence::layout(spec, measure),
         DiagramKind::UseCases => usecase::layout(spec, measure),
         DiagramKind::Keywords => Geometry::empty(),
     };
     geometry.normalise(MARGIN);
+    geometry
+}
+
+/// How `layout_ranked` spaces and sizes its boxes. `Default` is how `layout` draws a `Graph`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Packing {
+    /// The least space between two ranks; edge runs that need more widen the gap.
+    pub rank_gap: f32,
+    /// The space between two boxes of one rank.
+    pub node_gap: f32,
+    /// Space around the drawing.
+    pub margin: f32,
+    /// Each box as wide as its title on one line (up to the widest box), with a tighter
+    /// padding, instead of the usual width. A subtitle keeps to one line while it is no wider
+    /// than the title or `FIT_SUB_WIDTH`, and wraps past that.
+    pub fit_text: bool,
+}
+
+impl Default for Packing {
+    fn default() -> Self {
+        Self {
+            rank_gap: 72.0,
+            node_gap: 48.0,
+            margin: MARGIN,
+            fit_text: false,
+        }
+    }
+}
+
+/// Lays `spec` out top-down like a `Graph`, but with `ranks[i]` as the rank of `spec.nodes[i]`
+/// instead of the longest-path rank, spaced and sized as `packing` says. A missing entry
+/// counts as 0 and extra ones are ignored; the distinct ranks are renumbered densely, so an
+/// empty level leaves no blank row. The spec is not validated.
+pub fn layout_ranked(
+    spec: &DiagramSpec,
+    ranks: &[usize],
+    measure: &dyn Measure,
+    packing: &Packing,
+) -> Geometry {
+    let given: Vec<usize> = (0..spec.nodes.len())
+        .map(|i| ranks.get(i).copied().unwrap_or(0))
+        .collect();
+    let mut distinct = given.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let dense: Vec<usize> = given
+        .iter()
+        .map(|r| distinct.binary_search(r).unwrap_or(0))
+        .collect();
+    let mut geometry = layered_geometry(
+        spec,
+        measure,
+        Direction::TopToBottom,
+        Arrow::End,
+        Some(&dense),
+        Some(packing),
+    );
+    geometry.normalise(packing.margin);
     geometry
 }
 
@@ -71,6 +158,11 @@ impl Card {
 }
 
 pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Card {
+    sized_card(kind, node, measure, false)
+}
+
+/// `card`, or with `fit_text` a box as wide as its text on one line (`Packing::fit_text`).
+fn sized_card(kind: DiagramKind, node: &Node, measure: &dyn Measure, fit_text: bool) -> Card {
     let title_style = TextStyle::Title;
     let sub_style = if node.change == Change::Unchanged {
         TextStyle::Sub
@@ -83,7 +175,9 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
         Shape::External => kind == DiagramKind::DataFlow,
         _ => matches!(kind, DiagramKind::Sequence | DiagramKind::UseCases),
     };
-    let pad = if kind == DiagramKind::Sequence {
+    let pad = if fit_text {
+        FIT_PAD
+    } else if kind == DiagramKind::Sequence {
         SEQUENCE_PAD
     } else {
         PAD
@@ -116,6 +210,7 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
         }
         _ => {
             let (base, min_w, max_w) = match (kind, node.shape) {
+                _ if fit_text => (0.0, FIT_MIN_WIDTH, MAX_WIDTH),
                 (DiagramKind::Sequence, _) => (130.0, 120.0, 180.0),
                 (DiagramKind::UseCases, Shape::Pill) => (190.0, MIN_WIDTH, MAX_WIDTH),
                 (DiagramKind::UseCases, _) => (150.0, 140.0, 200.0),
@@ -129,14 +224,23 @@ pub(crate) fn card(kind: DiagramKind, node: &Node, measure: &dyn Measure) -> Car
             };
             // A participant's or an actor's name keeps to one line while the widest box allows
             // it.
-            let one_line = kind == DiagramKind::Sequence
+            let one_line = fit_text
+                || kind == DiagramKind::Sequence
                 || (kind == DiagramKind::UseCases && node.shape != Shape::Pill);
             let title_w = if one_line {
                 measure.width(&node.label, title_style)
             } else {
                 longest_word(&node.label, title_style)
             };
-            let wanted = title_w.max(longest_word(sub_text, sub_style)) + 2.0 * pad;
+            let sub_w = if fit_text {
+                measure
+                    .width(sub_text, sub_style)
+                    .min(title_w.max(FIT_SUB_WIDTH))
+                    .max(longest_word(sub_text, sub_style))
+            } else {
+                longest_word(sub_text, sub_style)
+            };
+            let wanted = title_w.max(sub_w) + 2.0 * pad;
             card.w = base.max(wanted).clamp(min_w, max_w);
             // A hair of room, so a name that set the width is not wrapped by a rounding error.
             let inner = card.w - 2.0 * pad + 0.01;
@@ -159,7 +263,10 @@ fn layered_geometry(
     measure: &dyn Measure,
     direction: Direction,
     arrow: Arrow,
+    ranks: Option<&[usize]>,
+    packing: Option<&Packing>,
 ) -> Geometry {
+    let fit_text = packing.is_some_and(|p| p.fit_text);
     let tables = matches!(
         spec.kind,
         DiagramKind::EntityRelationship | DiagramKind::Classes
@@ -167,7 +274,7 @@ fn layered_geometry(
     let cards: Vec<Card> = spec
         .nodes
         .iter()
-        .map(|n| card(spec.kind, n, measure))
+        .map(|n| sized_card(spec.kind, n, measure, fit_text))
         .collect();
     let tabular: Vec<Option<tables::Table>> = spec
         .nodes
@@ -203,6 +310,9 @@ fn layered_geometry(
         arrow,
         top_aligned: tables,
         label_style,
+        ranks,
+        rank_gap: packing.map(|p| p.rank_gap),
+        node_gap: packing.map(|p| p.node_gap),
     };
     let placed = layered::place(spec, &sizes, measure, &options);
 
@@ -1100,5 +1210,154 @@ mod tests {
             stacked >= 60,
             "only {stacked} of 180 diagrams hang a box 72 px under another"
         );
+    }
+
+    fn ranked(nodes: &[&str], edges: &[(&str, &str)]) -> DiagramSpec {
+        spec(
+            "graph",
+            nodes.iter().map(|n| node(n, n, "box")).collect(),
+            edges.iter().map(|(a, b)| edge(a, b, None)).collect(),
+        )
+    }
+
+    #[test]
+    fn ranked_layout_puts_each_node_on_its_rank_top_down() {
+        let s = ranked(&["a", "b", "c", "d"], &[("a", "b"), ("a", "c"), ("b", "d")]);
+        let g = layout_ranked(&s, &[0, 1, 1, 2], &Fonts, &Packing::default());
+        check(&s, &g);
+        let (a, b, c, d) = (
+            rect_of(&g, "a"),
+            rect_of(&g, "b"),
+            rect_of(&g, "c"),
+            rect_of(&g, "d"),
+        );
+        assert!(
+            (b.centre().y - c.centre().y).abs() < 1e-3,
+            "one rank, one row"
+        );
+        assert!(b.y >= a.bottom() + 72.0 - 0.01 && d.y >= b.bottom() + 72.0 - 0.01);
+        assert_eq!(g.edges.len(), 3);
+        assert!(
+            (g.edges[0].points[0].y - a.bottom()).abs() < 1e-3,
+            "an edge leaves the bottom side"
+        );
+        for (i, b) in g.boxes.iter().enumerate() {
+            assert_eq!(b.index, i, "boxes keep the spec's order");
+        }
+    }
+
+    #[test]
+    fn the_default_packing_lays_a_graph_out_as_layout_does() {
+        let s = ranked(&["a", "b", "c", "d"], &[("a", "b"), ("a", "c"), ("b", "d")]);
+        assert_eq!(
+            layout_ranked(&s, &[0, 1, 1, 2], &Fonts, &Packing::default()),
+            layout(&s, &Fonts)
+        );
+    }
+
+    #[test]
+    fn a_tight_packing_narrows_the_gaps_and_fits_each_box_to_its_text() {
+        let mut s = ranked(&["a", "b", "c"], &[("a", "b"), ("a", "c")]);
+        s.nodes[1].sub = Some("not touched · 1 caller".into());
+        let tight = Packing {
+            rank_gap: 36.0,
+            node_gap: 20.0,
+            margin: MARGIN,
+            fit_text: true,
+        };
+        check(&s, &layout_ranked(&s, &[0, 1, 1], &Fonts, &tight));
+        let tight = Packing {
+            margin: 12.0,
+            ..tight
+        };
+        let g = layout_ranked(&s, &[0, 1, 1], &Fonts, &tight);
+        let (a, b, c) = (rect_of(&g, "a"), rect_of(&g, "b"), rect_of(&g, "c"));
+        assert!(b.y - a.bottom() < 72.0 && b.y - a.bottom() >= 36.0 - 0.01);
+        assert!((c.x - b.right() - 20.0).abs() < 0.01, "{b:?} {c:?}");
+        assert!(
+            a.w < BOX_WIDTH && a.w >= FIT_MIN_WIDTH,
+            "a short name, a narrow box"
+        );
+        let sub = g.boxes[1].sub.as_ref().expect("a subtitle");
+        assert_eq!(sub.lines.len(), 1, "the subtitle stays on one line");
+        assert!(b.w > a.w);
+        assert_eq!(
+            (
+                a.y,
+                g.boxes.iter().map(|b| b.rect.x).fold(f32::MAX, f32::min)
+            ),
+            (12.0, 12.0)
+        );
+        let right = g.boxes.iter().map(|b| b.rect.right()).fold(0.0, f32::max);
+        assert!(
+            (g.size.0 - right - 12.0).abs() < 1e-3,
+            "the margin on every side"
+        );
+        s.nodes[2].sub = Some("serde_json · outside this repo · and more".into());
+        let g = layout_ranked(&s, &[0, 1, 1], &Fonts, &tight);
+        let c = rect_of(&g, "c");
+        assert!(c.w <= FIT_SUB_WIDTH + 2.0 * FIT_PAD + 0.01, "{c:?}");
+        let sub = g.boxes[2].sub.as_ref().expect("a subtitle");
+        assert_eq!(sub.lines.len(), 2, "a long subtitle wraps");
+    }
+
+    #[test]
+    fn explicit_ranks_win_over_the_direction_of_the_edges() {
+        let s = ranked(&["a", "b"], &[("b", "a")]);
+        let g = layout_ranked(&s, &[0, 1], &Fonts, &Packing::default());
+        check(&s, &g);
+        assert!(
+            rect_of(&g, "a").bottom() < rect_of(&g, "b").y,
+            "a is above b although b calls a"
+        );
+    }
+
+    #[test]
+    fn empty_ranks_leave_no_blank_row_and_short_ranks_do_not_panic() {
+        let s = ranked(&["a", "b"], &[("a", "b")]);
+        assert_eq!(
+            layout_ranked(&s, &[0, 2], &Fonts, &Packing::default()),
+            layout_ranked(&s, &[0, 1], &Fonts, &Packing::default())
+        );
+        let three = ranked(&["a", "b", "c"], &[("a", "b")]);
+        check(
+            &three,
+            &layout_ranked(&three, &[0, 1], &Fonts, &Packing::default()),
+        );
+        assert_eq!(
+            layout_ranked(
+                &spec("graph", vec![], vec![]),
+                &[],
+                &Fonts,
+                &Packing::default()
+            )
+            .size,
+            (48.0, 48.0)
+        );
+    }
+
+    #[test]
+    fn sixty_ranked_nodes_and_eighty_edges_are_valid_deterministic_and_inside_the_budget() {
+        let names: Vec<String> = (0..60).map(|i| format!("n{i}")).collect();
+        let ranks: Vec<usize> = (0..60).map(|i| i / 10).collect();
+        let edges: Vec<(String, String)> = (0..80)
+            .map(|k| {
+                let a = (k * 7) % 50;
+                let b = (a / 10 + 1) * 10 + (k * 3) % 10;
+                (format!("n{a}"), format!("n{b}"))
+            })
+            .collect();
+        let s = spec(
+            "graph",
+            names
+                .iter()
+                .map(|n| node(n, &format!("Function {n}"), "box"))
+                .collect(),
+            edges.iter().map(|(a, b)| edge(a, b, None)).collect(),
+        );
+        let (g, took) = cpu_timed(|| layout_ranked(&s, &ranks, &Fonts, &Packing::default()));
+        assert!(took.as_millis() <= BUDGET_MS, "{took:?}");
+        check(&s, &g);
+        assert_eq!(layout_ranked(&s, &ranks, &Fonts, &Packing::default()), g);
     }
 }

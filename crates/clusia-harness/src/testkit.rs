@@ -196,6 +196,11 @@ pub fn keyword_placement_block(json: serde_json::Value) -> String {
     format!("```clusia-keyword-placement\n{json}\n```")
 }
 
+/// A fenced `clusia-story` block holding `json`, one Story.
+pub fn story_block(json: serde_json::Value) -> String {
+    format!("```clusia-story\n{json}\n```")
+}
+
 /// A fenced `clusia-pass` block holding `json`.
 pub fn pass_block(json: serde_json::Value) -> String {
     format!("```clusia-pass\n{json}\n```")
@@ -694,6 +699,14 @@ mod tests {
         let spec = diagram_block(serde_json::json!({"key": "k"}));
         assert_eq!(plan, "```clusia-diagram-plan\n[]\n```");
         assert_eq!(spec, "```clusia-diagram\n{\"key\":\"k\"}\n```");
+    }
+
+    #[test]
+    fn the_story_block_uses_the_info_string_the_extractor_reads() {
+        assert_eq!(
+            story_block(serde_json::json!({"sentence": "s"})),
+            "```clusia-story\n{\"sentence\":\"s\"}\n```"
+        );
     }
 
     #[test]

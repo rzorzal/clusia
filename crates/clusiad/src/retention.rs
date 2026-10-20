@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clusia_core::{PrRef, ReviewState};
 use clusia_git::{remove_worktree, repo_of_worktree};
+use clusia_store::calls::delete_calls;
+use clusia_store::stories::delete_stories;
 use clusia_store::{ReviewLoad, delete_diagrams, load_review};
 
 use crate::reviews::{cleanup_checkout, lock};
@@ -62,6 +64,8 @@ pub(crate) async fn sweep(shared: &Shared) -> usize {
     sweep_caches(shared, cutoff).await;
     sweep_checks(shared, cutoff).await;
     sweep_diagrams(shared, cutoff).await;
+    sweep_calls(shared, cutoff).await;
+    sweep_stories(shared, cutoff).await;
     removed
 }
 
@@ -135,6 +139,58 @@ async fn sweep_diagrams(shared: &Shared, cutoff: i64) {
             && let Err(e) = delete_diagrams(&shared.paths, &pr)
         {
             tracing::warn!(error = %e, pr = %pr, "cannot delete the stored diagrams");
+        }
+    }
+}
+
+/// Removes the call graph indexes of pull requests with no review file that are older than
+/// `cutoff`, like the stored diagrams.
+async fn sweep_calls(shared: &Shared, cutoff: i64) {
+    let Ok(mut entries) = tokio::fs::read_dir(shared.paths.calls_dir()).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pr) = PrRef::from_file_key(&name) else {
+            continue;
+        };
+        if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
+            continue;
+        }
+        let _guard = lock(shared, &pr).await;
+        if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
+            continue;
+        }
+        if !shared.paths.review_file(&pr).exists()
+            && let Err(e) = delete_calls(&shared.paths, &pr)
+        {
+            tracing::warn!(error = %e, pr = %pr, "cannot delete the call graph index");
+        }
+    }
+}
+
+/// Removes the stored stories of pull requests with no review file that are older than
+/// `cutoff`, like the stored diagrams.
+async fn sweep_stories(shared: &Shared, cutoff: i64) {
+    let Ok(mut entries) = tokio::fs::read_dir(shared.paths.stories_dir()).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pr) = PrRef::from_file_key(&name) else {
+            continue;
+        };
+        if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
+            continue;
+        }
+        let _guard = lock(shared, &pr).await;
+        if shared.is_touched(&pr.file_key()) || recently_modified(&entry.path(), cutoff) {
+            continue;
+        }
+        if !shared.paths.review_file(&pr).exists()
+            && let Err(e) = delete_stories(&shared.paths, &pr)
+        {
+            tracing::warn!(error = %e, pr = %pr, "cannot delete the stored stories");
         }
     }
 }
@@ -444,6 +500,60 @@ mod tests {
         assert!(kept.exists(), "its review still exists");
         assert!(touched.exists(), "open this session");
         assert!(stray.exists(), "not named for a pull request");
+    }
+
+    fn calls_for(shared: &Shared, n: u64, days_old: u64) -> PathBuf {
+        let pr: PrRef = format!("acme/widgets#{n}").parse().unwrap();
+        let dir = shared.paths.calls_for(&pr);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{}.json", "a".repeat(40))), b"{}").unwrap();
+        age(&dir, days_old);
+        dir
+    }
+
+    #[tokio::test]
+    async fn sweep_drops_old_call_indexes_that_have_no_review_and_keeps_the_rest() {
+        let (_dir, shared) = shared();
+        let old = calls_for(&shared, 1, 100);
+        let fresh = calls_for(&shared, 2, 1);
+        old_review(&shared, 3, ReviewState::Saved);
+        let kept = calls_for(&shared, 3, 100);
+        let touched = calls_for(&shared, 4, 100);
+        shared.touch(&"acme/widgets#4".parse().unwrap());
+        let stray = shared.paths.calls_dir().join("not-a-review");
+        std::fs::create_dir_all(&stray).unwrap();
+        age(&stray, 100);
+        sweep(&shared).await;
+        assert!(!old.exists(), "no review, older than the retention");
+        assert!(fresh.exists(), "recent");
+        assert!(kept.exists(), "its review still exists");
+        assert!(touched.exists(), "open this session");
+        assert!(stray.exists(), "not named for a pull request");
+    }
+
+    fn stories_for(shared: &Shared, n: u64, days_old: u64) -> PathBuf {
+        let pr: PrRef = format!("acme/widgets#{n}").parse().unwrap();
+        let dir = shared.paths.stories_for(&pr);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("v1.json"), b"{}").unwrap();
+        age(&dir, days_old);
+        dir
+    }
+
+    #[tokio::test]
+    async fn sweep_drops_old_stories_that_have_no_review_and_keeps_the_rest() {
+        let (_dir, shared) = shared();
+        let old = stories_for(&shared, 1, 100);
+        let fresh = stories_for(&shared, 2, 1);
+        old_review(&shared, 3, ReviewState::Saved);
+        let kept = stories_for(&shared, 3, 100);
+        let touched = stories_for(&shared, 4, 100);
+        shared.touch(&"acme/widgets#4".parse().unwrap());
+        sweep(&shared).await;
+        assert!(!old.exists(), "no review, older than the retention");
+        assert!(fresh.exists(), "recent");
+        assert!(kept.exists(), "its review still exists");
+        assert!(touched.exists(), "open this session");
     }
 
     fn media_file(dir: &std::path::Path, name: &str, bytes: usize, days_old: u64) -> PathBuf {

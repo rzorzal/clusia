@@ -201,6 +201,7 @@ pub fn title_for_origin(tool: &str, origin: TurnOrigin, agent: &str) -> String {
         TurnOrigin::Audit => "Audit check",
         TurnOrigin::Revalidation => "Revalidation",
         TurnOrigin::Diagrams => "Diagram drawing",
+        TurnOrigin::Story => "Story writing",
     };
     match tool {
         "Bash" => format!("{who} wants to run a command"),
@@ -1923,6 +1924,10 @@ mod tests {
         assert_eq!(
             title_for_origin("Bash", TurnOrigin::Revalidation, "Claude Code"),
             "Revalidation wants to run a command"
+        );
+        assert_eq!(
+            title_for_origin("Bash", TurnOrigin::Story, "Claude Code"),
+            "Story writing wants to run a command"
         );
         assert_eq!(
             title_for("Bash", "Claude Code"),

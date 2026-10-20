@@ -22,6 +22,7 @@ use crate::screens::review::agent::model::Chats;
 use crate::screens::review::checks::Checks;
 use crate::screens::review::diagrams::Diagrams;
 use crate::screens::review::revalidation::Revalidations;
+use crate::screens::review::story::model::Stories;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
@@ -507,13 +508,16 @@ fn rebuild_top_bar(
     checks: Res<Checks>,
     diagrams: Res<Diagrams>,
     revalidations: Res<Revalidations>,
+    stories: Res<Stories>,
     mut bars: Query<(Entity, &mut TopBar)>,
     tracks: Query<(&ChildOf, &ScrollPosition), With<SideTrack>>,
 ) {
     let mut view = top_bar_view(&nav, &model.snapshot);
     for tab in &mut view.tabs {
         if let TabTarget::Review(pr) = &tab.target {
-            tab.working = Work::of(pr, &chats, &checks, &diagrams, &revalidations).any();
+            tab.working = Work::of(pr, &chats, &checks, &diagrams, &revalidations)
+                .with_story(stories.0.get(pr))
+                .any();
         }
     }
     for (entity, mut bar) in &mut bars {
