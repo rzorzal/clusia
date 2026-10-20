@@ -76,6 +76,8 @@ pub struct GitHub {
     pub(crate) token: Token,
     /// Set when GitHub answered 401 to this client's token: a cached token should be asked for again.
     rejected: AtomicBool,
+    /// The login the token belongs to; a new token makes a new client, so it cannot go stale.
+    viewer_login: tokio::sync::OnceCell<String>,
     /// Full URL → (ETag, body) for conditional requests.
     cache: Mutex<HashMap<String, CacheEntry>>,
 }
@@ -384,6 +386,7 @@ impl GitHub {
             api,
             token,
             rejected: AtomicBool::new(false),
+            viewer_login: tokio::sync::OnceCell::new(),
             cache: Mutex::new(HashMap::new()),
         })
     }
@@ -796,6 +799,14 @@ impl GitHub {
         Ok(Viewer { login, scopes })
     }
 
+    /// The login of the token's owner, asked for once per client. A failure is not kept.
+    pub async fn viewer_login(&self) -> Result<String, ProviderError> {
+        self.viewer_login
+            .get_or_try_init(|| async { Ok(self.viewer().await?.login) })
+            .await
+            .cloned()
+    }
+
     pub async fn list_prs(&self, filter: PrFilter) -> Result<Vec<PrSummary>, ProviderError> {
         let query = [
             ("q", search_query(filter)),
@@ -1198,6 +1209,40 @@ mod tests {
                 scopes: vec!["repo".into(), "read:org".into()]
             }
         );
+    }
+
+    #[tokio::test]
+    async fn the_viewer_login_is_asked_for_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "login": "octo" })))
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        for _ in 0..3 {
+            assert_eq!(client.viewer_login().await.unwrap(), "octo");
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_viewer_login_is_asked_for_again() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "login": "octo" })))
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        assert!(client.viewer_login().await.is_err());
+        assert_eq!(client.viewer_login().await.unwrap(), "octo");
     }
 
     #[tokio::test]

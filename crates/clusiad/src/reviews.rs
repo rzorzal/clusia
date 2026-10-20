@@ -368,7 +368,7 @@ async fn unchanged_open(
         .ok();
     let viewer = match cache.viewer {
         Some(v) => Some(v),
-        None => gh.viewer().await.ok().map(|v| v.login),
+        None => gh.viewer_login().await.ok(),
     };
     let files = Arc::new(cache.files);
     let fresh = ReviewCache {
@@ -520,7 +520,7 @@ async fn full_open(
         Some(format!("{} files", files.len())),
     );
 
-    let viewer = gh.viewer().await.ok().map(|v| v.login);
+    let viewer = gh.viewer_login().await.ok();
     Ok((
         Opened {
             worktree: info.path,

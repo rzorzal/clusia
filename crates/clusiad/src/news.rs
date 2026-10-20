@@ -261,7 +261,7 @@ pub(crate) async fn whats_new(shared: &Shared, pr: &PrRef) -> Outcome {
                 .await
                 .ok()
                 .map(|c| c.label().to_string());
-            let viewer = gh.viewer().await.ok().map(|v| v.login);
+            let viewer = gh.viewer_login().await.ok();
             (conversation, checks_label, viewer)
         }
     };

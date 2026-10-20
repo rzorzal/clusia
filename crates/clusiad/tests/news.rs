@@ -278,3 +278,15 @@ async fn whats_new_after_an_open_reads_only_the_commits() {
     assert!(new_calls[0].ends_with("/pulls/7/commits"), "{new_calls:?}");
     w.daemon.stop().await;
 }
+
+#[tokio::test]
+async fn opening_twice_asks_github_who_the_viewer_is_once() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(Command::CloseReview { pr: pr7() }).await.unwrap();
+    open(&mut c).await;
+
+    assert_eq!(seen(&w.server).await.get("/user"), Some(&1));
+    w.daemon.stop().await;
+}

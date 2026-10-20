@@ -490,7 +490,7 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
         };
         if let Some(by) = by {
             if viewer.is_none() {
-                viewer = Some(gh.viewer().await.ok().map(|v| v.login));
+                viewer = Some(gh.viewer_login().await.ok());
             }
             let Some(Some(me)) = &viewer else {
                 left_for_later = true;

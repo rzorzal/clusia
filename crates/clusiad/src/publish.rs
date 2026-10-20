@@ -111,8 +111,8 @@ pub(crate) async fn posted_review(
     head_sha: &str,
     finalized_at: i64,
 ) -> Posted {
-    let viewer = match gh.viewer().await {
-        Ok(v) => v.login,
+    let viewer = match gh.viewer_login().await {
+        Ok(login) => login,
         Err(e) => return Posted::Unknown(e),
     };
     let reviews = match gh.list_reviews(pr).await {
@@ -422,8 +422,8 @@ pub(crate) async fn publish(
             "the pull request has new commits; your comments were re-anchored — check them and publish again",
         );
     }
-    let viewer = match gh.viewer().await {
-        Ok(v) => v.login,
+    let viewer = match gh.viewer_login().await {
+        Ok(login) => login,
         Err(e) => return provider_error(e),
     };
     let role = if viewer.eq_ignore_ascii_case(&detail.summary.author) {
