@@ -310,7 +310,7 @@ pub struct RetryButton;
 pub struct ToastCard;
 
 #[derive(Component)]
-struct TopBar {
+pub(crate) struct TopBar {
     built: Option<TopBarView>,
 }
 
@@ -343,6 +343,8 @@ impl Plugin for NavPlugin {
             .map(|s| s.0.clone())
             .unwrap_or(WindowTarget::Home);
         app.insert_resource(Nav::new(&start))
+            .init_resource::<MinuteTick>()
+            .add_systems(Update, tick_minute.before(NavSystems))
             .add_message::<TabCloseRequested>()
             .add_systems(Startup, (load_leaf, spawn_chrome))
             .add_systems(
@@ -350,7 +352,7 @@ impl Plugin for NavPlugin {
                 (
                     show,
                     expire_toasts.in_set(Asking),
-                    rebuild_top_bar,
+                    rebuild_top_bar.run_if(top_bar_changed),
                     rebuild_banner,
                     rebuild_screen,
                     rebuild_toasts,
@@ -498,6 +500,44 @@ fn tab_node(on: bool) -> impl Bundle {
         BorderColor::default(),
         Stroke(if on { Swatch::Line } else { Swatch::Clear }),
     )
+}
+
+/// The minute of the clock, so age labels ("5m") are rebuilt once a minute, not every frame.
+/// It turns on the clock's minute boundaries, so a label can lag its true age by up to 59 s.
+#[derive(Resource, Debug, Default, PartialEq, Eq)]
+pub struct MinuteTick(pub i64);
+
+fn tick_minute(clock: Res<crate::clock::Clock>, mut tick: ResMut<MinuteTick>) {
+    let minute = clock.now().div_euclid(60);
+    if tick.0 != minute {
+        tick.0 = minute;
+    }
+}
+
+/// Whether the top bar's view could differ from the one it shows: something it reads changed,
+/// or the bar was just spawned.
+pub(crate) fn top_bar_changed(
+    nav: Res<Nav>,
+    model: Res<Model>,
+    fonts: Res<UiFonts>,
+    leaf: Res<Leaf>,
+    chats: Res<Chats>,
+    checks: Res<Checks>,
+    diagrams: Res<Diagrams>,
+    revalidations: Res<Revalidations>,
+    stories: Res<Stories>,
+    spawned: Query<(), Added<TopBar>>,
+) -> bool {
+    nav.is_changed()
+        || model.is_changed()
+        || fonts.is_changed()
+        || leaf.is_changed()
+        || chats.is_changed()
+        || checks.is_changed()
+        || diagrams.is_changed()
+        || revalidations.is_changed()
+        || stories.is_changed()
+        || !spawned.is_empty()
 }
 
 fn rebuild_top_bar(

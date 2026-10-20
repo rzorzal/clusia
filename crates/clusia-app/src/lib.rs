@@ -30,6 +30,9 @@ pub mod window_frame;
 pub(crate) mod testing;
 
 #[cfg(test)]
+mod idle;
+
+#[cfg(test)]
 mod overflow;
 
 /// How the window introduces itself to the daemon.

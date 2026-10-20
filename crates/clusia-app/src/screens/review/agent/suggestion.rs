@@ -299,10 +299,11 @@ fn on_edit(
 }
 
 /// A suggestion accepted or dismissed closes the editor that was editing it (another
-/// suggestion leaves it alone): there is nothing left to edit.
-pub(crate) fn close_edited(tabs: &mut ReviewTabs, tell: &AgentTell) {
+/// suggestion leaves it alone): there is nothing left to edit. Says whether an editor was
+/// closed.
+pub(crate) fn close_edited(tabs: &mut ReviewTabs, tell: &AgentTell) -> bool {
     let AgentTell::Handled { pr, id, .. } = tell else {
-        return;
+        return false;
     };
     if let Some(tab) = tabs.0.get_mut(pr)
         && matches!(
@@ -311,7 +312,9 @@ pub(crate) fn close_edited(tabs: &mut ReviewTabs, tell: &AgentTell) {
         )
     {
         tab.ui.editor = None;
+        return true;
     }
+    false
 }
 
 #[cfg(test)]
