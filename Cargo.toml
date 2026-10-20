@@ -93,6 +93,11 @@ bevy_ui = { path = "vendor/bevy_ui" }
 [profile.dev.package."*"]
 opt-level = 2
 
-# Symbols are of no use to the app: crash reports are not symbolicated from the binary.
+# The shipped binaries carry no symbol table (-54 MB), so crash reports and panic backtraces
+# show bare addresses. The function names and line numbers go to a `.dSYM` that the release
+# build writes next to each binary in `target/release/`; packaging copies only the binaries,
+# so the bundle stays small. Keep the `.dSYM` of a release to symbolicate its crashes.
 [profile.release]
 strip = "symbols"
+debug = "line-tables-only"
+split-debuginfo = "packed"

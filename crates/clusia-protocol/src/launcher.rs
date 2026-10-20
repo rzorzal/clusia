@@ -283,14 +283,14 @@ pub async fn ensure_daemon(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ClientMessage, MessageReader, PROTOCOL_VERSION, ServerMessage, write_message};
+    use clusia_core::testkit::patient;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn the_readiness_poll_is_fast_enough_not_to_dominate_a_warm_start() {
         assert!(POLL <= Duration::from_millis(10), "poll is {POLL:?}");
     }
-    use crate::{ClientMessage, MessageReader, PROTOCOL_VERSION, ServerMessage, write_message};
-    use clusia_core::testkit::patient;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn the_launch_marker_has_one_name_for_every_process() {
