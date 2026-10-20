@@ -17,7 +17,9 @@ use super::model::{Calls, CallsModel};
 use crate::fonts::UiFonts;
 use crate::review_state::{ReviewTabs, TabUi};
 use crate::theme::Swatch;
-use crate::ui::kit::{self, Clickable, Fill, HoverFill, Type, badge, text, text_field};
+use crate::ui::kit::{
+    self, Clickable, Fill, HoverFill, Type, badge, text, text_field, wrapped_text,
+};
 
 /// The find box of `pr`'s Calls view.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -486,15 +488,15 @@ fn row_button(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row: &R
             line.spawn((
                 Node {
                     flex_grow: 1.0,
+                    flex_basis: px(0),
                     min_width: px(0),
-                    overflow: Overflow::clip(),
                     ..default()
                 },
                 Pickable::IGNORE,
             ))
             .with_children(|l| {
                 l.spawn((
-                    text(
+                    wrapped_text(
                         fonts,
                         row.label.clone(),
                         Type {
@@ -504,7 +506,10 @@ fn row_button(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row: &R
                             mono: true,
                         },
                     ),
-                    TextLayout::no_wrap(),
+                    Node {
+                        max_width: percent(100),
+                        ..default()
+                    },
                     Pickable::IGNORE,
                 ));
             });
@@ -514,7 +519,11 @@ fn row_button(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, row: &R
         });
         if let Some(detail) = &row.detail {
             r.spawn((
-                text(fonts, detail.clone(), Type::MONO.ink(Swatch::Faint)),
+                wrapped_text(fonts, detail.clone(), Type::MONO.ink(Swatch::Faint)),
+                Node {
+                    max_width: percent(100),
+                    ..default()
+                },
                 Pickable::IGNORE,
             ));
         }

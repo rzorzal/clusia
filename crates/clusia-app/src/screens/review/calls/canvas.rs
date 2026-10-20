@@ -19,7 +19,7 @@ use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::text::{Justify, LineBreak};
 use bevy::ui::ComputedNode;
-use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
+use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_calls::{CallGraph, NodeKind};
 use clusia_core::PrRef;
 use clusia_diagram::{BoxGeo, FaceMeasure, Geometry, Rect as GRect, layout_ranked};
@@ -45,6 +45,7 @@ use crate::screens::review::diagrams::view::CanvasView;
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
     self, Clickable, Fill, HoverFill, Stroke, Type, Variant, badge, button, card, text,
+    wrapped_text,
 };
 
 /// The zoom a graph that does not fit opens at.
@@ -473,9 +474,12 @@ fn header(c: &mut ChildSpawnerCommands, pen: &Pen, pr: &PrRef, g: &CallGraph) {
             left: px(0),
             right: px(0),
             top: px(0),
-            height: px(HEADER_H),
-            padding: UiRect::new(px(16), px(150), px(0), px(0)),
+            min_height: px(HEADER_H),
+            // A narrow canvas puts the crumbs, the note and Depth on more lines.
+            flex_wrap: FlexWrap::Wrap,
+            padding: UiRect::new(px(16), px(150), px(8), px(8)),
             column_gap: px(8),
+            row_gap: px(4),
             align_items: AlignItems::Center,
             border: UiRect::bottom(px(1)),
             ..default()
@@ -486,6 +490,10 @@ fn header(c: &mut ChildSpawnerCommands, pen: &Pen, pr: &PrRef, g: &CallGraph) {
         Stroke(Swatch::Line),
     ))
     .with_children(|h| {
+        let fitted = || Node {
+            max_width: percent(100),
+            ..default()
+        };
         let last = crumbs.len().saturating_sub(1);
         for (i, label) in crumbs.iter().enumerate() {
             if i > 0 {
@@ -497,14 +505,14 @@ fn header(c: &mut ChildSpawnerCommands, pen: &Pen, pr: &PrRef, g: &CallGraph) {
                 ink: if i == last { Swatch::Fg } else { Swatch::Muted },
                 mono: true,
             };
-            h.spawn((text(pen, label.clone(), t), TextLayout::no_wrap(), ignore()));
+            h.spawn((wrapped_text(pen, label.clone(), t), fitted(), ignore()));
         }
         if g.hidden_edges > 0 {
             let note = match g.hidden_edges {
                 1 => "· 1 edge not shown".to_string(),
                 n => format!("· {n} edges not shown"),
             };
-            h.spawn((text(pen, note, Type::META), TextLayout::no_wrap(), ignore()));
+            h.spawn((wrapped_text(pen, note, Type::META), fitted(), ignore()));
         }
         h.spawn((
             Node {
@@ -580,12 +588,28 @@ fn depth_control(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, dept
 }
 
 fn legend(c: &mut ChildSpawnerCommands, pen: &Pen, dots: Option<&Dots>) {
+    // The span the legend may take: as wide as its items on a wide canvas, wrapped on a narrow one.
     c.spawn((
         Node {
             position_type: PositionType::Absolute,
             left: px(16),
+            right: px(16),
             bottom: px(16),
+            align_items: AlignItems::FlexEnd,
+            ..default()
+        },
+        ignore(),
+    ))
+    .with_children(|span| legend_box(span, pen, dots));
+}
+
+fn legend_box(c: &mut ChildSpawnerCommands, pen: &Pen, dots: Option<&Dots>) {
+    c.spawn((
+        Node {
+            max_width: percent(100),
+            flex_wrap: FlexWrap::Wrap,
             column_gap: px(16),
+            row_gap: px(6),
             align_items: AlignItems::Center,
             padding: UiRect::axes(px(12), px(8)),
             border: px(1).all(),
@@ -628,7 +652,11 @@ fn legend(c: &mut ChildSpawnerCommands, pen: &Pen, dots: Option<&Dots>) {
             true,
         );
         l.spawn((
-            text(pen, "+N · click to expand", Type::MUTED.size(12.0)),
+            wrapped_text(pen, "+N · click to expand", Type::MUTED.size(12.0)),
+            Node {
+                max_width: percent(100),
+                ..default()
+            },
             ignore(),
         ));
     });
@@ -658,68 +686,96 @@ fn draw_blank(c: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, blank: 
             });
         }
         Blank::File(path) => {
-            c.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(0),
-                    right: px(0),
-                    top: px(0),
-                    height: px(HEADER_H),
-                    padding: UiRect::horizontal(px(16)),
-                    align_items: AlignItems::Center,
-                    border: UiRect::bottom(px(1)),
-                    ..default()
-                },
-                BackgroundColor::default(),
-                Fill(Swatch::Bg),
-                BorderColor::default(),
-                Stroke(Swatch::Line),
-                children![(
-                    text(fonts, path.clone(), Type::MONO.ink(Swatch::Fg)),
-                    ignore()
-                )],
-            ));
-            c.spawn((centred, ignore())).with_children(|m| {
-                m.spawn(card(Node {
-                    width: px(440),
+            let column = Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                right: px(0),
+                top: px(0),
+                bottom: px(0),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            };
+            c.spawn((column, ignore())).with_children(|c| {
+                c.spawn((
+                    Node {
+                        flex_shrink: 0.0,
+                        min_height: px(HEADER_H),
+                        padding: UiRect::axes(px(16), px(8)),
+                        align_items: AlignItems::Center,
+                        border: UiRect::bottom(px(1)),
+                        ..default()
+                    },
+                    BackgroundColor::default(),
+                    Fill(Swatch::Bg),
+                    BorderColor::default(),
+                    Stroke(Swatch::Line),
+                    children![(
+                        wrapped_text(fonts, path.clone(), Type::MONO.ink(Swatch::Fg)),
+                        Node {
+                            max_width: percent(100),
+                            ..default()
+                        },
+                        ignore()
+                    )],
+                ));
+                // Centred while it fits; taller than the canvas, it scrolls from its top.
+                let scrolled = Node {
+                    flex_grow: 1.0,
+                    min_height: px(0),
                     flex_direction: FlexDirection::Column,
-                    row_gap: px(12),
-                    padding: UiRect::all(px(24)),
+                    align_items: AlignItems::Center,
+                    overflow: Overflow::scroll_y(),
+                    padding: UiRect::all(px(16)),
                     ..default()
-                }))
-                .with_children(|k| {
-                    k.spawn(text(fonts, unsupported_title(path), Type::HEADING));
-                    k.spawn(text(
+                };
+                c.spawn((scrolled, ScrollArea, ScrollPosition::default()))
+                    .with_children(|m| {
+                        m.spawn(card(Node {
+                            width: percent(100),
+                            max_width: px(440),
+                            flex_shrink: 0.0,
+                            margin: UiRect::vertical(Val::Auto),
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(12),
+                            padding: UiRect::all(px(24)),
+                            ..default()
+                        }))
+                        .with_children(|k| {
+                            k.spawn(wrapped_text(fonts, unsupported_title(path), Type::HEADING));
+                            k.spawn(wrapped_text(
                         fonts,
                         "Clúsia draws calls for Rust, TypeScript, JavaScript and Python. A plugin \
                          can add more languages.",
                         Type::MUTED,
                     ));
-                    k.spawn(text(
+                            k.spawn(wrapped_text(
                         fonts,
                         format!("The change in {path} is still in Story and in the Unified diff."),
                         Type::MUTED,
                     ));
-                    k.spawn(Node {
-                        column_gap: px(8),
-                        ..default()
-                    })
-                    .with_children(|b| {
-                        for (label, what) in [
-                            ("Show in Unified", UnsupportedWhat::Unified),
-                            ("Open in Story", UnsupportedWhat::Story),
-                        ] {
-                            b.spawn((
-                                button(fonts, label, Variant::Secondary),
-                                UnsupportedAction {
-                                    pr: pr.clone(),
-                                    what,
-                                },
-                                observe(on_unsupported),
-                            ));
-                        }
+                            k.spawn(Node {
+                                flex_wrap: FlexWrap::Wrap,
+                                column_gap: px(8),
+                                row_gap: px(8),
+                                ..default()
+                            })
+                            .with_children(|b| {
+                                for (label, what) in [
+                                    ("Show in Unified", UnsupportedWhat::Unified),
+                                    ("Open in Story", UnsupportedWhat::Story),
+                                ] {
+                                    b.spawn((
+                                        button(fonts, label, Variant::Secondary),
+                                        UnsupportedAction {
+                                            pr: pr.clone(),
+                                            what,
+                                        },
+                                        observe(on_unsupported),
+                                    ));
+                                }
+                            });
+                        });
                     });
-                });
             });
         }
     }
@@ -989,9 +1045,20 @@ pub(super) fn place_level_labels(
         let Ok(state) = canvases.get(label.canvas) else {
             continue;
         };
-        let top = px(state.view.pan.y + label.mid * state.view.zoom - LEVEL_LABEL_H / 2.0);
+        let y = state.view.pan.y + label.mid * state.view.zoom - LEVEL_LABEL_H / 2.0;
+        let top = px(y);
         if node.top != top {
             node.top = top;
+        }
+        // A band panned out of the canvas takes its label with it rather than leaving it past
+        // the canvas's edge.
+        let display = if y >= 0.0 && y + LEVEL_LABEL_H <= state.view.viewport.y {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != display {
+            node.display = display;
         }
         let want = if state.fitted {
             Visibility::Inherited

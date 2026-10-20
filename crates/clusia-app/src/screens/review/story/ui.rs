@@ -12,7 +12,6 @@ use bevy::text::{Strikethrough, TextSpan};
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_core::story::Tone as ChipTone;
-use clusia_diagram::Rect as GRect;
 
 use super::model::Stories;
 use super::view::*;
@@ -21,14 +20,14 @@ use crate::fonts::UiFonts;
 use crate::review_state::{DiffMode, EditTarget, Editor, ReviewTabs};
 use crate::screens::review::agent::harness_ready;
 use crate::screens::review::checks::Checks;
-use crate::screens::review::diagrams::canvas::{Dots, dashed_ring};
+use crate::screens::review::diagrams::canvas::{Dots, stretched_dashed_ring};
 use crate::screens::review::diff::{Gutter, HighlightCache, show_line, unified_rows, unsent};
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Ink, Stroke, Tone, Type, Variant, badge, button, card, checkbox,
-    disabled_button, font, panel, text,
+    Clickable, Fill, HoverFill, Ink, Preview, Stroke, Tone, Type, Variant, badge, button, card,
+    checkbox, disabled_button, font, panel, text, wrapped_text,
 };
 use crate::ui::markdown::RenderOpts;
 use crate::ui::spinner::spinner;
@@ -111,10 +110,8 @@ pub struct BodyPart {
     built: Option<(BodyView, RenderOpts)>,
 }
 
-/// The height of a list row that carries the dashed ring, so the ring has a fixed box.
+/// The least height of a list row that carries the dashed ring; it grows with its text.
 const ADDED_ROW_HEIGHT: f32 = 54.0;
-/// The width of a list row: the column's 258 px less its padding.
-const ROW_WIDTH: f32 = 238.0;
 
 /// The left list and the body, in the Story frame's root.
 pub(super) fn parts(p: &mut ChildSpawnerCommands, pr: &PrRef) {
@@ -429,23 +426,13 @@ fn row_button(
     };
     let node = Node {
         width: percent(100),
-        height: if added {
-            px(ADDED_ROW_HEIGHT)
-        } else {
-            Val::Auto
-        },
-        min_height: px(40),
+        min_height: px(if added { ADDED_ROW_HEIGHT } else { 40.0 }),
         flex_shrink: 0.0,
         column_gap: px(8),
         padding: UiRect::axes(px(8), px(7)),
         align_items: AlignItems::Center,
         border: px(1).all(),
         border_radius: BorderRadius::all(px(6)),
-        overflow: if added {
-            Overflow::clip()
-        } else {
-            Overflow::visible()
-        },
         ..default()
     };
     let stroke = if row.mark == Some(Mark::Changed) {
@@ -516,26 +503,14 @@ fn row_button(
                 Node {
                     position_type: PositionType::Absolute,
                     left: px(0),
+                    right: px(0),
                     top: px(0),
+                    bottom: px(0),
                     ..default()
                 },
                 AddedRing,
             ))
-            .with_children(|o| {
-                dashed_ring(
-                    o,
-                    dots,
-                    GRect {
-                        x: 0.0,
-                        y: 0.0,
-                        w: ROW_WIDTH,
-                        h: ADDED_ROW_HEIGHT,
-                    },
-                    6.0,
-                    0.0,
-                    Swatch::Green,
-                );
-            });
+            .with_children(|o| stretched_dashed_ring(o, dots, 6.0, Swatch::Green));
         }
     });
 }
@@ -733,15 +708,21 @@ fn banner_strip(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, banne
         if spin {
             b.spawn(spinner());
         }
-        b.spawn((
-            text(fonts, message, Type::BODY),
-            Node {
-                flex_grow: 1.0,
-                flex_basis: px(0),
-                min_width: px(0),
-                ..default()
-            },
-        ));
+        b.spawn(Node {
+            flex_grow: 1.0,
+            flex_basis: px(0),
+            min_width: px(0),
+            ..default()
+        })
+        .with_children(|m| {
+            m.spawn((
+                wrapped_text(fonts, message, Type::BODY),
+                Node {
+                    max_width: percent(100),
+                    ..default()
+                },
+            ));
+        });
         if let Some((action, label, variant)) = action {
             b.spawn((
                 button(fonts, label, variant),
@@ -889,6 +870,19 @@ fn chip_row(
     });
 }
 
+/// A text box no wider than what holds it.
+fn fitted() -> Node {
+    Node {
+        max_width: percent(100),
+        ..default()
+    }
+}
+
+/// Text that breaks at the width of what holds it, never past it.
+fn prose() -> (TextLayout, Node) {
+    (TextLayout::linebreak(LineBreak::WordOrCharacter), fitted())
+}
+
 fn summary_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &SummaryView) {
     p.spawn(card(Node {
         width: percent(100),
@@ -899,7 +893,7 @@ fn summary_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, s: &SummaryView) 
         ..default()
     }))
     .with_children(|c| {
-        c.spawn(text(fonts, "In one sentence: ", Type::STRONG))
+        c.spawn((text(fonts, "In one sentence: ", Type::STRONG), prose()))
             .with_children(|t| {
                 t.spawn((
                     TextSpan::new(s.sentence.clone()),
@@ -952,7 +946,9 @@ fn current_card(
     current.with_children(|k| {
         k.spawn(Node {
             width: percent(100),
+            flex_wrap: FlexWrap::Wrap,
             column_gap: px(8),
+            row_gap: px(4),
             align_items: AlignItems::Center,
             ..default()
         })
@@ -962,14 +958,17 @@ fn current_card(
                 c.number.to_string(),
                 Type::STRONG.ink(Swatch::Green),
             ));
-            h.spawn(text(
-                fonts,
-                c.title.clone(),
-                if c.mono {
-                    Type::MONO.size(Type::HEADING.size)
-                } else {
-                    Type::HEADING
-                },
+            h.spawn((
+                wrapped_text(
+                    fonts,
+                    c.title.clone(),
+                    if c.mono {
+                        Type::MONO.size(Type::HEADING.size)
+                    } else {
+                        Type::HEADING
+                    },
+                ),
+                fitted(),
             ));
             if let Some(mark) = c.mark {
                 mark_badge(h, fonts, mark);
@@ -978,10 +977,13 @@ fn current_card(
                 flex_grow: 1.0,
                 ..default()
             });
-            h.spawn(text(
-                fonts,
-                c.places.join("  "),
-                Type::MONO.size(11.0).ink(Swatch::Muted),
+            h.spawn((
+                wrapped_text(
+                    fonts,
+                    c.places.join("  "),
+                    Type::MONO.size(11.0).ink(Swatch::Muted),
+                ),
+                fitted(),
             ));
         });
         let lead = match &c.since {
@@ -991,16 +993,17 @@ fn current_card(
             ),
             None => (c.explanation.clone(), Type::BODY),
         };
-        k.spawn(text(fonts, lead.0, lead.1)).with_children(|t| {
-            if let Some(since) = &c.since {
-                t.spawn((
-                    TextSpan::new(format!("{since} {}", c.explanation)),
-                    font(fonts, Type::BODY),
-                    TextColor::default(),
-                    Ink(Type::BODY.ink),
-                ));
-            }
-        });
+        k.spawn((text(fonts, lead.0, lead.1), prose()))
+            .with_children(|t| {
+                if let Some(since) = &c.since {
+                    t.spawn((
+                        TextSpan::new(format!("{since} {}", c.explanation)),
+                        font(fonts, Type::BODY),
+                        TextColor::default(),
+                        Ink(Type::BODY.ink),
+                    ));
+                }
+            });
         if !c.use_cases.is_empty() {
             k.spawn(Node {
                 width: percent(100),
@@ -1103,10 +1106,9 @@ fn block_view(
     ))
     .with_children(|b| {
         if caption {
-            b.spawn(text(
-                fonts,
-                block.path.clone(),
-                Type::META.ink(Swatch::Muted),
+            b.spawn((
+                wrapped_text(fonts, block.path.clone(), Type::META.ink(Swatch::Muted)),
+                fitted(),
             ));
         }
         unified_rows(
@@ -1161,15 +1163,21 @@ fn note_row(p: &mut ChildSpawnerCommands, fonts: &UiFonts, n: &NoteView) {
     ))
     .with_children(|r| {
         r.spawn(badge(fonts, label, tone));
-        r.spawn((
-            text(fonts, n.text.clone(), Type::BODY),
-            Node {
-                flex_grow: 1.0,
-                flex_basis: px(0),
-                min_width: px(0),
-                ..default()
-            },
-        ));
+        r.spawn(Node {
+            flex_grow: 1.0,
+            flex_basis: px(0),
+            min_width: px(0),
+            ..default()
+        })
+        .with_children(|t| {
+            t.spawn((
+                wrapped_text(fonts, n.text.clone(), Type::BODY),
+                Node {
+                    max_width: percent(100),
+                    ..default()
+                },
+            ));
+        });
         r.spawn(text(fonts, n.who.clone(), Type::META));
     });
 }
@@ -1219,8 +1227,8 @@ fn other_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, o: &Oth
         if let Some(mark) = o.mark {
             mark_badge(r, fonts, mark);
         }
+        // One line of the step's text: the card opens the step, which shows all of it.
         r.spawn((
-            text(fonts, o.text.clone(), Type::MUTED),
             Node {
                 flex_grow: 1.0,
                 flex_basis: px(0),
@@ -1229,7 +1237,11 @@ fn other_card(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, o: &Oth
                 overflow: Overflow::clip(),
                 ..default()
             },
-        ));
+            Preview,
+        ))
+        .with_children(|t| {
+            t.spawn(text(fonts, o.text.clone(), Type::MUTED));
+        });
         use_case_chips(r, fonts, &o.use_cases);
     });
 }

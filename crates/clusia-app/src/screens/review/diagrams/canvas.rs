@@ -1739,6 +1739,124 @@ fn sync_viewport(
     }
 }
 
+/// A dashed ring on the edge of the node it is spawned in, whatever that node's size: the sides
+/// are tied to the edges instead of laid out at fixed lengths, so a box that grows with its text
+/// keeps a whole ring.
+pub(crate) fn stretched_dashed_ring(
+    p: &mut ChildSpawnerCommands,
+    tiles: Option<&Dots>,
+    radius: f32,
+    ink: Swatch,
+) {
+    let (t, r, d) = (RING_LINE, radius, 2.0 * radius);
+    let edge = |left: Val, right: Val, top: Val, bottom: Val, width: Val, height: Val| Node {
+        position_type: PositionType::Absolute,
+        left,
+        right,
+        top,
+        bottom,
+        width,
+        height,
+        ..default()
+    };
+    let sides = [
+        (true, edge(px(r), px(r), px(0), Val::Auto, Val::Auto, px(t))),
+        (true, edge(px(r), px(r), Val::Auto, px(0), Val::Auto, px(t))),
+        (
+            false,
+            edge(px(0), Val::Auto, px(r), px(r), px(t), Val::Auto),
+        ),
+        (
+            false,
+            edge(Val::Auto, px(0), px(r), px(r), px(t), Val::Auto),
+        ),
+    ];
+    for (horizontal, node) in sides {
+        let mut side = p.spawn((node, ignore(), LinePiece));
+        match tiles {
+            Some(tiles) => {
+                let tile = if horizontal {
+                    &tiles.ring_x
+                } else {
+                    &tiles.ring_y
+                };
+                side.insert((
+                    ImageNode {
+                        image: tile.clone(),
+                        color: Color::NONE,
+                        image_mode: NodeImageMode::Tiled {
+                            tile_x: horizontal,
+                            tile_y: !horizontal,
+                            stretch_value: 1.0,
+                        },
+                        ..default()
+                    },
+                    Tint(ink),
+                    DashedPiece,
+                ));
+            }
+            None => {
+                side.insert((BackgroundColor::default(), Fill(ink)));
+            }
+        }
+    }
+    // As in `dashed_ring`: each arc is the round corner of a node twice the radius across,
+    // clipped to the quarter that holds it.
+    let corners = [
+        (
+            (px(0), Val::Auto, px(0), Val::Auto),
+            (px(0), px(0)),
+            UiRect::new(px(t), px(0), px(t), px(0)),
+            BorderRadius::top_left(px(r)),
+        ),
+        (
+            (Val::Auto, px(0), px(0), Val::Auto),
+            (px(-r), px(0)),
+            UiRect::new(px(0), px(t), px(t), px(0)),
+            BorderRadius::top_right(px(r)),
+        ),
+        (
+            (px(0), Val::Auto, Val::Auto, px(0)),
+            (px(0), px(-r)),
+            UiRect::new(px(t), px(0), px(0), px(t)),
+            BorderRadius::bottom_left(px(r)),
+        ),
+        (
+            (Val::Auto, px(0), Val::Auto, px(0)),
+            (px(-r), px(-r)),
+            UiRect::new(px(0), px(t), px(0), px(t)),
+            BorderRadius::bottom_right(px(r)),
+        ),
+    ];
+    for ((left, right, top, bottom), (dx, dy), border, border_radius) in corners {
+        p.spawn((
+            Node {
+                overflow: Overflow::clip(),
+                ..edge(left, right, top, bottom, px(r), px(r))
+            },
+            ignore(),
+            LinePiece,
+        ))
+        .with_children(|q| {
+            q.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: dx,
+                    top: dy,
+                    width: px(d),
+                    height: px(d),
+                    border,
+                    border_radius,
+                    ..default()
+                },
+                BorderColor::default(),
+                Stroke(ink),
+                ignore(),
+            ));
+        });
+    }
+}
+
 /// The ring of a box that is hovered or has the keyboard focus. A Calls box also rings while it
 /// is selected, so its own system draws it.
 pub(crate) fn outline_boxes(
