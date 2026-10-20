@@ -9,9 +9,10 @@ use bevy::picking::events::{Pointer, Press};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
-use bevy::window::{PrimaryWindow, RequestRedraw};
+use bevy::window::PrimaryWindow;
 use clusia_core::PrRef;
 use clusia_protocol::WindowTarget;
+use std::time::Duration;
 
 use crate::app::StartTarget;
 use crate::bridge::{Ask, Asks, Connection, Model, ShowRequested, Toast, Toasts};
@@ -29,6 +30,7 @@ use crate::ui::kit::{
     Fill, HoverFill, Icon, Reveal, SideTrack, Stroke, Type, Variant, button, icon_button, panel,
     text,
 };
+use crate::ui::pace::{Asking, Pace, Wake};
 use crate::ui::spinner::spinner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -347,7 +349,7 @@ impl Plugin for NavPlugin {
                 Update,
                 (
                     show,
-                    expire_toasts,
+                    expire_toasts.in_set(Asking),
                     rebuild_top_bar,
                     rebuild_banner,
                     rebuild_screen,
@@ -742,18 +744,18 @@ fn rebuild_screen(
     }
 }
 
-fn expire_toasts(
-    time: Res<Time>,
-    mut toasts: ResMut<Toasts>,
-    mut redraw: MessageWriter<RequestRedraw>,
-) {
+/// How long the loop sleeps while a toast is shown. Virtual time moves by 250 ms at most per
+/// wake, so a longer sleep would stretch the toast's life by the difference.
+const TOAST_WAKE: Duration = Duration::from_millis(250);
+
+fn expire_toasts(time: Res<Time>, mut toasts: ResMut<Toasts>, mut pace: ResMut<Pace>) {
     let now = time.elapsed_secs_f64();
     if toasts.0.iter().any(|t| t.until <= now) {
         toasts.0.retain(|t| t.until > now);
     }
     if !toasts.0.is_empty() {
-        // Keep the reactive loop ticking until the last toast has gone.
-        redraw.write(RequestRedraw);
+        // Keep the reactive loop waking until the last toast has gone.
+        pace.ask(Wake::steady(TOAST_WAKE));
     }
 }
 
@@ -797,6 +799,9 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::testing::{self, NOW};
+    use bevy::time::TimeUpdateStrategy;
+    use bevy::window::{RequestRedraw, WindowOccluded};
+    use bevy::winit::{UpdateMode, WinitSettings};
 
     /// An app at the smallest window and the largest text with `n` review tabs open, the last
     /// one open.
@@ -1323,6 +1328,81 @@ mod tests {
         app.update();
         app.update();
         assert_eq!(testing::count::<ToastCard>(&mut app), 1, "expired ones go");
+    }
+
+    fn toast_app() -> App {
+        let mut app = testing::app(fixture::demo(NOW));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            16,
+        )));
+        app.insert_resource(WinitSettings::desktop_app());
+        app.update();
+        app
+    }
+
+    fn redraws(app: &mut App) -> usize {
+        app.world_mut()
+            .resource_mut::<Messages<RequestRedraw>>()
+            .drain()
+            .count()
+    }
+
+    #[test]
+    fn a_toast_waits_for_its_deadline_without_redrawing_every_frame() {
+        let mut app = toast_app();
+        let until = app.world().resource::<Time>().elapsed_secs_f64() + 4.0;
+        app.world_mut().resource_mut::<Toasts>().0 = vec![Toast {
+            text: "Token saved in the Keychain".into(),
+            warning: false,
+            until,
+        }];
+        app.update();
+        redraws(&mut app);
+        let mut asked = 0;
+        for _ in 0..200 {
+            app.update();
+            asked += redraws(&mut app);
+        }
+        assert_eq!(asked, 0, "a wake at a time, not a redraw per frame");
+        let settings = app.world().resource::<WinitSettings>();
+        assert_eq!(
+            settings.focused_mode,
+            UpdateMode::reactive(Duration::from_millis(250)),
+            "virtual time moves 250 ms at most per wake"
+        );
+        assert_eq!(settings.unfocused_mode, settings.focused_mode);
+        assert_eq!(testing::count::<ToastCard>(&mut app), 1);
+        for _ in 0..200 {
+            app.update();
+        }
+        assert_eq!(testing::count::<ToastCard>(&mut app), 0, "it expired");
+        assert!(app.world().resource::<Toasts>().0.is_empty());
+        assert_eq!(
+            app.world().resource::<WinitSettings>().focused_mode,
+            WinitSettings::desktop_app().focused_mode,
+            "and the loop sleeps again"
+        );
+    }
+
+    #[test]
+    fn a_covered_window_does_not_wake_for_a_toast() {
+        let mut app = toast_app();
+        app.world_mut().write_message(WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: true,
+        });
+        app.world_mut().resource_mut::<Toasts>().0 = vec![Toast {
+            text: "Token saved in the Keychain".into(),
+            warning: false,
+            until: 1e9,
+        }];
+        for _ in 0..20 {
+            app.update();
+            assert_eq!(
+                app.world().resource::<WinitSettings>().focused_mode,
+                WinitSettings::desktop_app().focused_mode
+            );
+        }
     }
 
     #[test]

@@ -824,8 +824,10 @@ mod tests {
         use crate::ui::leaf::{Blink, Pulse, Sway};
         use bevy::time::TimeUpdateStrategy;
         use bevy::window::RequestRedraw;
+        use bevy::winit::{UpdateMode, WinitSettings};
         use std::time::Duration;
         let mut app = testing::app(fixture::demo(NOW));
+        app.insert_resource(WinitSettings::desktop_app());
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
             150,
         )));
@@ -866,7 +868,12 @@ mod tests {
         let mut fills = Vec::new();
         for _ in 0..8 {
             app.update();
-            assert!(redraws(&mut app) > 0, "a redraw every frame while running");
+            assert_eq!(redraws(&mut app), 0, "paced wakes, not a redraw per frame");
+            assert_eq!(
+                app.world().resource::<WinitSettings>().focused_mode,
+                UpdateMode::reactive(Duration::from_millis(50)),
+                "a wake every step of the sway"
+            );
             let now = moving(&mut app);
             assert!(now.iter().zip(&last).all(|(a, b)| a != b), "all move");
             let scale = |e: Entity| app.world().get::<UiTransform>(e).unwrap().scale;
