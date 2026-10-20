@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
@@ -42,7 +43,10 @@ const MIN_WAKE_WAIT: Duration = Duration::from_millis(33);
 /// The frames of an animated GIF, each a full picture.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GifFrames {
-    pub frames: Vec<Handle<Image>>,
+    /// The first frame as a texture, for places that show a GIF as a still.
+    pub first: Handle<Image>,
+    /// The RGBA pixels of every frame, shared by the slots that show the GIF.
+    pub pixels: Arc<Vec<Vec<u8>>>,
     pub delays: Vec<Duration>,
     pub size: UVec2,
 }
@@ -93,10 +97,13 @@ enum Showing {
     Failed(String),
 }
 
-/// An animated picture. `visible` is kept up to date by `track_visibility`.
+/// An animated picture. `visible` is kept up to date by `track_visibility`. The slot's
+/// `ImageNode` keeps pointing at `shown`; a new frame is written into that texture, because
+/// swapping the handle makes Bevy rewrite the node's `ContentSize` and lay the page out again.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct GifAnim {
-    pub frames: Vec<Handle<Image>>,
+    pub pixels: Arc<Vec<Vec<u8>>>,
+    pub shown: Handle<Image>,
     pub delays: Vec<Duration>,
     pub i: usize,
     pub t: Duration,
@@ -104,9 +111,10 @@ pub struct GifAnim {
 }
 
 impl GifAnim {
-    pub fn new(gif: &GifFrames) -> Self {
+    pub fn new(gif: &GifFrames, shown: Handle<Image>) -> Self {
         Self {
-            frames: gif.frames.clone(),
+            pixels: gif.pixels.clone(),
+            shown,
             delays: gif.delays.clone(),
             i: 0,
             t: Duration::ZERO,
@@ -116,7 +124,7 @@ impl GifAnim {
 
     /// Whether it has more than one frame to show.
     pub fn moves(&self) -> bool {
-        self.frames.len() > 1
+        self.delays.len() > 1
     }
 
     /// Moves `dt` forward; `true` when the frame changed.
@@ -127,13 +135,13 @@ impl GifAnim {
         self.t += dt;
         let start = self.i;
         // A long pause (a closed laptop) must not spin through the loop for ages.
-        for _ in 0..self.frames.len() {
+        for _ in 0..self.delays.len() {
             let delay = self.delays[self.i];
             if self.t < delay {
                 return self.i != start;
             }
             self.t -= delay;
-            self.i = (self.i + 1) % self.frames.len();
+            self.i = (self.i + 1) % self.delays.len();
         }
         self.t = Duration::ZERO;
         self.i != start
@@ -220,27 +228,38 @@ fn decode_gif(bytes: &[u8], images: &mut Assets<Image>) -> Result<MediaState, St
     if width > MAX_SIDE || height > MAX_SIDE {
         return Err("The GIF is too large to show".into());
     }
-    let mut frames = Vec::new();
+    let mut first = None;
+    let mut pixels = Vec::new();
     let mut delays = Vec::new();
     for frame in decoder.into_frames().take(MAX_GIF_FRAMES) {
         let Ok(frame) = frame else { break };
         // Keeps at least one frame, then stops before the total passes the cap.
-        let total = (frames.len() as u64 + 1) * u64::from(width) * u64::from(height);
-        if !frames.is_empty() && total > MAX_GIF_PIXELS {
+        let total = (pixels.len() as u64 + 1) * u64::from(width) * u64::from(height);
+        if !pixels.is_empty() && total > MAX_GIF_PIXELS {
             break;
         }
         delays.push(frame_delay(Duration::from(frame.delay())));
-        frames.push(images.add(Image::from_dynamic(
-            DynamicImage::ImageRgba8(frame.into_buffer()),
-            true,
-            RenderAssetUsages::RENDER_WORLD,
-        )));
+        let buffer = frame.into_buffer();
+        // `shown_texture` builds each picture from `width × height` pixels, so a frame the
+        // decoder returned at another size is refused here, not left to panic there.
+        if buffer.dimensions() != (width, height) {
+            return Err(damaged());
+        }
+        if first.is_none() {
+            first = Some(images.add(Image::from_dynamic(
+                DynamicImage::ImageRgba8(buffer.clone()),
+                true,
+                RenderAssetUsages::RENDER_WORLD,
+            )));
+        }
+        pixels.push(buffer.into_raw());
     }
-    if frames.is_empty() {
+    let Some(first) = first else {
         return Err(damaged());
-    }
+    };
     Ok(MediaState::Gif(GifFrames {
-        frames,
+        first,
+        pixels: Arc::new(pixels),
         delays,
         size: UVec2::new(width, height),
     }))
@@ -275,7 +294,7 @@ fn decode_arrived(
 fn fill_slots(
     mut commands: Commands,
     fonts: Res<UiFonts>,
-    images: Res<Assets<Image>>,
+    mut images: ResMut<Assets<Image>>,
     mut cache: ResMut<MediaCache>,
     mut asks: ResMut<Asks>,
     slots: Query<(Entity, &MdImage, Option<&Showing>)>,
@@ -312,7 +331,8 @@ fn fill_slots(
                 size_slot(&mut e, size);
             }
             MediaState::Gif(gif) => {
-                e.insert((ImageNode::new(gif.frames[0].clone()), GifAnim::new(&gif)));
+                let shown = images.add(shown_texture(&gif));
+                e.insert((ImageNode::new(shown.clone()), GifAnim::new(&gif, shown)));
                 size_slot(&mut e, Some(gif.size));
             }
             MediaState::Refused(reason) | MediaState::Failed(reason) => {
@@ -320,6 +340,18 @@ fn fill_slots(
             }
         }
     }
+}
+
+/// The texture one slot shows its GIF in, starting on the first frame. It keeps its pixels in
+/// the main world so a frame can be written into it.
+fn shown_texture(gif: &GifFrames) -> Image {
+    let frame = image::RgbaImage::from_raw(gif.size.x, gif.size.y, gif.pixels[0].clone())
+        .expect("every frame holds width × height RGBA pixels");
+    Image::from_dynamic(
+        DynamicImage::ImageRgba8(frame),
+        true,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
 }
 
 /// A slot left to size itself takes its picture's size, shrinking to the row but keeping the
@@ -369,10 +401,15 @@ fn track_visibility(
     }
 }
 
-fn advance_gifs(time: Res<Time>, mut gifs: Query<(&mut GifAnim, &mut ImageNode)>) {
-    for (mut gif, mut node) in &mut gifs {
+fn advance_gifs(time: Res<Time>, mut images: ResMut<Assets<Image>>, mut gifs: Query<&mut GifAnim>) {
+    for mut gif in &mut gifs {
         if gif.visible && gif.advance(time.delta()) {
-            node.image = gif.frames[gif.i].clone();
+            let gif = &*gif;
+            if let Some(mut texture) = images.get_mut(&gif.shown)
+                && let Some(data) = texture.data.as_mut()
+            {
+                data.copy_from_slice(&gif.pixels[gif.i]);
+            }
         }
     }
 }
@@ -858,11 +895,14 @@ mod tests {
         else {
             panic!("a GIF")
         };
-        assert_eq!(frames.frames.len(), 3);
+        assert_eq!(frames.pixels.len(), 3);
         assert_eq!(frames.size, UVec2::new(6, 4));
+        let images = app.world().resource::<Assets<Image>>();
+        let node = app.world().get::<ImageNode>(e).unwrap();
         assert_eq!(
-            app.world().get::<ImageNode>(e).unwrap().image,
-            frames.frames[0]
+            red_of(images, &node.image),
+            0,
+            "it starts on the first frame"
         );
         show(&mut app, e);
         stepping(&mut app, 100);
@@ -877,7 +917,57 @@ mod tests {
             "it loops through every frame"
         );
         let shown = app.world().get::<ImageNode>(e).unwrap().image.clone();
-        assert_eq!(shown, frames.frames[frame_index(&app, e)]);
+        let images = app.world().resource::<Assets<Image>>();
+        assert_eq!(red_of(images, &shown), frame_index(&app, e) as u8 * 80);
+    }
+
+    /// The first byte of each of the three solid frames `write_gif` makes.
+    fn red_of(images: &Assets<Image>, handle: &Handle<Image>) -> u8 {
+        images.get(handle).unwrap().data.as_ref().unwrap()[0]
+    }
+
+    #[test]
+    fn a_gif_frame_swaps_pixels_without_touching_the_node() {
+        // Bevy recomputes a node's `ContentSize` (and so the layout) only when its `ImageNode`
+        // changed; this app has no UI plugin, so an untouched node is what the test can pin.
+        #[derive(Resource, Default)]
+        struct Touched(u32);
+        fn count(mut touched: ResMut<Touched>, nodes: Query<(), Changed<ImageNode>>) {
+            touched.0 += nodes.iter().count() as u32;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gif = write_gif(dir.path(), "a.gif", 3, 100);
+        let mut app = app();
+        app.init_resource::<Touched>().add_systems(Last, count);
+        let e = slot(&mut app, URL);
+        deliver(&mut app, URL, Ok(file(&gif, MediaKind::Gif)));
+        show(&mut app, e);
+        stepping(&mut app, 100);
+        for _ in 0..3 {
+            app.update();
+        }
+        let shown = app.world().get::<ImageNode>(e).unwrap().image.clone();
+        let assets = app.world().resource::<Assets<Image>>().len();
+        *app.world_mut().resource_mut::<Touched>() = Touched::default();
+        let mut reds = HashSet::new();
+        for _ in 0..9 {
+            app.update();
+            let images = app.world().resource::<Assets<Image>>();
+            reds.insert(red_of(images, &shown));
+            assert_eq!(
+                red_of(images, &shown),
+                frame_index(&app, e) as u8 * 80,
+                "the shown picture is the current frame"
+            );
+        }
+        assert_eq!(reds.len(), 3, "every frame reached the one picture");
+        assert_eq!(app.world().get::<ImageNode>(e).unwrap().image, shown);
+        assert_eq!(app.world().resource::<Assets<Image>>().len(), assets);
+        assert_eq!(
+            app.world().resource::<Touched>().0,
+            0,
+            "no frame rewrites the node, which is what makes Bevy lay the page out again"
+        );
     }
 
     #[test]
@@ -1142,7 +1232,8 @@ mod tests {
     #[test]
     fn frames_advance_and_wrap() {
         let mut gif = GifAnim {
-            frames: vec![Handle::default(); 3],
+            pixels: Arc::new(vec![Vec::new(); 3]),
+            shown: Handle::default(),
             delays: vec![Duration::from_millis(100); 3],
             i: 0,
             t: Duration::ZERO,
