@@ -6,6 +6,7 @@ pub mod composer;
 pub mod emoji;
 pub mod kit;
 pub mod leaf;
+pub mod lru;
 pub mod markdown;
 pub mod media;
 pub mod modal;

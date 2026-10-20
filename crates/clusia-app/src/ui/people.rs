@@ -301,11 +301,7 @@ fn fill_avatars(
                 _ => None,
             });
         let Some(url) = url else { continue };
-        if !cache.by_url.contains_key(&url) {
-            cache.by_url.insert(url.clone(), MediaState::Loading);
-            asks.send(Ask::FetchMedia(url.clone()));
-        }
-        let handle = match &cache.by_url[&url] {
+        let handle = match cache.want(&url, &mut asks) {
             MediaState::Image(handle) => handle.clone(),
             MediaState::Gif(gif) => gif.first.clone(),
             _ => continue,
@@ -770,7 +766,7 @@ mod tests {
                 file: Ok(png(dir.path())),
             },
         );
-        testing::settle(&mut app);
+        testing::decoded(&mut app);
         assert!(app.world().get::<ImageNode>(face).is_some());
         assert!(!shown(&mut app).contains(&"O".to_string()));
     }

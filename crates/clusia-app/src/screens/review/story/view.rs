@@ -12,7 +12,8 @@ use clusia_protocol::StoryState;
 use super::model::StoryModel;
 use crate::review_state::{EditTarget, Tab, TabUi};
 use crate::screens::review::checks::ChecksModel;
-use crate::screens::review::diff::{Below, HighlightCache, UnifiedLine, excerpt};
+use crate::screens::review::diff::{Below, UnifiedLine, excerpt};
+use crate::screens::review::highlight::HighlightCache;
 use crate::theme::Swatch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
