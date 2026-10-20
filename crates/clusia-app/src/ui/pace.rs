@@ -37,7 +37,8 @@ pub struct Wake {
 }
 
 impl Wake {
-    /// A mark that moves: it steps at `wait` with focus and at `UNFOCUSED_WAIT` (or `wait`,
+    /// A mark that moves (virtual time advances 250 ms at most per wake, so a longer wait runs
+    /// it slower than the clock): it steps at `wait` with focus and at `UNFOCUSED_WAIT` (or `wait`,
     /// when that is longer) without it.
     pub fn paced(wait: Duration) -> Self {
         Self {
@@ -78,7 +79,9 @@ impl Pace {
     }
 }
 
-/// The systems that call `Pace::ask` belong to this set; `settle` runs after it.
+/// The systems that call `Pace::ask` belong to this set; `settle` runs after it in `PostUpdate`.
+/// An ask must come from `Update`, or from `PostUpdate` inside this set: one made later in the
+/// frame, or in `PostUpdate` outside the set, is dropped for that frame.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Asking;
 

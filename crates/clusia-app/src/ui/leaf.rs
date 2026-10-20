@@ -204,6 +204,7 @@ impl Plugin for LeafPlugin {
 /// `desktop_app`): it asks for the next frame and starts from there.
 fn grow(
     time: Res<Time>,
+    covered: Res<WindowCovered>,
     mut stalks: Query<(&mut Stalk, &mut Node)>,
     mut redraw: MessageWriter<RequestRedraw>,
 ) {
@@ -221,7 +222,7 @@ fn grow(
         node.height = px(stalk.height * eased);
         moving |= stalk.progress < 1.0;
     }
-    if moving {
+    if moving && !covered.0 {
         redraw.write(RequestRedraw);
     }
 }
@@ -334,6 +335,24 @@ mod tests {
         let (stalk, node) = q.single(app.world()).expect("one stalk");
         assert_eq!((stalk.progress, node.height), (0.0, px(0)), "no jump");
         assert!(redraws(&mut app) > 0, "the next frame is asked for at once");
+    }
+
+    #[test]
+    fn a_covered_window_is_not_redrawn_for_a_growing_stalk() {
+        let mut app = testing::app(Snapshot::default());
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            50,
+        )));
+        app.world_mut().write_message(WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: true,
+        });
+        app.update();
+        app.world_mut().spawn(leaf(LeafState::Growing));
+        for _ in 0..4 {
+            app.update();
+            assert_eq!(redraws(&mut app), 0, "nothing to draw for");
+        }
     }
 
     #[test]
