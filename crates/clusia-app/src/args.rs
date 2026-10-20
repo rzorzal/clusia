@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use clusia_core::config::DiffView;
 use clusia_core::diagram::DiagramKind;
 use clusia_core::{PrRef, PrRefError};
 use clusia_protocol::WindowTarget;
@@ -73,6 +74,18 @@ pub enum Scene {
     DiagramsNoHarness,
     /// The Diagrams tab with nothing drawn, a harness set up and drawing on open off.
     DiagramsNoAutoDraw,
+    /// The Diff's Story view, written (DiffStory.png).
+    DiffStory,
+    /// The Diff's Story view before anything is written (DiffStory-static.png).
+    DiffStoryStatic,
+    /// The Diff's Story view written for an older commit (DiffStory-outdated.png).
+    DiffStoryOutdated,
+    /// The Diff's Story view with the changes since the previous version marked (DiffStory-compare.png).
+    DiffStoryCompare,
+    /// The Diff's Calls view around `TokenStore::refresh` (DiffCalls.png).
+    DiffCalls,
+    /// The Diff's Calls view for a change in a language with no call graph (DiffCalls-unsupported.png).
+    DiffCallsUnsupported,
     /// Config › Harness opened at the *Draw diagrams* checkbox, as the Diagrams tab's link does.
     ConfigFocus,
     /// The window after a restart, its tabs back.
@@ -109,6 +122,18 @@ impl Scene {
     /// The scenes of the Diagrams tab; each one hides the right panel, as the mockups have none.
     pub fn is_diagram(self) -> bool {
         self.diagram_kind().is_some() || self == Scene::DiagramsDrawing
+    }
+
+    /// The Diff view a scene shows, when it shows one (Config's *Open the Diff as* is not touched).
+    pub fn diff_view(self) -> Option<DiffView> {
+        match self {
+            Scene::DiffStory
+            | Scene::DiffStoryStatic
+            | Scene::DiffStoryOutdated
+            | Scene::DiffStoryCompare => Some(DiffView::Story),
+            Scene::DiffCalls | Scene::DiffCallsUnsupported => Some(DiffView::Calls),
+            _ => None,
+        }
     }
 }
 
@@ -380,5 +405,41 @@ mod tests {
         );
         assert!(parse(&["--config-page", "git", "--config"]).is_err());
         assert!(parse(&["--config-page", "git", "--review", "a/b#1"]).is_err());
+    }
+
+    #[test]
+    fn the_diff_view_scenes_parse_and_know_their_view() {
+        use clusia_core::config::DiffView;
+        for (name, scene, view) in [
+            ("diff-story", Scene::DiffStory, DiffView::Story),
+            ("diff-story-static", Scene::DiffStoryStatic, DiffView::Story),
+            (
+                "diff-story-outdated",
+                Scene::DiffStoryOutdated,
+                DiffView::Story,
+            ),
+            (
+                "diff-story-compare",
+                Scene::DiffStoryCompare,
+                DiffView::Story,
+            ),
+            ("diff-calls", Scene::DiffCalls, DiffView::Calls),
+            (
+                "diff-calls-unsupported",
+                Scene::DiffCallsUnsupported,
+                DiffView::Calls,
+            ),
+        ] {
+            assert_eq!(
+                parse(&["--demo", "--scene", name]).unwrap().scene,
+                Some(scene),
+                "{name}"
+            );
+            assert_eq!(scene.diff_view(), Some(view), "{name}");
+            assert!(!scene.is_diagram(), "{name}");
+        }
+        for scene in [Scene::Diff, Scene::Split, Scene::Diagrams, Scene::Audits] {
+            assert_eq!(scene.diff_view(), None, "{scene:?}");
+        }
     }
 }
