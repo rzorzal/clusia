@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor/bevy_ui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -84,6 +85,10 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+
+# bevy_ui 0.19.1 with one fix (see vendor/README.md).
+[patch.crates-io]
+bevy_ui = { path = "vendor/bevy_ui" }
 
 [profile.dev.package."*"]
 opt-level = 2

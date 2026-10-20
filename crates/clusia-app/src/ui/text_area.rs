@@ -314,4 +314,62 @@ mod tests {
         let e = app.world().get::<EditableText>(area).unwrap();
         assert_eq!(e.value().to_string(), "x\nyz", "the cursor went to the end");
     }
+
+    fn changed_at(app: &App, area: Entity) -> u32 {
+        app.world()
+            .entity(area)
+            .get_change_ticks::<EditableText>()
+            .unwrap()
+            .changed
+            .get()
+    }
+
+    #[test]
+    fn an_unfocused_area_is_not_marked_changed_on_every_frame() {
+        let mut app = testing::layout_app(Snapshot::default(), UVec2::new(600, 400));
+        let fonts = UiFonts::default();
+        let area = app
+            .world_mut()
+            .spawn(growing_text_area(
+                &fonts,
+                "one line",
+                2.0,
+                6.0,
+                Caret::End,
+                1,
+            ))
+            .id();
+        testing::settle(&mut app);
+        let settled = changed_at(&app, area);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            changed_at(&app, area),
+            settled,
+            "an idle input must not dirty the layout"
+        );
+    }
+
+    #[test]
+    fn typing_still_grows_the_area_under_real_layout() {
+        let mut app = testing::layout_app(Snapshot::default(), UVec2::new(600, 400));
+        let fonts = UiFonts::default();
+        let area = app
+            .world_mut()
+            .spawn(growing_text_area(
+                &fonts,
+                "one line",
+                2.0,
+                6.0,
+                Caret::End,
+                1,
+            ))
+            .id();
+        testing::settle(&mut app);
+        assert_eq!(lines(&app, area), Some(2.0));
+        testing::type_into(&mut app, area, "\n2\n3\n4");
+        testing::settle(&mut app);
+        assert_eq!(lines(&app, area), Some(4.0), "grows with what was typed");
+    }
 }
