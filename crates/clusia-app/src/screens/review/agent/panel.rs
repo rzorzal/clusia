@@ -6,6 +6,8 @@
 //! transcript and a footer with the input. Each part keeps the view it was built from and
 //! rebuilds only when that changes, so streaming text never rebuilds the input.
 
+use std::time::Duration;
+
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::ButtonInput;
 use bevy::input_focus::tab_navigation::TabIndex;
@@ -37,6 +39,7 @@ use crate::ui::kit::{
 };
 use crate::ui::markdown::parse::parse_in;
 use crate::ui::markdown::{RenderOpts, markdown};
+use crate::ui::pace::{Pace, Wake};
 use crate::ui::spinner::{beat, spinner};
 use crate::ui::text_area::{Caret, growing_line_area, set_text};
 
@@ -154,9 +157,11 @@ struct Transcript {
     version: u64,
     /// `Time::elapsed_secs_f64` of the last time the answer still arriving was redrawn.
     drawn_at: f64,
-    /// How many times lines were respawned.
+    /// The chat `version` whose redraw is waiting for `LIVE_REDRAW` to pass.
+    held: Option<u64>,
+    /// How many times the lines were diffed against the chat.
     #[cfg(test)]
-    rebuilds: u32,
+    diffs: u32,
     /// The transcript ends with the live row (a turn runs).
     live: bool,
     /// `Time::elapsed_secs_f64` when this window first drew the live row of the running turn, for
@@ -526,9 +531,10 @@ fn fill_region(
                     pr: pr.clone(),
                     built: None,
                     version: 0,
+                    held: None,
                     drawn_at: f64::NEG_INFINITY,
                     #[cfg(test)]
-                    rebuilds: 0,
+                    diffs: 0,
                     live: false,
                     since: None,
                 },
@@ -758,6 +764,7 @@ fn rebuild_transcript(
     theme: Res<Theme>,
     model: Res<Model>,
     time: Res<Time>,
+    mut pace: ResMut<Pace>,
     mut parts: Query<(
         Entity,
         &mut Transcript,
@@ -776,6 +783,21 @@ fn rebuild_transcript(
             continue;
         }
         let now = time.elapsed_secs_f64();
+        // The redraw of the answer is held back and nothing came since: wake for its deadline.
+        if part.held == Some(chat.version())
+            && part.live == live
+            && chat.streaming()
+            && now - part.drawn_at < LIVE_REDRAW
+        {
+            pace.ask(Wake::steady(Duration::from_secs_f64(
+                LIVE_REDRAW - (now - part.drawn_at),
+            )));
+            continue;
+        }
+        #[cfg(test)]
+        {
+            part.diffs += 1;
+        }
         let wanted: Vec<(u64, bool)> = chat
             .lines
             .iter()
@@ -803,8 +825,14 @@ fn rebuild_transcript(
             && chat.streaming()
             && matches!(chat.lines.last(), Some(ChatLine::Text(_)));
         if growing && now - part.drawn_at < LIVE_REDRAW {
+            part.held = Some(chat.version());
+            // A wake at the deadline: without one the loop may sleep with the tail unseen.
+            pace.ask(Wake::steady(Duration::from_secs_f64(
+                LIVE_REDRAW - (now - part.drawn_at),
+            )));
             continue;
         }
+        part.held = None;
         let pr = part.pr.clone();
         let follow = part.built.is_none() || at_bottom(node);
         let since = match (live, part.since) {
@@ -826,10 +854,6 @@ fn rebuild_transcript(
                 live_row(t, &fonts, &pr, &chat.agent_name(), since);
             }
         });
-        #[cfg(test)]
-        {
-            part.rebuilds += 1;
-        }
         part.drawn_at = now;
         if follow {
             // The layout clamps this to the end of the content: the newest line stays in view.
@@ -2382,7 +2406,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_with_nothing_new_neither_compare_nor_rebuild_the_transcript() {
+    fn frames_with_nothing_new_do_not_even_diff_the_transcript() {
         let mut app = open_chat();
         app.world_mut()
             .resource_mut::<Chats>()
@@ -2392,11 +2416,12 @@ mod tests {
         testing::settle(&mut app);
         let t = transcript(&mut app);
         let before = lines_of(&mut app);
-        let passes = app.world().get::<Transcript>(t).unwrap().rebuilds;
+        let passes = app.world().get::<Transcript>(t).unwrap().diffs;
+        assert!(passes > 0, "the chat was diffed while it changed");
         for _ in 0..30 {
             app.update();
         }
-        assert_eq!(app.world().get::<Transcript>(t).unwrap().rebuilds, passes);
+        assert_eq!(app.world().get::<Transcript>(t).unwrap().diffs, passes);
         assert_eq!(lines_of(&mut app), before);
     }
 
@@ -2454,13 +2479,31 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_keeps_the_scroll_and_the_earlier_lines_a_selection_lives_in() {
+    fn a_selection_in_an_earlier_line_survives_a_new_line_and_a_chunk() {
+        use crate::ui::code_select::{At, CodeLine, CodeSelection};
         let mut app = open_chat();
         app.world_mut()
             .resource_mut::<Chats>()
             .entry(&pr())
             .push_me("Show it".into());
         chunk_of(&mut app, "```rust\nlet a = 1;\n```");
+        testing::settle(&mut app);
+        let t = transcript(&mut app);
+        let block: Vec<(Entity, Entity)> = {
+            let world = app.world_mut();
+            let mut lines = world.query::<(Entity, &CodeLine)>();
+            lines.iter(world).map(|(e, l)| (e, l.key.group)).collect()
+        };
+        let (_, group) = *block
+            .iter()
+            .find(|(e, _)| is_under(&app, *e, t))
+            .expect("the code block is in the transcript");
+        let at = |offset| At { order: 0, offset };
+        app.world_mut()
+            .resource_mut::<CodeSelection>()
+            .select(group, 0, at(0), at(3));
+        testing::settle(&mut app);
+        assert!(!app.world().resource::<CodeSelection>().is_empty());
         say(
             &mut app,
             AgentTell::ToolUse {
@@ -2471,8 +2514,20 @@ mod tests {
         );
         chunk_of(&mut app, "The ");
         testing::settle(&mut app);
+        chunk_of(&mut app, "lock.");
+        testing::settle(&mut app);
+        assert!(
+            !app.world().resource::<CodeSelection>().is_empty(),
+            "the selected block was not respawned"
+        );
+    }
+
+    #[test]
+    fn a_chunk_keeps_the_scroll_of_a_reader_who_scrolled_up() {
+        let mut app = open_chat();
+        chunk_of(&mut app, "The ");
+        testing::settle(&mut app);
         let t = transcript(&mut app);
-        let before = lines_of(&mut app);
         app.world_mut().get_mut::<ScrollPosition>(t).unwrap().y = 100.0;
         let mut node = app.world_mut().get_mut::<ComputedNode>(t).unwrap();
         node.size = Vec2::new(400.0, 200.0);
@@ -2481,8 +2536,43 @@ mod tests {
         chunk_of(&mut app, "lock.");
         testing::settle(&mut app);
         assert_eq!(app.world().get::<ScrollPosition>(t).unwrap().y, 100.0);
-        let after = lines_of(&mut app);
-        assert_eq!(after[..3], before[..3], "the code block is the same entity");
+    }
+
+    #[test]
+    fn chunks_that_stop_without_a_done_still_wake_the_loop_for_the_tail() {
+        let mut app = open_chat();
+        // Still marks need no wake of their own, so any ask is the transcript's.
+        app.insert_resource(crate::ui::spinner::Motion { reduced: true });
+        app.insert_resource(bevy::winit::WinitSettings::desktop_app());
+        run_state(&mut app, SessionStateKind::Running);
+        chunk_of(&mut app, "The ");
+        for _ in 0..10 {
+            app.update();
+        }
+        // Drawn at once: the last redraw is long past.
+        chunk_of(&mut app, "lock.");
+        assert_eq!(
+            app.world().resource::<Pace>().written,
+            None,
+            "nothing is pending before a chunk is held back"
+        );
+        chunk_of(&mut app, " Next.");
+        let wait = app
+            .world()
+            .resource::<Pace>()
+            .written
+            .expect("a wake is asked while the redraw waits");
+        assert!(wait <= std::time::Duration::from_millis(100), "{wait:?}");
+        assert!(!testing::shows(&mut app, "Next."), "held back");
+        for _ in 0..10 {
+            app.update();
+        }
+        assert!(testing::shows(&mut app, "The lock. Next."), "no Done came");
+        assert_eq!(
+            app.world().resource::<Pace>().written,
+            None,
+            "the ask ends with the redraw"
+        );
     }
 
     #[test]

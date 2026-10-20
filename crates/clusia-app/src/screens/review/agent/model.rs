@@ -314,6 +314,8 @@ impl ChatModel {
             }
             AgentTell::Done { turn, .. } => {
                 self.streaming = None;
+                // The answer is whole: a view holding back its redraw must show it now.
+                self.version += 1;
                 return self.ended(*turn);
             }
             AgentTell::Error {
