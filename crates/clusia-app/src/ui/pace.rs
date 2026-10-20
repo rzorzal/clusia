@@ -223,6 +223,32 @@ mod tests {
     }
 
     #[test]
+    fn when_the_last_ask_ends_both_waits_go_back_to_the_desktop_ones() {
+        fn ask_while(on: Res<Active>, mut pace: ResMut<Pace>) {
+            if on.0 {
+                pace.ask(Wake::paced(Duration::from_millis(100)));
+            }
+        }
+        #[derive(Resource)]
+        struct Active(bool);
+        let mut app = testing::app(Snapshot::default());
+        app.insert_resource(WinitSettings::desktop_app());
+        app.insert_resource(Active(true));
+        app.add_systems(PostUpdate, ask_while.in_set(Asking));
+        app.update();
+        assert_eq!(unfocused(&app), UpdateMode::reactive(UNFOCUSED_WAIT));
+        app.world_mut().resource_mut::<Active>().0 = false;
+        app.update();
+        let desktop = WinitSettings::desktop_app();
+        assert_eq!(focused(&app), desktop.focused_mode);
+        assert_eq!(unfocused(&app), desktop.unfocused_mode);
+        assert_eq!(
+            unfocused(&app),
+            UpdateMode::reactive_low_power(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
     fn a_covered_window_asks_for_no_wake_and_gets_it_back_when_shown() {
         let mut app = app_asking(Wake::paced(ms(100)));
         app.update();
