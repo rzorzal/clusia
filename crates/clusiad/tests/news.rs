@@ -248,3 +248,33 @@ async fn base_only_move_keeps_a_saved_review_saved() {
     );
     w.daemon.stop().await;
 }
+
+/// How many requests the mock GitHub has seen so far, by path.
+async fn seen(server: &wiremock::MockServer) -> std::collections::HashMap<String, usize> {
+    let mut by_path = std::collections::HashMap::new();
+    for request in server.received_requests().await.unwrap() {
+        *by_path.entry(request.url.path().to_string()).or_default() += 1;
+    }
+    by_path
+}
+
+#[tokio::test]
+async fn whats_new_after_an_open_reads_only_the_commits() {
+    let w = world().await;
+    let mut c = w.daemon.client().await;
+    open(&mut c).await;
+    c.request(Command::MarkSeen { pr: pr7() }).await.unwrap();
+    let before = seen(&w.server).await;
+
+    c.request(Command::GetWhatsNew { pr: pr7() }).await.unwrap();
+
+    let after = seen(&w.server).await;
+    let new_calls: Vec<_> = after
+        .iter()
+        .filter(|(path, n)| **n > before.get(*path).copied().unwrap_or(0))
+        .map(|(path, _)| path.as_str())
+        .collect();
+    assert_eq!(new_calls.len(), 1, "{new_calls:?}");
+    assert!(new_calls[0].ends_with("/pulls/7/commits"), "{new_calls:?}");
+    w.daemon.stop().await;
+}

@@ -264,6 +264,13 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
     announce(shared, &review);
 
     let role = role_of(viewer.as_deref(), &detail);
+    crate::news::remember(
+        shared,
+        pr,
+        &conversation,
+        checks.as_ref(),
+        viewer.as_deref(),
+    );
     let cache = ReviewCache {
         pr: detail,
         files: files.to_vec(),

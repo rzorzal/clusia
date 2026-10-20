@@ -3,10 +3,12 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use clusia_core::time::parse_rfc3339;
 use clusia_core::{
-    Activity, ActivityKind, CommitInfo, PrConversation, PrRef, PrState, ReviewEvent, ReviewState,
+    Activity, ActivityKind, ChecksSummary, CommitInfo, PrConversation, PrRef, PrState, ReviewEvent,
+    ReviewState,
 };
 use clusia_git::{pin_commit, reviewed_ref};
 use clusia_protocol::{Event, NewsItem, NewsKind, Outcome, Reply, SyncState, topics};
@@ -181,6 +183,55 @@ pub(crate) fn news_items(input: &NewsInput) -> Vec<NewsItem> {
     items
 }
 
+/// How long what an open read still counts as current for the news that follows it.
+const FRESH_FOR: Duration = Duration::from_secs(30);
+
+/// The parts of the news an open has already read from GitHub.
+pub(crate) struct FreshRead {
+    at: Instant,
+    conversation: PrConversation,
+    checks_label: Option<String>,
+    viewer: Option<String>,
+}
+
+/// Keeps what an open of `pr` read, replacing the older read and dropping any that went stale.
+pub(crate) fn remember(
+    shared: &Shared,
+    pr: &PrRef,
+    conversation: &PrConversation,
+    checks: Option<&ChecksSummary>,
+    viewer: Option<&str>,
+) {
+    let mut reads = shared
+        .fresh_reads
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reads.retain(|_, read| read.at.elapsed() < FRESH_FOR);
+    reads.insert(
+        pr.clone(),
+        FreshRead {
+            at: Instant::now(),
+            conversation: conversation.clone(),
+            checks_label: checks.map(|c| c.label().to_string()),
+            viewer: viewer.map(str::to_string),
+        },
+    );
+}
+
+fn fresh_read(shared: &Shared, pr: &PrRef) -> Option<FreshRead> {
+    let reads = shared
+        .fresh_reads
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let read = reads.get(pr).filter(|read| read.at.elapsed() < FRESH_FOR)?;
+    Some(FreshRead {
+        at: read.at,
+        conversation: read.conversation.clone(),
+        checks_label: read.checks_label.clone(),
+        viewer: read.viewer.clone(),
+    })
+}
+
 pub(crate) async fn whats_new(shared: &Shared, pr: &PrRef) -> Outcome {
     let review = match load_existing(shared, pr) {
         Ok(r) => r,
@@ -198,16 +249,22 @@ pub(crate) async fn whats_new(shared: &Shared, pr: &PrRef) -> Outcome {
         Ok(c) => c,
         Err(e) => return provider_error(e),
     };
-    let conversation = match gh.get_conversation(pr).await {
-        Ok(c) => c,
-        Err(e) => return provider_error(e),
+    let (conversation, checks_label, viewer) = match fresh_read(shared, pr) {
+        Some(read) => (read.conversation, read.checks_label, read.viewer),
+        None => {
+            let conversation = match gh.get_conversation(pr).await {
+                Ok(c) => c,
+                Err(e) => return provider_error(e),
+            };
+            let checks_label = gh
+                .get_checks(pr, &review.head_sha)
+                .await
+                .ok()
+                .map(|c| c.label().to_string());
+            let viewer = gh.viewer().await.ok().map(|v| v.login);
+            (conversation, checks_label, viewer)
+        }
     };
-    let checks_label = gh
-        .get_checks(pr, &review.head_sha)
-        .await
-        .ok()
-        .map(|c| c.label().to_string());
-    let viewer = gh.viewer().await.ok().map(|v| v.login);
     let local = match crate::activity::read_off_thread(&shared.paths).await {
         Ok((all, _)) => all.into_iter().filter(|a| &a.pr == pr).collect(),
         Err(e) => {

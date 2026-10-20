@@ -224,6 +224,8 @@ pub struct TabUi {
     pub expanded: BTreeSet<String>,
     /// An `OpenReview` for this tab is in flight.
     pub opening: bool,
+    /// The fresh copy is shown and its news has not arrived yet.
+    pub news_pending: bool,
     /// Why the last refresh of a tab that already shows a copy failed.
     pub open_error: Option<String>,
     /// The area selected in Audits (its id); `None`: **All** when the audit has findings, else the first area.
@@ -289,6 +291,7 @@ impl Default for TabUi {
             finalize: FinalizeForm::default(),
             expanded: BTreeSet::new(),
             opening: false,
+            news_pending: false,
             open_error: None,
             audit_area: None,
             revalidation: RevalView::Auto,
@@ -553,6 +556,7 @@ pub(crate) fn apply(
         Tell::Opened { pr, view, news } => match tabs.0.get_mut(&pr) {
             Some(tab) => {
                 tab.ui.opening = false;
+                tab.ui.news_pending = false;
                 tab.ui.open_error = None;
                 tab.phase = Phase::Ready(Box::new(Ready {
                     view: *view,
@@ -565,6 +569,31 @@ pub(crate) fn apply(
                 changed = false;
                 asks.send(Ask::CloseReview(pr));
             }
+        },
+        Tell::OpenedAwaitingNews { pr, view } => match tabs.0.get_mut(&pr) {
+            Some(tab) => {
+                tab.ui.opening = false;
+                tab.ui.news_pending = true;
+                tab.ui.open_error = None;
+                tab.phase = Phase::Ready(Box::new(Ready {
+                    view: *view,
+                    news: Vec::new(),
+                    cached_at: None,
+                }));
+            }
+            None => {
+                changed = false;
+                asks.send(Ask::CloseReview(pr));
+            }
+        },
+        Tell::News { pr, news } => match tabs.0.get_mut(&pr) {
+            Some(tab) if tab.ui.news_pending => {
+                tab.ui.news_pending = false;
+                if let Phase::Ready(ready) = &mut tab.phase {
+                    ready.news = news;
+                }
+            }
+            _ => changed = false,
         },
         Tell::OpenedFromCache {
             pr,

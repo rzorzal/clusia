@@ -164,7 +164,8 @@ fn open_after_load(
 ) {
     let mut todo: Vec<(PrRef, bool)> = Vec::new();
     for (pr, tab) in &tabs.0 {
-        let now_fresh = matches!(&tab.phase, Phase::Ready(r) if r.cached_at.is_none());
+        let now_fresh =
+            !tab.ui.news_pending && matches!(&tab.phase, Phase::Ready(r) if r.cached_at.is_none());
         let was_fresh = fresh.insert(pr.clone(), now_fresh).unwrap_or(false);
         if now_fresh
             && !was_fresh
@@ -765,6 +766,90 @@ mod tests {
         );
         testing::settle(&mut app);
         assert!(testing::recorded(&mut app).is_empty());
+    }
+
+    /// Opens `pr` the way the bridge does: the copy first, the news later.
+    fn open_awaiting_news(app: &mut App) -> (PrRef, Vec<NewsItem>) {
+        let pr: PrRef = "rzorzal/clusia#123".parse().unwrap();
+        app.world_mut().write_message(crate::bridge::ShowRequested(
+            clusia_protocol::WindowTarget::Review { pr: pr.clone() },
+        ));
+        testing::settle(app);
+        testing::recorded(app);
+        let (view, news) = fixture::demo_review(NOW);
+        testing::tell(
+            app,
+            crate::bridge::Tell::OpenedAwaitingNews {
+                pr: pr.clone(),
+                view: Box::new(view),
+            },
+        );
+        testing::settle(app);
+        (pr, news)
+    }
+
+    #[test]
+    fn the_copy_shows_before_its_news_and_nothing_is_marked_seen_meanwhile() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (pr, _) = open_awaiting_news(&mut app);
+        let tab = testing::tab(&app, &pr);
+        assert!(tab.ready().is_some_and(|r| r.cached_at.is_none()));
+        assert_eq!(tab.ui.modal, None);
+        assert!(
+            !testing::recorded(&mut app).contains(&Ask::MarkSeen(pr)),
+            "the news has not arrived: what it would say must not be marked seen"
+        );
+    }
+
+    #[test]
+    fn the_news_that_follows_opens_what_is_new() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (pr, news) = open_awaiting_news(&mut app);
+        testing::recorded(&mut app);
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::News {
+                pr: pr.clone(),
+                news: news.clone(),
+            },
+        );
+        testing::settle(&mut app);
+        assert_eq!(modal(&app, &pr), Some(Modal::WhatsNew));
+        assert_eq!(testing::tab(&app, &pr).ready().unwrap().news, news);
+        assert!(!testing::recorded(&mut app).contains(&Ask::MarkSeen(pr)));
+    }
+
+    #[test]
+    fn empty_news_that_follows_marks_it_seen() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let (pr, _) = open_awaiting_news(&mut app);
+        testing::recorded(&mut app);
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::News {
+                pr: pr.clone(),
+                news: vec![],
+            },
+        );
+        testing::settle(&mut app);
+        assert_eq!(modal(&app, &pr), None);
+        assert!(testing::recorded(&mut app).contains(&Ask::MarkSeen(pr)));
+    }
+
+    #[test]
+    fn news_for_a_tab_that_is_not_waiting_for_it_is_dropped() {
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        let (_, news) = fixture::demo_review(NOW);
+        testing::tell(
+            &mut app,
+            crate::bridge::Tell::News {
+                pr: pr.clone(),
+                news,
+            },
+        );
+        testing::settle(&mut app);
+        assert!(testing::tab(&app, &pr).ready().unwrap().news.is_empty());
     }
 
     #[test]

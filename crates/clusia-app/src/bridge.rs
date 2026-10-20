@@ -898,6 +898,17 @@ pub enum Tell {
         view: Box<ReviewView>,
         news: Vec<NewsItem>,
     },
+    /// Like `Opened`, with the news still on its way: `News` follows, even when it is empty.
+    /// The tab does not mark the review seen or open What's new before then.
+    OpenedAwaitingNews {
+        pr: PrRef,
+        view: Box<ReviewView>,
+    },
+    /// The news of a review whose `OpenedAwaitingNews` came first.
+    News {
+        pr: PrRef,
+        news: Vec<NewsItem>,
+    },
     OpenedFromCache {
         pr: PrRef,
         view: Box<ReviewView>,
@@ -2482,9 +2493,10 @@ fn forget_finished(open: &OpenSet, tell: &Tell) {
 async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
     match ask {
         Ask::OpenReview(pr) => {
-            let tell = open_review(&socket, &teller, pr).await;
-            forget_finished(&open, &tell);
-            teller.send(tell);
+            if let Some(tell) = open_review(&socket, &teller, pr).await {
+                forget_finished(&open, &tell);
+                teller.send(tell);
+            }
         }
         Ask::FetchMedia(url) => teller.send(fetch_media(&socket, url).await),
         Ask::FetchProfile(login) => teller.send(fetch_profile(&socket, login).await),
@@ -2527,16 +2539,18 @@ fn message_of(e: ClientError) -> String {
     }
 }
 
-/// Sends `OpenedFromCache` when there is a cached copy, so the tab shows it at once; gives back `Opened` or `OpenFailed`.
-async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
+/// Sends `OpenedFromCache` when there is a cached copy, so the tab shows it at once. The fresh
+/// copy is sent as `OpenedAwaitingNews` the moment it arrives and the news after it, so the tab
+/// does not wait for the news. Gives back `OpenFailed` when the open failed.
+async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Option<Tell> {
     let mut client = match worker(socket).await {
         Ok(c) => c,
         Err(message) => {
-            return Tell::OpenFailed {
+            return Some(Tell::OpenFailed {
                 pr,
                 message,
                 cache: false,
-            };
+            });
         }
     };
     let mut cache = false;
@@ -2554,6 +2568,10 @@ async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
     }
     match client.request(Command::OpenReview { pr: pr.clone() }).await {
         Ok(Reply::Review(view)) => {
+            teller.send(Tell::OpenedAwaitingNews {
+                pr: pr.clone(),
+                view,
+            });
             let news = match client
                 .request(Command::GetWhatsNew { pr: pr.clone() })
                 .await
@@ -2561,18 +2579,18 @@ async fn open_review(socket: &Path, teller: &Teller, pr: PrRef) -> Tell {
                 Ok(Reply::WhatsNew(news)) => news,
                 _ => Vec::new(),
             };
-            Tell::Opened { pr, view, news }
+            Some(Tell::News { pr, news })
         }
-        Ok(_) => Tell::OpenFailed {
+        Ok(_) => Some(Tell::OpenFailed {
             pr,
             message: "clusiad sent an unexpected reply".into(),
             cache,
-        },
-        Err(e) => Tell::OpenFailed {
+        }),
+        Err(e) => Some(Tell::OpenFailed {
             pr,
             message: message_of(e),
             cache,
-        },
+        }),
     }
 }
 

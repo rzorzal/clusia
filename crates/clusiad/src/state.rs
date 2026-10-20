@@ -116,6 +116,8 @@ pub(crate) struct Shared {
     pub review_locks: std::sync::Mutex<HashMap<PrRef, Arc<tokio::sync::Mutex<()>>>>,
     /// Parsed files per PR, keyed by the head SHA they were fetched for.
     pub files_cache: Mutex<HashMap<PrRef, CachedFiles>>,
+    /// What the last open of each PR read from GitHub, so the news right after it asks for less.
+    pub fresh_reads: std::sync::Mutex<HashMap<PrRef, crate::news::FreshRead>>,
     /// When each saved review whose worktree would not update may be tried again.
     pub checkout_backoff: std::sync::Mutex<HashMap<PrRef, Backoff>>,
     /// Held for the whole of a sync, so the loop, `SyncNow` and `ListPrs` never overlap.
@@ -198,6 +200,7 @@ impl Shared {
             touched: std::sync::Mutex::new(HashSet::new()),
             review_locks: std::sync::Mutex::new(HashMap::new()),
             files_cache: Mutex::new(HashMap::new()),
+            fresh_reads: std::sync::Mutex::new(HashMap::new()),
             checkout_backoff: std::sync::Mutex::new(HashMap::new()),
             sync_lock: Mutex::new(()),
             first_sync_done,
