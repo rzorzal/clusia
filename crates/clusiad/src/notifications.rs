@@ -216,6 +216,13 @@ pub(crate) struct Engine {
     watch: SyncWatch,
     /// When the feed was last asked for. In memory only: a restart may read it once more.
     feed_read_at: Option<std::time::Instant>,
+    /// Notification thread → the `updated_at` it had when its review request was told, and the
+    /// key it was told under. While a thread stands still there is nothing to look up again.
+    /// In memory only: a restart looks each unread thread up once more.
+    told_requests: std::collections::HashMap<String, (String, String)>,
+    /// Threads told by the thread's own key because the request could not be looked up; when
+    /// the lookup works again, the request it names is that same one.
+    told_blind: std::collections::HashSet<String>,
 }
 
 impl Engine {
@@ -225,6 +232,8 @@ impl Engine {
             recent: Recent::default(),
             watch: SyncWatch::default(),
             feed_read_at: None,
+            told_requests: Default::default(),
+            told_blind: Default::default(),
         }
     }
 
@@ -455,8 +464,20 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
         };
         // A review request is keyed by the request itself, known only after asking GitHub.
         let rerequestable = candidate.kind == EventKind::ReviewRequested;
-        if !rerequestable && shared.engine.lock().await.data.has_key(&candidate.key) {
-            continue;
+        let thread = candidate.key.clone();
+        {
+            let engine = shared.engine.lock().await;
+            let settled = if rerequestable {
+                engine
+                    .told_requests
+                    .get(&thread)
+                    .is_some_and(|(at, key)| *at == n.updated_at && engine.data.has_key(key))
+            } else {
+                engine.data.has_key(&candidate.key)
+            };
+            if settled {
+                continue;
+            }
         }
         let by = match who(gh, n, candidate.kind).await {
             Who::Named(by) => Some(by),
@@ -478,12 +499,13 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
             if *me == by {
                 // What you wrote yourself is no news to you; remembered so it is not looked
                 // up again.
-                shared
-                    .engine
-                    .lock()
-                    .await
-                    .data
-                    .remember(&candidate.key, candidate.at);
+                let mut engine = shared.engine.lock().await;
+                engine.data.remember(&candidate.key, candidate.at);
+                if rerequestable {
+                    engine
+                        .told_requests
+                        .insert(thread, (n.updated_at.clone(), candidate.key.clone()));
+                }
                 continue;
             }
             if let Some(named) = from_notification(n, Some(&by), now) {
@@ -492,12 +514,33 @@ async fn poll_feed(shared: &Shared, gh: &GitHub, now: i64) {
             if rerequestable && let Some(pr) = n.pr() {
                 // Without the request's id the thread keys it, so a failed lookup still tells
                 // about the request, once.
-                let request = gh.latest_review_request(&pr, me).await.ok().flatten();
-                candidate.key = review_request_key(&pr, &n.id, request);
+                let lookup = gh.latest_review_request(&pr, me).await;
+                let mut engine = shared.engine.lock().await;
+                match lookup {
+                    Ok(request) => {
+                        candidate.key = review_request_key(&pr, &n.id, request);
+                        if engine.told_blind.remove(&thread) && request.is_some() {
+                            // Told already, when the id was out of reach.
+                            engine.data.remember(&candidate.key, candidate.at);
+                        }
+                    }
+                    Err(_) => {
+                        engine.told_blind.insert(thread.clone());
+                    }
+                }
             }
         }
-        if rerequestable && shared.engine.lock().await.data.has_key(&candidate.key) {
-            continue;
+        if rerequestable {
+            let mut engine = shared.engine.lock().await;
+            // A thread told blind is looked up again at the next read.
+            if !engine.told_blind.contains(&thread) {
+                engine
+                    .told_requests
+                    .insert(thread, (n.updated_at.clone(), candidate.key.clone()));
+            }
+            if engine.data.has_key(&candidate.key) {
+                continue;
+            }
         }
         events.push(candidate);
     }
@@ -1372,5 +1415,184 @@ mod tests {
         assert_eq!(last_state(Some(&settled)), Some("c1:passing"));
         assert_eq!(last_state(Some("c1:passing")), None);
         assert_eq!(last_state(None), None);
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+    use crate::options::DaemonOptions;
+    use clusia_core::{Config, Paths};
+    use clusia_platform::MemoryStore;
+    use clusia_provider::{Token, TokenOrigin};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn shared() -> (tempfile::TempDir, Shared) {
+        let dir = tempfile::tempdir().unwrap();
+        let options = DaemonOptions {
+            github_api: Some("http://127.0.0.1:9".into()),
+            github_token: None,
+            gh_program: "/nonexistent/gh".into(),
+            secrets: Arc::new(MemoryStore::default()),
+            background_sync: false,
+            tray_program: None,
+            spawner: Arc::new(crate::spawner::RecordingSpawner::default()),
+            media_extra_hosts: Vec::new(),
+            media_allow_local: false,
+            media_resolve: Vec::new(),
+            giphy_api: Some("http://127.0.0.1:9".into()),
+            harness_search_paths: Vec::new(),
+            bridge_program: None,
+            harness_env: Vec::new(),
+            claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
+        };
+        let shared = Shared::new(Paths::new(dir.path()), Config::default(), options);
+        (dir, shared)
+    }
+
+    fn thread(updated_at: &str) -> Value {
+        json!({
+            "id": "1", "reason": "review_requested", "unread": true, "updated_at": updated_at,
+            "subject": {
+                "title": "Add feature",
+                "url": "https://api.github.com/repos/acme/widgets/pulls/7",
+                "latest_comment_url": null,
+                "type": "PullRequest"
+            },
+            "repository": { "full_name": "acme/widgets" }
+        })
+    }
+
+    async fn mount(server: &MockServer, p: &str, template: ResponseTemplate) {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(template)
+            .mount(server)
+            .await;
+    }
+
+    fn requested(ids: &[u64]) -> ResponseTemplate {
+        let events: Vec<Value> = ids
+            .iter()
+            .map(|id| {
+                json!({ "id": id, "event": "review_requested", "requested_reviewer": { "login": "me" } })
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(events)
+    }
+
+    /// A GitHub where `me` is asked to review acme/widgets#7 by `maria`.
+    async fn github(updated_at: &str, events: ResponseTemplate) -> MockServer {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/notifications",
+            ResponseTemplate::new(200).set_body_json(vec![thread(updated_at)]),
+        )
+        .await;
+        mount(
+            &server,
+            "/repos/acme/widgets/pulls/7",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "number": 7, "title": "Add feature", "html_url": "https://github.com/acme/widgets/pull/7",
+                "user": { "login": "maria" }, "draft": false, "updated_at": updated_at,
+                "comments": 0, "review_comments": 0, "additions": 1, "deletions": 1, "changed_files": 1,
+                "state": "open", "merged": false, "body": "",
+                "base": { "ref": "main", "sha": "a", "repo": { "clone_url": "https://github.com/acme/widgets.git" } },
+                "head": { "ref": "f", "sha": "b", "repo": null }
+            })),
+        )
+        .await;
+        mount(
+            &server,
+            "/user",
+            ResponseTemplate::new(200).set_body_json(json!({ "login": "me" })),
+        )
+        .await;
+        mount(&server, "/repos/acme/widgets/issues/7/events", events).await;
+        server
+    }
+
+    fn client(server: &MockServer) -> GitHub {
+        GitHub::new(&server.uri(), Token::new("tok", TokenOrigin::Pat)).unwrap()
+    }
+
+    /// One read of the feed, as if the minute since the last had passed.
+    async fn poll(shared: &Shared, gh: &GitHub) {
+        {
+            let mut engine = shared.engine.lock().await;
+            engine.feed_read_at = None;
+            engine.data.feed_since = Some(format_rfc3339(now_unix() - 100));
+        }
+        poll_feed(shared, gh, now_unix()).await;
+    }
+
+    async fn hits(server: &MockServer, p: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == p)
+            .count()
+    }
+
+    async fn told(shared: &Shared) -> usize {
+        shared.engine.lock().await.data.items.len()
+    }
+
+    #[tokio::test]
+    async fn a_told_request_costs_no_lookups_until_its_thread_moves() {
+        let (_dir, shared) = shared();
+        let server = github("2026-10-01T12:00:00Z", requested(&[501])).await;
+        let gh = client(&server);
+        for _ in 0..4 {
+            poll(&shared, &gh).await;
+        }
+        assert_eq!(told(&shared).await, 1);
+        assert_eq!(hits(&server, "/notifications").await, 4);
+        for p in [
+            "/repos/acme/widgets/pulls/7",
+            "/user",
+            "/repos/acme/widgets/issues/7/events",
+        ] {
+            assert_eq!(hits(&server, p).await, 1, "{p} is asked once");
+        }
+
+        let server = github("2026-10-02T12:00:00Z", requested(&[501, 502])).await;
+        let gh = client(&server);
+        poll(&shared, &gh).await;
+        poll(&shared, &gh).await;
+        assert_eq!(told(&shared).await, 2, "a new request is told");
+        assert_eq!(
+            hits(&server, "/repos/acme/widgets/issues/7/events").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_told_while_the_lookup_failed_is_not_told_again() {
+        let (_dir, shared) = shared();
+        let server = github("2026-10-01T12:00:00Z", ResponseTemplate::new(500)).await;
+        poll(&shared, &client(&server)).await;
+        assert_eq!(told(&shared).await, 1, "told by the thread, lookup or not");
+
+        let server = github("2026-10-01T12:00:00Z", requested(&[501])).await;
+        poll(&shared, &client(&server)).await;
+        assert_eq!(
+            told(&shared).await,
+            1,
+            "the same request, now known by its id"
+        );
+        poll(&shared, &client(&server)).await;
+        assert_eq!(told(&shared).await, 1);
+
+        let server = github("2026-10-02T12:00:00Z", requested(&[501, 502])).await;
+        poll(&shared, &client(&server)).await;
+        assert_eq!(told(&shared).await, 2, "a later request still counts");
     }
 }

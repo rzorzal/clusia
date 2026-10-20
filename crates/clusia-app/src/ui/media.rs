@@ -979,6 +979,63 @@ mod tests {
     }
 
     #[test]
+    fn occlusion_leaves_the_spinners_pace_in_place() {
+        use crate::ui::spinner::{Pace, spinner};
+        let dir = tempfile::tempdir().unwrap();
+        let gif = write_gif(dir.path(), "a.gif", 3, 100);
+        let mut app = app();
+        app.insert_resource(WinitSettings::desktop_app());
+        app.world_mut().spawn(spinner());
+        let e = slot(&mut app, URL);
+        deliver(&mut app, URL, Ok(file(&gif, MediaKind::Gif)));
+        show(&mut app, e);
+        stepping(&mut app, 16);
+        for _ in 0..10 {
+            app.update();
+        }
+        let spin = Duration::from_millis(100);
+        let gif_wait = Duration::from_millis(50);
+        let focused = |app: &App| app.world().resource::<WinitSettings>().focused_mode;
+        assert_eq!(
+            focused(&app),
+            UpdateMode::reactive(gif_wait),
+            "the GIF wakes sooner than the spinner"
+        );
+        app.world_mut().write_message(WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: true,
+        });
+        for _ in 0..10 {
+            app.update();
+        }
+        let switches = app.world().resource::<GifClock>().switches;
+        assert_eq!(app.world().resource::<GifClock>().waiting, None);
+        assert_eq!(
+            focused(&app),
+            UpdateMode::reactive(spin),
+            "the spinner keeps its own wake-up"
+        );
+        assert_eq!(
+            app.world().resource::<WinitSettings>().unfocused_mode,
+            UpdateMode::reactive(spin)
+        );
+        assert_eq!(app.world().resource::<Pace>().0, Some(spin));
+        for _ in 0..40 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<GifClock>().switches, switches);
+        assert_eq!(focused(&app), UpdateMode::reactive(spin), "no tug of war");
+        app.world_mut().write_message(WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: false,
+        });
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(focused(&app), UpdateMode::reactive(gif_wait));
+    }
+
+    #[test]
     fn gif_clock_switches_once() {
         let dir = tempfile::tempdir().unwrap();
         let gif = write_gif(dir.path(), "a.gif", 2, 100);

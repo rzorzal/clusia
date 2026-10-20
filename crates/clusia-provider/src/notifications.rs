@@ -179,9 +179,10 @@ impl GitHub {
         Ok(combine(runs, &status))
     }
 
-    /// The id of the newest event that requested a review of `pr` from `reviewer` (compared
-    /// without regard to case), or `None` when nothing did by name, as when a team was asked.
-    /// Each new request is an event of its own, though the notification thread stays the same.
+    /// The id of the event behind the review of `pr` still requested from `reviewer` (compared
+    /// without regard to case), or `None` when none is: it was never asked by name, as when a
+    /// team was asked, or the request was taken back. Each new request is an event of its own,
+    /// though the notification thread stays the same.
     pub async fn latest_review_request(
         &self,
         pr: &PrRef,
@@ -194,16 +195,24 @@ impl GitHub {
                 pr.number
             ))
             .await?;
-        Ok(events
+        let mut about_reviewer: Vec<(u64, bool)> = events
             .iter()
-            .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("review_requested"))
-            .filter(|e| {
-                e.pointer("/requested_reviewer/login")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|login| login.eq_ignore_ascii_case(reviewer))
+            .filter_map(|e| {
+                let asked = match e.get("event")?.as_str()? {
+                    "review_requested" => true,
+                    "review_request_removed" => false,
+                    _ => return None,
+                };
+                let login = e.pointer("/requested_reviewer/login")?.as_str()?;
+                login
+                    .eq_ignore_ascii_case(reviewer)
+                    .then_some((e.get("id")?.as_u64()?, asked))
             })
-            .filter_map(|e| e.get("id").and_then(|v| v.as_u64()))
-            .max())
+            .collect();
+        about_reviewer.sort_unstable();
+        Ok(about_reviewer
+            .last()
+            .and_then(|&(id, asked)| asked.then_some(id)))
     }
 
     /// The login of whoever wrote the comment at `url`, a `latest_comment_url` of a
@@ -267,7 +276,10 @@ mod tests {
                 { "id": 13, "event": "labeled" },
                 { "id": 14, "event": "review_requested", "requested_team": { "slug": "core" } },
                 { "id": 15, "event": "review_requested", "requested_reviewer": { "login": "me" } },
-                { "id": 16, "event": "review_request_removed", "requested_reviewer": { "login": "me" } }
+                { "id": 16, "event": "review_request_removed", "requested_reviewer": { "login": "ana" } },
+                { "id": 17, "event": "review_request_removed", "requested_reviewer": { "login": "bob" } },
+                { "id": 18, "event": "review_requested", "requested_reviewer": { "login": "bob" } },
+                { "id": 19, "event": "review_request_removed", "requested_reviewer": { "login": "BOB" } }
             ])))
             .mount(&server)
             .await;
@@ -278,9 +290,15 @@ mod tests {
         );
         assert_eq!(
             g.latest_review_request(&pr7(), "ana").await.unwrap(),
-            Some(12)
+            None,
+            "a later removal cancels the request"
         );
-        assert_eq!(g.latest_review_request(&pr7(), "bob").await.unwrap(), None);
+        assert_eq!(
+            g.latest_review_request(&pr7(), "bob").await.unwrap(),
+            None,
+            "asked again and removed again"
+        );
+        assert_eq!(g.latest_review_request(&pr7(), "zed").await.unwrap(), None);
     }
 
     #[tokio::test]
