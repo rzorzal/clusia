@@ -55,18 +55,46 @@ fn code_text(fonts: &UiFonts, size: f32, spans: Vec<CodeSpan>, layout: TextLayou
         layout,
         Children::spawn(SpawnWith(move |p: &mut ChildSpawner| {
             for s in spans {
-                let mut span = p.spawn((
-                    TextSpan::new(s.text),
-                    face.clone(),
-                    TextColor::default(),
-                    Ink(s.ink),
-                ));
+                let mut span = p.spawn(span_bundle(&face, s.text, s.ink));
                 if let Some(mark) = s.mark {
                     span.insert((TextBackgroundColor(Color::NONE), Mark(mark)));
                 }
             }
         })),
     )
+}
+
+fn span_bundle(face: &TextFont, text: String, ink: Swatch) -> impl Bundle {
+    (
+        TextSpan::new(text),
+        face.clone(),
+        TextColor::default(),
+        Ink(ink),
+    )
+}
+
+/// Gives the code line `text` (spawned by `code_line` or `wrapped_code_line`) the runs of
+/// `spans` in place of its own. The text keeps its entity, so only its runs are new; `spans`
+/// should read as the text did, or what copies the line goes stale.
+pub fn respan(
+    commands: &mut Commands,
+    text: Entity,
+    fonts: &UiFonts,
+    size: f32,
+    spans: Vec<CodeSpan>,
+) {
+    let face = font(fonts, Type::MONO.size(size));
+    commands
+        .entity(text)
+        .despawn_related::<Children>()
+        .with_children(|p| {
+            for s in spans {
+                let mut span = p.spawn(span_bundle(&face, s.text, s.ink));
+                if let Some(mark) = s.mark {
+                    span.insert((TextBackgroundColor(Color::NONE), Mark(mark)));
+                }
+            }
+        });
 }
 
 /// The text of `spans` as the line it came from: an empty line (its one-space placeholder)
