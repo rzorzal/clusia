@@ -655,7 +655,9 @@ fn list(
                             flex_direction: FlexDirection::Column,
                             ..default()
                         })
-                        .with_children(|e| editor_box(e, fonts, editor, pr));
+                        .with_children(|e| {
+                            editor_box(e, fonts, editor, pr);
+                        });
                     }
                 } else {
                     draft_reply(c, fonts, pr, d, opts);
@@ -670,7 +672,9 @@ fn list(
                     flex_direction: FlexDirection::Column,
                     ..default()
                 })
-                .with_children(|e| editor_box(e, fonts, editor, pr));
+                .with_children(|e| {
+                    editor_box(e, fonts, editor, pr);
+                });
             }
             c.spawn(divider());
             c.spawn(footer()).with_children(|f| {
