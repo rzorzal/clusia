@@ -1273,8 +1273,8 @@ fn wants_of(body: &DiffBody, editor: Option<&Editor>) -> Vec<Want> {
 
 /// Brings `built`'s children to `wants`: a line whose row changed is respawned in its place, a
 /// new selection or focus is set on the row that is there, what sits under a row is respawned
-/// alone, lines past the end go and new lines are appended.
-#[allow(clippy::too_many_arguments)]
+/// alone, lines past the end go and new lines are appended. Lines are matched by position, so a
+/// line added or removed above respawns every row below it.
 fn reconcile(
     commands: &mut Commands,
     body: Entity,
@@ -2088,6 +2088,8 @@ fn below(
     match item {
         Below::Editor => match editor {
             Some(editor) => editor_box(p, fonts, editor, pr),
+            // The view places the editor only while there is one; the empty node keeps one node
+            // per item, which `update_items` indexes by.
             None => p.spawn(Node::default()).id(),
         },
         Below::Thread(t) => p
@@ -5101,5 +5103,33 @@ mod tests {
             testing::activate(&mut app, cancel);
             testing::settle(&mut app);
         }
+    }
+
+    #[test]
+    fn a_hovered_row_keeps_its_hover_tint_when_its_selection_ends() {
+        let mut app = review_app();
+        let tokens = app.world().resource::<Theme>().tokens;
+        let tint = tokens.get(Swatch::Selected);
+        // A line whose own fill reads apart from the hover tint.
+        let mut q = app.world_mut().query::<(Entity, &LineButton, &Fill)>();
+        let (line, side, number, own) = q
+            .iter(app.world())
+            .find(|(_, _, f)| tokens.get(f.0) != tint)
+            .map(|(e, b, f)| (e, b.side, b.line, f.0))
+            .expect("a line that is not tinted like a hover");
+        testing::activate(&mut app, line);
+        testing::settle(&mut app);
+        assert_eq!(fill_of_line(&mut app, side, number), Swatch::Selected);
+        app.world_mut().entity_mut(line).insert(Hovered(true));
+        testing::settle(&mut app);
+        let cancel = testing::find::<EditorCancel>(&mut app, |_| true);
+        testing::activate(&mut app, cancel);
+        testing::settle(&mut app);
+        assert_eq!(app.world().get::<Fill>(line).unwrap().0, own);
+        assert_eq!(
+            app.world().get::<BackgroundColor>(line).unwrap().0,
+            tint,
+            "the pointer is still on the row"
+        );
     }
 }

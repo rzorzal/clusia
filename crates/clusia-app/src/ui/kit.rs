@@ -988,11 +988,12 @@ fn restyle(
 
 /// Runs after `restyle`: pressed widgets show `PressFill`, hovered ones `HoverFill`, the others
 /// their `Fill`. The press ends without a change the system could see, so it compares colors.
+/// A new `Fill` repaints too: `restyle` writes it without knowing the widget is hovered.
 fn hover(
     theme: Res<Theme>,
     mut widgets: Query<(
         Ref<Hovered>,
-        &Fill,
+        Ref<Fill>,
         &HoverFill,
         Option<&PressFill>,
         Has<Pressed>,
@@ -1001,7 +1002,7 @@ fn hover(
 ) {
     for (hovered, fill, over, press, pressed, mut color) in &mut widgets {
         // Only widgets with a `PressFill` need the check every frame.
-        if press.is_none() && !theme.is_changed() && !hovered.is_changed() {
+        if press.is_none() && !theme.is_changed() && !hovered.is_changed() && !fill.is_changed() {
             continue;
         }
         let swatch = match press {
