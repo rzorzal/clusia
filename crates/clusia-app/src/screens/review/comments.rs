@@ -814,7 +814,7 @@ fn post_row(
                     observe(on_hide),
                 ));
             });
-            markdown(c, fonts, &parse_in(&post.body, pr), opts);
+            markdown(c, fonts, &parse_in(&post.body, &opts.github_host, pr), opts);
         });
     });
 }
@@ -875,7 +875,7 @@ fn draft_reply(
                 observe(on_remove),
             ));
         });
-        markdown(c, fonts, &parse_in(&d.body, pr), opts);
+        markdown(c, fonts, &parse_in(&d.body, &opts.github_host, pr), opts);
     });
 }
 

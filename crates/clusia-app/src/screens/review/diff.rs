@@ -1525,7 +1525,7 @@ fn below(
                                 markdown_line(
                                     w,
                                     fonts,
-                                    &parse_in(&first.body, pr),
+                                    &parse_in(&first.body, &opts.github_host, pr),
                                     Type::BODY,
                                     opts,
                                     120,
@@ -1582,7 +1582,7 @@ fn below(
                                 });
                                 r.spawn(copy_button(fonts, &post.body));
                             });
-                            markdown(b, fonts, &parse_in(&post.body, pr), opts);
+                            markdown(b, fonts, &parse_in(&post.body, &opts.github_host, pr), opts);
                         });
                     }
                 }
@@ -1645,7 +1645,7 @@ fn below(
                         observe(on_remove),
                     ));
                 });
-                markdown(c, fonts, &parse_in(&d.body, pr), opts);
+                markdown(c, fonts, &parse_in(&d.body, &opts.github_host, pr), opts);
             });
         }
     }

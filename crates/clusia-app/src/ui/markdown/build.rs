@@ -40,6 +40,8 @@ pub struct RenderOpts {
     pub suggestion_base: Option<String>,
     /// Draw images from other sites (otherwise they become link chips).
     pub load_external: bool,
+    /// The GitHub web host that `@mentions` and `#123` references point at.
+    pub github_host: String,
 }
 
 impl RenderOpts {
@@ -48,6 +50,7 @@ impl RenderOpts {
         Self {
             code_size,
             load_external: config.media.load_external_images,
+            github_host: config.github.host.clone(),
             ..Self::default()
         }
     }
@@ -59,6 +62,7 @@ impl Default for RenderOpts {
             code_size: 12.0,
             suggestion_base: None,
             load_external: false,
+            github_host: "github.com".into(),
         }
     }
 }
@@ -1340,7 +1344,7 @@ mod tests {
         let pr = clusia_core::PrRef::new("acme", "widgets", 7).unwrap();
         let root = render(
             &mut app,
-            crate::ui::markdown::parse::parse_in("thanks @alice for #12", &pr),
+            crate::ui::markdown::parse::parse_in("thanks @alice for #12", "github.com", &pr),
         );
         let mention = entity_with_text(&app, root, "@alice");
         testing::activate(&mut app, mention);
@@ -1807,9 +1811,15 @@ mod tests {
                 code_size: 13.0,
                 suggestion_base: None,
                 load_external: false,
+                github_host: "github.com".into(),
             }
         );
         config.media.load_external_images = true;
         assert!(RenderOpts::from_config(14.0, &config).load_external);
+        config.github.host = "ghe.acme.test".into();
+        assert_eq!(
+            RenderOpts::from_config(14.0, &config).github_host,
+            "ghe.acme.test"
+        );
     }
 }

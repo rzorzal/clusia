@@ -1302,7 +1302,14 @@ fn draft_card_node(
             }
         });
         if !card.body.is_empty() {
-            markdown_line(c, fonts, &parse_in(&card.body, pr), Type::BODY, opts, 80);
+            markdown_line(
+                c,
+                fonts,
+                &parse_in(&card.body, &opts.github_host, pr),
+                Type::BODY,
+                opts,
+                80,
+            );
         }
     });
 }

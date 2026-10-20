@@ -890,7 +890,7 @@ fn chat_line(
                     ..default()
                 });
             } else {
-                markdown(p, fonts, &parse_in(&shown, pr), opts);
+                markdown(p, fonts, &parse_in(&shown, &opts.github_host, pr), opts);
             }
         }
         // A call is over once anything follows it; the last one of a running turn is not.

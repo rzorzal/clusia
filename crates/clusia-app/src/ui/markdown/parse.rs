@@ -85,21 +85,47 @@ impl Inline {
     }
 }
 
+/// Where `@user`, `@org/team` and `owner/repo#123` point, and which repository a bare
+/// `#123` belongs to.
+struct Refs {
+    host: String,
+    repo: Option<(String, String)>,
+}
+
+/// `md` with no references: `@user` and `#123` stay text, because there is no GitHub host to
+/// link them to.
 pub fn parse(md: &str) -> Vec<Block> {
     parse_with(md, None)
 }
 
-/// `parse` for a comment on `pr`, where a bare `#123` names an issue or pull request of the
-/// same repository and so can be a link.
-pub fn parse_in(md: &str, pr: &PrRef) -> Vec<Block> {
-    parse_with(md, Some(pr))
+/// `parse`, with `@user`, `@org/team` and `owner/repo#123` linked to the GitHub web `host`.
+pub fn parse_on(md: &str, host: &str) -> Vec<Block> {
+    parse_with(
+        md,
+        Some(Refs {
+            host: host.to_string(),
+            repo: None,
+        }),
+    )
 }
 
-fn parse_with(md: &str, pr: Option<&PrRef>) -> Vec<Block> {
+/// `parse_on` for a comment on `pr`, where a bare `#123` names an issue or pull request of the
+/// same repository and so can be a link.
+pub fn parse_in(md: &str, host: &str, pr: &PrRef) -> Vec<Block> {
+    parse_with(
+        md,
+        Some(Refs {
+            host: host.to_string(),
+            repo: Some((pr.owner.clone(), pr.repo.clone())),
+        }),
+    )
+}
+
+fn parse_with(md: &str, refs: Option<Refs>) -> Vec<Block> {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut p = Builder {
-        repo: pr.map(|pr| (pr.owner.clone(), pr.repo.clone())),
+        refs,
         ..Builder::default()
     };
     p.stack.push(Frame::Container(Vec::new()));
@@ -156,8 +182,7 @@ struct Builder {
     table: Option<TableState>,
     /// The closing text of the HTML comment or `<script>` / `<style>` body still open.
     html_skip: Option<&'static str>,
-    /// The owner and name of the repository a bare `#123` refers to.
-    repo: Option<(String, String)>,
+    refs: Option<Refs>,
 }
 
 impl Builder {
@@ -497,11 +522,9 @@ impl Builder {
     /// unless the text is already inside one.
     fn references(&mut self, text: &str) {
         let style = self.style();
-        let repo = self.repo.as_ref().map(|(o, r)| (o.as_str(), r.as_str()));
-        let spans = if self.links.is_empty() {
-            split_references(text, repo)
-        } else {
-            vec![(text, None)]
+        let spans = match &self.refs {
+            Some(refs) if self.links.is_empty() => split_references(text, refs),
+            _ => vec![(text, None)],
         };
         for (piece, url) in spans {
             let style = match url {
@@ -612,11 +635,9 @@ fn split_url(word: &str) -> (&str, Option<&str>, &str) {
 }
 
 /// Splits `text` into runs, each with the GitHub address it links to, if any: `@user`,
-/// `@org/team`, `owner/repo#123`, and `#123` when `repo` says which repository it is in.
-fn split_references<'a>(
-    text: &'a str,
-    repo: Option<(&str, &str)>,
-) -> Vec<(&'a str, Option<String>)> {
+/// `@org/team`, `owner/repo#123`, and `#123` when `refs` says which repository it is in.
+fn split_references<'a>(text: &'a str, refs: &Refs) -> Vec<(&'a str, Option<String>)> {
+    let host = refs.host.as_str();
     let mut out = Vec::new();
     let mut plain_from = 0;
     let mut prev: Option<char> = None;
@@ -629,9 +650,12 @@ fn split_references<'a>(
         }
         let rest = &text[i..];
         let found = match c {
-            '@' => mention(rest),
-            '#' => repo.and_then(|(owner, name)| issue(rest, owner, name)),
-            c if c.is_ascii_alphanumeric() => full_reference(rest),
+            '@' => mention(rest, host),
+            '#' => refs
+                .repo
+                .as_ref()
+                .and_then(|(owner, name)| issue(rest, host, owner, name)),
+            c if c.is_ascii_alphanumeric() => full_reference(rest, host),
             _ => None,
         };
         let Some((len, url)) = found else { continue };
@@ -660,25 +684,24 @@ fn name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-'
 }
 
-/// `@user`, or `@org/team`.
-fn mention(rest: &str) -> Option<(usize, String)> {
+/// `@user`, or `@org/team`. A hyphen at the end of a name is not part of it.
+fn mention(rest: &str, host: &str) -> Option<(usize, String)> {
     let body = &rest[1..];
     let user = run(body, name_char);
-    if user == 0 || user > 39 || body.starts_with('-') || body[..user].ends_with('-') {
+    let name = body[..user].trim_end_matches('-');
+    if name.is_empty() || user > 39 || body.starts_with('-') {
         return None;
     }
-    if let Some(after) = body[user..].strip_prefix('/') {
+    if name.len() == user
+        && let Some(after) = body[user..].strip_prefix('/')
+    {
         let team = run(after, |c| name_char(c) || c == '_');
         if team > 0 && !after[..team].ends_with('-') {
-            let url = format!(
-                "https://github.com/orgs/{}/teams/{}",
-                &body[..user],
-                &after[..team]
-            );
+            let url = format!("https://{host}/orgs/{name}/teams/{}", &after[..team]);
             return Some((1 + user + 1 + team, url));
         }
     }
-    Some((1 + user, format!("https://github.com/{}", &body[..user])))
+    Some((1 + name.len(), format!("https://{host}/{name}")))
 }
 
 /// The digits after the `#` of `rest`, when nothing alphanumeric follows them.
@@ -689,17 +712,17 @@ fn number(rest: &str) -> Option<usize> {
         .then_some(digits)
 }
 
-fn issue(rest: &str, owner: &str, repo: &str) -> Option<(usize, String)> {
+fn issue(rest: &str, host: &str, owner: &str, repo: &str) -> Option<(usize, String)> {
     let digits = number(&rest[1..])?;
     let n = &rest[1..1 + digits];
     Some((
         1 + digits,
-        format!("https://github.com/{owner}/{repo}/issues/{n}"),
+        format!("https://{host}/{owner}/{repo}/issues/{n}"),
     ))
 }
 
 /// `owner/repo#123`.
-fn full_reference(rest: &str) -> Option<(usize, String)> {
+fn full_reference(rest: &str, host: &str) -> Option<(usize, String)> {
     let owner = run(rest, |c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     let after = rest[owner..].strip_prefix('/')?;
     let repo = run(after, |c| c.is_ascii_alphanumeric() || "._-".contains(c));
@@ -709,7 +732,7 @@ fn full_reference(rest: &str) -> Option<(usize, String)> {
         return None;
     }
     let url = format!(
-        "https://github.com/{}/{}/issues/{}",
+        "https://{host}/{}/{}/issues/{}",
         &rest[..owner],
         &after[..repo],
         &tail[..digits]
@@ -769,8 +792,7 @@ fn html_parts<'a>(html: &'a str, skip: &mut Option<&'static str>) -> Vec<HtmlPar
     let mut rest = html;
     loop {
         if let Some(close) = *skip {
-            let lower = rest.to_ascii_lowercase();
-            match lower.find(close) {
+            match find_ignoring_case(rest, close) {
                 Some(at) => {
                     rest = &rest[at + close.len()..];
                     *skip = None;
@@ -829,18 +851,58 @@ fn html_parts<'a>(html: &'a str, skip: &mut Option<&'static str>) -> Vec<HtmlPar
     }
 }
 
-/// The entities HTML written by hand uses; others stay as written.
+/// The byte offset of the first `needle` (lowercase ASCII) in `hay`, whatever its case.
+fn find_ignoring_case(hay: &str, needle: &str) -> Option<usize> {
+    hay.as_bytes()
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// The entities HTML written by hand uses: the five named ones and numeric ones. Anything
+/// else (an unknown name, a number that is no character) stays as written.
 fn decode_entities(text: &str) -> String {
-    [
-        ("&nbsp;", " "),
-        ("&lt;", "<"),
-        ("&gt;", ">"),
-        ("&quot;", "\""),
-        ("&#39;", "'"),
-        ("&amp;", "&"),
-    ]
-    .iter()
-    .fold(text.to_string(), |t, (from, to)| t.replace(from, to))
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        match entity(rest) {
+            Some((c, len)) => {
+                out.push(c);
+                rest = &rest[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The character the entity at the start of `s` (which begins with `&`) stands for, and its
+/// length in bytes.
+fn entity(s: &str) -> Option<(char, usize)> {
+    // Longer than any entity worth decoding, so a stray `&` never scans far.
+    let end = s.bytes().take(12).position(|b| b == b';')?;
+    let name = &s[1..end];
+    let c = match name {
+        "nbsp" => ' ',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "amp" => '&',
+        _ => {
+            let digits = name.strip_prefix('#')?;
+            let code = match digits.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => digits.parse().ok()?,
+            };
+            char::from_u32(code).filter(|c| *c != '\0')?
+        }
+    };
+    Some((c, end + 1))
 }
 
 /// The quoted value of `name="…"` (or `'…'`) inside one tag.
@@ -1013,7 +1075,7 @@ mod tests {
     }
 
     fn para_in(md: &str) -> Vec<Inline> {
-        match parse_in(md, &widgets()).as_slice() {
+        match parse_in(md, "github.com", &widgets()).as_slice() {
             [Block::Paragraph(inlines)] => inlines.clone(),
             other => panic!("not one paragraph: {other:?}"),
         }
@@ -1089,11 +1151,15 @@ mod tests {
 
     #[test]
     fn a_bare_issue_number_needs_the_repository() {
-        assert_eq!(para("see #12"), vec![word("see", true), word("#12", false)]);
+        let on = |md: &str| match parse_on(md, "github.com").as_slice() {
+            [Block::Paragraph(inlines)] => inlines.clone(),
+            other => panic!("not one paragraph: {other:?}"),
+        };
         assert_eq!(
-            para("see @alice acme/widgets#12"),
+            on("see #12 @alice acme/widgets#12"),
             vec![
                 word("see", true),
+                word("#12", true),
                 styled("@alice", link("https://github.com/alice"), true),
                 styled(
                     "acme/widgets#12",
@@ -1102,6 +1168,102 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn without_a_host_nothing_is_a_reference() {
+        assert_eq!(
+            para("see @alice #12 acme/widgets#12"),
+            vec![
+                word("see", true),
+                word("@alice", true),
+                word("#12", true),
+                word("acme/widgets#12", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn references_follow_the_configured_host() {
+        let host = "ghe.acme.test";
+        let in_pr = |md: &str| match parse_in(md, host, &widgets()).as_slice() {
+            [Block::Paragraph(inlines)] => inlines.clone(),
+            other => panic!("not one paragraph: {other:?}"),
+        };
+        assert_eq!(
+            in_pr("@alice @acme/reviewers #12 acme/gadgets#3"),
+            vec![
+                styled("@alice", link("https://ghe.acme.test/alice"), true),
+                styled(
+                    "@acme/reviewers",
+                    link("https://ghe.acme.test/orgs/acme/teams/reviewers"),
+                    true
+                ),
+                styled(
+                    "#12",
+                    link("https://ghe.acme.test/acme/widgets/issues/12"),
+                    true
+                ),
+                styled(
+                    "acme/gadgets#3",
+                    link("https://ghe.acme.test/acme/gadgets/issues/3"),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_trailing_hyphen_is_not_part_of_the_mention() {
+        assert_eq!(
+            para_in("@alice- hi"),
+            vec![
+                styled("@alice", link("https://github.com/alice"), false),
+                word("-", true),
+                word("hi", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn numeric_entities_decode_and_others_stay() {
+        assert_eq!(
+            para("<p>it&#39;s &#x27;ok&#x27; &#128512; &copy; &#0; &#xD800; &amp;lt;</p>"),
+            vec![
+                word("it's", true),
+                word("'ok'", true),
+                Inline::Emoji {
+                    file: "1f600.png",
+                    link: None,
+                    space_after: true,
+                },
+                word("&copy;", true),
+                word("&#0;", true),
+                word("&#xD800;", true),
+                word("&lt;", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn many_script_pairs_on_one_line_stay_linear() {
+        let line = format!("<div>{}</div>", "<script>x</script>".repeat(20_000));
+        let start = cpu_time();
+        let blocks = parse(&line);
+        let spent = cpu_time() - start;
+        assert!(blocks.is_empty(), "{blocks:?}");
+        assert!(spent < std::time::Duration::from_secs(1), "{spent:?}");
+    }
+
+    /// CPU time of this thread, so a busy machine does not fail the budget.
+    fn cpu_time() -> std::time::Duration {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `ts` is a valid timespec for the call to fill in.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+        std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
     }
 
     #[test]
