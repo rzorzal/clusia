@@ -19,7 +19,9 @@ use crate::message::{Command, Reply};
 pub const LAUNCHED_BY: &str = "CLUSIA_LAUNCHED_BY";
 
 pub const READY_TIMEOUT: Duration = Duration::from_secs(5);
-const POLL: Duration = Duration::from_millis(100);
+/// How often the socket is tried. A warm daemon binds within a few milliseconds, so a slower
+/// poll makes every start wait out the rest of its interval.
+const POLL: Duration = Duration::from_millis(10);
 /// The exit status of a clusiad that found another one running (`StartError::AlreadyRunning`).
 const ALREADY_RUNNING: i32 = 3;
 /// Past this size the start log is emptied before the next start appends to it.
@@ -284,6 +286,11 @@ mod tests {
     use crate::{ClientMessage, MessageReader, PROTOCOL_VERSION, ServerMessage, write_message};
     use clusia_core::testkit::patient;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_readiness_poll_is_fast_enough_not_to_dominate_a_warm_start() {
+        assert!(POLL <= Duration::from_millis(10), "poll is {POLL:?}");
+    }
 
     #[test]
     fn the_launch_marker_has_one_name_for_every_process() {

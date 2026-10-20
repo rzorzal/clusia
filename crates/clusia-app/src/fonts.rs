@@ -11,6 +11,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use bevy::text::{FontSource, FontStyle};
 use clusia_core::config::{INTER as INTER_NAME, SYSTEM_FONT};
 use clusia_diagram::Advances;
+use parley::fontique::Blob;
 use skrifa::raw::FileRef;
 use skrifa::string::StringId;
 use skrifa::{FontRef, MetadataProvider};
@@ -85,12 +86,20 @@ impl Default for UiFonts {
     }
 }
 
+/// A font that reads the compiled-in bytes in place instead of copying them to the heap.
+fn embedded(bytes: &'static [u8]) -> Font {
+    Font {
+        data: Blob::new(Arc::new(bytes)),
+        alias: String::new(),
+    }
+}
+
 /// The bundled faces, added to `fonts`.
 pub fn load(fonts: &mut Assets<Font>) -> UiFonts {
     UiFonts {
-        sans: Face::handle(&fonts.add(Font::from_bytes(INTER.to_vec()))),
-        italic: Face::handle(&fonts.add(Font::from_bytes(INTER_ITALIC.to_vec()))),
-        mono: fonts.add(Font::from_bytes(JETBRAINS_MONO.to_vec())),
+        sans: Face::handle(&fonts.add(embedded(INTER))),
+        italic: Face::handle(&fonts.add(embedded(INTER_ITALIC))),
+        mono: fonts.add(embedded(JETBRAINS_MONO)),
         ..UiFonts::default()
     }
 }
@@ -564,6 +573,22 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use bevy::text::FontSize;
     use clusia_diagram::{FaceMeasure, Measure, TextStyle};
+
+    #[test]
+    fn the_bundled_faces_share_the_compiled_in_bytes() {
+        let mut fonts = Assets::<Font>::default();
+        let ui = load(&mut fonts);
+        let ptr = |h: &Handle<Font>| fonts.get(h).unwrap().data.data().as_ptr();
+        let FontSource::Handle(sans) = &ui.sans.source else {
+            panic!("sans is a handle")
+        };
+        let FontSource::Handle(italic) = &ui.italic.source else {
+            panic!("italic is a handle")
+        };
+        assert_eq!(ptr(sans), INTER.as_ptr());
+        assert_eq!(ptr(italic), INTER_ITALIC.as_ptr());
+        assert_eq!(ptr(&ui.mono), JETBRAINS_MONO.as_ptr());
+    }
 
     #[test]
     fn covers_reads_the_character_map() {
