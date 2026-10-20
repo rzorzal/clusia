@@ -44,7 +44,7 @@ use crate::ui::kit::{
     Clickable, Fill, HoverFill, Preview, Reveal, SideTrack, Stroke, Tone, Type, Variant, badge,
     button, card, panel, segment, segments, text, wrapped_text, wrapping_button,
 };
-use crate::ui::markdown::parse::parse_in;
+use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
 use crate::ui::people::{person_avatar, person_name};
 
@@ -4951,6 +4951,9 @@ mod tests {
     #[test]
     fn a_focus_line_moves_its_light_and_marker_without_respawning_rows() {
         let mut app = review_app();
+        // The colors land first: a landing restyles rows on its own, whenever the pool is done.
+        finish_highlights(app.world_mut());
+        testing::settle(&mut app);
         let pr = fixture::demo_pr();
         let rows = row_entities(&mut app);
         let seen = churn(&mut app, |app| show_in(app, &pr, REFRESH, Some((44, 44))));
@@ -5192,6 +5195,58 @@ mod tests {
             "A minute is safer while the runners drift."
         ));
         rows_in_line_order(&mut app);
+    }
+
+    #[test]
+    fn a_thread_card_respawned_with_the_same_text_is_not_parsed_again() {
+        use crate::ui::markdown::cache::counts;
+        let reply = "Diff card respawn **probe** reply";
+        let mut app = review_app();
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+            let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).unwrap().phase else {
+                panic!("ready")
+            };
+            let post = ready
+                .view
+                .conversation
+                .as_mut()
+                .expect("demo conversation")
+                .review_threads
+                .iter_mut()
+                .flat_map(|t| t.comments.iter_mut())
+                .find(|c| c.body == "A minute is safer while the runners drift.")
+                .expect("the demo reply");
+            post.body = reply.into();
+        }
+        testing::settle(&mut app);
+        let toggle = testing::find::<ThreadToggle>(&mut app, |_| true);
+        testing::activate(&mut app, toggle);
+        testing::settle(&mut app);
+        let probe = |app: &mut App| {
+            let mut q = app.world_mut().query::<(Entity, &Text)>();
+            q.iter(app.world())
+                .filter(|(_, t)| t.0 == "probe")
+                .map(|(e, _)| e)
+                .collect::<Vec<_>>()
+        };
+        let before = probe(&mut app);
+        assert!(!before.is_empty(), "the expanded thread shows the reply");
+        let parses = counts::parses(reply);
+        assert!(parses >= 1, "the expanded thread was built");
+        // Collapse and expand again: the card is spawned anew with the same comments.
+        for _ in 0..2 {
+            let toggle = testing::find::<ThreadToggle>(&mut app, |_| true);
+            testing::activate(&mut app, toggle);
+            testing::settle(&mut app);
+        }
+        let after = probe(&mut app);
+        assert!(
+            !after.is_empty() && after != before,
+            "the card was respawned"
+        );
+        assert_eq!(counts::parses(reply), parses, "no parse on a respawn");
     }
 
     #[test]

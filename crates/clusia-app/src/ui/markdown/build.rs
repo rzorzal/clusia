@@ -4,6 +4,7 @@
 //! (`MdImage`) and emoji are sized boxes (`MdEmoji`) that systems fill in.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use bevy::clipboard::Clipboard;
 use bevy::input_focus::tab_navigation::TabIndex;
@@ -11,7 +12,6 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::text::{Strikethrough, Underline, UnderlineColor};
 use bevy::ui_widgets::{Activate, Button as WidgetButton};
-use clusia_highlight::highlight;
 
 use crate::fonts::UiFonts;
 use crate::platform_open::{OpenUrls, visit};
@@ -22,6 +22,7 @@ use crate::ui::emoji::EmojiImages;
 use crate::ui::kit::{
     Clickable, Fill, Ink, Stroke, TextSized, Type, Variant, font, text, wrapping_button,
 };
+use crate::ui::markdown::cache;
 use crate::ui::markdown::parse::{Block, Inline, ListItem, Style};
 
 /// The width of a space, in ems.
@@ -42,6 +43,9 @@ pub struct RenderOpts {
     pub load_external: bool,
     /// The GitHub web host that `@mentions` and `#123` references point at.
     pub github_host: String,
+    /// Fenced blocks highlight through the shared cache. Off for text still growing, whose
+    /// every prefix would be an entry never asked for again.
+    pub cached: bool,
 }
 
 impl RenderOpts {
@@ -63,6 +67,7 @@ impl Default for RenderOpts {
             suggestion_base: None,
             load_external: false,
             github_host: "github.com".into(),
+            cached: true,
         }
     }
 }
@@ -541,7 +546,12 @@ fn code_block(
     let all: Vec<&str> = source.trim_end_matches('\n').split('\n').collect();
     let shown = &all[..all.len().min(MAX_CODE_LINES)];
     let path = lang.map(path_for_lang).unwrap_or_default();
-    let spans = highlight(&path, &shown.join("\n"));
+    let code = shown.join("\n");
+    let spans = if opts.cached {
+        cache::highlighted(&path, &code)
+    } else {
+        Arc::new(cache::highlight_uncached(&path, &code))
+    };
     c.spawn(block_frame()).with_children(|b| {
         let group = b.target_entity();
         for (i, line) in shown.iter().enumerate() {
@@ -1548,6 +1558,61 @@ mod tests {
     }
 
     #[test]
+    fn a_code_block_built_again_is_highlighted_once_and_follows_the_theme() {
+        use crate::ui::markdown::cache::counts;
+        let code = "let build_cache_probe = 1;";
+        let block = || Block::Code {
+            lang: Some("rust".into()),
+            text: code.into(),
+        };
+        let keyword_color = |app: &mut App, root: Entity| {
+            let mut q = app.world_mut().query::<(Entity, &Ink, &TextColor)>();
+            q.iter(app.world())
+                .filter(|(e, ink, _)| {
+                    ink.0 == Swatch::Code(Class::Keyword) && is_under(app.world(), *e, root)
+                })
+                .map(|(_, _, c)| c.0)
+                .collect::<Vec<_>>()
+        };
+        let mut app = fresh();
+        let first = render(&mut app, vec![block()]);
+        let again = render(&mut app, vec![block()]);
+        assert_eq!(counts::highlights(code), 1, "built twice, highlighted once");
+        assert_eq!(
+            testing::tree_signature(&app, first),
+            testing::tree_signature(&app, again)
+        );
+        let light = LIGHT.get(Swatch::Code(Class::Keyword));
+        assert_eq!(keyword_color(&mut app, again), [light]);
+        testing::set_config_locally(&mut app, "appearance.theme", "dark");
+        let dark = render(&mut app, vec![block()]);
+        assert_eq!(counts::highlights(code), 1);
+        let want = DARK.get(Swatch::Code(Class::Keyword));
+        assert_ne!(want, light);
+        assert_eq!(keyword_color(&mut app, dark), [want], "no stale colors");
+    }
+
+    #[test]
+    fn bodies_from_the_cache_build_as_parsed_ones() {
+        use crate::ui::markdown::cache;
+        use crate::ui::markdown::parse;
+        let pr = clusia_core::PrRef {
+            owner: "acme".into(),
+            repo: "widgets".into(),
+            number: 7,
+        };
+        let md = "# Notes\n\n- [x] thanks @alice for #12, see [docs](https://example.com)\n\n\
+                  ```rust\nlet build_sample = 1;\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |";
+        let mut app = fresh();
+        let uncached = render(&mut app, parse::parse_in(md, "github.com", &pr));
+        let cached = render(&mut app, cache::parse_in(md, "github.com", &pr).to_vec());
+        let from_cache = render(&mut app, cache::parse_in(md, "github.com", &pr).to_vec());
+        let want = testing::tree_signature(&app, uncached);
+        assert_eq!(testing::tree_signature(&app, cached), want);
+        assert_eq!(testing::tree_signature(&app, from_cache), want);
+    }
+
+    #[test]
     fn code_blocks_are_colored_lines_with_a_cap() {
         let mut app = fresh();
         let root = render(
@@ -1812,6 +1877,7 @@ mod tests {
                 suggestion_base: None,
                 load_external: false,
                 github_host: "github.com".into(),
+                cached: true,
             }
         );
         config.media.load_external_images = true;

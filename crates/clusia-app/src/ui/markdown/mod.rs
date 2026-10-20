@@ -2,6 +2,7 @@
 //! builder (`build`) that lays them out as one node per word, code run, emoji and image.
 
 pub mod build;
+pub mod cache;
 pub mod parse;
 
 pub use build::{

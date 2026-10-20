@@ -39,7 +39,7 @@ use crate::ui::kit::{
     Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, disabled_button,
     icon_button, panel, text, wrapped_text,
 };
-use crate::ui::markdown::parse::parse_in;
+use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, markdown_line};
 use crate::ui::people::person;
 use crate::ui::spinner::{beat, spinner};

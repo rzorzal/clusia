@@ -28,7 +28,7 @@ use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Stroke, Tone, Type, Variant, badge, button, card, chip, divider, panel, text, wrapped_text,
 };
-use crate::ui::markdown::parse::parse_in;
+use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown};
 use crate::ui::people::{person_avatar, person_name};
 use crate::ui::text_area::set_text;
@@ -1770,6 +1770,37 @@ mod tests {
         assert!(!testing::shows(&mut app, "**"), "no raw markdown");
         assert_eq!(testing::count::<MdImage>(&mut app), 1);
         assert!(testing::recorded(&mut app).contains(&Ask::FetchMedia(url.to_string())));
+    }
+
+    #[test]
+    fn a_respawned_comment_is_not_parsed_or_highlighted_again() {
+        use crate::ui::markdown::cache::counts;
+        let mut app = comments_app();
+        let code = "let comments_respawn_probe = 1;";
+        let body = format!("Comments respawn **probe**\n\n```rust\n{code}\n```");
+        set_first_body(&mut app, &body);
+        let (parses, highlights) = (counts::parses(&body), counts::highlights(code));
+        assert!(parses >= 1 && highlights >= 1, "the body was built");
+        let before = word_entities(&mut app, "probe");
+        // The image setting redraws every comment with the same text.
+        app.world_mut()
+            .resource_mut::<Model>()
+            .snapshot
+            .config
+            .media
+            .load_external_images = true;
+        testing::settle(&mut app);
+        let after = word_entities(&mut app, "probe");
+        assert!(
+            !after.is_empty() && after != before,
+            "the comment was respawned"
+        );
+        assert_eq!(counts::parses(&body), parses, "no parse on a respawn");
+        assert_eq!(
+            counts::highlights(code),
+            highlights,
+            "no highlight on a respawn"
+        );
     }
 
     #[test]

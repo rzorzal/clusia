@@ -5,7 +5,9 @@
 mod classes;
 mod languages;
 
-use tree_sitter_highlight::{HighlightEvent, Highlighter};
+use std::cell::RefCell;
+
+use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
 pub use classes::{Class, class_for};
 pub use languages::language_for;
@@ -49,9 +51,26 @@ fn plain(text: &str) -> Vec<Vec<Span>> {
         .collect()
 }
 
+thread_local! {
+    /// A highlighter keeps its parser and query cursors between runs, so each thread reuses
+    /// one instead of building them for every text.
+    static HIGHLIGHTER: RefCell<Highlighter> = RefCell::new(Highlighter::new());
+}
+
 fn highlight_as(lang: &str, text: &str) -> Option<Vec<Vec<Span>>> {
     let config = languages::config(lang)?;
-    let mut highlighter = Highlighter::new();
+    HIGHLIGHTER.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut highlighter) => highlight_with(&mut highlighter, config, text),
+        // Only reached if a highlight ever ran inside another on this thread.
+        Err(_) => highlight_with(&mut Highlighter::new(), config, text),
+    })
+}
+
+fn highlight_with(
+    highlighter: &mut Highlighter,
+    config: &HighlightConfiguration,
+    text: &str,
+) -> Option<Vec<Vec<Span>>> {
     let events = highlighter
         .highlight(config, text.as_bytes(), None, None, |name| {
             languages::config(name)
@@ -126,6 +145,17 @@ impl<'a> Lines<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reused_highlighter_matches_a_fresh_one_across_languages() {
+        // Twice through every language on one thread, so each run follows another grammar.
+        for (path, text) in SAMPLES.iter().chain(SAMPLES.iter()) {
+            let lang = language_for(path).unwrap();
+            let config = languages::config(lang).unwrap();
+            let fresh = highlight_with(&mut Highlighter::new(), config, text);
+            assert_eq!(highlight_as(lang, text), fresh, "{path}");
+        }
+    }
 
     /// One sample per language; each must produce at least one non-plain span.
     const SAMPLES: [(&str, &str); 22] = [
