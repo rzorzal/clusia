@@ -343,6 +343,7 @@ pub(crate) async fn set_config_value(shared: &Shared, key: String, raw: String) 
         },
     );
     if resync {
+        shared.forget_token();
         shared.sync_now.notify_one();
     }
     Outcome::Ok(Reply::Value(rendered))
@@ -419,6 +420,7 @@ async fn set_token(shared: &Shared, token: &str) -> Outcome {
             format!("could not store the token: {e}"),
         ));
     }
+    shared.forget_token();
     shared.sync_now.notify_one();
     Outcome::Ok(Reply::Ack)
 }
@@ -427,6 +429,7 @@ async fn clear_token(shared: &Shared) -> Outcome {
     let host = shared.config.read().await.github.host.clone();
     match shared.secrets.delete(&host) {
         Ok(_) => {
+            shared.forget_token();
             shared.sync_now.notify_one();
             Outcome::Ok(Reply::Ack)
         }

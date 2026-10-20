@@ -6,10 +6,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::{Duration, Instant};
 
+use clusia_core::config::AuthSource;
 use clusia_core::{Config, FileDiff, Paths, PrRef, PrSummary};
 use clusia_platform::SecretStore;
 use clusia_protocol::{Event, PermissionStatus, SyncStatus};
-use clusia_provider::GitHub;
+use clusia_provider::{GitHub, Token, TokenOrigin};
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 
 use crate::calls::Indexes;
@@ -34,6 +35,35 @@ pub(crate) struct PrLists {
 
 /// Head SHA and the parsed files fetched for it.
 pub(crate) type CachedFiles = (String, Arc<Vec<FileDiff>>);
+
+/// How long a token from `gh auth token` is used before the CLI is asked again.
+const TOKEN_TTL: Duration = Duration::from_secs(300);
+
+/// The last token `gh auth token` gave for a sign-in method and host. Tokens from the
+/// environment and the Keychain are not kept: they are cheap to read, and a stored one changes
+/// through the daemon, which forgets this entry then.
+#[derive(Default)]
+pub(crate) struct TokenCache(Option<(AuthSource, String, Token, Instant)>);
+
+impl TokenCache {
+    /// The kept token when it is for `auth` and `host` and less than `TOKEN_TTL` old at `now`.
+    pub fn get(&self, auth: AuthSource, host: &str, now: Instant) -> Option<Token> {
+        let (kept_auth, kept_host, token, at) = self.0.as_ref()?;
+        (*kept_auth == auth && kept_host == host && now.saturating_duration_since(*at) < TOKEN_TTL)
+            .then(|| token.clone())
+    }
+
+    /// Keeps `token`, taken at `now`, when it came from the CLI.
+    pub fn put(&mut self, auth: AuthSource, host: &str, token: &Token, now: Instant) {
+        if token.origin == TokenOrigin::GhCli {
+            self.0 = Some((auth, host.to_string(), token.clone(), now));
+        }
+    }
+
+    pub fn forget(&mut self) {
+        self.0 = None;
+    }
+}
 
 /// Counts one piece of work in `Shared::busy` while it lives, so a shutdown can wait for it.
 pub(crate) struct Busy(Arc<Shared>);
@@ -105,6 +135,8 @@ pub(crate) struct Shared {
     pub paused: AtomicBool,
     /// Reused while host and token are unchanged, so ETag caching survives between syncs.
     pub client: Mutex<Option<Arc<GitHub>>>,
+    /// The token `gh auth token` gave, so a request does not start a process to learn it again.
+    pub token_cache: std::sync::Mutex<TokenCache>,
     pub worktree_lock: Mutex<()>,
     /// Serialises the read-modify-write of the window's open tabs.
     pub tabs_lock: Mutex<()>,
@@ -135,6 +167,14 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// Makes the next request ask for the token again.
+    pub fn forget_token(&self) {
+        self.token_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forget();
+    }
+
     pub fn new(paths: Paths, config: Config, options: DaemonOptions) -> Self {
         let (events, _) = broadcast::channel(256);
         let (shutdown, _) = watch::channel(false);
@@ -194,6 +234,7 @@ impl Shared {
             sync_now: Notify::new(),
             paused: AtomicBool::new(false),
             client: Mutex::new(None),
+            token_cache: std::sync::Mutex::new(TokenCache::default()),
             worktree_lock: Mutex::new(()),
             tabs_lock: Mutex::new(()),
             hidden_lock: Mutex::new(()),
@@ -279,5 +320,70 @@ impl Shared {
     /// Sends `event` to every connection subscribed to `topic`. No listeners is fine.
     pub fn publish(&self, topic: &str, event: Event) {
         let _ = self.events.send((topic.to_string(), event));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kept(origin: TokenOrigin, now: Instant) -> TokenCache {
+        let mut cache = TokenCache::default();
+        cache.put(
+            AuthSource::GhCli,
+            "github.com",
+            &Token::new("secret", origin),
+            now,
+        );
+        cache
+    }
+
+    #[test]
+    fn a_cli_token_is_kept_until_it_is_five_minutes_old() {
+        let t0 = Instant::now();
+        let cache = kept(TokenOrigin::GhCli, t0);
+        let at = |secs| t0 + Duration::from_secs(secs);
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "github.com", at(299))
+                .is_some()
+        );
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "github.com", at(300))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_kept_token_is_for_its_sign_in_method_and_host_only() {
+        let t0 = Instant::now();
+        let cache = kept(TokenOrigin::GhCli, t0);
+        assert!(cache.get(AuthSource::Pat, "github.com", t0).is_none());
+        assert!(
+            cache
+                .get(AuthSource::GhCli, "ghe.example.com", t0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tokens_that_are_cheap_to_read_are_not_kept() {
+        let t0 = Instant::now();
+        for origin in [TokenOrigin::Env, TokenOrigin::Pat] {
+            assert!(
+                kept(origin, t0)
+                    .get(AuthSource::GhCli, "github.com", t0)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn forgetting_empties_it() {
+        let t0 = Instant::now();
+        let mut cache = kept(TokenOrigin::GhCli, t0);
+        cache.forget();
+        assert!(cache.get(AuthSource::GhCli, "github.com", t0).is_none());
     }
 }

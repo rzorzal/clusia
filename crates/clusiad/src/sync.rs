@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clusia_core::PrFilter;
 use clusia_protocol::{Event, SyncState, SyncStatus, topics};
@@ -27,17 +27,43 @@ pub(crate) fn now_unix() -> i64 {
 /// The client for the configured host and current token. `None` means there is no token.
 pub(crate) async fn github_client(shared: &Shared) -> Result<Option<Arc<GitHub>>, ProviderError> {
     let github = shared.config.read().await.github.clone();
-    let sources = TokenSources {
-        env: shared.github_token.as_deref(),
-        gh_program: &shared.gh_program,
-        secrets: shared.secrets.as_ref(),
-    };
-    let token = match resolve_token(github.auth, &github.host, &sources).await {
-        Ok(Some(token)) => token,
-        Ok(None) => return Ok(None),
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot read the stored token");
-            return Ok(None);
+    // GitHub turned the cached client's token down: it may have been revoked or replaced, so
+    // the CLI is asked again.
+    {
+        let mut cached = shared.client.lock().await;
+        if cached.as_ref().is_some_and(|client| client.was_rejected()) {
+            *cached = None;
+            shared.forget_token();
+        }
+    }
+    let kept = shared
+        .token_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(github.auth, &github.host, Instant::now());
+    let token = match kept {
+        Some(token) => token,
+        None => {
+            let sources = TokenSources {
+                env: shared.github_token.as_deref(),
+                gh_program: &shared.gh_program,
+                secrets: shared.secrets.as_ref(),
+            };
+            match resolve_token(github.auth, &github.host, &sources).await {
+                Ok(Some(token)) => {
+                    shared
+                        .token_cache
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .put(github.auth, &github.host, &token, Instant::now());
+                    token
+                }
+                Ok(None) => return Ok(None),
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot read the stored token");
+                    return Ok(None);
+                }
+            }
         }
     };
     let api = shared

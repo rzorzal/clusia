@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clusia_core::{
@@ -73,6 +74,8 @@ pub struct GitHub {
     /// GraphQL endpoint derived from `api`.
     pub(crate) graphql: String,
     pub(crate) token: Token,
+    /// Set when GitHub answered 401 to this client's token: a cached token should be asked for again.
+    rejected: AtomicBool,
     /// Full URL → (ETag, body) for conditional requests.
     cache: Mutex<HashMap<String, CacheEntry>>,
 }
@@ -380,6 +383,7 @@ impl GitHub {
             graphql: crate::graphql::graphql_url(&api),
             api,
             token,
+            rejected: AtomicBool::new(false),
             cache: Mutex::new(HashMap::new()),
         })
     }
@@ -390,6 +394,17 @@ impl GitHub {
 
     pub fn token(&self) -> &Token {
         &self.token
+    }
+
+    /// Whether GitHub has turned this client's token down since it was made.
+    pub fn was_rejected(&self) -> bool {
+        self.rejected.load(Ordering::Relaxed)
+    }
+
+    /// A 401: remembers it and builds the error (see [`unauthorized`]).
+    pub(crate) fn rejected(&self, text: &str) -> ProviderError {
+        self.rejected.store(true, Ordering::Relaxed);
+        unauthorized(text)
     }
 
     /// Every page of a list endpoint (`per_page=100`, following `Link: rel="next"`).
@@ -465,7 +480,7 @@ impl GitHub {
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
         if status == StatusCode::UNAUTHORIZED {
-            return Err(unauthorized(&text));
+            return Err(self.rejected(&text));
         }
         if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
             return Err(ProviderError::RateLimited { retry_after_secs });
@@ -705,7 +720,7 @@ impl GitHub {
             .await
             .map_err(|e| ProviderError::Offline(e.to_string()))?;
         if status == StatusCode::UNAUTHORIZED {
-            return Err(unauthorized(&text));
+            return Err(self.rejected(&text));
         }
         if let Some(retry_after_secs) = rate_limit_wait(status, &headers) {
             return Err(ProviderError::RateLimited { retry_after_secs });
