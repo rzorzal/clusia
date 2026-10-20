@@ -270,8 +270,13 @@ impl CodeSelection {
 
 /// Spawns a line of selectable code in `p`: the highlight layer, then `text`, which draws over it.
 /// `copy` is what copying the line takes: its code alone. The text must lay out as one `Text`
-/// whose bytes are `copy`'s.
-pub fn selectable(p: &mut ChildSpawnerCommands, key: LineKey, copy: String, text: impl Bundle) {
+/// whose bytes are `copy`'s. Returns the text's entity.
+pub fn selectable(
+    p: &mut ChildSpawnerCommands,
+    key: LineKey,
+    copy: String,
+    text: impl Bundle,
+) -> Entity {
     let layer = p
         .spawn((
             Node {
@@ -293,7 +298,8 @@ pub fn selectable(p: &mut ChildSpawnerCommands, key: LineKey, copy: String, text
         },
         observe(on_press),
         observe(on_drag),
-    ));
+    ))
+    .id()
 }
 
 pub struct CodeSelectPlugin;

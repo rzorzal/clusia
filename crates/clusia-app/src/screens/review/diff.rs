@@ -37,7 +37,7 @@ use crate::screens::review::highlight::{HighlightCache, Highlighted, HighlightsL
 use crate::screens::review::revalidation::{Revalidations, reanchor_click};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
-use crate::ui::code::{CodeSpan, plain_text, spans_for, wrapped_code_line};
+use crate::ui::code::{CodeSpan, plain_text, respan, spans_for, wrapped_code_line};
 use crate::ui::code_select::{ClickKind, CodeSelection, LineKey, selectable};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
@@ -797,6 +797,45 @@ impl RowKey {
             RowKey::Split(l) => [&l.left, &l.right][at].as_ref().map(|c| c.kind),
         }
     }
+
+    /// The code runs of side `at`, as `kind` counts sides.
+    fn spans(&self, at: usize) -> Option<&[CodeSpan]> {
+        match self {
+            RowKey::Unified(l) => (at == 0).then_some(&l.spans[..]),
+            RowKey::Split(l) => [&l.left, &l.right][at].as_ref().map(|c| &c.spans[..]),
+        }
+    }
+
+    /// The line with its runs cut down to its text: two lines that differ only in color (a
+    /// highlight landing, or a new head shown plain) are equal so.
+    fn uncolored(&self) -> RowKey {
+        let plain = |spans: &[CodeSpan]| {
+            vec![CodeSpan {
+                text: spans.iter().map(|s| s.text.as_str()).collect(),
+                ink: Swatch::Muted,
+                mark: None,
+            }]
+        };
+        match self {
+            RowKey::Unified(l) => RowKey::Unified(UnifiedLine {
+                spans: plain(&l.spans),
+                ..l.clone()
+            }),
+            RowKey::Split(l) => {
+                let cell = |c: &Option<Cell>| {
+                    c.as_ref().map(|c| Cell {
+                        spans: plain(&c.spans),
+                        ..c.clone()
+                    })
+                };
+                RowKey::Split(SplitLine {
+                    left: cell(&l.left),
+                    right: cell(&l.right),
+                    ..l.clone()
+                })
+            }
+        }
+    }
 }
 
 /// What sits under a row: one list in Unified, one per side in Split.
@@ -827,6 +866,8 @@ struct Slot {
     entity: Entity,
     /// The nodes whose fill shows the selection: the row in Unified, each side's cell in Split.
     cells: [Option<Entity>; 2],
+    /// Each side's code text, recolored in place when only its colors change.
+    texts: [Option<Entity>; 2],
     selected: [bool; 2],
     /// It carries `FocusRow`.
     focused: bool,
@@ -1261,10 +1302,20 @@ fn reconcile(
             at += 1 + usize::from(built.slots[order].below.is_some());
             continue;
         };
-        if slot.row != want.row {
+        if slot.row != want.row && slot.row.uncolored() != want.row.uncolored() {
             despawn_slot(commands, slot);
             *slot = spawn_slot(commands, body, Some(at), draw, order, want, focused);
         } else {
+            if slot.row != want.row {
+                for side in 0..2 {
+                    if let (Some(text), Some(spans)) = (slot.texts[side], want.row.spans(side))
+                        && slot.row.spans(side) != Some(spans)
+                    {
+                        respan(commands, text, draw.fonts, draw.size, spans.to_vec());
+                    }
+                }
+                slot.row = want.row;
+            }
             for side in 0..2 {
                 if slot.selected[side] != want.selected[side]
                     && let (Some(cell), Some(kind)) = (slot.cells[side], slot.row.kind(side))
@@ -1383,18 +1434,23 @@ fn spawn_slot(
     want: Want,
     focused: bool,
 ) -> Slot {
-    let mut spawned = (Entity::PLACEHOLDER, [None; 2], None);
+    let mut spawned = (Entity::PLACEHOLDER, [None; 2], [None; 2], None);
     commands.entity(body).with_children(|p| {
-        let (entity, cells) = match &want.row {
+        let (entity, cells, texts) = match &want.row {
             RowKey::Unified(line) => {
-                let row = unified_row(p, draw, order, line, want.selected[0], focused);
-                (row, [Some(row), None])
+                let (row, text) = unified_row(p, draw, order, line, want.selected[0], focused);
+                (row, [Some(row), None], [text, None])
             }
             RowKey::Split(line) => split_row(p, draw, order, line, want.selected, focused),
         };
-        spawned = (entity, cells, under_node(p, draw, &want.row, &want.under));
+        spawned = (
+            entity,
+            cells,
+            texts,
+            under_node(p, draw, &want.row, &want.under),
+        );
     });
-    let (entity, cells, below) = spawned;
+    let (entity, cells, texts, below) = spawned;
     if let Some(at) = place {
         let mut placed = vec![entity];
         placed.extend(below.as_ref().map(|u| u.node));
@@ -1404,6 +1460,7 @@ fn spawn_slot(
         row: want.row,
         entity,
         cells,
+        texts,
         selected: want.selected,
         focused,
         under: want.under,
@@ -1641,7 +1698,8 @@ fn code(
     size: f32,
     spans: Vec<CodeSpan>,
     select: Option<LineKey>,
-) {
+) -> Option<Entity> {
+    let mut text = None;
     p.spawn(Node {
         flex_grow: 1.0,
         flex_basis: px(0),
@@ -1655,16 +1713,19 @@ fn code(
         ..default()
     })
     .with_children(|c| match select {
-        Some(key) => selectable(
-            c,
-            key,
-            plain_text(&spans),
-            wrapped_code_line(fonts, size, spans),
-        ),
+        Some(key) => {
+            text = Some(selectable(
+                c,
+                key,
+                plain_text(&spans),
+                wrapped_code_line(fonts, size, spans),
+            ));
+        }
         None => {
             c.spawn(wrapped_code_line(fonts, size, spans));
         }
     });
+    text
 }
 
 /// A line's container; commentable lines are buttons that open the editor.
@@ -1779,7 +1840,7 @@ pub(crate) fn unified_rows(
     }
 }
 
-/// One Unified row, `order`-th of its body.
+/// One Unified row, `order`-th of its body, and its code text.
 fn unified_row(
     p: &mut ChildSpawnerCommands,
     draw: &Draw,
@@ -1787,9 +1848,10 @@ fn unified_row(
     line: &UnifiedLine,
     selected: bool,
     focused: bool,
-) -> Entity {
+) -> (Entity, Option<Entity>) {
     let (fonts, size) = (draw.fonts, draw.size);
-    line_node(
+    let mut text = None;
+    let row = line_node(
         p,
         percent(100),
         line.kind,
@@ -1817,9 +1879,10 @@ fn unified_row(
                 order,
                 column: 0,
             };
-            code(r, fonts, size, line.spans.clone(), Some(key));
+            text = code(r, fonts, size, line.spans.clone(), Some(key));
         },
-    )
+    );
+    (row, text)
 }
 
 /// What sits under a Unified row, indented to its code.
@@ -1864,7 +1927,7 @@ fn under_node(
     })
 }
 
-/// One Split line, `order`-th of its body: the row and each side's cell.
+/// One Split line, `order`-th of its body: the row, each side's cell and each side's code text.
 fn split_row(
     p: &mut ChildSpawnerCommands,
     draw: &Draw,
@@ -1872,9 +1935,10 @@ fn split_row(
     line: &SplitLine,
     selected: [bool; 2],
     focused: bool,
-) -> (Entity, [Option<Entity>; 2]) {
+) -> (Entity, [Option<Entity>; 2], [Option<Entity>; 2]) {
     let (fonts, size) = (draw.fonts, draw.size);
     let mut cells = [None; 2];
+    let mut texts = [None; 2];
     let mut pair = p.spawn(Node {
         width: percent(100),
         flex_shrink: 0.0,
@@ -1919,7 +1983,7 @@ fn split_row(
                             order,
                             column: column as u8,
                         };
-                        code(x, fonts, size, c.spans.clone(), Some(key));
+                        texts[column] = code(x, fonts, size, c.spans.clone(), Some(key));
                     });
                     cells[column] = Some(node);
                 }
@@ -1936,7 +2000,7 @@ fn split_row(
             }
         }
     });
-    (pair.id(), cells)
+    (pair.id(), cells, texts)
 }
 
 /// What sits under a Split line, each side under its own column.
@@ -2488,6 +2552,7 @@ mod tests {
     use crate::fixture;
     use crate::screens::review::calls::CallsRoot;
     use crate::screens::review::editor::{EditorArea, EditorCancel, EditorSubmit};
+    use crate::screens::review::highlight::{HIGHLIGHT_CACHE_BYTES, finish_highlights};
     use crate::screens::review::shell::SectionTab;
     use crate::screens::review::story::StoryRoot;
     use crate::testing::{self, NOW};
@@ -4977,10 +5042,42 @@ mod tests {
         );
     }
 
+    /// Code spans inked with a syntax color other than plain, under the body.
+    fn colored_spans(app: &mut App) -> usize {
+        use clusia_highlight::Class;
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let under = descendants(app, body);
+        let mut q = app.world_mut().query::<(Entity, &crate::ui::kit::Ink)>();
+        q.iter(app.world())
+            .filter(|(e, ink)| {
+                under.contains(e) && matches!(ink.0, Swatch::Code(c) if c != Class::Plain)
+            })
+            .count()
+    }
+
+    /// The review with its highlights in: computed right away (`background` false) or in the
+    /// background and landed.
+    fn lit_review_app(background: bool) -> App {
+        let mut app = review_app();
+        if !background {
+            app.insert_resource(HighlightCache::default());
+            app.world_mut().resource_mut::<ReviewTabs>().set_changed();
+        }
+        finish_highlights(app.world_mut());
+        testing::settle(&mut app);
+        assert!(colored_spans(&mut app) > 0);
+        app
+    }
+
     #[test]
     fn a_changed_line_is_respawned_alone_in_its_place() {
-        for mode in [DiffMode::Unified, DiffMode::Split] {
-            let mut app = review_app();
+        for (mode, background) in [
+            (DiffMode::Unified, false),
+            (DiffMode::Split, false),
+            (DiffMode::Unified, true),
+            (DiffMode::Split, true),
+        ] {
+            let mut app = lit_review_app(background);
             set_mode(&mut app, mode);
             let pr = fixture::demo_pr();
             let before = row_entities(&mut app);
@@ -5002,19 +5099,80 @@ mod tests {
                 ready.view.pr.head_sha = "4b5c6d7e8f9a0b1c2d3e".into();
             }
             testing::settle(&mut app);
-            let after = row_entities(&mut app);
-            assert_eq!(before.len(), after.len(), "{mode:?}");
-            let fresh = after.iter().filter(|e| !before.contains(e)).count();
-            assert!(
-                (1..=4).contains(&fresh),
-                "{mode:?}: only the changed line's row is new, not {fresh} entities"
+            // In the background the new head shows plain first, then its colors land.
+            for landed in [false, true] {
+                if landed {
+                    finish_highlights(app.world_mut());
+                    testing::settle(&mut app);
+                    assert!(colored_spans(&mut app) > 0, "{mode:?}");
+                }
+                let after = row_entities(&mut app);
+                assert_eq!(before.len(), after.len(), "{mode:?} {background}");
+                let fresh = after.iter().filter(|e| !before.contains(e)).count();
+                assert!(
+                    (1..=4).contains(&fresh),
+                    "{mode:?} background {background} landed {landed}: only the changed \
+                     line's row is new, not {fresh} entities"
+                );
+                assert!(
+                    code_lines(&mut app)
+                        .iter()
+                        .any(|(_, l)| l.text.contains("Refresh two minutes early")),
+                    "{mode:?}"
+                );
+                rows_in_line_order(&mut app);
+            }
+        }
+    }
+
+    /// The entities alive in the world.
+    fn live(app: &mut App) -> usize {
+        let mut q = app.world_mut().query::<Entity>();
+        q.iter(app.world()).count()
+    }
+
+    #[test]
+    fn landing_colors_restyles_the_rows_in_place() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = lit_review_app(true);
+            set_mode(&mut app, mode);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let rows = row_entities(&mut app);
+            let nodes = descendants(&app, body).len();
+            let entities = live(&mut app);
+            let in_color = colored_spans(&mut app);
+            // As if the review were seen for the first time: shown plain, then in color.
+            app.insert_resource(HighlightCache::in_background(HIGHLIGHT_CACHE_BYTES));
+            app.world_mut().resource_mut::<ReviewTabs>().set_changed();
+            app.update();
+            assert_eq!(
+                colored_spans(&mut app),
+                0,
+                "{mode:?}: plain inside the frame"
             );
-            assert!(
-                code_lines(&mut app)
-                    .iter()
-                    .any(|(_, l)| l.text.contains("Refresh two minutes early")),
-                "{mode:?}"
+            assert_eq!(
+                row_entities(&mut app),
+                rows,
+                "{mode:?}: going plain keeps the rows"
             );
+            finish_highlights(app.world_mut());
+            testing::settle(&mut app);
+            assert_eq!(
+                colored_spans(&mut app),
+                in_color,
+                "{mode:?}: in color again"
+            );
+            assert_eq!(
+                row_entities(&mut app),
+                rows,
+                "{mode:?}: the landing keeps the rows"
+            );
+            assert_eq!(
+                descendants(&app, body).len(),
+                nodes,
+                "{mode:?}: nothing multiplied"
+            );
+            assert_eq!(live(&mut app), entities, "{mode:?}: nothing leaked");
             rows_in_line_order(&mut app);
         }
     }
