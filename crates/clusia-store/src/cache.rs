@@ -1,13 +1,30 @@
 //! `cache/reviews/<owner~repo~n>.json`: what the last successful open fetched, so the window
 //! can show a review without the network ("Open from cache"). Losing it only costs a refetch.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use clusia_core::{Paths, PrRef, ReviewCache};
 
 use crate::atomic::{quarantine, write_atomic};
 use crate::now_unix;
+
+/// How many times each cache file was parsed, by path. Counted per file so tests that run side
+/// by side, each in its own home, do not see each other's reads.
+static PARSES: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
+
+/// How many times this process has parsed the cache file of `pr` under `paths`.
+pub fn review_cache_parses(paths: &Paths, pr: &PrRef) -> usize {
+    PARSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&paths.review_cache_file(pr))
+        .copied()
+        .unwrap_or(0)
+}
 
 pub fn save_review_cache(paths: &Paths, pr: &PrRef, cache: &ReviewCache) -> io::Result<()> {
     let json = serde_json::to_vec(cache).map_err(io::Error::other)?;
@@ -22,6 +39,11 @@ pub fn load_review_cache(paths: &Paths, pr: &PrRef) -> io::Result<Option<ReviewC
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
+    *PARSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(path.clone())
+        .or_default() += 1;
     match serde_json::from_slice::<ReviewCache>(&bytes) {
         Ok(cache) => Ok(Some(cache)),
         Err(e) => {
@@ -104,6 +126,11 @@ mod tests {
         save_review_cache(&p, &pr(), &cache()).unwrap();
         assert!(p.review_cache_file(&pr()).exists());
         assert_eq!(load_review_cache(&p, &pr()).unwrap(), Some(cache()));
+        assert_eq!(
+            review_cache_parses(&p, &pr()),
+            1,
+            "a missing file is not parsed"
+        );
         delete_review_cache(&p, &pr()).unwrap();
         assert!(!p.review_cache_file(&pr()).exists());
         delete_review_cache(&p, &pr()).unwrap();

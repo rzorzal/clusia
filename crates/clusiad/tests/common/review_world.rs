@@ -98,6 +98,37 @@ async fn world_with(
     }
 }
 
+/// Stops the daemon of `w`, runs `change` on its home while it is down, and starts another
+/// daemon there against the same GitHub.
+pub async fn restart_after(w: World, change: impl FnOnce(&clusia_core::Paths)) -> World {
+    let World {
+        tmp,
+        server,
+        daemon,
+        head,
+        base,
+        origin,
+    } = w;
+    let paths = daemon.paths.clone();
+    let home = daemon.stop().await;
+    change(&paths);
+    let daemon = TestDaemon::restart_with(home, || {
+        let mut options = test_options();
+        options.github_api = Some(server.uri());
+        options.github_token = Some("tok".into());
+        options
+    })
+    .await;
+    World {
+        tmp,
+        server,
+        daemon,
+        head,
+        base,
+        origin,
+    }
+}
+
 pub fn pr7() -> clusia_core::PrRef {
     "acme/widgets#7".parse().unwrap()
 }

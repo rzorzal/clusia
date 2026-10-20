@@ -41,7 +41,6 @@ use clusia_store::diagrams::{
     delete_diagrams, load_diagram_version, load_diagram_versions, load_latest_diagram_version,
     next_diagram_number, save_diagram_version,
 };
-use clusia_store::load_review_cache;
 use tokio::sync::watch;
 
 use crate::agent_log;
@@ -1091,8 +1090,8 @@ async fn start(shared: &Arc<Shared>, pr: &PrRef, mode: Mode) -> Result<(), Outco
     };
     // Code links are kept only for the pull request's files, so a missing cache reads them
     // again; only when that fails too is every link dropped.
-    let (pr_title, diffs) = match load_review_cache(&shared.paths, pr) {
-        Ok(Some(cache)) => (cache.pr.summary.title, cache.files),
+    let (pr_title, diffs) = match shared.review_caches.get(pr).await {
+        Some(cache) => (cache.pr.summary.title.clone(), cache.files.clone()),
         _ => {
             let files = match reviews::files_for(shared, pr, &review.head_sha).await {
                 Ok(files) => files.as_ref().clone(),

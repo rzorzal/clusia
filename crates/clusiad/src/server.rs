@@ -222,6 +222,7 @@ impl Daemon {
         if !self.shared.wait_idle(SHUTDOWN_GRACE).await {
             tracing::warn!("stopping with requests still running after {SHUTDOWN_GRACE:?}");
         }
+        self.shared.review_caches.settled().await;
         tokio::join!(
             crate::checks::shutdown(&self.shared),
             crate::diagrams::shutdown(&self.shared),
@@ -231,6 +232,8 @@ impl Daemon {
             self.shared.sessions.shutdown(&self.shared),
             crate::codex::shutdown(&self.shared)
         );
+        // A turn that ended during those shutdowns may have queued its notes.
+        self.shared.review_caches.settled().await;
         if let Some(tray) = tray {
             // The supervisor kills the tray on shutdown; give it a moment to reap it.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), tray).await;

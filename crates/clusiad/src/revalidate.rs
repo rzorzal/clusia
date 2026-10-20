@@ -20,7 +20,7 @@ use clusia_core::{
 use clusia_git::{diff_for_prompt, repo_of_worktree};
 use clusia_harness::{AgentEvent, RawVerdict, extract_diagrams_stale, extract_revalidation_blocks};
 use clusia_protocol::{AgentErrorKind, AgentLogEntry, Event, TurnOrigin, topics};
-use clusia_store::{list_reviews, load_review_cache};
+use clusia_store::list_reviews;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -503,10 +503,10 @@ pub(crate) async fn files_at(
     pr: &PrRef,
     head: &str,
 ) -> Option<Arc<Vec<FileDiff>>> {
-    if let Ok(Some(cache)) = load_review_cache(&shared.paths, pr)
+    if let Some(cache) = shared.review_caches.get(pr).await
         && cache.pr.head_sha == head
     {
-        return Some(Arc::new(cache.files));
+        return Some(Arc::new(cache.files.clone()));
     }
     reviews::files_for(shared, pr, head).await.ok()
 }

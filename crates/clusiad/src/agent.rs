@@ -16,7 +16,6 @@ use clusia_protocol::{
     Suggestion, topics,
 };
 use clusia_store::agent::{load_agent_state, save_agent_state};
-use clusia_store::load_review_cache;
 
 use crate::agent_log;
 use crate::notifications;
@@ -163,21 +162,28 @@ fn write_notes(path: &Path, text: &str) -> io::Result<()> {
 
 /// Writes `.clusia/review.md` in the worktree: what any agent reads first to know the pull
 /// request, the draft, the summary and what was accepted or dismissed. Best effort: without a
-/// worktree or a cached copy of the pull request there is nothing to write yet.
+/// worktree or a cached copy of the pull request there is nothing to write yet. Written on the
+/// blocking pool, after the notes queued before, from the review as it is now.
 pub(crate) fn refresh_review_md(shared: &Shared, review: &Review) {
-    if !shared.paths.worktree_for(&review.pr).is_dir() {
-        return;
-    }
-    let cache = match load_review_cache(&shared.paths, &review.pr) {
-        Ok(Some(cache)) => cache,
-        _ => return,
-    };
-    let state = load_agent_state(&shared.paths, &review.pr).unwrap_or_default();
-    let summary = agent_log::last_summary(&agent_log::read(&shared.paths.agent_log(&review.pr)));
-    let text = clusia_core::review_md(review, &cache.pr, summary.as_deref(), &state);
-    if let Err(e) = write_notes(&notes_path(shared, &review.pr), &text) {
-        tracing::warn!(error = %e, pr = %review.pr, "cannot write the review notes");
-    }
+    let worktree = shared.paths.worktree_for(&review.pr);
+    let notes = notes_path(shared, &review.pr);
+    let paths = shared.paths.clone();
+    let caches = shared.review_caches.clone();
+    let review = review.clone();
+    drop(shared.review_caches.write_later(notes.clone(), move || {
+        if !worktree.is_dir() {
+            return Ok(());
+        }
+        let Some(cache) = caches.get_blocking(&review.pr) else {
+            return Ok(());
+        };
+        let state = load_agent_state(&paths, &review.pr).unwrap_or_default();
+        let summary = agent_log::last_summary(&agent_log::read(&paths.agent_log(&review.pr)));
+        let text = clusia_core::review_md(&review, &cache.pr, summary.as_deref(), &state);
+        write_notes(&notes, &text).inspect_err(
+            |e| tracing::warn!(error = %e, pr = %review.pr, "cannot write the review notes"),
+        )
+    }));
 }
 
 /// [`refresh_review_md`] for the stored review of `pr`.
@@ -220,8 +226,8 @@ pub(crate) async fn on_open(shared: &Arc<Shared>, pr: &PrRef, head: &str) -> (St
         return skipped(format!("{name} already read this version"));
     }
     let again = state.last_summary_head.is_some();
-    let text = match load_review_cache(&shared.paths, pr) {
-        Ok(Some(cache)) => summary_prompt(again, &cache.pr, &cache.conversation),
+    let text = match shared.review_caches.get(pr).await {
+        Some(cache) => summary_prompt(again, &cache.pr, &cache.conversation),
         _ => plain_summary_prompt(again),
     };
     let prompt = Prompt {

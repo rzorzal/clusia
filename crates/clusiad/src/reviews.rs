@@ -16,8 +16,7 @@ use clusia_protocol::{
     ProtocolError, Reply, ReviewSummary, ReviewView, StepStatus, topics,
 };
 use clusia_store::{
-    ReviewLoad, append_activity, delete_review, delete_review_cache, list_reviews, load_review,
-    load_review_cache, save_review, save_review_cache,
+    ReviewLoad, append_activity, delete_review, list_reviews, load_review, save_review,
 };
 
 use clusia_provider::GitHub;
@@ -271,7 +270,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         checks.as_ref(),
         viewer.as_deref(),
     );
-    let cache = ReviewCache {
+    let cache = Arc::new(ReviewCache {
         pr: detail,
         files: files.to_vec(),
         conversation,
@@ -280,9 +279,10 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         viewer,
         worktree: Some(worktree),
         fetched_at: now,
-    };
-    if !cache_saved && let Err(e) = save_review_cache(&shared.paths, pr, &cache) {
-        tracing::warn!(error = %e, pr = %pr, "cannot write the review cache");
+    });
+    if !cache_saved {
+        // A failed write is logged; the copy in memory still serves this daemon.
+        drop(shared.review_caches.put(pr, cache.clone()));
     }
     crate::agent::refresh_review_md(shared, &review);
     let (status, note) = crate::agent::on_open(shared, pr, &review.head_sha).await;
@@ -303,7 +303,11 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         None => (status, note),
     };
     step(shared, pr, LoadStepKind::Agent, status, Some(note));
-    Outcome::Ok(Reply::Review(Box::new(view_of(review, cache))))
+    // The view owns its data: memory keeps the shared copy, the reply gets its own.
+    Outcome::Ok(Reply::Review(Box::new(view_of(
+        review,
+        Arc::unwrap_or_clone(cache),
+    ))))
 }
 
 /// What an open needs from the checkout and from GitHub, however it got them.
@@ -328,14 +332,7 @@ async fn unchanged_open(
     pr: &PrRef,
     detail: &PrDetail,
 ) -> Option<Opened> {
-    let cache = match load_review_cache(&shared.paths, pr) {
-        Ok(Some(c)) => c,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::warn!(error = %e, pr = %pr, "cannot read the review cache");
-            return None;
-        }
-    };
+    let cache = shared.review_caches.get(pr).await?;
     let before = &cache.pr;
     if before.head_sha != detail.head_sha
         || before.base_sha != detail.base_sha
@@ -366,11 +363,11 @@ async fn unchanged_open(
     let checks = checks
         .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the checks"))
         .ok();
-    let viewer = match cache.viewer {
-        Some(v) => Some(v),
+    let viewer = match &cache.viewer {
+        Some(v) => Some(v.clone()),
         None => gh.viewer_login().await.ok(),
     };
-    let files = Arc::new(cache.files);
+    let files = Arc::new(cache.files.clone());
     let fresh = ReviewCache {
         pr: detail.clone(),
         files: files.to_vec(),
@@ -378,7 +375,7 @@ async fn unchanged_open(
         checks,
         role: role_of(viewer.as_deref(), detail),
         viewer: viewer.clone(),
-        worktree: cache.worktree,
+        worktree: cache.worktree.clone(),
         fetched_at: now_unix(),
     };
     {
@@ -388,9 +385,7 @@ async fn unchanged_open(
         if !on_head(&worktree, &detail.head_sha).await {
             return None;
         }
-        if let Err(e) = save_review_cache(&shared.paths, pr, &fresh) {
-            tracing::warn!(error = %e, pr = %pr, "cannot write the review cache");
-        }
+        drop(shared.review_caches.put(pr, Arc::new(fresh)));
     }
     shared
         .files_cache
@@ -567,13 +562,8 @@ pub(crate) async fn cached(shared: &Shared, pr: &PrRef) -> Outcome {
             format!("no cached copy of {pr}"),
         ))
     };
-    let cache = match load_review_cache(&shared.paths, pr) {
-        Ok(Some(c)) => c,
-        Ok(None) => return not_found(),
-        Err(e) => {
-            tracing::warn!(error = %e, pr = %pr, "cannot read the review cache");
-            return not_found();
-        }
+    let Some(cache) = shared.review_caches.get(pr).await else {
+        return not_found();
     };
     // A review closed with an empty draft leaves no file but keeps its cache: it reopens as a
     // fresh review of the cached pull request.
@@ -590,16 +580,15 @@ pub(crate) async fn cached(shared: &Shared, pr: &PrRef) -> Outcome {
     };
     let fetched_at = cache.fetched_at;
     Outcome::Ok(Reply::Cached(Box::new(CachedReview {
-        view: view_of(review, cache),
+        view: view_of(review, Arc::unwrap_or_clone(cache)),
         fetched_at,
     })))
 }
 
 /// Forgets the cached copy of `pr` (best effort): its review is gone.
 pub(crate) fn drop_cache(shared: &Shared, pr: &PrRef) {
-    if let Err(e) = delete_review_cache(&shared.paths, pr) {
-        tracing::warn!(error = %e, pr = %pr, "cannot delete the review cache");
-    }
+    // A failed removal is logged; memory already has no copy.
+    drop(shared.review_caches.forget(pr));
     crate::checks::drop_results(shared, pr);
 }
 
