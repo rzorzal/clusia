@@ -57,7 +57,10 @@ use crate::ui::kit::{
 };
 use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
+use crate::ui::pace::{Pace, Wake, WindowCovered};
 use crate::ui::people::{person_avatar, person_name};
+use crate::ui::spinner::Motion;
+use crate::ui::tween::{Ease, FRAME_WAIT, Tween, progress};
 
 const NO_DIFF: &str = "No diff to show for this file";
 
@@ -351,6 +354,29 @@ const TEXT_TOP: f32 = 3.0;
 
 /// Lines of context kept above a line that is scrolled to.
 const FOCUS_CONTEXT: usize = 3;
+
+/// How long the scroll to a focused line eases (in-out cubic).
+const GLIDE_MS: u64 = 220;
+
+/// How far the scroll to a focused line eases at most, as a share of the view's height. A line
+/// farther away is jumped to this far short of it first: the ease crosses half a view of rows,
+/// not the thousands between, and the line is on screen from its first frame when it lies below.
+const GLIDE_REACH: f32 = 0.5;
+
+/// How long a focused row's flash takes to ease (out cubic) to its fill, and the colour it
+/// starts at.
+const FLASH_MS: u64 = 600;
+const FLASH: Swatch = Swatch::AmberSoft;
+
+/// How far `built`'s scroll to a focused line eases at most.
+fn glide_reach(built: &Built) -> f32 {
+    let view = if built.view > 0.0 {
+        built.view
+    } else {
+        rows::VIEW_GUESS
+    };
+    GLIDE_REACH * view
+}
 
 /// The scroll offset that brings the line at `index` into view with a few lines above it, the
 /// lines weighing `heights`. Lines not laid out yet are guesses, so `reach_focus` corrects it
@@ -1282,9 +1308,12 @@ const FOCUS_FRAMES: u8 = 4;
 /// put it (the user moved it), or after `FOCUS_FRAMES` frames without a laid-out row.
 #[derive(Component)]
 struct FocusPending {
-    /// The scroll offset the estimate set.
+    /// The scroll offset the estimate (or the ease, each frame) set.
     set: f32,
     left: u8,
+    /// The ease toward the line, while it runs. The frames wait for no row meanwhile: the row
+    /// comes into the window on the way.
+    glide: Option<Glide>,
 }
 
 impl FocusPending {
@@ -1292,7 +1321,36 @@ impl FocusPending {
         Self {
             set,
             left: FOCUS_FRAMES,
+            glide: None,
         }
+    }
+
+    /// The scroll moved by `delta` with the rows it shows (heights measured above them): the
+    /// offset set and the ease's ends move with it.
+    fn shift(&mut self, delta: f32) {
+        self.set += delta;
+        if let Some(glide) = &mut self.glide {
+            glide.shift(delta);
+        }
+    }
+}
+
+/// A scroll easing from `from` to `to` over `GLIDE_MS`. Until `reach_focus` finds the row laid
+/// out (`found`), `to` is where the body's heights put line `line`, weighed again each frame as
+/// rows are measured on the way; `from` stays within the reach of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Glide {
+    from: f32,
+    to: f32,
+    line: usize,
+    found: bool,
+    start: Option<f64>,
+}
+
+impl Glide {
+    fn shift(&mut self, delta: f32) {
+        self.from += delta;
+        self.to += delta;
     }
 }
 
@@ -1303,7 +1361,13 @@ impl Plugin for DiffPlugin {
         app.init_resource::<HighlightCache>()
             .add_systems(
                 Update,
-                (fill_region, rebuild_diff, follow_scroll, reach_focus)
+                (
+                    fill_region,
+                    rebuild_diff,
+                    glide_focus,
+                    follow_scroll,
+                    reach_focus,
+                )
                     .chain()
                     .after(ReviewSystems),
             )
@@ -1478,6 +1542,7 @@ fn rebuild_diff(
     selection: Res<CodeSelection>,
     mut measure: CodeMeasure,
     mut last_opts: Local<Option<RenderOpts>>,
+    (motion, covered): (Res<Motion>, Res<WindowCovered>),
     mut files: Query<(Entity, &mut FilesPart)>,
     mut headers: Query<(Entity, &mut HeaderPart)>,
     mut bodies: Query<(
@@ -1619,8 +1684,23 @@ fn rebuild_diff(
             scroll.0.y = rows::top(&built.heights, line) + into;
         }
         let refocus = focus.filter(|_| refocus);
+        let mut glide = None;
         if let Some((index, _)) = refocus {
-            scroll.0.y = focus_scroll(&built.heights, index);
+            let to = focus_scroll(&built.heights, index);
+            let reach = glide_reach(&built);
+            let from = scroll.0.y.clamp(to - reach, to + reach);
+            if motion.reduced || covered.0 || (to - from).abs() < 0.5 {
+                scroll.0.y = to;
+            } else {
+                scroll.0.y = from;
+                glide = Some(Glide {
+                    from,
+                    to,
+                    line: index,
+                    found: false,
+                    start: None,
+                });
+            }
         }
         let mut y = scroll.0.y;
         place(
@@ -1634,12 +1714,18 @@ fn rebuild_diff(
         );
         if y != scroll.0.y {
             if let Some(mut pending) = pending {
-                pending.set += y - scroll.0.y;
+                pending.shift(y - scroll.0.y);
+            }
+            if let Some(glide) = &mut glide {
+                glide.shift(y - scroll.0.y);
             }
             scroll.0.y = y;
         }
         if refocus.is_some() {
-            commands.entity(entity).insert(FocusPending::at(scroll.0.y));
+            commands.entity(entity).insert(FocusPending {
+                glide,
+                ..FocusPending::at(scroll.0.y)
+            });
         }
         if built.footer.is_none() && built.more > 0 {
             commands.entity(entity).with_children(|p| {
@@ -2013,6 +2099,54 @@ fn slot_entities(slot: &Slot) -> Vec<Entity> {
     out
 }
 
+/// Eases a body's scroll toward its focused line. It runs before `follow_scroll`, which places
+/// the rows for the eased scroll in the same frame, so no frame of the ease shows a gap. A
+/// scroll that is not where the ease left it (the wheel) ends the ease at once, and
+/// `reach_focus` then lets the focus go. With Reduce Motion or a covered window it lands now.
+fn glide_focus(
+    time: Res<Time>,
+    motion: Res<Motion>,
+    covered: Res<WindowCovered>,
+    mut pace: ResMut<Pace>,
+    mut bodies: Query<(&BodyPart, &mut ScrollPosition, &mut FocusPending)>,
+) {
+    let now = time.elapsed_secs_f64();
+    for (part, mut scroll, mut pending) in &mut bodies {
+        let Some(mut glide) = pending.glide else {
+            continue;
+        };
+        if (scroll.y - pending.set).abs() > 0.5 {
+            pending.glide = None;
+            continue;
+        }
+        if let Some(built) = &part.built {
+            if !glide.found {
+                glide.to = focus_scroll(&built.heights, glide.line);
+            }
+            let reach = glide_reach(built);
+            glide.from = glide.from.clamp(glide.to - reach, glide.to + reach);
+        }
+        let secs = GLIDE_MS as f32 / 1000.0;
+        let jump = motion.reduced || covered.0;
+        let (k, done) = progress(&mut glide.start, now, secs, Ease::InOutCubic, jump);
+        let y = if done {
+            glide.to
+        } else {
+            glide.from + (glide.to - glide.from) * k
+        };
+        if done {
+            pending.glide = None;
+        } else {
+            pending.glide = Some(glide);
+            pace.ask(Wake::steady(FRAME_WAIT));
+        }
+        pending.set = y;
+        if scroll.y != y {
+            scroll.y = y;
+        }
+    }
+}
+
 /// Moves a body's window with its scroll, and to heights that changed or a press held on a
 /// line.
 fn follow_scroll(
@@ -2065,7 +2199,7 @@ fn follow_scroll(
         );
         if y != scroll.y {
             if let Some(mut pending) = pending {
-                pending.set += y - scroll.y;
+                pending.shift(y - scroll.y);
             }
             scroll.y = y;
         }
@@ -2203,7 +2337,7 @@ fn measure_rows(
             let delta = anchored - scroll.y;
             scroll.y = anchored;
             if let Some(mut pending) = pending {
-                pending.set += delta;
+                pending.shift(delta);
             }
         }
     }
@@ -2297,9 +2431,11 @@ fn spawn_slot(
 }
 
 /// Scrolls a body to its focused row, once the row has a laid-out box, with a few rows of
-/// context above it.
+/// context above it; while the scroll eases there, the ease is aimed at it instead. Then the
+/// row's fills flash, unless motion is reduced or the window covered.
 fn reach_focus(
     mut commands: Commands,
+    (motion, covered, theme): (Res<Motion>, Res<WindowCovered>, Res<Theme>),
     mut bodies: Query<(
         Entity,
         &BodyPart,
@@ -2319,6 +2455,9 @@ fn reach_focus(
             .iter()
             .find(|(f, row, _)| f.0 == part.pr && row.size.y > 0.0)
         else {
+            if pending.glide.is_some() {
+                continue;
+            }
             pending.left -= 1;
             if pending.left == 0 {
                 commands.entity(entity).remove::<FocusPending>();
@@ -2331,8 +2470,26 @@ fn reach_focus(
         // The row was laid out at the scroll the layout applied, which a height measured since
         // may have moved.
         let into = top(row, row_at) - top(body, body_at) + body.scroll_position.y * scale;
-        scroll.0.y = (into - FOCUS_CONTEXT as f32 * ROW_HEIGHT).max(0.0);
+        let to = (into - FOCUS_CONTEXT as f32 * ROW_HEIGHT).max(0.0);
+        if let Some(glide) = &mut pending.glide {
+            glide.to = to;
+            glide.found = true;
+            continue;
+        }
+        scroll.0.y = to;
         commands.entity(entity).remove::<FocusPending>();
+        if motion.reduced || covered.0 {
+            continue;
+        }
+        let cells = part
+            .built
+            .as_ref()
+            .and_then(|b| b.slots.iter().find(|s| s.focused))
+            .map_or([None; 2], |s| s.cells);
+        let flash = Tween::flash(FLASH_MS, Ease::OutCubic, theme.tokens.get(FLASH));
+        for cell in cells.into_iter().flatten() {
+            commands.entity(cell).try_insert(flash);
+        }
     }
 }
 
@@ -7050,5 +7207,345 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn body_of(app: &mut App) -> Entity {
+        testing::find::<BodyPart>(app, |_| true)
+    }
+
+    fn built_of(app: &App, body: Entity) -> &Built {
+        app.world()
+            .get::<BodyPart>(body)
+            .unwrap()
+            .built
+            .as_ref()
+            .unwrap()
+    }
+
+    fn scroll_of(app: &App, body: Entity) -> f32 {
+        app.world().get::<ScrollPosition>(body).unwrap().y
+    }
+
+    fn gliding(app: &App, body: Entity) -> bool {
+        app.world()
+            .get::<FocusPending>(body)
+            .is_some_and(|p| p.glide.is_some())
+    }
+
+    /// The lines at the view's top and bottom edges are spawned.
+    fn assert_view_spawned(app: &App, body: Entity, what: &str) {
+        let built = built_of(app, body);
+        let scroll = scroll_of(app, body);
+        let (first, _) = rows::at(&built.heights, scroll);
+        let (last, _) = rows::at(&built.heights, scroll + built.view);
+        assert!(
+            built.window.contains(&first) && built.window.contains(&last),
+            "{what}: lines {first}..={last} in view at {scroll}, {:?} spawned",
+            built.window
+        );
+    }
+
+    /// Asks for `line` of `big.txt`, then runs frames until the focus is reached, checking on
+    /// each that the view's rows are spawned. The scroll after each frame, the first being the
+    /// frame that asked.
+    fn glide_to(app: &mut App, line: u32, what: &str) -> Vec<f32> {
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = ui_mut(app, &pr);
+            let tab = tabs.0.get_mut(&pr).unwrap();
+            assert!(show_line(tab, "big.txt", Some((line, line))));
+        }
+        let body = body_of(app);
+        let mut ys = Vec::new();
+        for frame in 0..60 {
+            app.update();
+            ys.push(scroll_of(app, body));
+            assert_view_spawned(app, body, &format!("{what}, frame {frame}"));
+            if app.world().get::<FocusPending>(body).is_none() {
+                return ys;
+            }
+        }
+        panic!("{what}: the focus was never reached");
+    }
+
+    /// Where line `line`'s row sits under the top of the body's view.
+    fn row_under_top(app: &mut App, line: u32) -> f32 {
+        let body = body_of(app);
+        let (_, by, _, _) = testing::frame(app, body);
+        let row = testing::find::<LineButton>(app, |b| b.line == line);
+        let (_, ry, _, _) = testing::frame(app, row);
+        ry - by
+    }
+
+    /// The fills of the focused row: the row in Unified, its cells in Split.
+    fn focused_cells(app: &App, body: Entity) -> Vec<Entity> {
+        let built = built_of(app, body);
+        let slot = built
+            .slots
+            .iter()
+            .find(|s| s.focused)
+            .expect("a focused row");
+        slot.cells.into_iter().flatten().collect()
+    }
+
+    #[test]
+    fn a_focused_line_eases_into_place_and_lands_exactly() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut twin = thousand_app(mode);
+            twin.insert_resource(Motion { reduced: true });
+            set_body_scroll(&mut twin, 4_000.0);
+            let (top, _) = first_in_view(&mut twin);
+            let jumped = glide_to(&mut twin, top + 12, &format!("{mode:?} reduced"));
+            let mut app = thousand_app(mode);
+            set_body_scroll(&mut app, 4_000.0);
+            let ys = glide_to(&mut app, top + 12, &format!("{mode:?}"));
+            assert_eq!(ys[0], 4_000.0, "{mode:?}: the first frame shows the start");
+            assert!(
+                ys.windows(2).all(|w| w[1] >= w[0]),
+                "{mode:?}: it only moves on: {ys:?}"
+            );
+            let end = *ys.last().unwrap();
+            let between = ys.iter().filter(|y| **y > 4_000.0 && **y < end).count();
+            assert!(between >= 8, "{mode:?}: it eases: {ys:?}");
+            // 220 ms at 16 ms a frame, and the frame that asked.
+            assert!(
+                (14..=16).contains(&ys.len()),
+                "{mode:?}: {} frames",
+                ys.len()
+            );
+            assert_eq!(
+                end,
+                *jumped.last().unwrap(),
+                "{mode:?}: it lands where the jump does"
+            );
+            let body = body_of(&mut app);
+            for _ in 0..5 {
+                app.update();
+            }
+            assert_eq!(scroll_of(&app, body), end, "{mode:?}: and stays");
+            let under = row_under_top(&mut app, top + 12);
+            assert!(
+                (under - FOCUS_CONTEXT as f32 * ROW_HEIGHT).abs() < 0.5,
+                "{mode:?}: the line sits {under} px under the top"
+            );
+        }
+    }
+
+    #[test]
+    fn a_far_focus_jumps_close_then_eases_at_most_half_a_view() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let body = body_of(&mut app);
+            let reach = GLIDE_REACH * built_of(&app, body).view;
+            let ys = glide_to(&mut app, 900, &format!("{mode:?} down"));
+            let end = *ys.last().unwrap();
+            // The line's estimate is weighed again as rows are measured on the way; the ease
+            // stays within its reach of it, so within a row or two of where it lands.
+            assert!(
+                ys.iter()
+                    .all(|y| (end - y).abs() <= reach + 2.0 * ROW_HEIGHT),
+                "{mode:?}: from {} to {end}, no farther than {reach}: {ys:?}",
+                ys[0]
+            );
+            assert!(
+                end - ys[0] > reach / 2.0,
+                "{mode:?}: it still eases: {ys:?}"
+            );
+            let ys = glide_to(&mut app, 40, &format!("{mode:?} up"));
+            let end = *ys.last().unwrap();
+            assert!(
+                ys.iter()
+                    .all(|y| (y - end).abs() <= reach + 2.0 * ROW_HEIGHT),
+                "{mode:?}: up, no farther than {reach}: {ys:?}"
+            );
+            assert!(ys[0] - end > reach / 2.0, "{mode:?}: up, it eases: {ys:?}");
+            // The ease that a far focus plans crosses the reach, no more.
+            let pr = fixture::demo_pr();
+            {
+                let mut tabs = ui_mut(&mut app, &pr);
+                assert!(show_line(
+                    tabs.0.get_mut(&pr).unwrap(),
+                    "big.txt",
+                    Some((700, 700))
+                ));
+            }
+            app.update();
+            let glide = app
+                .world()
+                .get::<FocusPending>(body)
+                .unwrap()
+                .glide
+                .unwrap();
+            assert!(
+                (glide.to - glide.from - reach).abs() < 0.01,
+                "{mode:?}: {glide:?} eases {reach}"
+            );
+            assert_eq!(scroll_of(&app, body), glide.from, "{mode:?}: after a jump");
+            assert!(spawned_orders(&mut app).len() <= WINDOW_LINES);
+        }
+    }
+
+    #[test]
+    fn a_wheel_during_the_ease_ends_it_at_once() {
+        let mut app = thousand_app(DiffMode::Unified);
+        app.add_plugins(bevy::ui_widgets::ScrollAreaPlugin);
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = ui_mut(&mut app, &pr);
+            assert!(show_line(
+                tabs.0.get_mut(&pr).unwrap(),
+                "big.txt",
+                Some((300, 300))
+            ));
+        }
+        let body = body_of(&mut app);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert!(gliding(&app, body));
+        let before = scroll_of(&app, body);
+        testing::wheel(&mut app, body, 3.0);
+        let moved = 3.0 * bevy::input::mouse::MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR;
+        assert!(app.world().get::<FocusPending>(body).is_none());
+        let after = scroll_of(&app, body);
+        assert!(
+            (after - (before - moved)).abs() <= 1.0,
+            "the wheel's scroll stands: {before} - {moved} is not {after}"
+        );
+        for _ in 0..20 {
+            app.update();
+        }
+        assert_eq!(scroll_of(&app, body), after, "nothing pulls it back");
+        assert_eq!(testing::count::<Tween>(&mut app), 0, "and nothing flashes");
+    }
+
+    #[test]
+    fn the_focused_row_flashes_and_rests_on_its_swatch() {
+        let theme = crate::theme::LIGHT;
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            // Plain: the lit row rests on the selected fill.
+            let mut app = thousand_app(mode);
+            let body = body_of(&mut app);
+            glide_to(&mut app, 120, &format!("{mode:?}"));
+            let cells = focused_cells(&app, body);
+            assert!(!cells.is_empty());
+            for cell in &cells {
+                assert!(
+                    app.world()
+                        .get::<Tween>(*cell)
+                        .is_some_and(|t| t.flash.is_some()),
+                    "{mode:?}: the row flashes"
+                );
+            }
+            app.update();
+            let bg = |app: &App, e: Entity| app.world().get::<BackgroundColor>(e).unwrap().0;
+            let lit = cells[cells.len() - 1];
+            assert_ne!(bg(&app, lit), theme.selected, "{mode:?}: it starts lit");
+            testing::run_tweens(&mut app);
+            assert_eq!(
+                bg(&app, lit),
+                theme.selected,
+                "{mode:?}: it ends on its fill"
+            );
+
+            // The selection moves to another line on the way: the row ends on its own fill;
+            // a hovered one on its hover fill.
+            for hovered in [false, true] {
+                let mut app = thousand_app(mode);
+                let body = body_of(&mut app);
+                glide_to(&mut app, 120, &format!("{mode:?}"));
+                let cell = *focused_cells(&app, body).last().unwrap();
+                app.update();
+                let other = testing::find::<LineButton>(&mut app, |b| b.line == 118);
+                testing::activate(&mut app, other);
+                app.update();
+                assert_eq!(fill_of_line(&mut app, Side::Right, 120), Swatch::AddedBg);
+                if hovered {
+                    app.world_mut().entity_mut(cell).insert(Hovered(true));
+                }
+                assert!(
+                    app.world().get::<Tween>(cell).is_some(),
+                    "{mode:?}: still flashing"
+                );
+                testing::run_tweens(&mut app);
+                let want = if hovered {
+                    theme.selected
+                } else {
+                    theme.added_bg
+                };
+                assert_eq!(bg(&app, cell), want, "{mode:?}, hovered {hovered}");
+            }
+        }
+    }
+
+    #[test]
+    fn reduce_motion_jumps_to_the_line_without_a_flash_or_a_wake() {
+        use bevy::winit::WinitSettings;
+        let mut app = thousand_app(DiffMode::Unified);
+        app.insert_resource(Motion { reduced: true });
+        app.insert_resource(WinitSettings::desktop_app());
+        let body = body_of(&mut app);
+        let ys = glide_to(&mut app, 300, "reduced");
+        assert!(ys.len() <= 2, "it lands at once: {ys:?}");
+        assert!(ys[0] > 5_000.0, "the first frame is at the line: {ys:?}");
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        app.update();
+        assert_eq!(app.world().resource::<Pace>().written, None);
+        assert_eq!(
+            app.world().resource::<WinitSettings>().focused_mode,
+            WinitSettings::desktop_app().focused_mode
+        );
+        assert!(!gliding(&app, body));
+    }
+
+    #[test]
+    fn a_covered_window_jumps_to_the_line() {
+        let mut app = thousand_app(DiffMode::Unified);
+        app.world_mut().write_message(bevy::window::WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: true,
+        });
+        app.update();
+        let ys = glide_to(&mut app, 300, "covered");
+        assert!(ys.len() <= 2, "it lands at once: {ys:?}");
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+    }
+
+    #[test]
+    fn the_loop_wakes_only_while_the_ease_and_the_flash_run() {
+        use bevy::winit::{UpdateMode, WinitSettings};
+        let mut app = thousand_app(DiffMode::Unified);
+        app.insert_resource(WinitSettings::desktop_app());
+        app.update();
+        let focused = |app: &App| app.world().resource::<WinitSettings>().focused_mode;
+        let desktop = WinitSettings::desktop_app().focused_mode;
+        assert_eq!(focused(&app), desktop);
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = ui_mut(&mut app, &pr);
+            assert!(show_line(
+                tabs.0.get_mut(&pr).unwrap(),
+                "big.txt",
+                Some((300, 300))
+            ));
+        }
+        let body = body_of(&mut app);
+        app.update();
+        let mut frames = 0;
+        while gliding(&app, body) || testing::count::<Tween>(&mut app) > 0 {
+            assert_eq!(
+                focused(&app),
+                UpdateMode::reactive(FRAME_WAIT),
+                "frame {frames}"
+            );
+            app.update();
+            frames += 1;
+            assert!(frames < 100);
+        }
+        // The ease, then the flash.
+        assert!(frames >= 45, "{frames} frames");
+        app.update();
+        assert_eq!(focused(&app), desktop);
+        assert_eq!(app.world().resource::<Pace>().written, None);
     }
 }
