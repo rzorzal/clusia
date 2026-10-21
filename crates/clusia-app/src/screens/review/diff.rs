@@ -1421,27 +1421,43 @@ fn frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
                     built: None,
                 },
             ));
-            c.spawn((
-                panel(
-                    Node {
-                        flex_grow: 1.0,
-                        min_height: px(0),
-                        flex_direction: FlexDirection::Column,
-                        overflow: Overflow {
-                            x: OverflowAxis::Clip,
-                            y: OverflowAxis::Scroll,
+            // The body is out of flow in a holder that takes the room left: the layout asks the
+            // holder, which has no content of its own, for its size, and lays the body out only
+            // at that size. Otherwise every size query of the screen above reaches the rows under
+            // other constraints than the last, and each spacer change or row spawned measures
+            // every row's text again.
+            c.spawn(Node {
+                flex_grow: 1.0,
+                flex_basis: px(0),
+                min_height: px(0),
+                ..default()
+            })
+            .with_children(|h| {
+                h.spawn((
+                    panel(
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(0),
+                            right: px(0),
+                            top: px(0),
+                            bottom: px(0),
+                            flex_direction: FlexDirection::Column,
+                            overflow: Overflow {
+                                x: OverflowAxis::Clip,
+                                y: OverflowAxis::Scroll,
+                            },
+                            ..default()
                         },
-                        ..default()
+                        Swatch::Surface,
+                    ),
+                    ScrollArea,
+                    ScrollPosition::default(),
+                    BodyPart {
+                        pr: pr.clone(),
+                        built: None,
                     },
-                    Swatch::Surface,
-                ),
-                ScrollArea,
-                ScrollPosition::default(),
-                BodyPart {
-                    pr: pr.clone(),
-                    built: None,
-                },
-            ));
+                ));
+            });
         });
     });
 }
@@ -1836,15 +1852,16 @@ fn place(
     let pin = pin.filter(|p| *p < built.wants.len());
     let (top_line, _) = rows::at(&built.heights, *scroll);
     let old = built.window.clone();
-    let mut want = rows::window(&built.heights, *scroll, view);
+    let mut want = rows::page(&built.heights, *scroll, view, old.clone());
     let above = if want.start < old.end && old.start < want.end {
         old.start
     } else {
         top_line
     };
-    // Lines coming in may weigh more or less than guessed, which moves the window again; a few
-    // rounds settle it.
-    'weigh: for _ in 0..4 {
+    // Lines coming in may weigh more or less than guessed, which moves the window again, until
+    // every line in it is weighed. Each round that changes a height has laid out a line not laid
+    // out before, so the rounds end.
+    'weigh: loop {
         let mut changed = false;
         for order in want.clone() {
             let (row, line) = built.keys[order];
@@ -1871,7 +1888,7 @@ fn place(
         if !changed {
             break;
         }
-        want = rows::window(&built.heights, *scroll, view);
+        want = rows::page(&built.heights, *scroll, view, old.clone());
     }
     // The pinned row is taken out of the body's children, clear of the window's child indices,
     // until it is placed again.
@@ -6582,6 +6599,165 @@ mod tests {
         set_body_scroll(&mut app, 18_000.0);
         assert!(!spawned_orders(&mut app).contains(&0));
         assert!(colored_spans(&mut app) > 0, "the rows come in color");
+    }
+
+    /// A leaf that counts how often the layout asks for its size.
+    struct CountingMeasure(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl bevy::ui::Measure for CountingMeasure {
+        fn measure(&mut self, _: bevy::ui::MeasureArgs) -> Vec2 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Vec2::splat(4.0)
+        }
+    }
+
+    /// Puts a counting leaf in a row in the middle of the window and returns its count.
+    fn count_row_measures(app: &mut App) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        use bevy::ui::{ContentSize, NodeMeasure};
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let built = app
+            .world()
+            .get::<BodyPart>(body)
+            .unwrap()
+            .built
+            .as_ref()
+            .unwrap();
+        let row = built.slots[built.slots.len() / 2].entity;
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut content = ContentSize::default();
+        content.set(NodeMeasure::Custom(Box::new(CountingMeasure(
+            asked.clone(),
+        ))));
+        let leaf = app.world_mut().spawn((Node::default(), content)).id();
+        app.world_mut().entity_mut(row).add_child(leaf);
+        testing::settle(app);
+        asked
+    }
+
+    #[test]
+    fn a_spacer_that_changes_lays_out_no_row_again() {
+        use std::sync::atomic::Ordering;
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            set_body_scroll(&mut app, 5_000.0);
+            let asked = count_row_measures(&mut app);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let spacer = app
+                .world()
+                .get::<BodyPart>(body)
+                .unwrap()
+                .built
+                .as_ref()
+                .unwrap()
+                .spacers[0];
+            let before = asked.load(Ordering::Relaxed);
+            for step in 0..10 {
+                let mut node = app.world_mut().get_mut::<Node>(spacer).unwrap();
+                let Val::Px(height) = node.height else {
+                    panic!("a spacer has a height in pixels")
+                };
+                node.height = px(height + if step % 2 == 0 { 1.0 } else { -1.0 });
+                app.update();
+            }
+            let asked = asked.load(Ordering::Relaxed) - before;
+            assert_eq!(
+                asked, 0,
+                "{mode:?}: a row was measured {asked} times in 10 frames"
+            );
+        }
+    }
+
+    /// The body's children, in order.
+    fn body_children(app: &App, body: Entity) -> Vec<Entity> {
+        app.world()
+            .get::<Children>(body)
+            .map(|c| c.to_vec())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_steady_scroll_changes_the_rows_on_few_frames() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let mut changed = 0;
+            for frame in 0..240 {
+                let before = body_children(&app, body);
+                let mut q = app
+                    .world_mut()
+                    .query_filtered::<&mut ScrollPosition, With<BodyPart>>();
+                for mut p in q.iter_mut(app.world_mut()) {
+                    p.y += 40.0;
+                }
+                app.update();
+                if body_children(&app, body) != before {
+                    changed += 1;
+                }
+                let built = app
+                    .world()
+                    .get::<BodyPart>(body)
+                    .unwrap()
+                    .built
+                    .as_ref()
+                    .unwrap();
+                let scroll = app.world().get::<ScrollPosition>(body).unwrap().y;
+                let (first, _) = rows::at(&built.heights, scroll);
+                let (last, _) = rows::at(&built.heights, scroll + built.view);
+                assert!(
+                    built.window.contains(&first) && built.window.contains(&last),
+                    "{mode:?}, frame {frame}: lines {first}..={last} in view, {:?} spawned",
+                    built.window
+                );
+            }
+            // Ruling: a steady scroll places the window on at most one frame in twelve.
+            assert!(
+                changed <= 20,
+                "{mode:?}: the rows changed on {changed} of 240 frames"
+            );
+            assert!(spawned_orders(&mut app).len() <= WINDOW_LINES);
+            assert_heights_add_up(&mut app, &format!("{mode:?}"));
+            rows_in_line_order(&mut app);
+        }
+    }
+
+    #[test]
+    fn a_far_focus_spawns_only_the_view_in_its_first_frame() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let pr = fixture::demo_pr();
+            {
+                let mut tabs = ui_mut(&mut app, &pr);
+                assert!(show_line(
+                    tabs.0.get_mut(&pr).unwrap(),
+                    "big.txt",
+                    Some((900, 900))
+                ));
+            }
+            let (spawned, _) = churn(&mut app, |app| app.update());
+            let lines = spawned_orders(&mut app);
+            // What an 800 px view of 22 px rows shows, a `LOW` margin each side, and the rows cut
+            // at each edge.
+            let needs = ((800.0 + 2.0 * rows::LOW) / ROW_HEIGHT).ceil() as usize + 2;
+            assert!(
+                lines.len() <= needs,
+                "{mode:?}: {} lines spawned in the first frame, the view needs {needs}",
+                lines.len()
+            );
+            assert!(
+                spawned.len() <= needs * 25,
+                "{mode:?}: {} nodes spawned",
+                spawned.len()
+            );
+            testing::settle(&mut app);
+            let line = testing::find::<LineButton>(&mut app, |b| b.line == 900);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let (_, by, _, bh) = testing::frame(&app, body);
+            let (_, ly, _, lh) = testing::frame(&app, line);
+            assert!(
+                ly >= by && ly + lh <= by + bh,
+                "{mode:?}: line 900 is in view"
+            );
+        }
     }
 
     #[test]
