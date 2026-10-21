@@ -148,9 +148,10 @@ impl DespawnAfter {
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Animating(pub bool);
 
-/// A layer of `swatch` over its parent that clears in `ms`, then goes: the parent's contents
-/// seem to fade in over that colour without a single text being touched. Picking passes
-/// through it.
+/// A layer of `swatch` over its parent that clears in `ms`: the parent's contents seem to fade
+/// in over that colour without a single text being touched. Picking passes through it. Once
+/// clear it is hidden, not despawned: taking a node out lays its parent out again, and that
+/// re-measures every text under it. It goes with the parent's next rebuild.
 pub fn veil(swatch: Swatch, ms: u64, ease: Ease) -> impl Bundle {
     (
         Node {
@@ -167,8 +168,27 @@ pub fn veil(swatch: Swatch, ms: u64, ease: Ease) -> impl Bundle {
         bevy::picking::Pickable::IGNORE,
         Veil,
         Tween::new(ms, ease, Look::REST, Look::REST.faded(0.0)),
-        DespawnAfter::new(ms),
     )
+}
+
+/// How long a new screen or section takes to come in, and how far below its place it starts.
+pub const ENTER_MS: u64 = 140;
+pub const ENTER_RISE: f32 = 4.0;
+
+/// Brings in the contents of `root` that just replaced others: it rises `ENTER_RISE` px into
+/// place while a veil of the window's background over `cover` (`root` or the node that holds
+/// it) clears. Nothing starts with Reduce Motion.
+pub fn enter(commands: &mut Commands, motion: &Motion, root: Entity, cover: Entity) {
+    if motion.reduced {
+        return;
+    }
+    commands.entity(root).insert(Tween::new(
+        ENTER_MS,
+        Ease::OutCubic,
+        Look::REST.shifted(0.0, ENTER_RISE),
+        Look::REST,
+    ));
+    commands.spawn((veil(Swatch::Bg, ENTER_MS, Ease::OutCubic), ChildOf(cover)));
 }
 
 /// Above every sibling of the node it covers.
@@ -239,13 +259,17 @@ fn animate(
         Option<(&Stroke, &mut BorderColor)>,
         Option<(&Ink, &mut TextColor)>,
         Option<&mut Outline>,
+        Option<&mut Visibility>,
+        Has<Veil>,
     )>,
     mut despawns: Query<(Entity, &mut DespawnAfter)>,
 ) {
     let now = time.elapsed_secs_f64();
     let jump = motion.reduced || covered.0;
     let mut ticking = false;
-    for (entity, mut tween, transform, fill, stroke, ink, outline) in &mut tweens {
+    for (entity, mut tween, transform, fill, stroke, ink, outline, visibility, veiled) in
+        &mut tweens
+    {
         let start = *tween.start.get_or_insert(now);
         let t = if jump || tween.secs <= 0.0 {
             1.0
@@ -287,6 +311,9 @@ fn animate(
             }
         }
         if done {
+            if veiled && let Some(mut visibility) = visibility {
+                visibility.set_if_neq(Visibility::Hidden);
+            }
             commands.entity(entity).try_remove::<Tween>();
         } else {
             ticking = true;
@@ -573,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn a_veil_clears_and_goes_without_blocking_the_pointer() {
+    fn a_veil_clears_and_hides_without_blocking_the_pointer_or_laying_out() {
         let mut app = app();
         let parent = spawn(&mut app, Node::default());
         let v = app
@@ -590,10 +617,15 @@ mod tests {
             *app.world().get::<bevy::picking::Pickable>(v).unwrap(),
             bevy::picking::Pickable::IGNORE
         );
-        for _ in 0..20 {
-            app.update();
-        }
-        assert!(app.world().get_entity(v).is_err());
-        assert!(app.world().get_entity(parent).is_ok());
+        run_out(&mut app, v);
+        assert_eq!(
+            app.world().get::<BackgroundColor>(v).unwrap().0.alpha(),
+            0.0
+        );
+        assert_eq!(app.world().get::<Visibility>(v), Some(&Visibility::Hidden));
+        assert!(
+            app.world().get_entity(v).is_ok(),
+            "kept: a despawn would lay out again"
+        );
     }
 }

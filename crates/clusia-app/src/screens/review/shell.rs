@@ -36,13 +36,14 @@ use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, disabled_button,
-    icon_button, panel, text, wrapped_text,
+    Clickable, Fill, HoverFill, Icon, Painting, Stroke, Tone, Type, Variant, badge, button,
+    disabled_button, icon_button, panel, text, wrapped_text,
 };
 use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, markdown_line};
 use crate::ui::people::person;
-use crate::ui::spinner::{beat, spinner};
+use crate::ui::spinner::{Motion, beat, spinner};
+use crate::ui::tween::enter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderView {
@@ -552,7 +553,34 @@ impl Plugin for ShellPlugin {
             )
                 .chain()
                 .in_set(ReviewSystems),
-        );
+        )
+        .add_systems(PostUpdate, enter_section.before(Painting));
+    }
+}
+
+/// The section a `SectionBody` shows, once it has shown one.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct SectionShown(ReviewSection);
+
+/// Brings a section in when the tab switches to it. It runs after every section's filler, so
+/// the veil lands over the new contents; a filler that empties the body later takes it along.
+fn enter_section(
+    mut commands: Commands,
+    tabs: Res<ReviewTabs>,
+    motion: Res<Motion>,
+    bodies: Query<(Entity, &SectionBody, Option<&SectionShown>)>,
+) {
+    for (entity, body, shown) in &bodies {
+        let Some(section) = tabs.0.get(&body.pr).map(|t| t.ui.section) else {
+            continue;
+        };
+        if shown == Some(&SectionShown(section)) {
+            continue;
+        }
+        if shown.is_some() {
+            enter(&mut commands, &motion, entity, entity);
+        }
+        commands.entity(entity).insert(SectionShown(section));
     }
 }
 
@@ -1691,6 +1719,56 @@ fn on_finalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_section_switch_brings_the_new_section_in_and_leaves_nothing_behind() {
+        use crate::ui::tween::{ENTER_RISE, Tween};
+        let mut app = testing::demo_review_app();
+        testing::run_tweens(&mut app);
+        let pr = fixture::demo_pr();
+        let body = testing::find::<SectionBody>(&mut app, |b| b.pr == pr);
+        assert!(
+            app.world().get::<Tween>(body).is_none(),
+            "the first section just appears"
+        );
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .section = ReviewSection::Comments;
+        app.update();
+        assert!(app.world().get::<Tween>(body).is_some());
+        assert_eq!(
+            app.world().get::<UiTransform>(body).unwrap().translation,
+            Val2::px(0.0, ENTER_RISE)
+        );
+        let veil = testing::veil_over(&mut app, body).expect("a veil over the body");
+        let children = app.world().get::<Children>(body).unwrap();
+        assert_eq!(children.last(), Some(&veil), "over the new contents");
+        testing::run_tweens(&mut app);
+        assert_eq!(testing::showing_veils(&mut app), 0);
+        assert_eq!(
+            app.world().get::<UiTransform>(body).unwrap().translation,
+            Val2::ZERO
+        );
+        // An idle frame after it starts nothing.
+        app.update();
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+    }
+
+    #[test]
+    fn with_reduce_motion_a_section_switch_just_shows_the_section() {
+        let mut app = testing::demo_review_app();
+        app.insert_resource(Motion { reduced: true });
+        testing::run_tweens(&mut app);
+        let pr = fixture::demo_pr();
+        let veils = testing::count::<crate::ui::tween::Veil>(&mut app);
+        testing::set_section(&mut app, &pr, ReviewSection::Comments);
+        assert_eq!(testing::count::<crate::ui::tween::Tween>(&mut app), 0);
+        assert_eq!(testing::count::<crate::ui::tween::Veil>(&mut app), veils);
+    }
     use crate::fixture;
     use crate::nav::Screen;
     use crate::testing::{self, NOW};

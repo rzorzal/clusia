@@ -31,7 +31,8 @@ use crate::ui::kit::{
     text,
 };
 use crate::ui::pace::{Asking, Pace, Wake};
-use crate::ui::spinner::spinner;
+use crate::ui::spinner::{Motion, spinner};
+use crate::ui::tween::enter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
@@ -745,6 +746,7 @@ fn on_retry(_activate: On<Activate>, mut asks: ResMut<Asks>, mut model: ResMut<M
 fn rebuild_screen(
     mut commands: Commands,
     nav: Res<Nav>,
+    motion: Res<Motion>,
     mut roots: Query<(Entity, &mut ScreenRoot)>,
 ) {
     // Config sections switch inside `ConfigScreen`; here only the kind of screen matters.
@@ -764,22 +766,18 @@ fn rebuild_screen(
             ..default()
         };
         // The review plugin fills `ReviewScreen` according to the tab's phase.
-        commands
-            .entity(entity)
-            .with_children(|p| match &nav.screen {
-                Screen::Home => {
-                    p.spawn((fill, HomeScreen));
-                }
-                Screen::FirstRun => {
-                    p.spawn((fill, FirstRunScreen));
-                }
-                Screen::Config(_) => {
-                    p.spawn((fill, ConfigScreen));
-                }
-                Screen::Review(pr) => {
-                    p.spawn((fill, ReviewScreen(pr.clone())));
-                }
-            });
+        let screen = match &nav.screen {
+            Screen::Home => commands.spawn((fill, HomeScreen, ChildOf(entity))),
+            Screen::FirstRun => commands.spawn((fill, FirstRunScreen, ChildOf(entity))),
+            Screen::Config(_) => commands.spawn((fill, ConfigScreen, ChildOf(entity))),
+            Screen::Review(pr) => commands.spawn((fill, ReviewScreen(pr.clone()), ChildOf(entity))),
+        }
+        .id();
+        // The window's first screen just appears; a switch brings the next one in. The veil
+        // sits beside the screen, which its builder fills (and empties) on its own.
+        if root.built.is_some() {
+            enter(&mut commands, &motion, screen, entity);
+        }
         root.built = Some(kind.clone());
     }
 }
@@ -842,6 +840,26 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
     use bevy::window::{RequestRedraw, WindowOccluded};
     use bevy::winit::{UpdateMode, WinitSettings};
+
+    #[test]
+    fn a_screen_switch_brings_the_next_screen_in_and_the_first_just_appears() {
+        use crate::ui::tween::{Tween, Veil};
+        let mut app = testing::app(fixture::demo(NOW));
+        let home = testing::find::<HomeScreen>(&mut app, |_| true);
+        assert!(app.world().get::<Tween>(home).is_none());
+        assert_eq!(testing::count::<Veil>(&mut app), 0);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .go(&WindowTarget::Config);
+        app.update();
+        let config = testing::find::<ConfigScreen>(&mut app, |_| true);
+        assert!(app.world().get::<Tween>(config).is_some());
+        let root = app.world().get::<ChildOf>(config).unwrap().parent();
+        assert!(testing::veil_over(&mut app, root).is_some());
+        testing::run_tweens(&mut app);
+        assert_eq!(testing::showing_veils(&mut app), 0);
+        assert!(testing::shows(&mut app, "Appearance"));
+    }
 
     /// An app at the smallest window and the largest text with `n` review tabs open, the last
     /// one open.
