@@ -41,9 +41,16 @@ const MAX_GIF_PIXELS: u64 = 48_000_000;
 /// Browsers show GIF frames that ask for less than this for this long instead.
 const MIN_FRAME: Duration = Duration::from_millis(20);
 const DEFAULT_FRAME: Duration = Duration::from_millis(100);
-/// The shortest wait between wakes for GIFs (about 30 a second). `GifAnim::advance` carries
-/// the time left over, so a faster GIF skips frames instead of running slow.
+/// The shortest wait between wakes for a GIF whose frames last less than this (about 30 a
+/// second). `GifAnim::advance` carries the time left over, so a faster GIF skips frames
+/// instead of running slow.
 const MIN_WAKE_WAIT: Duration = Duration::from_millis(33);
+/// The shortest wait between wakes for any other GIF: one display frame, so a frame that came
+/// due a hair before the wake is never shown more than a display frame late.
+const DISPLAY_FRAME: Duration = Duration::from_millis(16);
+/// Added to the wait for a frame's due time: the event loop counts its wait from the scheduled
+/// start of the last wake, so a wake can land a little before the frame is due and miss it.
+const WAKE_SLACK: Duration = Duration::from_millis(4);
 /// The shortest wait between a GIF's wakes without focus: 4 a second keeps it alive in a
 /// window the user is not looking at, and every wake costs the same however few frames it shows.
 const UNFOCUSED_GIF_WAIT: Duration = Duration::from_millis(250);
@@ -257,6 +264,17 @@ impl GifAnim {
         }
         self.t = Duration::ZERO;
         self.i != start
+    }
+
+    /// How long until the frame on screen is due to change, never less than a wake can honour.
+    fn until_due(&self) -> Duration {
+        let delay = self.delays[self.i];
+        let floor = if delay < MIN_WAKE_WAIT {
+            MIN_WAKE_WAIT
+        } else {
+            DISPLAY_FRAME
+        };
+        (delay.saturating_sub(self.t) + WAKE_SLACK).max(floor)
     }
 
     /// The shortest delay of its frames.
@@ -664,12 +682,14 @@ pub struct GifClock {
     pub switches: u32,
 }
 
-/// While at least one animated GIF is visible the event loop wakes at half its shortest frame
-/// delay (never sooner than `MIN_WAKE_WAIT`, nor than `UNFOCUSED_GIF_WAIT` without focus), and
-/// follows the fastest GIF still in view both ways. When someone else (a finished ask) left the
-/// settings slower than that, it writes its wait again; faster ones it leaves alone, so it never
-/// fights `Pace`. When no GIF is left it goes back to the desktop settings. The settings change only at those edges, never per frame (a change makes Bevy
-/// redraw at once). Screenshot runs keep their continuous mode.
+/// While at least one animated GIF is visible the event loop wakes when the soonest next frame
+/// among them is due (never sooner than a display frame, nor than `MIN_WAKE_WAIT` for a GIF with
+/// shorter frames, nor than `UNFOCUSED_GIF_WAIT` without focus), and follows the GIFs in view
+/// both ways. The wait moves with every frame, but only its own value is rewritten; `switches`
+/// counts the edges (a GIF appears, the last one goes). When someone else (a finished ask) left
+/// the settings slower than that, it writes its wait again; faster ones it leaves alone, and
+/// it does not overwrite a wait it did not write, so it never fights `Pace`. When no GIF is left
+/// it goes back to the desktop settings. Screenshot runs keep their continuous mode.
 fn gif_clock(
     mut clock: ResMut<GifClock>,
     gifs: Query<&GifAnim>,
@@ -679,19 +699,20 @@ fn gif_clock(
     let want = gifs
         .iter()
         .filter(|g| g.visible && g.moves())
-        .map(GifAnim::shortest)
-        .min()
-        .map(|d| (d / 2).max(MIN_WAKE_WAIT));
+        .map(GifAnim::until_due)
+        .min();
     match (clock.waiting, want) {
         (None, Some(wait)) if !matches!(settings.focused_mode, UpdateMode::Continuous) => {
             set_pace(&mut settings, wait);
             clock.waiting = Some(wait);
             clock.switches += 1;
         }
-        (Some(now), Some(wait)) if wait != now || slower_than(&settings, wait) => {
-            set_pace(&mut settings, wait);
+        (Some(now), Some(wait)) => {
+            let ours = settings.focused_mode == UpdateMode::reactive(now);
+            if (ours && wait != now) || slower_than(&settings, wait) {
+                set_pace(&mut settings, wait);
+            }
             clock.waiting = Some(wait);
-            clock.switches += 1;
         }
         (Some(_), None) => {
             *settings = WinitSettings::desktop_app();
@@ -1326,13 +1347,9 @@ mod tests {
             app.update();
         }
         let spin = Duration::from_millis(200);
-        let gif_wait = Duration::from_millis(50);
         let focused = |app: &App| app.world().resource::<WinitSettings>().focused_mode;
-        assert_eq!(
-            focused(&app),
-            UpdateMode::reactive(gif_wait),
-            "the GIF wakes sooner than the spinner"
-        );
+        let gif_wait = |app: &App| focused_wait(app) <= Duration::from_millis(104);
+        assert!(gif_wait(&app), "the GIF wakes sooner than the spinner");
         app.world_mut().write_message(WindowOccluded {
             window: Entity::PLACEHOLDER,
             occluded: true,
@@ -1361,7 +1378,7 @@ mod tests {
         for _ in 0..10 {
             app.update();
         }
-        assert_eq!(focused(&app), UpdateMode::reactive(gif_wait));
+        assert!(gif_wait(&app));
         app.world_mut().despawn(e);
         for _ in 0..5 {
             app.update();
@@ -1389,10 +1406,13 @@ mod tests {
         }
         let clock = app.world().resource::<GifClock>().clone();
         assert_eq!(clock.switches, 1, "once, not once per frame");
-        let half = Duration::from_millis(50);
-        assert_eq!(clock.waiting, Some(half));
+        let due = clock.waiting.expect("the clock runs");
+        assert!(
+            due <= Duration::from_millis(104),
+            "no later than the frame: {due:?}"
+        );
         let settings = app.world().resource::<WinitSettings>();
-        assert_eq!(settings.focused_mode, UpdateMode::reactive(half));
+        assert_eq!(settings.focused_mode, UpdateMode::reactive(due));
         assert_eq!(
             settings.unfocused_mode,
             UpdateMode::reactive(Duration::from_millis(250))
@@ -1431,6 +1451,83 @@ mod tests {
         );
     }
 
+    fn focused_wait(app: &App) -> Duration {
+        match app.world().resource::<WinitSettings>().focused_mode {
+            UpdateMode::Reactive { wait, .. } => wait,
+            other => panic!("not reactive: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_focused_gif_wakes_about_once_per_frame_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let gif = write_gif(dir.path(), "a.gif", 2, 60);
+        let mut app = app();
+        app.insert_resource(WinitSettings::desktop_app());
+        let e = slot(&mut app, URL);
+        deliver(&mut app, URL, Ok(file(&gif, MediaKind::Gif)));
+        show(&mut app, e);
+        stepping(&mut app, 16);
+        app.update();
+        // The test plays the event loop: the next wake comes after the wait the clock set.
+        let mut elapsed = 0;
+        let mut wakes = 0;
+        while elapsed < 1000 {
+            let step = focused_wait(&app).as_millis() as u64;
+            stepping(&mut app, step);
+            app.update();
+            elapsed += step;
+            wakes += 1;
+        }
+        assert!(
+            (14..=18).contains(&wakes),
+            "one wake per 60 ms frame, not two: {wakes} wakes in a second"
+        );
+    }
+
+    #[test]
+    fn gifs_with_different_delays_each_show_their_frames_on_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let quick = write_gif(dir.path(), "quick.gif", 2, 60);
+        let slow = write_gif(dir.path(), "slow.gif", 2, 100);
+        let mut app = app();
+        app.insert_resource(WinitSettings::desktop_app());
+        let other = "https://github.com/user-attachments/assets/2.gif";
+        let a = slot(&mut app, URL);
+        let b = slot(&mut app, other);
+        deliver(&mut app, URL, Ok(file(&quick, MediaKind::Gif)));
+        deliver(&mut app, other, Ok(file(&slow, MediaKind::Gif)));
+        show(&mut app, a);
+        show(&mut app, b);
+        // The GIFs start in the first update; the test then plays the event loop: the next
+        // wake comes after the wait the clock set.
+        stepping(&mut app, 16);
+        app.update();
+        let mut step = focused_wait(&app).as_millis() as u64;
+        let mut elapsed = 0;
+        let mut seen = [(0, 0usize); 2];
+        let mut late = 0;
+        while elapsed < 1200 {
+            stepping(&mut app, step);
+            app.update();
+            elapsed += step;
+            for (n, (e, delay)) in [(a, 60), (b, 100)].into_iter().enumerate() {
+                if frame_index(&app, e) != seen[n].1 {
+                    seen[n].0 += 1;
+                    seen[n].1 = frame_index(&app, e);
+                    late = late.max(elapsed.saturating_sub(seen[n].0 * delay));
+                }
+            }
+            step = focused_wait(&app).as_millis() as u64;
+        }
+        assert!(seen[0].0 >= 18, "the 60 ms GIF kept its pace: {seen:?}");
+        assert!(seen[1].0 >= 11, "the 100 ms GIF kept its pace: {seen:?}");
+        assert!(
+            late <= 16,
+            "no frame later than one display frame: {late} ms"
+        );
+    }
+
     #[test]
     fn an_unfocused_window_wakes_for_a_gif_no_faster_than_the_cap() {
         let dir = tempfile::tempdir().unwrap();
@@ -1445,10 +1542,9 @@ mod tests {
             app.update();
         }
         let settings = app.world().resource::<WinitSettings>();
-        assert_eq!(
-            settings.focused_mode,
-            UpdateMode::reactive(Duration::from_millis(50)),
-            "focused, the GIF keeps its own delay"
+        assert!(
+            focused_wait(&app) <= Duration::from_millis(104),
+            "focused, the GIF wakes for its next frame"
         );
         assert_eq!(
             settings.unfocused_mode,
@@ -1470,15 +1566,13 @@ mod tests {
         for _ in 0..5 {
             app.update();
         }
+        let wait = focused_wait(&app);
+        assert!(
+            wait > Duration::from_millis(1500) && wait <= Duration::from_millis(2004),
+            "the wait is the time to the frame: {wait:?}"
+        );
         let settings = app.world().resource::<WinitSettings>();
-        assert_eq!(
-            settings.focused_mode,
-            UpdateMode::reactive(Duration::from_millis(1000))
-        );
-        assert_eq!(
-            settings.unfocused_mode,
-            UpdateMode::reactive(Duration::from_millis(1000))
-        );
+        assert_eq!(settings.unfocused_mode, UpdateMode::reactive(wait));
     }
 
     #[test]
@@ -1500,9 +1594,10 @@ mod tests {
         for _ in 0..5 {
             app.update();
         }
-        assert_eq!(
-            app.world().resource::<GifClock>().waiting,
-            Some(Duration::from_millis(33))
+        let fast_wait = app.world().resource::<GifClock>().waiting.unwrap();
+        assert!(
+            fast_wait >= Duration::from_millis(16) && fast_wait <= Duration::from_millis(44),
+            "a 40 ms GIF waits for its next frame: {fast_wait:?}"
         );
         app.world_mut()
             .entity_mut(b)
@@ -1511,16 +1606,17 @@ mod tests {
             app.update();
         }
         let clock = app.world().resource::<GifClock>().clone();
-        assert_eq!(clock.waiting, Some(Duration::from_millis(100)));
-        assert_eq!(clock.switches, 2);
+        let slow_wait = clock.waiting.unwrap();
+        assert!(slow_wait <= Duration::from_millis(204));
+        assert_eq!(clock.switches, 1, "following a GIF is not a switch");
         assert_eq!(
             app.world().resource::<WinitSettings>().focused_mode,
-            UpdateMode::reactive(Duration::from_millis(100))
+            UpdateMode::reactive(slow_wait)
         );
         for _ in 0..30 {
             app.update();
         }
-        assert_eq!(app.world().resource::<GifClock>().switches, 2);
+        assert_eq!(app.world().resource::<GifClock>().switches, 1);
     }
 
     #[test]
@@ -1556,9 +1652,11 @@ mod tests {
         for _ in 0..10 {
             app.update();
         }
+        let clock = app.world().resource::<GifClock>().waiting.unwrap();
+        assert!(clock > Duration::from_millis(100) && clock <= Duration::from_millis(304));
         assert_eq!(
             focused(&app),
-            UpdateMode::reactive(Duration::from_millis(150)),
+            UpdateMode::reactive(clock),
             "the GIF takes its wait back"
         );
         let switches = app.world().resource::<GifClock>().switches;
