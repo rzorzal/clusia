@@ -348,7 +348,8 @@ pub fn ring_to(
 const VEIL_Z: i32 = 1000;
 
 /// A row on its way out: neither it nor anything in it answers the pointer (`Pickable` is not
-/// inherited, so `make_inert` puts it on every part once they are spawned).
+/// inherited, so `make_inert` puts it on every part once they are spawned). An inert row also
+/// carries `DespawnAfter`, so `make_inert` runs only while something animates.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Inert;
 
@@ -383,7 +384,7 @@ impl Plugin for TweenPlugin {
                     .after(Painting)
                     .before(UiSystems::Layout),
             )
-            .add_systems(PostUpdate, make_inert);
+            .add_systems(PostUpdate, make_inert.run_if(running));
     }
 }
 

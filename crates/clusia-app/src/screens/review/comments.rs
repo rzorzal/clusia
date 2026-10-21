@@ -2,6 +2,8 @@
 //! filtered Open / Resolved / All. Replies and resolves join the draft; nothing is posted
 //! until the review is published.
 
+use std::collections::{HashMap, HashSet};
+
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
 use bevy::text::EditableText;
@@ -519,41 +521,59 @@ fn rebuild_comments(
 
 /// The posts a rebuilt list shows that the list before it did not. A post is its key and its
 /// place among the posts of that key (a thread's posts share the thread's key), so an edited
-/// body or a new age is the same post, and a reply is the next place in its thread.
+/// body or a new age is the same post, and a reply is the next place in its thread. Worked out
+/// once per rebuild, in one pass over each list, laid out as the new view is.
 #[derive(Debug, Default)]
-struct Fresh(Vec<(String, usize)>);
+struct Fresh {
+    general: Vec<bool>,
+    threads: Vec<Vec<bool>>,
+}
 
 impl Fresh {
-    fn ids(v: &CommentsView) -> Vec<((String, usize), &PostView)> {
-        let mut ids: Vec<((String, usize), &PostView)> = Vec::new();
+    /// Calls `each` with the id of every post of `v`: the general posts, then each thread's.
+    fn walk<'a>(v: &'a CommentsView, mut each: impl FnMut((&'a str, usize))) {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
         for post in v
             .general
             .iter()
             .chain(v.threads.iter().flat_map(|t| &t.posts))
         {
-            let nth = ids.iter().filter(|((key, _), _)| *key == post.key).count();
-            ids.push(((post.key.clone(), nth), post));
+            let nth = seen.entry(post.key.as_str()).or_default();
+            each((post.key.as_str(), *nth));
+            *nth += 1;
         }
-        ids
     }
 
     fn since(old: &CommentsView, new: &CommentsView) -> Self {
-        let before: Vec<(String, usize)> = Self::ids(old).into_iter().map(|(id, _)| id).collect();
-        Self(
-            Self::ids(new)
-                .into_iter()
-                .map(|(id, _)| id)
-                .filter(|id| !before.contains(id))
+        let mut before: HashSet<(&str, usize)> = HashSet::new();
+        Self::walk(old, |id| {
+            before.insert(id);
+        });
+        let mut fresh = Vec::new();
+        Self::walk(new, |id| fresh.push(!before.contains(&id)));
+        let mut fresh = fresh.into_iter();
+        Self {
+            general: fresh.by_ref().take(new.general.len()).collect(),
+            threads: new
+                .threads
+                .iter()
+                .map(|t| fresh.by_ref().take(t.posts.len()).collect())
                 .collect(),
-        )
+        }
     }
 
-    /// Whether `post`, one of `v`'s, is new.
-    fn has(&self, v: &CommentsView, post: &PostView) -> bool {
-        !self.0.is_empty()
-            && Self::ids(v)
-                .into_iter()
-                .any(|(id, p)| std::ptr::eq(p, post) && self.0.contains(&id))
+    /// Whether the general post at `i` is new.
+    fn general(&self, i: usize) -> bool {
+        self.general.get(i).copied().unwrap_or(false)
+    }
+
+    /// Whether post `i` of thread `t` is new.
+    fn post(&self, t: usize, i: usize) -> bool {
+        self.threads
+            .get(t)
+            .and_then(|posts| posts.get(i))
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -630,7 +650,7 @@ fn list(
             "General discussion",
             Type::STRONG.size(12.0).ink(Swatch::Muted),
         ));
-        for post in &v.general {
+        for (at, post) in v.general.iter().enumerate() {
             if post.hidden == HiddenState::Hidden {
                 p.spawn(card(Node {
                     flex_direction: FlexDirection::Column,
@@ -645,7 +665,7 @@ fn list(
                     ..default()
                 }))
                 .id();
-            if fresh.has(v, post) {
+            if fresh.general(at) {
                 arrive(p.commands_mut(), motion, general, Swatch::Bg, 1.0);
             }
             p.commands_mut().entity(general).with_children(|c| {
@@ -664,7 +684,7 @@ fn list(
             });
         }
     }
-    for t in &v.threads {
+    for (at, t) in v.threads.iter().enumerate() {
         p.spawn(Node {
             column_gap: px(8),
             row_gap: px(4),
@@ -708,7 +728,7 @@ fn list(
             }))
             .id();
         // A new thread comes in whole; a new reply clears in its place in the card.
-        let new_thread = t.posts.first().is_some_and(|first| fresh.has(v, first));
+        let new_thread = fresh.post(at, 0);
         if new_thread {
             arrive(p.commands_mut(), motion, thread, Swatch::Bg, 1.0);
         }
@@ -718,7 +738,7 @@ fn list(
                     c.spawn(divider());
                 }
                 let row = post_row(c, fonts, pr, post, opts);
-                if !new_thread && fresh.has(v, post) {
+                if !new_thread && fresh.post(at, i) {
                     clear_in(c.commands_mut(), motion, row, Swatch::Surface);
                 }
             }
@@ -1302,6 +1322,40 @@ mod tests {
         testing::run_tweens(&mut app);
         assert_eq!(testing::count::<Tween>(&mut app), 0);
         assert_eq!(testing::showing_veils(&mut app), 0);
+    }
+
+    #[test]
+    fn fresh_marks_a_reply_where_it_lands_and_not_an_edit() {
+        let ui = TabUi::default();
+        let mut r = ready();
+        let before = comments_view(&r, &ui, NOW);
+        let at = before
+            .threads
+            .iter()
+            .position(|t| !t.posts.is_empty())
+            .expect("a thread with posts");
+        let id = before.threads[at].thread.clone();
+        let thread = threads_mut(&mut r)
+            .iter_mut()
+            .find(|t| thread_ref(t) == id)
+            .expect("its review thread");
+        let mut reply = thread.comments[0].clone();
+        reply.body = "One more thing".into();
+        thread.comments.push(reply);
+        thread.comments[0].body = "Edited".into();
+        let after = comments_view(&r, &ui, NOW);
+        let fresh = Fresh::since(&before, &after);
+        let last = after.threads[at].posts.len() - 1;
+        for (t, thread) in after.threads.iter().enumerate() {
+            for i in 0..thread.posts.len() {
+                assert_eq!(
+                    fresh.post(t, i),
+                    t == at && i == last,
+                    "thread {t} post {i}"
+                );
+            }
+        }
+        assert!((0..after.general.len()).all(|i| !fresh.general(i)));
     }
 
     #[test]

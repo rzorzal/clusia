@@ -61,8 +61,9 @@ fn open_layer(add: On<Add, ModalLayer>, motion: Res<Motion>, mut commands: Comma
     }
 }
 
-/// A card on a dialog's layer grows into place as its surface and border fade in (a card used
-/// elsewhere, as the loading one, does not).
+/// A card on a dialog's layer grows into place (a card used elsewhere, as the loading one, does
+/// not). It stays opaque: Bevy has no group opacity, and fading only its surface would leave its
+/// text floating over the page.
 fn open_card(
     add: On<Add, ModalCard>,
     motion: Res<Motion>,
@@ -77,7 +78,7 @@ fn open_card(
         commands.entity(add.entity).insert(Tween::new(
             MODAL_IN_MS,
             Ease::OutCubic,
-            Look::REST.scaled(CARD_FROM).faded(0.0),
+            Look::REST.scaled(CARD_FROM),
             Look::REST,
         ));
     }
@@ -236,13 +237,14 @@ mod tests {
             app.world().get::<UiTransform>(card).unwrap().scale,
             Vec2::splat(CARD_FROM)
         );
+        // Opaque from its first frame, with its text: only the layer dims in.
         assert_eq!(
-            app.world().get::<BackgroundColor>(card).unwrap().0.alpha(),
-            0.0
+            app.world().get::<BackgroundColor>(card).unwrap().0,
+            LIGHT.surface
         );
         assert_eq!(
-            app.world().get::<BorderColor>(card).unwrap().top.alpha(),
-            0.0
+            app.world().get::<BorderColor>(card).unwrap().top,
+            LIGHT.line
         );
         app.update();
         let scale = app.world().get::<UiTransform>(card).unwrap().scale.x;

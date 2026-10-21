@@ -560,9 +560,9 @@ fn place_card(
 pub const CARD_IN_MS: u64 = 120;
 pub const CARD_FROM: f32 = 0.97;
 
-/// The card grows into place, and it and every colour and picture in it fade in: what is under a floating
-/// card is not one colour a veil could take. It is shown in the frame this runs, after
-/// `animate`, so the start is put on at once.
+/// The card grows into place, and it and every colour and picture in it fade in: what is under
+/// a floating card is not one colour a veil could take. It is shown in the frame this runs,
+/// after `animate`, so the start is put on at once.
 fn appear(
     commands: &mut Commands,
     theme: &Theme,
