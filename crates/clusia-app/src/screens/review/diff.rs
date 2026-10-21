@@ -1421,27 +1421,43 @@ fn frame(p: &mut ChildSpawnerCommands, pr: &PrRef) {
                     built: None,
                 },
             ));
-            c.spawn((
-                panel(
-                    Node {
-                        flex_grow: 1.0,
-                        min_height: px(0),
-                        flex_direction: FlexDirection::Column,
-                        overflow: Overflow {
-                            x: OverflowAxis::Clip,
-                            y: OverflowAxis::Scroll,
+            // The body is out of flow in a holder that takes the room left: the layout asks the
+            // holder, which has no content of its own, for its size, and lays the body out only
+            // at that size. Otherwise every size query of the screen above reaches the rows under
+            // other constraints than the last, and each spacer change or row spawned measures
+            // every row's text again.
+            c.spawn(Node {
+                flex_grow: 1.0,
+                flex_basis: px(0),
+                min_height: px(0),
+                ..default()
+            })
+            .with_children(|h| {
+                h.spawn((
+                    panel(
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(0),
+                            right: px(0),
+                            top: px(0),
+                            bottom: px(0),
+                            flex_direction: FlexDirection::Column,
+                            overflow: Overflow {
+                                x: OverflowAxis::Clip,
+                                y: OverflowAxis::Scroll,
+                            },
+                            ..default()
                         },
-                        ..default()
+                        Swatch::Surface,
+                    ),
+                    ScrollArea,
+                    ScrollPosition::default(),
+                    BodyPart {
+                        pr: pr.clone(),
+                        built: None,
                     },
-                    Swatch::Surface,
-                ),
-                ScrollArea,
-                ScrollPosition::default(),
-                BodyPart {
-                    pr: pr.clone(),
-                    built: None,
-                },
-            ));
+                ));
+            });
         });
     });
 }
@@ -6582,6 +6598,72 @@ mod tests {
         set_body_scroll(&mut app, 18_000.0);
         assert!(!spawned_orders(&mut app).contains(&0));
         assert!(colored_spans(&mut app) > 0, "the rows come in color");
+    }
+
+    /// A leaf that counts how often the layout asks for its size.
+    struct CountingMeasure(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl bevy::ui::Measure for CountingMeasure {
+        fn measure(&mut self, _: bevy::ui::MeasureArgs) -> Vec2 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Vec2::splat(4.0)
+        }
+    }
+
+    /// Puts a counting leaf in a row in the middle of the window and returns its count.
+    fn count_row_measures(app: &mut App) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        use bevy::ui::{ContentSize, NodeMeasure};
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let built = app
+            .world()
+            .get::<BodyPart>(body)
+            .unwrap()
+            .built
+            .as_ref()
+            .unwrap();
+        let row = built.slots[built.slots.len() / 2].entity;
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut content = ContentSize::default();
+        content.set(NodeMeasure::Custom(Box::new(CountingMeasure(
+            asked.clone(),
+        ))));
+        let leaf = app.world_mut().spawn((Node::default(), content)).id();
+        app.world_mut().entity_mut(row).add_child(leaf);
+        testing::settle(app);
+        asked
+    }
+
+    #[test]
+    fn a_spacer_that_changes_lays_out_no_row_again() {
+        use std::sync::atomic::Ordering;
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            set_body_scroll(&mut app, 5_000.0);
+            let asked = count_row_measures(&mut app);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let spacer = app
+                .world()
+                .get::<BodyPart>(body)
+                .unwrap()
+                .built
+                .as_ref()
+                .unwrap()
+                .spacers[0];
+            let before = asked.load(Ordering::Relaxed);
+            for step in 0..10 {
+                let mut node = app.world_mut().get_mut::<Node>(spacer).unwrap();
+                let Val::Px(height) = node.height else {
+                    panic!("a spacer has a height in pixels")
+                };
+                node.height = px(height + if step % 2 == 0 { 1.0 } else { -1.0 });
+                app.update();
+            }
+            let asked = asked.load(Ordering::Relaxed) - before;
+            assert_eq!(
+                asked, 0,
+                "{mode:?}: a row was measured {asked} times in 10 frames"
+            );
+        }
     }
 
     #[test]
