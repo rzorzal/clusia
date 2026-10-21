@@ -14,3 +14,4 @@ pub mod pace;
 pub mod people;
 pub mod spinner;
 pub mod text_area;
+pub mod tween;

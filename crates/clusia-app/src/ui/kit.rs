@@ -876,6 +876,11 @@ fn reveal_in_track(
     }
 }
 
+/// The systems that resolve swatches into colours (`restyle`, then `hover`). What changes a
+/// resolved colour afterwards in the frame (a fade) runs after this set.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Painting;
+
 pub struct KitPlugin;
 
 impl Plugin for KitPlugin {
@@ -889,6 +894,7 @@ impl Plugin for KitPlugin {
             crate::ui::media::MediaPlugin,
             crate::ui::people::PeoplePlugin,
             crate::ui::code_select::CodeSelectPlugin,
+            crate::ui::tween::TweenPlugin,
         ))
         .add_message::<FieldCommitted>()
         .add_observer(commit_on_blur)
@@ -900,7 +906,9 @@ impl Plugin for KitPlugin {
         .add_systems(Update, (commit_on_enter, pointer_cursor.run_if(cursor_due)))
         .add_systems(
             PostUpdate,
-            (restyle.run_if(restyle_due), hover.run_if(hover_due)).chain(),
+            (restyle.run_if(restyle_due), hover.run_if(hover_due))
+                .chain()
+                .in_set(Painting),
         )
         .add_systems(PostUpdate, (relift_labels, resize_with_text));
     }
