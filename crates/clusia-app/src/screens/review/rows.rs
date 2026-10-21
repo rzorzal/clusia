@@ -5,6 +5,10 @@
 
 use std::ops::Range;
 
+use unicode_width::UnicodeWidthChar;
+
+use crate::ui::code::TAB;
+
 /// How far past each edge of the view rows are still spawned, in logical pixels. A scroll
 /// shorter than this finds its rows already there.
 pub const MARGIN: f32 = 240.0;
@@ -13,9 +17,8 @@ pub const MARGIN: f32 = 240.0;
 pub const VIEW_GUESS: f32 = 800.0;
 
 /// The rows of `heights` that a view `view` pixels high, scrolled to `scroll`, shows with
-/// `MARGIN` on each side, widened to hold the row `pin`. A scroll past the end counts as the end,
-/// as the layout clamps it.
-pub fn window(heights: &[f32], scroll: f32, view: f32, pin: Option<usize>) -> Range<usize> {
+/// `MARGIN` on each side. A scroll past the end counts as the end, as the layout clamps it.
+pub fn window(heights: &[f32], scroll: f32, view: f32) -> Range<usize> {
     let total: f32 = heights.iter().sum();
     let scroll = scroll.min(total - view).max(0.0);
     let (from, to) = (scroll - MARGIN, scroll + view + MARGIN);
@@ -32,11 +35,7 @@ pub fn window(heights: &[f32], scroll: f32, view: f32, pin: Option<usize>) -> Ra
         }
         top += h;
     }
-    let start = start.unwrap_or(end).min(end);
-    match pin.filter(|p| *p < heights.len()) {
-        Some(p) => start.min(p)..end.max(p + 1),
-        None => start..end,
-    }
+    start.unwrap_or(end).min(end)..end
 }
 
 /// Where row `index` starts: what the rows above it weigh.
@@ -110,9 +109,19 @@ impl Metrics {
     }
 }
 
-/// The visual lines `text` takes at `columns` characters a line, broken as the code is: at
-/// blanks where it can, inside a word only when the word is wider than a whole line. Blanks at
-/// the end of a line hang past its edge.
+/// The columns a character takes in monospaced code: two for a wide glyph (East Asian Width),
+/// none for a combining mark, a tab as many as it shows as.
+fn columns_of(c: char) -> usize {
+    if c == '\t' {
+        TAB.len()
+    } else {
+        c.width().unwrap_or(0)
+    }
+}
+
+/// The visual lines `text` takes at `columns` columns a line, broken as the code is: at blanks
+/// where it can, inside a word only when the word is wider than a whole line. Blanks at the end
+/// of a line hang past its edge.
 pub fn wrapped_lines(text: &str, columns: usize) -> usize {
     let columns = columns.max(1);
     let mut lines = 1;
@@ -120,14 +129,14 @@ pub fn wrapped_lines(text: &str, columns: usize) -> usize {
     let mut chars = text.chars().peekable();
     while chars.peek().is_some() {
         let mut ink = 0;
-        while chars.next_if(|c| !c.is_whitespace()).is_some() {
-            ink += 1;
+        while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+            ink += columns_of(c);
         }
         let mut blank = 0;
-        while chars.next_if(|c| c.is_whitespace()).is_some() {
-            blank += 1;
+        while let Some(c) = chars.next_if(|c| c.is_whitespace()) {
+            blank += columns_of(c);
         }
-        if used + ink <= columns {
+        if ink == 0 || used + ink <= columns {
             used += ink + blank;
             continue;
         }
@@ -148,17 +157,10 @@ mod tests {
     fn the_window_is_the_view_and_a_margin_each_side() {
         let heights = vec![20.0; 100];
         // A 200 px view at 1,000 px: rows 50..60, and 12 rows of margin each side.
-        assert_eq!(window(&heights, 1_000.0, 200.0, None), 38..72);
-        assert_eq!(window(&heights, 0.0, 200.0, None), 0..22);
-        assert_eq!(window(&heights, 1.0e6, 200.0, None), 78..100);
-        assert_eq!(window(&[], 0.0, 200.0, None), 0..0);
-    }
-
-    #[test]
-    fn a_pinned_row_widens_the_window_to_reach_it() {
-        let heights = vec![20.0; 100];
-        assert_eq!(window(&heights, 1_000.0, 200.0, Some(5)), 5..72);
-        assert_eq!(window(&heights, 0.0, 200.0, Some(90)), 0..91);
+        assert_eq!(window(&heights, 1_000.0, 200.0), 38..72);
+        assert_eq!(window(&heights, 0.0, 200.0), 0..22);
+        assert_eq!(window(&heights, 1.0e6, 200.0), 78..100);
+        assert_eq!(window(&[], 0.0, 200.0), 0..0);
     }
 
     #[test]
@@ -166,7 +168,7 @@ mod tests {
         let mut heights = vec![20.0; 100];
         heights[10] = 2_000.0;
         // The view inside the tall row holds it alone, with what the margin reaches.
-        let w = window(&heights, 1_000.0, 200.0, None);
+        let w = window(&heights, 1_000.0, 200.0);
         assert!(w.contains(&10) && w.len() <= 2, "{w:?}");
         assert_eq!(top(&heights, 11), 2_200.0);
         assert_eq!(at(&heights, 2_210.0), (11, 10.0));
@@ -183,6 +185,11 @@ mod tests {
         // A word wider than a line breaks inside, on lines of its own.
         assert_eq!(wrapped_lines(&"x".repeat(25), 10), 3);
         assert_eq!(wrapped_lines(&format!("ab {}", "x".repeat(25)), 10), 4);
+        // Wide glyphs take two columns, combining marks none.
+        assert_eq!(wrapped_lines(&"漢".repeat(5), 10), 1);
+        assert_eq!(wrapped_lines(&"漢".repeat(6), 10), 2);
+        assert_eq!(wrapped_lines(&"e\u{301}".repeat(10), 10), 1);
+        assert_eq!(wrapped_lines("\tabcdefg", 10), 2);
     }
 
     fn seen(text: &str, size: [f32; 2], lines: usize) -> Seen<'_> {

@@ -551,6 +551,11 @@ fn drop_stale(
                 selection.group = None;
                 return;
             }
+            // Lines that only left or came into view read as the source does, which is
+            // unchanged: nothing to fingerprint again.
+            if !resourced && selection.fingerprint.is_some() {
+                return;
+            }
             for l in &source.0 {
                 (l.order, l.column, &l.text).hash(&mut hasher);
             }
