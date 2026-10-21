@@ -122,6 +122,17 @@ pub fn markdown(
     blocks: &[Block],
     opts: &RenderOpts,
 ) {
+    markdown_body(p, fonts, blocks, opts);
+}
+
+/// `markdown`, answering the column. Each block is one child of it, in order, so a caller can
+/// keep the children of the blocks that did not change.
+pub fn markdown_body(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    blocks: &[Block],
+    opts: &RenderOpts,
+) -> Entity {
     p.spawn((
         Node {
             flex_direction: FlexDirection::Column,
@@ -136,7 +147,8 @@ pub fn markdown(
         for b in blocks {
             block(c, fonts, b, opts, Type::BODY);
         }
-    });
+    })
+    .id()
 }
 
 /// Draws the first `max_chars` characters of `blocks` as one row in the text style `base`:
