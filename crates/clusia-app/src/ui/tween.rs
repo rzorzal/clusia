@@ -1,6 +1,7 @@
 //! Short animations of properties that only change how a node is drawn: its `UiTransform`
 //! (shift and scale), the alpha of its swatches (`Fill`, `Stroke`, `Ink`), a flash of its
-//! `BackgroundColor` easing to its `Fill`, and its `Outline` colour. Nothing here writes a `Node`, so a running tween never lays the window out again.
+//! `BackgroundColor` easing to its `Fill`, and its `Outline` colour. Nothing here writes a
+//! `Node`, so a running tween never lays the window out again.
 //!
 //! A `Tween` is written once, when the animation starts; `animate` takes its start time from
 //! the first frame that sees it, eases it each frame with `set_if_neq`, writes the end value

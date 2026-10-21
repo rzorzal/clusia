@@ -1305,7 +1305,8 @@ const FOCUS_FRAMES: u8 = 4;
 /// On a body whose scroll is an estimate until its rows are laid out: wrapped rows are taller
 /// than the estimate counts, so the first laid-out frame moves the scroll to the real row. It
 /// is one-shot: it goes when the row is reached, when the scroll is no longer where the estimate
-/// put it (the user moved it), or after `FOCUS_FRAMES` frames without a laid-out row.
+/// put it (the user moved it), or after `FOCUS_FRAMES` frames without a laid-out row. While the
+/// scroll eases toward the line no frame is counted: the countdown starts once the ease is over.
 #[derive(Component)]
 struct FocusPending {
     /// The scroll offset the estimate (or the ease, each frame) set.
@@ -7249,11 +7250,16 @@ mod tests {
     /// each that the view's rows are spawned. The scroll after each frame, the first being the
     /// frame that asked.
     fn glide_to(app: &mut App, line: u32, what: &str) -> Vec<f32> {
+        glide_in(app, "big.txt", line, what)
+    }
+
+    /// `glide_to` on line `line` of `path`.
+    fn glide_in(app: &mut App, path: &str, line: u32, what: &str) -> Vec<f32> {
         let pr = fixture::demo_pr();
         {
             let mut tabs = ui_mut(app, &pr);
             let tab = tabs.0.get_mut(&pr).unwrap();
-            assert!(show_line(tab, "big.txt", Some((line, line))));
+            assert!(show_line(tab, path, Some((line, line))));
         }
         let body = body_of(app);
         let mut ys = Vec::new();
@@ -7547,5 +7553,74 @@ mod tests {
         app.update();
         assert_eq!(focused(&app), desktop);
         assert_eq!(app.world().resource::<Pace>().written, None);
+    }
+
+    #[test]
+    fn every_frame_of_an_ease_in_a_tall_view_shows_its_rows() {
+        // Half the view is eased, so the steepest frame moves past the rows' margin. At the
+        // taller of the two, a step also outruns what a page holds ahead of the view: rows placed
+        // a frame late, for the scroll before the step, leave a gap.
+        for (mode, height) in [DiffMode::Unified, DiffMode::Split]
+            .into_iter()
+            .flat_map(|mode| [(mode, 1_600), (mode, 2_400)])
+        {
+            let what = format!("{mode:?} at {height}");
+            let mut app = thousand_app(mode);
+            resize(&mut app, UVec2::new(1280, height));
+            let body = body_of(&mut app);
+            let view = built_of(&app, body).view;
+            assert!(view >= 1_000.0, "{what}: a {view} px view");
+            let ys = glide_to(&mut app, 900, &format!("{what}, down"));
+            let step = ys.windows(2).map(|w| w[1] - w[0]).fold(0.0, f32::max);
+            assert!(step > rows::LOW, "{what}: the steepest step is {step} px");
+            glide_to(&mut app, 860, &format!("{what}, up"));
+            glide_to(&mut app, 300, &format!("{what}, far up"));
+        }
+    }
+
+    #[test]
+    fn every_frame_of_an_ease_over_wrapped_rows_shows_its_rows() {
+        let mut app = wrap_app();
+        let long = "x".repeat(400);
+        add_file(&mut app, "wide.txt", 400, |n| format!("{n} {long}"));
+        let ys = glide_in(&mut app, "wide.txt", 300, "wrapped, a new file");
+        assert!(ys.len() > 3, "it eases: {ys:?}");
+        glide_in(&mut app, "wide.txt", 296, "wrapped, up");
+        glide_in(&mut app, "wide.txt", 120, "wrapped, far up");
+        let line = testing::find::<LineButton>(&mut app, |b| b.line == 120);
+        let body = body_of(&mut app);
+        let (_, by, _, bh) = testing::frame(&app, body);
+        let (_, ly, _, _) = testing::frame(&app, line);
+        assert!(ly >= by && ly < by + bh, "line 120 is in view");
+    }
+
+    #[test]
+    fn a_second_focus_during_an_ease_carries_on_from_where_it_is() {
+        let mut app = thousand_app(DiffMode::Unified);
+        set_body_scroll(&mut app, 4_000.0);
+        let (top, _) = first_in_view(&mut app);
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = ui_mut(&mut app, &pr);
+            let tab = tabs.0.get_mut(&pr).unwrap();
+            assert!(show_line(tab, "big.txt", Some((top + 12, top + 12))));
+        }
+        let body = body_of(&mut app);
+        for _ in 0..6 {
+            app.update();
+        }
+        assert!(gliding(&app, body));
+        let mid = scroll_of(&app, body);
+        assert!(mid > 4_000.0, "on its way: {mid}");
+        let ys = glide_to(&mut app, top + 20, "a second focus");
+        assert!(
+            ys.iter().all(|y| *y >= mid) && ys.windows(2).all(|w| w[1] >= w[0]),
+            "no step back from {mid}: {ys:?}"
+        );
+        let under = row_under_top(&mut app, top + 20);
+        assert!(
+            (under - FOCUS_CONTEXT as f32 * ROW_HEIGHT).abs() < 0.5,
+            "the second line sits {under} px under the top"
+        );
     }
 }
