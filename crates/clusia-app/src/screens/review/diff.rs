@@ -10,13 +10,21 @@
 //! row alone, a line whose content changed is respawned in its place, and more lines append.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
+use bevy::ecs::system::SystemParam;
 use bevy::input::ButtonInput;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::text::{
+    ComputedTextBlock, FontCx, Justify, LayoutCx, LetterSpacing, LineBreak, LineHeight, RemSize,
+    TextBounds, TextLayoutInfo, TextPipeline,
+};
+use bevy::ui::UiSystems;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_core::commentable_lines;
@@ -27,7 +35,7 @@ use clusia_view::diff::{
 };
 
 use crate::bridge::{Ask, Asks, Model, Toasts, set_config};
-use crate::fonts::UiFonts;
+use crate::fonts::{Face, UiFonts};
 use crate::review_state::{
     DiffMode, EditTarget, Editor, Phase, Ready, ReviewSection, ReviewTabs, SHOW_STEP, Tab, TabUi,
 };
@@ -35,14 +43,17 @@ use crate::screens::review::ReviewSystems;
 use crate::screens::review::editor::{editor_box, not_sent, read_only_reason};
 use crate::screens::review::highlight::{HighlightCache, Highlighted, HighlightsLanded};
 use crate::screens::review::revalidation::{Revalidations, reanchor_click};
+use crate::screens::review::rows::{self, Metrics, Seen};
 use crate::screens::review::shell::SectionBody;
 use crate::theme::{Swatch, Theme};
 use crate::ui::code::{CodeSpan, plain_text, respan, spans_for, wrapped_code_line};
-use crate::ui::code_select::{ClickKind, CodeSelection, LineKey, selectable};
+use crate::ui::code_select::{
+    ClickKind, CodeSelection, CodeSource, LineKey, SourceLine, selectable,
+};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Preview, Reveal, SideTrack, Stroke, Tone, Type, Variant, badge,
-    button, card, panel, segment, segments, text, wrapped_text, wrapping_button,
+    button, card, font, panel, segment, segments, text, wrapped_text, wrapping_button,
 };
 use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown, markdown_line};
@@ -341,11 +352,11 @@ const TEXT_TOP: f32 = 3.0;
 /// Lines of context kept above a line that is scrolled to.
 const FOCUS_CONTEXT: usize = 3;
 
-/// The scroll offset that brings the line at `index` into view with a few lines above it. Wrapped
-/// lines and comments above it make rows taller, so this is a first guess that `reach_focus`
-/// corrects once the rows are laid out.
-fn focus_scroll(index: usize) -> f32 {
-    index.saturating_sub(FOCUS_CONTEXT) as f32 * ROW_HEIGHT
+/// The scroll offset that brings the line at `index` into view with a few lines above it, the
+/// lines weighing `heights`. Lines not laid out yet are guesses, so `reach_focus` corrects it
+/// once the row is laid out.
+fn focus_scroll(heights: &[f32], index: usize) -> f32 {
+    rows::top(heights, index.saturating_sub(FOCUS_CONTEXT))
 }
 
 fn is_selected(sel: Option<(Side, u32, u32)>, anchor: Option<(Side, u32)>) -> bool {
@@ -778,7 +789,22 @@ struct BodyShape {
     path: Option<String>,
     layout: Layout,
     code_size: f32,
+    /// The text scale, the code face and the text face (the cards'): with the code size, what
+    /// the rows' heights follow.
+    text_scale: f32,
+    mono: AssetId<Font>,
+    sans: Face,
     opts: RenderOpts,
+}
+
+impl BodyShape {
+    /// The part of the body's width one row's code shares: all of it, or a Split column.
+    fn share(&self) -> f32 {
+        match self.layout {
+            Layout::Split => 0.5,
+            _ => 1.0,
+        }
+    }
 }
 
 /// A line as its row draws it: with no selection (a selected fill is set on the row in place)
@@ -854,6 +880,7 @@ impl UnderKey {
 }
 
 /// A body line as the view wants it.
+#[derive(Clone)]
 struct Want {
     row: RowKey,
     selected: [bool; 2],
@@ -883,17 +910,357 @@ struct Under {
     items: [Vec<Entity>; 2],
 }
 
-/// What a body's children are. They are, in order: the Split labels (in Split), each slot's row
-/// and its below node, and the **Show more** footer.
+/// What a body's children are. They are, in order: the Split labels (in Split), the top spacer,
+/// the row and the below node of each line in the window, the bottom spacer, and the **Show
+/// more** footer. Only the lines in the window are spawned; the spacers weigh what the others
+/// would.
 struct Built {
     shape: BodyShape,
+    /// Every line, spawned or not.
+    wants: Vec<Want>,
+    /// Each line's keys: its row's (its text) among `laid`, and its own (its text and what sits
+    /// under it) among `measured`.
+    keys: Vec<(u64, u64)>,
+    /// What each line weighs, as the spacers count it: as measured at `width`, or a guess.
+    heights: Vec<f32>,
+    /// The lines that are spawned, and their slots in order.
+    window: Range<usize>,
     slots: Vec<Slot>,
+    spacers: [Entity; 2],
+    spaced: [f32; 2],
+    /// Heights of lines laid out before, by line key and body width.
+    measured: HashMap<(u64, u32), f32>,
+    /// Heights of rows (without what sits under them) laid out ahead of the layout, by row key
+    /// and body width.
+    laid: HashMap<(u64, u32), f32>,
+    /// The code font's metrics, learned from the rows laid out.
+    metrics: Option<Metrics>,
+    /// How much narrower a row's code is than its share of the body, learned from a laid-out row.
+    gutter: Option<f32>,
+    /// What measured under a line, by what sits there: at each width, and last at any width.
+    under_seen: HashMap<(u64, u32), f32>,
+    under_any: HashMap<u64, f32>,
+    /// The body's laid-out width and height in logical pixels; zero before it is laid out.
+    width: u32,
+    view: f32,
+    /// Physical pixels per logical one.
+    scale: f32,
+    /// The line a press is held on while the window has moved off it, and its slot, kept
+    /// spawned outside the window: the drag is sent to it.
+    pinned: Option<(usize, Slot)>,
+    /// The heights or the view changed since the window was placed.
+    moved: bool,
+    /// Lines spawned at the window's top since they were last measured: the spacer counted
+    /// them at a guessed height, and what they really weigh moves the rows below them.
+    fresh: Range<usize>,
+    /// The window moved to lines apart from the ones it held (a far scroll, a focus, a new
+    /// body), so no row on screen was laid out before.
+    jumped: bool,
+    /// How many times the window was placed, and the rows measured, for tests that no pass
+    /// runs when nothing moves.
+    passes: usize,
+    measures: usize,
+    /// The text of every code line, as the body's `CodeSource` holds it.
+    source: Vec<SourceLine>,
+    focus_row: Option<usize>,
     more: usize,
     footer: Option<Entity>,
     /// The Split labels and their node, the first child.
     labels: Option<((String, String), Entity)>,
     /// The line to scroll to.
     focus: Option<(usize, u32)>,
+}
+
+/// The lines measured are kept up to this many, then forgotten all at once.
+const MEASURED_CAP: usize = 50_000;
+
+/// What the editor's text box under a line is guessed to weigh until it is laid out.
+const BELOW_GUESS: f32 = 96.0;
+
+impl Built {
+    /// An empty body of `shape`, its spacers spawned in `body`. It keeps what `was` knew of the
+    /// body's size.
+    fn new(commands: &mut Commands, body: Entity, shape: BodyShape, was: Option<&Built>) -> Self {
+        let mut spacers = [Entity::PLACEHOLDER; 2];
+        commands.entity(body).with_children(|p| {
+            for spacer in &mut spacers {
+                *spacer = p.spawn(spacer_node(0.0)).id();
+            }
+        });
+        Self {
+            shape,
+            wants: Vec::new(),
+            keys: Vec::new(),
+            heights: Vec::new(),
+            window: 0..0,
+            slots: Vec::new(),
+            spacers,
+            spaced: [0.0; 2],
+            measured: HashMap::new(),
+            laid: HashMap::new(),
+            metrics: None,
+            gutter: None,
+            under_seen: HashMap::new(),
+            under_any: HashMap::new(),
+            width: was.map_or(0, |b| b.width),
+            view: was.map_or(0.0, |b| b.view),
+            scale: was.map_or(1.0, |b| b.scale),
+            pinned: None,
+            moved: false,
+            fresh: 0..0,
+            jumped: false,
+            passes: 0,
+            measures: 0,
+            source: Vec::new(),
+            focus_row: None,
+            more: 0,
+            footer: None,
+            labels: None,
+            focus: None,
+        }
+    }
+
+    /// The child index of the window's first row: after the labels, a pinned row above the
+    /// window and the top spacer.
+    fn base(&self) -> usize {
+        let pinned = match &self.pinned {
+            Some((order, slot)) if *order < self.window.start => slot_entities(slot).len(),
+            _ => 0,
+        };
+        usize::from(self.labels.is_some()) + pinned + 1
+    }
+
+    /// Weighs every line again: as measured at the current width, or guessed.
+    fn reweigh(&mut self) {
+        let share = self.width as f32 * self.shape.share();
+        let heights = self
+            .wants
+            .iter()
+            .zip(&self.keys)
+            .map(|(want, (row, line))| {
+                self.measured
+                    .get(&(*line, self.width))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        let row = self.laid.get(&(*row, self.width)).copied();
+                        row.unwrap_or_else(|| guess(want, self.metrics, share))
+                            + self.under_guess(want)
+                    })
+            })
+            .collect();
+        self.heights = heights;
+    }
+
+    /// What sits under `want`'s row is guessed to weigh: what the like of it measured at this
+    /// width, else at any width, else an estimate from its kind and text.
+    fn under_guess(&self, want: &Want) -> f32 {
+        if want.under.is_empty() {
+            return 0.0;
+        }
+        let key = under_key(&want.under);
+        if let Some(seen) = self
+            .under_seen
+            .get(&(key, self.width))
+            .or_else(|| self.under_any.get(&key))
+        {
+            return *seen;
+        }
+        want.under
+            .items
+            .iter()
+            .filter(|items| !items.is_empty())
+            .map(|items| {
+                let gaps = 8.0 * (items.len() - 1) as f32;
+                16.0 + gaps + items.iter().map(item_guess).sum::<f32>()
+            })
+            .fold(0.0, f32::max)
+    }
+
+    /// What `want`'s row weighs with its code laid out as the UI will lay it out; `None` until a
+    /// laid-out row told how wide the code is, or without a text pipeline.
+    fn exact(&self, want: &Want, fonts: &UiFonts, measure: &mut CodeMeasure) -> Option<f32> {
+        let width = self.width as f32 * self.shape.share() - self.gutter?;
+        let face = font(fonts, Type::MONO.size(self.shape.code_size));
+        let hunk = match &want.row {
+            RowKey::Split(line) => line.hunk.clone(),
+            RowKey::Unified(_) => None,
+        };
+        let mut row = ROW_HEIGHT;
+        for text in (0..2)
+            .filter_map(|side| want.row.spans(side))
+            .map(plain_text)
+            .chain(hunk)
+        {
+            row = row.max(TEXT_TOP + measure.height(&text, &face, width, self.scale)?);
+        }
+        Some(row)
+    }
+}
+
+/// A card's guessed height: a header line (avatar, name, buttons), then each post's text at
+/// about 90 characters a line.
+fn item_guess(item: &Below) -> f32 {
+    let text = |body: &str| (body.len() as f32 / 90.0).ceil().max(1.0) * 20.0;
+    match item {
+        Below::Thread(t) if !t.expanded => 78.0,
+        Below::Thread(t) => 78.0 + t.posts.iter().map(|p| 36.0 + text(&p.body)).sum::<f32>(),
+        Below::Draft(d) => 78.0 + text(&d.body),
+        Below::Editor => BELOW_GUESS + 84.0,
+    }
+}
+
+/// What decides the height of what sits under a line: each card's text and state, not which
+/// thread or draft it is, so cards that read alike share what they measured. A collapsed card
+/// shows one clipped line of its first comment, so its text does not count.
+fn under_key(under: &UnderKey) -> u64 {
+    let mut h = DefaultHasher::new();
+    for (side, items) in under.items.iter().enumerate() {
+        side.hash(&mut h);
+        for item in items {
+            match item {
+                Below::Thread(t) => {
+                    (0u8, &t.author, t.replies, t.expanded).hash(&mut h);
+                    if t.expanded {
+                        for post in &t.posts {
+                            (&post.author, &post.body).hash(&mut h);
+                        }
+                    }
+                }
+                Below::Draft(d) => (1u8, &d.label, &d.body, format!("{:?}", d.status)).hash(&mut h),
+                Below::Editor => 2u8.hash(&mut h),
+            }
+        }
+    }
+    format!("{:?}", under.editor).hash(&mut h);
+    h.finish()
+}
+
+/// Lays code text out as the UI will, before it is spawned: through the same text pipeline,
+/// font context and rem size, so a row's height is known without a frame of layout.
+#[derive(SystemParam)]
+struct CodeMeasure<'w, 's> {
+    fonts: Option<Res<'w, Assets<Font>>>,
+    pipeline: Option<ResMut<'w, TextPipeline>>,
+    font_cx: Option<ResMut<'w, FontCx>>,
+    layout_cx: Option<ResMut<'w, LayoutCx>>,
+    rem: Option<Res<'w, RemSize>>,
+    block: Local<'s, ComputedTextBlock>,
+}
+
+impl CodeMeasure<'_, '_> {
+    /// The height in logical pixels of `text` in `face`, broken at `width` logical pixels on a
+    /// target of `scale` physical pixels per logical one.
+    fn height(&mut self, text: &str, face: &TextFont, width: f32, scale: f32) -> Option<f32> {
+        let (Some(fonts), Some(pipeline), Some(font_cx), Some(layout_cx), Some(rem)) = (
+            self.fonts.as_deref(),
+            self.pipeline.as_deref_mut(),
+            self.font_cx.as_deref_mut(),
+            self.layout_cx.as_deref_mut(),
+            self.rem.as_deref(),
+        ) else {
+            return None;
+        };
+        if text.is_empty() {
+            return Some(0.0);
+        }
+        let span = (
+            Entity::PLACEHOLDER,
+            0,
+            text,
+            face,
+            Color::WHITE,
+            LineHeight::default(),
+            LetterSpacing::default(),
+        );
+        pipeline
+            .update_buffer(
+                fonts,
+                std::iter::once(span),
+                LineBreak::WordOrCharacter,
+                Justify::default(),
+                TextBounds {
+                    width: Some(width * scale),
+                    height: None,
+                },
+                scale,
+                &mut self.block,
+                font_cx,
+                layout_cx,
+                Vec2::ZERO,
+                rem.0,
+            )
+            .ok()?;
+        Some(self.block.buffer().height().ceil() / scale)
+    }
+}
+
+fn spacer_node(height: f32) -> Node {
+    Node {
+        width: percent(100),
+        height: px(height),
+        flex_shrink: 0.0,
+        ..default()
+    }
+}
+
+/// A line's keys among the heights laid out: its row's (its text, not its colors), and its own
+/// (with what sits under it).
+fn line_key(want: &Want) -> (u64, u64) {
+    let mut h = DefaultHasher::new();
+    for side in 0..2 {
+        for span in want.row.spans(side).into_iter().flatten() {
+            h.write(span.text.as_bytes());
+        }
+        h.write_u8(0xff);
+    }
+    if let RowKey::Split(line) = &want.row {
+        line.hunk.hash(&mut h);
+    }
+    let row = h.finish();
+    if !want.under.is_empty() {
+        under_key(&want.under).hash(&mut h);
+    }
+    (row, h.finish())
+}
+
+/// What a line's row not laid out yet is guessed to weigh, with the code font's `metrics` when
+/// they are known, in a row whose code shares `share` pixels of the body.
+fn guess(want: &Want, metrics: Option<Metrics>, share: f32) -> f32 {
+    match metrics.filter(|_| share > 0.0) {
+        Some(m) => {
+            let columns = m.columns(share);
+            let tall = |text: &str| {
+                ROW_HEIGHT.max(TEXT_TOP + rows::wrapped_lines(text, columns) as f32 * m.line)
+            };
+            let hunk = match &want.row {
+                RowKey::Split(line) => line.hunk.as_deref().map(tall),
+                RowKey::Unified(_) => None,
+            };
+            (0..2)
+                .filter_map(|side| want.row.spans(side))
+                .map(|spans| tall(&plain_text(spans)))
+                .chain(hunk)
+                .fold(ROW_HEIGHT, f32::max)
+        }
+        None => ROW_HEIGHT,
+    }
+}
+
+/// The text of every code line of `wants`, as their `CodeLine`s hold it.
+fn source_of(wants: &[Want]) -> Vec<SourceLine> {
+    let mut out = Vec::new();
+    for (order, want) in wants.iter().enumerate() {
+        for column in 0..2 {
+            if let Some(spans) = want.row.spans(column) {
+                out.push(SourceLine {
+                    order,
+                    column: column as u8,
+                    text: plain_text(spans),
+                });
+            }
+        }
+    }
+    out
 }
 
 #[derive(Component)]
@@ -933,12 +1300,14 @@ pub struct DiffPlugin;
 
 impl Plugin for DiffPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<HighlightCache>().add_systems(
-            Update,
-            (fill_region, rebuild_diff, reach_focus)
-                .chain()
-                .after(ReviewSystems),
-        );
+        app.init_resource::<HighlightCache>()
+            .add_systems(
+                Update,
+                (fill_region, rebuild_diff, follow_scroll, reach_focus)
+                    .chain()
+                    .after(ReviewSystems),
+            )
+            .add_systems(PostUpdate, measure_rows.after(UiSystems::Layout));
     }
 }
 
@@ -1090,15 +1459,22 @@ fn rebuild_diff(
     fonts: Res<UiFonts>,
     mut cache: ResMut<HighlightCache>,
     landed: Res<HighlightsLanded>,
+    selection: Res<CodeSelection>,
+    mut measure: CodeMeasure,
     mut last_opts: Local<Option<RenderOpts>>,
     mut files: Query<(Entity, &mut FilesPart)>,
     mut headers: Query<(Entity, &mut HeaderPart)>,
-    mut bodies: Query<(Entity, &mut BodyPart, &mut ScrollPosition)>,
+    mut bodies: Query<(
+        Entity,
+        &mut BodyPart,
+        &mut ScrollPosition,
+        Option<&mut FocusPending>,
+    )>,
 ) {
     let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
     let fresh = files.iter().any(|(_, p)| p.built.is_none())
         || headers.iter().any(|(_, p)| p.built.is_none())
-        || bodies.iter().any(|(_, p, _)| p.built.is_none());
+        || bodies.iter().any(|(_, p, ..)| p.built.is_none());
     let opts_changed = last_opts.as_ref() != Some(&opts);
     if !(fresh || tabs.is_changed() || theme.is_changed() || landed.is_changed() || opts_changed) {
         return;
@@ -1138,7 +1514,7 @@ fn rebuild_diff(
         refill(&mut commands, entity, |p| header(p, fonts, v));
         part.built = Some(key);
     }
-    for (entity, mut part, mut scroll) in &mut bodies {
+    for (entity, mut part, mut scroll, pending) in &mut bodies {
         let Some((v, editor)) = views.get(&part.pr) else {
             continue;
         };
@@ -1150,17 +1526,15 @@ fn rebuild_diff(
                 DiffBody::Split { .. } => Layout::Split,
             },
             code_size: v.code_size,
+            text_scale: theme.text_scale,
+            mono: fonts.mono.id(),
+            sans: fonts.sans.clone(),
             opts: opts.clone(),
         };
         let focus = v.focus_row.map(|row| (row, v.focus_seq));
+        let refocus = part.built.as_ref().map(|b| b.focus) != Some(focus);
         if part.built.as_ref().map(|b| &b.shape.path) != Some(&shape.path) {
             scroll.0 = Vec2::ZERO; // another file starts at its top
-        }
-        if let Some((index, _)) = focus
-            && part.built.as_ref().map(|b| b.focus) != Some(focus)
-        {
-            scroll.0.y = focus_scroll(index);
-            commands.entity(entity).insert(FocusPending::at(scroll.0.y));
         }
         let pr = part.pr.clone();
         let path = v.path.clone().unwrap_or_default();
@@ -1174,22 +1548,24 @@ fn rebuild_diff(
             opts: &shape.opts,
             gutter: Gutter::Both,
         };
+        // The line at the top of the view, kept there when the same file is drawn anew.
+        let mut top_line = None;
+        let mut renewed = false;
         let mut built = match part.built.take() {
             Some(built) if built.shape == shape => built,
-            _ => {
+            was => {
+                renewed = true;
+                if let Some(was) = &was
+                    && was.shape.path == shape.path
+                {
+                    top_line = Some(rows::at(&was.heights, scroll.0.y));
+                }
                 refill(&mut commands, entity, |p| {
                     if let Layout::Empty(message) = &shape.layout {
                         empty_body(p, fonts, message);
                     }
                 });
-                Built {
-                    shape: shape.clone(),
-                    slots: Vec::new(),
-                    more: 0,
-                    footer: None,
-                    labels: None,
-                    focus: None,
-                }
+                Built::new(&mut commands, entity, shape.clone(), was.as_ref())
             }
         };
         if let DiffBody::Split { before, after, .. } = &v.body {
@@ -1216,6 +1592,44 @@ fn rebuild_diff(
             v.more,
             v.focus_row,
         );
+        let source = source_of(&built.wants);
+        if renewed || source != built.source {
+            commands.entity(entity).insert(CodeSource(source.clone()));
+            built.source = source;
+        }
+        if let Some((line, into)) = top_line
+            && line > 0
+        {
+            scroll.0.y = rows::top(&built.heights, line) + into;
+        }
+        let refocus = focus.filter(|_| refocus);
+        if let Some((index, _)) = refocus {
+            scroll.0.y = focus_scroll(&built.heights, index);
+        }
+        let mut y = scroll.0.y;
+        place(
+            &mut commands,
+            entity,
+            &mut built,
+            &draw,
+            &mut y,
+            selection.held(entity),
+            &mut measure,
+        );
+        if y != scroll.0.y {
+            if let Some(mut pending) = pending {
+                pending.set += y - scroll.0.y;
+            }
+            scroll.0.y = y;
+        }
+        if refocus.is_some() {
+            commands.entity(entity).insert(FocusPending::at(scroll.0.y));
+        }
+        if built.footer.is_none() && built.more > 0 {
+            commands.entity(entity).with_children(|p| {
+                built.footer = Some(show_more(p, fonts, &pr, built.more));
+            });
+        }
         built.focus = focus;
         part.built = Some(built);
     }
@@ -1268,10 +1682,11 @@ fn wants_of(body: &DiffBody, editor: Option<&Editor>) -> Vec<Want> {
     }
 }
 
-/// Brings `built`'s children to `wants`: a line whose row changed is respawned in its place, a
-/// new selection or focus is set on the row that is there, what sits under a row is respawned
-/// alone, lines past the end go and new lines are appended. Lines are matched by position, so a
-/// line added or removed above respawns every row below it.
+/// Brings `built` to `wants`. In the window, a line whose row changed is respawned in its place,
+/// a new selection or focus is set on the row that is there, and what sits under a row is
+/// respawned alone; lines of the window past the new end go. Lines outside the window only
+/// change what they weigh. Lines are matched by position, so a line added or removed above
+/// respawns every row below it. `place` then spawns what the window gains.
 fn reconcile(
     commands: &mut Commands,
     body: Entity,
@@ -1281,30 +1696,48 @@ fn reconcile(
     more: usize,
     focus_row: Option<usize>,
 ) {
-    // The footer is the last child: it goes before lines are appended and comes back after.
-    if (built.more != more || built.slots.len() != wants.len())
+    // A pinned row stays while its line reads the same; it is not the window's to update.
+    if let Some((order, mut slot)) = built.pinned.take() {
+        match wants.get(order) {
+            Some(want)
+                if want.row.uncolored() == slot.row.uncolored()
+                    && want.under == slot.under
+                    && want.selected == slot.selected =>
+            {
+                for side in 0..2 {
+                    if let (Some(text), Some(spans)) = (slot.texts[side], want.row.spans(side))
+                        && slot.row.spans(side) != Some(spans)
+                    {
+                        respan(commands, text, draw.fonts, draw.size, spans.to_vec());
+                    }
+                }
+                slot.row = want.row.clone();
+                built.pinned = Some((order, slot));
+            }
+            _ => despawn_slot(commands, &slot),
+        }
+    }
+    // The footer is the last child: it goes when it changes and comes back after `place`.
+    if (built.more != more || built.wants.len() != wants.len())
         && let Some(footer) = built.footer.take()
     {
         commands.entity(footer).despawn();
     }
-    let keep = built.slots.len().min(wants.len());
-    for slot in built.slots.drain(keep..) {
+    let first = built.window.start;
+    let kept = built.window.end.min(wants.len()).saturating_sub(first);
+    for slot in built.slots.drain(kept.min(built.slots.len())..) {
         despawn_slot(commands, &slot);
     }
+    built.window = first..first + built.slots.len();
     // The index of the current slot's row among the body's children.
-    let mut at = usize::from(built.labels.is_some());
-    for (order, want) in wants.into_iter().enumerate() {
+    let mut at = built.base();
+    for (k, slot) in built.slots.iter_mut().enumerate() {
+        let order = first + k;
+        let want = &wants[order];
         let focused = focus_row == Some(order);
-        let Some(slot) = built.slots.get_mut(order) else {
-            built
-                .slots
-                .push(spawn_slot(commands, body, None, draw, order, want, focused));
-            at += 1 + usize::from(built.slots[order].below.is_some());
-            continue;
-        };
         if slot.row != want.row && slot.row.uncolored() != want.row.uncolored() {
             despawn_slot(commands, slot);
-            *slot = spawn_slot(commands, body, Some(at), draw, order, want, focused);
+            *slot = spawn_slot(commands, body, Some(at), draw, order, want.clone(), focused);
         } else {
             if slot.row != want.row {
                 for side in 0..2 {
@@ -1314,7 +1747,7 @@ fn reconcile(
                         respan(commands, text, draw.fonts, draw.size, spans.to_vec());
                     }
                 }
-                slot.row = want.row;
+                slot.row = want.row.clone();
             }
             for side in 0..2 {
                 if slot.selected[side] != want.selected[side]
@@ -1368,17 +1801,395 @@ fn reconcile(
                         slot.below = spawned;
                     }
                 }
-                slot.under = want.under;
+                slot.under = want.under.clone();
             }
         }
-        at += 1 + usize::from(built.slots[order].below.is_some());
+        at += 1 + usize::from(slot.below.is_some());
     }
-    if built.footer.is_none() && more > 0 {
-        commands.entity(body).with_children(|p| {
-            built.footer = Some(show_more(p, draw.fonts, draw.pr, more));
-        });
-    }
+    built.keys = wants.iter().map(line_key).collect();
+    built.wants = wants;
+    built.focus_row = focus_row;
     built.more = more;
+    built.reweigh();
+}
+
+/// Spawns and despawns rows so the window holds the lines a view scrolled to `scroll` shows,
+/// keeps the line `pin` spawned (in the window or past it), and gives the spacers the weight of
+/// the lines outside. Lines coming into the window are laid out first, so the spacer gives up
+/// what they really weigh; those above the rows already drawn (or, after a jump, above the line
+/// on top) move `scroll` by what they gained over their guess, so the drawn rows stay put.
+fn place(
+    commands: &mut Commands,
+    body: Entity,
+    built: &mut Built,
+    draw: &Draw,
+    scroll: &mut f32,
+    pin: Option<usize>,
+    measure: &mut CodeMeasure,
+) {
+    built.passes += 1;
+    let view = if built.view > 0.0 {
+        built.view
+    } else {
+        rows::VIEW_GUESS
+    };
+    let pin = pin.filter(|p| *p < built.wants.len());
+    let (top_line, _) = rows::at(&built.heights, *scroll);
+    let old = built.window.clone();
+    let mut want = rows::window(&built.heights, *scroll, view);
+    let above = if want.start < old.end && old.start < want.end {
+        old.start
+    } else {
+        top_line
+    };
+    // Lines coming in may weigh more or less than guessed, which moves the window again; a few
+    // rounds settle it.
+    'weigh: for _ in 0..4 {
+        let mut changed = false;
+        for order in want.clone() {
+            let (row, line) = built.keys[order];
+            let (row, line) = ((row, built.width), (line, built.width));
+            if built.window.contains(&order)
+                || built.measured.contains_key(&line)
+                || built.laid.contains_key(&row)
+            {
+                continue;
+            }
+            let Some(laid) = built.exact(&built.wants[order], draw.fonts, measure) else {
+                break 'weigh;
+            };
+            built.laid.insert(row, laid);
+            let height = laid + built.under_guess(&built.wants[order]);
+            let was = std::mem::replace(&mut built.heights[order], height);
+            if (height - was).abs() > 0.01 {
+                changed = true;
+                if order < above {
+                    *scroll += height - was;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+        want = rows::window(&built.heights, *scroll, view);
+    }
+    // The pinned row is taken out of the body's children, clear of the window's child indices,
+    // until it is placed again.
+    if let Some((order, slot)) = built.pinned.take() {
+        if Some(order) == pin {
+            commands.entity(body).detach_children(&slot_entities(&slot));
+            built.pinned = Some((order, slot));
+        } else {
+            despawn_slot(commands, &slot);
+        }
+    }
+    if want != old {
+        let mut gone = Vec::new();
+        if want.start >= old.end || want.end <= old.start {
+            gone.extend(old.clone().zip(built.slots.drain(..)));
+            built.window = want.start..want.start;
+            built.fresh = 0..0;
+            built.jumped = true;
+        } else {
+            if want.start < old.start {
+                built.fresh = match &built.fresh {
+                    f if f.is_empty() => want.start..old.start,
+                    f => want.start.min(f.start)..old.start.max(f.end),
+                };
+            }
+            let front = want.start.saturating_sub(old.start);
+            let back = old.end.saturating_sub(want.end);
+            let kept = built.slots.len() - back;
+            gone.extend((old.end - back..old.end).zip(built.slots.drain(kept..)));
+            gone.extend((old.start..old.start + front).zip(built.slots.drain(..front)));
+            built.window = old.start.max(want.start)..old.end.min(want.end);
+        }
+        for (order, slot) in gone {
+            if Some(order) == pin {
+                commands.entity(body).detach_children(&slot_entities(&slot));
+                built.pinned = Some((order, slot));
+            } else {
+                despawn_slot(commands, &slot);
+            }
+        }
+        let mut at = usize::from(built.labels.is_some()) + 1;
+        let mut front = Vec::with_capacity(want.len());
+        for order in want.start..built.window.start {
+            front.push(bring(commands, body, draw, built, order, &mut at));
+        }
+        at += built
+            .slots
+            .iter()
+            .map(|s| slot_entities(s).len())
+            .sum::<usize>();
+        let mut back = Vec::new();
+        for order in built.window.end..want.end {
+            back.push(bring(commands, body, draw, built, order, &mut at));
+        }
+        front.append(&mut built.slots);
+        front.append(&mut back);
+        built.slots = front;
+        built.window = want;
+    }
+    // The pinned row stands in for its own height: above the window before the top spacer,
+    // below it after the bottom one.
+    let mut spaced = [
+        rows::top(&built.heights, built.window.start),
+        built.heights[built.window.end..].iter().sum(),
+    ];
+    if let Some((order, slot)) = &built.pinned {
+        let above = *order < built.window.start;
+        spaced[usize::from(!above)] -= built.heights[*order];
+        let at = if above {
+            usize::from(built.labels.is_some())
+        } else {
+            let rows: usize = built.slots.iter().map(|s| slot_entities(s).len()).sum();
+            usize::from(built.labels.is_some()) + 1 + rows + 1
+        };
+        commands
+            .entity(body)
+            .insert_children(at, &slot_entities(slot));
+    }
+    for (side, height) in spaced.into_iter().enumerate() {
+        let height = height.max(0.0);
+        if (height - built.spaced[side]).abs() > 0.01 {
+            commands
+                .entity(built.spacers[side])
+                .insert(spacer_node(height));
+        }
+        built.spaced[side] = height;
+    }
+}
+
+/// The slot of line `order` for the window, at child index `at`: the pinned one when it is that
+/// line, or a new one.
+fn bring(
+    commands: &mut Commands,
+    body: Entity,
+    draw: &Draw,
+    built: &mut Built,
+    order: usize,
+    at: &mut usize,
+) -> Slot {
+    let slot = match built.pinned.take() {
+        Some((pinned, slot)) if pinned == order => {
+            commands
+                .entity(body)
+                .insert_children(*at, &slot_entities(&slot));
+            slot
+        }
+        other => {
+            built.pinned = other;
+            let focused = built.focus_row == Some(order);
+            let want = built.wants[order].clone();
+            spawn_slot(commands, body, Some(*at), draw, order, want, focused)
+        }
+    };
+    *at += slot_entities(&slot).len();
+    slot
+}
+
+/// A slot's nodes among the body's children: its row and what sits under it.
+fn slot_entities(slot: &Slot) -> Vec<Entity> {
+    let mut out = vec![slot.entity];
+    out.extend(slot.below.as_ref().map(|u| u.node));
+    out
+}
+
+/// Moves a body's window with its scroll, and to heights that changed or a press held on a
+/// line.
+fn follow_scroll(
+    mut commands: Commands,
+    tabs: Res<ReviewTabs>,
+    fonts: Res<UiFonts>,
+    selection: Res<CodeSelection>,
+    mut measure: CodeMeasure,
+    mut bodies: Query<(
+        Entity,
+        &mut BodyPart,
+        &mut ScrollPosition,
+        Option<&mut FocusPending>,
+    )>,
+) {
+    for (entity, mut part, mut scroll, pending) in &mut bodies {
+        let Some(built) = part.built.as_ref() else {
+            continue;
+        };
+        if !(scroll.is_changed() || built.moved || selection.is_changed()) {
+            continue;
+        }
+        let pr = part.pr.clone();
+        let editor = tabs.0.get(&pr).and_then(|t| t.ui.editor.clone());
+        let Some(built) = part.bypass_change_detection().built.as_mut() else {
+            continue;
+        };
+        built.moved = false;
+        let opts = built.shape.opts.clone();
+        let path = built.shape.path.clone().unwrap_or_default();
+        let draw = Draw {
+            fonts: &fonts,
+            pr: &pr,
+            path: &path,
+            group: entity,
+            size: built.shape.code_size,
+            editor: editor.as_ref(),
+            opts: &opts,
+            gutter: Gutter::Both,
+        };
+        let mut y = scroll.y;
+        place(
+            &mut commands,
+            entity,
+            built,
+            &draw,
+            &mut y,
+            selection.held(entity),
+            &mut measure,
+        );
+        if y != scroll.y {
+            if let Some(mut pending) = pending {
+                pending.set += y - scroll.y;
+            }
+            scroll.y = y;
+        }
+    }
+}
+
+/// Reads what the rows in each window weigh once laid out, how wide their code is and the code
+/// font's metrics. When heights change, the line at the top of the view stays where it is: the
+/// scroll moves by what the lines above it gained or lost.
+fn measure_rows(
+    mut bodies: Query<(
+        &mut BodyPart,
+        &ComputedNode,
+        &mut ScrollPosition,
+        Option<&mut FocusPending>,
+    )>,
+    nodes: Query<Ref<ComputedNode>>,
+    texts: Query<(&TextLayoutInfo, &ComputedNode)>,
+) {
+    for (mut part, body, mut scroll, pending) in &mut bodies {
+        let Some(built) = part.bypass_change_detection().built.as_mut() else {
+            continue;
+        };
+        let scale = body.inverse_scale_factor;
+        let width = (body.size.x * scale).round() as u32;
+        if width == 0 || built.slots.is_empty() {
+            continue;
+        }
+        let view = body.size.y * scale;
+        let resized = width != built.width;
+        let mut moved = resized || (view - built.view).abs() > 0.5;
+        // Rows whose boxes did not change since the last pass weigh what they did, and taught
+        // what they could.
+        let laid_out = |e: Entity| nodes.get(e).is_ok_and(|n| n.is_changed());
+        let touched = built.slots.iter().any(|slot| {
+            laid_out(slot.entity) || slot.below.as_ref().is_some_and(|u| laid_out(u.node))
+        });
+        if !(moved || touched) {
+            continue;
+        }
+        built.measures += 1;
+        built.width = width;
+        built.view = view;
+        built.scale = scale.recip();
+        let share = width as f32 * built.shape.share();
+        let seen: Vec<(String, [f32; 2], usize, f32)> = built
+            .slots
+            .iter()
+            .flat_map(|slot| (0..2).map(move |side| (slot, side)))
+            .filter_map(|(slot, side)| {
+                let (info, node) = texts.get(slot.texts[side]?).ok()?;
+                let s = node.inverse_scale_factor;
+                let text = plain_text(slot.row.spans(side)?);
+                let lines = info
+                    .glyphs
+                    .iter()
+                    .map(|g| g.line_index + 1)
+                    .max()
+                    .unwrap_or(0);
+                let size = [info.size.x * s, info.size.y * s];
+                Some((text, size, lines, node.size.x * s))
+            })
+            .collect();
+        if resized || built.gutter.is_none() {
+            built.gutter = seen.first().map(|(_, _, _, boxed)| share - boxed);
+        }
+        let learned = built.metrics.is_none() && {
+            built.metrics = Metrics::learn(seen.iter().map(|(text, size, lines, boxed)| Seen {
+                text,
+                size: *size,
+                lines: *lines,
+                boxed: *boxed,
+                share,
+            }));
+            built.metrics.is_some()
+        };
+        moved |= learned;
+        if built.measured.len() + built.laid.len() + built.under_seen.len() > MEASURED_CAP {
+            built.measured.clear();
+            built.laid.clear();
+            built.under_seen.clear();
+            built.under_any.clear();
+        }
+        for (k, slot) in built.slots.iter().enumerate() {
+            let Ok(row) = nodes.get(slot.entity) else {
+                continue;
+            };
+            if row.size.y <= 0.0 {
+                continue;
+            }
+            let order = built.window.start + k;
+            let below = slot
+                .below
+                .as_ref()
+                .and_then(|u| nodes.get(u.node).ok())
+                .map(|n| n.size.y * scale);
+            if let Some(below) = below {
+                let key = under_key(&built.wants[order].under);
+                built.under_seen.insert((key, width), below);
+                built.under_any.insert(key, below);
+            }
+            let height = row.size.y * scale + below.unwrap_or(0.0);
+            let key = (built.keys[order].1, width);
+            // Within a pixel is the layout rounding a height laid out beforehand: it stays.
+            if (built.heights[order] - height).abs() > 1.0 {
+                built.measured.insert(key, height);
+                moved = true;
+            } else {
+                built.measured.entry(key).or_insert(built.heights[order]);
+            }
+        }
+        if !moved {
+            continue;
+        }
+        // The scroll the layout applied: one past the end is clamped to it.
+        let applied = scroll.y.min(body.scroll_position.y * scale + 1.0);
+        let was = built.heights.clone();
+        let (line, into) = rows::at(&was, applied);
+        built.reweigh();
+        built.moved = true;
+        let fresh = std::mem::replace(&mut built.fresh, 0..0);
+        let jumped = std::mem::take(&mut built.jumped);
+        let anchored = if resized || learned || jumped {
+            // Every guess changed, or no row in view was laid out before: the line at the top
+            // stays at the top.
+            let into = into.min(built.heights.get(line).copied().unwrap_or(0.0));
+            rows::top(&built.heights, line) + into
+        } else {
+            // Lines that came out of the top spacer pushed the rows that were in view by what
+            // they weigh over their guess; the view follows those rows.
+            let fresh = fresh.start.min(was.len())..fresh.end.min(was.len());
+            applied + fresh.map(|i| built.heights[i] - was[i]).sum::<f32>()
+        };
+        if (anchored - applied).abs() > 0.5 {
+            let delta = anchored - scroll.y;
+            scroll.y = anchored;
+            if let Some(mut pending) = pending {
+                pending.set += delta;
+            }
+        }
+    }
 }
 
 fn despawn_slot(commands: &mut Commands, slot: &Slot) {
@@ -1500,7 +2311,9 @@ fn reach_focus(
         let scale = body.inverse_scale_factor;
         let top =
             |n: &ComputedNode, at: &UiGlobalTransform| (at.translation.y - n.size.y / 2.0) * scale;
-        let into = top(row, row_at) - top(body, body_at) + scroll.0.y;
+        // The row was laid out at the scroll the layout applied, which a height measured since
+        // may have moved.
+        let into = top(row, row_at) - top(body, body_at) + body.scroll_position.y * scale;
         scroll.0.y = (into - FOCUS_CONTEXT as f32 * ROW_HEIGHT).max(0.0);
         commands.entity(entity).remove::<FocusPending>();
     }
@@ -3517,9 +4330,10 @@ mod tests {
 
     #[test]
     fn the_scroll_keeps_a_few_lines_above_the_line() {
-        assert_eq!(focus_scroll(0), 0.0);
-        assert_eq!(focus_scroll(3), 0.0);
-        assert_eq!(focus_scroll(10), 7.0 * ROW_HEIGHT);
+        let rows = [ROW_HEIGHT; 20];
+        assert_eq!(focus_scroll(&rows, 0), 0.0);
+        assert_eq!(focus_scroll(&rows, 3), 0.0);
+        assert_eq!(focus_scroll(&rows, 10), 7.0 * ROW_HEIGHT);
     }
 
     #[test]
@@ -4991,22 +5805,24 @@ mod tests {
             }
             testing::settle(&mut app);
             let rows = row_entities(&mut app);
-            let lines = |rows: &[Entity], app: &mut App| {
-                let mut q = app.world_mut().query::<&crate::ui::code_select::CodeLine>();
-                rows.iter()
-                    .filter(|&&e| q.get(app.world(), e).is_ok())
-                    .count()
+            // Only the rows in view are spawned; the body's source holds every line's code.
+            let lines = |app: &mut App| {
+                let body = testing::find::<BodyPart>(app, |_| true);
+                let source = app.world().get::<CodeSource>(body).expect("a source");
+                let mut orders: Vec<usize> = source.0.iter().map(|l| l.order).collect();
+                orders.dedup();
+                orders.len()
             };
             // A Split hunk header spans both sides and holds no selectable code.
-            let shown = lines(&rows, &mut app);
+            let shown = lines(&mut app);
             assert!((SHOW_STEP - 1..=SHOW_STEP).contains(&shown), "{mode:?}");
             let more = testing::find::<ShowMore>(&mut app, |_| true);
-            let (spawned, gone) = churn(&mut app, |app| {
+            let (_, gone) = churn(&mut app, |app| {
                 testing::activate(app, more);
                 testing::settle(app);
             });
+            assert_eq!(lines(&mut app), shown + SHOW_STEP, "{mode:?}");
             let after = row_entities(&mut app);
-            assert_eq!(lines(&after, &mut app), shown + SHOW_STEP, "{mode:?}");
             for row in &rows {
                 assert!(after.contains(row), "{mode:?}: a shown row was respawned");
             }
@@ -5015,7 +5831,6 @@ mod tests {
                 "{mode:?}: only the Show more footer goes, not {} nodes",
                 gone.len()
             );
-            assert!(spawned.len() > SHOW_STEP);
         }
     }
 
@@ -5300,5 +6115,764 @@ mod tests {
             tint,
             "the pointer is still on the row"
         );
+    }
+
+    /// The most lines a body at 1280 × 800 spawns: the rows in view and a margin on each side.
+    const WINDOW_LINES: usize = 80;
+    /// The most nodes such a body holds.
+    const WINDOW_NODES: usize = 1_600;
+
+    /// A file of `count` added lines, each `text(n)`, at `path`.
+    fn add_file(app: &mut App, path: &str, count: u32, text: impl Fn(u32) -> String) {
+        let pr = fixture::demo_pr();
+        let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+        let Phase::Ready(ready) = &mut tabs.0.get_mut(&pr).expect("a tab").phase else {
+            panic!("ready")
+        };
+        let body: String = (1..=count).map(|n| format!("+{}\n", text(n))).collect();
+        ready.view.diff.push(FileDiff {
+            path: path.into(),
+            previous_path: None,
+            status: "added".into(),
+            additions: u64::from(count),
+            deletions: 0,
+            patch: Some(format!("@@ -0,0 +1,{count} @@\n{body}")),
+        });
+    }
+
+    /// The laid-out review at 1280 × 800 showing 1,000 lines of `big.txt` in `mode`.
+    fn thousand_app(mode: DiffMode) -> App {
+        let mut app = wrap_app();
+        add_file(&mut app, "big.txt", 1200, |n| format!("line {n}"));
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = ui_mut(&mut app, &pr);
+            let ui = &mut tabs.0.get_mut(&pr).unwrap().ui;
+            ui.file = Some("big.txt".into());
+            ui.shown = 2 * SHOW_STEP;
+            ui.mode = mode;
+        }
+        testing::settle(&mut app);
+        app
+    }
+
+    /// The orders of the body's spawned code lines, sorted and without repeats.
+    fn spawned_orders(app: &mut App) -> Vec<usize> {
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let mut orders: Vec<usize> = code_lines(app)
+            .into_iter()
+            .filter(|(_, l)| l.key.group == body)
+            .map(|(_, l)| l.key.order)
+            .collect();
+        orders.dedup();
+        orders
+    }
+
+    fn set_body_scroll(app: &mut App, y: f32) {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut ScrollPosition, With<BodyPart>>();
+        for mut p in q.iter_mut(app.world_mut()) {
+            p.y = y;
+        }
+        testing::settle(app);
+    }
+
+    /// The window the camera draws, in logical pixels.
+    fn resize(app: &mut App, size: UVec2) {
+        use bevy::camera::{Camera, Viewport};
+        let mut q = app.world_mut().query::<&mut Camera>();
+        for mut camera in q.iter_mut(app.world_mut()) {
+            if let Some(info) = camera.computed.target_info.as_mut() {
+                info.physical_size = size;
+            }
+            camera.viewport = Some(Viewport {
+                physical_size: size,
+                ..default()
+            });
+        }
+        testing::settle(app);
+    }
+
+    /// The spacers' heights, top and bottom, and the laid-out height of every spawned slot.
+    fn spacers_and_slots(app: &mut App) -> (f32, f32, f32) {
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let built = app
+            .world()
+            .get::<BodyPart>(body)
+            .unwrap()
+            .built
+            .as_ref()
+            .unwrap();
+        let height = |e: Entity| testing::frame(app, e).3;
+        let slots: f32 = built
+            .slots
+            .iter()
+            .chain(built.pinned.as_ref().map(|(_, s)| s))
+            .map(|s| height(s.entity) + s.below.as_ref().map_or(0.0, |u| height(u.node)))
+            .sum();
+        (height(built.spacers[0]), height(built.spacers[1]), slots)
+    }
+
+    /// What the body's lines weigh in all, as its spacers count them.
+    fn total_height(app: &mut App) -> f32 {
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let built = app
+            .world()
+            .get::<BodyPart>(body)
+            .unwrap()
+            .built
+            .as_ref()
+            .unwrap();
+        built.heights.iter().sum()
+    }
+
+    /// The first line whose row shows at the top of the body's view, and its top in the window.
+    fn first_in_view(app: &mut App) -> (u32, f32) {
+        let body = testing::find::<BodyPart>(app, |_| true);
+        let (_, top, _, _) = testing::frame(app, body);
+        let mut q = app.world_mut().query::<(Entity, &LineButton)>();
+        let buttons: Vec<(Entity, u32)> = q.iter(app.world()).map(|(e, b)| (e, b.line)).collect();
+        buttons
+            .into_iter()
+            .map(|(e, line)| {
+                let (_, y, _, h) = testing::frame(app, e);
+                (line, y, h)
+            })
+            .filter(|(_, y, h)| y + h > top + 0.5)
+            .map(|(line, y, _)| (line, y))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("a row in view")
+    }
+
+    fn assert_heights_add_up(app: &mut App, what: &str) {
+        let (top, bottom, slots) = spacers_and_slots(app);
+        let total = total_height(app);
+        assert!(
+            (top + slots + bottom - total).abs() <= 1.0,
+            "{what}: {top} + {slots} + {bottom} is the whole {total}"
+        );
+    }
+
+    #[test]
+    fn a_thousand_line_diff_spawns_only_the_rows_in_view() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let orders = spawned_orders(&mut app);
+            assert!(
+                orders.len() <= WINDOW_LINES,
+                "{mode:?}: {} lines spawned",
+                orders.len()
+            );
+            // A Split hunk header holds no selectable code.
+            assert!(orders.first() <= Some(&1), "{mode:?}: from the top");
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let nodes = descendants(&app, body).len();
+            assert!(nodes <= WINDOW_NODES, "{mode:?}: {nodes} nodes in the body");
+            let (_, by, _, bh) = testing::frame(&app, body);
+            let last = *orders.last().unwrap();
+            let lines = code_lines(&mut app);
+            let (bottom_line, _) = lines
+                .iter()
+                .find(|(_, l)| l.key.group == body && l.key.order == last)
+                .unwrap();
+            let (_, ly, _, _) = testing::frame(&app, *bottom_line);
+            assert!(ly >= by + bh, "{mode:?}: the rows reach past the view");
+            assert_heights_add_up(&mut app, &format!("{mode:?}"));
+        }
+    }
+
+    #[test]
+    fn entering_the_diff_spawns_only_the_window() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let pr = fixture::demo_pr();
+            ui_mut(&mut app, &pr).0.get_mut(&pr).unwrap().ui.section = ReviewSection::Security;
+            testing::settle(&mut app);
+            let before = live(&mut app);
+            ui_mut(&mut app, &pr).0.get_mut(&pr).unwrap().ui.section = ReviewSection::Diff;
+            testing::settle(&mut app);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let nodes = descendants(&app, body).len();
+            assert!(nodes <= WINDOW_NODES, "{mode:?}: {nodes} nodes in the body");
+            let grew = live(&mut app).saturating_sub(before);
+            assert!(
+                grew <= 2 * WINDOW_NODES,
+                "{mode:?}: {grew} entities spawned"
+            );
+        }
+    }
+
+    #[test]
+    fn show_more_spawns_no_more_than_a_window() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let pr = fixture::demo_pr();
+            ui_mut(&mut app, &pr).0.get_mut(&pr).unwrap().ui.shown = SHOW_STEP;
+            testing::settle(&mut app);
+            let more = testing::find::<ShowMore>(&mut app, |_| true);
+            let (spawned, gone) = churn(&mut app, |app| {
+                testing::activate(app, more);
+                testing::settle(app);
+            });
+            assert!(
+                spawned.len() <= WINDOW_NODES,
+                "{mode:?}: {} nodes spawned",
+                spawned.len()
+            );
+            assert!(gone.len() < 10, "{mode:?}: {} nodes despawned", gone.len());
+            assert!(spawned_orders(&mut app).len() <= WINDOW_LINES);
+            assert_heights_add_up(&mut app, &format!("{mode:?}"));
+        }
+    }
+
+    #[test]
+    fn a_resize_keeps_every_row() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            set_body_scroll(&mut app, 5_000.0);
+            let rows = row_entities(&mut app);
+            let seen = churn(&mut app, |app| resize(app, UVec2::new(1000, 800)));
+            assert!(seen.0.is_empty(), "{mode:?}: {} spawned", seen.0.len());
+            assert!(seen.1.is_empty(), "{mode:?}: {} despawned", seen.1.len());
+            assert_eq!(row_entities(&mut app), rows, "{mode:?}");
+            assert_heights_add_up(&mut app, &format!("{mode:?}"));
+        }
+    }
+
+    #[test]
+    fn a_line_click_in_a_long_diff_respawns_no_row() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let rows = row_entities(&mut app);
+            assert!(rows.len() <= 2 * WINDOW_LINES, "{mode:?}: {}", rows.len());
+            let line = testing::find::<LineButton>(&mut app, |b| b.line == 10);
+            let (spawned, _) = churn(&mut app, |app| {
+                testing::activate(app, line);
+                testing::settle(app);
+            });
+            // The editor pushes the window's last rows out of it and its first measure brings
+            // some back; the rows in view stay as they are.
+            for n in 1..=20 {
+                let row = testing::find::<LineButton>(&mut app, |b| b.line == n);
+                assert!(rows.contains(&row), "{mode:?}: line {n} was respawned");
+            }
+            assert!(spawned.len() < 120, "{mode:?}: {} spawned", spawned.len());
+            assert_eq!(testing::count::<EditorArea>(&mut app), 1);
+        }
+    }
+
+    #[test]
+    fn scrolling_spawns_the_rows_that_come_into_view() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            set_body_scroll(&mut app, 11_000.0);
+            let orders = spawned_orders(&mut app);
+            assert!(orders.len() <= WINDOW_LINES, "{mode:?}: {}", orders.len());
+            assert!(!orders.contains(&0), "{mode:?}: the top rows went");
+            let (line, _) = first_in_view(&mut app);
+            assert!(
+                (480..=520).contains(&line),
+                "{mode:?}: line {line} at the top"
+            );
+            assert_heights_add_up(&mut app, &format!("{mode:?}"));
+            rows_in_line_order(&mut app);
+        }
+    }
+
+    #[test]
+    fn wrapped_rows_measured_on_the_way_keep_the_view_still() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = wrap_app();
+            let long = "word ".repeat(70);
+            add_file(&mut app, "wide.txt", 400, |n| format!("{n} {long}"));
+            let pr = fixture::demo_pr();
+            {
+                let mut tabs = ui_mut(&mut app, &pr);
+                let ui = &mut tabs.0.get_mut(&pr).unwrap().ui;
+                ui.file = Some("wide.txt".into());
+                ui.mode = mode;
+            }
+            testing::settle(&mut app);
+            set_body_scroll(&mut app, 12_000.0);
+            let (line, y) = first_in_view(&mut app);
+            // Rows above come into the window and are laid out for the first time.
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&mut ScrollPosition, With<BodyPart>>();
+            for mut p in q.iter_mut(app.world_mut()) {
+                p.y -= 300.0;
+            }
+            testing::settle(&mut app);
+            let row = testing::find::<LineButton>(&mut app, |b| b.line == line);
+            let (_, now, _, _) = testing::frame(&app, row);
+            assert!(
+                (now - (y + 300.0)).abs() <= 1.0,
+                "{mode:?}: line {line} went from {y} to {now}, not {}",
+                y + 300.0
+            );
+            assert_heights_add_up(&mut app, &format!("{mode:?}"));
+            for _ in 0..5 {
+                app.update();
+            }
+            let (_, still, _, _) = testing::frame(&app, row);
+            assert_eq!(still, now, "{mode:?}: the view settles");
+        }
+    }
+
+    #[test]
+    fn another_text_size_keeps_the_line_at_the_top_and_the_heights_true() {
+        use clusia_core::TextSize;
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            set_body_scroll(&mut app, 8_000.0);
+            let (line, _) = first_in_view(&mut app);
+            {
+                let mut theme = app.world_mut().resource_mut::<Theme>();
+                *theme = (*theme).with_text_size(TextSize::Large);
+            }
+            testing::settle(&mut app);
+            testing::settle(&mut app);
+            let (now, _) = first_in_view(&mut app);
+            assert!(
+                now.abs_diff(line) <= 1,
+                "{mode:?}: line {line} became {now}"
+            );
+            assert_heights_add_up(&mut app, &format!("{mode:?}"));
+            let before = first_in_view(&mut app);
+            for _ in 0..5 {
+                app.update();
+            }
+            assert_eq!(
+                first_in_view(&mut app),
+                before,
+                "{mode:?}: the view settles"
+            );
+        }
+    }
+
+    #[test]
+    fn a_far_focus_line_is_spawned_and_in_view() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let pr = fixture::demo_pr();
+            show_in(&mut app, &pr, "big.txt", Some((900, 900)));
+            testing::settle(&mut app);
+            let line = testing::find::<LineButton>(&mut app, |b| b.line == 900);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let (_, by, _, bh) = testing::frame(&app, body);
+            let (_, ly, _, lh) = testing::frame(&app, line);
+            assert!(
+                ly >= by && ly + lh <= by + bh,
+                "{mode:?}: the line at {ly}..{} is inside the view {by}..{}",
+                ly + lh,
+                by + bh
+            );
+            assert!(spawned_orders(&mut app).len() <= WINDOW_LINES);
+        }
+    }
+
+    fn left_release(app: &mut App) {
+        use bevy::input::ButtonState;
+        use bevy::input::mouse::{MouseButton, MouseButtonInput};
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Left,
+            state: ButtonState::Released,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+    }
+
+    fn code_line_of(app: &mut App, text: &str) -> Entity {
+        code_lines(app)
+            .into_iter()
+            .find(|(_, l)| l.text == text)
+            .map(|(e, _)| e)
+            .unwrap_or_else(|| panic!("{text:?} is spawned"))
+    }
+
+    #[test]
+    fn a_drag_runs_past_the_window_and_copies_every_line() {
+        let mut app = thousand_app(DiffMode::Unified);
+        let from = code_line_of(&mut app, "line 5");
+        let a = testing::code_point(&app, from, 0);
+        // The button goes down as the press lands, as the window sends them.
+        app.world_mut()
+            .write_message(bevy::input::mouse::MouseButtonInput {
+                button: MouseButton::Left,
+                state: bevy::input::ButtonState::Pressed,
+                window: Entity::PLACEHOLDER,
+            });
+        press_on(&mut app, from, a);
+        // The wheel turns while the button is held: line 5 leaves the view.
+        set_body_scroll(&mut app, 600.0 * ROW_HEIGHT);
+        let to = code_line_of(&mut app, "line 610");
+        let b = testing::code_point(&app, to, "line 610".len());
+        testing::drag_code(&mut app, from, a, b);
+        testing::chord(&mut app, KeyCode::KeyC);
+        let want: Vec<String> = (5..=610).map(|n| format!("line {n}")).collect();
+        assert_eq!(app.world().resource::<CopiedText>().0, [want.join("\n")]);
+        left_release(&mut app);
+        testing::settle(&mut app);
+        assert!(
+            spawned_orders(&mut app).len() <= WINDOW_LINES,
+            "the window shrinks back once the button is up"
+        );
+        assert!(
+            !app.world().resource::<CodeSelection>().is_empty(),
+            "lines leaving the window keep the selection"
+        );
+    }
+
+    #[test]
+    fn a_selection_outlives_its_rows_and_copies_lines_not_spawned() {
+        let mut app = thousand_app(DiffMode::Split);
+        let from = code_line_of(&mut app, "line 3");
+        let to = code_line_of(&mut app, "line 6");
+        drag_between(&mut app, (from, 0), (to, 2));
+        left_release(&mut app);
+        set_body_scroll(&mut app, 15_000.0);
+        assert!(
+            app.world().get_entity(from).is_err(),
+            "line 3 left the window"
+        );
+        assert!(!app.world().resource::<CodeSelection>().is_empty());
+        testing::chord(&mut app, KeyCode::KeyC);
+        assert_eq!(
+            app.world().resource::<CopiedText>().0,
+            ["line 3\nline 4\nline 5\nli"]
+        );
+    }
+
+    #[test]
+    fn a_return_to_a_width_seen_before_reuses_its_heights() {
+        let mut app = wrap_app();
+        let long = "word ".repeat(70);
+        add_file(&mut app, "wide.txt", 400, |n| format!("{n} {long}"));
+        let pr = fixture::demo_pr();
+        ui_mut(&mut app, &pr).0.get_mut(&pr).unwrap().ui.file = Some("wide.txt".into());
+        testing::settle(&mut app);
+        set_body_scroll(&mut app, 6_000.0);
+        let first = first_in_view(&mut app);
+        let (top, _, _) = spacers_and_slots(&mut app);
+        resize(&mut app, UVec2::new(900, 800));
+        testing::settle(&mut app);
+        resize(&mut app, UVec2::new(1280, 800));
+        testing::settle(&mut app);
+        assert_eq!(spacers_and_slots(&mut app).0, top, "the same spacer");
+        assert_eq!(first_in_view(&mut app).0, first.0, "the same line on top");
+    }
+
+    #[test]
+    fn rows_scrolled_to_after_a_landing_come_in_color() {
+        let mut app = wrap_app();
+        add_file(&mut app, "big.rs", 1200, |n| {
+            format!("let value_{n} = {n};")
+        });
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = ui_mut(&mut app, &pr);
+            let ui = &mut tabs.0.get_mut(&pr).unwrap().ui;
+            ui.file = Some("big.rs".into());
+            ui.shown = 2 * SHOW_STEP;
+        }
+        testing::settle(&mut app);
+        finish_highlights(app.world_mut());
+        testing::settle(&mut app);
+        set_body_scroll(&mut app, 18_000.0);
+        assert!(!spawned_orders(&mut app).contains(&0));
+        assert!(colored_spans(&mut app) > 0, "the rows come in color");
+    }
+
+    #[test]
+    fn a_settled_long_diff_places_nothing() {
+        let mut app = thousand_app(DiffMode::Unified);
+        set_body_scroll(&mut app, 4_000.0);
+        let body = testing::find::<BodyPart>(&mut app, |_| true);
+        let passes = |app: &App| {
+            app.world()
+                .get::<BodyPart>(body)
+                .unwrap()
+                .built
+                .as_ref()
+                .unwrap()
+                .passes
+        };
+        let before = passes(&app);
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(passes(&app), before, "no window pass while nothing moves");
+    }
+
+    #[test]
+    fn a_windowed_body_lets_no_text_overflow() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            for y in [0.0, 11_000.0, 1.0e6] {
+                set_body_scroll(&mut app, y);
+                let flagged = testing::overflowing_text(&mut app);
+                assert!(flagged.is_empty(), "{mode:?} at {y}: {flagged:#?}");
+            }
+        }
+    }
+
+    /// The laid-out review at 1280 × 800 showing all `count` lines of `long.txt`, each `text(n)`.
+    fn long_app(mode: DiffMode, count: u32, text: impl Fn(u32) -> String) -> App {
+        let mut app = wrap_app();
+        add_file(&mut app, "long.txt", count, text);
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = ui_mut(&mut app, &pr);
+            let ui = &mut tabs.0.get_mut(&pr).unwrap().ui;
+            ui.file = Some("long.txt".into());
+            // The hunk header is a row too.
+            ui.shown = count as usize + 1;
+            ui.mode = mode;
+        }
+        testing::settle(&mut app);
+        app
+    }
+
+    #[test]
+    fn a_held_drag_over_a_long_diff_keeps_one_line_past_the_window() {
+        let mut app = long_app(DiffMode::Unified, 5_000, |n| format!("line {n}"));
+        let from = code_line_of(&mut app, "line 5");
+        let a = testing::code_point(&app, from, 0);
+        app.world_mut()
+            .write_message(bevy::input::mouse::MouseButtonInput {
+                button: MouseButton::Left,
+                state: bevy::input::ButtonState::Pressed,
+                window: Entity::PLACEHOLDER,
+            });
+        press_on(&mut app, from, a);
+        set_body_scroll(&mut app, 1.0e7);
+        let spawned = spawned_orders(&mut app).len();
+        assert!(
+            spawned <= WINDOW_LINES + 1,
+            "{spawned} lines spawned while the press is held"
+        );
+        assert!(
+            app.world().get_entity(from).is_ok(),
+            "the pressed line stays"
+        );
+        let to = code_line_of(&mut app, "line 5000");
+        let b = testing::code_point(&app, to, "line 5000".len());
+        testing::drag_code(&mut app, from, a, b);
+        testing::chord(&mut app, KeyCode::KeyC);
+        let want: Vec<String> = (5..=5_000).map(|n| format!("line {n}")).collect();
+        assert_eq!(app.world().resource::<CopiedText>().0, [want.join("\n")]);
+        assert_heights_add_up(&mut app, "held");
+        left_release(&mut app);
+        testing::settle(&mut app);
+        assert!(app.world().get_entity(from).is_err(), "it goes on release");
+        assert!(spawned_orders(&mut app).len() <= WINDOW_LINES);
+        assert!(!app.world().resource::<CodeSelection>().is_empty());
+    }
+
+    #[test]
+    fn a_held_line_scrolled_back_into_view_is_the_same_row() {
+        let mut app = long_app(DiffMode::Split, 2_000, |n| format!("line {n}"));
+        let from = code_line_of(&mut app, "line 5");
+        let a = testing::code_point(&app, from, 0);
+        app.world_mut()
+            .write_message(bevy::input::mouse::MouseButtonInput {
+                button: MouseButton::Left,
+                state: bevy::input::ButtonState::Pressed,
+                window: Entity::PLACEHOLDER,
+            });
+        press_on(&mut app, from, a);
+        set_body_scroll(&mut app, 20_000.0);
+        set_body_scroll(&mut app, 0.0);
+        assert_eq!(code_line_of(&mut app, "line 5"), from);
+        rows_in_line_order(&mut app);
+        assert_heights_add_up(&mut app, "back");
+    }
+
+    /// Scrolls the body up by `by` without settling and returns, for each of the next frames,
+    /// how far the line that was on top sits from where the scroll alone puts it.
+    fn drift_scrolling_up(app: &mut App, by: f32) -> Vec<f32> {
+        let (line, y) = first_in_view(app);
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut ScrollPosition, With<BodyPart>>();
+        for mut p in q.iter_mut(app.world_mut()) {
+            p.y -= by;
+        }
+        (0..5)
+            .map(|_| {
+                app.update();
+                let row = testing::find::<LineButton>(app, |b| b.line == line);
+                testing::frame(app, row).1 - (y + by)
+            })
+            .collect()
+    }
+
+    fn assert_no_drift(app: &mut App, what: &str) {
+        for step in 0..3 {
+            let drift = drift_scrolling_up(app, 300.0);
+            assert!(
+                drift.iter().all(|d| d.abs() <= 1.0),
+                "{what}, step {step}: the top line drifts {drift:?} frame by frame"
+            );
+        }
+    }
+
+    /// Code lines of every length, most of them wrapping, with punctuation to break at.
+    fn code_text(n: u32) -> String {
+        format!(
+            "let value_{n} = compute(alpha, beta.gamma(), \"delta\"); // {}",
+            "note-{n} and/or (more) ".repeat((n % 23) as usize)
+        )
+    }
+
+    #[test]
+    fn wrapped_code_coming_in_above_never_moves_the_view() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = long_app(mode, 600, code_text);
+            let middle = total_height(&mut app) / 2.0;
+            set_body_scroll(&mut app, middle);
+            assert_no_drift(&mut app, &format!("{mode:?}"));
+        }
+    }
+
+    #[test]
+    fn wide_glyphs_coming_in_above_never_move_the_view() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = long_app(mode, 600, |n| {
+                format!(
+                    "{n} 漢字かな交じり文 🎉 {}",
+                    "テキスト、".repeat((n % 29) as usize)
+                )
+            });
+            let middle = total_height(&mut app) / 2.0;
+            set_body_scroll(&mut app, middle);
+            assert_no_drift(&mut app, &format!("{mode:?}"));
+        }
+    }
+
+    #[test]
+    fn far_lines_count_wide_glyphs_as_two_columns() {
+        assert_eq!(rows::wrapped_lines(&"漢".repeat(10), 10), 2);
+        assert_eq!(rows::wrapped_lines(&"a".repeat(10), 10), 1);
+        assert_eq!(
+            rows::wrapped_lines("\tab", 5),
+            2,
+            "a tab shows as four spaces"
+        );
+    }
+
+    #[test]
+    fn a_settled_diff_whose_lines_all_wrap_measures_nothing() {
+        // In Split the hunk header holds no code, so no line here teaches the font's metrics.
+        let mut app = long_app(DiffMode::Split, 400, |n| format!("{n}{}", "x".repeat(400)));
+        set_body_scroll(&mut app, 3_000.0);
+        let body = testing::find::<BodyPart>(&mut app, |_| true);
+        let measures = |app: &App| {
+            let built = app.world().get::<BodyPart>(body).unwrap().built.as_ref();
+            built.unwrap().measures
+        };
+        let before = measures(&app);
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(measures(&app), before, "no measuring while nothing moves");
+    }
+
+    #[test]
+    fn a_body_with_no_lines_leaves_no_source_behind() {
+        let mut app = wrap_app();
+        let pr = fixture::demo_pr();
+        {
+            let mut tabs = ui_mut(&mut app, &pr);
+            let tab = tabs.0.get_mut(&pr).unwrap();
+            let Phase::Ready(ready) = &mut tab.phase else {
+                panic!("ready")
+            };
+            ready.view.diff.push(FileDiff {
+                path: "empty.txt".into(),
+                previous_path: None,
+                status: "modified".into(),
+                additions: 0,
+                deletions: 0,
+                patch: None,
+            });
+            tab.ui.file = Some("empty.txt".into());
+        }
+        testing::settle(&mut app);
+        let body = testing::find::<BodyPart>(&mut app, |_| true);
+        let source = app.world().get::<CodeSource>(body);
+        assert!(source.is_none_or(|s| s.0.is_empty()), "{source:?}");
+    }
+
+    /// `long_app` with a review thread under every `every`-th line of `long.txt`, the ones in
+    /// `open` expanded.
+    fn threaded_app(mode: DiffMode, every: u32, open: impl Fn(u32) -> bool) -> App {
+        let mut app = long_app(mode, 600, code_text);
+        let pr = fixture::demo_pr();
+        let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+        let tab = tabs.0.get_mut(&pr).unwrap();
+        let Phase::Ready(ready) = &mut tab.phase else {
+            panic!("ready")
+        };
+        let conversation = ready.view.conversation.as_mut().expect("the demo threads");
+        let model = conversation.review_threads[0].clone();
+        for n in (every..=600).step_by(every as usize) {
+            let mut t = model.clone();
+            t.id = format!("long-{n}");
+            t.path = "long.txt".into();
+            t.line = Some(n);
+            t.side = Side::Right;
+            t.is_resolved = false;
+            // Each thread reads apart, so none weighs what another measured.
+            for (i, c) in t.comments.iter_mut().enumerate() {
+                c.body = format!(
+                    "Note {n}.{i}: {}",
+                    "the cache keeps this entry ".repeat((n % 13) as usize)
+                );
+            }
+            if open(n) {
+                tab.ui.expanded.insert(t.id.clone());
+            }
+            conversation.review_threads.push(t);
+        }
+        testing::settle(&mut app);
+        app
+    }
+
+    #[test]
+    fn cards_coming_in_above_at_a_new_width_hold_the_view() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = threaded_app(mode, 7, |_| false);
+            // Every card is laid out once at this width, then the window narrows.
+            // Steps short of the window, so no line is passed over as heights grow behind them.
+            let mut y = 0.0;
+            while y < total_height(&mut app) {
+                set_body_scroll(&mut app, y);
+                y += 400.0;
+            }
+            resize(&mut app, UVec2::new(1100, 800));
+            let middle = total_height(&mut app) / 2.0;
+            set_body_scroll(&mut app, middle);
+            assert_no_drift(&mut app, &format!("{mode:?} collapsed"));
+        }
+    }
+
+    #[test]
+    fn expanded_cards_coming_in_above_settle_within_a_frame() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = threaded_app(mode, 9, |n| n % 2 == 0);
+            // At a width no card was laid out at: their text wraps where no guess has seen it.
+            resize(&mut app, UVec2::new(900, 800));
+            let middle = total_height(&mut app) / 2.0;
+            set_body_scroll(&mut app, middle);
+            for step in 0..3 {
+                let drift = drift_scrolling_up(&mut app, 300.0);
+                assert!(
+                    drift[1..].iter().all(|d| d.abs() <= 1.0),
+                    "{mode:?}, step {step}: still off after a frame: {drift:?}"
+                );
+            }
+        }
     }
 }

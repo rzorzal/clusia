@@ -4,6 +4,9 @@
 //! its highlight). Lines that belong together share a `group` (one diff, one dialog, one code
 //! block); a drag selects between two points of one group, and in a split view stays on the
 //! column where it began. The selection lives in `CodeSelection`; Cmd-C copies its text.
+//!
+//! A group that spawns only the lines in view puts a `CodeSource` on its entity: the text of
+//! every line, so a selection reaches past the spawned lines and outlives them.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -196,6 +199,38 @@ struct Highlight {
     origin: Vec2,
 }
 
+/// Every line of a group, spawned or not, sorted by order and column; on the group's entity.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct CodeSource(pub Vec<SourceLine>);
+
+/// One line of a `CodeSource`: what its `CodeLine` holds when it is spawned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLine {
+    pub order: usize,
+    pub column: u8,
+    pub text: String,
+}
+
+impl CodeSource {
+    fn get(&self, order: usize, column: u8) -> Option<&str> {
+        self.0
+            .binary_search_by_key(&(order, column), |l| (l.order, l.column))
+            .ok()
+            .map(|i| self.0[i].text.as_str())
+    }
+
+    fn lines(&self) -> Vec<SelLine<'_>> {
+        self.0
+            .iter()
+            .map(|l| SelLine {
+                order: l.order,
+                column: l.column,
+                text: &l.text,
+            })
+            .collect()
+    }
+}
+
 /// The current selection: a group, a column of it, and two points. Only one exists at a time.
 #[derive(Resource, Debug, Default)]
 pub struct CodeSelection {
@@ -206,6 +241,9 @@ pub struct CodeSelection {
     dragged: bool,
     multi: bool,
     pressed: bool,
+    /// The primary button is still down since a press on code: the line pressed must stay
+    /// spawned, as the drag is sent to it.
+    holding: bool,
     /// What the group's lines said when the selection was first seen; a change ends it.
     fingerprint: Option<u64>,
     last: Option<LastPress>,
@@ -248,6 +286,19 @@ impl CodeSelection {
         } else {
             ClickKind::Plain
         }
+    }
+
+    /// The order of the line a press is still held on, in `group`.
+    pub fn held(&self, group: Entity) -> Option<usize> {
+        (self.holding && self.group == Some(group)).then_some(self.anchor.order)
+    }
+
+    /// The text of the selection in `source`, its group's lines, one row per line.
+    pub fn source_text(&self, source: &CodeSource) -> String {
+        if self.group.is_none() {
+            return String::new();
+        }
+        selected_text(&source.lines(), self.column, self.anchor, self.focus)
     }
 
     /// The text of the selection, one row per line.
@@ -396,6 +447,7 @@ fn on_press(
     selection.dragged = false;
     selection.multi = count > 1;
     selection.pressed = true;
+    selection.holding = true;
     selection.fingerprint = None;
     selection.last = Some(LastPress {
         at: time.elapsed(),
@@ -450,10 +502,16 @@ fn forget(mouse: Option<Res<ButtonInput<MouseButton>>>, mut selection: ResMut<Co
     // Reads first: writing marks the selection changed, which repaints it.
     if selection.pressed {
         selection.pressed = false;
-    } else if mouse.is_some_and(|m| m.just_pressed(MouseButton::Left)) {
+    } else if mouse
+        .as_ref()
+        .is_some_and(|m| m.just_pressed(MouseButton::Left))
+    {
         selection.group = None;
         selection.dragged = false;
         selection.multi = false;
+    }
+    if selection.holding && !mouse.is_some_and(|m| m.pressed(MouseButton::Left)) {
+        selection.holding = false;
     }
 }
 
@@ -462,15 +520,18 @@ fn forget(mouse: Option<Res<ButtonInput<MouseButton>>>, mut selection: ResMut<Co
 fn drop_stale(
     mut selection: ResMut<CodeSelection>,
     lines: Query<&CodeLine>,
-    touched: Query<(), Or<(Added<CodeLine>, Changed<CodeLine>)>>,
+    sources: Query<Ref<CodeSource>>,
+    touched: Query<&CodeLine, Or<(Added<CodeLine>, Changed<CodeLine>)>>,
     mut removed: RemovedComponents<CodeLine>,
 ) {
     let Some(group) = selection.group else {
         return;
     };
+    let source = sources.get(group).ok();
     // Lines that were not touched say what they said when the selection was first seen.
     let gone = removed.read().count() > 0;
-    if !gone && touched.is_empty() && selection.fingerprint.is_some() {
+    let resourced = source.as_ref().is_some_and(|s| s.is_changed());
+    if !gone && touched.is_empty() && !resourced && selection.fingerprint.is_some() {
         return;
     }
     let mut own: Vec<&CodeLine> = lines.iter().filter(|l| l.key.group == group).collect();
@@ -478,10 +539,33 @@ fn drop_stale(
         selection.group = None;
         return;
     }
-    own.sort_by_key(|l| (l.key.order, l.key.column));
     let mut hasher = DefaultHasher::new();
-    for l in own {
-        (l.key.order, l.key.column, &l.text).hash(&mut hasher);
+    match &source {
+        // A line that leaves the view is no change; one touched into a text that is not the
+        // source's is.
+        Some(source) => {
+            if touched.iter().any(|l| {
+                l.key.group == group
+                    && source.get(l.key.order, l.key.column) != Some(l.text.as_str())
+            }) {
+                selection.group = None;
+                return;
+            }
+            // Lines that only left or came into view read as the source does, which is
+            // unchanged: nothing to fingerprint again.
+            if !resourced && selection.fingerprint.is_some() {
+                return;
+            }
+            for l in &source.0 {
+                (l.order, l.column, &l.text).hash(&mut hasher);
+            }
+        }
+        None => {
+            own.sort_by_key(|l| (l.key.order, l.key.column));
+            for l in own {
+                (l.key.order, l.key.column, &l.text).hash(&mut hasher);
+            }
+        }
     }
     let seen = hasher.finish();
     match selection.fingerprint {
@@ -497,6 +581,7 @@ fn copy_selection(
     keys: Res<ButtonInput<KeyCode>>,
     selection: Res<CodeSelection>,
     lines: Query<&CodeLine>,
+    sources: Query<&CodeSource>,
     focus: Option<Res<InputFocus>>,
     fields: Query<(), With<EditableText>>,
     recorder: Option<ResMut<CopiedText>>,
@@ -522,7 +607,10 @@ fn copy_selection(
     {
         return;
     }
-    let text = selection.text(lines);
+    let text = match selection.group.and_then(|g| sources.get(g).ok()) {
+        Some(source) => selection.source_text(source),
+        None => selection.text(lines),
+    };
     if !text.is_empty() {
         copy_text(recorder, clipboard, &text);
     }
