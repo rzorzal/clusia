@@ -6,6 +6,7 @@
 //! transcript and a footer with the input. Each part keeps the view it was built from and
 //! rebuilds only when that changes, so streaming text never rebuilds the input.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
@@ -38,8 +39,8 @@ use crate::ui::kit::{
     panel, text, wrapped_text,
 };
 use crate::ui::markdown::cache::parse_in;
-use crate::ui::markdown::parse;
-use crate::ui::markdown::{RenderOpts, markdown};
+use crate::ui::markdown::parse::{self, Block};
+use crate::ui::markdown::{MdBody, RenderOpts, markdown_body};
 use crate::ui::pace::{Pace, Wake};
 use crate::ui::spinner::{beat, spinner};
 use crate::ui::text_area::{Caret, growing_line_area, set_text};
@@ -169,6 +170,25 @@ struct Transcript {
     /// its elapsed time. The daemon does not tell when a turn began, so a turn already running
     /// when the window opened counts from then.
     since: Option<f64>,
+    /// The last line's markdown column as drawn, when the last line is an answer.
+    answer: Option<Answer>,
+}
+
+/// The markdown column of an answer and the blocks it was built from: its children are those
+/// blocks, one each, in order.
+struct Answer {
+    body: Entity,
+    blocks: Arc<Vec<Block>>,
+    /// The options its blocks were drawn with, `cached` aside (it changes no node). A kept block
+    /// drawn with other options would not match the rest of the column.
+    opts: RenderOpts,
+}
+
+/// The column of the answer that a redraw replaces: what it shows and its children.
+#[derive(Clone, Copy)]
+struct Reuse<'a> {
+    blocks: &'a [Block],
+    children: &'a [Entity],
 }
 
 /// The last row of the transcript while a turn runs: a spinner, who works, for how long, and
@@ -538,6 +558,7 @@ fn fill_region(
                     diffs: 0,
                     live: false,
                     since: None,
+                    answer: None,
                 },
             ));
             footer(p, &fonts, &pr);
@@ -773,6 +794,7 @@ fn rebuild_transcript(
         &ComputedNode,
         Option<&Children>,
     )>,
+    bodies: Query<&Children, With<MdBody>>,
 ) {
     let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
     for (entity, mut part, mut scroll, node, children) in &mut parts {
@@ -817,6 +839,7 @@ fn rebuild_transcript(
             .zip(&wanted)
             .take_while(|(a, b)| a == b)
             .count();
+        let drawn_lines = built.len();
         // Only the answer still arriving differs: it is parsed again at most `LIVE_REDRAW`
         // apart, and at once when it is whole.
         let growing = same + 1 == built.len()
@@ -842,24 +865,60 @@ fn rebuild_transcript(
         };
         // Each line is one child; the live row, when there was one, is the last.
         let kept = same.min(children.map_or(0, |c| c.len()));
+        // The answer drawn last is drawn again: its new column takes over the children of the
+        // leading blocks that still parse the same, so a growing answer spawns only its changed
+        // tail and a selection in a finished block survives.
+        let old = part.answer.take();
+        let old_body = old.as_ref().map(|a| a.body);
+        let reuse = old
+            .as_ref()
+            .filter(|a| {
+                kept + 1 == drawn_lines
+                    && children.and_then(|c| c.get(kept)) == Some(&a.body)
+                    && a.opts == opts
+            })
+            .and_then(|a| {
+                let drawn = bodies.get(a.body).map_or(&[][..], |c| &c[..]);
+                (drawn.len() == a.blocks.len()).then_some(Reuse {
+                    blocks: &a.blocks,
+                    children: drawn,
+                })
+            });
         if let Some(children) = children {
             for child in &children[kept..] {
-                commands.entity(*child).despawn();
+                // Despawned below, once the blocks it hands over have moved.
+                if reuse.is_none() || Some(*child) != old_body {
+                    commands.entity(*child).despawn();
+                }
             }
         }
         let last = chat.lines.len().saturating_sub(1);
         // The answer still arriving is parsed with no cache: each of its prefixes would be an
         // entry never asked for again. Once whole, every later build of it uses the cache.
         let streaming = live && chat.streaming();
+        let mut answer = None;
         commands.entity(entity).with_children(|t| {
             for (i, (line, (_, running))) in chat.lines.iter().zip(&wanted).enumerate().skip(kept) {
                 let growing = streaming && i == last;
-                chat_line(t, &fonts, &pr, line, &opts, *running, growing);
+                let reuse = reuse.filter(|_| i == kept);
+                let drawn = chat_line(t, &fonts, &pr, line, &opts, *running, growing, reuse);
+                if i == last {
+                    answer = drawn;
+                }
             }
             if live {
                 live_row(t, &fonts, &pr, &chat.agent_name(), since);
             }
         });
+        if reuse.is_some()
+            && let Some(body) = old_body
+        {
+            commands.entity(body).despawn();
+        }
+        // Every child from `kept` on was despawned: an answer among them is gone, even when no
+        // line replaced it.
+        let gone = old_body.is_some_and(|b| children.is_some_and(|c| c[kept..].contains(&b)));
+        part.answer = if kept > last && !gone { old } else { answer };
         part.drawn_at = now;
         if follow {
             // The layout clamps this to the end of the content: the newest line stays in view.
@@ -920,6 +979,8 @@ fn at_bottom(node: &ComputedNode) -> bool {
     node.scroll_position.y >= end.floor() - 1.0
 }
 
+/// Draws one line of the transcript; answers the markdown column of an answer.
+#[allow(clippy::too_many_arguments)]
 fn chat_line(
     p: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -928,7 +989,8 @@ fn chat_line(
     opts: &RenderOpts,
     running: bool,
     growing: bool,
-) {
+    reuse: Option<Reuse>,
+) -> Option<Answer> {
     match line {
         ChatLine::Me(body) => {
             p.spawn(panel(
@@ -945,25 +1007,7 @@ fn chat_line(
                 b.spawn(wrapped_text(fonts, body.clone(), Type::BODY));
             });
         }
-        ChatLine::Text(raw) => {
-            let shown = display_text(raw);
-            if shown.is_empty() {
-                // Every line is one child, even one with nothing to show yet.
-                p.spawn(Node {
-                    display: Display::None,
-                    ..default()
-                });
-            } else if growing {
-                let opts = RenderOpts {
-                    cached: false,
-                    ..opts.clone()
-                };
-                let blocks = parse::parse_in(&shown, &opts.github_host, pr);
-                markdown(p, fonts, &blocks, &opts);
-            } else {
-                markdown(p, fonts, &parse_in(&shown, &opts.github_host, pr), opts);
-            }
-        }
+        ChatLine::Text(raw) => return answer_line(p, fonts, pr, raw, opts, growing, reuse),
         // A call is over once anything follows it; the last one of a running turn is not.
         ChatLine::Tool(summary) if running => working_pill(p, fonts, summary),
         ChatLine::Tool(summary) => pill(
@@ -1024,6 +1068,64 @@ fn chat_line(
             super::suggestion::card(p, fonts, pr, suggestion, *state, opts);
         }
     }
+    None
+}
+
+/// Draws an answer as one markdown column. The children of `reuse` that show the same leading
+/// blocks move into the new column, before the blocks spawned for the rest.
+fn answer_line(
+    p: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    raw: &str,
+    opts: &RenderOpts,
+    growing: bool,
+    reuse: Option<Reuse>,
+) -> Option<Answer> {
+    let shown = display_text(raw);
+    if shown.is_empty() {
+        // Every line is one child, even one with nothing to show yet.
+        p.spawn(Node {
+            display: Display::None,
+            ..default()
+        });
+        return None;
+    }
+    let drawn_with = RenderOpts {
+        cached: true,
+        ..opts.clone()
+    };
+    let uncached;
+    let (blocks, opts) = if growing {
+        uncached = RenderOpts {
+            cached: false,
+            ..opts.clone()
+        };
+        let blocks = parse::parse_in(&shown, &uncached.github_host, pr);
+        (Arc::new(blocks), &uncached)
+    } else {
+        (parse_in(&shown, &opts.github_host, pr), opts)
+    };
+    let same = reuse.map_or(0, |r| {
+        r.blocks
+            .iter()
+            .zip(blocks.iter())
+            .take_while(|(a, b)| a == b)
+            .count()
+    });
+    let body = markdown_body(p, fonts, &blocks[same..], opts);
+    if let Some(r) = reuse
+        && same > 0
+    {
+        p.commands_mut()
+            .entity(body)
+            .insert_children(0, &r.children[..same]);
+    }
+    Some(Answer {
+        body,
+        blocks,
+        opts: drawn_with,
+    })
 }
 
 /// A one-line chip: a mark and a short text.
@@ -2612,6 +2714,239 @@ mod tests {
         assert!(
             !app.world().resource::<CodeSelection>().is_empty(),
             "the selected block was not respawned"
+        );
+    }
+
+    /// Every entity under `root`, `root` included.
+    fn tree_of(app: &App, root: Entity) -> std::collections::HashSet<Entity> {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![root];
+        while let Some(e) = stack.pop() {
+            seen.insert(e);
+            if let Some(children) = app.world().get::<Children>(e) {
+                stack.extend(children.iter());
+            }
+        }
+        seen
+    }
+
+    /// The block children of the answer line, the first line of the transcript.
+    fn answer_blocks(app: &mut App) -> Vec<Entity> {
+        let answer = first_line(app);
+        app.world()
+            .get::<Children>(answer)
+            .map(|c| c.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Ends the running turn and checks that the answer line is what a build of the whole
+    /// answer draws.
+    fn ends_like_a_whole_build(app: &mut App) {
+        say(
+            app,
+            AgentTell::Done {
+                pr: pr(),
+                turn: 1,
+                duration_ms: 1000,
+            },
+        );
+        run_state(app, SessionStateKind::Ready);
+        let line = first_line(app);
+        let streamed = testing::tree_signature(app, line);
+        let t = transcript(app);
+        app.world_mut().get_mut::<Transcript>(t).unwrap().built = None;
+        testing::settle(app);
+        let line = first_line(app);
+        assert_eq!(testing::tree_signature(app, line), streamed);
+    }
+
+    #[test]
+    fn a_streaming_answer_respawns_only_the_blocks_that_changed() {
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        let t = transcript(&mut app);
+        let mut most = 0;
+        for i in 0..40 {
+            let mut parts = vec![
+                format!("Paragraph {i} says the lock "),
+                "is held while the token ".to_string(),
+                "refreshes.\n\n".to_string(),
+            ];
+            if i % 10 == 9 {
+                parts.push(format!("```rust\nlet held_{i} = "));
+                parts.push("lock.held();\n```\n\n".to_string());
+            }
+            for part in parts {
+                let before = tree_of(&app, t);
+                chunk_of(&mut app, &part);
+                // Past the ten-a-second pace, so every chunk is drawn.
+                for _ in 0..8 {
+                    app.update();
+                }
+                let spawned = tree_of(&app, t).difference(&before).count();
+                most = most.max(spawned);
+            }
+        }
+        assert!(testing::shows(&mut app, "Paragraph 39 says"));
+        let whole = tree_of(&app, t).len();
+        assert!(whole > 400, "a long answer: {whole} nodes");
+        assert!(most <= 30, "{most} nodes spawned in one redraw of {whole}");
+        ends_like_a_whole_build(&mut app);
+    }
+
+    #[test]
+    fn a_block_that_changes_kind_is_respawned_from_there_on_and_ends_exact() {
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        let step = |app: &mut App, text: &str| {
+            chunk_of(app, text);
+            for _ in 0..8 {
+                app.update();
+            }
+            answer_blocks(app)
+        };
+        let first = step(&mut app, "The lock is held.\n\nThe token");
+        assert_eq!(first.len(), 2);
+        // The paragraph becomes a heading: the block before it stays.
+        let heading = step(&mut app, " store\n---\n\nIt ");
+        assert_eq!(heading.len(), 3);
+        assert_eq!(heading[0], first[0], "the finished paragraph was kept");
+        assert_ne!(heading[1], first[1], "the paragraph that became a heading");
+        // An open fence turns everything after it into code.
+        let fenced = step(&mut app, "refreshes.\n\n```rust\nlet a = 1;\n");
+        assert_eq!(fenced.len(), 4);
+        assert_eq!(fenced[..2], heading[..2], "the finished blocks stay");
+        assert_ne!(fenced[2], heading[2], "the paragraph that grew");
+        let inside = step(&mut app, "Still code.\n\n- not a list\n");
+        assert_eq!(inside.len(), 4, "the fence holds it all");
+        assert_eq!(inside[..3], fenced[..3], "the blocks before the fence stay");
+        assert_ne!(inside[3], fenced[3], "the code that grew");
+        let closed = step(&mut app, "```\n\n1. After the fence.");
+        assert_eq!(closed.len(), 5);
+        assert_eq!(closed[..3], fenced[..3]);
+        assert!(testing::shows(&mut app, "After the fence."));
+        let t = transcript(&mut app);
+        let mut code: Vec<(usize, String)> = {
+            let world = app.world_mut();
+            let mut lines = world.query::<(Entity, &crate::ui::code_select::CodeLine)>();
+            lines
+                .iter(world)
+                .map(|(e, l)| (e, l.key.order, l.text.clone()))
+                .collect::<Vec<_>>()
+        }
+        .into_iter()
+        .filter(|(e, ..)| is_under(&app, *e, t))
+        .map(|(_, order, text)| (order, text))
+        .collect();
+        code.sort();
+        let code: Vec<String> = code.into_iter().map(|(_, text)| text).collect();
+        assert_eq!(code, ["let a = 1;", "Still code.", "", "- not a list"]);
+        ends_like_a_whole_build(&mut app);
+    }
+
+    #[test]
+    fn a_selection_in_a_finished_block_of_the_live_answer_survives_a_redraw() {
+        use crate::ui::code_select::{At, CodeLine, CodeSelection};
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        chunk_of(&mut app, "```rust\nlet a = 1;\n```\n\nThe ");
+        testing::settle(&mut app);
+        let t = transcript(&mut app);
+        let group = {
+            let world = app.world_mut();
+            let mut lines = world.query::<(Entity, &CodeLine)>();
+            lines
+                .iter(world)
+                .map(|(e, l)| (e, l.key.group))
+                .collect::<Vec<_>>()
+        }
+        .into_iter()
+        .find(|(e, _)| is_under(&app, *e, t))
+        .map(|(_, group)| group)
+        .expect("the code block is in the answer");
+        let at = |offset| At { order: 0, offset };
+        app.world_mut()
+            .resource_mut::<CodeSelection>()
+            .select(group, 0, at(0), at(3));
+        testing::settle(&mut app);
+        for chunk in ["lock ", "is held.\n\nThe token ", "refreshes."] {
+            chunk_of(&mut app, chunk);
+            for _ in 0..8 {
+                app.update();
+            }
+        }
+        assert!(testing::shows(&mut app, "The lock is held."));
+        assert!(app.world().get_entity(group).is_ok(), "the block was kept");
+        assert!(
+            !app.world().resource::<CodeSelection>().is_empty(),
+            "the selection survived the redraws"
+        );
+    }
+
+    #[test]
+    fn new_render_options_mid_answer_redraw_its_finished_blocks() {
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        chunk_of(&mut app, "```rust\nlet a = 1;\n```\n\nThe ");
+        for _ in 0..8 {
+            app.update();
+        }
+        let before = answer_blocks(&mut app);
+        assert_eq!(before.len(), 2);
+        app.world_mut().resource_mut::<Theme>().code_size = 19.0;
+        chunk_of(&mut app, "lock.");
+        for _ in 0..8 {
+            app.update();
+        }
+        let after = answer_blocks(&mut app);
+        assert_eq!(after.len(), 2);
+        assert_ne!(
+            after[0], before[0],
+            "the code block is drawn at the new size"
+        );
+        let sized = tree_of(&app, after[0]).into_iter().any(|e| {
+            app.world()
+                .get::<TextFont>(e)
+                .is_some_and(|f| f.font_size == FontSize::Rem(19.0))
+        });
+        assert!(sized, "the kept code would still be at the old size");
+    }
+
+    #[test]
+    fn a_call_that_arrives_while_the_tail_is_held_keeps_the_finished_blocks() {
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        chunk_of(&mut app, "The lock is held.\n\nThe token");
+        for _ in 0..8 {
+            app.update();
+        }
+        // Drawn at once: the last redraw is long past. The next chunk is then held back.
+        chunk_of(&mut app, " refreshes");
+        let before = answer_blocks(&mut app);
+        assert_eq!(before.len(), 2);
+        chunk_of(&mut app, " now.");
+        assert!(testing::shows(&mut app, "The token refreshes"));
+        assert!(!testing::shows(&mut app, "refreshes now."), "held back");
+        say(
+            &mut app,
+            AgentTell::ToolUse {
+                pr: pr(),
+                turn: 1,
+                summary: "Read src/auth/store.rs".into(),
+            },
+        );
+        testing::settle(&mut app);
+        let after = answer_blocks(&mut app);
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0], before[0], "the finished paragraph was kept");
+        assert!(testing::shows(&mut app, "The token refreshes now."));
+        let lines = lines_of(&mut app);
+        assert_eq!(lines.len(), 3, "the answer, the call and the live row");
+        assert!(testing::shows(&mut app, "Read src/auth/store.rs"));
+        let t = transcript(&mut app);
+        assert!(
+            app.world().get::<Transcript>(t).unwrap().answer.is_none(),
+            "the call is the last line now"
         );
     }
 
