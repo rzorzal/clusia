@@ -517,34 +517,43 @@ fn rebuild_comments(
     }
 }
 
-/// The posts a rebuilt list shows that the list before it did not.
+/// The posts a rebuilt list shows that the list before it did not. A post is its key and its
+/// place among the posts of that key (a thread's posts share the thread's key), so an edited
+/// body or a new age is the same post, and a reply is the next place in its thread.
 #[derive(Debug, Default)]
-struct Fresh(Vec<(String, String, String)>);
+struct Fresh(Vec<(String, usize)>);
 
 impl Fresh {
-    /// A post is the same post while its key, author and body are: its age moves on its own.
-    fn of(post: &PostView) -> (String, String, String) {
-        (post.key.clone(), post.author.clone(), post.body.clone())
-    }
-
-    fn posts(v: &CommentsView) -> impl Iterator<Item = &PostView> {
-        v.general
+    fn ids(v: &CommentsView) -> Vec<((String, usize), &PostView)> {
+        let mut ids: Vec<((String, usize), &PostView)> = Vec::new();
+        for post in v
+            .general
             .iter()
             .chain(v.threads.iter().flat_map(|t| &t.posts))
+        {
+            let nth = ids.iter().filter(|((key, _), _)| *key == post.key).count();
+            ids.push(((post.key.clone(), nth), post));
+        }
+        ids
     }
 
     fn since(old: &CommentsView, new: &CommentsView) -> Self {
-        let before: Vec<_> = Self::posts(old).map(Self::of).collect();
+        let before: Vec<(String, usize)> = Self::ids(old).into_iter().map(|(id, _)| id).collect();
         Self(
-            Self::posts(new)
-                .map(Self::of)
-                .filter(|p| !before.contains(p))
+            Self::ids(new)
+                .into_iter()
+                .map(|(id, _)| id)
+                .filter(|id| !before.contains(id))
                 .collect(),
         )
     }
 
-    fn has(&self, post: &PostView) -> bool {
-        !self.0.is_empty() && self.0.contains(&Self::of(post))
+    /// Whether `post`, one of `v`'s, is new.
+    fn has(&self, v: &CommentsView, post: &PostView) -> bool {
+        !self.0.is_empty()
+            && Self::ids(v)
+                .into_iter()
+                .any(|(id, p)| std::ptr::eq(p, post) && self.0.contains(&id))
     }
 }
 
@@ -636,7 +645,7 @@ fn list(
                     ..default()
                 }))
                 .id();
-            if fresh.has(post) {
+            if fresh.has(v, post) {
                 arrive(p.commands_mut(), motion, general, Swatch::Bg, 1.0);
             }
             p.commands_mut().entity(general).with_children(|c| {
@@ -699,7 +708,7 @@ fn list(
             }))
             .id();
         // A new thread comes in whole; a new reply clears in its place in the card.
-        let new_thread = t.posts.first().is_some_and(|first| fresh.has(first));
+        let new_thread = t.posts.first().is_some_and(|first| fresh.has(v, first));
         if new_thread {
             arrive(p.commands_mut(), motion, thread, Swatch::Bg, 1.0);
         }
@@ -709,7 +718,7 @@ fn list(
                     c.spawn(divider());
                 }
                 let row = post_row(c, fonts, pr, post, opts);
-                if !new_thread && fresh.has(post) {
+                if !new_thread && fresh.has(v, post) {
                     clear_in(c.commands_mut(), motion, row, Swatch::Surface);
                 }
             }
@@ -1305,6 +1314,18 @@ mod tests {
             .insert_resource(crate::clock::Clock(Some(NOW + 3600)));
         with_ready(&mut app, |_, _| {});
         testing::settle(&mut app);
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        assert_eq!(testing::showing_veils(&mut app), 0);
+        // An edited comment is the same comment.
+        with_ready(&mut app, |r, _| {
+            let t = threads_mut(r)
+                .iter_mut()
+                .find(|t| !t.is_resolved)
+                .expect("an open thread");
+            t.comments[0].body = "Edited: a clearer ask".into();
+        });
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "clearer ask"));
         assert_eq!(testing::count::<Tween>(&mut app), 0);
         assert_eq!(testing::showing_veils(&mut app), 0);
         // Another filter shows threads the list did not: the list, not new comments.

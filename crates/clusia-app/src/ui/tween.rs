@@ -14,7 +14,7 @@ use bevy::ui::UiSystems;
 use std::time::Duration;
 
 use crate::theme::{Swatch, Theme};
-use crate::ui::kit::{Fill, Ink, Painting, Stroke};
+use crate::ui::kit::{Fill, HoverFill, Ink, Painting, Stroke};
 use crate::ui::pace::{Asking, Pace, Wake, WindowCovered};
 use crate::ui::spinner::Motion;
 
@@ -173,6 +173,11 @@ pub fn start_now(
         if let Some(stroke) = stroke {
             e.insert(BorderColor::all(faded(theme, stroke.0, alpha)));
         }
+        e.queue(move |mut entity: EntityWorldMut| {
+            if let Some(mut image) = entity.get_mut::<ImageNode>() {
+                fade_image(image.bypass_change_detection(), alpha);
+            }
+        });
     }
     e.insert(tween);
 }
@@ -298,7 +303,9 @@ pub fn depart(commands: &mut Commands, motion: &Motion, row: Entity, swatch: Swa
         commands.entity(row).despawn();
         return;
     }
-    commands.entity(row).insert(DespawnAfter::new(ROW_OUT_MS));
+    commands
+        .entity(row)
+        .insert((DespawnAfter::new(ROW_OUT_MS), Inert));
     commands.spawn((
         shroud_around(swatch, ROW_OUT_MS, Ease::OutCubic, outset),
         ChildOf(row),
@@ -340,6 +347,26 @@ pub fn ring_to(
 /// Above every sibling of the node it covers.
 const VEIL_Z: i32 = 1000;
 
+/// A row on its way out: neither it nor anything in it answers the pointer (`Pickable` is not
+/// inherited, so `make_inert` puts it on every part once they are spawned).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inert;
+
+fn make_inert(
+    mut commands: Commands,
+    rows: Query<Entity, Added<Inert>>,
+    children: Query<&Children>,
+) {
+    for row in &rows {
+        commands.entity(row).insert(bevy::picking::Pickable::IGNORE);
+        for part in children.iter_descendants(row) {
+            commands
+                .entity(part)
+                .insert(bevy::picking::Pickable::IGNORE);
+        }
+    }
+}
+
 /// A layer spawned by `veil`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Veil;
@@ -348,13 +375,15 @@ pub struct TweenPlugin;
 
 impl Plugin for TweenPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Animating>().add_systems(
-            PostUpdate,
-            (animate.run_if(running), idle.run_if(not(running)))
-                .in_set(Asking)
-                .after(Painting)
-                .before(UiSystems::Layout),
-        );
+        app.init_resource::<Animating>()
+            .add_systems(
+                PostUpdate,
+                (animate.run_if(running), idle.run_if(not(running)))
+                    .in_set(Asking)
+                    .after(Painting)
+                    .before(UiSystems::Layout),
+            )
+            .add_systems(PostUpdate, make_inert);
     }
 }
 
@@ -373,6 +402,16 @@ fn faded(theme: &Theme, swatch: Swatch, alpha: f32) -> Color {
         return color;
     }
     color.with_alpha(color.alpha() * alpha.max(0.0))
+}
+
+/// Draws `image` at `alpha` (a picture rests opaque). The tint is written without marking the
+/// component changed: the render reads it every frame, while a changed `ImageNode` has its
+/// content size set again, which lays the window out.
+fn fade_image(image: &mut ImageNode, alpha: f32) {
+    let want = image.color.with_alpha(alpha.clamp(0.0, 1.0));
+    if image.color != want {
+        image.color = want;
+    }
 }
 
 /// The colour `k` of the way from `a` to `b`. A clear end takes the other end's hue, so a ring
@@ -401,19 +440,20 @@ fn animate(
         Entity,
         &mut Tween,
         Option<&mut UiTransform>,
-        Option<(&Fill, &mut BackgroundColor)>,
+        Option<(&mut Fill, &mut BackgroundColor, Has<HoverFill>)>,
         Option<(&Stroke, &mut BorderColor)>,
         Option<(&Ink, &mut TextColor)>,
         Option<&mut Outline>,
         Option<&mut Visibility>,
         Has<Veil>,
+        Option<&mut ImageNode>,
     )>,
     mut despawns: Query<(Entity, &mut DespawnAfter)>,
 ) {
     let now = time.elapsed_secs_f64();
     let jump = motion.reduced || covered.0;
     let mut ticking = false;
-    for (entity, mut tween, transform, fill, stroke, ink, outline, visibility, veiled) in
+    for (entity, mut tween, transform, fill, stroke, ink, outline, visibility, veiled, image) in
         &mut tweens
     {
         let start = *tween.start.get_or_insert(now);
@@ -440,14 +480,22 @@ fn animate(
             transform.set_if_neq(want);
         }
         if tween.fades() {
-            if let Some((fill, mut color)) = fill {
+            if let Some((mut fill, mut color, hovers)) = fill {
                 color.set_if_neq(BackgroundColor(faded(&theme, fill.0, look.alpha)));
+                // The fade painted `Fill` over whatever hover or press colour the widget has
+                // now; `hover` repaints it on the next frame, which it does for a changed fill.
+                if done && hovers {
+                    fill.set_changed();
+                }
             }
             if let Some((stroke, mut color)) = stroke {
                 color.set_if_neq(BorderColor::all(faded(&theme, stroke.0, look.alpha)));
             }
             if let Some((ink, mut color)) = ink {
                 color.set_if_neq(TextColor(faded(&theme, ink.0, look.alpha)));
+            }
+            if let Some(mut image) = image {
+                fade_image(image.bypass_change_detection(), look.alpha);
             }
         }
         if let (Some((from, to)), Some(mut outline)) = (tween.ring, outline) {
@@ -485,7 +533,6 @@ mod tests {
     use crate::snapshot::Snapshot;
     use crate::testing::{self, FRAME};
     use crate::theme::LIGHT;
-    use crate::ui::kit::HoverFill;
     use bevy::window::WindowOccluded;
     use bevy::winit::{UpdateMode, WinitSettings};
 
@@ -625,6 +672,56 @@ mod tests {
         assert_eq!(bg(&app), LIGHT.surface);
         assert_eq!(app.world().get::<BorderColor>(e).unwrap().top, LIGHT.line);
         assert_eq!(app.world().get::<TextColor>(e).unwrap().0, LIGHT.fg);
+    }
+
+    #[test]
+    fn a_widget_hovered_while_it_fades_in_ends_on_its_hover_fill() {
+        use bevy::picking::hover::Hovered;
+        let mut app = app();
+        let e = spawn(
+            &mut app,
+            (
+                Node::default(),
+                BackgroundColor::default(),
+                Fill(Swatch::Surface),
+                HoverFill(Swatch::Hover),
+                Hovered::default(),
+                Tween::new(120, Ease::OutCubic, Look::REST.faded(0.0), Look::REST),
+            ),
+        );
+        app.update();
+        app.update();
+        app.world_mut().entity_mut(e).insert(Hovered(true));
+        run_out(&mut app, e);
+        app.update();
+        assert_eq!(
+            app.world().get::<BackgroundColor>(e).unwrap().0,
+            LIGHT.hover
+        );
+    }
+
+    #[test]
+    fn a_picture_fades_with_its_alpha_and_is_not_measured_again() {
+        let mut app = app();
+        let e = spawn(
+            &mut app,
+            (
+                Node::default(),
+                ImageNode::default(),
+                Tween::new(120, Ease::OutCubic, Look::REST.faded(0.0), Look::REST),
+            ),
+        );
+        app.update();
+        assert_eq!(app.world().get::<ImageNode>(e).unwrap().color.alpha(), 0.0);
+        app.world_mut().clear_trackers();
+        app.update();
+        let image = app.world_mut().entity_mut(e);
+        let image = image.get_ref::<ImageNode>().unwrap();
+        let a = image.color.alpha();
+        assert!(a > 0.0 && a < 1.0, "{a}");
+        assert!(!image.is_changed(), "a changed ImageNode is measured again");
+        run_out(&mut app, e);
+        assert_eq!(app.world().get::<ImageNode>(e).unwrap().color, Color::WHITE);
     }
 
     #[test]

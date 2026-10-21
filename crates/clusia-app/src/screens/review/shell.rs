@@ -1797,6 +1797,10 @@ fn on_finalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixture;
+    use crate::nav::Screen;
+    use crate::testing::{self, NOW};
+    use clusia_core::{Anchor, Origin, Side, ThreadRef};
 
     fn edit_draft(app: &mut App, edit: impl FnOnce(&mut Vec<DraftItem>)) {
         let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
@@ -1861,6 +1865,19 @@ mod tests {
             *app.world().get::<Pickable>(ghost).unwrap(),
             Pickable::IGNORE
         );
+        let parts: Vec<Entity> = {
+            let mut q = app.world_mut().query::<&Children>();
+            let q = q.query(app.world());
+            q.iter_descendants(ghost).collect()
+        };
+        assert!(!parts.is_empty());
+        for part in parts {
+            assert_eq!(
+                app.world().get::<Pickable>(part),
+                Some(&Pickable::IGNORE),
+                "nothing in the copy answers the pointer"
+            );
+        }
         testing::run_tweens(&mut app);
         assert!(app.world().get_entity(ghost).is_err());
         assert_eq!(testing::count::<Tween>(&mut app), 0);
@@ -1934,10 +1951,6 @@ mod tests {
         assert_eq!(testing::count::<crate::ui::tween::Tween>(&mut app), 0);
         assert_eq!(testing::count::<crate::ui::tween::Veil>(&mut app), veils);
     }
-    use crate::fixture;
-    use crate::nav::Screen;
-    use crate::testing::{self, NOW};
-    use clusia_core::{Anchor, Origin, Side, ThreadRef};
 
     fn ready_tab() -> Tab {
         let (view, news) = fixture::demo_review(NOW);

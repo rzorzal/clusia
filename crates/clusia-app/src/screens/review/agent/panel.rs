@@ -402,13 +402,17 @@ fn layout(
         &mut Node,
         Has<PanelClosing>,
         Has<Tween>,
+        &UiTransform,
     )>,
-    layers: Query<(Entity, &ChildOf), Or<(With<Veil>, With<Shroud>)>>,
+    layers: Query<
+        (Entity, &ChildOf, Has<Shroud>, &BackgroundColor),
+        Or<(With<Veil>, With<Shroud>)>,
+    >,
     mut regions: Query<(&AgentRegion, &mut Node), Without<PanelColumn>>,
     mut drafts: Query<(&RightPanel, &mut Node), (Without<PanelColumn>, Without<AgentRegion>)>,
 ) {
     let tab_of = |pr: &PrRef| chats.0.get(pr).map_or(PanelTab::Draft, |c| c.tab);
-    for (entity, column, mut node, closing, sliding) in &mut columns {
+    for (entity, column, mut node, closing, sliding, transform) in &mut columns {
         let (open, width) = chats
             .0
             .get(&column.pr)
@@ -419,7 +423,7 @@ fn layout(
         let shown = node.display == Display::Flex;
         let still = column.is_added() || motion.reduced;
         let clear_layers = |commands: &mut Commands| {
-            for (layer, child_of) in &layers {
+            for (layer, child_of, ..) in &layers {
                 if child_of.parent() == entity {
                     commands.entity(layer).despawn();
                 }
@@ -429,15 +433,45 @@ fn layout(
             if !shown {
                 node.display = Display::Flex;
             }
-            clear_layers(&mut commands);
             commands.entity(entity).remove::<PanelClosing>();
-            if !still {
-                commands.entity(entity).insert(Tween::new(
-                    PANEL_IN_MS,
-                    Ease::OutQuart,
-                    Look::REST.shifted(PANEL_SLIDE, 0.0),
-                    Look::REST,
-                ));
+            if still {
+                clear_layers(&mut commands);
+                continue;
+            }
+            // Shown again while it slides out, it turns back from where it is, and its shroud
+            // clears from how thick it got.
+            let from = match transform.translation.x {
+                Val::Px(x) if closing => x,
+                _ => PANEL_SLIDE,
+            };
+            commands.entity(entity).insert(Tween::new(
+                PANEL_IN_MS,
+                Ease::OutQuart,
+                Look::REST.shifted(from, 0.0),
+                Look::REST,
+            ));
+            let mut turned = false;
+            for (layer, child_of, shrouded, color) in &layers {
+                if child_of.parent() != entity {
+                    continue;
+                }
+                if closing && shrouded && !turned {
+                    turned = true;
+                    let alpha = color.0.alpha();
+                    commands.entity(layer).remove::<Shroud>().insert((
+                        Veil,
+                        Tween::new(
+                            PANEL_IN_MS,
+                            Ease::OutQuart,
+                            Look::REST.faded(alpha),
+                            Look::REST.faded(0.0),
+                        ),
+                    ));
+                } else {
+                    commands.entity(layer).despawn();
+                }
+            }
+            if !turned {
                 commands.spawn((
                     veil(Swatch::Bg, PANEL_IN_MS, Ease::OutQuart),
                     ChildOf(entity),
@@ -2235,6 +2269,20 @@ mod tests {
             .toggle();
         app.update();
         app.update();
+        app.update();
+        let Val::Px(gone) = shift_of(&app, col).x else {
+            panic!("a shift in pixels")
+        };
+        let shroud = {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&BackgroundColor, With<Shroud>>();
+            q.single(app.world()).unwrap().0.alpha()
+        };
+        assert!(
+            gone > 0.0 && shroud > 0.0 && shroud < 1.0,
+            "{gone} {shroud}"
+        );
         app.world_mut()
             .resource_mut::<Chats>()
             .entry(&pr())
@@ -2242,6 +2290,12 @@ mod tests {
         app.update();
         assert_eq!(shrouds_over(&mut app, col), 0);
         assert!(app.world().get::<PanelClosing>(col).is_none());
+        // It turns back from where it was, under a layer no thicker than it was: no jump to the
+        // far edge and no blink to the background.
+        assert_eq!(shift_of(&app, col), Val2::px(gone, 0.0));
+        let layer = testing::veil_over(&mut app, col).expect("a layer clearing");
+        let alpha = app.world().get::<BackgroundColor>(layer).unwrap().0.alpha();
+        assert!(alpha <= shroud + 1e-4, "{alpha} over {shroud}");
         testing::run_tweens(&mut app);
         assert_eq!(display_of::<PanelColumn>(&mut app, |_| true), Display::Flex);
         assert_eq!(shift_of(&app, col), Val2::ZERO);

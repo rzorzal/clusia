@@ -527,7 +527,7 @@ fn place_card(
     mut roots: Query<(Entity, &mut Node, &mut Visibility, &ComputedNode), With<CardRoot>>,
     theme: Res<Theme>,
     children: Query<&Children>,
-    painted: Query<(Option<&Fill>, Option<&Ink>, Option<&Stroke>)>,
+    painted: Query<(Option<&Fill>, Option<&Ink>, Option<&Stroke>, Has<ImageNode>)>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     let Some(target) = card.shown() else { return };
@@ -560,7 +560,7 @@ fn place_card(
 pub const CARD_IN_MS: u64 = 120;
 pub const CARD_FROM: f32 = 0.97;
 
-/// The card grows into place, and it and every colour in it fade in: what is under a floating
+/// The card grows into place, and it and every colour and picture in it fade in: what is under a floating
 /// card is not one colour a veil could take. It is shown in the frame this runs, after
 /// `animate`, so the start is put on at once.
 fn appear(
@@ -568,7 +568,7 @@ fn appear(
     theme: &Theme,
     card: Entity,
     children: &Query<&Children>,
-    painted: &Query<(Option<&Fill>, Option<&Ink>, Option<&Stroke>)>,
+    painted: &Query<(Option<&Fill>, Option<&Ink>, Option<&Stroke>, Has<ImageNode>)>,
 ) {
     let grow = Tween::new(
         CARD_IN_MS,
@@ -582,11 +582,12 @@ fn appear(
         Look::REST.faded(0.0),
         Look::REST,
     );
-    let marks = |e| painted.get(e).unwrap_or((None, None, None));
-    start_now(commands, theme, card, grow, marks(card));
+    let marks = |e| painted.get(e).unwrap_or((None, None, None, false));
+    let (fill, ink, stroke, _) = marks(card);
+    start_now(commands, theme, card, grow, (fill, ink, stroke));
     for part in children.iter_descendants(card) {
-        let (fill, ink, stroke) = marks(part);
-        if fill.is_some() || ink.is_some() || stroke.is_some() {
+        let (fill, ink, stroke, picture) = marks(part);
+        if fill.is_some() || ink.is_some() || stroke.is_some() || picture {
             start_now(commands, theme, part, fade, (fill, ink, stroke));
         }
     }

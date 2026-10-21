@@ -1650,6 +1650,41 @@ mod tests {
     }
 
     #[test]
+    fn a_selected_box_rings_in_over_a_tenth_of_a_second_and_unselected_goes_off_at_once() {
+        use crate::ui::tween::{RING_MS, Tween};
+        let (mut app, pr) = shown_graph();
+        testing::run_tweens(&mut app);
+        let select = |app: &mut App, node: Option<&str>| {
+            app.world_mut()
+                .resource_mut::<ReviewTabs>()
+                .0
+                .get_mut(&pr)
+                .unwrap()
+                .ui
+                .calls_node = node.map(String::from);
+            app.update();
+        };
+        select(&mut app, None);
+        let token = testing::find::<DiagramBox>(&mut app, |b| b.node == TOKEN);
+        let ring = |app: &App| app.world().get::<Outline>(token).unwrap().color;
+        assert_eq!(ring(&app), Color::NONE);
+        select(&mut app, Some(TOKEN));
+        assert!(
+            app.world().get::<Tween>(token).is_some(),
+            "the ring fades in"
+        );
+        app.update();
+        let mid = ring(&app).alpha();
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        let frames = testing::run_tweens(&mut app);
+        assert!(frames * 16 <= RING_MS as usize + 32, "{frames}");
+        assert_eq!(ring(&app), crate::theme::LIGHT.green);
+        select(&mut app, None);
+        assert_eq!(ring(&app), Color::NONE);
+        assert!(app.world().get::<Tween>(token).is_none());
+    }
+
+    #[test]
     fn open_in_editor_asks_for_the_function_line_in_the_worktree() {
         let (mut app, pr) = shown_graph();
         let worktree = testing::ready(&app, &pr)

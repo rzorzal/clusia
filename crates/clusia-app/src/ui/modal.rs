@@ -61,8 +61,8 @@ fn open_layer(add: On<Add, ModalLayer>, motion: Res<Motion>, mut commands: Comma
     }
 }
 
-/// A card on a dialog's layer grows into place (a card used elsewhere, as the loading one, does
-/// not).
+/// A card on a dialog's layer grows into place as its surface and border fade in (a card used
+/// elsewhere, as the loading one, does not).
 fn open_card(
     add: On<Add, ModalCard>,
     motion: Res<Motion>,
@@ -77,7 +77,7 @@ fn open_card(
         commands.entity(add.entity).insert(Tween::new(
             MODAL_IN_MS,
             Ease::OutCubic,
-            Look::REST.scaled(CARD_FROM),
+            Look::REST.scaled(CARD_FROM).faded(0.0),
             Look::REST,
         ));
     }
@@ -94,7 +94,9 @@ fn close_layer(
     if motion.reduced {
         return;
     }
-    let z = layers.get(gone.entity).map_or(100, |z| z.0);
+    // Just under the layer's own height, so a dialog opened in the same frame (the next
+    // permission) dims in over the old dim, not under it.
+    let z = layers.get(gone.entity).map_or(100, |z| z.0) - 1;
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -234,6 +236,14 @@ mod tests {
             app.world().get::<UiTransform>(card).unwrap().scale,
             Vec2::splat(CARD_FROM)
         );
+        assert_eq!(
+            app.world().get::<BackgroundColor>(card).unwrap().0.alpha(),
+            0.0
+        );
+        assert_eq!(
+            app.world().get::<BorderColor>(card).unwrap().top.alpha(),
+            0.0
+        );
         app.update();
         let scale = app.world().get::<UiTransform>(card).unwrap().scale.x;
         assert!(scale > CARD_FROM && scale < 1.0, "{scale}");
@@ -246,6 +256,14 @@ mod tests {
         assert_eq!(
             app.world().get::<UiTransform>(card).unwrap().scale,
             Vec2::ONE
+        );
+        assert_eq!(
+            app.world().get::<BackgroundColor>(card).unwrap().0,
+            LIGHT.surface
+        );
+        assert_eq!(
+            app.world().get::<BorderColor>(card).unwrap().top,
+            LIGHT.line
         );
         assert!(app.world().get::<Tween>(root).is_none());
     }
@@ -273,7 +291,11 @@ mod tests {
         let scrim = testing::find::<FadingScrim>(&mut app, |_| true);
         let w = app.world();
         assert_eq!(*w.get::<Pickable>(scrim).unwrap(), Pickable::IGNORE);
-        assert_eq!(w.get::<GlobalZIndex>(scrim).unwrap().0, 110);
+        assert_eq!(
+            w.get::<GlobalZIndex>(scrim).unwrap().0,
+            109,
+            "under a dialog opened in its place"
+        );
         let alpha = w.get::<BackgroundColor>(scrim).unwrap().0.alpha();
         assert!(alpha > 0.0, "{alpha}");
         testing::run_tweens(&mut app);
