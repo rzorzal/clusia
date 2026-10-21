@@ -179,6 +179,9 @@ struct Transcript {
 struct Answer {
     body: Entity,
     blocks: Arc<Vec<Block>>,
+    /// The options its blocks were drawn with, `cached` aside (it changes no node). A kept block
+    /// drawn with other options would not match the rest of the column.
+    opts: RenderOpts,
 }
 
 /// The column of the answer that a redraw replaces: what it shows and its children.
@@ -870,7 +873,9 @@ fn rebuild_transcript(
         let reuse = old
             .as_ref()
             .filter(|a| {
-                kept + 1 == drawn_lines && children.and_then(|c| c.get(kept)) == Some(&a.body)
+                kept + 1 == drawn_lines
+                    && children.and_then(|c| c.get(kept)) == Some(&a.body)
+                    && a.opts == opts
             })
             .and_then(|a| {
                 let drawn = bodies.get(a.body).map_or(&[][..], |c| &c[..]);
@@ -910,7 +915,10 @@ fn rebuild_transcript(
         {
             commands.entity(body).despawn();
         }
-        part.answer = if kept > last { old } else { answer };
+        // Every child from `kept` on was despawned: an answer among them is gone, even when no
+        // line replaced it.
+        let gone = old_body.is_some_and(|b| children.is_some_and(|c| c[kept..].contains(&b)));
+        part.answer = if kept > last && !gone { old } else { answer };
         part.drawn_at = now;
         if follow {
             // The layout clamps this to the end of the content: the newest line stays in view.
@@ -1083,6 +1091,10 @@ fn answer_line(
         });
         return None;
     }
+    let drawn_with = RenderOpts {
+        cached: true,
+        ..opts.clone()
+    };
     let uncached;
     let (blocks, opts) = if growing {
         uncached = RenderOpts {
@@ -1109,7 +1121,11 @@ fn answer_line(
             .entity(body)
             .insert_children(0, &r.children[..same]);
     }
-    Some(Answer { body, blocks })
+    Some(Answer {
+        body,
+        blocks,
+        opts: drawn_with,
+    })
 }
 
 /// A one-line chip: a mark and a short text.
@@ -2864,6 +2880,73 @@ mod tests {
         assert!(
             !app.world().resource::<CodeSelection>().is_empty(),
             "the selection survived the redraws"
+        );
+    }
+
+    #[test]
+    fn new_render_options_mid_answer_redraw_its_finished_blocks() {
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        chunk_of(&mut app, "```rust\nlet a = 1;\n```\n\nThe ");
+        for _ in 0..8 {
+            app.update();
+        }
+        let before = answer_blocks(&mut app);
+        assert_eq!(before.len(), 2);
+        app.world_mut().resource_mut::<Theme>().code_size = 19.0;
+        chunk_of(&mut app, "lock.");
+        for _ in 0..8 {
+            app.update();
+        }
+        let after = answer_blocks(&mut app);
+        assert_eq!(after.len(), 2);
+        assert_ne!(
+            after[0], before[0],
+            "the code block is drawn at the new size"
+        );
+        let sized = tree_of(&app, after[0]).into_iter().any(|e| {
+            app.world()
+                .get::<TextFont>(e)
+                .is_some_and(|f| f.font_size == FontSize::Rem(19.0))
+        });
+        assert!(sized, "the kept code would still be at the old size");
+    }
+
+    #[test]
+    fn a_call_that_arrives_while_the_tail_is_held_keeps_the_finished_blocks() {
+        let mut app = open_chat();
+        run_state(&mut app, SessionStateKind::Running);
+        chunk_of(&mut app, "The lock is held.\n\nThe token");
+        for _ in 0..8 {
+            app.update();
+        }
+        // Drawn at once: the last redraw is long past. The next chunk is then held back.
+        chunk_of(&mut app, " refreshes");
+        let before = answer_blocks(&mut app);
+        assert_eq!(before.len(), 2);
+        chunk_of(&mut app, " now.");
+        assert!(testing::shows(&mut app, "The token refreshes"));
+        assert!(!testing::shows(&mut app, "refreshes now."), "held back");
+        say(
+            &mut app,
+            AgentTell::ToolUse {
+                pr: pr(),
+                turn: 1,
+                summary: "Read src/auth/store.rs".into(),
+            },
+        );
+        testing::settle(&mut app);
+        let after = answer_blocks(&mut app);
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0], before[0], "the finished paragraph was kept");
+        assert!(testing::shows(&mut app, "The token refreshes now."));
+        let lines = lines_of(&mut app);
+        assert_eq!(lines.len(), 3, "the answer, the call and the live row");
+        assert!(testing::shows(&mut app, "Read src/auth/store.rs"));
+        let t = transcript(&mut app);
+        assert!(
+            app.world().get::<Transcript>(t).unwrap().answer.is_none(),
+            "the call is the last line now"
         );
     }
 
