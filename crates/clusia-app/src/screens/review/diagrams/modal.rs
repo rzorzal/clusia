@@ -1428,6 +1428,36 @@ mod tests {
         pr
     }
 
+    #[test]
+    fn the_node_dialog_dims_in_grows_and_leaves_a_fading_dim_when_closed() {
+        use crate::ui::modal::{FadingScrim, ModalCard};
+        use crate::ui::tween::Tween;
+        let (mut app, pr) = app_with_box();
+        let root = testing::find::<NodeModal>(&mut app, |_| true);
+        assert!(
+            app.world().get::<Tween>(root).is_some(),
+            "the layer dims in"
+        );
+        let card = testing::find::<ModalCard>(&mut app, |_| true);
+        assert_eq!(app.world().get::<ChildOf>(card).unwrap().parent(), root);
+        assert!(app.world().get::<Tween>(card).is_some(), "the card grows");
+        testing::run_tweens(&mut app);
+        assert_eq!(
+            app.world().get::<UiTransform>(card).unwrap().scale,
+            Vec2::ONE
+        );
+        edit_ui(&mut app, &pr, |ui| {
+            ui.modal = None;
+            ui.diagram_node = None;
+        });
+        app.update();
+        assert_eq!(testing::count::<NodeModal>(&mut app), 0);
+        assert_eq!(testing::count::<FadingScrim>(&mut app), 1);
+        testing::run_tweens(&mut app);
+        assert_eq!(testing::count::<FadingScrim>(&mut app), 0);
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+    }
+
     fn edit_ui(app: &mut App, pr: &PrRef, edit: impl FnOnce(&mut TabUi)) {
         let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
         edit(&mut tabs.0.get_mut(pr).expect("a tab").ui);

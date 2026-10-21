@@ -1178,6 +1178,39 @@ mod tests {
         app
     }
 
+    #[test]
+    fn finalize_dims_in_grows_and_leaves_a_fading_dim_when_closed() {
+        use crate::ui::modal::{FadingScrim, ModalCard};
+        use crate::ui::tween::Tween;
+        let mut app = finalize_app(false);
+        let root = testing::find::<FinalizeModal>(&mut app, |_| true);
+        assert!(
+            app.world().get::<Tween>(root).is_some(),
+            "the layer dims in"
+        );
+        let card = testing::find::<ModalCard>(&mut app, |_| true);
+        assert_eq!(app.world().get::<ChildOf>(card).unwrap().parent(), root);
+        assert!(app.world().get::<Tween>(card).is_some(), "the card grows");
+        testing::run_tweens(&mut app);
+        assert_eq!(
+            app.world().get::<UiTransform>(card).unwrap().scale,
+            Vec2::ONE
+        );
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&fixture::demo_pr())
+            .unwrap()
+            .ui
+            .modal = None;
+        app.update();
+        assert_eq!(testing::count::<FinalizeModal>(&mut app), 0);
+        assert_eq!(testing::count::<FadingScrim>(&mut app), 1);
+        testing::run_tweens(&mut app);
+        assert_eq!(testing::count::<FadingScrim>(&mut app), 0);
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+    }
+
     fn form(app: &App) -> FinalizeForm {
         testing::tab(app, &fixture::demo_pr()).ui.finalize
     }

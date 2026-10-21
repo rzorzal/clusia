@@ -13,6 +13,8 @@ use bevy::ui_widgets::observe;
 
 use crate::theme::Swatch;
 use crate::ui::kit::{Fill, Stroke};
+use crate::ui::spinner::Motion;
+use crate::ui::tween::{DespawnAfter, Ease, Look, Tween};
 
 /// A click landed on the dimmed layer itself, not on the card or anything in it. Each dialog
 /// that may be dismissed that way reads this next to its Esc key and applies the same rule.
@@ -23,8 +25,98 @@ pub struct ModalPlugin;
 
 impl Plugin for ModalPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<BackdropClicked>();
+        app.add_message::<BackdropClicked>()
+            .add_observer(open_layer)
+            .add_observer(open_card)
+            .add_observer(close_layer);
     }
+}
+
+/// How long a dialog takes to come in and to go, and the size its card grows from.
+pub const MODAL_IN_MS: u64 = 160;
+pub const MODAL_OUT_MS: u64 = 100;
+pub const CARD_FROM: f32 = 0.98;
+
+/// The dimmed layer of a dialog (`modal_root`).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModalLayer;
+
+/// A dialog's card (`modal_card`).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModalCard;
+
+/// The dim left behind by a closed dialog while it fades. It blocks nothing.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FadingScrim;
+
+/// The layer dims in.
+fn open_layer(add: On<Add, ModalLayer>, motion: Res<Motion>, mut commands: Commands) {
+    if !motion.reduced {
+        commands.entity(add.entity).insert(Tween::new(
+            MODAL_IN_MS,
+            Ease::OutCubic,
+            Look::REST.faded(0.0),
+            Look::REST,
+        ));
+    }
+}
+
+/// A card on a dialog's layer grows into place (a card used elsewhere, as the loading one, does
+/// not).
+fn open_card(
+    add: On<Add, ModalCard>,
+    motion: Res<Motion>,
+    parents: Query<&ChildOf>,
+    layers: Query<(), With<ModalLayer>>,
+    mut commands: Commands,
+) {
+    let on_layer = parents
+        .get(add.entity)
+        .is_ok_and(|c| layers.contains(c.parent()));
+    if on_layer && !motion.reduced {
+        commands.entity(add.entity).insert(Tween::new(
+            MODAL_IN_MS,
+            Ease::OutCubic,
+            Look::REST.scaled(CARD_FROM),
+            Look::REST,
+        ));
+    }
+}
+
+/// Whoever closes a dialog despawns it at once (so nothing reads a dialog that has gone); its
+/// dim fades out on its own over what was under it.
+fn close_layer(
+    gone: On<Despawn, ModalLayer>,
+    motion: Res<Motion>,
+    layers: Query<&GlobalZIndex>,
+    mut commands: Commands,
+) {
+    if motion.reduced {
+        return;
+    }
+    let z = layers.get(gone.entity).map_or(100, |z| z.0);
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            top: px(0),
+            width: percent(100),
+            height: percent(100),
+            ..default()
+        },
+        GlobalZIndex(z),
+        BackgroundColor::default(),
+        Fill(Swatch::Scrim),
+        Pickable::IGNORE,
+        FadingScrim,
+        Tween::new(
+            MODAL_OUT_MS,
+            Ease::InCubic,
+            Look::REST,
+            Look::REST.faded(0.0),
+        ),
+        DespawnAfter::new(MODAL_OUT_MS),
+    ));
 }
 
 /// Clicks inside the card bubble up to the layer; only the ones that began on the layer count.
@@ -55,6 +147,7 @@ pub fn modal_root() -> impl Bundle {
             is_hoverable: true,
         },
         TabGroup::modal(),
+        ModalLayer,
         observe(on_backdrop_click),
     )
 }
@@ -75,6 +168,7 @@ pub fn modal_card(width: f32) -> impl Bundle {
         Fill(Swatch::Surface),
         BorderColor::default(),
         Stroke(Swatch::Line),
+        ModalCard,
     )
 }
 
@@ -99,6 +193,8 @@ mod tests {
             .spawn((modal_card(560.0), ChildOf(root)))
             .id();
         app.update();
+        // The colours it rests on, once it has dimmed in.
+        testing::run_tweens(&mut app);
         let w = app.world();
         assert!(w.get::<ChildOf>(root).is_none(), "a root entity");
         assert_eq!(w.get::<GlobalZIndex>(root).unwrap().0, 100);
@@ -112,6 +208,96 @@ mod tests {
             app.world().get::<BackgroundColor>(root).unwrap().0,
             DARK.scrim
         );
+    }
+
+    fn dialog(app: &mut App) -> (Entity, Entity) {
+        let root = app.world_mut().spawn(modal_root()).id();
+        app.world_mut().entity_mut(root).insert(GlobalZIndex(110));
+        let card = app
+            .world_mut()
+            .spawn((modal_card(560.0), ChildOf(root)))
+            .id();
+        (root, card)
+    }
+
+    #[test]
+    fn a_dialog_dims_in_and_its_card_grows_into_place() {
+        use crate::ui::tween::Tween;
+        let mut app = testing::app(Snapshot::default());
+        let (root, card) = dialog(&mut app);
+        app.update();
+        assert_eq!(
+            app.world().get::<BackgroundColor>(root).unwrap().0.alpha(),
+            0.0
+        );
+        assert_eq!(
+            app.world().get::<UiTransform>(card).unwrap().scale,
+            Vec2::splat(CARD_FROM)
+        );
+        app.update();
+        let scale = app.world().get::<UiTransform>(card).unwrap().scale.x;
+        assert!(scale > CARD_FROM && scale < 1.0, "{scale}");
+        let frames = testing::run_tweens(&mut app);
+        assert!(frames * 16 <= MODAL_IN_MS as usize + 32, "{frames} frames");
+        assert_eq!(
+            app.world().get::<BackgroundColor>(root).unwrap().0,
+            LIGHT.scrim
+        );
+        assert_eq!(
+            app.world().get::<UiTransform>(card).unwrap().scale,
+            Vec2::ONE
+        );
+        assert!(app.world().get::<Tween>(root).is_none());
+    }
+
+    #[test]
+    fn a_card_off_a_dialog_layer_does_not_grow() {
+        let mut app = testing::app(Snapshot::default());
+        let card = app.world_mut().spawn(modal_card(540.0)).id();
+        app.update();
+        assert!(app.world().get::<crate::ui::tween::Tween>(card).is_none());
+    }
+
+    #[test]
+    fn a_closed_dialog_goes_at_once_and_its_dim_fades_out_blocking_nothing() {
+        let mut app = testing::app(Snapshot::default());
+        let (root, _) = dialog(&mut app);
+        testing::run_tweens(&mut app);
+        app.world_mut().entity_mut(root).despawn();
+        app.update();
+        assert_eq!(
+            testing::count::<ModalLayer>(&mut app),
+            0,
+            "nothing reads a gone dialog"
+        );
+        let scrim = testing::find::<FadingScrim>(&mut app, |_| true);
+        let w = app.world();
+        assert_eq!(*w.get::<Pickable>(scrim).unwrap(), Pickable::IGNORE);
+        assert_eq!(w.get::<GlobalZIndex>(scrim).unwrap().0, 110);
+        let alpha = w.get::<BackgroundColor>(scrim).unwrap().0.alpha();
+        assert!(alpha > 0.0, "{alpha}");
+        testing::run_tweens(&mut app);
+        assert_eq!(testing::count::<FadingScrim>(&mut app), 0);
+    }
+
+    #[test]
+    fn with_reduce_motion_a_dialog_just_opens_and_closes() {
+        let mut app = testing::app(Snapshot::default());
+        app.insert_resource(Motion { reduced: true });
+        let (root, card) = dialog(&mut app);
+        app.update();
+        assert_eq!(
+            app.world().get::<BackgroundColor>(root).unwrap().0,
+            LIGHT.scrim
+        );
+        assert_eq!(
+            app.world().get::<UiTransform>(card).unwrap().scale,
+            Vec2::ONE
+        );
+        app.world_mut().entity_mut(root).despawn();
+        app.update();
+        assert_eq!(testing::count::<FadingScrim>(&mut app), 0);
+        assert_eq!(testing::count::<crate::ui::tween::Tween>(&mut app), 0);
     }
 
     #[test]

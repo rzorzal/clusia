@@ -492,12 +492,14 @@ pub fn settle(app: &mut App) {
     }
 }
 
-/// Runs frames until no tween or fade-out is left (at most 100), and says how many it took.
+/// Runs frames until no tween or fade-out is left (at most 100), then one more for what waits
+/// on their end (a column hidden once it has slid out), and says how many it ran.
 pub fn run_tweens(app: &mut App) -> usize {
     use crate::ui::tween::{DespawnAfter, Tween};
     for n in 0..100 {
         if count::<Tween>(app) == 0 && count::<DespawnAfter>(app) == 0 {
-            return n;
+            app.update();
+            return n + 1;
         }
         app.update();
     }

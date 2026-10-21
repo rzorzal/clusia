@@ -42,8 +42,9 @@ use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::parse::{self, Block};
 use crate::ui::markdown::{MdBody, RenderOpts, markdown_body};
 use crate::ui::pace::{Pace, Wake};
-use crate::ui::spinner::{beat, spinner};
+use crate::ui::spinner::{Motion, beat, spinner};
 use crate::ui::text_area::{Caret, growing_line_area, set_text};
+use crate::ui::tween::{Ease, Look, Shroud, Tween, Veil, shroud, veil};
 
 /// The `TextArea::id` of the chat input.
 pub const CHAT_INPUT: u64 = 2;
@@ -379,24 +380,91 @@ fn flex_if(show: bool) -> Display {
     if show { Display::Flex } else { Display::None }
 }
 
-/// The column's visibility and width, and which tab's body is shown.
+/// How long the column takes to slide in and out, and from how far right it comes.
+pub const PANEL_IN_MS: u64 = 180;
+pub const PANEL_OUT_MS: u64 = 120;
+pub const PANEL_SLIDE: f32 = 24.0;
+
+/// A column sliding out: it is hidden once its tween ends.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelClosing;
+
+/// The column's visibility and width, and which tab's body is shown. Showing or hiding the
+/// column slides it (its width is set at once, so it is laid out only when it appears and when
+/// it goes); the first frame of a column and Reduce Motion just show or hide it.
 fn layout(
+    mut commands: Commands,
     chats: Res<Chats>,
-    mut columns: Query<(&PanelColumn, &mut Node)>,
+    motion: Res<Motion>,
+    mut columns: Query<(
+        Entity,
+        Ref<PanelColumn>,
+        &mut Node,
+        Has<PanelClosing>,
+        Has<Tween>,
+    )>,
+    layers: Query<(Entity, &ChildOf), Or<(With<Veil>, With<Shroud>)>>,
     mut regions: Query<(&AgentRegion, &mut Node), Without<PanelColumn>>,
     mut drafts: Query<(&RightPanel, &mut Node), (Without<PanelColumn>, Without<AgentRegion>)>,
 ) {
     let tab_of = |pr: &PrRef| chats.0.get(pr).map_or(PanelTab::Draft, |c| c.tab);
-    for (column, mut node) in &mut columns {
+    for (entity, column, mut node, closing, sliding) in &mut columns {
         let (open, width) = chats
             .0
             .get(&column.pr)
             .map_or((true, DEFAULT_WIDTH), |c| (c.open, c.width));
-        if node.display != flex_if(open) {
-            node.display = flex_if(open);
-        }
         if node.width != px(width) {
             node.width = px(width);
+        }
+        let shown = node.display == Display::Flex;
+        let still = column.is_added() || motion.reduced;
+        let clear_layers = |commands: &mut Commands| {
+            for (layer, child_of) in &layers {
+                if child_of.parent() == entity {
+                    commands.entity(layer).despawn();
+                }
+            }
+        };
+        if open && (!shown || closing) {
+            if !shown {
+                node.display = Display::Flex;
+            }
+            clear_layers(&mut commands);
+            commands.entity(entity).remove::<PanelClosing>();
+            if !still {
+                commands.entity(entity).insert(Tween::new(
+                    PANEL_IN_MS,
+                    Ease::OutQuart,
+                    Look::REST.shifted(PANEL_SLIDE, 0.0),
+                    Look::REST,
+                ));
+                commands.spawn((
+                    veil(Swatch::Bg, PANEL_IN_MS, Ease::OutQuart),
+                    ChildOf(entity),
+                ));
+            }
+        } else if !open && shown && !closing {
+            if still {
+                node.display = Display::None;
+            } else {
+                commands.entity(entity).insert((
+                    PanelClosing,
+                    Tween::new(
+                        PANEL_OUT_MS,
+                        Ease::InCubic,
+                        Look::REST,
+                        Look::REST.shifted(PANEL_SLIDE, 0.0),
+                    ),
+                ));
+                commands.spawn((
+                    shroud(Swatch::Bg, PANEL_OUT_MS, Ease::InCubic),
+                    ChildOf(entity),
+                ));
+            }
+        } else if !open && closing && !sliding {
+            node.display = Display::None;
+            clear_layers(&mut commands);
+            commands.entity(entity).remove::<PanelClosing>();
         }
     }
     for (region, mut node) in &mut regions {
@@ -2101,6 +2169,105 @@ mod tests {
         assert_eq!(testing::count::<ChatStop>(&mut app), 0);
     }
 
+    fn column(app: &mut App) -> Entity {
+        testing::find::<PanelColumn>(app, |_| true)
+    }
+
+    fn shift_of(app: &App, e: Entity) -> Val2 {
+        app.world().get::<UiTransform>(e).unwrap().translation
+    }
+
+    fn shrouds_over(app: &mut App, parent: Entity) -> usize {
+        let mut q = app.world_mut().query_filtered::<&ChildOf, With<Shroud>>();
+        q.iter(app.world()).filter(|c| c.parent() == parent).count()
+    }
+
+    #[test]
+    fn the_column_slides_out_then_hides_and_slides_back_in() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        testing::run_tweens(&mut app);
+        let col = column(&mut app);
+        assert!(
+            app.world().get::<Tween>(col).is_none(),
+            "a new column just shows"
+        );
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .toggle();
+        app.update();
+        assert_eq!(display_of::<PanelColumn>(&mut app, |_| true), Display::Flex);
+        assert!(app.world().get::<Tween>(col).is_some());
+        assert_eq!(shrouds_over(&mut app, col), 1);
+        app.update();
+        let x = shift_of(&app, col).x;
+        assert!(x != Val::Px(0.0) && x != Val::Px(PANEL_SLIDE), "{x:?}");
+        let frames = testing::run_tweens(&mut app);
+        assert!(frames * 16 <= PANEL_OUT_MS as usize + 48, "{frames} frames");
+        assert_eq!(display_of::<PanelColumn>(&mut app, |_| true), Display::None);
+        assert!(app.world().get::<PanelClosing>(col).is_none());
+        assert_eq!(shrouds_over(&mut app, col), 0);
+
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .toggle();
+        app.update();
+        assert_eq!(display_of::<PanelColumn>(&mut app, |_| true), Display::Flex);
+        assert_eq!(shift_of(&app, col), Val2::px(PANEL_SLIDE, 0.0));
+        assert!(testing::veil_over(&mut app, col).is_some());
+        testing::run_tweens(&mut app);
+        assert_eq!(shift_of(&app, col), Val2::ZERO);
+        assert!(testing::veil_over(&mut app, col).is_none());
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+    }
+
+    #[test]
+    fn a_column_shown_again_while_it_slides_out_comes_back() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        testing::run_tweens(&mut app);
+        let col = column(&mut app);
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .toggle();
+        app.update();
+        app.update();
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .toggle();
+        app.update();
+        assert_eq!(shrouds_over(&mut app, col), 0);
+        assert!(app.world().get::<PanelClosing>(col).is_none());
+        testing::run_tweens(&mut app);
+        assert_eq!(display_of::<PanelColumn>(&mut app, |_| true), Display::Flex);
+        assert_eq!(shift_of(&app, col), Val2::ZERO);
+    }
+
+    #[test]
+    fn with_reduce_motion_the_column_hides_and_shows_at_once() {
+        let mut app = testing::app(fixture::demo(NOW));
+        testing::open_ready(&mut app, false);
+        app.insert_resource(Motion { reduced: true });
+        testing::run_tweens(&mut app);
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .toggle();
+        app.update();
+        assert_eq!(display_of::<PanelColumn>(&mut app, |_| true), Display::None);
+        app.world_mut()
+            .resource_mut::<Chats>()
+            .entry(&pr())
+            .toggle();
+        app.update();
+        assert_eq!(display_of::<PanelColumn>(&mut app, |_| true), Display::Flex);
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+    }
+
     #[test]
     fn the_shortcut_and_the_status_bar_hide_and_show_the_column() {
         let mut app = testing::app(fixture::demo(NOW));
@@ -2111,6 +2278,8 @@ mod tests {
         // The headless app has no input plugin to end the press after one frame.
         press(&mut app, &[]);
         testing::settle(&mut app);
+        // The column slides out before it is hidden.
+        testing::run_tweens(&mut app);
         assert_eq!(display_of::<PanelColumn>(&mut app, |_| true), Display::None);
         assert!(testing::shows(&mut app, "Show panel"));
         let toggle = testing::find::<PanelToggle>(&mut app, |t| t.0 == pr());

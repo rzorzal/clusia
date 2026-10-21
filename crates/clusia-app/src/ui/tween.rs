@@ -171,6 +171,31 @@ pub fn veil(swatch: Swatch, ms: u64, ease: Ease) -> impl Bundle {
     )
 }
 
+/// A layer of `swatch` over its parent that thickens from clear to opaque in `ms` and stays:
+/// what it covers seems to fade out. Picking passes through it.
+pub fn shroud(swatch: Swatch, ms: u64, ease: Ease) -> impl Bundle {
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            right: px(0),
+            top: px(0),
+            bottom: px(0),
+            ..default()
+        },
+        ZIndex(VEIL_Z),
+        BackgroundColor::default(),
+        Fill(swatch),
+        bevy::picking::Pickable::IGNORE,
+        Shroud,
+        Tween::new(ms, ease, Look::REST.faded(0.0), Look::REST),
+    )
+}
+
+/// A layer spawned by `shroud`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shroud;
+
 /// How long a new screen or section takes to come in, and how far below its place it starts.
 pub const ENTER_MS: u64 = 140;
 pub const ENTER_RISE: f32 = 4.0;
