@@ -1884,6 +1884,26 @@ mod tests {
     }
 
     #[test]
+    fn a_card_removed_while_the_window_is_covered_leaves_no_copy_and_does_not_panic() {
+        use crate::ui::tween::{DespawnAfter, Inert};
+        let mut app = testing::demo_review_app();
+        testing::run_tweens(&mut app);
+        let cards = testing::count::<DraftCardButton>(&mut app);
+        app.world_mut().write_message(bevy::window::WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: true,
+        });
+        app.update();
+        edit_draft(&mut app, |items| {
+            items.remove(0);
+        });
+        app.update();
+        assert_eq!(testing::count::<DraftCardButton>(&mut app), cards - 1);
+        assert_eq!(testing::count::<Inert>(&mut app), 0, "no copy left");
+        assert_eq!(testing::count::<DespawnAfter>(&mut app), 0);
+    }
+
+    #[test]
     fn with_reduce_motion_draft_cards_just_appear_and_go() {
         let mut app = testing::demo_review_app();
         app.insert_resource(Motion { reduced: true });

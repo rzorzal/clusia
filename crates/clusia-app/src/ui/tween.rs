@@ -358,12 +358,16 @@ fn make_inert(
     rows: Query<Entity, Added<Inert>>,
     children: Query<&Children>,
 ) {
+    // It runs before `animate`, which despawns a row at once while the window is covered; an
+    // insert into a row gone all the same is skipped, not a panic.
     for row in &rows {
-        commands.entity(row).insert(bevy::picking::Pickable::IGNORE);
+        commands
+            .entity(row)
+            .try_insert(bevy::picking::Pickable::IGNORE);
         for part in children.iter_descendants(row) {
             commands
                 .entity(part)
-                .insert(bevy::picking::Pickable::IGNORE);
+                .try_insert(bevy::picking::Pickable::IGNORE);
         }
     }
 }
@@ -384,7 +388,7 @@ impl Plugin for TweenPlugin {
                     .after(Painting)
                     .before(UiSystems::Layout),
             )
-            .add_systems(PostUpdate, make_inert.run_if(running));
+            .add_systems(PostUpdate, make_inert.run_if(running).before(animate));
     }
 }
 
