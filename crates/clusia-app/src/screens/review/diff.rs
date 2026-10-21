@@ -1852,15 +1852,16 @@ fn place(
     let pin = pin.filter(|p| *p < built.wants.len());
     let (top_line, _) = rows::at(&built.heights, *scroll);
     let old = built.window.clone();
-    let mut want = rows::window(&built.heights, *scroll, view);
+    let mut want = rows::page(&built.heights, *scroll, view, old.clone());
     let above = if want.start < old.end && old.start < want.end {
         old.start
     } else {
         top_line
     };
-    // Lines coming in may weigh more or less than guessed, which moves the window again; a few
-    // rounds settle it.
-    'weigh: for _ in 0..4 {
+    // Lines coming in may weigh more or less than guessed, which moves the window again, until
+    // every line in it is weighed. Each round that changes a height has laid out a line not laid
+    // out before, so the rounds end.
+    'weigh: loop {
         let mut changed = false;
         for order in want.clone() {
             let (row, line) = built.keys[order];
@@ -1887,7 +1888,7 @@ fn place(
         if !changed {
             break;
         }
-        want = rows::window(&built.heights, *scroll, view);
+        want = rows::page(&built.heights, *scroll, view, old.clone());
     }
     // The pinned row is taken out of the body's children, clear of the window's child indices,
     // until it is placed again.
@@ -6662,6 +6663,99 @@ mod tests {
             assert_eq!(
                 asked, 0,
                 "{mode:?}: a row was measured {asked} times in 10 frames"
+            );
+        }
+    }
+
+    /// The body's children, in order.
+    fn body_children(app: &App, body: Entity) -> Vec<Entity> {
+        app.world()
+            .get::<Children>(body)
+            .map(|c| c.to_vec())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_steady_scroll_changes_the_rows_on_few_frames() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let mut changed = 0;
+            for frame in 0..240 {
+                let before = body_children(&app, body);
+                let mut q = app
+                    .world_mut()
+                    .query_filtered::<&mut ScrollPosition, With<BodyPart>>();
+                for mut p in q.iter_mut(app.world_mut()) {
+                    p.y += 40.0;
+                }
+                app.update();
+                if body_children(&app, body) != before {
+                    changed += 1;
+                }
+                let built = app
+                    .world()
+                    .get::<BodyPart>(body)
+                    .unwrap()
+                    .built
+                    .as_ref()
+                    .unwrap();
+                let scroll = app.world().get::<ScrollPosition>(body).unwrap().y;
+                let (first, _) = rows::at(&built.heights, scroll);
+                let (last, _) = rows::at(&built.heights, scroll + built.view);
+                assert!(
+                    built.window.contains(&first) && built.window.contains(&last),
+                    "{mode:?}, frame {frame}: lines {first}..={last} in view, {:?} spawned",
+                    built.window
+                );
+            }
+            // Ruling: a steady scroll places the window on at most one frame in twelve.
+            assert!(
+                changed <= 20,
+                "{mode:?}: the rows changed on {changed} of 240 frames"
+            );
+            assert!(spawned_orders(&mut app).len() <= WINDOW_LINES);
+            assert_heights_add_up(&mut app, &format!("{mode:?}"));
+            rows_in_line_order(&mut app);
+        }
+    }
+
+    #[test]
+    fn a_far_focus_spawns_only_the_view_in_its_first_frame() {
+        for mode in [DiffMode::Unified, DiffMode::Split] {
+            let mut app = thousand_app(mode);
+            let pr = fixture::demo_pr();
+            {
+                let mut tabs = ui_mut(&mut app, &pr);
+                assert!(show_line(
+                    tabs.0.get_mut(&pr).unwrap(),
+                    "big.txt",
+                    Some((900, 900))
+                ));
+            }
+            let (spawned, _) = churn(&mut app, |app| app.update());
+            let lines = spawned_orders(&mut app);
+            // What an 800 px view of 22 px rows shows, a `LOW` margin each side, and the rows cut
+            // at each edge.
+            let needs = ((800.0 + 2.0 * rows::LOW) / ROW_HEIGHT).ceil() as usize + 2;
+            assert!(
+                lines.len() <= needs,
+                "{mode:?}: {} lines spawned in the first frame, the view needs {needs}",
+                lines.len()
+            );
+            assert!(
+                spawned.len() <= needs * 25,
+                "{mode:?}: {} nodes spawned",
+                spawned.len()
+            );
+            testing::settle(&mut app);
+            let line = testing::find::<LineButton>(&mut app, |b| b.line == 900);
+            let body = testing::find::<BodyPart>(&mut app, |_| true);
+            let (_, by, _, bh) = testing::frame(&app, body);
+            let (_, ly, _, lh) = testing::frame(&app, line);
+            assert!(
+                ly >= by && ly + lh <= by + bh,
+                "{mode:?}: line 900 is in view"
             );
         }
     }

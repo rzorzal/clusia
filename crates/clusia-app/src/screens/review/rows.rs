@@ -16,12 +16,27 @@ pub const MARGIN: f32 = 240.0;
 /// The view's height while the body has no laid-out size yet.
 pub const VIEW_GUESS: f32 = 800.0;
 
+/// How close to an edge of the view the spawned rows may end before they are placed again, in
+/// logical pixels.
+pub const LOW: f32 = 80.0;
+
+/// How far past the edge the view moves toward rows placed again reach, in logical pixels. A
+/// steady scroll finds its rows there for `AHEAD - LOW` pixels, so it changes the rows on one
+/// frame in that many pixels' worth of frames rather than on each.
+pub const AHEAD: f32 = 720.0;
+
 /// The rows of `heights` that a view `view` pixels high, scrolled to `scroll`, shows with
 /// `MARGIN` on each side. A scroll past the end counts as the end, as the layout clamps it.
 pub fn window(heights: &[f32], scroll: f32, view: f32) -> Range<usize> {
+    span(heights, scroll, view, MARGIN, MARGIN)
+}
+
+/// The rows of `heights` from `above` pixels over the view's top edge to `below` pixels under
+/// its bottom edge, the view as `window` takes it.
+fn span(heights: &[f32], scroll: f32, view: f32, above: f32, below: f32) -> Range<usize> {
     let total: f32 = heights.iter().sum();
     let scroll = scroll.min(total - view).max(0.0);
-    let (from, to) = (scroll - MARGIN, scroll + view + MARGIN);
+    let (from, to) = (scroll - above, scroll + view + below);
     let mut top = 0.0;
     let mut start = None;
     let mut end = heights.len();
@@ -36,6 +51,27 @@ pub fn window(heights: &[f32], scroll: f32, view: f32) -> Range<usize> {
         top += h;
     }
     start.unwrap_or(end).min(end)..end
+}
+
+/// The rows to hold spawned for the view, while `held` are. `held` stay while they reach `LOW`
+/// past both edges of the view. When the view nears one end of them, the rows reach `AHEAD` past
+/// that edge and `LOW` past the other; past both ends, `MARGIN` past each. When the view shares
+/// no row with `held` (a jump, or nothing held yet), the rows are only what the view needs and
+/// `LOW` each side, so a jump spawns little and the scroll after it fills ahead.
+pub fn page(heights: &[f32], scroll: f32, view: f32, held: Range<usize>) -> Range<usize> {
+    let need = span(heights, scroll, view, LOW, LOW);
+    if need.is_empty() {
+        return need;
+    }
+    if need.end <= held.start || held.end <= need.start {
+        return need;
+    }
+    match (held.start <= need.start, need.end <= held.end) {
+        (true, true) => held,
+        (true, false) => span(heights, scroll, view, LOW, AHEAD),
+        (false, true) => span(heights, scroll, view, AHEAD, LOW),
+        (false, false) => window(heights, scroll, view),
+    }
 }
 
 /// Where row `index` starts: what the rows above it weigh.
@@ -161,6 +197,50 @@ mod tests {
         assert_eq!(window(&heights, 0.0, 200.0), 0..22);
         assert_eq!(window(&heights, 1.0e6, 200.0), 78..100);
         assert_eq!(window(&[], 0.0, 200.0), 0..0);
+    }
+
+    #[test]
+    fn a_window_is_kept_until_the_view_comes_near_its_edge() {
+        let heights = vec![20.0; 1_000];
+        // A 200 px view at 10,000 px shows rows 500..510.
+        let held = 490..540;
+        assert_eq!(page(&heights, 10_000.0, 200.0, held.clone()), held);
+        // 600 px further the view's bottom edge is within `LOW` of the held rows' end: the window
+        // reaches `AHEAD` past the bottom and `LOW` above.
+        let ahead = page(&heights, 10_600.0, 200.0, held.clone());
+        assert_eq!(ahead, 526..576, "{ahead:?}");
+        // Back up past the start: `AHEAD` above, `LOW` below.
+        let behind = page(&heights, 9_700.0, 200.0, held.clone());
+        assert_eq!(behind, 449..499, "{behind:?}");
+        // No row in common: only what the view needs.
+        assert_eq!(page(&heights, 15_000.0, 200.0, held), 746..764);
+        assert_eq!(page(&heights, 0.0, 200.0, 0..0), 0..14);
+        // A view taller than the held rows on both sides: a margin each side.
+        assert_eq!(page(&heights, 10_000.0, 200.0, 499..511), 488..522);
+        assert_eq!(page(&[], 0.0, 200.0, 0..0), 0..0);
+    }
+
+    #[test]
+    fn a_steady_scroll_places_the_window_on_few_frames() {
+        let heights = vec![22.0; 1_000];
+        let mut held = 0..0;
+        let mut placed = 0;
+        for frame in 0..240 {
+            let scroll = 40.0 * frame as f32;
+            let next = page(&heights, scroll, 800.0, held.clone());
+            if next != held {
+                placed += 1;
+            }
+            held = next;
+            let (first, _) = at(&heights, scroll);
+            let (last, _) = at(&heights, scroll + 800.0);
+            assert!(
+                held.contains(&first) && held.contains(&last),
+                "{frame}: {held:?}"
+            );
+            assert!(held.len() <= 80, "{frame}: {} rows", held.len());
+        }
+        assert!(placed <= 20, "placed on {placed} of 240 frames");
     }
 
     #[test]
