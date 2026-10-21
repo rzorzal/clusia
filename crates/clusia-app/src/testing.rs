@@ -492,6 +492,40 @@ pub fn settle(app: &mut App) {
     }
 }
 
+/// Runs frames until no tween or fade-out is left (at most 100), then one more for what waits
+/// on their end (a column hidden once it has slid out), and says how many it ran.
+pub fn run_tweens(app: &mut App) -> usize {
+    use crate::ui::tween::{DespawnAfter, Tween};
+    for n in 0..100 {
+        if count::<Tween>(app) == 0 && count::<DespawnAfter>(app) == 0 {
+            app.update();
+            return n + 1;
+        }
+        app.update();
+    }
+    panic!("a tween never ended");
+}
+
+/// The veils still showing: a cleared one stays, hidden, until its parent is rebuilt.
+pub fn showing_veils(app: &mut App) -> usize {
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&Visibility, With<crate::ui::tween::Veil>>();
+    q.iter(app.world())
+        .filter(|v| **v != Visibility::Hidden)
+        .count()
+}
+
+/// The veil laid over `parent`'s contents, if one still shows.
+pub fn veil_over(app: &mut App, parent: Entity) -> Option<Entity> {
+    let mut q = app
+        .world_mut()
+        .query_filtered::<(Entity, &ChildOf, &Visibility), With<crate::ui::tween::Veil>>();
+    q.iter(app.world())
+        .find(|(_, c, v)| c.parent() == parent && **v != Visibility::Hidden)
+        .map(|(e, _, _)| e)
+}
+
 /// Waits for the pictures being decoded in the background, then settles, so they are shown.
 pub fn decoded(app: &mut App) {
     crate::ui::media::finish_decodes(app.world_mut());

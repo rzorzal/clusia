@@ -6,6 +6,7 @@
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input_focus::tab_navigation::TabIndex;
+use bevy::picking::Pickable;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
@@ -36,13 +37,14 @@ use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::composer::ComposerMode;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Icon, Stroke, Tone, Type, Variant, badge, button, disabled_button,
-    icon_button, panel, text, wrapped_text,
+    Clickable, Fill, HoverFill, Icon, Painting, Stroke, Tone, Type, Variant, badge, button,
+    disabled_button, icon_button, panel, text, wrapped_text,
 };
 use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, markdown_line};
 use crate::ui::people::person;
-use crate::ui::spinner::{beat, spinner};
+use crate::ui::spinner::{Motion, beat, spinner};
+use crate::ui::tween::{arrive, depart, enter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderView {
@@ -552,7 +554,34 @@ impl Plugin for ShellPlugin {
             )
                 .chain()
                 .in_set(ReviewSystems),
-        );
+        )
+        .add_systems(PostUpdate, enter_section.before(Painting));
+    }
+}
+
+/// The section a `SectionBody` shows, once it has shown one.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct SectionShown(ReviewSection);
+
+/// Brings a section in when the tab switches to it. It runs after every section's filler, so
+/// the veil lands over the new contents; a filler that empties the body later takes it along.
+fn enter_section(
+    mut commands: Commands,
+    tabs: Res<ReviewTabs>,
+    motion: Res<Motion>,
+    bodies: Query<(Entity, &SectionBody, Option<&SectionShown>)>,
+) {
+    for (entity, body, shown) in &bodies {
+        let Some(section) = tabs.0.get(&body.pr).map(|t| t.ui.section) else {
+            continue;
+        };
+        if shown == Some(&SectionShown(section)) {
+            continue;
+        }
+        if shown.is_some() {
+            enter(&mut commands, &motion, entity, entity);
+        }
+        commands.entity(entity).insert(SectionShown(section));
     }
 }
 
@@ -1123,6 +1152,7 @@ fn rebuild_right(
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
     theme: Res<Theme>,
+    motion: Res<Motion>,
     mut panels: Query<(Entity, &mut RightPanel)>,
 ) {
     let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
@@ -1147,10 +1177,51 @@ fn rebuild_right(
         }
         let pr = right.pr.clone();
         let editor = general.cloned();
+        let moves = right
+            .built
+            .as_ref()
+            .map(|built| CardMoves::between(&built.cards, &want.cards))
+            .unwrap_or_default();
         refill(&mut commands, entity, |p| {
-            right_region(p, &fonts, &pr, &want, editor.as_ref(), &opts)
+            right_region(
+                p,
+                &fonts,
+                &pr,
+                &want,
+                editor.as_ref(),
+                &opts,
+                &moves,
+                &motion,
+            )
         });
         right.built = Some(want);
+    }
+}
+
+/// How the draft's cards changed since the list was last built: the ones new in it come in,
+/// the ones gone from it fade out where they were.
+#[derive(Debug, Default)]
+struct CardMoves {
+    fresh: Vec<String>,
+    /// Each with its place in the old list.
+    gone: Vec<(usize, DraftCard)>,
+}
+
+impl CardMoves {
+    fn between(old: &[DraftCard], new: &[DraftCard]) -> Self {
+        Self {
+            fresh: new
+                .iter()
+                .filter(|c| !old.iter().any(|o| o.id == c.id))
+                .map(|c| c.id.clone())
+                .collect(),
+            gone: old
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| !new.iter().any(|c| c.id == o.id))
+                .map(|(i, o)| (i, o.clone()))
+                .collect(),
+        }
     }
 }
 
@@ -1161,6 +1232,8 @@ fn right_region(
     v: &RightView,
     editor: Option<&Editor>,
     opts: &RenderOpts,
+    moves: &CardMoves,
+    motion: &Motion,
 ) {
     p.spawn(Node {
         flex_direction: FlexDirection::Column,
@@ -1229,13 +1302,26 @@ fn right_region(
                         Type::META,
                     ));
                 }
-                for card in &v.cards {
-                    draft_card_node(list, fonts, pr, card, v.read_only, opts);
+                // The cards gone from the draft keep their old places while they fade.
+                let mut rows: Vec<(&DraftCard, bool)> = v.cards.iter().map(|c| (c, false)).collect();
+                if !motion.reduced {
+                    for (at, card) in &moves.gone {
+                        rows.insert((*at).min(rows.len()), (card, true));
+                    }
+                }
+                for (card, gone) in rows {
+                    let row = draft_card_node(list, fonts, pr, card, v.read_only, opts, gone);
+                    if gone {
+                        depart(list.commands_mut(), motion, row, Swatch::Bg, 1.0);
+                    } else if moves.fresh.contains(&card.id) {
+                        arrive(list.commands_mut(), motion, row, Swatch::Bg, 1.0);
+                    }
                 }
             });
     });
 }
 
+/// A draft card, or with `gone` its copy while it fades out: the same box, answering nothing.
 fn draft_card_node(
     p: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -1243,8 +1329,9 @@ fn draft_card_node(
     card: &DraftCard,
     read_only: bool,
     opts: &RenderOpts,
-) {
-    p.spawn((
+    gone: bool,
+) -> Entity {
+    let mut root = p.spawn((
         Node {
             flex_direction: FlexDirection::Column,
             flex_shrink: 0.0,
@@ -1254,46 +1341,52 @@ fn draft_card_node(
             border_radius: BorderRadius::all(px(6)),
             ..default()
         },
-        WidgetButton,
-        Clickable,
-        Hovered::default(),
-        TabIndex(0),
         BackgroundColor::default(),
         Fill(Swatch::Surface),
-        HoverFill(Swatch::Hover),
         BorderColor::default(),
         Stroke(if card.obsolete {
             Swatch::Orange
         } else {
             Swatch::Line
         }),
-        DraftCardButton {
-            pr: pr.clone(),
-            target: card.target.clone(),
-        },
-        observe(on_card),
-    ))
-    .with_children(|c| {
+    ));
+    if gone {
+        root.insert(Pickable::IGNORE);
+    } else {
+        root.insert((
+            WidgetButton,
+            Clickable,
+            Hovered::default(),
+            TabIndex(0),
+            HoverFill(Swatch::Hover),
+            DraftCardButton {
+                pr: pr.clone(),
+                target: card.target.clone(),
+            },
+            observe(on_card),
+        ));
+    }
+    root.with_children(|c| {
         c.spawn(Node {
             column_gap: px(8),
             align_items: AlignItems::Center,
             ..default()
         })
         .with_children(|h| {
-            h.spawn((
-                Node {
-                    flex_grow: 1.0,
-                    flex_basis: px(0),
-                    min_width: px(0),
-                    column_gap: px(8),
-                    row_gap: px(4),
-                    flex_wrap: FlexWrap::Wrap,
-                    align_items: AlignItems::Center,
-                    ..default()
-                },
-                DraftCardPlace,
-            ))
-            .with_children(|place| {
+            let mut place = h.spawn(Node {
+                flex_grow: 1.0,
+                flex_basis: px(0),
+                min_width: px(0),
+                column_gap: px(8),
+                row_gap: px(4),
+                flex_wrap: FlexWrap::Wrap,
+                align_items: AlignItems::Center,
+                ..default()
+            });
+            if !gone {
+                place.insert(DraftCardPlace);
+            }
+            place.with_children(|place| {
                 place.spawn((
                     wrapped_text(fonts, card.title.clone(), Type::MONO),
                     Node {
@@ -1308,6 +1401,18 @@ fn draft_card_node(
                     place.spawn(badge(fonts, origin, Tone::Neutral));
                 }
             });
+            if gone {
+                // Where the buttons were, so the copy keeps the card's height.
+                if !read_only {
+                    h.spawn(Node {
+                        width: px(24),
+                        height: px(24),
+                        flex_shrink: 0.0,
+                        ..default()
+                    });
+                }
+                return;
+            }
             if !read_only && card.obsolete {
                 h.spawn((
                     button(fonts, "Restore", Variant::Secondary),
@@ -1353,6 +1458,7 @@ fn draft_card_node(
             );
         }
     });
+    root.id()
 }
 
 fn rebuild_status(
@@ -1695,6 +1801,176 @@ mod tests {
     use crate::nav::Screen;
     use crate::testing::{self, NOW};
     use clusia_core::{Anchor, Origin, Side, ThreadRef};
+
+    fn edit_draft(app: &mut App, edit: impl FnOnce(&mut Vec<DraftItem>)) {
+        let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+        let tab = tabs.0.get_mut(&fixture::demo_pr()).unwrap();
+        let Phase::Ready(r) = &mut tab.phase else {
+            panic!("ready")
+        };
+        edit(&mut r.view.review.draft.items);
+    }
+
+    #[test]
+    fn a_card_new_in_the_draft_comes_in_and_a_removed_one_fades_where_it_was() {
+        use crate::ui::tween::{DespawnAfter, ROW_RISE, Tween};
+        let mut app = testing::demo_review_app();
+        testing::run_tweens(&mut app);
+        let cards = testing::count::<DraftCardButton>(&mut app);
+        edit_draft(&mut app, |items| {
+            let mut item = items[0].clone();
+            item.id = "it_new".into();
+            items.push(item);
+        });
+        app.update();
+        assert_eq!(testing::count::<DraftCardButton>(&mut app), cards + 1);
+        let moving: Vec<Entity> = {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<(Entity, &Tween), With<DraftCardButton>>();
+            q.iter(app.world()).map(|(e, _)| e).collect()
+        };
+        assert_eq!(moving.len(), 1, "only the new card");
+        let new = moving[0];
+        assert_eq!(
+            app.world().get::<UiTransform>(new).unwrap().translation,
+            Val2::px(0.0, ROW_RISE)
+        );
+        assert!(testing::veil_over(&mut app, new).is_some());
+        let list = app.world().get::<ChildOf>(new).unwrap().parent();
+        assert_eq!(
+            app.world().get::<Children>(list).unwrap().last(),
+            Some(&new)
+        );
+        testing::run_tweens(&mut app);
+
+        edit_draft(&mut app, |items| {
+            items.remove(0);
+        });
+        app.update();
+        assert_eq!(
+            testing::count::<DraftCardButton>(&mut app),
+            cards,
+            "the copy is no card"
+        );
+        let ghost = testing::find::<DespawnAfter>(&mut app, |_| true);
+        let list = testing::find::<DraftList>(&mut app, |_| true);
+        assert_eq!(app.world().get::<ChildOf>(ghost).unwrap().parent(), list);
+        assert_eq!(
+            app.world().get::<Children>(list).unwrap().first(),
+            Some(&ghost),
+            "where the removed card was"
+        );
+        assert_eq!(
+            *app.world().get::<Pickable>(ghost).unwrap(),
+            Pickable::IGNORE
+        );
+        let parts: Vec<Entity> = {
+            let mut q = app.world_mut().query::<&Children>();
+            let q = q.query(app.world());
+            q.iter_descendants(ghost).collect()
+        };
+        assert!(!parts.is_empty());
+        for part in parts {
+            assert_eq!(
+                app.world().get::<Pickable>(part),
+                Some(&Pickable::IGNORE),
+                "nothing in the copy answers the pointer"
+            );
+        }
+        testing::run_tweens(&mut app);
+        assert!(app.world().get_entity(ghost).is_err());
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+    }
+
+    #[test]
+    fn a_card_removed_while_the_window_is_covered_leaves_no_copy_and_does_not_panic() {
+        use crate::ui::tween::{DespawnAfter, Inert};
+        let mut app = testing::demo_review_app();
+        testing::run_tweens(&mut app);
+        let cards = testing::count::<DraftCardButton>(&mut app);
+        app.world_mut().write_message(bevy::window::WindowOccluded {
+            window: Entity::PLACEHOLDER,
+            occluded: true,
+        });
+        app.update();
+        edit_draft(&mut app, |items| {
+            items.remove(0);
+        });
+        app.update();
+        assert_eq!(testing::count::<DraftCardButton>(&mut app), cards - 1);
+        assert_eq!(testing::count::<Inert>(&mut app), 0, "no copy left");
+        assert_eq!(testing::count::<DespawnAfter>(&mut app), 0);
+    }
+
+    #[test]
+    fn with_reduce_motion_draft_cards_just_appear_and_go() {
+        let mut app = testing::demo_review_app();
+        app.insert_resource(Motion { reduced: true });
+        testing::run_tweens(&mut app);
+        edit_draft(&mut app, |items| {
+            let mut item = items[0].clone();
+            item.id = "it_new".into();
+            items.push(item);
+            items.remove(0);
+        });
+        app.update();
+        assert_eq!(testing::count::<crate::ui::tween::Tween>(&mut app), 0);
+        assert_eq!(
+            testing::count::<crate::ui::tween::DespawnAfter>(&mut app),
+            0
+        );
+    }
+
+    #[test]
+    fn a_section_switch_brings_the_new_section_in_and_leaves_nothing_behind() {
+        use crate::ui::tween::{ENTER_RISE, Tween};
+        let mut app = testing::demo_review_app();
+        testing::run_tweens(&mut app);
+        let pr = fixture::demo_pr();
+        let body = testing::find::<SectionBody>(&mut app, |b| b.pr == pr);
+        assert!(
+            app.world().get::<Tween>(body).is_none(),
+            "the first section just appears"
+        );
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .section = ReviewSection::Comments;
+        app.update();
+        assert!(app.world().get::<Tween>(body).is_some());
+        assert_eq!(
+            app.world().get::<UiTransform>(body).unwrap().translation,
+            Val2::px(0.0, ENTER_RISE)
+        );
+        let veil = testing::veil_over(&mut app, body).expect("a veil over the body");
+        let children = app.world().get::<Children>(body).unwrap();
+        assert_eq!(children.last(), Some(&veil), "over the new contents");
+        testing::run_tweens(&mut app);
+        assert_eq!(testing::showing_veils(&mut app), 0);
+        assert_eq!(
+            app.world().get::<UiTransform>(body).unwrap().translation,
+            Val2::ZERO
+        );
+        // An idle frame after it starts nothing.
+        app.update();
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+    }
+
+    #[test]
+    fn with_reduce_motion_a_section_switch_just_shows_the_section() {
+        let mut app = testing::demo_review_app();
+        app.insert_resource(Motion { reduced: true });
+        testing::run_tweens(&mut app);
+        let pr = fixture::demo_pr();
+        let veils = testing::count::<crate::ui::tween::Veil>(&mut app);
+        testing::set_section(&mut app, &pr, ReviewSection::Comments);
+        assert_eq!(testing::count::<crate::ui::tween::Tween>(&mut app), 0);
+        assert_eq!(testing::count::<crate::ui::tween::Veil>(&mut app), veils);
+    }
 
     fn ready_tab() -> Tab {
         let (view, news) = fixture::demo_review(NOW);

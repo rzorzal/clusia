@@ -304,6 +304,7 @@ fn rebuild_config(
     focus: Res<InputFocus>,
     fields: Query<(&Field, &EditableText)>,
     text_face: Res<crate::fonts::TextFace>,
+    motion: Res<crate::ui::spinner::Motion>,
 ) {
     let Screen::Config(section) = nav.screen else {
         return;
@@ -370,8 +371,9 @@ fn rebuild_config(
         {
             continue;
         }
+        let mut page = None;
         refill(&mut commands, e, |p| {
-            p.spawn((
+            let mut spawned = p.spawn((
                 Node {
                     flex_direction: FlexDirection::Column,
                     row_gap: px(18),
@@ -379,8 +381,9 @@ fn rebuild_config(
                     ..default()
                 },
                 PageOf(section),
-            ))
-            .with_children(|c| match &view {
+            ));
+            page = Some(spawned.id());
+            spawned.with_children(|c| match &view {
                 PageView::General(v) => general::build(c, fonts, v),
                 PageView::Appearance(v) => appearance::build(c, fonts, v),
                 PageView::Git(v) => git::build(
@@ -398,6 +401,14 @@ fn rebuild_config(
                 PageView::Plugins => placeholders::plugins(c, fonts),
             });
         });
+        // Another section comes in; the same page rebuilt for a new value just changes.
+        let switched = part
+            .built
+            .as_ref()
+            .is_some_and(|b| std::mem::discriminant(b) != std::mem::discriminant(&view));
+        if let Some(page) = page.filter(|_| switched) {
+            crate::ui::tween::enter(&mut commands, &motion, page, e);
+        }
         part.built = Some(view.clone());
     }
 }
@@ -592,6 +603,26 @@ mod tests {
         app.world_mut().resource_mut::<Nav>().open_section(section);
         testing::settle(&mut app);
         app
+    }
+
+    #[test]
+    fn another_section_comes_in_and_a_new_value_on_the_same_page_does_not() {
+        use crate::ui::tween::Tween;
+        let mut app = config_app(Section::Appearance);
+        testing::run_tweens(&mut app);
+        app.world_mut()
+            .resource_mut::<Nav>()
+            .open_section(Section::GitServer);
+        app.update();
+        let page = testing::find::<PageOf>(&mut app, |p| p.0 == Section::GitServer);
+        assert!(app.world().get::<Tween>(page).is_some());
+        let part = app.world().get::<ChildOf>(page).unwrap().parent();
+        assert!(testing::veil_over(&mut app, part).is_some());
+        testing::run_tweens(&mut app);
+        testing::set_config_locally(&mut app, "appearance.theme", "dark");
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        assert_eq!(testing::showing_veils(&mut app), 0);
     }
 
     #[test]

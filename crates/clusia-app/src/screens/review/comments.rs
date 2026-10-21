@@ -2,6 +2,8 @@
 //! filtered Open / Resolved / All. Replies and resolves join the draft; nothing is posted
 //! until the review is published.
 
+use std::collections::{HashMap, HashSet};
+
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
 use bevy::text::EditableText;
@@ -31,7 +33,9 @@ use crate::ui::kit::{
 use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown};
 use crate::ui::people::{person_avatar, person_name};
+use crate::ui::spinner::Motion;
 use crate::ui::text_area::set_text;
+use crate::ui::tween::{arrive, clear_in};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChipView {
@@ -466,6 +470,7 @@ fn rebuild_comments(
     fonts: Res<UiFonts>,
     theme: Res<Theme>,
     model: Res<Model>,
+    motion: Res<Motion>,
     mut parts: Query<(Entity, &mut ListPart)>,
 ) {
     let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
@@ -490,11 +495,85 @@ fn rebuild_comments(
         let pr = part.pr.clone();
         let editor = tab.ui.editor.clone();
         let fonts = &*fonts;
+        // Only comments that arrived come in: a list shown anew, or through another filter,
+        // just appears.
+        let filter = |v: &CommentsView| v.chips.iter().find(|c| c.on).map(|c| c.filter);
+        let fresh = match &part.built {
+            Some((old, ..)) if filter(old) == filter(&key.0) => Fresh::since(old, &key.0),
+            _ => Fresh::default(),
+        };
         commands.entity(entity).despawn_related::<Children>();
         commands.entity(entity).with_children(|p| {
-            list(p, fonts, &pr, &key.0, editor.as_ref(), &key.3);
+            list(
+                p,
+                fonts,
+                &pr,
+                &key.0,
+                editor.as_ref(),
+                &key.3,
+                &fresh,
+                &motion,
+            );
         });
         part.built = Some(key);
+    }
+}
+
+/// The posts a rebuilt list shows that the list before it did not. A post is its key and its
+/// place among the posts of that key (a thread's posts share the thread's key), so an edited
+/// body or a new age is the same post, and a reply is the next place in its thread. Worked out
+/// once per rebuild, in one pass over each list, laid out as the new view is.
+#[derive(Debug, Default)]
+struct Fresh {
+    general: Vec<bool>,
+    threads: Vec<Vec<bool>>,
+}
+
+impl Fresh {
+    /// Calls `each` with the id of every post of `v`: the general posts, then each thread's.
+    fn walk<'a>(v: &'a CommentsView, mut each: impl FnMut((&'a str, usize))) {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for post in v
+            .general
+            .iter()
+            .chain(v.threads.iter().flat_map(|t| &t.posts))
+        {
+            let nth = seen.entry(post.key.as_str()).or_default();
+            each((post.key.as_str(), *nth));
+            *nth += 1;
+        }
+    }
+
+    fn since(old: &CommentsView, new: &CommentsView) -> Self {
+        let mut before: HashSet<(&str, usize)> = HashSet::new();
+        Self::walk(old, |id| {
+            before.insert(id);
+        });
+        let mut fresh = Vec::new();
+        Self::walk(new, |id| fresh.push(!before.contains(&id)));
+        let mut fresh = fresh.into_iter();
+        Self {
+            general: fresh.by_ref().take(new.general.len()).collect(),
+            threads: new
+                .threads
+                .iter()
+                .map(|t| fresh.by_ref().take(t.posts.len()).collect())
+                .collect(),
+        }
+    }
+
+    /// Whether the general post at `i` is new.
+    fn general(&self, i: usize) -> bool {
+        self.general.get(i).copied().unwrap_or(false)
+    }
+
+    /// Whether post `i` of thread `t` is new.
+    fn post(&self, t: usize, i: usize) -> bool {
+        self.threads
+            .get(t)
+            .and_then(|posts| posts.get(i))
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -505,6 +584,8 @@ fn list(
     v: &CommentsView,
     editor: Option<&Editor>,
     opts: &RenderOpts,
+    fresh: &Fresh,
+    motion: &Motion,
 ) {
     p.spawn(Node {
         column_gap: px(8),
@@ -569,7 +650,7 @@ fn list(
             "General discussion",
             Type::STRONG.size(12.0).ink(Swatch::Muted),
         ));
-        for post in &v.general {
+        for (at, post) in v.general.iter().enumerate() {
             if post.hidden == HiddenState::Hidden {
                 p.spawn(card(Node {
                     flex_direction: FlexDirection::Column,
@@ -578,11 +659,16 @@ fn list(
                 .with_children(|c| collapsed_row(c, fonts, pr, post));
                 continue;
             }
-            p.spawn(card(Node {
-                flex_direction: FlexDirection::Column,
-                ..default()
-            }))
-            .with_children(|c| {
+            let general = p
+                .spawn(card(Node {
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                }))
+                .id();
+            if fresh.general(at) {
+                arrive(p.commands_mut(), motion, general, Swatch::Bg, 1.0);
+            }
+            p.commands_mut().entity(general).with_children(|c| {
                 post_row(c, fonts, pr, post, opts);
                 c.spawn(divider());
                 c.spawn(footer()).with_children(|f| {
@@ -598,7 +684,7 @@ fn list(
             });
         }
     }
-    for t in &v.threads {
+    for (at, t) in v.threads.iter().enumerate() {
         p.spawn(Node {
             column_gap: px(8),
             row_gap: px(4),
@@ -635,16 +721,26 @@ fn list(
             .with_children(|c| collapsed_row(c, fonts, pr, first));
             continue;
         }
-        p.spawn(card(Node {
-            flex_direction: FlexDirection::Column,
-            ..default()
-        }))
-        .with_children(|c| {
+        let thread = p
+            .spawn(card(Node {
+                flex_direction: FlexDirection::Column,
+                ..default()
+            }))
+            .id();
+        // A new thread comes in whole; a new reply clears in its place in the card.
+        let new_thread = fresh.post(at, 0);
+        if new_thread {
+            arrive(p.commands_mut(), motion, thread, Swatch::Bg, 1.0);
+        }
+        p.commands_mut().entity(thread).with_children(|c| {
             for (i, post) in t.posts.iter().enumerate() {
                 if i > 0 {
                     c.spawn(divider());
                 }
-                post_row(c, fonts, pr, post, opts);
+                let row = post_row(c, fonts, pr, post, opts);
+                if !new_thread && fresh.post(at, i) {
+                    clear_in(c.commands_mut(), motion, row, Swatch::Surface);
+                }
             }
             for d in &t.drafts {
                 c.spawn(divider());
@@ -766,7 +862,7 @@ fn post_row(
     pr: &PrRef,
     post: &PostView,
     opts: &RenderOpts,
-) {
+) -> Entity {
     p.spawn(Node {
         padding: UiRect::axes(px(14), px(12)),
         column_gap: px(12),
@@ -820,7 +916,8 @@ fn post_row(
             });
             markdown(c, fonts, &parse_in(&post.body, &opts.github_host, pr), opts);
         });
-    });
+    })
+    .id()
 }
 
 fn draft_reply(
@@ -1120,6 +1217,7 @@ mod tests {
     use crate::ui::kit::Fill;
     use crate::ui::markdown::parse::parse;
     use crate::ui::markdown::{CopiedText, CopyMarkdown, MdBody, MdImage};
+    use crate::ui::tween::Look;
     use bevy::ecs::system::RunSystemOnce;
 
     fn ready() -> Ready {
@@ -1179,6 +1277,119 @@ mod tests {
         });
         testing::settle(&mut app);
         app
+    }
+
+    #[test]
+    fn a_reply_that_arrives_clears_in_and_a_new_thread_comes_in_whole() {
+        use crate::ui::tween::{ROW_RISE, Tween};
+        let mut app = comments_app();
+        testing::run_tweens(&mut app);
+        with_ready(&mut app, |r, _| {
+            let t = threads_mut(r)
+                .iter_mut()
+                .find(|t| !t.is_resolved)
+                .expect("an open thread");
+            let mut reply = t.comments[0].clone();
+            reply.body = "One more thing".into();
+            t.comments.push(reply);
+        });
+        app.update();
+        assert_eq!(testing::showing_veils(&mut app), 1, "over the reply alone");
+        assert_eq!(testing::count::<Tween>(&mut app), 1, "nothing moves");
+        testing::run_tweens(&mut app);
+        with_ready(&mut app, |r, _| {
+            let mut t = threads_mut(r)
+                .iter()
+                .find(|t| !t.is_resolved)
+                .expect("an open thread")
+                .clone();
+            t.id = "PRRT_new".into();
+            t.comments.truncate(1);
+            t.comments[0].body = "A new thread".into();
+            threads_mut(r).push(t);
+        });
+        app.update();
+        assert_eq!(testing::showing_veils(&mut app), 1);
+        let moving: Vec<Look> = {
+            let mut q = app.world_mut().query::<&Tween>();
+            q.iter(app.world())
+                .map(|t| t.from)
+                .filter(|l| l.shift != Vec2::ZERO)
+                .collect()
+        };
+        assert_eq!(moving.len(), 1, "the new thread's card");
+        assert_eq!(moving[0].shift, Vec2::new(0.0, ROW_RISE));
+        testing::run_tweens(&mut app);
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        assert_eq!(testing::showing_veils(&mut app), 0);
+    }
+
+    #[test]
+    fn fresh_marks_a_reply_where_it_lands_and_not_an_edit() {
+        let ui = TabUi::default();
+        let mut r = ready();
+        let before = comments_view(&r, &ui, NOW);
+        let at = before
+            .threads
+            .iter()
+            .position(|t| !t.posts.is_empty())
+            .expect("a thread with posts");
+        let id = before.threads[at].thread.clone();
+        let thread = threads_mut(&mut r)
+            .iter_mut()
+            .find(|t| thread_ref(t) == id)
+            .expect("its review thread");
+        let mut reply = thread.comments[0].clone();
+        reply.body = "One more thing".into();
+        thread.comments.push(reply);
+        thread.comments[0].body = "Edited".into();
+        let after = comments_view(&r, &ui, NOW);
+        let fresh = Fresh::since(&before, &after);
+        let last = after.threads[at].posts.len() - 1;
+        for (t, thread) in after.threads.iter().enumerate() {
+            for i in 0..thread.posts.len() {
+                assert_eq!(
+                    fresh.post(t, i),
+                    t == at && i == last,
+                    "thread {t} post {i}"
+                );
+            }
+        }
+        assert!((0..after.general.len()).all(|i| !fresh.general(i)));
+    }
+
+    #[test]
+    fn comments_shown_again_or_unchanged_do_not_come_in() {
+        use crate::ui::tween::Tween;
+        let mut app = comments_app();
+        testing::run_tweens(&mut app);
+        // The minute moves every age: nothing is new.
+        app.world_mut()
+            .insert_resource(crate::clock::Clock(Some(NOW + 3600)));
+        with_ready(&mut app, |_, _| {});
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        assert_eq!(testing::showing_veils(&mut app), 0);
+        // An edited comment is the same comment.
+        with_ready(&mut app, |r, _| {
+            let t = threads_mut(r)
+                .iter_mut()
+                .find(|t| !t.is_resolved)
+                .expect("an open thread");
+            t.comments[0].body = "Edited: a clearer ask".into();
+        });
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "clearer ask"));
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        assert_eq!(testing::showing_veils(&mut app), 0);
+        // Another filter shows threads the list did not: the list, not new comments.
+        with_ready(&mut app, |_, ui| {
+            ui.filter = crate::review_state::CommentsFilter::All;
+        });
+        testing::settle(&mut app);
+        assert!(has_text(&mut app, "resolved"));
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        assert_eq!(testing::showing_veils(&mut app), 0);
     }
 
     fn has_text(app: &mut App, needle: &str) -> bool {

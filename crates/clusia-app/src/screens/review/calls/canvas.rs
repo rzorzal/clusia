@@ -1079,21 +1079,30 @@ pub(super) fn place_level_labels(
 
 /// The green ring of a call box: hovered, focused, or the selected node.
 pub(super) fn outline_selected(
+    mut commands: Commands,
     focus: Res<InputFocus>,
     theme: Res<Theme>,
     tabs: Res<ReviewTabs>,
-    mut boxes: Query<(Entity, &DiagramBox, &Hovered, &mut Outline), With<CallsMarker>>,
+    motion: Res<crate::ui::spinner::Motion>,
+    mut boxes: Query<
+        (
+            Entity,
+            &DiagramBox,
+            &Hovered,
+            &mut Outline,
+            Option<&crate::ui::tween::Tween>,
+        ),
+        With<CallsMarker>,
+    >,
 ) {
-    for (entity, b, hovered, mut outline) in &mut boxes {
+    for (entity, b, hovered, mut outline, fading) in &mut boxes {
         let selected = tabs
             .0
             .get(&b.pr)
             .is_some_and(|t| t.ui.calls_node.as_deref() == Some(b.node.as_str()));
         let on = selected || hovered.get() || focus.get() == Some(entity);
         let want = if on { theme.tokens.green } else { Color::NONE };
-        if outline.color != want {
-            outline.color = want;
-        }
+        crate::ui::tween::ring_to(&mut commands, &motion, entity, &mut outline, fading, want);
     }
 }
 
@@ -1638,6 +1647,41 @@ mod tests {
         testing::settle(&mut app);
         assert_eq!(ui(&app, &pr).mode, DiffMode::Calls, "nothing changed");
         assert!(testing::shows(&mut app, "This file is not in the diff"));
+    }
+
+    #[test]
+    fn a_selected_box_rings_in_over_a_tenth_of_a_second_and_unselected_goes_off_at_once() {
+        use crate::ui::tween::{RING_MS, Tween};
+        let (mut app, pr) = shown_graph();
+        testing::run_tweens(&mut app);
+        let select = |app: &mut App, node: Option<&str>| {
+            app.world_mut()
+                .resource_mut::<ReviewTabs>()
+                .0
+                .get_mut(&pr)
+                .unwrap()
+                .ui
+                .calls_node = node.map(String::from);
+            app.update();
+        };
+        select(&mut app, None);
+        let token = testing::find::<DiagramBox>(&mut app, |b| b.node == TOKEN);
+        let ring = |app: &App| app.world().get::<Outline>(token).unwrap().color;
+        assert_eq!(ring(&app), Color::NONE);
+        select(&mut app, Some(TOKEN));
+        assert!(
+            app.world().get::<Tween>(token).is_some(),
+            "the ring fades in"
+        );
+        app.update();
+        let mid = ring(&app).alpha();
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        let frames = testing::run_tweens(&mut app);
+        assert!(frames * 16 <= RING_MS as usize + 32, "{frames}");
+        assert_eq!(ring(&app), crate::theme::LIGHT.green);
+        select(&mut app, None);
+        assert_eq!(ring(&app), Color::NONE);
+        assert!(app.world().get::<Tween>(token).is_none());
     }
 
     #[test]
