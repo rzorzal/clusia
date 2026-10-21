@@ -1395,10 +1395,10 @@ mod tests {
         }
         let clock = app.world().resource::<GifClock>().clone();
         assert_eq!(clock.switches, 1, "once, not once per frame");
-        let half = Duration::from_millis(100);
-        assert_eq!(clock.waiting, Some(half));
+        let wait = Duration::from_millis(100);
+        assert_eq!(clock.waiting, Some(wait));
         let settings = app.world().resource::<WinitSettings>();
-        assert_eq!(settings.focused_mode, UpdateMode::reactive(half));
+        assert_eq!(settings.focused_mode, UpdateMode::reactive(wait));
         assert_eq!(
             settings.unfocused_mode,
             UpdateMode::reactive(Duration::from_millis(250))
@@ -1562,13 +1562,14 @@ mod tests {
                 if frame_index(&app, e) != seen[n].1 {
                     seen[n].0 += 1;
                     seen[n].1 = frame_index(&app, e);
+                    // Both GIFs started in the first update, so frame n is due at n * delay.
                     late = late.max(elapsed.saturating_sub(seen[n].0 * delay));
                 }
             }
             step = focused_wait(&app).as_millis() as u64;
         }
         assert!(seen[0].0 >= 18, "the 60 ms GIF kept its pace: {seen:?}");
-        assert!(seen[1].0 >= 8, "the 100 ms GIF kept its pace: {seen:?}");
+        assert!(seen[1].0 >= 11, "the 100 ms GIF kept its pace: {seen:?}");
         assert!(
             late < 60,
             "a frame waits for the first wake after it is due, at most one wake: {late} ms"
