@@ -76,6 +76,24 @@ fn idle_frames_on_home_wake_no_builder() {
 }
 
 #[test]
+fn after_an_animated_switch_ends_idle_frames_animate_nothing_and_wake_no_builder() {
+    use crate::ui::tween::{Animating, DespawnAfter, Tween};
+    let mut app = testing::demo_review_app();
+    testing::set_section(&mut app, &fixture::demo_pr(), ReviewSection::Comments);
+    app.world_mut()
+        .resource_mut::<crate::screens::review::agent::Chats>()
+        .entry(&fixture::demo_pr())
+        .toggle();
+    testing::run_tweens(&mut app);
+    watch(&mut app);
+    idle_frames(&mut app, 10);
+    assert_eq!(wakes(&app), Wakes::default());
+    assert_eq!(testing::count::<Tween>(&mut app), 0);
+    assert_eq!(testing::count::<DespawnAfter>(&mut app), 0);
+    assert!(!app.world().resource::<Animating>().0);
+}
+
+#[test]
 fn a_tell_that_changes_nothing_wakes_no_builder() {
     let mut app = testing::demo_review_app();
     watch(&mut app);

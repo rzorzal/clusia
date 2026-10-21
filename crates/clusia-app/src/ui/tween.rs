@@ -144,6 +144,39 @@ impl DespawnAfter {
     }
 }
 
+/// Puts `tween`'s start look on `entity` through `commands`, for a tween begun after `animate`
+/// has run in the frame (one revealed after layout): the frame it shows would otherwise draw it
+/// at rest before the tween's first frame.
+pub fn start_now(
+    commands: &mut Commands,
+    theme: &Theme,
+    entity: Entity,
+    tween: Tween,
+    (fill, ink, stroke): (Option<&Fill>, Option<&Ink>, Option<&Stroke>),
+) {
+    let mut e = commands.entity(entity);
+    if tween.moves() {
+        e.insert(UiTransform {
+            translation: Val2::px(tween.from.shift.x, tween.from.shift.y),
+            scale: Vec2::splat(tween.from.scale),
+            rotation: Rot2::IDENTITY,
+        });
+    }
+    if tween.fades() {
+        let alpha = tween.from.alpha;
+        if let Some(fill) = fill {
+            e.insert(BackgroundColor(faded(theme, fill.0, alpha)));
+        }
+        if let Some(ink) = ink {
+            e.insert(TextColor(faded(theme, ink.0, alpha)));
+        }
+        if let Some(stroke) = stroke {
+            e.insert(BorderColor::all(faded(theme, stroke.0, alpha)));
+        }
+    }
+    e.insert(tween);
+}
+
 /// Whether a tween or a pending despawn is running. Written only when that changes.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Animating(pub bool);
@@ -270,6 +303,38 @@ pub fn depart(commands: &mut Commands, motion: &Motion, row: Entity, swatch: Swa
         shroud_around(swatch, ROW_OUT_MS, Ease::OutCubic, outset),
         ChildOf(row),
     ));
+}
+
+/// How long a focus ring takes to come on.
+pub const RING_MS: u64 = 100;
+
+/// Shows `want` as `entity`'s outline. A ring coming on fades in over `RING_MS` (linear); one
+/// going off or changing colour is written at once. `fading` is the tween `entity` carries.
+/// Call it from `Update`, so a fade it stops ends before `animate` runs.
+pub fn ring_to(
+    commands: &mut Commands,
+    motion: &Motion,
+    entity: Entity,
+    outline: &mut Outline,
+    fading: Option<&Tween>,
+    want: Color,
+) {
+    if let Some(fading) = fading {
+        if fading.ring.is_some_and(|(_, to)| to == want) {
+            return;
+        }
+        commands.entity(entity).try_remove::<Tween>();
+    }
+    if outline.color == want {
+        return;
+    }
+    if outline.color == Color::NONE && want != Color::NONE && !motion.reduced {
+        commands
+            .entity(entity)
+            .insert(Tween::ring(RING_MS, Ease::Linear, Color::NONE, want));
+    } else {
+        outline.color = want;
+    }
 }
 
 /// Above every sibling of the node it covers.

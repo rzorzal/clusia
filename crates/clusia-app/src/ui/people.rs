@@ -23,12 +23,14 @@ use clusia_core::people::{avatar_url, is_login, profile_url};
 use crate::bridge::{Ask, Asks, MediaError, Model};
 use crate::fonts::UiFonts;
 use crate::platform_open::{OpenUrls, visit};
-use crate::theme::Swatch;
+use crate::theme::{Swatch, Theme};
 use crate::ui::composer::popover::panel_spot;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Type, Variant, button, initial, text, wrapped_text,
+    Clickable, Fill, HoverFill, Ink, Stroke, Type, Variant, button, initial, text, wrapped_text,
 };
 use crate::ui::media::{MediaCache, MediaState};
+use crate::ui::spinner::Motion;
+use crate::ui::tween::{Ease, Look, Tween, start_now};
 
 /// The width of the card.
 const CARD_WIDTH: f32 = 280.0;
@@ -518,9 +520,14 @@ fn sync_card(
 /// Puts the card under the node it opened from (or above it when there is no room), inside the
 /// window.
 fn place_card(
+    mut commands: Commands,
     card: Res<HoverCard>,
+    motion: Res<Motion>,
     anchors: Query<(&ComputedNode, &UiGlobalTransform)>,
-    mut roots: Query<(&mut Node, &mut Visibility, &ComputedNode), With<CardRoot>>,
+    mut roots: Query<(Entity, &mut Node, &mut Visibility, &ComputedNode), With<CardRoot>>,
+    theme: Res<Theme>,
+    children: Query<&Children>,
+    painted: Query<(Option<&Fill>, Option<&Ink>, Option<&Stroke>)>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     let Some(target) = card.shown() else { return };
@@ -533,7 +540,7 @@ fn place_card(
         .map_or(Vec2::splat(f32::MAX), |w| Vec2::new(w.width(), w.height()));
     let scale = anchor.inverse_scale_factor;
     let rect = Rect::from_center_size(at.translation * scale, anchor.size * scale);
-    for (mut node, mut visibility, size) in &mut roots {
+    for (entity, mut node, mut visibility, size) in &mut roots {
         let spot = panel_spot(rect, size.size * size.inverse_scale_factor, window);
         let (l, t, h) = (px(spot.at.x), px(spot.at.y), px(spot.max_height));
         if node.left != l || node.top != t || node.max_height != h {
@@ -542,6 +549,45 @@ fn place_card(
             node.max_height = h;
         } else if *visibility != Visibility::Inherited {
             *visibility = Visibility::Inherited;
+            if !motion.reduced {
+                appear(&mut commands, &theme, entity, &children, &painted);
+            }
+        }
+    }
+}
+
+/// How long the card takes to appear, and the size it grows from.
+pub const CARD_IN_MS: u64 = 120;
+pub const CARD_FROM: f32 = 0.97;
+
+/// The card grows into place, and it and every colour in it fade in: what is under a floating
+/// card is not one colour a veil could take. It is shown in the frame this runs, after
+/// `animate`, so the start is put on at once.
+fn appear(
+    commands: &mut Commands,
+    theme: &Theme,
+    card: Entity,
+    children: &Query<&Children>,
+    painted: &Query<(Option<&Fill>, Option<&Ink>, Option<&Stroke>)>,
+) {
+    let grow = Tween::new(
+        CARD_IN_MS,
+        Ease::OutCubic,
+        Look::REST.scaled(CARD_FROM).faded(0.0),
+        Look::REST,
+    );
+    let fade = Tween::new(
+        CARD_IN_MS,
+        Ease::OutCubic,
+        Look::REST.faded(0.0),
+        Look::REST,
+    );
+    let marks = |e| painted.get(e).unwrap_or((None, None, None));
+    start_now(commands, theme, card, grow, marks(card));
+    for part in children.iter_descendants(card) {
+        let (fill, ink, stroke) = marks(part);
+        if fill.is_some() || ink.is_some() || stroke.is_some() {
+            start_now(commands, theme, part, fade, (fill, ink, stroke));
         }
     }
 }
@@ -882,6 +928,61 @@ mod tests {
         assert!((x - ax).abs() <= 1.0, "left edges line up: {x} vs {ax}");
         assert!(y >= ay + ah && y - (ay + ah) <= 12.0, "just below: {y}");
         assert!(x >= 0.0 && x + w <= 1280.0 && y + h <= 800.0);
+    }
+
+    #[test]
+    fn the_card_shows_clear_and_small_then_grows_and_fades_in_with_what_is_in_it() {
+        let mut app = testing::layout_app(fixture::demo(testing::NOW), UVec2::new(1280, 800));
+        testing::open_ready(&mut app, false);
+        testing::run_tweens(&mut app);
+        app.world_mut().resource_mut::<HoverCard>().pin("octo");
+        app.world_mut()
+            .resource_mut::<People>()
+            .by_login
+            .insert("octo".into(), ProfileState::Loaded(profile("octo")));
+        let card = loop {
+            app.update();
+            let mut q = app.world_mut().query::<(Entity, &CardRoot, &Visibility)>();
+            if let Some((e, _, _)) = q
+                .iter(app.world())
+                .find(|(_, c, v)| c.login == "octo" && **v == Visibility::Inherited)
+            {
+                break e;
+            }
+        };
+        let w = app.world();
+        assert_eq!(
+            w.get::<UiTransform>(card).unwrap().scale,
+            Vec2::splat(CARD_FROM)
+        );
+        assert_eq!(w.get::<BackgroundColor>(card).unwrap().0.alpha(), 0.0);
+        let texts: Vec<Entity> = {
+            let mut q = app.world_mut().query_filtered::<Entity, With<Ink>>();
+            q.iter(app.world())
+                .filter(|e| {
+                    std::iter::successors(Some(*e), |e| {
+                        app.world().get::<ChildOf>(*e).map(|c| c.parent())
+                    })
+                    .any(|a| a == card)
+                })
+                .collect()
+        };
+        assert!(!texts.is_empty());
+        for t in &texts {
+            assert_eq!(app.world().get::<TextColor>(*t).unwrap().0.alpha(), 0.0);
+        }
+        testing::run_tweens(&mut app);
+        assert_eq!(
+            app.world().get::<UiTransform>(card).unwrap().scale,
+            Vec2::ONE
+        );
+        assert_eq!(
+            app.world().get::<BackgroundColor>(card).unwrap().0,
+            crate::theme::LIGHT.surface
+        );
+        for t in &texts {
+            assert_eq!(app.world().get::<TextColor>(*t).unwrap().0.alpha(), 1.0);
+        }
     }
 
     #[test]

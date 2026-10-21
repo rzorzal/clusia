@@ -1860,22 +1860,27 @@ pub(crate) fn stretched_dashed_ring(
 /// The ring of a box that is hovered or has the keyboard focus. A Calls box also rings while it
 /// is selected, so its own system draws it.
 pub(crate) fn outline_boxes(
+    mut commands: Commands,
     focus: Res<InputFocus>,
     theme: Res<Theme>,
+    motion: Res<crate::ui::spinner::Motion>,
     mut boxes: Query<
-        (Entity, &Hovered, &mut Outline),
+        (
+            Entity,
+            &Hovered,
+            &mut Outline,
+            Option<&crate::ui::tween::Tween>,
+        ),
         (
             With<DiagramBox>,
             Without<crate::screens::review::calls::canvas::CallsMarker>,
         ),
     >,
 ) {
-    for (entity, hovered, mut outline) in &mut boxes {
+    for (entity, hovered, mut outline, fading) in &mut boxes {
         let on = hovered.get() || focus.get() == Some(entity);
         let want = if on { theme.tokens.green } else { Color::NONE };
-        if outline.color != want {
-            outline.color = want;
-        }
+        crate::ui::tween::ring_to(&mut commands, &motion, entity, &mut outline, fading, want);
     }
 }
 
@@ -2864,6 +2869,37 @@ mod tests {
     }
 
     #[test]
+    fn a_ring_fades_in_over_a_tenth_of_a_second_and_goes_off_at_once() {
+        use crate::ui::tween::{RING_MS, Tween};
+        let mut app = testing::app(fixture::demo(NOW));
+        let _ = open(&mut app);
+        testing::run_tweens(&mut app);
+        let http = box_entity(&mut app, "http");
+        let ring = |app: &App, e: Entity| app.world().get::<Outline>(e).unwrap().color;
+        app.world_mut().entity_mut(http).insert(Hovered(true));
+        app.update();
+        assert!(app.world().get::<Tween>(http).is_some());
+        app.update();
+        let mid = ring(&app, http).alpha();
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        let frames = testing::run_tweens(&mut app);
+        assert!(frames * 16 <= RING_MS as usize + 32, "{frames}");
+        assert_eq!(ring(&app, http), LIGHT.green);
+        app.world_mut().entity_mut(http).insert(Hovered(false));
+        app.update();
+        assert_eq!(ring(&app, http), Color::NONE);
+        // Off in the middle of the fade: off at once, and the fade does not come back.
+        app.world_mut().entity_mut(http).insert(Hovered(true));
+        app.update();
+        app.update();
+        app.world_mut().entity_mut(http).insert(Hovered(false));
+        app.update();
+        app.update();
+        assert_eq!(ring(&app, http), Color::NONE);
+        assert!(app.world().get::<Tween>(http).is_none());
+    }
+
+    #[test]
     fn hover_and_focus_ring_a_box() {
         let mut app = testing::app(fixture::demo(NOW));
         let _ = open(&mut app);
@@ -2876,6 +2912,8 @@ mod tests {
             .resource_mut::<InputFocus>()
             .set(lock, FocusCause::Navigated);
         testing::settle(&mut app);
+        // The rings fade in.
+        testing::run_tweens(&mut app);
         assert_eq!(ring(&app, http), LIGHT.green);
         assert_eq!(ring(&app, lock), LIGHT.green);
         app.world_mut().entity_mut(http).insert(Hovered(false));

@@ -1079,21 +1079,30 @@ pub(super) fn place_level_labels(
 
 /// The green ring of a call box: hovered, focused, or the selected node.
 pub(super) fn outline_selected(
+    mut commands: Commands,
     focus: Res<InputFocus>,
     theme: Res<Theme>,
     tabs: Res<ReviewTabs>,
-    mut boxes: Query<(Entity, &DiagramBox, &Hovered, &mut Outline), With<CallsMarker>>,
+    motion: Res<crate::ui::spinner::Motion>,
+    mut boxes: Query<
+        (
+            Entity,
+            &DiagramBox,
+            &Hovered,
+            &mut Outline,
+            Option<&crate::ui::tween::Tween>,
+        ),
+        With<CallsMarker>,
+    >,
 ) {
-    for (entity, b, hovered, mut outline) in &mut boxes {
+    for (entity, b, hovered, mut outline, fading) in &mut boxes {
         let selected = tabs
             .0
             .get(&b.pr)
             .is_some_and(|t| t.ui.calls_node.as_deref() == Some(b.node.as_str()));
         let on = selected || hovered.get() || focus.get() == Some(entity);
         let want = if on { theme.tokens.green } else { Color::NONE };
-        if outline.color != want {
-            outline.color = want;
-        }
+        crate::ui::tween::ring_to(&mut commands, &motion, entity, &mut outline, fading, want);
     }
 }
 
