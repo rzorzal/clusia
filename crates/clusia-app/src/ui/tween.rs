@@ -1,6 +1,7 @@
 //! Short animations of properties that only change how a node is drawn: its `UiTransform`
-//! (shift and scale), the alpha of its swatches (`Fill`, `Stroke`, `Ink`) and its `Outline`
-//! colour. Nothing here writes a `Node`, so a running tween never lays the window out again.
+//! (shift and scale), the alpha of its swatches (`Fill`, `Stroke`, `Ink`), a flash of its
+//! `BackgroundColor` easing to its `Fill`, and its `Outline` colour. Nothing here writes a
+//! `Node`, so a running tween never lays the window out again.
 //!
 //! A `Tween` is written once, when the animation starts; `animate` takes its start time from
 //! the first frame that sees it, eases it each frame with `set_if_neq`, writes the end value
@@ -28,6 +29,7 @@ pub enum Ease {
     OutCubic,
     OutQuart,
     InCubic,
+    InOutCubic,
 }
 
 impl Ease {
@@ -39,6 +41,8 @@ impl Ease {
             Ease::OutCubic => 1.0 - (1.0 - t).powi(3),
             Ease::OutQuart => 1.0 - (1.0 - t).powi(4),
             Ease::InCubic => t.powi(3),
+            Ease::InOutCubic if t < 0.5 => 4.0 * t.powi(3),
+            Ease::InOutCubic => 1.0 - (2.0 - 2.0 * t).powi(3) / 2.0,
         }
     }
 }
@@ -92,6 +96,8 @@ pub struct Tween {
     pub to: Look,
     /// The `Outline` colour at the start and at the end.
     pub ring: Option<(Color, Color)>,
+    /// The `BackgroundColor` it starts at, easing to the colour of the entity's `Fill`.
+    pub flash: Option<Color>,
     pub secs: f32,
     pub ease: Ease,
     /// `Time::elapsed_secs_f64` of the first frame that saw it.
@@ -104,6 +110,7 @@ impl Tween {
             from,
             to,
             ring: None,
+            flash: None,
             secs: ms as f32 / 1000.0,
             ease,
             start: None,
@@ -118,12 +125,44 @@ impl Tween {
         }
     }
 
+    /// A flash of the `BackgroundColor` alone, from `from` to the entity's `Fill`. The fill is
+    /// read each frame, so it ends on the one the entity has then (a selection that changed).
+    pub fn flash(ms: u64, ease: Ease, from: Color) -> Self {
+        Self {
+            flash: Some(from),
+            ..Self::new(ms, ease, Look::REST, Look::REST)
+        }
+    }
+
     fn moves(&self) -> bool {
         self.from.shift != self.to.shift || self.from.scale != self.to.scale
     }
 
     fn fades(&self) -> bool {
         self.from.alpha != self.to.alpha
+    }
+}
+
+/// Where an animation of `secs`, eased by `ease`, is at `now`: the share of the way and whether
+/// it is over. `start` takes `now` on the first call, so the first frame that sees an animation
+/// shows its start. With `jump` (Reduce Motion, a covered window) it is over at once.
+pub fn progress(
+    start: &mut Option<f64>,
+    now: f64,
+    secs: f32,
+    ease: Ease,
+    jump: bool,
+) -> (f32, bool) {
+    let start = *start.get_or_insert(now);
+    let t = if jump || secs <= 0.0 {
+        1.0
+    } else {
+        ((now - start) as f32 / secs).min(1.0)
+    };
+    if t >= 1.0 {
+        (1.0, true)
+    } else {
+        (ease.at(t), false)
     }
 }
 
@@ -461,14 +500,8 @@ fn animate(
     for (entity, mut tween, transform, fill, stroke, ink, outline, visibility, veiled, image) in
         &mut tweens
     {
-        let start = *tween.start.get_or_insert(now);
-        let t = if jump || tween.secs <= 0.0 {
-            1.0
-        } else {
-            ((now - start) as f32 / tween.secs).min(1.0)
-        };
-        let done = t >= 1.0;
-        let k = if done { 1.0 } else { tween.ease.at(t) };
+        let (secs, ease) = (tween.secs, tween.ease);
+        let (k, done) = progress(&mut tween.start, now, secs, ease, jump);
         let look = if done {
             tween.to
         } else {
@@ -484,15 +517,22 @@ fn animate(
             };
             transform.set_if_neq(want);
         }
-        if tween.fades() {
-            if let Some((mut fill, mut color, hovers)) = fill {
-                color.set_if_neq(BackgroundColor(faded(&theme, fill.0, look.alpha)));
-                // The fade painted `Fill` over whatever hover or press colour the widget has
-                // now; `hover` repaints it on the next frame, which it does for a changed fill.
-                if done && hovers {
-                    fill.set_changed();
-                }
+        if let Some((mut fill, mut color, hovers)) = fill
+            && (tween.fades() || tween.flash.is_some())
+        {
+            let rest = faded(&theme, fill.0, look.alpha);
+            let want = match tween.flash {
+                Some(from) if !done => mix(from, rest, k),
+                _ => rest,
+            };
+            color.set_if_neq(BackgroundColor(want));
+            // The tween painted `Fill` over whatever hover or press colour the widget has now;
+            // `hover` repaints it on the next frame, which it does for a changed fill.
+            if done && hovers {
+                fill.set_changed();
             }
+        }
+        if tween.fades() {
             if let Some((stroke, mut color)) = stroke {
                 color.set_if_neq(BorderColor::all(faded(&theme, stroke.0, look.alpha)));
             }
@@ -519,8 +559,8 @@ fn animate(
         }
     }
     for (entity, mut despawn) in &mut despawns {
-        let start = *despawn.start.get_or_insert(now);
-        if jump || (now - start) as f32 >= despawn.secs {
+        let secs = despawn.secs;
+        if progress(&mut despawn.start, now, secs, Ease::Linear, jump).1 {
             commands.entity(entity).try_despawn();
         } else {
             ticking = true;
@@ -591,6 +631,93 @@ mod tests {
         assert_eq!(Ease::OutQuart.at(0.5), 0.9375);
         assert_eq!(Ease::InCubic.at(0.5), 0.125);
         assert_eq!(Ease::Linear.at(0.25), 0.25);
+        assert_eq!(Ease::InOutCubic.at(0.0), 0.0);
+        assert_eq!(Ease::InOutCubic.at(0.25), 0.0625);
+        assert_eq!(Ease::InOutCubic.at(0.5), 0.5);
+        assert_eq!(Ease::InOutCubic.at(0.75), 0.9375);
+        assert_eq!(Ease::InOutCubic.at(1.0), 1.0);
+    }
+
+    #[test]
+    fn progress_starts_on_the_first_call_and_ends_exactly() {
+        let mut start = None;
+        assert_eq!(
+            progress(&mut start, 2.0, 0.1, Ease::Linear, false),
+            (0.0, false)
+        );
+        assert_eq!(start, Some(2.0));
+        let (k, done) = progress(&mut start, 2.05, 0.1, Ease::Linear, false);
+        assert!((k - 0.5).abs() < 1e-4 && !done, "{k}");
+        assert_eq!(
+            progress(&mut start, 2.2, 0.1, Ease::Linear, false),
+            (1.0, true)
+        );
+        let mut fresh = None;
+        assert_eq!(
+            progress(&mut fresh, 5.0, 0.1, Ease::Linear, true),
+            (1.0, true),
+            "a jump ends at once"
+        );
+    }
+
+    fn flashing(app: &mut App, extra: impl Bundle) -> Entity {
+        spawn(
+            app,
+            (
+                Node::default(),
+                BackgroundColor::default(),
+                Fill(Swatch::AddedBg),
+                Tween::flash(600, Ease::OutCubic, LIGHT.amber_soft),
+                extra,
+            ),
+        )
+    }
+
+    #[test]
+    fn a_flash_eases_from_its_colour_to_the_fill_and_ends_on_it() {
+        let mut app = app();
+        let e = flashing(&mut app, ());
+        app.update();
+        let bg = |app: &App| app.world().get::<BackgroundColor>(e).unwrap().0;
+        assert_eq!(
+            bg(&app),
+            LIGHT.amber_soft,
+            "the first frame shows the flash"
+        );
+        app.update();
+        app.update();
+        let mid = bg(&app);
+        assert!(mid != LIGHT.amber_soft && mid != LIGHT.added_bg, "{mid:?}");
+        let frames = run_out(&mut app, e);
+        // 600 ms at 16 ms a frame.
+        assert_eq!(frames, 36);
+        assert_eq!(bg(&app), LIGHT.added_bg);
+    }
+
+    #[test]
+    fn a_flash_follows_a_fill_changed_on_the_way_and_ends_on_the_hover_fill() {
+        use bevy::picking::hover::Hovered;
+        let mut app = app();
+        let e = flashing(&mut app, (HoverFill(Swatch::Hover), Hovered::default()));
+        app.update();
+        app.update();
+        app.world_mut().get_mut::<Fill>(e).unwrap().0 = Swatch::Selected;
+        run_out(&mut app, e);
+        assert_eq!(
+            app.world().get::<BackgroundColor>(e).unwrap().0,
+            LIGHT.selected,
+            "the new fill"
+        );
+        let e = flashing(&mut app, (HoverFill(Swatch::Hover), Hovered::default()));
+        app.update();
+        app.update();
+        app.world_mut().entity_mut(e).insert(Hovered(true));
+        run_out(&mut app, e);
+        app.update();
+        assert_eq!(
+            app.world().get::<BackgroundColor>(e).unwrap().0,
+            LIGHT.hover
+        );
     }
 
     #[test]
