@@ -32,7 +32,7 @@ use crate::ui::kit::{
 };
 use crate::ui::pace::{Asking, Pace, Wake};
 use crate::ui::spinner::{Motion, spinner};
-use crate::ui::tween::enter;
+use crate::ui::tween::{DespawnAfter, Ease, Look, Tween, enter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
@@ -797,37 +797,98 @@ fn expire_toasts(time: Res<Time>, mut toasts: ResMut<Toasts>, mut pace: ResMut<P
     }
 }
 
+/// How long a toast takes to come in, from how far below, and how long it takes to fade when
+/// its time is up.
+pub const TOAST_IN_MS: u64 = 180;
+pub const TOAST_RISE: f32 = 12.0;
+pub const TOAST_OUT_MS: u64 = 150;
+
+/// The toast a card shows. A card fading out has none (nor `ToastCard`).
+#[derive(Component, Debug, Clone, PartialEq)]
+struct ToastOf(Toast);
+
+/// Keeps one card per toast: a new toast's card comes in, the others stay as they are, and the
+/// card of a toast that has gone fades out and then goes.
 fn rebuild_toasts(
     mut commands: Commands,
     toasts: Res<Toasts>,
     fonts: Res<UiFonts>,
+    motion: Res<Motion>,
     mut slots: Query<(Entity, &mut ToastSlot)>,
+    cards: Query<(Entity, &ToastOf, &ChildOf, &Children)>,
 ) {
     for (entity, mut slot) in &mut slots {
         if slot.built.as_ref() == Some(&toasts.0) {
             continue;
         }
-        commands.entity(entity).despawn_related::<Children>();
-        commands.entity(entity).with_children(|p| {
-            for toast in &toasts.0 {
-                let t = if toast.warning {
-                    Type::BODY.ink(Swatch::Orange)
-                } else {
-                    Type::BODY
-                };
-                p.spawn((
+        let mut kept: Vec<Entity> = Vec::new();
+        for toast in &toasts.0 {
+            let card = cards.iter().find(|(card, of, child_of, _)| {
+                child_of.parent() == entity && of.0 == *toast && !kept.contains(card)
+            });
+            if let Some((card, ..)) = card {
+                kept.push(card);
+                continue;
+            }
+            let t = if toast.warning {
+                Type::BODY.ink(Swatch::Orange)
+            } else {
+                Type::BODY
+            };
+            let card = commands
+                .spawn((
                     crate::ui::kit::card(Node {
                         padding: UiRect::axes(px(14), px(10)),
                         max_width: px(420),
                         ..default()
                     }),
                     ToastCard,
+                    ToastOf(toast.clone()),
+                    ChildOf(entity),
                 ))
-                .with_children(|c| {
-                    c.spawn(text(&fonts, toast.text.clone(), t));
-                });
+                .id();
+            let label = commands
+                .spawn((text(&fonts, toast.text.clone(), t), ChildOf(card)))
+                .id();
+            kept.push(card);
+            if !motion.reduced {
+                let from = Look::REST.shifted(0.0, TOAST_RISE).faded(0.0);
+                commands.entity(card).insert(Tween::new(
+                    TOAST_IN_MS,
+                    Ease::OutCubic,
+                    from,
+                    Look::REST,
+                ));
+                commands.entity(label).insert(Tween::new(
+                    TOAST_IN_MS,
+                    Ease::OutCubic,
+                    Look::REST.faded(0.0),
+                    Look::REST,
+                ));
             }
-        });
+        }
+        for (card, _, child_of, children) in &cards {
+            if child_of.parent() != entity || kept.contains(&card) {
+                continue;
+            }
+            if motion.reduced {
+                commands.entity(card).despawn();
+                continue;
+            }
+            let out = Tween::new(
+                TOAST_OUT_MS,
+                Ease::InCubic,
+                Look::REST,
+                Look::REST.faded(0.0),
+            );
+            commands
+                .entity(card)
+                .remove::<(ToastCard, ToastOf)>()
+                .insert((out, DespawnAfter::new(TOAST_OUT_MS)));
+            for &label in children {
+                commands.entity(label).insert(out);
+            }
+        }
         slot.built = Some(toasts.0.clone());
     }
 }
@@ -1386,6 +1447,74 @@ mod tests {
         app.update();
         app.update();
         assert_eq!(testing::count::<ToastCard>(&mut app), 1, "expired ones go");
+    }
+
+    fn toast(text: &str, until: f64) -> Toast {
+        Toast {
+            text: text.into(),
+            warning: false,
+            until,
+        }
+    }
+
+    #[test]
+    fn a_toast_slides_up_and_fades_in_and_the_others_stay_as_they_are() {
+        use crate::ui::tween::Tween;
+        let mut app = toast_app();
+        app.world_mut().resource_mut::<Toasts>().0 = vec![toast("Saved", 1e9)];
+        app.update();
+        let first = testing::find::<ToastCard>(&mut app, |_| true);
+        let tween = *app.world().get::<Tween>(first).unwrap();
+        assert_eq!(tween.from.shift, Vec2::new(0.0, TOAST_RISE));
+        assert_eq!(tween.from.alpha, 0.0);
+        let label = app.world().get::<Children>(first).unwrap()[0];
+        assert!(
+            app.world().get::<Tween>(label).is_some(),
+            "its text fades in too"
+        );
+        testing::run_tweens(&mut app);
+        assert_eq!(
+            app.world().get::<BackgroundColor>(first).unwrap().0,
+            crate::theme::LIGHT.surface
+        );
+        app.world_mut()
+            .resource_mut::<Toasts>()
+            .0
+            .push(toast("Copied", 1e9));
+        app.update();
+        assert!(app.world().get_entity(first).is_ok(), "not built again");
+        assert!(app.world().get::<Tween>(first).is_none());
+        assert_eq!(testing::count::<ToastCard>(&mut app), 2);
+    }
+
+    #[test]
+    fn a_toast_whose_time_is_up_fades_out_then_goes() {
+        use crate::ui::tween::{DespawnAfter, Tween};
+        let mut app = toast_app();
+        let until = app.world().resource::<Time>().elapsed_secs_f64() + 0.2;
+        app.world_mut().resource_mut::<Toasts>().0 = vec![toast("Saved", until)];
+        app.update();
+        let card = testing::find::<ToastCard>(&mut app, |_| true);
+        for _ in 0..20 {
+            app.update();
+            if app.world().resource::<Toasts>().0.is_empty() {
+                break;
+            }
+        }
+        app.update();
+        assert_eq!(
+            testing::count::<ToastCard>(&mut app),
+            0,
+            "no longer a toast"
+        );
+        assert!(app.world().get::<DespawnAfter>(card).is_some());
+        assert_eq!(app.world().get::<Tween>(card).unwrap().to.alpha, 0.0);
+        testing::run_tweens(&mut app);
+        assert!(app.world().get_entity(card).is_err());
+        assert_eq!(
+            app.world().resource::<WinitSettings>().focused_mode,
+            WinitSettings::desktop_app().focused_mode
+        );
     }
 
     fn toast_app() -> App {

@@ -153,15 +153,13 @@ pub struct Animating(pub bool);
 /// clear it is hidden, not despawned: taking a node out lays its parent out again, and that
 /// re-measures every text under it. It goes with the parent's next rebuild.
 pub fn veil(swatch: Swatch, ms: u64, ease: Ease) -> impl Bundle {
+    veil_around(swatch, ms, ease, 0.0)
+}
+
+/// `veil` reaching `outset` px past its parent's padding box: over a border that wide.
+pub fn veil_around(swatch: Swatch, ms: u64, ease: Ease, outset: f32) -> impl Bundle {
     (
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(0),
-            right: px(0),
-            top: px(0),
-            bottom: px(0),
-            ..default()
-        },
+        layer(outset),
         ZIndex(VEIL_Z),
         BackgroundColor::default(),
         Fill(swatch),
@@ -174,15 +172,13 @@ pub fn veil(swatch: Swatch, ms: u64, ease: Ease) -> impl Bundle {
 /// A layer of `swatch` over its parent that thickens from clear to opaque in `ms` and stays:
 /// what it covers seems to fade out. Picking passes through it.
 pub fn shroud(swatch: Swatch, ms: u64, ease: Ease) -> impl Bundle {
+    shroud_around(swatch, ms, ease, 0.0)
+}
+
+/// `shroud` reaching `outset` px past its parent's padding box.
+pub fn shroud_around(swatch: Swatch, ms: u64, ease: Ease, outset: f32) -> impl Bundle {
     (
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(0),
-            right: px(0),
-            top: px(0),
-            bottom: px(0),
-            ..default()
-        },
+        layer(outset),
         ZIndex(VEIL_Z),
         BackgroundColor::default(),
         Fill(swatch),
@@ -190,6 +186,17 @@ pub fn shroud(swatch: Swatch, ms: u64, ease: Ease) -> impl Bundle {
         Shroud,
         Tween::new(ms, ease, Look::REST.faded(0.0), Look::REST),
     )
+}
+
+fn layer(outset: f32) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: px(-outset),
+        right: px(-outset),
+        top: px(-outset),
+        bottom: px(-outset),
+        ..default()
+    }
 }
 
 /// A layer spawned by `shroud`.
@@ -214,6 +221,55 @@ pub fn enter(commands: &mut Commands, motion: &Motion, root: Entity, cover: Enti
         Look::REST,
     ));
     commands.spawn((veil(Swatch::Bg, ENTER_MS, Ease::OutCubic), ChildOf(cover)));
+}
+
+/// How long a row put into a list takes to come in, how far below its place it starts, and how
+/// long a row taken out takes to fade.
+pub const ROW_IN_MS: u64 = 160;
+pub const ROW_RISE: f32 = 6.0;
+pub const ROW_OUT_MS: u64 = 120;
+
+/// Brings in `row`, new in its list: it rises `ROW_RISE` px into place while a veil of
+/// `swatch` (what is around the row) over it and `outset` px of border clears. It is spawned
+/// at its full size, so the rows after it move once, not along. Nothing starts with Reduce
+/// Motion.
+pub fn arrive(commands: &mut Commands, motion: &Motion, row: Entity, swatch: Swatch, outset: f32) {
+    if motion.reduced {
+        return;
+    }
+    commands.entity(row).insert(Tween::new(
+        ROW_IN_MS,
+        Ease::OutCubic,
+        Look::REST.shifted(0.0, ROW_RISE),
+        Look::REST,
+    ));
+    commands.spawn((
+        veil_around(swatch, ROW_IN_MS, Ease::OutCubic, outset),
+        ChildOf(row),
+    ));
+}
+
+/// Fades in `row`, new inside a box that stays (a reply in its thread's card), under a veil
+/// of `swatch`, without moving it. Nothing starts with Reduce Motion.
+pub fn clear_in(commands: &mut Commands, motion: &Motion, row: Entity, swatch: Swatch) {
+    if !motion.reduced {
+        commands.spawn((veil(swatch, ROW_IN_MS, Ease::OutCubic), ChildOf(row)));
+    }
+}
+
+/// Fades out `row`, a copy of a row its list no longer shows, under a shroud of `swatch`, then
+/// despawns it; the rows after it move up once, when it goes. With Reduce Motion it goes at
+/// once.
+pub fn depart(commands: &mut Commands, motion: &Motion, row: Entity, swatch: Swatch, outset: f32) {
+    if motion.reduced {
+        commands.entity(row).despawn();
+        return;
+    }
+    commands.entity(row).insert(DespawnAfter::new(ROW_OUT_MS));
+    commands.spawn((
+        shroud_around(swatch, ROW_OUT_MS, Ease::OutCubic, outset),
+        ChildOf(row),
+    ));
 }
 
 /// Above every sibling of the node it covers.

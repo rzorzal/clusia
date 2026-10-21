@@ -31,7 +31,9 @@ use crate::ui::kit::{
 use crate::ui::markdown::cache::parse_in;
 use crate::ui::markdown::{RenderOpts, copy_button, markdown};
 use crate::ui::people::{person_avatar, person_name};
+use crate::ui::spinner::Motion;
 use crate::ui::text_area::set_text;
+use crate::ui::tween::{arrive, clear_in};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChipView {
@@ -466,6 +468,7 @@ fn rebuild_comments(
     fonts: Res<UiFonts>,
     theme: Res<Theme>,
     model: Res<Model>,
+    motion: Res<Motion>,
     mut parts: Query<(Entity, &mut ListPart)>,
 ) {
     let opts = RenderOpts::from_config(theme.code_size, &model.snapshot.config);
@@ -490,11 +493,58 @@ fn rebuild_comments(
         let pr = part.pr.clone();
         let editor = tab.ui.editor.clone();
         let fonts = &*fonts;
+        // Only comments that arrived come in: a list shown anew, or through another filter,
+        // just appears.
+        let filter = |v: &CommentsView| v.chips.iter().find(|c| c.on).map(|c| c.filter);
+        let fresh = match &part.built {
+            Some((old, ..)) if filter(old) == filter(&key.0) => Fresh::since(old, &key.0),
+            _ => Fresh::default(),
+        };
         commands.entity(entity).despawn_related::<Children>();
         commands.entity(entity).with_children(|p| {
-            list(p, fonts, &pr, &key.0, editor.as_ref(), &key.3);
+            list(
+                p,
+                fonts,
+                &pr,
+                &key.0,
+                editor.as_ref(),
+                &key.3,
+                &fresh,
+                &motion,
+            );
         });
         part.built = Some(key);
+    }
+}
+
+/// The posts a rebuilt list shows that the list before it did not.
+#[derive(Debug, Default)]
+struct Fresh(Vec<(String, String, String)>);
+
+impl Fresh {
+    /// A post is the same post while its key, author and body are: its age moves on its own.
+    fn of(post: &PostView) -> (String, String, String) {
+        (post.key.clone(), post.author.clone(), post.body.clone())
+    }
+
+    fn posts(v: &CommentsView) -> impl Iterator<Item = &PostView> {
+        v.general
+            .iter()
+            .chain(v.threads.iter().flat_map(|t| &t.posts))
+    }
+
+    fn since(old: &CommentsView, new: &CommentsView) -> Self {
+        let before: Vec<_> = Self::posts(old).map(Self::of).collect();
+        Self(
+            Self::posts(new)
+                .map(Self::of)
+                .filter(|p| !before.contains(p))
+                .collect(),
+        )
+    }
+
+    fn has(&self, post: &PostView) -> bool {
+        !self.0.is_empty() && self.0.contains(&Self::of(post))
     }
 }
 
@@ -505,6 +555,8 @@ fn list(
     v: &CommentsView,
     editor: Option<&Editor>,
     opts: &RenderOpts,
+    fresh: &Fresh,
+    motion: &Motion,
 ) {
     p.spawn(Node {
         column_gap: px(8),
@@ -578,11 +630,16 @@ fn list(
                 .with_children(|c| collapsed_row(c, fonts, pr, post));
                 continue;
             }
-            p.spawn(card(Node {
-                flex_direction: FlexDirection::Column,
-                ..default()
-            }))
-            .with_children(|c| {
+            let general = p
+                .spawn(card(Node {
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                }))
+                .id();
+            if fresh.has(post) {
+                arrive(p.commands_mut(), motion, general, Swatch::Bg, 1.0);
+            }
+            p.commands_mut().entity(general).with_children(|c| {
                 post_row(c, fonts, pr, post, opts);
                 c.spawn(divider());
                 c.spawn(footer()).with_children(|f| {
@@ -635,16 +692,26 @@ fn list(
             .with_children(|c| collapsed_row(c, fonts, pr, first));
             continue;
         }
-        p.spawn(card(Node {
-            flex_direction: FlexDirection::Column,
-            ..default()
-        }))
-        .with_children(|c| {
+        let thread = p
+            .spawn(card(Node {
+                flex_direction: FlexDirection::Column,
+                ..default()
+            }))
+            .id();
+        // A new thread comes in whole; a new reply clears in its place in the card.
+        let new_thread = t.posts.first().is_some_and(|first| fresh.has(first));
+        if new_thread {
+            arrive(p.commands_mut(), motion, thread, Swatch::Bg, 1.0);
+        }
+        p.commands_mut().entity(thread).with_children(|c| {
             for (i, post) in t.posts.iter().enumerate() {
                 if i > 0 {
                     c.spawn(divider());
                 }
-                post_row(c, fonts, pr, post, opts);
+                let row = post_row(c, fonts, pr, post, opts);
+                if !new_thread && fresh.has(post) {
+                    clear_in(c.commands_mut(), motion, row, Swatch::Surface);
+                }
             }
             for d in &t.drafts {
                 c.spawn(divider());
@@ -766,7 +833,7 @@ fn post_row(
     pr: &PrRef,
     post: &PostView,
     opts: &RenderOpts,
-) {
+) -> Entity {
     p.spawn(Node {
         padding: UiRect::axes(px(14), px(12)),
         column_gap: px(12),
@@ -820,7 +887,8 @@ fn post_row(
             });
             markdown(c, fonts, &parse_in(&post.body, &opts.github_host, pr), opts);
         });
-    });
+    })
+    .id()
 }
 
 fn draft_reply(
@@ -1120,6 +1188,7 @@ mod tests {
     use crate::ui::kit::Fill;
     use crate::ui::markdown::parse::parse;
     use crate::ui::markdown::{CopiedText, CopyMarkdown, MdBody, MdImage};
+    use crate::ui::tween::Look;
     use bevy::ecs::system::RunSystemOnce;
 
     fn ready() -> Ready {
@@ -1179,6 +1248,73 @@ mod tests {
         });
         testing::settle(&mut app);
         app
+    }
+
+    #[test]
+    fn a_reply_that_arrives_clears_in_and_a_new_thread_comes_in_whole() {
+        use crate::ui::tween::{ROW_RISE, Tween};
+        let mut app = comments_app();
+        testing::run_tweens(&mut app);
+        with_ready(&mut app, |r, _| {
+            let t = threads_mut(r)
+                .iter_mut()
+                .find(|t| !t.is_resolved)
+                .expect("an open thread");
+            let mut reply = t.comments[0].clone();
+            reply.body = "One more thing".into();
+            t.comments.push(reply);
+        });
+        app.update();
+        assert_eq!(testing::showing_veils(&mut app), 1, "over the reply alone");
+        assert_eq!(testing::count::<Tween>(&mut app), 1, "nothing moves");
+        testing::run_tweens(&mut app);
+        with_ready(&mut app, |r, _| {
+            let mut t = threads_mut(r)
+                .iter()
+                .find(|t| !t.is_resolved)
+                .expect("an open thread")
+                .clone();
+            t.id = "PRRT_new".into();
+            t.comments.truncate(1);
+            t.comments[0].body = "A new thread".into();
+            threads_mut(r).push(t);
+        });
+        app.update();
+        assert_eq!(testing::showing_veils(&mut app), 1);
+        let moving: Vec<Look> = {
+            let mut q = app.world_mut().query::<&Tween>();
+            q.iter(app.world())
+                .map(|t| t.from)
+                .filter(|l| l.shift != Vec2::ZERO)
+                .collect()
+        };
+        assert_eq!(moving.len(), 1, "the new thread's card");
+        assert_eq!(moving[0].shift, Vec2::new(0.0, ROW_RISE));
+        testing::run_tweens(&mut app);
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        assert_eq!(testing::showing_veils(&mut app), 0);
+    }
+
+    #[test]
+    fn comments_shown_again_or_unchanged_do_not_come_in() {
+        use crate::ui::tween::Tween;
+        let mut app = comments_app();
+        testing::run_tweens(&mut app);
+        // The minute moves every age: nothing is new.
+        app.world_mut()
+            .insert_resource(crate::clock::Clock(Some(NOW + 3600)));
+        with_ready(&mut app, |_, _| {});
+        testing::settle(&mut app);
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        assert_eq!(testing::showing_veils(&mut app), 0);
+        // Another filter shows threads the list did not: the list, not new comments.
+        with_ready(&mut app, |_, ui| {
+            ui.filter = crate::review_state::CommentsFilter::All;
+        });
+        testing::settle(&mut app);
+        assert!(has_text(&mut app, "resolved"));
+        assert_eq!(testing::count::<Tween>(&mut app), 0);
+        assert_eq!(testing::showing_veils(&mut app), 0);
     }
 
     fn has_text(app: &mut App, needle: &str) -> bool {
