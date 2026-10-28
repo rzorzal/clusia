@@ -23,3 +23,7 @@ Live canvas (private to the owner): https://claude.ai/artifact/CWvYNxAqgnKrrLqi8
 | orange | `#D9572B` | `#F07A4A` |
 
 Type: Inter (UI), JetBrains Mono (code). 6 px radius, minimal borders.
+
+## SP4 · M1 (Tests)
+
+`sp4/` holds the M1 Tests boards approved in #311: the empty Tests tab, Auto Tests, Run Function tests, the setup plan and Config › Tests, in light and dark. The sources are plain HTML (`sp4/src`, sharing `base.css`); render them with headless Chrome at 1282×802. These boards replace `Tests.png` for M1; `TestCockpit.png` stays the target for M2.

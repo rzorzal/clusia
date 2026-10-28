@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"></head><body>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#88</span><b>orders api</b></span></div>
+  <div class="hdr"><h1><small>rzorzal/shop-demo &nbsp;#88</small> feat: orders api</h1>
+    <div class="sec"><span>Diagrams</span><span>Security</span><span>Diff</span><span>Audits</span><span>Comments</span><span class="on">Tests</span></div></div>
+  <div class="body" style="opacity:.35"><div class="row" style="height:178px"><div class="card" style="flex:1"></div><div class="card" style="flex:1"></div><div class="card" style="flex:1"></div></div><div class="card" style="flex:1"></div></div>
+  <div style="position:absolute;inset:0;background:rgba(20,24,22,.28)"></div>
+  <div class="card" style="position:absolute;left:230px;top:70px;width:820px;padding:22px 24px;box-shadow:0 18px 50px rgba(0,0,0,.18)">
+    <div style="font-size:16px;font-weight:600">Set up tests for #88</div>
+    <div class="m" style="margin:6px 0 14px">Claude Code read the repository and wrote this recipe. Nothing runs until you approve it. Steps run once; the results are reused next time.</div>
+    <div class="m" style="font-size:12px;font-weight:600;letter-spacing:.04em;margin-bottom:6px">SETUP · 4 STEPS</div>
+    <table><tbody>
+      <tr><td style="width:26px">☑</td><td style="width:270px">Build the image from <span class="mono">Dockerfile</span> (target <span class="mono">test</span>)</td><td class="mono m">docker build --target test …</td><td style="text-align:right;width:150px"><span class="pill" style="background:var(--chrome)">container</span> <span class="pill" style="background:var(--bluebg);color:var(--blue)">network</span></td></tr>
+      <tr><td>☑</td><td>Install dependencies</td><td class="mono m">npm ci</td><td style="text-align:right"><span class="pill" style="background:var(--chrome)">container</span> <span class="pill" style="background:var(--bluebg);color:var(--blue)">network</span></td></tr>
+      <tr><td>☑</td><td>Pull the <span class="mono">postgres</span> service</td><td class="mono m">docker compose pull postgres</td><td style="text-align:right"><span class="pill" style="background:var(--chrome)">container</span> <span class="pill" style="background:var(--bluebg);color:var(--blue)">network</span></td></tr>
+      <tr style="background:var(--amberbg)"><td>☑</td><td>Start Clúsia's own <span class="mono">postgres</span><div class="amb" style="font-size:12px">Runs on your Mac: no host folders, no open ports, internal network</div></td><td class="mono m">docker compose -p clusia-shop-demo-88 up -d postgres</td><td style="text-align:right"><span class="pill" style="background:var(--amberbg);color:var(--amber);border:1px solid var(--amberline)">host</span></td></tr>
+    </tbody></table>
+    <div class="m" style="font-size:12px;font-weight:600;letter-spacing:.04em;margin:16px 0 6px">TEST COMMANDS · NO NETWORK</div>
+    <div style="display:grid;grid-template-columns:110px 1fr;row-gap:5px">
+      <span class="m">All</span><span class="mono">npx vitest run --reporter=junit --outputFile=.clusia/out/junit.xml</span>
+      <span class="m">One test</span><span class="mono">npx vitest run -t "{name}"</span>
+      <span class="m">List</span><span class="mono">npx vitest list --json</span>
+      <span class="m">Variables</span><span class="mono">DATABASE_URL=postgres://test:test@postgres/shop &nbsp;API_KEY=fake_k3y_9a1 <span class="f">(fake · edit in the recipe)</span></span>
+    </div>
+    <div class="m" style="margin-top:14px;font-size:12px">About 1.4 GB to download · your running <span class="mono">shop-demo</span> stack is up and will not be used</div>
+    <div style="display:flex;gap:10px;margin-top:18px;align-items:center"><span style="text-decoration:underline">Edit recipe</span><span class="btn" style="margin-left:auto">Cancel</span><span class="btn">Approve selected</span><span class="btn p">Approve all and set up</span></div>
+  </div>
+</div></body></html>

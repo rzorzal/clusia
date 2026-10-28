@@ -1,0 +1,55 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>.in{display:flex;align-items:center;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--input);font-family:"JetBrains Mono",monospace;font-size:12px}
+.sub{display:flex;gap:6px;padding:12px 24px 0}.sub span{padding:6px 12px;border-radius:6px;color:var(--muted)}.sub span.on{background:var(--surface);border:1px solid var(--line);color:var(--fg);font-weight:600}
+.fn{padding:9px 12px;border-radius:6px;display:flex;flex-direction:column;gap:3px}.fn.on{background:var(--greenbg)}
+.case{padding:9px 12px;border-top:1px solid var(--line);display:flex;align-items:center;gap:10px}</style></head><body>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#123</span><b>auth refresh</b></span></div>
+  <div class="hdr"><h1><small>rzorzal/clusia &nbsp;#123</small> feat: auth refresh</h1>
+    <div class="sec"><span>Diagrams</span><span>Security</span><span>Diff</span><span>Audits</span><span>Comments</span><span class="on">Tests</span></div></div>
+  <div class="sub"><span>Auto Tests</span><span class="on">Run Function tests</span><span class="f" style="margin-left:auto;padding-right:0">Docker · Colima · ready</span></div>
+  <div class="body" style="flex-direction:row;padding-top:12px">
+    <div class="card" style="width:270px;padding:10px;display:flex;flex-direction:column;gap:2px">
+      <div class="m" style="font-size:11px;font-weight:600;letter-spacing:.05em;padding:4px 12px 6px">CHANGED FUNCTIONS · 5</div>
+      <div class="fn on"><span class="mono" style="font-weight:600">TokenStore::refresh</span><span class="f" style="font-size:12px">store/refresh.rs · changed · 4 cases</span><span style="font-size:12px"><span class="ok">3 passed</span> · <span class="bad">1 failed</span></span></div>
+      <div class="fn"><span class="mono">TokenStore::exchange</span><span class="f" style="font-size:12px">store/refresh.rs · new · 3 cases</span><span class="f" style="font-size:12px">not run</span></div>
+      <div class="fn"><span class="mono">backoff_delay</span><span class="f" style="font-size:12px">http/retry.rs · signature · 5 cases</span><span class="ok" style="font-size:12px">5 passed</span></div>
+      <div class="fn"><span class="mono">Config::token_path</span><span class="f" style="font-size:12px">config.rs · changed · 2 cases</span><span class="f" style="font-size:12px">not run</span></div>
+      <div class="fn" style="opacity:.6"><span class="mono">render_badge</span><span class="f" style="font-size:12px">ui/badge.swift · not supported yet</span></div>
+      <span class="btn" style="margin-top:auto">Run all cases · 14</span>
+    </div>
+    <div class="card" style="flex:1;padding:0;display:flex;flex-direction:column;min-width:0">
+      <div style="padding:14px 16px;border-bottom:1px solid var(--line)">
+        <div class="mono" style="font-size:13px"><b>pub async fn refresh</b>(&amp;self, now: Instant) -&gt; Result&lt;Token, RefreshError&gt;</div>
+        <div class="m" style="margin-top:6px">Cases written by Claude Code from the diff and the existing tests. Edit any value, or add your own.</div>
+      </div>
+      <div class="case" style="border-top:0;background:var(--code)"><span class="bad">✕</span><b style="flex:1">Endpoint fails, old token kept</b><span class="m">0.21 s</span><span>▶</span></div>
+      <div style="padding:12px 16px 14px 38px;background:var(--code);display:grid;grid-template-columns:120px 1.3fr 120px 1fr;gap:8px 12px;align-items:center">
+        <span class="m">stored token</span><span class="in">"old", expires +10 s</span>
+        <span class="m">now</span><span class="in">+15 s</span>
+        <span class="m">endpoint status</span><span class="in">500</span>
+        <span class="m">endpoint latency</span><span class="in">200 ms</span>
+        <span class="m">endpoint body</span><span class="in" style="grid-column:span 3">{"error": "server_error"}</span>
+        <span></span><span style="grid-column:span 3;display:flex;gap:10px;margin-top:4px"><span class="btn p" style="height:30px">▶ Run this case</span><span class="btn" style="height:30px">New fake values</span><span class="btn" style="height:30px">Reset</span></span>
+      </div>
+      <div class="case"><span class="ok">✓</span><span style="flex:1">Valid token, no exchange</span><span class="m">0.01 s</span><span>▶</span></div>
+      <div class="case"><span class="ok">✓</span><span style="flex:1">Expired token, one exchange</span><span class="m">0.32 s</span><span>▶</span></div>
+      <div class="case"><span class="ok">✓</span><span style="flex:1">Two callers at once share one exchange</span><span class="m">1.84 s</span><span>▶</span></div>
+      <div class="case" style="color:var(--muted)"><span>＋</span><span style="flex:1">Add a case</span><span style="text-decoration:underline">Ask Claude Code for more cases</span></div>
+    </div>
+    <div class="card" style="width:330px;display:flex;flex-direction:column">
+      <div class="t">Result <span class="pill" style="background:var(--redbg);color:var(--orange);margin-left:6px">failed</span></div>
+      <div class="m" style="font-size:12px;margin-bottom:6px">Returned</div>
+      <div class="mono" style="background:var(--code);border-radius:6px;padding:10px">Err(RefreshError::Http(500))</div>
+      <div class="m" style="font-size:12px;margin:12px 0 6px">Store after the call</div>
+      <div class="mono" style="background:var(--redbg);border-radius:6px;padding:10px">token = ""   <span class="bad">← expected "old"</span></div>
+      <div class="m" style="font-size:12px;margin:12px 0 6px">Output</div>
+      <div class="mono" style="background:var(--code);border-radius:6px;padding:10px;flex:1;white-space:pre;line-height:1.5">WARN refresh failed: 500
+store cleared before retry</div>
+      <div class="m" style="margin-top:10px;font-size:12px">0.21 s · container · no network</div>
+      <div style="display:flex;gap:14px;margin-top:8px"><span style="text-decoration:underline">Show driver code</span><span style="text-decoration:underline">Comment on the function</span></div>
+    </div>
+  </div>
+  <div class="status"><span class="ok">●</span> Claude Code · session active <span class="f">Draft saved · 4 items</span><span class="btn p" style="margin-left:auto">Finalize review</span></div>
+</div></body></html>

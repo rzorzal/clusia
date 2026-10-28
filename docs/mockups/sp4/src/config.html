@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"></head><body>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span><span class="tab">Home</span><span class="tab on"><b>Config</b></span></div>
+  <div style="flex:1;display:flex;min-height:0">
+    <div style="width:220px;border-right:1px solid var(--line);padding:18px 12px;display:flex;flex-direction:column;gap:2px;background:var(--chrome)">
+      <span class="tab">GitHub</span><span class="tab">Repositories</span><span class="tab">Harness</span><span class="tab on">Tests</span><span class="tab">Notifications</span><span class="tab">Editor</span><span class="tab">Appearance</span><span class="tab">Media</span><span class="tab">Plugins</span>
+    </div>
+    <div style="flex:1;padding:24px 32px;display:flex;flex-direction:column;gap:14px;overflow:hidden">
+      <div style="font-size:18px;font-weight:600">Tests</div>
+      <div class="card">
+        <div class="t">Where tests run</div>
+        <div style="display:flex;gap:10px">
+          <span class="card" style="flex:1;padding:12px;border:2px solid var(--green)"><b>Automatic</b><div class="m" style="margin-top:4px">A container when an engine is found, else the macOS sandbox</div></span>
+          <span class="card" style="flex:1;padding:12px"><b>Always a container</b><div class="m" style="margin-top:4px">Refuse to run without an engine</div></span>
+          <span class="card" style="flex:1;padding:12px"><b>Always local</b><div class="m" style="margin-top:4px">macOS sandbox in the worktree</div></span>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:10px;align-items:center"><span class="ok">✓</span> Found <b>Docker · Colima</b> <span class="mono m">~/.colima/default/docker.sock</span> <span class="ok">running</span><span class="btn" style="margin-left:auto;height:28px">Check again</span></div>
+      </div>
+      <div class="card">
+        <div class="t">Limits</div>
+        <div style="display:grid;grid-template-columns:200px 140px 1fr;row-gap:10px;align-items:center">
+          <span class="m">CPUs per run</span><span class="btn" style="justify-content:flex-start">5 of 10</span><span></span>
+          <span class="m">Memory per run</span><span class="btn" style="justify-content:flex-start">4096 MB</span><span></span>
+          <span class="m">Stop a run after</span><span class="btn" style="justify-content:flex-start">30 min</span><span></span>
+          <span class="m">Runs at the same time</span><span class="btn" style="justify-content:flex-start">1</span><span></span>
+        </div>
+      </div>
+      <div class="card" style="display:flex;align-items:center;gap:18px">
+        <div><div class="t" style="margin-bottom:4px">Disk used by test environments</div><div class="m">3 images 4.1 GB · caches 2.3 GB · worktree outputs 0.8 GB</div></div>
+        <span style="font-size:22px;font-weight:600;margin-left:auto">7.2 GB</span><span class="btn">Clean up…</span>
+      </div>
+    </div>
+  </div>
+</div></body></html>
