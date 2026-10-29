@@ -10,21 +10,56 @@ use crate::names::{LabelKind, Labels};
 pub const COMPOSE_MIN: (u32, u32, u32) = (2, 24, 4);
 pub const INTERNAL_NET: &str = "clusia_internal";
 
-/// Service keys that reach the host or escape the `clusia-` names and labels, in the order
-/// their refusals are given. `privileged` counts only when `true`.
-const SERVICE_KEYS: [&str; 11] = [
-    "network_mode",
-    "privileged",
-    "devices",
-    "pid",
-    "ipc",
-    "volumes_from",
-    "cap_add",
-    "security_opt",
-    "userns_mode",
-    "cgroup_parent",
-    "container_name",
+/// The service keys Clúsia lets through. Any other key is refused by name: Compose keeps
+/// growing keys that hand a service the engine socket or run a host program
+/// (`use_api_socket`, `post_start`, `provider`, …), so a deny-list would always lag.
+/// `extra_hosts`, `build` and `env_file` are checked further below.
+const SAFE_SERVICE_KEYS: [&str; 41] = [
+    "attach",
+    "build",
+    "command",
+    "configs",
+    "cpu_shares",
+    "cpus",
+    "depends_on",
+    "domainname",
+    "entrypoint",
+    "env_file",
+    "environment",
+    "expose",
+    "extra_hosts",
+    "healthcheck",
+    "hostname",
+    "image",
+    "init",
+    "labels",
+    "mem_limit",
+    "mem_reservation",
+    "memswap_limit",
+    "networks",
+    "pids_limit",
+    "platform",
+    "ports",
+    "profiles",
+    "pull_policy",
+    "read_only",
+    "restart",
+    "scale",
+    "secrets",
+    "shm_size",
+    "stdin_open",
+    "stop_grace_period",
+    "stop_signal",
+    "tmpfs",
+    "tty",
+    "ulimits",
+    "user",
+    "volumes",
+    "working_dir",
 ];
+
+/// Keys outside the safe list that count only when `true`.
+const FLAG_KEYS: [&str; 1] = ["privileged"];
 
 /// Reads the leading `major.minor.patch` (an optional `v`, missing parts 0, any suffix
 /// ignored) and compares it with [`COMPOSE_MIN`].
@@ -63,9 +98,18 @@ fn refusals(merged: &Value, worktree: Option<&Path>, names: &[String]) -> Vec<St
     let services = section(merged, "services");
     for (name, service) in sorted(services) {
         let s = printable(name);
-        for key in SERVICE_KEYS {
-            if set(service.get(key), key == "privileged") {
-                problems.push(format!("service {s} sets {key}, which Clúsia refuses"));
+        let Some(keys) = service.as_object() else {
+            continue;
+        };
+        for (key, value) in sorted(keys) {
+            if !SAFE_SERVICE_KEYS.contains(&key.as_str())
+                && !key.starts_with("x-")
+                && set(Some(value), FLAG_KEYS.contains(&key.as_str()))
+            {
+                problems.push(format!(
+                    "service {s} sets {}, which Clúsia refuses",
+                    printable(key)
+                ));
             }
         }
         if names_host_gateway(service.get("extra_hosts")) {
@@ -133,22 +177,28 @@ fn refusals(merged: &Value, worktree: Option<&Path>, names: &[String]) -> Vec<St
 }
 
 fn build_refusals(s: &str, build: &Map<String, Value>, wt: Option<&Path>, out: &mut Vec<String>) {
-    if let Some(context) = build.get("context").and_then(Value::as_str) {
-        if context.contains("://") || context.starts_with("git@") {
-            out.push(format!("service {s} builds from a remote context"));
-        } else if let Some(wt) = wt {
-            let path = Path::new(context);
-            let path = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                wt.join(path)
-            };
-            if !inside(wt, &path.to_string_lossy()) {
-                out.push(format!(
-                    "service {s} builds from {}, outside the worktree",
-                    printable(context)
-                ));
-            }
+    let context = build.get("context").and_then(Value::as_str);
+    let remote = context.is_some_and(|c| c.contains("://") || c.starts_with("git@"));
+    if remote {
+        out.push(format!("service {s} builds from a remote context"));
+    } else if let Some(wt) = wt {
+        let base = context.map_or_else(|| wt.to_path_buf(), |c| under(wt, c));
+        if let Some(context) = context
+            && !inside(wt, &base.to_string_lossy())
+        {
+            out.push(format!(
+                "service {s} builds from {}, outside the worktree",
+                printable(context)
+            ));
+        }
+        // A relative Dockerfile is read from the context.
+        if let Some(dockerfile) = build.get("dockerfile").and_then(Value::as_str)
+            && !inside(wt, &under(&base, dockerfile).to_string_lossy())
+        {
+            out.push(format!(
+                "service {s} builds from the Dockerfile {}, outside the worktree",
+                printable(dockerfile)
+            ));
         }
     }
     if set(build.get("ssh"), false) {
@@ -166,6 +216,16 @@ fn build_refusals(s: &str, build: &Map<String, Value>, wt: Option<&Path>, out: &
                 "service {s} sets build.{key}, which Clúsia refuses"
             ));
         }
+    }
+}
+
+/// `path` as is when absolute, else joined to `base`.
+fn under(base: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
     }
 }
 
@@ -470,16 +530,16 @@ volumes:
         assert_eq!(
             compose_problems(&merged, &wt, &["a".to_string(), "missing".to_string()]),
             [
-                "service a sets network_mode, which Clúsia refuses".to_string(),
+                "service a sets cap_add, which Clúsia refuses".to_string(),
+                "service a sets network_mode, which Clúsia refuses".into(),
                 "service a sets privileged, which Clúsia refuses".into(),
-                "service a sets cap_add, which Clúsia refuses".into(),
+                "service b sets cgroup_parent, which Clúsia refuses".into(),
                 "service b sets devices, which Clúsia refuses".into(),
-                "service b sets pid, which Clúsia refuses".into(),
                 "service b sets ipc, which Clúsia refuses".into(),
-                "service b sets volumes_from, which Clúsia refuses".into(),
+                "service b sets pid, which Clúsia refuses".into(),
                 "service b sets security_opt, which Clúsia refuses".into(),
                 "service b sets userns_mode, which Clúsia refuses".into(),
-                "service b sets cgroup_parent, which Clúsia refuses".into(),
+                "service b sets volumes_from, which Clúsia refuses".into(),
                 format!("service c builds from {o}, outside the worktree"),
                 "service c forwards SSH into its build".into(),
                 "service c uses additional build contexts".into(),
@@ -503,7 +563,7 @@ volumes:
         );
         let err = compose_override(&merged, "p", &labels()).unwrap_err();
         assert!(
-            err.starts_with("service a sets network_mode, which Clúsia refuses; "),
+            err.starts_with("service a sets cap_add, which Clúsia refuses; "),
             "{err}"
         );
         let fine = json!({
@@ -512,5 +572,43 @@ volumes:
             "volumes": {"pgdata": {"name": "p_pgdata", "driver": "local"}}
         });
         assert!(compose_problems(&fine, &wt, &["db".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn service_keys_outside_the_safe_list_are_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().canonicalize().unwrap();
+        let wt = top.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let merged = json!({
+            "name": "p",
+            "services": {
+                "a": {"image": "x", "use_api_socket": true},
+                "b": {"image": "x", "post_start": [{"command": "sh", "privileged": true, "user": "root"}]},
+                "c": {"provider": {"type": "acme-tool", "options": {"x": "1"}}},
+                "d": {"image": "x", "cgroup": "host", "uts": "host"},
+                "e": {"image": "x", "device_cgroup_rules": ["c 1:3 mr"], "runtime": "runc"},
+                "f": {"build": {"context": wt.clone(), "dockerfile": "../../outside/Dockerfile"}},
+                "g": {"build": {"context": wt.clone(), "dockerfile": top.join("Dockerfile")}},
+                "h": {"build": {"context": wt.clone(), "dockerfile": "docker/Dockerfile"}},
+                "i": {"image": "x", "command": null, "x-note": "inert"}
+            }
+        });
+        let t = top.display();
+        assert_eq!(
+            compose_problems(&merged, &wt, &[]),
+            [
+                "service a sets use_api_socket, which Clúsia refuses".to_string(),
+                "service b sets post_start, which Clúsia refuses".into(),
+                "service c sets provider, which Clúsia refuses".into(),
+                "service d sets cgroup, which Clúsia refuses".into(),
+                "service d sets uts, which Clúsia refuses".into(),
+                "service e sets device_cgroup_rules, which Clúsia refuses".into(),
+                "service e sets runtime, which Clúsia refuses".into(),
+                "service f builds from the Dockerfile ../../outside/Dockerfile, outside the worktree".into(),
+                format!("service g builds from the Dockerfile {t}/Dockerfile, outside the worktree"),
+            ]
+        );
+        assert!(compose_override(&merged, "p", &labels()).is_err());
     }
 }
