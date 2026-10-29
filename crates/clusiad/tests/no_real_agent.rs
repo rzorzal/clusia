@@ -1,6 +1,7 @@
-//! No test may start the real `claude` or `codex`. A test that starts one of Clúsia's programs
-//! has to set `CLUSIA_CLAUDE_BIN` and `CLUSIA_CODEX_BIN` to programs that are not there; this
-//! lists the ones that do not.
+//! No test may start the real `claude`, `codex`, `docker` or `sandbox-exec`. A test that starts
+//! one of Clúsia's programs has to set `CLUSIA_CLAUDE_BIN`, `CLUSIA_CODEX_BIN`,
+//! `CLUSIA_DOCKER_BIN` and `CLUSIA_SANDBOX_EXEC_BIN` to programs that are not there; this lists
+//! the ones that do not.
 
 use std::path::{Path, PathBuf};
 
@@ -45,11 +46,14 @@ fn every_test_that_starts_a_program_keeps_the_real_agent_out() {
         .filter(|file| {
             let text = std::fs::read_to_string(file).unwrap_or_default();
             STARTS_A_PROGRAM.iter().any(|marker| text.contains(marker))
-                && !(text.contains("CLUSIA_CLAUDE_BIN") && text.contains("CLUSIA_CODEX_BIN"))
+                && !(text.contains("CLUSIA_CLAUDE_BIN")
+                    && text.contains("CLUSIA_CODEX_BIN")
+                    && text.contains("CLUSIA_DOCKER_BIN")
+                    && text.contains("CLUSIA_SANDBOX_EXEC_BIN"))
         })
         .collect();
     assert!(
         offenders.is_empty(),
-        "these tests start a program without setting CLUSIA_CLAUDE_BIN and CLUSIA_CODEX_BIN: {offenders:?}"
+        "these tests start a program without setting CLUSIA_CLAUDE_BIN, CLUSIA_CODEX_BIN, CLUSIA_DOCKER_BIN and CLUSIA_SANDBOX_EXEC_BIN: {offenders:?}"
     );
 }

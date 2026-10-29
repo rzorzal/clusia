@@ -36,13 +36,17 @@ pub fn test_options() -> DaemonOptions {
         media_resolve: Vec::new(),
         giphy_api: Some("http://127.0.0.1:9".into()),
         harness_search_paths: Vec::new(),
-        // No test starts the real claude or codex: this is what CLUSIA_CLAUDE_BIN and CLUSIA_CODEX_BIN
-        // would say too.
+        // No test starts the real claude, codex, docker or sandbox-exec: this is what
+        // CLUSIA_CLAUDE_BIN, CLUSIA_CODEX_BIN, CLUSIA_DOCKER_BIN and CLUSIA_SANDBOX_EXEC_BIN would
+        // say too.
         claude_program: Some("/nonexistent/claude".into()),
         codex_program: Some("/nonexistent/codex".into()),
         gh_config_dir: None,
         bridge_program: Some(env!("CARGO_BIN_EXE_clusiad").into()),
         harness_env: Vec::new(),
+        test_exec: Arc::new(clusia_testrun::testkit::FakeExec::new()),
+        docker_program: Some("/nonexistent/docker".into()),
+        sandbox_exec_program: "/nonexistent/sandbox-exec".into(),
     }
 }
 

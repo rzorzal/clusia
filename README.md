@@ -98,6 +98,7 @@ Commands that talk to the daemon start it when it is not running; `daemon status
 | `clusia story owner/repo#123 [--write]` | List the steps of a review's Story, one line each, then `Written by <agent> from commit <sha7>` or `Static order` (the order Clúsia works out itself, callees first, before an agent has written anything). `--write` asks your agent to write it and follows the progress on stderr; Ctrl-C stops it. With `--json` it prints the Story, its versions and the head of the pull request. |
 | `clusia calls owner/repo#123 [function] [--depth N]` | Print the call graph of a changed function (the first changed one when none is named) level by level, as `↑3  auth_middleware  not touched`, then `●  TokenStore::refresh`, then `↓1  …`; depth 1 to 5, default from `diff.calls_depth`. With `--json` it prints the graph. |
 | `clusia revalidate owner/repo#123 [--again]` | Check the draft comments of a saved review against its new commits now and print one line per comment (a round that already finished is printed as it is; `--again` runs it once more): `KEPT`, `MOVED`, `OBSOLETE`, `REWORD` or `NOT CHECKED`, then `file:line` and the text. Nothing in the draft changes: you decide in the window. The exit code is 0 when the round finished |
+| `clusia tests owner/repo#123 [--generate] [--setup [--yes]] [--list] [--run [--all\|--near\|--one NAME]]` | The tests of a review. Alone it prints the environment (`Docker · Colima · running`, or `No container engine · local sandbox`), where the setup stands and the last run. `--generate` asks your agent for the recipe (one turn); `--setup` shows the plan with every command and asks before anything runs; `--list` lists the tests; `--run` runs them all, the ones near the change or one, printing `PASS  name  12 ms` per test and ending with `3 passed, 1 failed, 0 skipped in 4.2 s (container · Colima)`. The exit code is the run's: 0 when every test passed, the test command's own code when one failed, 124 when it ran past its limit, 130 when you stopped it. Ctrl-C stops the run |
 | `clusia agent log owner/repo#123` / `agent stop owner/repo#123` | Replay the chat of a review, or stop the turn the agent is running |
 | `clusia config get <key>` / `set <key> <value>` | Read or change one setting, for example `github.poll_interval_secs` |
 | `clusia daemon status` / `stop` | Show whether the daemon runs, or stop it |
@@ -149,6 +150,26 @@ Clúsia can talk to **your own Claude Code, Codex or a command of your own** abo
 
 <p align="center"><img src="docs/assets/sp2-m6-first-run-custom-light.png" alt="First run with the Custom command card selected and its Program field" width="720"></p>
 
+## Tests
+
+- **What it does.** It runs the pull request's own tests on your Mac, isolated: all of them, the ones near the change (in a file the PR touches, in the module of a changed function, or named by the agent), or one. Nothing runs when a review opens. `clusia tests owner/repo#123 --generate` probes the machine (no agent) and asks your agent, in one forked read-only turn, for a recipe; Clúsia writes it from the agent's answer to `.clusia/recipe.toml` in the worktree. The file is never committed.
+- **Two runners.**
+  - **Container**, when a Docker-compatible engine is installed: Colima, OrbStack, Docker Desktop or Podman, found even with launchd's thin `PATH`. Each run is a new `docker run --rm` with `--network none` (or the stack's internal network when the recipe has services), the worktree at `/work`, the clone's git folder read-only, cache volumes per repository and ecosystem, the CPU and memory limits of Config › Tests, and no variable from your environment.
+  - **Local sandbox**, when there is no engine: Clúsia's own `sandbox-exec` profile. It has no network, and it writes only to the worktree, a temp folder per review and a cache folder per repository. It cannot read `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.docker/config.json`, `~/.kube`, `~/.gnupg`, `~/Library/Keychains`, `~/.git-credentials`, `~/.config/git/credentials`, `~/.cargo/credentials` and `credentials.toml`, `~/.pypirc`, `~/.config/gcloud`, `~/.azure`, `~/.claude`, `~/.claude.json`, `~/.codex`, `~/.npmrc`, `~/.yarnrc.yml`, `~/.gem/credentials`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.terraform.d/credentials.tfrc.json`, `~/.vault-token`, Clúsia's data folder or the clone's `.env*` files. A run starts from an empty environment, so no token reaches it. It can signal only its own processes.
+  - `tests.runner` picks one (`auto`, `container`, `local`).
+- **You approve first.** Anything that needs the network or changes state is a step in the setup plan: starting a stopped engine, pulling or building the image, `npm ci` and the like, the compose services the tests need. Each step shows its exact command, where it runs (amber, "on your Mac", for host steps) and whether it uses the network. The recipe's test commands are shown and approved too. Nothing from the recipe runs before that, not even the command that lists the tests. An approval belongs to the review and the recipe's exact contents: a recipe changed by you, the agent or the pull request asks again. A pull request that ships its own `.clusia/` folder is refused.
+- **Your recipe stays yours.** Edit `.clusia/recipe.toml` as you like. Clúsia overwrites only what it wrote itself, and a new proposal from the agent waits until you accept it.
+- **Services.** When the recipe names compose services, Clúsia starts its own copy under its own project, with no host folders, no published ports and an internal network. It never uses the stack you have running, and takes its copy down when you close, publish or discard the review, and when the daemon stops.
+- **Disk.** Images are tagged `clusia/<repo>:<hash>` and reused while the recipe's image inputs hold. Images and cache volumes go when the last worktree of the repository goes; containers are `--rm`, and the 6-hour sweep removes any orphan `clusia-*` container. Clúsia removes only what it labelled, never a base image you pulled. The last 5 runs per commit (20 in all) and their logs (10 MB each at most) are kept, and go when the review is published or discarded. Runs on an older commit show as *Stale*.
+- **Never.** Clúsia never installs an engine or a toolchain, never copies an `.env` file (the recipe lists fake values you can edit), never connects the tests to your own running services, and never runs anything you did not approve. A setup step in the local sandbox does not see your `~/.npmrc`, so a private registry needs a container engine or a project-level `.npmrc` without the token.
+- **GitHub's checks** appear by name next to the local runs.
+- **The limits.** A test run executes the pull request's own code. The container and the sandbox are what keep it in. The local sandbox relies on `sandbox-exec`, which Apple deprecated but which still works; if it stops working, the local runner refuses and asks for an engine. What else to know:
+  - the dependency caches of a repository (its cache folder and volumes) are shared by every pull request of that repository, so one pull request can leave something in them that a later run uses;
+  - a recipe's `runner = "local"` picks the sandbox even when an engine is installed; the setup plan shows the runner, and the approval covers it;
+  - in the local sandbox, a process that calls `setsid` leaves the run's process group, so Stop, the timeout and closing the review do not end it; it keeps the sandbox's limits;
+  - a setup step that has the network uses Docker's bridge network, which can reach your local network, as Docker's networking allows;
+  - Go test names carry no package, so two packages with a test of the same name are listed once.
+
 ## Notifications and login
 
 Clúsia notifies you when:
@@ -176,6 +197,7 @@ Config › General has **Start at login**. **Quit** in the tray stops everything
 | Reviews and settings | `~/Library/Application Support/Clusia` |
 | Logs | `~/Library/Logs/Clusia/daemon.log`, `app.log`, `tray.log`, and `daemon.launchd.log` for what the login agent printed |
 | The agent's chat logs | `~/Library/Application Support/Clusia/agent/` (one `.jsonl` log and one `.state.json` per review); the agent reads `.clusia/review.md` in each worktree |
+| Test records and logs | `~/Library/Application Support/Clusia/tests/` (one `.json` per review, `logs/`, `tmp/`, `cache/`); the recipe is `.clusia/recipe.toml` in each worktree |
 | The login agent | `~/Library/LaunchAgents/io.github.rzorzal.clusia.daemon.plist` |
 
 [`docs/daemon.md`](docs/daemon.md) has the environment variables, files and log rotation.
@@ -217,6 +239,10 @@ Config › General has **Start at login**. **Quit** in the tray stops everything
 **Stop everything.** Choose Quit in the tray, or run `clusia daemon stop`.
 
 **Start fresh.** Run `clusia uninstall`, move `~/Library/Application Support/Clusia` to the Trash, and install again. This deletes your saved drafts and settings.
+
+**`clusia tests` says the engine is stopped.** The environment line names the start command (`colima start`, open OrbStack or Docker Desktop, `podman machine start`). Run it yourself, or approve the **engine** step in `--setup`.
+
+**The setup says "<Engine> can't see <path>".** Your engine's VM does not share that folder. Share it (Colima: `mounts` in `colima.yaml`) and run `--setup` again.
 
 ## Uninstall
 

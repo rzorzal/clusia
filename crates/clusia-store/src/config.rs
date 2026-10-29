@@ -929,4 +929,32 @@ mod tests {
         let c = set_value(&c, "appearance.diff_view", "story").unwrap();
         assert_eq!(c.appearance.diff_view, clusia_core::DiffView::Story);
     }
+
+    #[test]
+    fn the_tests_settings_round_trip_and_are_read_and_set_by_name() {
+        let (_d, p) = paths();
+        let mut c = Config::default();
+        c.tests.runner = clusia_core::tests::RunnerChoice::Local;
+        c.tests.memory_mb = 8192;
+        save_config(&p, &c).unwrap();
+        let text = fs::read_to_string(p.config_file()).unwrap();
+        assert!(text.contains("[tests]"), "{text}");
+        assert!(text.contains("runner = \"local\""), "{text}");
+        assert!(text.contains("memory_mb = 8192"), "{text}");
+        assert_eq!(load_config(&p).unwrap(), Loaded::Read(c));
+
+        let c = Config::default();
+        assert_eq!(get_value(&c, "tests.runner").unwrap(), "auto");
+        assert_eq!(get_value(&c, "tests.cpus").unwrap(), "0");
+        assert_eq!(get_value(&c, "tests.memory_mb").unwrap(), "4096");
+        assert_eq!(get_value(&c, "tests.run_timeout_secs").unwrap(), "1800");
+        assert_eq!(get_value(&c, "tests.parallel_runs").unwrap(), "1");
+        let c = set_value(&c, "tests.runner", "container").unwrap();
+        assert_eq!(c.tests.runner, clusia_core::tests::RunnerChoice::Container);
+        let c = set_value(&c, "tests.parallel_runs", "3").unwrap();
+        assert_eq!(c.tests.parallel_runs, 3);
+        assert!(set_value(&c, "tests.runner", "podman").is_err());
+        assert!(set_value(&c, "tests.memory_mb", "3").is_err());
+        assert!(set_value(&c, "tests.parallel_runs", "5").is_err());
+    }
 }

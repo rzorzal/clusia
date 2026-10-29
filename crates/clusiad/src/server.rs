@@ -224,6 +224,7 @@ impl Daemon {
         }
         self.shared.review_caches.settled().await;
         tokio::join!(
+            crate::tests::shutdown(&self.shared),
             crate::checks::shutdown(&self.shared),
             crate::diagrams::shutdown(&self.shared),
             crate::calls::shutdown(&self.shared),

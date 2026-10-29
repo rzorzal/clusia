@@ -40,6 +40,7 @@ mod state;
 mod story;
 mod sync;
 mod tabs;
+mod tests;
 mod tray;
 mod turns;
 mod worktrees;

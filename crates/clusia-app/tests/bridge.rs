@@ -318,6 +318,7 @@ fn seed_demo_review(dir: &std::path::Path) -> PrRef {
         role: view.role,
         viewer: view.viewer,
         worktree: view.worktree,
+        check_runs: Vec::new(),
         fetched_at: 1_790_000_000 - 3600,
     };
     for (file, json) in [
@@ -638,6 +639,7 @@ fn seed_cache(dir: &std::path::Path, pr: &PrRef) {
         role: view.role,
         viewer: view.viewer,
         worktree: view.worktree,
+        check_runs: Vec::new(),
         fetched_at: 1_790_000_000 - 3600,
     };
     let file = clusia_core::Paths::new(dir).review_cache_file(pr);

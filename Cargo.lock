@@ -1843,6 +1843,7 @@ dependencies = [
  "clusia-highlight",
  "clusia-platform",
  "clusia-protocol",
+ "clusia-testrun",
  "clusia-view",
  "clusiad",
  "crossbeam-channel",
@@ -2010,6 +2011,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "clusia-testrun"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "libc",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "clusia-tray"
 version = "0.1.0"
 dependencies = [
@@ -2053,6 +2069,7 @@ dependencies = [
  "clusia-protocol",
  "clusia-provider",
  "clusia-store",
+ "clusia-testrun",
  "libc",
  "reqwest",
  "serde",

@@ -263,6 +263,19 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
             step,
             body,
         } => crate::story::add_step_comment(shared, client, &pr, number, &step, &body).await,
+        Command::GetTests { pr } => crate::tests::get(shared, &pr).await,
+        Command::GenerateTests { pr } => crate::tests::generate(shared, &pr).await,
+        Command::PrepareTests {
+            pr,
+            recipe_hash,
+            approve,
+        } => crate::tests::prepare(shared, &pr, &recipe_hash, approve).await,
+        Command::RunTests { pr, scope } => crate::tests::run(shared, &pr, scope).await,
+        Command::StopTests { pr } => crate::tests::stop(shared, &pr),
+        Command::ListTests { pr } => crate::tests::list(shared, &pr).await,
+        Command::AcceptRecipe { pr } => crate::tests::accept_recipe(shared, &pr).await,
+        Command::GetTestDisk => crate::tests::disk(shared).await,
+        Command::CleanUpTests { repo } => crate::tests::clean_up(shared, repo).await,
     }
 }
 

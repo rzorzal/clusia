@@ -29,6 +29,7 @@ pub mod story;
 pub mod tabs;
 #[cfg(any(test, feature = "test-kit"))]
 pub mod testkit;
+pub mod tests;
 pub mod time;
 
 pub use activity::{Activity, ActivityKind, ActivitySummary, DayCount};
@@ -56,8 +57,8 @@ pub use paths::{LAUNCH_AGENT_FILE, Paths, PathsError};
 pub use people::Profile;
 pub use pr::{PrDetail, PrFilter, PrRef, PrRefError, PrSummary};
 pub use prdata::{
-    ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, ReviewCache, ReviewInfo,
-    ReviewThread, ThreadComment, ThreadPost,
+    CheckRun, ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, ReviewCache,
+    ReviewInfo, ReviewThread, ThreadComment, ThreadPost,
 };
 pub use publish::{
     DEFAULT_BODY, PublishError, PublishPlan, ReplyPayload, ReviewComment, ReviewPayload,

@@ -353,6 +353,7 @@ pub(crate) async fn stop(shared: &Shared, pr: &PrRef) {
     crate::diagrams::stop_all(shared, pr, crate::turns::Why::Ended).await;
     crate::story::stop_all(shared, pr, crate::turns::Why::Ended).await;
     crate::revalidate::stop_all(shared, pr, crate::turns::Why::Ended).await;
+    crate::tests::stop_all(shared, pr, crate::turns::Why::Ended).await;
     shared.sessions.end(shared, pr).await;
     crate::codex::close(shared, pr).await;
     shared.permissions.forget_review(shared, pr);
@@ -370,6 +371,7 @@ pub(crate) fn forget_checks(shared: &Shared, pr: &PrRef) {
     crate::calls::forget(shared, pr);
     crate::story::forget(shared, pr);
     crate::revalidate::forget(shared, pr);
+    crate::tests::forget(shared, pr);
 }
 
 /// The review is gone: what was still waiting is dismissed and the summary forgotten, so a later

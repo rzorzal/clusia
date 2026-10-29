@@ -21,7 +21,7 @@ pub(crate) const MEDIA_MAX_AGE: Duration = Duration::from_secs(14 * 86_400);
 pub(crate) const MEDIA_MAX_BYTES: u64 = 500 * 1024 * 1024;
 
 /// Whether `dir` was modified at or after `cutoff` (unknown times count as recent).
-fn recently_modified(dir: &Path, cutoff: i64) -> bool {
+pub(crate) fn recently_modified(dir: &Path, cutoff: i64) -> bool {
     let Ok(modified) = std::fs::metadata(dir).and_then(|m| m.modified()) else {
         return true;
     };
@@ -63,6 +63,7 @@ pub(crate) async fn sweep(shared: &Shared) -> usize {
     let removed = sweep_worktrees(shared, cutoff).await;
     sweep_caches(shared, cutoff).await;
     sweep_checks(shared, cutoff).await;
+    crate::tests::sweep(shared, cutoff).await;
     sweep_diagrams(shared, cutoff).await;
     sweep_calls(shared, cutoff).await;
     sweep_stories(shared, cutoff).await;
@@ -315,6 +316,9 @@ mod tests {
             harness_search_paths: Vec::new(),
             bridge_program: None,
             harness_env: Vec::new(),
+            test_exec: Arc::new(clusia_testrun::testkit::FakeExec::new()),
+            docker_program: Some("/nonexistent/docker".into()),
+            sandbox_exec_program: "/nonexistent/sandbox-exec".into(),
             claude_program: Some("/nonexistent/claude".into()),
             codex_program: Some("/nonexistent/codex".into()),
             gh_config_dir: None,

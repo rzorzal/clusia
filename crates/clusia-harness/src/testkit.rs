@@ -206,6 +206,16 @@ pub fn pass_block(json: serde_json::Value) -> String {
     format!("```clusia-pass\n{json}\n```")
 }
 
+/// A fenced `clusia-recipe` block holding `json`, one recipe.
+pub fn recipe_block(json: serde_json::Value) -> String {
+    format!("```clusia-recipe\n{json}\n```")
+}
+
+/// A fenced `clusia-near-tests` block holding `json`, `{"tests": [..]}`.
+pub fn near_tests_block(json: serde_json::Value) -> String {
+    format!("```clusia-near-tests\n{json}\n```")
+}
+
 /// The turns the fake plays, one per call.
 #[derive(Debug, Clone)]
 pub struct Script {

@@ -12,8 +12,8 @@ use tokio::signal::unix::{SignalKind, signal};
 #[command(name = "clusiad", version, about = "Clúsia daemon")]
 /// Environment overrides: CLUSIA_HOME, CLUSIA_GITHUB_API, CLUSIA_GITHUB_TOKEN, CLUSIA_GH_BIN,
 /// CLUSIA_SECRET_STORE=memory, CLUSIA_TRAY_BIN, CLUSIA_CLAUDE_BIN, CLUSIA_CODEX_BIN,
-/// CLUSIA_BRIDGE_BIN, CLUSIA_GIPHY_API. The daemon keeps the environment of whoever started it (see
-/// docs/daemon.md).
+/// CLUSIA_DOCKER_BIN, CLUSIA_SANDBOX_EXEC_BIN, CLUSIA_BRIDGE_BIN, CLUSIA_GIPHY_API. The daemon
+/// keeps the environment of whoever started it (see docs/daemon.md).
 struct Args {
     /// Data directory (defaults to $CLUSIA_HOME or ~/Library/Application Support/Clusia).
     #[arg(long, value_name = "DIR")]

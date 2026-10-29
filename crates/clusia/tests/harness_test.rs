@@ -21,6 +21,8 @@ fn clusia(home: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
         .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
+        .env("CLUSIA_DOCKER_BIN", "/nonexistent/docker")
+        .env("CLUSIA_SANDBOX_EXEC_BIN", "/nonexistent/sandbox-exec")
         .env("CLUSIA_SECRET_STORE", "memory")
         .env("GH_TOKEN", "ghp_secret_one")
         .env("GITHUB_TOKEN", "ghp_secret_two")

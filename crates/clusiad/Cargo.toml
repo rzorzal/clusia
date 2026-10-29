@@ -23,6 +23,7 @@ clusia-provider.workspace = true
 clusia-git.workspace = true
 clusia-analytics.workspace = true
 clusia-calls.workspace = true
+clusia-testrun.workspace = true
 libc.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -39,6 +40,7 @@ uuid.workspace = true
 clusia-core = { workspace = true, features = ["test-kit"] }
 tokio = { workspace = true, features = ["test-util"] }
 clusia-harness = { workspace = true, features = ["test-kit"] }
+clusia-testrun = { workspace = true, features = ["test-kit"] }
 tempfile.workspace = true
 wiremock.workspace = true
 serde_json.workspace = true

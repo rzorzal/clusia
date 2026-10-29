@@ -238,9 +238,11 @@ async fn answered<T>(asked: impl Future<Output = T>, interrupt: &mut Signal) -> 
 /// The check a permission request comes from; `None` for the chat's and the revalidation's.
 fn kind_of(origin: TurnOrigin) -> Option<CheckKind> {
     match origin {
-        TurnOrigin::Chat | TurnOrigin::Revalidation | TurnOrigin::Diagrams | TurnOrigin::Story => {
-            None
-        }
+        TurnOrigin::Chat
+        | TurnOrigin::Revalidation
+        | TurnOrigin::Diagrams
+        | TurnOrigin::Story
+        | TurnOrigin::Recipe => None,
         TurnOrigin::Security => Some(CheckKind::Security),
         TurnOrigin::Audit => Some(CheckKind::Audit),
     }

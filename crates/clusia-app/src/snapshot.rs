@@ -174,7 +174,13 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         | Event::DiagramEntryChanged { .. }
         // The Story and Calls views keep their own models.
         | Event::StoryChanged { .. }
-        | Event::CallsIndexChanged { .. } => {}
+        | Event::CallsIndexChanged { .. }
+        // The Tests tab keeps its own model.
+        | Event::TestEnv { .. }
+        | Event::TestStep { .. }
+        | Event::TestOutput { .. }
+        | Event::TestResult { .. }
+        | Event::TestRunDone { .. } => {}
     }
     (r, None)
 }

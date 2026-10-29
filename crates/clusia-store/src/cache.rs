@@ -109,6 +109,7 @@ mod tests {
             role: Role::Reviewer,
             viewer: Some("octo".into()),
             worktree: Some("/w/acme~widgets~7".into()),
+            check_runs: Vec::new(),
             fetched_at: 1_700_000_000,
         }
     }

@@ -3,6 +3,8 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 /// macOS limits `sun_path` to 104 bytes including the trailing NUL.
 pub const MAX_SOCKET_PATH: usize = 103;
 
@@ -120,6 +122,42 @@ impl Paths {
     /// What the checks of `pr` found, for as long as the review lasts.
     pub fn checks_file(&self, pr: &crate::PrRef) -> PathBuf {
         self.checks_dir().join(format!("{}.json", pr.file_key()))
+    }
+
+    /// What the test setup and the test runs keep: records, logs, temp folders and caches.
+    pub fn tests_dir(&self) -> PathBuf {
+        self.root.join("tests")
+    }
+
+    /// What the tests of `pr` know, for as long as the review lasts.
+    pub fn tests_file(&self, pr: &crate::PrRef) -> PathBuf {
+        self.tests_dir().join(format!("{}.json", pr.file_key()))
+    }
+
+    /// The logs of the test runs of `pr`.
+    pub fn test_logs_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.tests_dir().join("logs").join(pr.file_key())
+    }
+
+    pub fn test_log(&self, pr: &crate::PrRef, run: &str) -> PathBuf {
+        self.test_logs_for(pr).join(format!("{run}.log"))
+    }
+
+    /// The temp folder of the runs of `pr`. Named by a short hash, because a Unix-socket path
+    /// has a length limit.
+    pub fn test_tmp_for(&self, pr: &crate::PrRef) -> PathBuf {
+        let digest = Sha256::digest(pr.file_key().as_bytes());
+        let short = digest[..6]
+            .iter()
+            .fold(String::new(), |acc, b| acc + &format!("{b:02x}"));
+        self.tests_dir().join("tmp").join(short)
+    }
+
+    /// The package caches that the runs of one repository share.
+    pub fn test_cache_for(&self, owner: &str, repo: &str) -> PathBuf {
+        self.tests_dir()
+            .join("cache")
+            .join(format!("{owner}~{repo}"))
     }
 
     /// The drawn diagrams of every review, one folder per pull request.
@@ -408,5 +446,41 @@ mod tests {
             real.launch_agents_dir(),
             Path::new("/Users/me/Library/LaunchAgents")
         );
+    }
+
+    #[test]
+    fn test_files_are_keyed_by_pull_request() {
+        let p = Paths::new("/tmp/c");
+        let pr = crate::PrRef::new("acme", "widgets", 7).unwrap();
+        assert_eq!(p.tests_dir(), PathBuf::from("/tmp/c/tests"));
+        assert_eq!(
+            p.tests_file(&pr),
+            PathBuf::from("/tmp/c/tests/acme~widgets~7.json")
+        );
+        assert_eq!(
+            p.test_logs_for(&pr),
+            PathBuf::from("/tmp/c/tests/logs/acme~widgets~7")
+        );
+        assert_eq!(
+            p.test_log(&pr, "r3"),
+            PathBuf::from("/tmp/c/tests/logs/acme~widgets~7/r3.log")
+        );
+        assert_eq!(
+            p.test_cache_for("acme", "widgets"),
+            PathBuf::from("/tmp/c/tests/cache/acme~widgets")
+        );
+    }
+
+    #[test]
+    fn the_review_temp_folder_is_short_and_stable() {
+        let p = Paths::new("/tmp/c");
+        let pr = crate::PrRef::new("acme", "widgets", 7).unwrap();
+        // sha256("acme~widgets~7") starts 941b4433b49d.
+        assert_eq!(
+            p.test_tmp_for(&pr),
+            PathBuf::from("/tmp/c/tests/tmp/941b4433b49d")
+        );
+        let other = crate::PrRef::new("acme", "widgets", 8).unwrap();
+        assert_ne!(p.test_tmp_for(&pr), p.test_tmp_for(&other));
     }
 }

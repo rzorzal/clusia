@@ -64,6 +64,17 @@ pub struct CommitInfo {
     pub date: String,
 }
 
+/// One check run of a pull request's head commit, as GitHub reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckRun {
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub details_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ChecksSummary {
     pub total: u32,
@@ -73,6 +84,26 @@ pub struct ChecksSummary {
 }
 
 impl ChecksSummary {
+    /// Counts `runs` as GitHub's check list reads: one that is not `completed` is pending; a
+    /// completed one passed on `success`, `neutral` or `skipped` and failed on anything else.
+    pub fn of(runs: &[CheckRun]) -> Self {
+        let mut summary = Self::default();
+        for run in runs {
+            summary.total += 1;
+            if run.status != "completed" {
+                summary.pending += 1;
+            } else if matches!(
+                run.conclusion.as_deref(),
+                Some("success" | "neutral" | "skipped")
+            ) {
+                summary.passed += 1;
+            } else {
+                summary.failed += 1;
+            }
+        }
+        summary
+    }
+
     pub fn label(&self) -> &'static str {
         if self.total == 0 {
             "none"
@@ -135,6 +166,8 @@ pub struct ReviewCache {
     pub role: Role,
     pub viewer: Option<String>,
     pub worktree: Option<String>,
+    #[serde(default)]
+    pub check_runs: Vec<CheckRun>,
     pub fetched_at: i64,
 }
 
@@ -191,8 +224,14 @@ mod tests {
 
     #[test]
     fn review_cache_round_trips() {
+        let cache = sample_cache();
+        let json = serde_json::to_string(&cache).unwrap();
+        assert_eq!(serde_json::from_str::<ReviewCache>(&json).unwrap(), cache);
+    }
+
+    fn sample_cache() -> ReviewCache {
         let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
-        let cache = ReviewCache {
+        ReviewCache {
             pr: PrDetail {
                 summary: crate::PrSummary {
                     pr: pr.clone(),
@@ -255,9 +294,62 @@ mod tests {
             role: Role::Author,
             viewer: Some("maria".into()),
             worktree: None,
+            check_runs: vec![run("build", "completed", Some("success"))],
             fetched_at: 1_700_000_000,
+        }
+    }
+
+    fn run(name: &str, status: &str, conclusion: Option<&str>) -> CheckRun {
+        CheckRun {
+            name: name.into(),
+            status: status.into(),
+            conclusion: conclusion.map(Into::into),
+            started_at: None,
+            completed_at: None,
+            details_url: None,
+        }
+    }
+
+    #[test]
+    fn a_summary_counts_runs_the_way_get_checks_does() {
+        let runs = [
+            run("build", "completed", Some("success")),
+            run("lint", "completed", Some("neutral")),
+            run("docs", "completed", Some("skipped")),
+            run("test", "completed", Some("failure")),
+            run("deploy", "completed", Some("cancelled")),
+            run("e2e", "in_progress", None),
+            run("queued", "queued", None),
+        ];
+        assert_eq!(
+            ChecksSummary::of(&runs),
+            ChecksSummary {
+                total: 7,
+                passed: 3,
+                failed: 2,
+                pending: 2
+            }
+        );
+        assert_eq!(ChecksSummary::of(&[]), ChecksSummary::default());
+    }
+
+    #[test]
+    fn check_runs_round_trip_and_old_caches_have_none() {
+        let full = CheckRun {
+            name: "build".into(),
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            started_at: Some("2026-10-01T10:00:00Z".into()),
+            completed_at: Some("2026-10-01T10:05:00Z".into()),
+            details_url: Some("https://github.com/acme/widgets/actions/runs/1".into()),
         };
-        let json = serde_json::to_string(&cache).unwrap();
-        assert_eq!(serde_json::from_str::<ReviewCache>(&json).unwrap(), cache);
+        assert_eq!(
+            serde_json::to_string(&full).unwrap(),
+            r#"{"name":"build","status":"completed","conclusion":"success","started_at":"2026-10-01T10:00:00Z","completed_at":"2026-10-01T10:05:00Z","details_url":"https://github.com/acme/widgets/actions/runs/1"}"#
+        );
+        let mut value = serde_json::to_value(sample_cache()).unwrap();
+        value.as_object_mut().unwrap().remove("check_runs");
+        let old: ReviewCache = serde_json::from_value(value).unwrap();
+        assert!(old.check_runs.is_empty());
     }
 }

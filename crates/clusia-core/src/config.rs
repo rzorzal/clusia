@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::checks::{AuditArea, BUILTIN_AREA_IDS, default_areas, validate_area};
 use crate::revalidation::{QUIET_DEFAULT_SECS, QUIET_RANGE};
+use crate::tests::RunnerChoice;
 
 pub const MIN_POLL_SECS: u64 = 15;
 pub const MAX_POLL_SECS: u64 = 3600;
@@ -25,6 +26,7 @@ pub struct Config {
     pub composer: Composer,
     pub harness: Harness,
     pub diff: Diff,
+    pub tests: Tests,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,6 +579,47 @@ impl Default for Diff {
     }
 }
 
+pub const TEST_CPUS_MAX: u32 = 256;
+pub const TEST_MEMORY_RANGE: std::ops::RangeInclusive<u32> = 512..=262_144;
+pub const RUN_TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 60..=14_400;
+pub const PARALLEL_RUNS_RANGE: std::ops::RangeInclusive<u32> = 1..=4;
+
+/// How the PR's tests run: where, with how much, for how long and how many at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tests {
+    pub runner: RunnerChoice,
+    /// Cores for a container; 0 means half the machine's, at least one.
+    pub cpus: u32,
+    pub memory_mb: u32,
+    pub run_timeout_secs: u32,
+    /// Activities (setup steps, runs, lists) that may run at once across every review.
+    pub parallel_runs: u32,
+}
+
+impl Default for Tests {
+    fn default() -> Self {
+        Self {
+            runner: RunnerChoice::Auto,
+            cpus: 0,
+            memory_mb: 4096,
+            run_timeout_secs: 1800,
+            parallel_runs: 1,
+        }
+    }
+}
+
+impl Tests {
+    /// The cores a container gets on a machine with `cores`.
+    pub fn cpus_for(&self, cores: u32) -> u32 {
+        if self.cpus == 0 {
+            (cores / 2).max(1)
+        } else {
+            self.cpus
+        }
+    }
+}
+
 /// The agent behind the review chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1122,6 +1165,30 @@ impl Config {
                 CALLS_DEPTH_RANGE.start(),
                 CALLS_DEPTH_RANGE.end()
             ));
+        }
+        let tests = &self.tests;
+        if tests.cpus > TEST_CPUS_MAX {
+            return Err(format!(
+                "tests.cpus must be between 0 and {TEST_CPUS_MAX}, got {}",
+                tests.cpus
+            ));
+        }
+        for (key, value, range) in [
+            ("memory_mb", tests.memory_mb, &TEST_MEMORY_RANGE),
+            (
+                "run_timeout_secs",
+                tests.run_timeout_secs,
+                &RUN_TIMEOUT_RANGE,
+            ),
+            ("parallel_runs", tests.parallel_runs, &PARALLEL_RUNS_RANGE),
+        ] {
+            if !range.contains(&value) {
+                return Err(format!(
+                    "tests.{key} must be between {} and {}, got {value}",
+                    range.start(),
+                    range.end()
+                ));
+            }
         }
         let mut seen = BTreeSet::new();
         for area in &self.harness.audit_areas {
@@ -2163,5 +2230,78 @@ mod tests {
                     .unwrap();
             assert_eq!(c.appearance.diff_view, view);
         }
+    }
+
+    #[test]
+    fn the_tests_settings_default_and_resolve_cpus() {
+        let t = Config::default().tests;
+        assert_eq!(
+            t,
+            Tests {
+                runner: crate::tests::RunnerChoice::Auto,
+                cpus: 0,
+                memory_mb: 4096,
+                run_timeout_secs: 1800,
+                parallel_runs: 1,
+            }
+        );
+        assert_eq!(t.cpus_for(10), 5);
+        assert_eq!(t.cpus_for(1), 1, "at least one");
+        assert_eq!(t.cpus_for(0), 1);
+        let pinned = Tests { cpus: 3, ..t };
+        assert_eq!(pinned.cpus_for(64), 3);
+        let old: Config = serde_json::from_str(r#"{"harness":{"on_open":"wait"}}"#).unwrap();
+        assert_eq!(old.tests, Tests::default());
+        let some: Config =
+            serde_json::from_str(r#"{"tests":{"runner":"local","parallel_runs":2}}"#).unwrap();
+        assert_eq!(some.tests.runner, crate::tests::RunnerChoice::Local);
+        assert_eq!((some.tests.parallel_runs, some.tests.memory_mb), (2, 4096));
+    }
+
+    #[test]
+    fn the_tests_settings_are_bounded() {
+        let mut c = Config::default();
+        let mut check = |apply: &dyn Fn(&mut Tests), want: Option<&str>| {
+            let before = c.tests.clone();
+            apply(&mut c.tests);
+            match want {
+                Some(message) => assert_eq!(c.validate().unwrap_err(), message),
+                None => assert_eq!(c.validate(), Ok(())),
+            }
+            c.tests = before;
+        };
+        check(
+            &|t| t.cpus = 257,
+            Some("tests.cpus must be between 0 and 256, got 257"),
+        );
+        check(&|t| t.cpus = 256, None);
+        check(&|t| t.cpus = 0, None);
+        check(
+            &|t| t.memory_mb = 3,
+            Some("tests.memory_mb must be between 512 and 262144, got 3"),
+        );
+        check(
+            &|t| t.memory_mb = 262_145,
+            Some("tests.memory_mb must be between 512 and 262144, got 262145"),
+        );
+        check(&|t| t.memory_mb = 512, None);
+        check(
+            &|t| t.run_timeout_secs = 59,
+            Some("tests.run_timeout_secs must be between 60 and 14400, got 59"),
+        );
+        check(
+            &|t| t.run_timeout_secs = 14_401,
+            Some("tests.run_timeout_secs must be between 60 and 14400, got 14401"),
+        );
+        check(&|t| t.run_timeout_secs = 14_400, None);
+        check(
+            &|t| t.parallel_runs = 0,
+            Some("tests.parallel_runs must be between 1 and 4, got 0"),
+        );
+        check(
+            &|t| t.parallel_runs = 5,
+            Some("tests.parallel_runs must be between 1 and 4, got 5"),
+        );
+        check(&|t| t.parallel_runs = 4, None);
     }
 }

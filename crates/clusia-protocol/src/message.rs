@@ -5,6 +5,9 @@ pub use clusia_core::OpenTarget;
 use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::revalidation::Revalidation;
 use clusia_core::story::{StoryVersion, StoryVersionState};
+use clusia_core::tests::{
+    Approve, DiskReport, KnownTest, StepState, TestCaseResult, TestRun, TestScope, TestsView,
+};
 use clusia_core::{
     ActivitySummary, CheckKind, CheckResult, ChecksSummary, Config, DraftItem, DraftKind,
     EventKind, FileDiff, Finding, HiddenComments, MediaKind, OpenTabs, Pass, PrConversation,
@@ -25,6 +28,8 @@ pub mod topics {
     pub const TRAY: &str = "tray";
     /// The review agent's chat: every `Agent*` event and `SessionState`.
     pub const AGENT: &str = "agent";
+    /// The test setup and the test runs: every `Test*` event.
+    pub const TESTS: &str = "tests";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -293,6 +298,45 @@ pub enum Command {
     /// The results and the state of both checks of this review.
     GetChecks {
         pr: PrRef,
+    },
+    /// What the tests of this review know (`Reply::Tests`). Any pull request answers.
+    GetTests {
+        pr: PrRef,
+    },
+    /// Probe the machine and ask the agent for a recipe, or ask again for a new one.
+    GenerateTests {
+        pr: PrRef,
+    },
+    /// Approve setup steps and run them. `recipe_hash` is the hash of the recipe whose plan the
+    /// reviewer saw; an approval of another recipe is refused.
+    PrepareTests {
+        pr: PrRef,
+        recipe_hash: String,
+        approve: Approve,
+    },
+    /// Run tests (`Reply::TestRunStarted`).
+    RunTests {
+        pr: PrRef,
+        scope: TestScope,
+    },
+    /// Stop the setup, run or list that runs or waits for this review.
+    StopTests {
+        pr: PrRef,
+    },
+    /// The tests the recipe's `list` command names (`Reply::TestList`).
+    ListTests {
+        pr: PrRef,
+    },
+    /// Write the recipe the agent proposed over the reviewer's file (`Reply::Tests`).
+    AcceptRecipe {
+        pr: PrRef,
+    },
+    /// What the test runs keep on this machine (`Reply::TestDisk`).
+    GetTestDisk,
+    /// Remove what the test runs keep of `repo` (`owner/repo`), or of every repository
+    /// (`Reply::TestDisk`).
+    CleanUpTests {
+        repo: Option<String>,
     },
     /// The comments hidden in this pull request (`Reply::HiddenComments`).
     GetHiddenComments {
@@ -568,6 +612,14 @@ pub enum Reply {
     },
     /// One version, for `GetStoryVersion`.
     StoryVersion(StoryVersion),
+    /// What `GetTests` and `AcceptRecipe` know.
+    Tests(Box<TestsView>),
+    /// A run was accepted and has this id; its events follow on topic `tests`.
+    TestRunStarted {
+        run: String,
+    },
+    TestList(Vec<KnownTest>),
+    TestDisk(DiskReport),
     /// What `GetCalls` knows: the graph (none while the index is not ready), the state of the
     /// index, and the files of languages Clúsia does not read.
     Calls {
@@ -936,6 +988,36 @@ pub enum Event {
     CallsIndexChanged {
         pr: PrRef,
         state: CallsIndexState,
+    },
+    /// The machine, the recipe, the plan or the phase of a review's tests changed (topic
+    /// `tests`).
+    TestEnv {
+        pr: PrRef,
+        view: Box<TestsView>,
+    },
+    /// A setup step changed state (topic `tests`); `tail` is the end of its output.
+    TestStep {
+        pr: PrRef,
+        step: String,
+        state: StepState,
+        tail: Option<String>,
+    },
+    /// The end of a run's output so far (topic `tests`), at most every `OUTPUT_EVERY_MS`.
+    TestOutput {
+        pr: PrRef,
+        run: String,
+        tail: String,
+    },
+    /// One test of a run reported (topic `tests`).
+    TestResult {
+        pr: PrRef,
+        run: String,
+        result: TestCaseResult,
+    },
+    /// A run ended, whatever the outcome (topic `tests`).
+    TestRunDone {
+        pr: PrRef,
+        run: Box<TestRun>,
     },
 }
 
@@ -1306,6 +1388,13 @@ pub enum AgentLogEntry {
         turn: u64,
         state: String,
     },
+    /// The recipe turn changed state: `waiting`, `running`, `done`, `failed` or `stopped`. Not
+    /// part of the chat: `GetAgentLog` leaves these out.
+    Tests {
+        at: i64,
+        turn: u64,
+        state: String,
+    },
 }
 
 /// A permission request waiting for the reviewer: the fields of `Event::PermissionRequested`.
@@ -1327,7 +1416,7 @@ pub struct PermissionRequest {
 }
 
 /// Who runs a turn of the agent: the review chat, one of the two checks, the revalidation, the
-/// drawing of diagrams, or the writing of the Story.
+/// drawing of diagrams, the writing of the Story, or the recipe of the tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOrigin {
@@ -1338,6 +1427,7 @@ pub enum TurnOrigin {
     Revalidation,
     Diagrams,
     Story,
+    Recipe,
 }
 
 impl TurnOrigin {
@@ -1553,6 +1643,7 @@ pub enum WindowTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clusia_core::tests::*;
 
     #[test]
     fn a_suggestion_anchors_at_its_line_first_then_at_its_range() {
@@ -4410,6 +4501,164 @@ mod tests {
         assert_eq!(
             wire(&entry),
             r#"{"type":"story","at":9,"turn":3,"state":"running"}"#
+        );
+        round_trip(entry);
+    }
+
+    #[test]
+    fn test_commands_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        assert_eq!(
+            request(Command::GetTests { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"get_tests":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::GenerateTests { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"generate_tests":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::PrepareTests {
+                pr: acme(),
+                recipe_hash: "abc".into(),
+                approve: Approve::Steps(vec!["image".into()]),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"prepare_tests":{"pr":"acme/widgets#7","recipe_hash":"abc","approve":{"steps":["image"]}}}}"#
+        );
+        assert_eq!(
+            request(Command::RunTests {
+                pr: acme(),
+                scope: TestScope::One {
+                    name: "a::b".into()
+                },
+            }),
+            r#"{"type":"request","id":5,"cmd":{"run_tests":{"pr":"acme/widgets#7","scope":{"one":{"name":"a::b"}}}}}"#
+        );
+        assert_eq!(
+            request(Command::StopTests { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"stop_tests":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::ListTests { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"list_tests":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::AcceptRecipe { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"accept_recipe":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetTestDisk),
+            r#"{"type":"request","id":5,"cmd":"get_test_disk"}"#
+        );
+        assert_eq!(
+            request(Command::CleanUpTests { repo: None }),
+            r#"{"type":"request","id":5,"cmd":{"clean_up_tests":{"repo":null}}}"#
+        );
+        assert_eq!(
+            request(Command::CleanUpTests {
+                repo: Some("acme/widgets".into())
+            }),
+            r#"{"type":"request","id":5,"cmd":{"clean_up_tests":{"repo":"acme/widgets"}}}"#
+        );
+    }
+
+    #[test]
+    fn test_replies_and_events_wire_format() {
+        let reply = |reply| {
+            wire(&ServerMessage::Response {
+                id: 5,
+                result: Outcome::Ok(reply),
+            })
+        };
+        assert_eq!(
+            reply(Reply::TestRunStarted { run: "r1".into() }),
+            r#"{"type":"response","id":5,"result":{"ok":{"test_run_started":{"run":"r1"}}}}"#
+        );
+        assert_eq!(
+            reply(Reply::TestList(vec![KnownTest {
+                name: "auth::refresh".into(),
+                file: None,
+                module: Some("auth".into()),
+            }])),
+            r#"{"type":"response","id":5,"result":{"ok":{"test_list":[{"name":"auth::refresh","file":null,"module":"auth"}]}}}"#
+        );
+        assert_eq!(
+            reply(Reply::TestDisk(DiskReport {
+                items: vec![DiskItem {
+                    kind: DiskKind::Image,
+                    name: "clusia/acme-widgets-1a2b3c:0123456789abcdef".into(),
+                    repo: Some("acme/widgets".into()),
+                    bytes: 1024,
+                }],
+                total_bytes: 1024,
+                note: None,
+            })),
+            r#"{"type":"response","id":5,"result":{"ok":{"test_disk":{"items":[{"kind":"image","name":"clusia/acme-widgets-1a2b3c:0123456789abcdef","repo":"acme/widgets","bytes":1024}],"total_bytes":1024,"note":null}}}}"#
+        );
+        let view = TestsView::new("abc");
+        assert_eq!(
+            reply(Reply::Tests(Box::new(view.clone()))),
+            format!(
+                r#"{{"type":"response","id":5,"result":{{"ok":{{"tests":{}}}}}}}"#,
+                wire(&view)
+            )
+        );
+
+        let event = |event| {
+            wire(&ServerMessage::Event {
+                topic: topics::TESTS.into(),
+                event,
+            })
+        };
+        assert_eq!(topics::TESTS, "tests");
+        assert_eq!(
+            event(Event::TestStep {
+                pr: acme(),
+                step: "image".into(),
+                state: StepState::Running,
+                tail: None,
+            }),
+            r#"{"type":"event","topic":"tests","event":{"test_step":{"pr":"acme/widgets#7","step":"image","state":"running","tail":null}}}"#
+        );
+        assert_eq!(
+            event(Event::TestOutput {
+                pr: acme(),
+                run: "r1".into(),
+                tail: "ok".into()
+            }),
+            r#"{"type":"event","topic":"tests","event":{"test_output":{"pr":"acme/widgets#7","run":"r1","tail":"ok"}}}"#
+        );
+        assert_eq!(
+            event(Event::TestResult {
+                pr: acme(),
+                run: "r1".into(),
+                result: TestCaseResult {
+                    name: "t".into(),
+                    file: None,
+                    status: TestStatus::Passed,
+                    duration_ms: Some(3),
+                    message: None,
+                },
+            }),
+            r#"{"type":"event","topic":"tests","event":{"test_result":{"pr":"acme/widgets#7","run":"r1","result":{"name":"t","file":null,"status":"passed","duration_ms":3,"message":null}}}}"#
+        );
+        round_trip(Event::TestEnv {
+            pr: acme(),
+            view: Box::new(view),
+        });
+    }
+
+    #[test]
+    fn a_recipe_turn_is_not_a_chat_turn() {
+        assert_eq!(wire(&TurnOrigin::Recipe), r#""recipe""#);
+        assert!(!TurnOrigin::Recipe.is_chat());
+        let entry = AgentLogEntry::Tests {
+            at: 9,
+            turn: 3,
+            state: "running".into(),
+        };
+        assert_eq!(
+            wire(&entry),
+            r#"{"type":"tests","at":9,"turn":3,"state":"running"}"#
         );
         round_trip(entry);
     }

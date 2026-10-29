@@ -1115,6 +1115,9 @@ pub(crate) fn close_unfinished(shared: &Shared) {
             let story = entries
                 .iter()
                 .any(|entry| matches!(entry, AgentLogEntry::Story { turn: t, .. } if *t == turn));
+            let tests = entries
+                .iter()
+                .any(|entry| matches!(entry, AgentLogEntry::Tests { turn: t, .. } if *t == turn));
             let entry = match check {
                 Some(kind) => AgentLogEntry::Check {
                     at: now_unix(),
@@ -1134,6 +1137,11 @@ pub(crate) fn close_unfinished(shared: &Shared) {
                     key: drawing.flatten(),
                 },
                 None if story => AgentLogEntry::Story {
+                    at: now_unix(),
+                    turn,
+                    state: "stopped".into(),
+                },
+                None if tests => AgentLogEntry::Tests {
                     at: now_unix(),
                     turn,
                     state: "stopped".into(),
@@ -1451,6 +1459,9 @@ mod tests {
             harness_search_paths: Vec::new(),
             bridge_program: None,
             harness_env: Vec::new(),
+            test_exec: Arc::new(clusia_testrun::testkit::FakeExec::new()),
+            docker_program: Some("/nonexistent/docker".into()),
+            sandbox_exec_program: "/nonexistent/sandbox-exec".into(),
         };
         Arc::new(Shared::new(paths, config, options))
     }

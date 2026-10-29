@@ -50,6 +50,8 @@ With `harness.kind = custom` each turn starts one process, as Claude's do, but s
 | `CLUSIA_TRAY_BIN` | the tray program; `none` disables it |
 | `CLUSIA_CLAUDE_BIN` | the `claude` program the review agent runs when Config › Harness names none, and first run looks only there |
 | `CLUSIA_CODEX_BIN` | the `codex` program the review agent runs when Config › Harness names none and `harness.kind` is `codex`, and first run looks only there |
+| `CLUSIA_DOCKER_BIN` | the `docker` (or `podman`) program the test runner uses, overriding the lookup; `none`, or a path that is not there, means no container engine |
+| `CLUSIA_SANDBOX_EXEC_BIN` | the `sandbox-exec` the local test runner uses (default `/usr/bin/sandbox-exec`) |
 | `CLUSIA_DAEMON_BIN` | the daemon program the clients start |
 | `CLUSIA_GIPHY_API` | Giphy API base URL |
 
