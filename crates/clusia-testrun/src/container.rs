@@ -48,7 +48,7 @@ pub async fn image_present(exec: &dyn Exec, docker: &Docker, tag: &str) -> bool 
 
 /// Builds the plan's base (when it has one), then the generated Dockerfile from `build_dir`,
 /// emptied first so the build context holds that file alone and no repo file reaches an
-/// image step.
+/// image step. `limit` covers both builds.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_image(
     exec: &dyn Exec,
@@ -60,6 +60,7 @@ pub async fn build_image(
     stop: &StopFlag,
     chunk: Chunk<'_>,
 ) -> io::Result<Ended> {
+    let started = tokio::time::Instant::now();
     if let Some(base) = &plan.base_build {
         let ended = exec
             .stream(&docker.command(base), limit, stop, &mut *chunk)
@@ -90,7 +91,12 @@ pub async fn build_image(
     args.extend(["-t".to_string(), plan.tag.clone(), "-f".to_string()]);
     args.push(file.display().to_string());
     args.push(build_dir.display().to_string());
-    exec.stream(&docker.command(args), limit, stop, chunk).await
+    // Both builds share the step's limit.
+    let left = limit.saturating_sub(started.elapsed());
+    if left.is_zero() {
+        return Ok(Ended::TimedOut);
+    }
+    exec.stream(&docker.command(args), left, stop, chunk).await
 }
 
 /// Runs `job` to its end, its limit or `stop`. The container outlives its `docker run`
@@ -687,6 +693,46 @@ mod tests {
         .unwrap();
         assert_eq!(ended, Ended::Exited(Some(1)));
         assert_eq!(failing.calls().len(), 1, "a failed base stops the build");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_two_builds_share_one_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = ImagePlan {
+            base_build: Some(strings(&["build", "-t", "clusia/x-base:1", "/wt"])),
+            dockerfile: "FROM clusia/x-base:1\n".into(),
+            tag: "clusia/x:2".into(),
+            hash: "2".repeat(64),
+            notes: vec![],
+            network: false,
+        };
+        let fake = FakeExec::new();
+        fake.on_sequence(
+            "docker",
+            &["build"],
+            vec![
+                FakeReply::after(Duration::from_secs(50), FakeReply::ok("")),
+                FakeReply::hang(),
+            ],
+        );
+        let stop = StopFlag::new();
+        let mut chunk = |_: Stream, _: &[u8]| {};
+        let started = tokio::time::Instant::now();
+        let ended = build_image(
+            &fake,
+            &docker(),
+            &plan,
+            &dir.path().join("build"),
+            &labels(LabelKind::Run),
+            Duration::from_secs(60),
+            &stop,
+            &mut chunk,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ended, Ended::TimedOut);
+        assert_eq!(fake.calls().len(), 2);
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
     }
 
     #[tokio::test]

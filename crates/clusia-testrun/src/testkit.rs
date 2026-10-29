@@ -22,6 +22,10 @@ enum Reply {
     },
     Hang,
     Missing,
+    Slow {
+        after: Duration,
+        then: Box<Reply>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,15 @@ impl FakeReply {
     /// The program is not there.
     pub fn missing() -> Self {
         Self(Reply::Missing)
+    }
+
+    /// `then`, after `after` of the (paused or real) clock; a limit or a stop that comes first
+    /// ends it as for [`FakeReply::hang`].
+    pub fn after(after: Duration, then: FakeReply) -> Self {
+        Self(Reply::Slow {
+            after,
+            then: Box::new(then.0),
+        })
     }
 }
 
@@ -158,8 +171,16 @@ impl Exec for FakeExec {
         limit: Duration,
     ) -> BoxFut<'a, io::Result<Output>> {
         Box::pin(async move {
-            match self.answer(cmd) {
-                Reply::Missing => Err(not_found(cmd)),
+            let reply = match self.answer(cmd) {
+                Reply::Slow { after, then } if after < limit => {
+                    tokio::time::sleep(after).await;
+                    *then
+                }
+                Reply::Slow { .. } => Reply::Hang,
+                reply => reply,
+            };
+            match reply {
+                Reply::Missing | Reply::Slow { .. } => Err(not_found(cmd)),
                 Reply::Hang => {
                     tokio::time::sleep(limit).await;
                     Ok(Output {
@@ -202,8 +223,18 @@ impl Exec for FakeExec {
         chunk: &'a mut (dyn FnMut(Stream, &[u8]) + Send),
     ) -> BoxFut<'a, io::Result<Ended>> {
         Box::pin(async move {
-            let (pieces, code) = match self.answer(cmd) {
-                Reply::Missing => return Err(not_found(cmd)),
+            let reply = match self.answer(cmd) {
+                Reply::Slow { after, then } if after < limit => {
+                    tokio::select! {
+                        _ = stop.notified() => return Ok(Ended::Stopped),
+                        _ = tokio::time::sleep(after) => *then,
+                    }
+                }
+                Reply::Slow { .. } => Reply::Hang,
+                reply => reply,
+            };
+            let (pieces, code) = match reply {
+                Reply::Missing | Reply::Slow { .. } => return Err(not_found(cmd)),
                 Reply::Hang => {
                     return Ok(tokio::select! {
                         _ = stop.notified() => Ended::Stopped,
