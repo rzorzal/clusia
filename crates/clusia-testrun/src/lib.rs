@@ -5,6 +5,8 @@ pub mod engine;
 pub mod exec;
 pub mod log;
 pub mod names;
+pub mod plan;
+pub mod recipe;
 pub mod scan;
 #[cfg(any(test, feature = "test-kit"))]
 pub mod testkit;
