@@ -8,6 +8,7 @@ use clusia_core::printable::printable;
 
 use crate::names::{LabelKind, Labels, base_ref, image_ref, sha256_hex};
 use crate::recipe::{ImageSource, Recipe, StepInto};
+use crate::scan::open_regular;
 
 /// The cap on a Dockerfile the build reads.
 const FILE_MAX: u64 = 1024 * 1024;
@@ -283,14 +284,10 @@ fn read_inside(
 ) -> Result<(PathBuf, String), String> {
     let path = resolve_inside(wt, base, rel, what)?;
     let shown = printable(rel);
-    let file =
-        std::fs::File::open(&path).map_err(|e| format!("The {what} {shown} can't be read: {e}"))?;
-    let meta = file
-        .metadata()
-        .map_err(|e| format!("The {what} {shown} can't be read: {e}"))?;
-    if !meta.is_file() {
-        return Err(format!("The {what} {shown} is not a file"));
-    }
+    let file = open_regular(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::InvalidInput => format!("The {what} {shown} is not a file"),
+        _ => format!("The {what} {shown} can't be read: {e}"),
+    })?;
     let mut bytes = Vec::new();
     file.take(max + 1)
         .read_to_end(&mut bytes)
@@ -700,6 +697,35 @@ mod tests {
             plan_image(&recipe(source, vec![]), &wt, SLUG, &labels(), INPUTS),
             Err("The Dockerfile ci/Dockerfile resolves outside the worktree".to_string())
         );
+    }
+
+    #[test]
+    fn a_fifo_named_as_the_dockerfile_is_refused_without_blocking() {
+        let (dir, wt) = worktree();
+        let fifo = std::ffi::CString::new(wt.join("Dockerfile").to_str().unwrap()).unwrap();
+        // SAFETY: `fifo` is a NUL-terminated path that lives across the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let source = ImageSource::Dockerfile {
+                path: "Dockerfile".into(),
+                target: None,
+            };
+            let _ = tx.send(plan_image(
+                &recipe(source, vec![]),
+                &wt,
+                SLUG,
+                &labels(),
+                INPUTS,
+            ));
+        });
+        // A FIFO with no writer would block an open for reading forever.
+        let planned = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(
+            planned.expect("plan_image returned"),
+            Err("The Dockerfile Dockerfile is not a file".to_string())
+        );
+        drop(dir);
     }
 
     #[test]

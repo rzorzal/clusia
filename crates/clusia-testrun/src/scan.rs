@@ -163,6 +163,26 @@ fn is_regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 
+/// Opens a regular file for reading, never blocking on a FIFO and never following a symlink
+/// at the last component: a step that runs PR code may plant either at a path Clúsia reads.
+/// The type is checked before the open and again on the open file, which closes the race of
+/// a swap in between.
+pub(crate) fn open_regular(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let not_a_file = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file");
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(not_a_file());
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(not_a_file());
+    }
+    Ok(file)
+}
+
 fn capped(set: BTreeSet<String>) -> Vec<String> {
     set.into_iter().take(LIST_MAX).collect()
 }
@@ -193,7 +213,7 @@ fn digest_of(worktree: &Path, rel: &str) -> String {
         return "missing".to_string();
     }
     let mut bytes = Vec::new();
-    match fs::File::open(&path).and_then(|f| f.take(SIGNAL_FILE_MAX).read_to_end(&mut bytes)) {
+    match open_regular(&path).and_then(|f| f.take(SIGNAL_FILE_MAX).read_to_end(&mut bytes)) {
         Ok(_) => sha256_hex(&bytes),
         Err(_) => "missing".to_string(),
     }
@@ -568,6 +588,42 @@ mod tests {
         assert_eq!(after, inputs_hash(dir.path(), &signals), "and it is stable");
     }
 
+    #[test]
+    fn a_fifo_or_a_symlink_is_never_opened_as_a_signal_file() {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), "Cargo.lock", "version = 3\n");
+        let signals = repo_signals(dir.path());
+        let missing = {
+            let gone = tempfile::tempdir().unwrap();
+            inputs_hash(gone.path(), &signals)
+        };
+        std::fs::remove_file(dir.path().join("Cargo.lock")).unwrap();
+        let fifo = std::ffi::CString::new(dir.path().join("Cargo.lock").to_str().unwrap()).unwrap();
+        // SAFETY: `fifo` is a NUL-terminated path that lives across the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let path = dir.path().join("Cargo.lock");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_regular(&path).map(drop).map_err(|e| e.kind()));
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).expect("no block"),
+            Err(std::io::ErrorKind::InvalidInput)
+        );
+        assert_eq!(inputs_hash(dir.path(), &signals), missing);
+
+        put(dir.path(), "real.lock", "version = 3\n");
+        std::os::unix::fs::symlink(dir.path().join("real.lock"), dir.path().join("link.lock"))
+            .unwrap();
+        assert_eq!(
+            open_regular(&dir.path().join("link.lock"))
+                .map_err(|e| e.kind())
+                .err(),
+            Some(std::io::ErrorKind::InvalidInput)
+        );
+        assert!(open_regular(&dir.path().join("real.lock")).is_ok());
+    }
+
     #[tokio::test]
     async fn existing_state_is_read_from_the_engine_the_disk_and_the_path() {
         let worktree = tempfile::tempdir().unwrap();
@@ -830,10 +886,15 @@ mod tests {
             eprintln!("skipped: /usr/bin/git is not there");
             return;
         }
+        let home = tempfile::tempdir().unwrap();
         let git = |dir: &Path, args: &[&str]| {
+            // Never the owner's configuration, templates or filters.
             let status = std::process::Command::new("/usr/bin/git")
                 .args(args)
                 .current_dir(dir)
+                .env("HOME", home.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .status()
                 .unwrap();
             assert!(status.success(), "git {args:?}");
