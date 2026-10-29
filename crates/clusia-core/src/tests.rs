@@ -475,7 +475,7 @@ If you cannot write a recipe, say why in one sentence and write no block.\n"
     )
 }
 
-/// The paragraph about the function cases (none in M1a).
+/// The paragraph about the function cases; empty until the harness writes cases.
 fn cases_text(_cases: bool) -> &'static str {
     ""
 }

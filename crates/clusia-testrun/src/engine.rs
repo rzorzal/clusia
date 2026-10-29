@@ -226,16 +226,26 @@ pub fn start_command(kind: EngineKind, endpoint: &str) -> Option<String> {
                 .split_once("/.colima/")
                 .and_then(|(_, rest)| rest.split('/').next())
                 .filter(|p| !p.is_empty() && *p != "default");
-            Some(match profile {
-                Some(profile) => format!("colima start --profile {profile}"),
-                None => "colima start".to_string(),
-            })
+            match profile {
+                // The command is shown to the reviewer and run word by word, so the profile
+                // must be one plain word that cannot read as a flag.
+                Some(profile) if !plain_profile(profile) => None,
+                Some(profile) => Some(format!("colima start --profile {profile}")),
+                None => Some("colima start".to_string()),
+            }
         }
         EngineKind::OrbStack => Some("open -a OrbStack".to_string()),
         EngineKind::DockerDesktop => Some("open -a Docker".to_string()),
         EngineKind::Podman => Some("podman machine start".to_string()),
         EngineKind::Other => None,
     }
+}
+
+fn plain_profile(name: &str) -> bool {
+    !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 #[cfg(test)]
@@ -555,6 +565,17 @@ mod tests {
                 EngineKind::Colima,
                 "unix:///Users/octo/.colima/work/docker.sock",
                 Some("colima start --profile work"),
+            ),
+            // A profile name that is not a plain word gets no command to run.
+            (
+                EngineKind::Colima,
+                "unix:///Users/octo/.colima/w k;rm -rf ~/docker.sock",
+                None,
+            ),
+            (
+                EngineKind::Colima,
+                "unix:///Users/octo/.colima/--help/docker.sock",
+                None,
             ),
             (EngineKind::OrbStack, "", Some("open -a OrbStack")),
             (EngineKind::DockerDesktop, "", Some("open -a Docker")),

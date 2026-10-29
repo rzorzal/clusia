@@ -323,6 +323,8 @@ fn a_daemon_that_loses_the_lock_leaves_the_logs_alone() {
         .arg(dir.path())
         .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
         .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
+        .env("CLUSIA_DOCKER_BIN", "/nonexistent/docker")
+        .env("CLUSIA_SANDBOX_EXEC_BIN", "/nonexistent/sandbox-exec")
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap();
@@ -334,33 +336,4 @@ fn a_daemon_that_loses_the_lock_leaves_the_logs_alone() {
         long_ago
     );
     assert_eq!(std::fs::read_dir(paths.logs_dir()).unwrap().count(), before);
-}
-
-#[tokio::test]
-async fn the_test_commands_say_they_are_not_available_yet() {
-    let d = TestDaemon::start().await;
-    let (mut r, mut w, greeting) = raw_hello(&d, PROTOCOL_VERSION).await;
-    assert!(matches!(greeting, ServerMessage::Welcome { .. }));
-    write_message(
-        &mut w,
-        &ClientMessage::Request {
-            id: 21,
-            cmd: Command::GetTests {
-                pr: "acme/widgets#7".parse().unwrap(),
-            },
-        },
-    )
-    .await
-    .unwrap();
-    match r.next::<ServerMessage>().await.unwrap().unwrap() {
-        ServerMessage::Response {
-            id: 21,
-            result: Outcome::Err(e),
-        } => {
-            assert_eq!(e.code, ErrorCode::Internal);
-            assert_eq!(e.message, "tests are not available yet");
-        }
-        other => panic!("unexpected {other:?}"),
-    }
-    d.stop().await;
 }

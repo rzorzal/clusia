@@ -799,6 +799,9 @@ mod tests {
             harness_search_paths: Vec::new(),
             bridge_program: None,
             harness_env: Vec::new(),
+            test_exec: Arc::new(clusia_testrun::testkit::FakeExec::new()),
+            docker_program: Some("/nonexistent/docker".into()),
+            sandbox_exec_program: "/nonexistent/sandbox-exec".into(),
         };
         Arc::new(Shared::new(paths, config, options))
     }

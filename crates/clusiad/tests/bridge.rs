@@ -15,6 +15,8 @@ fn bridge(socket: &std::path::Path) -> Command {
         .args(["--pr", "acme/widgets#7", "--turn", "1"])
         .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
         .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
+        .env("CLUSIA_DOCKER_BIN", "/nonexistent/docker")
+        .env("CLUSIA_SANDBOX_EXEC_BIN", "/nonexistent/sandbox-exec")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -82,6 +84,8 @@ async fn a_bad_flag_set_is_refused() {
         .args(["permission-bridge", "--turn", "x"])
         .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
         .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
+        .env("CLUSIA_DOCKER_BIN", "/nonexistent/docker")
+        .env("CLUSIA_SANDBOX_EXEC_BIN", "/nonexistent/sandbox-exec")
         .output()
         .await
         .unwrap();

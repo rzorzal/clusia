@@ -1,7 +1,6 @@
 //! The recipe file of a worktree: how it is read, whose it is and how it is written. Every
 //! access goes through one descriptor of `.clusia`, opened without following a link, so
 //! nothing swapped into the clone after a check is followed.
-#![allow(dead_code)]
 
 use std::ffi::CString;
 use std::fs::File;

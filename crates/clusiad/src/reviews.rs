@@ -923,6 +923,7 @@ async fn leave(
     crate::checks::stop_all(shared, pr, crate::turns::Why::User).await;
     crate::diagrams::stop_all(shared, pr, crate::turns::Why::User).await;
     crate::story::stop_all(shared, pr, crate::turns::Why::User).await;
+    crate::tests::stop_all(shared, pr, crate::turns::Why::User).await;
     shared.sessions.close_review(shared, pr).await;
     Ok(true)
 }
@@ -942,6 +943,7 @@ pub(crate) async fn cleanup_checkout(shared: &Shared, pr: &PrRef) {
     } else if path.exists() {
         let _ = tokio::fs::remove_dir_all(&path).await;
     }
+    crate::tests::after_checkout_removed(shared, pr).await;
 }
 
 pub(crate) async fn discard(shared: &Shared, client: &str, pr: &PrRef) -> Outcome {

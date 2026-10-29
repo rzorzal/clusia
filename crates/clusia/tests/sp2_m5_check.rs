@@ -221,6 +221,8 @@ fn it_refuses_a_machine_where_codex_does_not_run_and_changes_nothing() {
             .env("HOME", dir.path())
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
+            .env("CLUSIA_DOCKER_BIN", "/nonexistent/docker")
+            .env("CLUSIA_SANDBOX_EXEC_BIN", "/nonexistent/sandbox-exec")
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -256,6 +258,8 @@ fn a_no_to_the_settings_question_keeps_everything_as_it_was() {
         .env("HOME", dir.path())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
+        .env("CLUSIA_DOCKER_BIN", "/nonexistent/docker")
+        .env("CLUSIA_SANDBOX_EXEC_BIN", "/nonexistent/sandbox-exec")
         .env("SP2_CHECK_WAIT", "2")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

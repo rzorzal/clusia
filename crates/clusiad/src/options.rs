@@ -52,6 +52,14 @@ pub struct DaemonOptions {
     /// Variables added to the daemon's environment for a custom command's process, before the
     /// ones it must not see are dropped. Empty in production; tests use it to prove the drop.
     pub harness_env: Vec<(OsString, OsString)>,
+    /// Starts docker, sandbox-exec and the recipe's shell for the tests; tests use `FakeExec`.
+    pub test_exec: Arc<dyn clusia_testrun::exec::Exec>,
+    /// The `docker` (or `podman`) program; `None` finds it as `engine::detect` does. Env:
+    /// `CLUSIA_DOCKER_BIN` (`none` means no engine).
+    pub docker_program: Option<PathBuf>,
+    /// The `sandbox-exec` of the local runner. Env: `CLUSIA_SANDBOX_EXEC_BIN`; default
+    /// `/usr/bin/sandbox-exec`.
+    pub sandbox_exec_program: PathBuf,
 }
 
 impl DaemonOptions {
@@ -85,7 +93,21 @@ impl DaemonOptions {
             gh_config_dir: None,
             bridge_program: var("CLUSIA_BRIDGE_BIN").map(PathBuf::from),
             harness_env: Vec::new(),
+            test_exec: Arc::new(clusia_testrun::exec::SystemExec),
+            docker_program: docker_program_from(var("CLUSIA_DOCKER_BIN")),
+            sandbox_exec_program: var("CLUSIA_SANDBOX_EXEC_BIN")
+                .map_or_else(|| PathBuf::from("/usr/bin/sandbox-exec"), PathBuf::from),
         }
+    }
+}
+
+/// `CLUSIA_DOCKER_BIN`: `none` is a path that is never there, so no engine is found; any other
+/// value is the program; without it `engine::detect` looks in the usual places.
+pub fn docker_program_from(env: Option<String>) -> Option<PathBuf> {
+    match env.as_deref() {
+        None => None,
+        Some("none") => Some(PathBuf::from("/nonexistent/docker")),
+        Some(program) => Some(PathBuf::from(program)),
     }
 }
 
@@ -136,6 +158,19 @@ pub fn harness_dirs(path: Option<std::ffi::OsString>, home: Option<PathBuf>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_none_means_no_engine() {
+        assert_eq!(docker_program_from(None), None, "unset: the lookup decides");
+        assert_eq!(
+            docker_program_from(Some("none".into())),
+            Some(PathBuf::from("/nonexistent/docker"))
+        );
+        assert_eq!(
+            docker_program_from(Some("/opt/homebrew/bin/docker".into())),
+            Some(PathBuf::from("/opt/homebrew/bin/docker"))
+        );
+    }
 
     #[test]
     fn harness_dirs_follow_path_then_the_usual_folders() {

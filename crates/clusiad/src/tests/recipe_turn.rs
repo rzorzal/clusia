@@ -1,5 +1,4 @@
 //! The recipe turn: one forked, read-only agent turn that answers with a recipe.
-#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::time::Duration;

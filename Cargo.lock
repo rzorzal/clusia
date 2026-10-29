@@ -1843,6 +1843,7 @@ dependencies = [
  "clusia-highlight",
  "clusia-platform",
  "clusia-protocol",
+ "clusia-testrun",
  "clusia-view",
  "clusiad",
  "crossbeam-channel",

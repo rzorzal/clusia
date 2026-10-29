@@ -182,6 +182,15 @@ pub(crate) struct Shared {
     pub bridge_program: Option<PathBuf>,
     /// Added to the daemon's environment for a custom command's process; empty in production.
     pub harness_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// Starts docker, sandbox-exec and the recipe's shell for the tests (see
+    /// `DaemonOptions::test_exec`).
+    pub test_exec: Arc<dyn clusia_testrun::exec::Exec>,
+    /// The `docker` program of `DaemonOptions`; `None` finds it as `engine::detect` does.
+    pub docker_program: Option<PathBuf>,
+    /// The `sandbox-exec` of the local runner (see `DaemonOptions::sandbox_exec_program`).
+    pub sandbox_exec_program: PathBuf,
+    /// The test environments, setups and runs of every review.
+    pub tests: crate::tests::Bench,
     /// The permission requests waiting for the reviewer.
     pub permissions: Permissions,
     /// The running agent turns of every review.
@@ -302,6 +311,10 @@ impl Shared {
             gh_config_dir: options.gh_config_dir,
             bridge_program: options.bridge_program,
             harness_env: options.harness_env,
+            test_exec: options.test_exec,
+            docker_program: options.docker_program,
+            sandbox_exec_program: options.sandbox_exec_program,
+            tests: crate::tests::Bench::default(),
             permissions: Permissions::default(),
             sessions: Sessions::default(),
             checks: Checks::default(),

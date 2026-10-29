@@ -36,6 +36,7 @@ unicode-width.workspace = true
 pulldown-cmark.workspace = true
 
 [dev-dependencies]
+clusia-testrun = { workspace = true, features = ["test-kit"] }
 clusiad.workspace = true
 clusia-platform.workspace = true
 clusia-harness = { workspace = true, features = ["test-kit"] }

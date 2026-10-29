@@ -2,7 +2,6 @@
 //! every call is recorded.
 
 use std::collections::BTreeSet;
-use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -240,6 +239,8 @@ impl Exec for FakeExec {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::*;
 
     fn docker(args: &[&str]) -> CommandSpec {
