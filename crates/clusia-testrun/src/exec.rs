@@ -213,7 +213,10 @@ async fn drive(
             None => std::future::pending().await,
         }
     };
-    tokio::pin!(deadline, stopped);
+    // A descendant that left the group can hold a pipe open past its leader's exit: after
+    // the exit the pipes get `KILL_GRACE` to drain and no longer.
+    let drain = tokio::time::sleep(limit);
+    tokio::pin!(deadline, stopped, drain);
     loop {
         if !out_open
             && !err_open
@@ -234,7 +237,11 @@ async fn drive(
             // background process would have held open.
             exit = child.wait(), if status.is_none() => {
                 status = Some(exit?);
+                drain.as_mut().reset(tokio::time::Instant::now() + KILL_GRACE);
                 signal_group(pid, libc::SIGKILL);
+            }
+            _ = &mut drain, if status.is_some() => {
+                return Ok(Ended::Exited(status.and_then(|s| s.code())));
             }
             _ = &mut stopped => {
                 terminate(&mut child, pid).await;
@@ -470,6 +477,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ended, Ended::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn a_descendant_that_left_the_group_does_not_turn_an_exit_into_a_timeout() {
+        // The child makes its own session, so the exit-time kill of the group misses it, and it
+        // keeps the pipes open.
+        let script = "use POSIX; my $p = fork; if ($p == 0) { POSIX::setsid(); exec 'sleep', '30' } print $p; exit 0";
+        let cmd = CommandSpec::new("/usr/bin/perl").args(["-MPOSIX", "-e", script]);
+        let started = Instant::now();
+        let out = SystemExec
+            .output(&cmd, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let pid: i32 = String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: the pid is the stray `sleep` this test started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert_eq!(out.code, Some(0));
+        assert!(!out.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[tokio::test]

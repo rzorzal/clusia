@@ -31,7 +31,7 @@ const SKIP_DIRS: [&str; 7] = [
     ".venv",
     "dist",
 ];
-const LOCKFILES: [&str; 11] = [
+const LOCKFILES: [&str; 12] = [
     "Cargo.lock",
     "package-lock.json",
     "yarn.lock",
@@ -43,6 +43,7 @@ const LOCKFILES: [&str; 11] = [
     "requirements.txt",
     "go.sum",
     "Gemfile.lock",
+    "gradle.lockfile",
 ];
 const TOOLCHAINS: [&str; 8] = [
     "rust-toolchain.toml",
@@ -246,7 +247,7 @@ pub async fn existing(
     engine: Option<&Engine>,
     host: &HostEnv,
     worktree: &Path,
-    clone: &Path,
+    _clone: &Path,
     repo: &str,
 ) -> Existing {
     let (mut images, mut reviewer_services) = (Vec::new(), Vec::new());
@@ -270,16 +271,26 @@ pub async fn existing(
         )
         .await;
         images.truncate(LIST_MAX);
-        let compose = vec![
-            OsString::from("compose"),
-            OsString::from("--project-directory"),
-            clone.as_os_str().to_owned(),
-            OsString::from("ps"),
-            OsString::from("--services"),
-            OsString::from("--status"),
-            OsString::from("running"),
-        ];
-        reviewer_services = engine_lines(exec, engine, host, compose, Some(clone)).await;
+        // Asks the engine for what is running, so no compose file is ever parsed.
+        reviewer_services = engine_lines(
+            exec,
+            engine,
+            host,
+            [
+                "ps",
+                "--filter",
+                "label=com.docker.compose.project",
+                "--format",
+                r#"{{.Label "com.docker.compose.service"}}"#,
+            ]
+            .map(OsString::from)
+            .to_vec(),
+            None,
+        )
+        .await;
+        reviewer_services.sort();
+        reviewer_services.dedup();
+        reviewer_services.truncate(LIST_MAX);
     }
     Existing {
         images,
@@ -514,6 +525,17 @@ mod tests {
     }
 
     #[test]
+    fn a_gradle_lockfile_is_a_signal_and_is_hashed() {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), "gradle.lockfile", "a=1\n");
+        let signals = repo_signals(dir.path());
+        assert_eq!(signals.lockfiles, vec!["gradle.lockfile".to_string()]);
+        let before = inputs_hash(dir.path(), &signals);
+        put(dir.path(), "gradle.lockfile", "a=2\n");
+        assert_ne!(inputs_hash(dir.path(), &signals), before);
+    }
+
+    #[test]
     fn the_inputs_hash_follows_signal_files_only() {
         let dir = tempfile::tempdir().unwrap();
         put(dir.path(), "Cargo.lock", "version = 3\n");
@@ -563,7 +585,7 @@ mod tests {
                 "clusia/rzorzal-clusia-06d0a3:0123456789abcdef\nclusia/rzorzal-clusia-06d0a3:fedcba9876543210\n",
             ),
         )
-        .on("docker", &["compose", "--project-directory"], FakeReply::ok("db\nredis\n"));
+        .on("docker", &["ps"], FakeReply::ok("redis\ndb\nredis\n"));
         let host = HostEnv {
             path: Some("/usr/bin:/opt/x/bin".into()),
             home: PathBuf::from("/Users/octo"),
@@ -614,16 +636,18 @@ mod tests {
         assert_eq!(
             args[1],
             [
-                "compose",
-                "--project-directory",
-                clone.path().to_str().unwrap(),
                 "ps",
-                "--services",
-                "--status",
-                "running"
+                "--filter",
+                "label=com.docker.compose.project",
+                "--format",
+                r#"{{.Label "com.docker.compose.service"}}"#
             ]
         );
-        assert_eq!(calls[1].cwd.as_deref(), Some(clone.path()));
+        assert!(
+            args.iter().all(|a| a[0] != "compose"),
+            "no compose file is parsed"
+        );
+        assert_eq!(calls[1].cwd, None);
         assert!(calls.iter().all(|c| c.clear_env));
     }
 
