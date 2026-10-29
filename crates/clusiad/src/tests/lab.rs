@@ -1320,7 +1320,7 @@ async fn a_local_run_uses_the_offline_profile_and_none_of_the_daemon_env() {
     let image_step = plan.steps.iter().find(|s| s.id == "image:1").unwrap();
     assert!(
         matches!(image_step.state, StepState::Skipped { .. }),
-        "container only (R10)"
+        "image steps are container only"
     );
     assert!(lab.ran().iter().all(|c| !c.contains("apt-get")));
     ready_after(&lab, 7).await;

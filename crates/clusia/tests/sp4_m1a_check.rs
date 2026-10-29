@@ -1,4 +1,4 @@
-//! The SP4 · M1a owner-check script parses, lists its steps, keeps to the owner's own `rzorzal/*`
+//! The tests owner-check script parses, lists its steps, keeps to the owner's own `rzorzal/*`
 //! pull requests, asks before it spends anything, answers nothing for the owner,
 //! installs, starts, removes and publishes nothing, and puts back the runner it changes. No test
 //! runs a real agent or engine through the script: the `clusia` it finds is a fake.

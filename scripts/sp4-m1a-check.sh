@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Owner check for the tests of a review (SP4 · M1a): your own agent and the container engine you
+# Owner check for the tests of a review: your own agent and the container engine you
 # already have (or none), on a pull request of yours (rzorzal/*), with this terminal in front
 # of you. It refuses every other owner. It spends one agent turn (the recipe), downloads what the
 # setup plan lists once you approve it, runs the pull request's tests on this Mac in a container
