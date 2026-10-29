@@ -36,11 +36,16 @@ fn status_of(word: &str) -> Option<TestStatus> {
 }
 
 /// A verbose line as (id, status): `id STATUS [ 50%]`, `id SKIPPED (why)  [ 50%]` or the
-/// xdist form `[gw0] STATUS id`.
+/// xdist form `[gw0] STATUS id`, with or without a `[ 25%]` token before the status.
 fn status_line(line: &str) -> Option<(String, TestStatus)> {
     let line = line.trim();
     if let Some(rest) = line.strip_prefix("[gw") {
         let (_, rest) = rest.split_once("] ")?;
+        // Newer xdist prints the progress before the status: `[gw0] [ 25%] PASSED id`.
+        let rest = match rest.strip_prefix('[').and_then(|r| r.split_once("%] ")) {
+            Some((_, after)) => after,
+            None => rest,
+        };
         let (word, id) = rest.split_once(' ')?;
         let status = status_of(word)?;
         return id.contains("::").then(|| (id.trim().to_string(), status));
@@ -183,6 +188,32 @@ FAILED tests/test_pay.py::test_refund - assert 3 == 4
                 ("tests/test_a.py::test_five", TestStatus::Failed),
             ]
         );
+    }
+
+    #[test]
+    fn the_xdist_form_with_a_progress_token_is_read() {
+        let (live, all) = run("[gw0] [ 25%] PASSED tests/test_x.py::test_a\n\
+             [gw1] [ 50%] FAILED tests/test_x.py::test_b\n\
+             [gw0] [ 62%] SKIPPED tests/test_x.py::test_c\n\
+             [gw1] [ 75%] ERROR tests/test_x.py::test_d\n\
+             [gw0] [ 87%] XFAIL tests/test_x.py::test_e\n\
+             [gw1] [100%] XPASS tests/test_x.py::test_f\n\
+             FAILED tests/test_x.py::test_b - assert 1 == 2\n");
+        assert_eq!(live.len(), 6);
+        let statuses: Vec<_> = all.iter().map(|r| (r.name.as_str(), r.status)).collect();
+        assert_eq!(
+            statuses,
+            [
+                ("tests/test_x.py::test_a", TestStatus::Passed),
+                ("tests/test_x.py::test_b", TestStatus::Failed),
+                ("tests/test_x.py::test_c", TestStatus::Skipped),
+                ("tests/test_x.py::test_d", TestStatus::Failed),
+                ("tests/test_x.py::test_e", TestStatus::Skipped),
+                ("tests/test_x.py::test_f", TestStatus::Passed),
+            ]
+        );
+        assert_eq!(all[1].message.as_deref(), Some("assert 1 == 2"));
+        assert_eq!(all[1].file.as_deref(), Some("tests/test_x.py"));
     }
 
     #[test]
