@@ -197,7 +197,14 @@ async fn drive(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(|e| {
+        let program = cmd.program.display();
+        let text = match &cmd.cwd {
+            Some(cwd) => format!("{program} can't start in {}: {e}", cwd.display()),
+            None => format!("{program} can't start: {e}"),
+        };
+        io::Error::new(e.kind(), text)
+    })?;
     let pid = child.id();
     let (mut out, mut err) = (
         child.stdout.take().expect("stdout is piped"),
@@ -361,6 +368,37 @@ mod tests {
         assert_eq!(
             shown.trim(),
             dir.path().canonicalize().unwrap().to_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spawn_error_names_the_program_and_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = SystemExec
+            .output(
+                &CommandSpec::new("/nonexistent/acme-tool").cwd(dir.path()),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        let text = err.to_string();
+        assert!(
+            text.starts_with("/nonexistent/acme-tool can't start in ")
+                && text.contains(&dir.path().display().to_string()),
+            "{text}"
+        );
+        let err = SystemExec
+            .output(
+                &CommandSpec::new("/nonexistent/acme-tool"),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("/nonexistent/acme-tool can't start: "),
+            "{err}"
         );
     }
 
