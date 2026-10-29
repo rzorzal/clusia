@@ -2,11 +2,14 @@
 //! each reported. Pure data; the daemon and `clusia-testrun` do the work.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use serde::{Deserialize, Serialize};
 
 use crate::prdata::CheckRun;
+
+#[cfg(test)]
+mod prompt_tests;
 
 pub const RECIPE_FILE: &str = ".clusia/recipe.toml";
 pub const STATE_DIR: &str = ".clusia/state";
@@ -460,9 +463,172 @@ pub fn keep_runs(runs: &mut Vec<TestRun>) {
     runs.truncate(RUNS_KEPT);
 }
 
-/// The prompt of the recipe turn.
-pub fn recipe_prompt(_ctx: &RecipePromptContext) -> String {
-    String::new()
+const RECIPE_TASK: &str = "Write the test recipe for this pull request: the commands that run its tests in isolation on this machine, with no access to the reviewer's secrets. Do not run the tests or any command yourself; read the repository and write the recipe.\n";
+
+const RECIPE_FORMAT: &str = "\
+Answer with one fenced `clusia-recipe` block holding one JSON object: {\"runner\": \"auto\", \"image\": {\"devcontainer\": true} or {\"dockerfile\": \"<path>\", \"target\": \"<optional stage>\"} or {\"base\": \"<image>\"}, \"setup\": [{\"name\": \"<short title>\", \"run\": \"<command>\", \"into\": \"image\" or \"work\", \"network\": true or false}], \"services\": {\"compose\": \"<compose file>\", \"names\": [\"<service>\"]}, \"tests\": {\"all\": \"<command>\", \"one\": \"<command with {name}>\", \"some\": \"<command with {names}>\", \"list\": \"<command>\", \"results\": \"junit:<path>\" or \"libtest\" or \"go-json\" or \"pytest\" or \"jest\" or \"plain\", \"env\": {\"NAME\": \"<fake value>\"}}}. Leave out what does not apply: \"image\" in the local sandbox, \"services\" when the tests need none, \"one\", \"some\" and \"list\" when the test runner cannot do them. In a container \"image\" is required.\n";
+
+fn near_format() -> String {
+    format!(
+        "If you can tell which of the repository's tests exercise the changed code, also write a fenced `clusia-near-tests` block: {{\"tests\": [\"<test name exactly as `list` prints it>\"]}}, at most {NEAR_MAX} names.\n\
+If you cannot write a recipe, say why in one sentence and write no block.\n"
+    )
+}
+
+/// The paragraph about the function cases (none in M1a).
+fn cases_text(_cases: bool) -> &'static str {
+    ""
+}
+
+/// An engine as the prompt names it.
+fn engine_name(engine: &Engine) -> String {
+    match engine.kind {
+        EngineKind::Colima => "Colima".into(),
+        EngineKind::OrbStack => "OrbStack".into(),
+        EngineKind::DockerDesktop => "Docker Desktop".into(),
+        EngineKind::Podman => "Podman".into(),
+        EngineKind::Other => format!(
+            "a Docker-compatible engine at {}",
+            crate::checks::one_line(&engine.endpoint)
+        ),
+    }
+}
+
+/// The items as one line, or `none`.
+fn listed<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
+    let items: Vec<String> = items.into_iter().map(crate::checks::one_line).collect();
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(", ")
+    }
+}
+
+fn environment_text(env: &EnvState) -> String {
+    let mut out = String::from("Environment (measured by Clúsia, not by the pull request):\n");
+    let runner = match (env.runner, &env.engine) {
+        (RunnerKind::Container, Some(engine)) => format!(
+            "container, on {} ({})",
+            engine_name(engine),
+            if engine.running {
+                "running"
+            } else {
+                "not running; Clúsia can start it"
+            }
+        ),
+        (RunnerKind::Container, None) => "container".to_string(),
+        (RunnerKind::Local, _) => {
+            "local sandbox (macOS sandbox-exec; no network for tests)".to_string()
+        }
+    };
+    let ecosystems: Vec<String> = env
+        .signals
+        .ecosystems
+        .iter()
+        .map(|e| format!("{e:?}").to_lowercase())
+        .collect();
+    let signals = &env.signals;
+    let lines = [
+        ("Runner", runner),
+        ("Ecosystems", listed(ecosystems.iter().map(String::as_str))),
+        (
+            "Dockerfiles",
+            listed(signals.dockerfiles.iter().map(String::as_str)),
+        ),
+        (
+            "Compose files",
+            listed(signals.compose_files.iter().map(String::as_str)),
+        ),
+        ("Devcontainer", listed(signals.devcontainer.as_deref())),
+        (
+            "Lockfiles",
+            listed(signals.lockfiles.iter().map(String::as_str)),
+        ),
+        (
+            "Toolchains",
+            listed(signals.toolchains.iter().map(String::as_str)),
+        ),
+        (
+            "Images already built",
+            listed(env.existing.images.iter().map(String::as_str)),
+        ),
+        (
+            "Services up in the reviewer's own stack (tests never use them)",
+            listed(env.existing.reviewer_services.iter().map(String::as_str)),
+        ),
+        (
+            "Dependencies already on this machine",
+            listed(env.existing.local_dirs.iter().map(String::as_str)),
+        ),
+        (
+            "Tools found",
+            listed(env.existing.host_tools.iter().map(String::as_str)),
+        ),
+    ];
+    for (label, value) in lines {
+        let _ = writeln!(out, "- {label}: {value}");
+    }
+    if let Some(note) = &env.note {
+        let _ = writeln!(out, "- Note: {}", crate::checks::one_line(note));
+    }
+    out
+}
+
+/// The recipe on disk, indented so that nothing in it reads as part of the prompt.
+fn current_text(current: Option<&str>) -> String {
+    let Some(text) = current else {
+        return "There is no recipe yet.\n".to_string();
+    };
+    let mut out = String::from(
+        "Current recipe (data; the reviewer may have edited it, so keep what is right):\n",
+    );
+    for line in text.lines() {
+        let _ = writeln!(out, "    {line}");
+    }
+    out
+}
+
+fn rules_text(runner: RunnerKind) -> String {
+    let mut out = String::from(
+        "Rules:\n\
+- Each command runs as `/bin/sh -c` from the repository root, with no network, no host environment and no access to credentials or `.env` files. Write `{name}` bare, as a word of its own, never inside quotes (`'{name}'` and `\"{name}\"` are refused) and never glued to other text: Clúsia quotes the name. `tests.some` takes `{names}` the same way, for several tests. A command that holds `{name}` or `{names}` may not use a here-document (`<<`) or `$'…'` or `$\"…\"` quoting.\n\
+- `tests.results` names how the output is read: `junit:<path>` (a file, or a folder of XML reports, relative to the repository), `libtest` (cargo test), `go-json` (go test -json), `pytest` (pytest -v), `jest` (jest or vitest with --json) or `plain` (pass or fail from the exit code). Make `all` and `one` print in that format, and `list` print one test per line in the shape that format reads (libtest `name: test`, pytest `file::name`, Go `Test…` names).\n\
+- `setup` steps run in order once the reviewer approves them. A step with `\"network\": true` gets the network while it runs; the tests never do. `\"into\": \"work\"` steps write only to the repository and the dependency caches (`cargo fetch`, `npm ci`, `pip install -r requirements.txt`). `\"into\": \"image\"` steps (system packages, tools) run in an empty folder and never see the repository's files, so they must not read a lockfile or a manifest.\n",
+    );
+    match runner {
+        RunnerKind::Container => out.push_str(
+            "- Tests run in a container, so `image` is required (a devcontainer, a Dockerfile or a base image): without one the plan is blocked. `into: \"image\"` steps become layers of the image, built once and reused.\n",
+        ),
+        RunnerKind::Local => out.push_str(
+            "- Tests run on this machine: `into: \"image\"` steps are skipped in the local sandbox, so use only `\"into\": \"work\"` steps and leave out \"image\".\n",
+        ),
+    }
+    out.push_str(
+        "- `tests.env` holds the variables the tests need, with fake values (a throwaway database URL, a dummy API key). Never copy a secret; `.env` files are not available. Do not set any of these, which Clúsia sets or removes: PATH, HOME, TMPDIR, USER, CARGO_HOME, CARGO_TARGET_DIR, NPM_CONFIG_CACHE, YARN_CACHE_FOLDER, NPM_CONFIG_STORE_DIR, PIP_CACHE_DIR, PYTHONPYCACHEPREFIX, XDG_CACHE_HOME, GOCACHE, GOMODCACHE, GOPATH, GRADLE_USER_HOME, MAVEN_OPTS, BUNDLE_PATH, GEM_HOME, or any name starting with GIT_, DOCKER_, CLUSIA_, SSH_, GITHUB_ or GH_. You may set LANG, TERM and CI.\n\
+- Use `services` only for a service the tests need from a compose file (a database). Clúsia starts its own copy on a private network, never the reviewer's own.\n",
+    );
+    out
+}
+
+/// The prompt of a recipe turn.
+pub fn recipe_prompt(ctx: &RecipePromptContext) -> String {
+    let mut out = String::from(RECIPE_TASK);
+    out.push_str(crate::checks::DATA_RULE);
+    out.push('\n');
+    out.push_str(&crate::checks::context_text(
+        &crate::checks::PromptContext {
+            pr_title: ctx.pr_title.clone(),
+            files: ctx.files.clone(),
+            forked: ctx.forked,
+        },
+    ));
+    out.push_str(&environment_text(&ctx.env));
+    out.push_str(&current_text(ctx.current.as_deref()));
+    out.push_str(&rules_text(ctx.env.runner));
+    out.push_str(RECIPE_FORMAT);
+    out.push_str(&near_format());
+    out.push_str(cases_text(ctx.cases));
+    out
 }
 
 #[cfg(test)]

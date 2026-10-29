@@ -2068,6 +2068,7 @@ dependencies = [
  "clusia-protocol",
  "clusia-provider",
  "clusia-store",
+ "clusia-testrun",
  "libc",
  "reqwest",
  "serde",
