@@ -578,9 +578,20 @@ fn placeholder_problem(field: &str, text: &str, placeholder: &str) -> Option<Str
     let needle: Vec<char> = placeholder.chars().collect();
     let mut quote = Quote::None;
     let mut found = false;
+    // A here-document body and `$'…'`/`$"…"` quoting each change what a quote or a newline
+    // means to the shell, which this scan does not model, so a command holding the
+    // placeholder may not use them outside single quotes.
+    let mut risky = false;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        if quote != Quote::Single
+            && (chars[i..].starts_with(&['<', '<'])
+                || chars[i..].starts_with(&['$', '\''])
+                || chars[i..].starts_with(&['$', '"']))
+        {
+            risky = true;
+        }
         if quote == Quote::None && chars[i..].starts_with(&needle) {
             found = true;
             let before = i == 0 || chars[i - 1].is_whitespace();
@@ -609,6 +620,11 @@ fn placeholder_problem(field: &str, text: &str, placeholder: &str) -> Option<Str
             _ => {}
         }
         i += 1;
+    }
+    if found && risky {
+        return Some(format!(
+            "{field} must use {placeholder} as a word of its own, outside quotes"
+        ));
     }
     (!found).then(|| format!("{field} must contain {placeholder}"))
 }
@@ -1081,6 +1097,9 @@ env = { RUST_BACKTRACE = "1" }
             "echo \"run {name}\"",
             "echo 'run {name}'",
             "cargo test $({name})x",
+            "cat <<EOF\n{name}\nEOF",
+            "echo $'a\\' {name}",
+            "echo $\"a\" {name}",
         ] {
             assert_eq!(one(bad), [bare], "{bad}");
         }
