@@ -49,19 +49,8 @@ pub fn base_ref(slug: &str, hash: &str) -> String {
     format!("clusia/{slug}-base:{}", short(hash))
 }
 
-fn eco_name(eco: Ecosystem) -> &'static str {
-    match eco {
-        Ecosystem::Cargo => "cargo",
-        Ecosystem::Node => "node",
-        Ecosystem::Python => "python",
-        Ecosystem::Go => "go",
-        Ecosystem::Jvm => "jvm",
-        Ecosystem::Ruby => "ruby",
-    }
-}
-
 pub fn cache_volume(slug: &str, eco: Ecosystem) -> String {
-    format!("clusia-cache-{slug}-{}", eco_name(eco))
+    format!("clusia-cache-{slug}-{}", crate::eco::name(eco))
 }
 
 pub fn compose_project(slug: &str, number: u64) -> String {
