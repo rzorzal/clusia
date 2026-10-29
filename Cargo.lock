@@ -2010,6 +2010,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clusia-testrun"
+version = "0.1.0"
+dependencies = [
+ "clusia-core",
+ "libc",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "clusia-tray"
 version = "0.1.0"
 dependencies = [

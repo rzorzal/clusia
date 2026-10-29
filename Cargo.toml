@@ -24,6 +24,7 @@ clusia-highlight = { path = "crates/clusia-highlight" }
 clusia-diagram = { path = "crates/clusia-diagram" }
 clusia-calls = { path = "crates/clusia-calls" }
 clusia-harness = { path = "crates/clusia-harness" }
+clusia-testrun = { path = "crates/clusia-testrun" }
 clusiad = { path = "crates/clusiad" }
 security-framework = "3.7.0"
 serde = { version = "1.0.229", features = ["derive"] }
