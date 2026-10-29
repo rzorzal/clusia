@@ -94,7 +94,8 @@ pub async fn build_image(
 }
 
 /// Runs `job` to its end, its limit or `stop`. The container outlives its `docker run`
-/// client, so a stop or a timeout kills the container by name, then the client.
+/// client, so a stop or a timeout kills the container by name, then the client, then removes
+/// the container.
 pub async fn run_container(
     exec: &dyn Exec,
     docker: &Docker,
@@ -132,6 +133,15 @@ pub async fn run_container(
         client_stop.fire();
         let _ = client.await;
     }
+    // A kill that came before the container existed failed, yet the engine may still hold the
+    // client's create or start: that container would run with no limit, and `--rm` never
+    // removes one left in Created. Its absence ("No such container") is the usual answer.
+    let _ = exec
+        .output(
+            &docker.command(["rm", "-f", job.name.as_str()]),
+            KILL_TIMEOUT,
+        )
+        .await;
     Ok(why)
 }
 
@@ -814,6 +824,58 @@ mod tests {
             Duration::from_secs(1),
             "no grace after the failed kill, none after the second"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_before_the_container_exists_removes_it_after_the_client() {
+        for (limit, stop_after, expected) in
+            [(600, Some(1), Ended::Stopped), (5, None, Ended::TimedOut)]
+        {
+            let t = tree();
+            let fake = FakeExec::new();
+            let name = "clusia-run-acme-widgets-abc123-7-5";
+            fake.on("docker", &["volume", "create"], FakeReply::ok(""))
+                .on(
+                    "docker",
+                    &["kill"],
+                    FakeReply::fail(1, "Error response from daemon: No such container: x"),
+                )
+                .on(
+                    "docker",
+                    &["rm"],
+                    FakeReply::fail(1, "Error response from daemon: No such container: x"),
+                )
+                .on("docker", &["run"], FakeReply::hang());
+            let stop = StopFlag::new();
+            if let Some(after) = stop_after {
+                let flag = stop.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(after)).await;
+                    flag.fire();
+                });
+            }
+            let mut chunk = |_: Stream, _: &[u8]| {};
+            let ended = run_container(
+                &fake,
+                &docker(),
+                &job(name),
+                &t.mounts,
+                Duration::from_secs(limit),
+                &stop,
+                &mut chunk,
+            )
+            .await
+            .unwrap();
+            assert_eq!(ended, expected);
+            let calls: Vec<Vec<String>> = fake.calls().iter().map(args).collect();
+            // The engine may still create or start it after the kills failed and the client
+            // was stopped.
+            assert_eq!(
+                calls.last(),
+                Some(&strings(&["rm", "-f", name])),
+                "{expected:?}: {calls:?}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
