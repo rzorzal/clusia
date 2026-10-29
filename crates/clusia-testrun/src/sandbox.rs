@@ -447,7 +447,7 @@ mod tests {
         }
     }
 
-    /// Rules 1 and 1a: everything before the network block.
+    /// The launch rules and everything else before the network block.
     const PREFIX: &str = r##"(version 1)
 (allow default)
 (deny appleevent-send)
@@ -600,7 +600,7 @@ mod tests {
             format!("  (subpath \"{}\")\n", home.join(".aws").display()),
             format!("  (subpath \"{}\")\n", real.display()),
         );
-        // X34: a symlink inside a denied folder is denied at its target.
+        // A symlink inside a denied folder is denied at its target.
         follows(
             format!("  (subpath \"{}\")\n", home.join(".ssh").display()),
             format!("  (literal \"{}\")\n", key.display()),
@@ -776,7 +776,7 @@ mod tests {
             ("PATH", "/usr/bin:/bin:/h/.cargo/bin".to_string()),
             ("HOME", "/h".to_string()),
             ("USER", "h".to_string()),
-            // X10: the recipe's LANG and CI replace the base pairs in their place.
+            // The recipe's LANG and CI replace the base pairs in their place.
             ("LANG", "C".to_string()),
             ("TERM", "dumb".to_string()),
             ("CI", "false".to_string()),

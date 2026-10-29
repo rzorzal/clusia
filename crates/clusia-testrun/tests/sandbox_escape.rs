@@ -319,7 +319,7 @@ async fn writes_stay_in_the_roots_even_through_symlinks() {
             "echo x > clusia-link/state/y.done".to_string(),
             "mv .clusia moved-clusia".to_string(),
             "rm -rf .clusia".to_string(),
-            // X28: the worktree's pointer to its gitdir stays Clúsia's.
+            // The worktree's pointer to its gitdir stays Clúsia's.
             "echo 'gitdir: /tmp/evil' > .git".to_string(),
             "mv .git moved-git".to_string(),
             "rm -f .git".to_string(),
@@ -334,7 +334,7 @@ async fn writes_stay_in_the_roots_even_through_symlinks() {
         }
     }
 
-    // X33: `/dev/tty` is writable, the user's other terminals are not.
+    // `/dev/tty` is writable, the user's other terminals are not.
     let owner = std::fs::metadata(&lab.top).unwrap().uid();
     match other_terminal(owner) {
         Some(tty) => {
@@ -464,7 +464,7 @@ async fn toolchains_git_and_the_worktree_path_still_work() {
         eprintln!("skipped node --version: node is not installed");
     }
     for mode in BOTH {
-        // X35: tools that walk up from the worktree cross the denied data root.
+        // Tools that walk up from the worktree cross the denied data root.
         for script in ["pwd -P", "realpath ."] {
             let out = lab.run(mode, script).await;
             assert_eq!(
