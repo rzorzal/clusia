@@ -56,14 +56,30 @@ async fn a_real_engine_builds_runs_stops_and_cleans_up() {
         cli: PathBuf::from(&engine.cli),
         env: engine::cli_env(Path::new(&engine.cli), &host),
     };
-    if !container::image_present(&exec, &docker, "alpine:3.20").await
-        && std::env::var("CLUSIA_TEST_NETWORK").as_deref() != Ok("1")
-    {
-        eprintln!(
-            "skipped: alpine:3.20 is not on the engine; set CLUSIA_TEST_NETWORK=1 to pull it"
+    if !container::image_present(&exec, &docker, "alpine:3.20").await {
+        if std::env::var("CLUSIA_TEST_NETWORK").as_deref() != Ok("1") {
+            eprintln!(
+                "skipped: alpine:3.20 is not on the engine; set CLUSIA_TEST_NETWORK=1 to pull it"
+            );
+            return;
+        }
+        // A build pulls `FROM` into the build cache only, with no image record, so the base
+        // is pulled here: the last check must find it whatever the build did.
+        let pulled = exec
+            .output(&docker.command(["pull", "alpine:3.20"]), LIMIT)
+            .await
+            .unwrap();
+        assert_eq!(
+            pulled.code,
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&pulled.stderr)
         );
-        return;
     }
+    assert!(
+        container::image_present(&exec, &docker, "alpine:3.20").await,
+        "the base is in the image store before the build"
+    );
 
     // Under the home folder, which every engine shares by default (Colima shares only ~).
     let dir = tempfile::Builder::new()
@@ -220,6 +236,10 @@ async fn a_real_engine_builds_runs_stops_and_cleans_up() {
     .await;
     assert_eq!(left, "", "a stopped run leaves no container");
 
+    assert!(
+        container::image_present(&exec, &docker, "alpine:3.20").await,
+        "the base is still there before the cleanup"
+    );
     assert_eq!(cleanup::remove_repo(&exec, &docker, REPO).await, Ok(()));
     assert!(!container::image_present(&exec, &docker, &plan.tag).await);
     let filter = format!("label=io.clusia.repo={REPO}");

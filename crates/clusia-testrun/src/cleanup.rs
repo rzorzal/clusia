@@ -151,7 +151,8 @@ pub async fn disk_report(
 }
 
 async fn images(exec: &dyn Exec, docker: &Docker) -> Vec<DiskItem> {
-    let list = ["image", "ls", "--filter", LABEL_REPO, "--format", "{{.ID}}"];
+    let filter = format!("label={LABEL_REPO}");
+    let list = ["image", "ls", "--filter", &filter, "--format", "{{.ID}}"];
     let Ok(out) = call(exec, docker, &list).await else {
         return vec![];
     };
@@ -194,12 +195,14 @@ async fn images(exec: &dyn Exec, docker: &Docker) -> Vec<DiskItem> {
         .collect()
 }
 
-/// The labelled volumes, and whether every size could be read.
+/// The labelled volumes, and whether every size could be read. A listing that fails counts
+/// as sizes not read, so the report says so instead of looking complete.
 async fn volumes(exec: &dyn Exec, docker: &Docker) -> (Vec<DiskItem>, bool) {
+    let filter = format!("label={LABEL_REPO}");
     let format = format!("{{{{.Name}}}} {{{{.Label \"{LABEL_REPO}\"}}}}");
-    let list = ["volume", "ls", "--filter", LABEL_REPO, "--format", &format];
+    let list = ["volume", "ls", "--filter", &filter, "--format", &format];
     let Ok(out) = call(exec, docker, &list).await else {
-        return (vec![], true);
+        return (vec![], false);
     };
     let listed: Vec<(String, Option<String>)> = String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -576,6 +579,28 @@ mod tests {
         assert_eq!(report.note.as_deref(), Some(BASE_NOTE));
         let calls = calls(&fake);
         assert_eq!(
+            calls[0],
+            strings(&[
+                "image",
+                "ls",
+                "--filter",
+                "label=io.clusia.repo",
+                "--format",
+                "{{.ID}}"
+            ])
+        );
+        assert_eq!(
+            calls[2],
+            strings(&[
+                "volume",
+                "ls",
+                "--filter",
+                "label=io.clusia.repo",
+                "--format",
+                "{{.Name}} {{.Label \"io.clusia.repo\"}}",
+            ])
+        );
+        assert_eq!(
             calls[1],
             strings(&[
                 "image",
@@ -590,6 +615,22 @@ mod tests {
         let no_engine = disk_report(&fake, None, &[cache], &[]).await;
         assert_eq!(no_engine.items.len(), 1);
         assert_eq!(no_engine.total_bytes, 300);
+    }
+
+    #[tokio::test]
+    async fn a_failed_volume_listing_says_the_sizes_could_not_be_read() {
+        let fake = FakeExec::new();
+        fake.on("docker", &["image", "ls"], FakeReply::ok("")).on(
+            "docker",
+            &["volume", "ls"],
+            FakeReply::fail(125, "invalid argument for \"-f, --filter\" flag\n"),
+        );
+        let report = disk_report(&fake, Some(&docker()), &[], &[]).await;
+        assert!(report.items.is_empty());
+        assert_eq!(
+            report.note,
+            Some(format!("{BASE_NOTE} Volume sizes could not be read."))
+        );
     }
 
     #[test]
