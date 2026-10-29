@@ -592,7 +592,9 @@ async fn mount(shared: &Shared, pr: &PrRef, id: u64, ctx: &Ctx, env: &EnvState, 
                 caches: Vec::new(),
             };
             let name = names::run_name(&ctx.slug, pr.number, shared.tests.seq());
-            container::mount_check(
+            // Live before it starts, so no orphan pass removes the probe mid-check.
+            super::set_container(shared, pr, id, Some(name.clone()));
+            let checked = container::mount_check(
                 shared.test_exec.as_ref(),
                 &docker,
                 engine,
@@ -601,7 +603,9 @@ async fn mount(shared: &Shared, pr: &PrRef, id: u64, ctx: &Ctx, env: &EnvState, 
                 &ctx.labels(LabelKind::Probe),
                 &name,
             )
-            .await
+            .await;
+            super::set_container(shared, pr, id, None);
+            checked
         }
         None => Err("No container engine found.".into()),
     };
@@ -753,6 +757,8 @@ async fn run_step(walk: &Walk<'_>, step: &PlanStep) -> StepEnd {
                 Err(reasons) => return StepEnd::Failed(reasons, String::new()),
             },
         };
+        // The project is live while it comes up; the record names it once it is up.
+        super::set_container(shared, walk.pr, walk.id, Some(stack.project.clone()));
         let ended = container::stack_up(
             exec,
             &docker,
@@ -767,6 +773,7 @@ async fn run_step(walk: &Walk<'_>, step: &PlanStep) -> StepEnd {
             let project = stack.project.clone();
             env::update_record(shared, walk.pr, |record| record.stack = Some(project)).await;
         }
+        super::set_container(shared, walk.pr, walk.id, None);
         return step_end(ended, limit, sink.tail());
     }
     if let Some(at) = id
@@ -1223,9 +1230,12 @@ pub(super) async fn run(
             _ => {}
         }
     }
-    run.exit_code = match run.outcome {
-        RunOutcome::Stopped | RunOutcome::TimedOut | RunOutcome::Error { .. } => None,
-        _ => first_failure.unwrap_or(Some(0)),
+    // A run that failed only by its results keeps no code: every command exited 0, and a 0
+    // next to Failed reads as a pass.
+    run.exit_code = match (&run.outcome, first_failure) {
+        (RunOutcome::Stopped | RunOutcome::TimedOut | RunOutcome::Error { .. }, _) => None,
+        (RunOutcome::Failed, None) => None,
+        (_, failure) => failure.unwrap_or(Some(0)),
     };
     run.results = results;
     run.tail = tail;

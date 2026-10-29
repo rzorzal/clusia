@@ -1047,6 +1047,33 @@ async fn a_failed_run_keeps_command_runner_code_and_output() {
 }
 
 #[tokio::test]
+async fn failures_from_the_results_after_exit_0_keep_no_exit_code() {
+    let output = vec![(Stream::Out, "test store::expired ... FAILED\n".to_string())];
+    let lab = lab(
+        Machine::Colima { running: true },
+        vec![answer(no_setup(recipe()))],
+        &[7],
+        |x, _| {
+            built(x);
+            x.on_sequence(
+                "docker",
+                &["run"],
+                vec![FakeReply::ok(""), FakeReply::chunks(output, 0)],
+            );
+        },
+    );
+    ready(&lab, 7).await;
+    let id = started(&lab, 7, TestScope::All).await;
+    let done = finished(&lab, 7, &id).await;
+    assert_eq!(done.outcome, RunOutcome::Failed);
+    assert_eq!(done.totals.failed, 1);
+    assert_eq!(
+        done.exit_code, None,
+        "0 would read as a pass next to Failed"
+    );
+}
+
+#[tokio::test]
 async fn one_activity_per_review_and_parallel_runs_across_reviews() {
     let lab = lab(
         Machine::Colima { running: true },
@@ -1649,6 +1676,14 @@ async fn clean_up_removes_by_label_and_answers_the_disk() {
         lab.calls_with(&["image", "rm", "-f", "sha256:aaa"]).len(),
         1
     );
+    // The orphan pass looks at this repository's containers only.
+    let orphans = lab.calls_with(&["ps", "-a", "--filter"]);
+    assert_eq!(orphans.len(), 1);
+    assert!(
+        args_of(&orphans[0]).contains(&"label=io.clusia.repo=acme/widgets".to_string()),
+        "{}",
+        line_of(&orphans[0])
+    );
     // The removal lists by this repository's label; the report then lists every repository's.
     let removal = lab.calls_with(&["image", "ls", "-q"]);
     assert!(!removal.is_empty());
@@ -1846,6 +1881,82 @@ async fn a_marker_with_other_content_makes_the_step_missing_again() {
         refused(run(&lab.shared, &pr(7), TestScope::All).await)
             .starts_with("Set up the tests first")
     );
+}
+
+#[tokio::test]
+async fn the_probe_and_a_stack_coming_up_are_live_for_the_orphan_pass() {
+    let slow = || FakeReply::after(Duration::from_millis(1500), FakeReply::ok(""));
+    let lab = lab(
+        Machine::Colima { running: true },
+        vec![answer(with_services(no_setup(recipe())))],
+        &[7],
+        |x, paths| {
+            built(x);
+            compose_file(paths, 7);
+            // config, pull, build, then a slow `up -d --wait`.
+            x.on_sequence(
+                "docker",
+                &["compose", "-p"],
+                vec![
+                    FakeReply::ok(MERGED),
+                    FakeReply::ok(""),
+                    FakeReply::ok(""),
+                    slow(),
+                    FakeReply::ok(""),
+                ],
+            );
+            x.on("docker", &["run"], slow());
+        },
+    );
+    let project = clusia_testrun::names::compose_project(
+        &clusia_testrun::names::repo_slug("acme", "widgets"),
+        7,
+    );
+    generated(&lab, 7).await;
+    assert!(matches!(
+        approve(&lab, 7, Approve::All).await,
+        Outcome::Ok(Reply::Ack)
+    ));
+    let (mut probe_seen, mut stack_seen) = (false, false);
+    while !idle(&lab.shared, 7) {
+        let live = env::live_names(&lab.shared);
+        let probing = lab.shared.tests.with(&pr(7), |entry| {
+            entry.activity.as_ref().is_some_and(|a| {
+                a.phase
+                    == TestsPhase::Preparing {
+                        step: "mount".into(),
+                    }
+            })
+        });
+        probe_seen |= probing && live.iter().any(|n| n.starts_with("clusia-run-"));
+        let stack_recorded = load_tests(&lab.shared.paths, &pr(7))
+            .unwrap()
+            .stack
+            .is_some();
+        stack_seen |= !stack_recorded && live.contains(&project);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(probe_seen, "the mount-check probe is live while it runs");
+    assert!(stack_seen, "the project is live while `up` runs");
+    assert!(
+        env::live_names(&lab.shared).contains(&project),
+        "then by the record"
+    );
+}
+
+#[tokio::test]
+async fn a_panic_between_begin_and_the_spawn_frees_the_review() {
+    let lab = lab(Machine::NoEngine, Vec::new(), &[7], |_, _| {});
+    let shared = lab.shared.clone();
+    let task = tokio::spawn(async move {
+        let started = begin(&shared, &pr(7), Doing::Prepare, TestsPhase::Waiting)
+            .unwrap_or_else(|_| panic!("free"));
+        let _guard = Ending::new(&shared, &pr(7), started.id, started.live);
+        panic!("a bug before the background task starts");
+    });
+    assert!(task.await.unwrap_err().is_panic());
+    assert!(idle(&lab.shared, 7));
+    assert!(begin(&lab.shared, &pr(7), Doing::Run, TestsPhase::Waiting).is_ok());
 }
 
 #[tokio::test]

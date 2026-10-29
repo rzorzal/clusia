@@ -50,21 +50,21 @@ pub async fn remove_repo(exec: &dyn Exec, docker: &Docker, repo: &str) -> Result
 
 /// Removes `clusia-` containers that no live run or stack owns: a container of a dead compose
 /// project takes its project down once, any other goes into one `rm -f`. `live` holds the
-/// names of running run containers and the projects of live stacks.
+/// names of running run containers and the projects of live stacks. With `repo`, only that
+/// repository's containers are looked at.
 pub async fn remove_orphans(
     exec: &dyn Exec,
     docker: &Docker,
     live: &[String],
+    repo: Option<&str>,
 ) -> Result<(), String> {
     let format = "{{.Names}} {{.Label \"com.docker.compose.project\"}}";
-    let args = [
-        "ps",
-        "-a",
-        "--filter",
-        "label=io.clusia.review",
-        "--format",
-        format,
-    ];
+    let mut args = vec!["ps", "-a", "--filter", "label=io.clusia.review"];
+    let only = repo.map(|repo| format!("label={LABEL_REPO}={repo}"));
+    if let Some(only) = &only {
+        args.extend(["--filter", only.as_str()]);
+    }
+    args.extend(["--format", format]);
     let out = call(exec, docker, &args).await?;
     let mut projects: Vec<String> = Vec::new();
     let mut names: Vec<String> = Vec::new();
@@ -465,7 +465,7 @@ mod tests {
             "clusia-run-acme-widgets-abc123-7-1",
             "clusia-acme-widgets-abc123-7",
         ]);
-        assert_eq!(remove_orphans(&fake, &docker(), &live).await, Ok(()));
+        assert_eq!(remove_orphans(&fake, &docker(), &live, None).await, Ok(()));
         assert_eq!(
             calls(&fake),
             [
@@ -495,11 +495,31 @@ mod tests {
             &["ps"],
             FakeReply::ok("clusia-run-acme-widgets-abc123-7-1\n"),
         );
-        assert_eq!(remove_orphans(&quiet, &docker(), &live).await, Ok(()));
+        assert_eq!(remove_orphans(&quiet, &docker(), &live, None).await, Ok(()));
         assert_eq!(
             calls(&quiet).len(),
             1,
             "nothing to remove, nothing else runs"
+        );
+
+        let one_repo = FakeExec::new();
+        one_repo.on("docker", &["ps"], FakeReply::ok(""));
+        assert_eq!(
+            remove_orphans(&one_repo, &docker(), &live, Some("acme/widgets")).await,
+            Ok(())
+        );
+        assert_eq!(
+            calls(&one_repo),
+            [strings(&[
+                "ps",
+                "-a",
+                "--filter",
+                "label=io.clusia.review",
+                "--filter",
+                "label=io.clusia.repo=acme/widgets",
+                "--format",
+                "{{.Names}} {{.Label \"com.docker.compose.project\"}}",
+            ])]
         );
     }
 

@@ -68,7 +68,8 @@ pub(super) struct Activity {
     pub stop: Arc<StopFlag>,
     /// Stops the recipe turn.
     pub turn: Arc<Stop>,
-    /// The container of the command that runs now, which the sweep must leave alone.
+    /// The container of the command that runs now, or the compose project coming up, which
+    /// the sweep must leave alone.
     pub container: Option<String>,
 }
 
@@ -157,7 +158,7 @@ impl Bench {
         mounts.retain(|(_, w), result| !(w == worktree && result.is_err()));
     }
 
-    /// The containers the running activities have started.
+    /// The containers and coming-up compose projects of the running activities.
     pub(super) fn containers(&self) -> Vec<String> {
         let table = self.table.lock().unwrap_or_else(|p| p.into_inner());
         table
@@ -362,6 +363,7 @@ pub(crate) async fn generate(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
         Err(Refused::Busy(Doing::Generate)) => return Outcome::Ok(Reply::Ack),
         Err(refused) => return refused.outcome(pr),
     };
+    let guard = Ending::new(shared, pr, started.id, started.live);
     // The `Generating` view goes out before the `Ack`, so a client always sees it begin.
     tell(shared, pr).await;
     let id = started.id;
@@ -370,7 +372,7 @@ pub(crate) async fn generate(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
         shared.clone(),
         pr.clone(),
         id,
-        started.live,
+        guard.hand_off(),
         job,
     ));
     Outcome::Ok(Reply::Ack)
@@ -390,8 +392,9 @@ pub(crate) async fn prepare(
         Ok(started) => started,
         Err(refused) => return refused.outcome(pr),
     };
+    let guard = Ending::new(shared, pr, started.id, started.live);
     if let Err(out) = work::accept_setup(shared, pr, recipe_hash, &approve).await {
-        end(shared, pr, started.id, None);
+        guard.quietly();
         return out;
     }
     // The `Waiting` view goes out before the `Ack`, so a client always sees the setup begin.
@@ -401,7 +404,7 @@ pub(crate) async fn prepare(
         shared.clone(),
         pr.clone(),
         started.id,
-        started.live,
+        guard.hand_off(),
         job,
     ));
     Outcome::Ok(Reply::Ack)
@@ -416,10 +419,11 @@ pub(crate) async fn run(shared: &Arc<Shared>, pr: &PrRef, scope: TestScope) -> O
         Ok(started) => started,
         Err(refused) => return refused.outcome(pr),
     };
+    let guard = Ending::new(shared, pr, started.id, started.live);
     let job = match work::accept_run(shared, pr, scope).await {
         Ok(job) => job,
         Err(out) => {
-            end(shared, pr, started.id, None);
+            guard.quietly();
             return out;
         }
     };
@@ -436,7 +440,7 @@ pub(crate) async fn run(shared: &Arc<Shared>, pr: &PrRef, scope: TestScope) -> O
         shared.clone(),
         pr.clone(),
         started.id,
-        started.live,
+        guard.hand_off(),
         task,
     ));
     Outcome::Ok(Reply::TestRunStarted { run: run_id })
@@ -464,12 +468,7 @@ pub(crate) async fn list(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
     };
     let (shared, pr) = (shared.clone(), pr.clone());
     let task = tokio::spawn(async move {
-        let _end = Ending {
-            shared: shared.clone(),
-            pr: pr.clone(),
-            id: started.id,
-            live: Some(started.live),
-        };
+        let _end = Ending::new(&shared, &pr, started.id, started.live);
         work::list(&shared, &pr, started.id, &started.stop).await
     });
     task.await.unwrap_or_else(|_| {
@@ -480,7 +479,9 @@ pub(crate) async fn list(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
     })
 }
 
-/// Ends activity `id` of `pr` when dropped, and tells the windows.
+/// Ends activity `id` of `pr` when dropped, and tells the windows, so that a panic or an early
+/// return never leaves the review busy. `hand_off` gives the activity to `work::drive`, which
+/// ends it itself.
 struct Ending {
     shared: Arc<Shared>,
     pr: PrRef,
@@ -488,10 +489,36 @@ struct Ending {
     live: Option<Live>,
 }
 
+impl Ending {
+    fn new(shared: &Arc<Shared>, pr: &PrRef, id: u64, live: Live) -> Self {
+        Self {
+            shared: shared.clone(),
+            pr: pr.clone(),
+            id,
+            live: Some(live),
+        }
+    }
+
+    fn hand_off(mut self) -> Live {
+        self.live
+            .take()
+            .expect("an armed guard holds its live count")
+    }
+
+    /// Ends the activity now, without telling the windows, which never saw it begin.
+    fn quietly(self) {
+        end(&self.shared, &self.pr, self.id, None);
+        drop(self.hand_off());
+    }
+}
+
 impl Drop for Ending {
     fn drop(&mut self) {
+        let Some(live) = self.live.take() else {
+            return;
+        };
         end(&self.shared, &self.pr, self.id, None);
-        let (shared, pr, live) = (self.shared.clone(), self.pr.clone(), self.live.take());
+        let (shared, pr) = (self.shared.clone(), self.pr.clone());
         tokio::spawn(async move {
             let _live = live;
             tell(&shared, &pr).await;
@@ -596,6 +623,7 @@ pub(crate) async fn clean_up(shared: &Shared, repo: Option<String>) -> Outcome {
     if shared.tests.closing.load(Ordering::SeqCst) {
         return reviews::invalid_state(STOPPING);
     }
+    let one = repo.is_some();
     let repos: Vec<(String, String)> = match repo {
         Some(repo) => match repo_name(&repo) {
             Some(name) => vec![name],
@@ -639,11 +667,15 @@ pub(crate) async fn clean_up(shared: &Shared, repo: Option<String>) -> Outcome {
         remove_cache(shared, owner, name);
         forget_repo_facts(shared, owner, name);
     }
+    // Only the repositories checked for busy activities above: another one's probe or stack
+    // may be on its way up.
+    let only = one.then(|| repos.first().map(|(owner, name)| format!("{owner}/{name}")));
     if let Some(docker) = &docker
         && let Err(e) = clusia_testrun::cleanup::remove_orphans(
             shared.test_exec.as_ref(),
             docker,
             &env::live_names(shared),
+            only.flatten().as_deref(),
         )
         .await
     {
@@ -797,6 +829,7 @@ pub(crate) async fn sweep(shared: &Shared, cutoff: i64) {
             shared.test_exec.as_ref(),
             &docker,
             &env::live_names(shared),
+            None,
         )
         .await
     {
