@@ -2015,6 +2015,7 @@ version = "0.1.0"
 dependencies = [
  "clusia-core",
  "libc",
+ "quick-xml",
  "serde",
  "serde_json",
  "sha2",

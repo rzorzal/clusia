@@ -12,8 +12,10 @@ pub mod image;
 pub mod local;
 pub mod log;
 pub mod names;
+pub mod near;
 pub mod plan;
 pub mod recipe;
+pub mod results;
 pub mod sandbox;
 pub mod scan;
 #[cfg(any(test, feature = "test-kit"))]
