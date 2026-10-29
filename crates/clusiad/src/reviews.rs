@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clusia_core::{
-    Activity, ActivityKind, Anchor, ChecksSummary, DraftKind, FileDiff, Origin, PrConversation,
-    PrDetail, PrRef, Review, ReviewCache, ReviewEvent, ReviewState, Role, Side, ThreadRef,
-    can_comment,
+    Activity, ActivityKind, Anchor, CheckRun, ChecksSummary, DraftKind, FileDiff, Origin,
+    PrConversation, PrDetail, PrRef, Review, ReviewCache, ReviewEvent, ReviewState, Role, Side,
+    ThreadRef, can_comment,
 };
 use clusia_git::{
     base_pin_ref, git, pin_commit, remove_worktree, repo_of_worktree, reviewed_ref, unpin,
@@ -163,6 +163,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         files,
         conversation,
         checks,
+        check_runs,
         viewer,
         cache_saved,
     } = opened;
@@ -278,7 +279,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         role,
         viewer,
         worktree: Some(worktree),
-        check_runs: Vec::new(),
+        check_runs,
         fetched_at: now,
     });
     if !cache_saved {
@@ -318,6 +319,8 @@ struct Opened {
     files: Arc<Vec<FileDiff>>,
     conversation: PrConversation,
     checks: Option<ChecksSummary>,
+    /// What `checks` counts, by name.
+    check_runs: Vec<CheckRun>,
     viewer: Option<String>,
     /// The cache was already written, next to a worktree verified under the worktree lock.
     cache_saved: bool,
@@ -356,14 +359,18 @@ async fn unchanged_open(
         }
         repo_of_worktree(&worktree).await.ok()?
     };
-    let (conversation, checks) =
-        tokio::join!(gh.get_conversation(pr), gh.get_checks(pr, &detail.head_sha));
+    let (conversation, check_runs) = tokio::join!(
+        gh.get_conversation(pr),
+        gh.get_check_runs(pr, &detail.head_sha)
+    );
     let conversation = conversation
         .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the conversation"))
         .ok()?;
-    let checks = checks
+    let check_runs = check_runs
         .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the checks"))
         .ok();
+    let checks = check_runs.as_deref().map(ChecksSummary::of);
+    let check_runs = check_runs.unwrap_or_default();
     let viewer = match &cache.viewer {
         Some(v) => Some(v.clone()),
         None => gh.viewer_login().await.ok(),
@@ -377,7 +384,7 @@ async fn unchanged_open(
         role: role_of(viewer.as_deref(), detail),
         viewer: viewer.clone(),
         worktree: cache.worktree.clone(),
-        check_runs: Vec::new(),
+        check_runs: check_runs.clone(),
         fetched_at: now_unix(),
     };
     {
@@ -400,6 +407,7 @@ async fn unchanged_open(
         files,
         conversation,
         checks,
+        check_runs,
         viewer,
         cache_saved: true,
     })
@@ -492,14 +500,16 @@ async fn full_open(
     relocate::refresh_base(&repo, &remote, pr, &detail.base_ref).await;
 
     step(shared, pr, LoadStepKind::Pr, StepStatus::Running, None);
-    let (files, conversation, checks) = tokio::join!(
+    let (files, conversation, check_runs) = tokio::join!(
         gh.get_files(pr),
         gh.get_conversation(pr),
-        gh.get_checks(pr, &detail.head_sha),
+        gh.get_check_runs(pr, &detail.head_sha),
     );
-    let checks = checks
+    let check_runs = check_runs
         .inspect_err(|e| tracing::warn!(error = %e, pr = %pr, "cannot read the checks"))
         .ok();
+    let checks = check_runs.as_deref().map(ChecksSummary::of);
+    let check_runs = check_runs.unwrap_or_default();
     let (files, conversation) = match files.and_then(|f| Ok((f, conversation?))) {
         Ok((f, c)) => (Arc::new(f), c),
         Err(e) => {
@@ -534,6 +544,7 @@ async fn full_open(
             files,
             conversation,
             checks,
+            check_runs,
             viewer,
             cache_saved: false,
         },

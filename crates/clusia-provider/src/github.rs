@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clusia_core::{
-    ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, PrDetail, PrFilter, PrRef,
-    PrSummary, Profile, ReviewInfo, Side, ThreadComment,
+    CheckRun, ChecksSummary, CommitInfo, FileDiff, IssueComment, PrConversation, PrDetail,
+    PrFilter, PrRef, PrSummary, Profile, ReviewInfo, Side, ThreadComment,
 };
 use reqwest::{StatusCode, header};
 use serde::Deserialize;
@@ -231,18 +231,36 @@ struct RawGitAuthor {
 }
 
 #[derive(Deserialize)]
-struct RawCheckRuns {
-    check_runs: Vec<RawCheckRun>,
-}
-
-#[derive(Deserialize)]
 struct RawCheckRun {
+    #[serde(default)]
+    name: String,
     status: String,
     conclusion: Option<String>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    details_url: Option<String>,
 }
 
 fn login(user: Option<UserRef>) -> String {
     user.map(|u| u.login).unwrap_or_else(|| "ghost".to_string())
+}
+
+/// The list of one page: the page itself, or the array at `key` of an object page.
+fn page_items(
+    mut page: serde_json::Value,
+    path: &str,
+    key: Option<&str>,
+) -> Result<Vec<serde_json::Value>, ProviderError> {
+    let list = match key {
+        Some(key) => page.get_mut(key).map(serde_json::Value::take),
+        None => Some(page),
+    };
+    match list {
+        Some(serde_json::Value::Array(items)) => Ok(items),
+        _ => Err(ProviderError::Decode(format!(
+            "{path} did not return a list"
+        ))),
+    }
 }
 
 pub(crate) fn decode_list<T: serde::de::DeserializeOwned>(
@@ -426,17 +444,22 @@ impl GitHub {
         extra: &[(&str, &str)],
         use_cache: bool,
     ) -> Result<Vec<serde_json::Value>, ProviderError> {
+        self.get_paginated_in(path, None, extra, use_cache).await
+    }
+
+    /// The page walker. With `key`, every page is an object and the list is the array at that
+    /// key (the check-runs endpoint); without it, every page is the list.
+    async fn get_paginated_in(
+        &self,
+        path: &str,
+        key: Option<&str>,
+        extra: &[(&str, &str)],
+        use_cache: bool,
+    ) -> Result<Vec<serde_json::Value>, ProviderError> {
         let mut query = vec![("per_page", "100")];
         query.extend_from_slice(extra);
         let (first, mut headers) = self.request(path, &query, use_cache).await?;
-        let mut items = match first {
-            serde_json::Value::Array(a) => a,
-            _ => {
-                return Err(ProviderError::Decode(format!(
-                    "{path} did not return a list"
-                )));
-            }
-        };
+        let mut items = page_items(first, path, key)?;
         for _ in 1..MAX_PAGES {
             let Some(next) = next_link(&headers) else {
                 break;
@@ -448,14 +471,7 @@ impl GitHub {
             }
             let (page, h) = self.request_url(next, &[], use_cache).await?;
             headers = h;
-            match page {
-                serde_json::Value::Array(a) => items.extend(a),
-                _ => {
-                    return Err(ProviderError::Decode(format!(
-                        "{path} did not return a list"
-                    )));
-                }
-            }
+            items.extend(page_items(page, path, key)?);
         }
         Ok(items)
     }
@@ -617,25 +633,32 @@ impl GitHub {
             .collect())
     }
 
-    pub async fn get_checks(&self, pr: &PrRef, sha: &str) -> Result<ChecksSummary, ProviderError> {
+    /// Every check run of `sha`, in GitHub's order, across all pages.
+    pub async fn get_check_runs(
+        &self,
+        pr: &PrRef,
+        sha: &str,
+    ) -> Result<Vec<CheckRun>, ProviderError> {
         let path = format!("{}/commits/{sha}/check-runs", Self::repo_path(pr));
-        let (body, _) = self.get(&path, &[("per_page", "100")]).await?;
-        let runs: RawCheckRuns = decode(body)?;
-        let mut summary = ChecksSummary::default();
-        for run in runs.check_runs {
-            summary.total += 1;
-            if run.status != "completed" {
-                summary.pending += 1;
-            } else if matches!(
-                run.conclusion.as_deref(),
-                Some("success" | "neutral" | "skipped")
-            ) {
-                summary.passed += 1;
-            } else {
-                summary.failed += 1;
-            }
-        }
-        Ok(summary)
+        let raw: Vec<RawCheckRun> = decode_list(
+            self.get_paginated_in(&path, Some("check_runs"), &[], true)
+                .await?,
+        )?;
+        Ok(raw
+            .into_iter()
+            .map(|run| CheckRun {
+                name: run.name,
+                status: run.status,
+                conclusion: run.conclusion,
+                started_at: run.started_at,
+                completed_at: run.completed_at,
+                details_url: run.details_url,
+            })
+            .collect())
+    }
+
+    pub async fn get_checks(&self, pr: &PrRef, sha: &str) -> Result<ChecksSummary, ProviderError> {
+        Ok(ChecksSummary::of(&self.get_check_runs(pr, sha).await?))
     }
 
     pub(crate) async fn get(
@@ -1509,6 +1532,155 @@ mod tests {
                 pending: 1
             }
         );
+    }
+    fn run_json(name: &str, status: &str, conclusion: Option<&str>) -> serde_json::Value {
+        json!({
+            "name": name,
+            "status": status,
+            "conclusion": conclusion,
+            "started_at": "2026-10-01T10:00:00Z",
+            "completed_at": conclusion.map(|_| "2026-10-01T10:05:00Z"),
+            "details_url": format!("https://github.com/acme/widgets/actions/runs/{name}"),
+        })
+    }
+
+    #[tokio::test]
+    async fn check_runs_keep_their_name_times_and_link() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/commits/c2/check-runs"))
+            .and(query_param("per_page", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 3,
+                "check_runs": [
+                    run_json("build", "completed", Some("success")),
+                    run_json("test", "in_progress", None),
+                    { "status": "completed", "conclusion": "failure" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let runs = gh(&server).get_check_runs(&pr7(), "c2").await.unwrap();
+        assert_eq!(
+            runs,
+            vec![
+                CheckRun {
+                    name: "build".into(),
+                    status: "completed".into(),
+                    conclusion: Some("success".into()),
+                    started_at: Some("2026-10-01T10:00:00Z".into()),
+                    completed_at: Some("2026-10-01T10:05:00Z".into()),
+                    details_url: Some("https://github.com/acme/widgets/actions/runs/build".into()),
+                },
+                CheckRun {
+                    name: "test".into(),
+                    status: "in_progress".into(),
+                    conclusion: None,
+                    started_at: Some("2026-10-01T10:00:00Z".into()),
+                    completed_at: None,
+                    details_url: Some("https://github.com/acme/widgets/actions/runs/test".into()),
+                },
+                CheckRun {
+                    name: String::new(),
+                    status: "completed".into(),
+                    conclusion: Some("failure".into()),
+                    started_at: None,
+                    completed_at: None,
+                    details_url: None,
+                },
+            ],
+            "a run without a name still reads"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_runs_page_past_one_hundred() {
+        let server = MockServer::start().await;
+        let next = format!(
+            "<{}/repos/acme/widgets/commits/c2/check-runs?per_page=100&page=2>; rel=\"next\"",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/commits/c2/check-runs"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 4,
+                "check_runs": [
+                    run_json("c", "completed", Some("failure")),
+                    run_json("d", "queued", None)
+                ]
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/commits/c2/check-runs"))
+            .and(query_param("per_page", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", next.as_str())
+                    .set_body_json(json!({
+                        "total_count": 4,
+                        "check_runs": [
+                            run_json("a", "completed", Some("success")),
+                            run_json("b", "completed", Some("skipped"))
+                        ]
+                    })),
+            )
+            .with_priority(5)
+            .mount(&server)
+            .await;
+        let client = gh(&server);
+        let names: Vec<String> = client
+            .get_check_runs(&pr7(), "c2")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, ["a", "b", "c", "d"]);
+        assert_eq!(
+            client.get_checks(&pr7(), "c2").await.unwrap(),
+            ChecksSummary {
+                total: 4,
+                passed: 2,
+                failed: 1,
+                pending: 1
+            },
+            "the summary counts every page"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_runs_ignore_a_foreign_next_link() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/commits/c2/check-runs"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", "<http://evil.example/x?page=2>; rel=\"next\"")
+                    .set_body_json(json!({
+                        "total_count": 1,
+                        "check_runs": [run_json("a", "completed", Some("success"))]
+                    })),
+            )
+            .mount(&server)
+            .await;
+        let runs = gh(&server).get_check_runs(&pr7(), "c2").await.unwrap();
+        assert_eq!(runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn check_runs_without_a_list_are_a_decode_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/commits/c2/check-runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "total_count": 0 })))
+            .mount(&server)
+            .await;
+        let error = gh(&server).get_check_runs(&pr7(), "c2").await.unwrap_err();
+        assert!(matches!(error, ProviderError::Decode(_)), "{error:?}");
+        assert!(gh(&server).get_checks(&pr7(), "c2").await.is_err());
     }
 
     #[tokio::test]
