@@ -113,6 +113,36 @@ pub enum Command {
         #[arg(long)]
         again: bool,
     },
+    /// The tests of a review: the environment and the last run, or (in this order) generate the
+    /// recipe, approve the setup, list the tests and run them.
+    Tests {
+        /// `owner/repo#number` or a pull request URL.
+        pr: String,
+        /// Probe the machine and have the agent write the recipe (one turn of the agent).
+        #[arg(long)]
+        generate: bool,
+        /// Show the setup plan and ask before it runs.
+        #[arg(long)]
+        setup: bool,
+        /// Approve every step of the setup plan without asking.
+        #[arg(long, requires = "setup")]
+        yes: bool,
+        /// Run the tests and stream the results; the exit code is the run's.
+        #[arg(long)]
+        run: bool,
+        /// Run every test (the default for --run).
+        #[arg(long, requires = "run", conflicts_with_all = ["near", "one"])]
+        all: bool,
+        /// Run only the tests near the change.
+        #[arg(long, requires = "run", conflicts_with = "one")]
+        near: bool,
+        /// Run one test, by name.
+        #[arg(long, requires = "run", value_name = "NAME")]
+        one: Option<String>,
+        /// List the tests the recipe's list command finds.
+        #[arg(long)]
+        list: bool,
+    },
     /// Check a custom command against Clúsia's JSON-lines protocol.
     #[command(subcommand)]
     Harness(HarnessCommand),

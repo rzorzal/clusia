@@ -2346,6 +2346,21 @@ fn uninstall_removes_the_bundle_the_agent_and_the_link_in_the_given_folders() {
     assert!(bin.join("other").exists(), "nothing else is touched");
 }
 
+#[test]
+fn tests_flags_that_need_another_are_usage_errors() {
+    let home = Home::new();
+    for args in [
+        &["tests", "acme/widgets#7", "--yes"][..],
+        &["tests", "acme/widgets#7", "--near"][..],
+        &["tests", "acme/widgets#7", "--one", "store::refresh"][..],
+        &["tests", "acme/widgets#7", "--run", "--all", "--near"][..],
+        &["tests", "acme/widgets#7", "--run", "--near", "--one", "x"][..],
+    ] {
+        let out = home.clusia(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
 /// `clusia check` against a daemon whose every answer the test writes.
 mod check_against_a_scripted_daemon {
     use std::path::Path;
@@ -2416,49 +2431,58 @@ mod check_against_a_scripted_daemon {
         })
     }
 
-    /// Serves one client on `socket`: each request gets what `answer` returns, or no answer at
-    /// all for `None`. `answer` may send events, now or later, through the `Say` it is given.
-    fn daemon(
+    /// Serves every client that connects on `socket`: each request gets what `answer` returns,
+    /// or no answer at all for `None`. `answer` may send events, now or later, through the `Say`
+    /// it is given.
+    pub(super) fn daemon(
         rt: &tokio::runtime::Runtime,
         socket: &Path,
-        mut answer: impl FnMut(&Request, &Say) -> Option<Reply> + Send + 'static,
+        answer: impl FnMut(&Request, &Say) -> Option<Reply> + Send + 'static,
     ) {
         let listener = {
             let _guard = rt.enter();
             tokio::net::UnixListener::bind(socket).unwrap()
         };
+        let answer = Arc::new(std::sync::Mutex::new(answer));
         rt.spawn(async move {
-            let Ok((stream, _)) = listener.accept().await else {
-                return;
-            };
-            let (read, mut write) = stream.into_split();
-            let mut read = MessageReader::new(read);
-            let Ok(Some(ClientMessage::Hello { .. })) = read.next::<ClientMessage>().await else {
-                return;
-            };
-            let (say, mut said) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
-            tokio::spawn(async move {
-                while let Some(message) = said.recv().await {
-                    if write_message(&mut write, &message).await.is_err() {
-                        return;
-                    }
-                }
-            });
-            let _ = say.send(ServerMessage::Welcome {
-                protocol: PROTOCOL_VERSION,
-                daemon: "9.9.9".into(),
-            });
-            while let Ok(Some(ClientMessage::Request { id, cmd })) =
-                read.next::<ClientMessage>().await
-            {
-                if let Some(reply) = answer(&cmd, &say) {
-                    let _ = say.send(ServerMessage::Response {
-                        id,
-                        result: Outcome::Ok(reply),
-                    });
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(serve(stream, answer.clone()));
+            }
+        });
+    }
+
+    /// One client of `daemon`: the hello, then every request answered as `answer` says.
+    async fn serve<F>(stream: tokio::net::UnixStream, answer: Arc<std::sync::Mutex<F>>)
+    where
+        F: FnMut(&Request, &Say) -> Option<Reply> + Send + 'static,
+    {
+        let (read, mut write) = stream.into_split();
+        let mut read = MessageReader::new(read);
+        let Ok(Some(ClientMessage::Hello { .. })) = read.next::<ClientMessage>().await else {
+            return;
+        };
+        let (say, mut said) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
+        tokio::spawn(async move {
+            while let Some(message) = said.recv().await {
+                if write_message(&mut write, &message).await.is_err() {
+                    return;
                 }
             }
         });
+        let _ = say.send(ServerMessage::Welcome {
+            protocol: PROTOCOL_VERSION,
+            daemon: "9.9.9".into(),
+        });
+        while let Ok(Some(ClientMessage::Request { id, cmd })) = read.next::<ClientMessage>().await
+        {
+            let reply = (answer.lock().unwrap())(&cmd, &say);
+            if let Some(reply) = reply {
+                let _ = say.send(ServerMessage::Response {
+                    id,
+                    result: Outcome::Ok(reply),
+                });
+            }
+        }
     }
 
     fn check(home: &Path) -> std::process::Child {
@@ -2477,7 +2501,7 @@ mod check_against_a_scripted_daemon {
     }
 
     /// Waits up to `limit` for `child`; kills it and returns `None` when it is still running.
-    fn ended_within(child: &mut std::process::Child, limit: Duration) -> Option<i32> {
+    pub(super) fn ended_within(child: &mut std::process::Child, limit: Duration) -> Option<i32> {
         let give_up = Instant::now() + limit;
         while Instant::now() < give_up {
             if let Some(status) = child.try_wait().unwrap() {
@@ -2490,7 +2514,7 @@ mod check_against_a_scripted_daemon {
         None
     }
 
-    fn stderr_of(child: &mut std::process::Child) -> String {
+    pub(super) fn stderr_of(child: &mut std::process::Child) -> String {
         use std::io::Read;
         let mut text = String::new();
         child
@@ -2502,7 +2526,7 @@ mod check_against_a_scripted_daemon {
         text
     }
 
-    fn stdout_of(child: &mut std::process::Child) -> String {
+    pub(super) fn stdout_of(child: &mut std::process::Child) -> String {
         use std::io::Read;
         let mut text = String::new();
         child
@@ -2575,7 +2599,7 @@ mod check_against_a_scripted_daemon {
         is_running
     }
 
-    fn interrupt(child: &std::process::Child) {
+    pub(super) fn interrupt(child: &std::process::Child) {
         // SAFETY: signals a child this test spawned and still owns.
         assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     }
@@ -2615,5 +2639,522 @@ mod check_against_a_scripted_daemon {
         let err = stderr_of(&mut child);
         assert_eq!(code, Some(130), "{err}");
         assert!(err.contains("The daemon did not answer"), "{err}");
+    }
+}
+
+mod tests_against_a_scripted_daemon {
+    use std::io::Write;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use clusia_core::tests::{
+        Engine, EngineKind, EnvState, Existing, PlanStep, RepoSignals, RunOutcome, RunnerKind,
+        SetupPlan, StepPlace, StepState, TestCaseResult, TestRun, TestScope, TestStatus,
+        TestsPhase, TestsView, Totals,
+    };
+    use clusia_protocol::{Command as Request, Event, Reply, ServerMessage};
+    use tokio::sync::mpsc::UnboundedSender;
+
+    use super::check_against_a_scripted_daemon::{
+        daemon, ended_within, interrupt, stderr_of, stdout_of,
+    };
+
+    fn pr() -> clusia_core::PrRef {
+        "acme/widgets#7".parse().unwrap()
+    }
+
+    fn env() -> EnvState {
+        EnvState {
+            head: "9be1d07".into(),
+            probed_at: 1_761_600_000,
+            engine: Some(Engine {
+                kind: EngineKind::Colima,
+                cli: "/opt/homebrew/bin/docker".into(),
+                endpoint: "unix:///Users/octo/.colima/default/docker.sock".into(),
+                context: Some("colima".into()),
+                running: true,
+                start: Some("colima start".into()),
+                compose: Some("2.29.1".into()),
+            }),
+            runner: RunnerKind::Container,
+            note: None,
+            sandbox_ok: true,
+            signals: RepoSignals::default(),
+            existing: Existing::default(),
+            inputs_hash: "ab".into(),
+        }
+    }
+
+    fn view(phase: TestsPhase, plan: Option<SetupPlan>) -> TestsView {
+        TestsView {
+            head: "9be1d07".into(),
+            phase,
+            env: Some(env()),
+            recipe: None,
+            proposal: None,
+            plan,
+            runs: Vec::new(),
+            near: Vec::new(),
+            github_checks: Vec::new(),
+            refresh_available: false,
+        }
+    }
+
+    fn event(event: Event) -> ServerMessage {
+        ServerMessage::Event {
+            topic: "tests".into(),
+            event,
+        }
+    }
+
+    fn tests_cmd(home: &Path, args: &[&str]) -> std::process::Child {
+        std::process::Command::new(env!("CARGO_BIN_EXE_clusia"))
+            .arg("--home")
+            .arg(home)
+            .args(["tests", "acme/widgets#7"])
+            .args(args)
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
+            .env("CLUSIA_DOCKER_BIN", "/nonexistent/docker")
+            .env("CLUSIA_SANDBOX_EXEC_BIN", "/nonexistent/sandbox-exec")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn run_output_is_printed_filtered() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        daemon(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, say| match cmd {
+                Request::GetTests { .. } => {
+                    Some(Reply::Tests(Box::new(view(TestsPhase::Ready, None))))
+                }
+                Request::RunTests { scope, .. } => {
+                    assert_eq!(*scope, TestScope::All, "--run alone runs all the tests");
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        let result = |name: &str, status, ms| TestCaseResult {
+                            name: name.into(),
+                            file: None,
+                            status,
+                            duration_ms: ms,
+                            message: None,
+                        };
+                        for r in [
+                            result("store::ok\u{1b}[2J", TestStatus::Passed, Some(12)),
+                            result("store::bad\u{202e}name", TestStatus::Failed, None),
+                        ] {
+                            let _ = say.send(event(Event::TestResult {
+                                pr: pr(),
+                                run: "run-1".into(),
+                                result: r,
+                            }));
+                        }
+                        let mut failed = result("store::bad\u{202e}name", TestStatus::Failed, None);
+                        failed.message = Some("left\u{1b}]8;;http://x\u{7}: 1".into());
+                        let run = TestRun {
+                            id: "run-1".into(),
+                            head: "9be1d07".into(),
+                            scope: TestScope::All,
+                            runner: RunnerKind::Container,
+                            command: "cargo test --workspace".into(),
+                            started_at: 1_761_600_000,
+                            duration_ms: 4_200,
+                            exit_code: Some(3),
+                            outcome: RunOutcome::Failed,
+                            totals: Totals {
+                                passed: 1,
+                                failed: 1,
+                                skipped: 0,
+                            },
+                            results: vec![
+                                result("store::ok\u{1b}[2J", TestStatus::Passed, Some(12)),
+                                failed,
+                            ],
+                            log: None,
+                            tail: "boom \u{1b}[31mred\u{1b}[0m\n\u{202e}gnp.exe\n".into(),
+                        };
+                        let _ = say.send(event(Event::TestRunDone {
+                            pr: pr(),
+                            run: Box::new(run),
+                        }));
+                    });
+                    Some(Reply::TestRunStarted {
+                        run: "run-1".into(),
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(3), "the run's own exit code\n{out}\n{err}");
+        for text in [&out, &err] {
+            assert!(!text.contains('\u{1b}'), "{text:?}");
+            assert!(!text.contains('\u{202e}'), "{text:?}");
+            assert!(!text.contains('\u{7}'), "{text:?}");
+        }
+        assert!(out.contains("PASS  store::ok\\u{1b}[2J  12 ms"), "{out}");
+        assert!(out.contains("FAIL  store::bad\\u{202e}name"), "{out}");
+        assert!(out.contains("Command: cargo test --workspace"), "{out}");
+        assert!(out.contains("Runner: container · Colima"), "{out}");
+        assert!(out.contains("Exit code: 3"), "{out}");
+        assert!(out.contains("  boom \\u{1b}[31mred\\u{1b}[0m"), "{out}");
+        assert_eq!(
+            out.trim_end().lines().last(),
+            Some("1 passed, 1 failed, 0 skipped in 4.2 s (container · Colima)"),
+            "{out}"
+        );
+        assert!(err.contains("tests failed (exit code 3)"), "{err}");
+    }
+
+    #[test]
+    fn a_declined_setup_approves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = asked.clone();
+        let plan = SetupPlan {
+            recipe_hash: "ab".into(),
+            steps: vec![PlanStep {
+                id: "work:0".into(),
+                title: "Fetch dependencies".into(),
+                command: "cargo fetch".into(),
+                place: StepPlace::Container,
+                network: true,
+                hint: None,
+                state: StepState::Missing,
+                approved: false,
+            }],
+            commands: Vec::new(),
+            commands_approved: false,
+            ready: false,
+            blocked: None,
+        };
+        daemon(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, _| {
+                seen.lock().unwrap().push(format!("{cmd:?}"));
+                match cmd {
+                    Request::GetTests { .. } => Some(Reply::Tests(Box::new(view(
+                        TestsPhase::NeedsSetup,
+                        Some(plan.clone()),
+                    )))),
+                    _ => Some(Reply::Ack),
+                }
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--setup"]);
+        child.stdin.take().unwrap().write_all(b"n\n").unwrap();
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains("$ cargo fetch"),
+            "the plan is shown first: {err}"
+        );
+        assert!(
+            err.contains("Approve all 1 steps and the test commands? [y/N]"),
+            "{err}"
+        );
+        assert!(err.contains("Setup not approved; nothing ran."), "{err}");
+        assert!(
+            !asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("PrepareTests")),
+            "{:?}",
+            asked.lock().unwrap()
+        );
+    }
+
+    fn one_step_plan(title: &str, hint: Option<&str>, state: StepState) -> SetupPlan {
+        SetupPlan {
+            recipe_hash: "ab12".into(),
+            steps: vec![PlanStep {
+                id: "work:0".into(),
+                title: title.into(),
+                command: "cargo fetch".into(),
+                place: StepPlace::Container,
+                network: true,
+                hint: hint.map(String::from),
+                state,
+                approved: false,
+            }],
+            commands: Vec::new(),
+            commands_approved: false,
+            ready: false,
+            blocked: None,
+        }
+    }
+
+    /// A daemon that records every request and answers `GetTests` with `view`; `then` runs on
+    /// the request after its answer, with a way to send events.
+    fn recording_daemon(
+        dir: &Path,
+        rt: &tokio::runtime::Runtime,
+        view: TestsView,
+        mut then: impl FnMut(&Request, &UnboundedSender<ServerMessage>) -> Option<Reply>
+        + Send
+        + 'static,
+    ) -> Arc<Mutex<Vec<String>>> {
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = asked.clone();
+        daemon(
+            rt,
+            &clusia_core::Paths::new(dir).socket(),
+            move |cmd, say| {
+                seen.lock().unwrap().push(format!("{cmd:?}"));
+                match cmd {
+                    Request::GetTests { .. } => Some(Reply::Tests(Box::new(view.clone()))),
+                    other => then(other, say),
+                }
+            },
+        );
+        asked
+    }
+
+    #[test]
+    fn a_line_typed_before_the_question_is_no_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let plan = one_step_plan("Fetch dependencies", None, StepState::Missing);
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::NeedsSetup, Some(plan)),
+            |_, _| Some(Reply::Ack),
+        );
+        let mut child = tests_cmd(dir.path(), &["--setup"]);
+        // Already waiting in stdin when the question prints: it was aimed at something else.
+        child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains("(A line typed before the question was ignored.)"),
+            "{err}"
+        );
+        assert!(err.contains("Setup not approved; nothing ran."), "{err}");
+        assert!(
+            !asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("PrepareTests"))
+        );
+    }
+
+    #[test]
+    fn the_setup_sends_the_hash_it_showed_and_ends_on_ready_right_after_the_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let plan = one_step_plan("Fetch dependencies", None, StepState::Missing);
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::NeedsSetup, Some(plan)),
+            |cmd, say| match cmd {
+                Request::PrepareTests { .. } => {
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(event(Event::TestEnv {
+                            pr: pr(),
+                            view: Box::new(view(TestsPhase::Ready, None)),
+                        }));
+                    });
+                    Some(Reply::Ack)
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--setup", "--yes"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(0), "{err}");
+        assert!(
+            err.contains("$ cargo fetch"),
+            "--yes still prints the plan: {err}"
+        );
+        let asked = asked.lock().unwrap();
+        let prepare = asked
+            .iter()
+            .find(|c| c.starts_with("PrepareTests"))
+            .expect("approved");
+        assert!(prepare.contains("recipe_hash: \"ab12\""), "{prepare}");
+    }
+
+    #[test]
+    fn a_ready_told_before_the_ack_still_ends_the_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let plan = one_step_plan("Fetch dependencies", None, StepState::Missing);
+        let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = prepared.clone();
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = asked.clone();
+        daemon(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, say| {
+                seen.lock().unwrap().push(format!("{cmd:?}"));
+                match cmd {
+                    Request::GetTests { .. } if done.load(std::sync::atomic::Ordering::SeqCst) => {
+                        Some(Reply::Tests(Box::new(view(TestsPhase::Ready, None))))
+                    }
+                    Request::GetTests { .. } => Some(Reply::Tests(Box::new(view(
+                        TestsPhase::NeedsSetup,
+                        Some(plan.clone()),
+                    )))),
+                    Request::PrepareTests { .. } => {
+                        // Nothing had to run: the end is told before the request is answered.
+                        let _ = say.send(event(Event::TestEnv {
+                            pr: pr(),
+                            view: Box::new(view(TestsPhase::Ready, None)),
+                        }));
+                        done.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Some(Reply::Ack)
+                    }
+                    _ => Some(Reply::Ack),
+                }
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--setup", "--yes"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        assert_eq!(code, Some(0), "{}", stderr_of(&mut child));
+        let asked = asked.lock().unwrap();
+        let mut after = asked
+            .iter()
+            .skip_while(|c| !c.starts_with("PrepareTests"))
+            .skip(1);
+        assert!(
+            after.any(|c| c.starts_with("GetTests")),
+            "the view is read once after the Ack: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn setup_texts_from_the_pr_are_printed_filtered() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let plan = one_step_plan(
+            "Fetch\u{1b}[2J deps",
+            Some("about\u{202e} 1 min"),
+            StepState::Missing,
+        );
+        let failed = one_step_plan(
+            "Fetch\u{1b}[2J deps",
+            None,
+            StepState::Failed {
+                message: "boom\u{1b}[31m\u{202e}".into(),
+            },
+        );
+        recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::NeedsSetup, Some(plan)),
+            move |cmd, say| match cmd {
+                Request::PrepareTests { .. } => {
+                    let (say, failed) = (say.clone(), failed.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(event(Event::TestStep {
+                            pr: pr(),
+                            step: "work:0".into(),
+                            state: StepState::Failed {
+                                message: "boom\u{1b}[31m\u{202e}".into(),
+                            },
+                            tail: Some("x\u{1b}[2K".into()),
+                        }));
+                        let _ = say.send(event(Event::TestEnv {
+                            pr: pr(),
+                            view: Box::new(view(TestsPhase::NeedsSetup, Some(failed))),
+                        }));
+                    });
+                    Some(Reply::Ack)
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--setup", "--yes"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(1), "{err}");
+        for text in [&out, &err] {
+            assert!(
+                !text.contains('\u{1b}') && !text.contains('\u{202e}'),
+                "{text:?}"
+            );
+        }
+        assert!(err.contains("about\\u{202e} 1 min"), "{err}");
+        assert!(
+            err.contains("Fetch\\u{1b}[2J deps: failed: boom\\u{1b}[31m\\u{202e}"),
+            "{err}"
+        );
+        assert!(
+            err.contains("Setup did not finish: boom\\u{1b}[31m\\u{202e}"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_ctrl_c_during_a_request_stops_the_tests_and_exits_130() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (sent, is_sent) = std::sync::mpsc::channel();
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, _| match cmd {
+                // The run is accepted daemon-side but never answered.
+                Request::RunTests { .. } => {
+                    let _ = sent.send(());
+                    None
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run"]);
+        is_sent.recv_timeout(Duration::from_secs(20)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        interrupt(&child);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        assert_eq!(code, Some(130), "{}", stderr_of(&mut child));
+        assert!(
+            asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("StopTests")),
+            "{:?}",
+            asked.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_bare_tests_only_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = recording_daemon(dir.path(), &rt, view(TestsPhase::Ready, None), |_, _| {
+            Some(Reply::Ack)
+        });
+        let mut child = tests_cmd(dir.path(), &[]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        assert_eq!(code, Some(0), "{}", stderr_of(&mut child));
+        let asked = asked.lock().unwrap();
+        assert!(asked.iter().all(|c| c.starts_with("GetTests")), "{asked:?}");
     }
 }

@@ -3,6 +3,7 @@
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 
+use clusia_core::tests::TestScope;
 use clusia_core::{Paths, PrFilter, PrRef, PrSummary};
 use clusia_protocol::{
     Client, ClientError, Command as Request, LaunchError, Reply, SyncState, SyncStatus, launcher,
@@ -15,6 +16,7 @@ use crate::cli::{
 };
 use crate::{
     agent, calls, check, diagrams, harness_test, install, revalidate, review, spawn, story,
+    tests_cmd,
 };
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
@@ -35,6 +37,9 @@ pub enum CliError {
     Other(String),
     #[error("{0}")]
     Usage(String),
+    /// A command that ran and reports with its own exit code: a test run that did not pass.
+    #[error("{message}")]
+    Exit { code: u8, message: String },
 }
 
 impl From<LaunchError> for CliError {
@@ -60,6 +65,7 @@ impl CliError {
         match self {
             CliError::NotRunning => 3,
             CliError::Usage(_) => 2,
+            CliError::Exit { code, .. } => *code,
             _ => 1,
         }
     }
@@ -73,6 +79,7 @@ impl CliError {
             CliError::Launch(_) => "launch",
             CliError::Other(_) => "other",
             CliError::Usage(_) => "usage",
+            CliError::Exit { .. } => "tests",
         }
     }
 }
@@ -110,6 +117,31 @@ pub async fn run(
         } => calls::calls(paths, home, &pr, function.as_deref(), depth, json).await,
         Command::Revalidate { pr, again } => {
             revalidate::revalidate(paths, home, &pr, again, json).await
+        }
+        Command::Tests {
+            pr,
+            generate,
+            setup,
+            yes,
+            run,
+            all: _,
+            near,
+            one,
+            list,
+        } => {
+            let scope = run.then_some(match one {
+                Some(name) => TestScope::One { name },
+                None if near => TestScope::NearChange,
+                None => TestScope::All,
+            });
+            let wanted = tests_cmd::Wanted {
+                generate,
+                setup,
+                yes,
+                list,
+                run: scope,
+            };
+            tests_cmd::tests(paths, home, &pr, wanted, json).await
         }
         Command::Harness(HarnessCommand::Test {
             program,
