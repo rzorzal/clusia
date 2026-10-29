@@ -30,7 +30,7 @@ pub enum NetMode {
     Online,
 }
 
-pub const DENY_HOME: [&str; 18] = [
+pub const DENY_HOME: [&str; 25] = [
     ".ssh",
     ".aws",
     ".config/gh",
@@ -49,6 +49,13 @@ pub const DENY_HOME: [&str; 18] = [
     ".claude",
     ".claude.json",
     ".codex",
+    ".npmrc",
+    ".yarnrc.yml",
+    ".gem/credentials",
+    ".m2/settings.xml",
+    ".gradle/gradle.properties",
+    ".terraform.d/credentials.tfrc.json",
+    ".vault-token",
 ];
 
 pub const HEALTH_PROFILE: &str = "(version 1)(allow default)";
@@ -56,7 +63,7 @@ pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 pub const ENV_DEPTH: usize = 4;
 
 /// The `DENY_HOME` entries that are files; the rest are folders.
-const DENY_FILES: [&str; 8] = [
+const DENY_FILES: [&str; 15] = [
     ".netrc",
     ".docker/config.json",
     ".git-credentials",
@@ -65,14 +72,23 @@ const DENY_FILES: [&str; 8] = [
     ".cargo/credentials.toml",
     ".pypirc",
     ".claude.json",
+    ".npmrc",
+    ".yarnrc.yml",
+    ".gem/credentials",
+    ".m2/settings.xml",
+    ".gradle/gradle.properties",
+    ".terraform.d/credentials.tfrc.json",
+    ".vault-token",
 ];
 
 /// Folders a `.env` search never enters: tool output and dependencies, not the project's own.
 const ENV_SKIP: [&str; 3] = [".git", "node_modules", "target"];
 
-/// Nothing a run starts may reach LaunchServices, AppleEvents, the pasteboard or launchd, which
-/// would act outside its process tree and its sandbox. `osascript -e 'return 1'` sends no
-/// AppleEvent, so the two launchers are also refused at exec.
+/// Nothing a run starts may reach LaunchServices, AppleEvents, the pasteboard or launchd, or
+/// signal a process outside its sandbox, which would act outside its process tree. Signals
+/// within the sandbox stay allowed, so a run can still stop its own children (`(target others)`
+/// does not do that). `osascript -e 'return 1'` sends no AppleEvent, so the two launchers are
+/// also refused at exec.
 const NO_LAUNCH: &str = "(deny appleevent-send)\n\
                          (deny mach-lookup\n  \
                          (global-name \"com.apple.coreservices.launchservicesd\")\n  \
@@ -80,7 +96,9 @@ const NO_LAUNCH: &str = "(deny appleevent-send)\n\
                          (deny mach-lookup\n  (global-name \"com.apple.pasteboard.1\"))\n\
                          (deny mach-lookup\n  (global-name \"com.apple.launchd.peer\"))\n\
                          (deny process-exec\n  (literal \"/usr/bin/osascript\")\n  \
-                         (literal \"/usr/bin/open\"))\n";
+                         (literal \"/usr/bin/open\"))\n\
+                         (deny signal)\n\
+                         (allow signal (target same-sandbox))\n";
 
 /// The device nodes a shell and its tools write to. `/dev/tty` is the run's own terminal only;
 /// a pattern over `/dev/tty*` would reach the user's other terminals.
@@ -330,10 +348,13 @@ pub async fn health(exec: &dyn Exec, sandbox_exec: &Path) -> Result<(), String> 
     let cmd = CommandSpec::new(sandbox_exec)
         .args(["-p", HEALTH_PROFILE, "/usr/bin/true"])
         .clear_env();
-    let out = exec
-        .output(&cmd, HEALTH_TIMEOUT)
-        .await
-        .map_err(|_| missing())?;
+    // The binary is there, so a failed start says why rather than calling it missing.
+    let out = exec.output(&cmd, HEALTH_TIMEOUT).await.map_err(|e| {
+        format!(
+            "sandbox-exec can't start a sandbox here ({}). {ADVICE}",
+            printable(&e.to_string())
+        )
+    })?;
     if out.code == Some(0) && !out.timed_out {
         return Ok(());
     }
@@ -461,6 +482,8 @@ mod tests {
 (deny process-exec
   (literal "/usr/bin/osascript")
   (literal "/usr/bin/open"))
+(deny signal)
+(allow signal (target same-sandbox))
 (deny network*)
 "##;
 
@@ -516,6 +539,13 @@ mod tests {
   (subpath "/h/.claude")
   (literal "/h/.claude.json")
   (subpath "/h/.codex")
+  (literal "/h/.npmrc")
+  (literal "/h/.yarnrc.yml")
+  (literal "/h/.gem/credentials")
+  (literal "/h/.m2/settings.xml")
+  (literal "/h/.gradle/gradle.properties")
+  (literal "/h/.terraform.d/credentials.tfrc.json")
+  (literal "/h/.vault-token")
   (literal "/c/widgets/.env"))
 "##;
 
@@ -886,6 +916,18 @@ mod tests {
         assert!(
             missing.calls().is_empty(),
             "nothing runs when the binary is not there"
+        );
+
+        let refused = FakeExec::new();
+        refused.executable_at("/usr/bin/sandbox-exec");
+        assert_eq!(
+            health(&refused, Path::new("/usr/bin/sandbox-exec")).await,
+            Err(
+                "sandbox-exec can't start a sandbox here (/usr/bin/sandbox-exec is not there). \
+                 Install a container engine, or set tests.runner to container."
+                    .to_string()
+            ),
+            "a binary that is there but fails to start is not called missing"
         );
 
         let hangs = FakeExec::new();

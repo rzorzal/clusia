@@ -24,7 +24,7 @@ const BOTH: [NetMode; 2] = [NetMode::Offline, NetMode::Online];
 const ESCAPE_JOB: &str = "io.clusia.escape";
 
 /// A file in each deny-list place the tests cover, and the secret it holds.
-const SECRETS: [(&str, &str); 11] = [
+const SECRETS: [(&str, &str); 18] = [
     (".ssh/id_test", "ssh-secret"),
     (".aws/credentials", "aws-secret"),
     (".config/gh/hosts.yml", "gh-secret"),
@@ -39,6 +39,16 @@ const SECRETS: [(&str, &str); 11] = [
         "gcloud-secret",
     ),
     (".claude/.credentials.json", "claude-secret"),
+    (".npmrc", "//registry.npmjs.org/:_authToken=npm-secret"),
+    (".yarnrc.yml", "npmAuthToken: yarn-secret"),
+    (".gem/credentials", ":rubygems_api_key: gem-secret"),
+    (".m2/settings.xml", "<password>maven-secret</password>"),
+    (".gradle/gradle.properties", "signingPassword=gradle-secret"),
+    (
+        ".terraform.d/credentials.tfrc.json",
+        "{\"token\": \"terraform-secret\"}",
+    ),
+    (".vault-token", "vault-secret"),
 ];
 
 struct Lab {
@@ -541,6 +551,57 @@ async fn children_inherit_the_profile() {
     }
     assert!(!home.join("child.txt").exists());
     assert!(!home.join("late.txt").exists());
+}
+
+/// A `sleep` started outside any sandbox, killed when dropped.
+struct Outsider(std::process::Child);
+
+impl Outsider {
+    fn start() -> Self {
+        Self(Command::new("/bin/sleep").arg("60").spawn().unwrap())
+    }
+
+    fn alive(&mut self) -> bool {
+        self.0.try_wait().unwrap().is_none()
+    }
+}
+
+impl Drop for Outsider {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test]
+async fn signals_reach_only_the_run_itself() {
+    let Some(lab) = lab() else { return };
+    let mut control = Outsider::start();
+    let kill = |pid: u32| format!("/bin/kill -TERM {pid}");
+    assert_eq!(
+        lab.unsandboxed(&kill(control.0.id())).await.code,
+        Some(0),
+        "control"
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!control.alive(), "control: the outside sleep was killed");
+
+    let mut outsider = Outsider::start();
+    for mode in BOTH {
+        let out = lab.run(mode, &kill(outsider.0.id())).await;
+        assert_ne!(out.code, Some(0), "{mode:?} signalled an outside process");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(outsider.alive(), "{mode:?}: the outside sleep survives");
+        // The run still stops its own children.
+        let own = "/bin/sleep 60 & /bin/kill -TERM $! && wait $!; echo \"status $?\"";
+        let out = lab.run(mode, own).await;
+        assert_eq!(
+            text(&out.stdout),
+            "status 143\n",
+            "{mode:?}: {}",
+            text(&out.stderr)
+        );
+    }
 }
 
 /// The newest TextEdit process, if any.
