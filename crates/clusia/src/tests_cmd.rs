@@ -428,6 +428,29 @@ fn setup_ended(view: &TestsView) -> bool {
     !(matches!(view.phase, TestsPhase::NeedsSetup) && unapproved)
 }
 
+/// The step lines told before the `Ack`, and the setup's end when it was told then too.
+fn told_before_ack(
+    events: Vec<(String, Event)>,
+    pr: &PrRef,
+    plan: &SetupPlan,
+) -> (Vec<String>, Option<TestsView>) {
+    let mut lines = Vec::new();
+    let mut last = None;
+    for (_, event) in events {
+        match event {
+            Event::TestStep {
+                pr: of,
+                step,
+                state,
+                ..
+            } if of == *pr => lines.extend(step_line(plan, &step, &state)),
+            Event::TestEnv { pr: of, view } if of == *pr => last = Some(*view),
+            _ => {}
+        }
+    }
+    (lines, last.filter(|view| !setting_up(&view.phase)))
+}
+
 fn setup_failure(view: &TestsView) -> String {
     let failed = view
         .plan
@@ -474,23 +497,17 @@ async fn setup(
         approve: Approve::All,
     };
     stop.ask(client, request, true, "the setup").await?;
-    // An end told before the `Ack` is in the view read now; the steps told before it are said.
-    for (_, event) in client.take_events() {
-        if let Event::TestStep {
-            pr: of,
-            step,
-            state,
-            ..
-        } = event
-            && of == *pr
-            && let Some(line) = step_line(&plan, &step, &state)
-        {
-            eprintln!("{line}");
-        }
+    let (lines, told_end) = told_before_ack(client.take_events(), pr, &plan);
+    for line in lines {
+        eprintln!("{line}");
     }
-    let now = view_of(client, pr, stop).await?;
-    let ended = if setup_ended(&now) {
-        Some(now)
+    // The view read now may already be the end; when it looks like the one from before the
+    // approval, an end told before the `Ack` is the end, since no other will come.
+    let now = Some(view_of(client, pr, stop).await?)
+        .filter(setup_ended)
+        .or(told_end);
+    let ended = if now.is_some() {
+        now
     } else {
         loop {
             match stop.event(client, "the setup").await? {
@@ -1013,6 +1030,62 @@ mod tests {
             }),
             "Failed: no\\u{1b}[2J recipe"
         );
+    }
+
+    #[test]
+    fn an_end_told_before_the_ack_ends_the_setup() {
+        let acme: PrRef = "acme/widgets#7".parse().unwrap();
+        let other: PrRef = "acme/widgets#8".parse().unwrap();
+        let plan = SetupPlan {
+            recipe_hash: "ab".into(),
+            steps: vec![PlanStep {
+                id: "image".into(),
+                title: "Build the image".into(),
+                command: "docker build …".into(),
+                place: StepPlace::Container,
+                network: true,
+                hint: None,
+                state: StepState::Missing,
+                approved: true,
+            }],
+            commands: vec![],
+            commands_approved: true,
+            ready: false,
+            blocked: None,
+        };
+        let env_event = |pr: &PrRef, phase: TestsPhase| {
+            let mut view = TestsView::new("9be1d07");
+            view.phase = phase;
+            (
+                topics::TESTS.to_string(),
+                Event::TestEnv {
+                    pr: pr.clone(),
+                    view: Box::new(view),
+                },
+            )
+        };
+        let step = (
+            topics::TESTS.to_string(),
+            Event::TestStep {
+                pr: acme.clone(),
+                step: "image".into(),
+                state: StepState::Running,
+                tail: None,
+            },
+        );
+        let events = vec![
+            env_event(&acme, TestsPhase::Waiting),
+            step.clone(),
+            env_event(&acme, TestsPhase::NeedsSetup),
+            env_event(&other, TestsPhase::Waiting),
+        ];
+        let (lines, ended) = told_before_ack(events, &acme, &plan);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(ended.map(|v| v.phase), Some(TestsPhase::NeedsSetup));
+
+        let still_going = vec![env_event(&acme, TestsPhase::Waiting), step];
+        let (_, ended) = told_before_ack(still_going, &acme, &plan);
+        assert_eq!(ended, None);
     }
 
     #[test]

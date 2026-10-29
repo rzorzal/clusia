@@ -3046,6 +3046,32 @@ mod tests_against_a_scripted_daemon {
     }
 
     #[test]
+    fn an_unfinished_end_told_before_the_ack_still_ends_the_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // The daemon's plan gained a step nobody approved (the engine stopped), so the setup
+        // ends at once in NeedsSetup, told before the Ack; every later read looks the same.
+        let plan = one_step_plan("Fetch dependencies", None, StepState::Missing);
+        let needs = view(TestsPhase::NeedsSetup, Some(plan));
+        let told = needs.clone();
+        recording_daemon(dir.path(), &rt, needs, move |cmd, say| match cmd {
+            Request::PrepareTests { .. } => {
+                let _ = say.send(event(Event::TestEnv {
+                    pr: pr(),
+                    view: Box::new(told.clone()),
+                }));
+                Some(Reply::Ack)
+            }
+            _ => Some(Reply::Ack),
+        });
+        let mut child = tests_cmd(dir.path(), &["--setup", "--yes"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(err.contains("Setup did not finish"), "{err}");
+    }
+
+    #[test]
     fn setup_texts_from_the_pr_are_printed_filtered() {
         let dir = tempfile::tempdir().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
