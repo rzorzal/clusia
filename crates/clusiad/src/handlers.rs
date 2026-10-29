@@ -263,6 +263,18 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
             step,
             body,
         } => crate::story::add_step_comment(shared, client, &pr, number, &step, &body).await,
+        Command::GetTests { .. }
+        | Command::GenerateTests { .. }
+        | Command::PrepareTests { .. }
+        | Command::RunTests { .. }
+        | Command::StopTests { .. }
+        | Command::ListTests { .. }
+        | Command::AcceptRecipe { .. }
+        | Command::GetTestDisk
+        | Command::CleanUpTests { .. } => Outcome::Err(ProtocolError::new(
+            ErrorCode::Internal,
+            "tests are not available yet",
+        )),
     }
 }
 

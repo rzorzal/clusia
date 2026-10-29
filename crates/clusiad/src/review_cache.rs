@@ -316,6 +316,7 @@ mod tests {
             role: Role::Reviewer,
             viewer: Some("octo".into()),
             worktree: None,
+            check_runs: Vec::new(),
             fetched_at,
         }
     }

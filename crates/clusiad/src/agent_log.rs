@@ -28,7 +28,8 @@ pub(crate) fn turn_of(entry: &AgentLogEntry) -> u64 {
         | AgentLogEntry::Check { turn, .. }
         | AgentLogEntry::Revalidation { turn, .. }
         | AgentLogEntry::Diagrams { turn, .. }
-        | AgentLogEntry::Story { turn, .. } => *turn,
+        | AgentLogEntry::Story { turn, .. }
+        | AgentLogEntry::Tests { turn, .. } => *turn,
     }
 }
 
@@ -111,6 +112,7 @@ fn is_run_entry(entry: &AgentLogEntry) -> bool {
             | AgentLogEntry::Revalidation { .. }
             | AgentLogEntry::Diagrams { .. }
             | AgentLogEntry::Story { .. }
+            | AgentLogEntry::Tests { .. }
     )
 }
 
@@ -131,7 +133,7 @@ pub(crate) fn last_turn(path: &Path) -> u64 {
 }
 
 /// The turns that belong to a check, a revalidation, a drawing or a story, not to the chat:
-/// those with a `Check`, `Revalidation`, `Diagrams` or `Story` entry. Every entry of such a turn (its tools, its permission lines, its end) stays out of the chat.
+/// those with a `Check`, `Revalidation`, `Diagrams`, `Story` or `Tests` entry. Every entry of such a turn (its tools, its permission lines, its end) stays out of the chat.
 pub(crate) fn check_turns(entries: &[AgentLogEntry]) -> std::collections::HashSet<u64> {
     entries
         .iter()
@@ -142,7 +144,7 @@ pub(crate) fn check_turns(entries: &[AgentLogEntry]) -> std::collections::HashSe
 
 /// The turns that started but have no ending, oldest first: a chat turn ends with `Done` or
 /// `Error`, a check's, a revalidation's, a drawing's or a story's with a `Check`,
-/// `Revalidation`, `Diagrams` or `Story` entry that is `done`, `failed` or `stopped`.
+/// `Revalidation`, `Diagrams`, `Story` or `Tests` entry that is `done`, `failed` or `stopped`.
 pub(crate) fn unfinished_turns(entries: &[AgentLogEntry]) -> Vec<u64> {
     let mut started = Vec::new();
     let mut ended = std::collections::HashSet::new();
@@ -156,7 +158,8 @@ pub(crate) fn unfinished_turns(entries: &[AgentLogEntry]) -> Vec<u64> {
             AgentLogEntry::Check { state, .. }
             | AgentLogEntry::Revalidation { state, .. }
             | AgentLogEntry::Diagrams { state, .. }
-            | AgentLogEntry::Story { state, .. } => {
+            | AgentLogEntry::Story { state, .. }
+            | AgentLogEntry::Tests { state, .. } => {
                 matches!(state.as_str(), "done" | "failed" | "stopped")
             }
             _ => false,
@@ -528,5 +531,20 @@ mod tests {
         ];
         assert_eq!(last_summary(&log).as_deref(), Some("The summary."));
         assert_eq!(last_summary(&log[1..]), None);
+    }
+
+    #[test]
+    fn a_tests_turn_is_a_run_not_a_chat_turn() {
+        let entry = |turn: u64, state: &str| AgentLogEntry::Tests {
+            at: 1,
+            turn,
+            state: state.into(),
+        };
+        assert!(is_run_entry(&entry(4, "running")));
+        assert_eq!(turn_of(&entry(4, "running")), 4);
+        let entries = vec![entry(4, "running")];
+        assert_eq!(unfinished_turns(&entries), vec![4]);
+        let entries = vec![entry(4, "running"), entry(4, "failed")];
+        assert!(unfinished_turns(&entries).is_empty());
     }
 }

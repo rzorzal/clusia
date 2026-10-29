@@ -432,7 +432,8 @@ impl ChatModel {
                 | AgentLogEntry::Check { .. }
                 | AgentLogEntry::Revalidation { .. }
                 | AgentLogEntry::Diagrams { .. }
-                | AgentLogEntry::Story { .. } => {}
+                | AgentLogEntry::Story { .. }
+                | AgentLogEntry::Tests { .. } => {}
             }
         }
         let unfinished = match entries.last() {
@@ -442,7 +443,8 @@ impl ChatModel {
             | Some(AgentLogEntry::Check { .. })
             | Some(AgentLogEntry::Revalidation { .. })
             | Some(AgentLogEntry::Diagrams { .. })
-            | Some(AgentLogEntry::Story { .. }) => None,
+            | Some(AgentLogEntry::Story { .. })
+            | Some(AgentLogEntry::Tests { .. }) => None,
             Some(
                 AgentLogEntry::User { turn, .. }
                 | AgentLogEntry::Text { turn, .. }

@@ -278,6 +278,7 @@ pub(crate) async fn open(shared: &Arc<Shared>, client: &str, pr: &PrRef) -> Outc
         role,
         viewer,
         worktree: Some(worktree),
+        check_runs: Vec::new(),
         fetched_at: now,
     });
     if !cache_saved {
@@ -376,6 +377,7 @@ async fn unchanged_open(
         role: role_of(viewer.as_deref(), detail),
         viewer: viewer.clone(),
         worktree: cache.worktree.clone(),
+        check_runs: Vec::new(),
         fetched_at: now_unix(),
     };
     {

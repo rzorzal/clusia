@@ -202,6 +202,7 @@ pub fn title_for_origin(tool: &str, origin: TurnOrigin, agent: &str) -> String {
         TurnOrigin::Revalidation => "Revalidation",
         TurnOrigin::Diagrams => "Diagram drawing",
         TurnOrigin::Story => "Story writing",
+        TurnOrigin::Recipe => "Test recipe",
     };
     match tool {
         "Bash" => format!("{who} wants to run a command"),

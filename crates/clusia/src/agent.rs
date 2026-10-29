@@ -432,7 +432,8 @@ fn turn_of(entry: &AgentLogEntry) -> u64 {
         | AgentLogEntry::Check { turn, .. }
         | AgentLogEntry::Revalidation { turn, .. }
         | AgentLogEntry::Diagrams { turn, .. }
-        | AgentLogEntry::Story { turn, .. } => *turn,
+        | AgentLogEntry::Story { turn, .. }
+        | AgentLogEntry::Tests { turn, .. } => *turn,
     }
 }
 
@@ -455,6 +456,7 @@ pub(crate) fn log_lines(
                     | AgentLogEntry::Revalidation { .. }
                     | AgentLogEntry::Diagrams { .. }
                     | AgentLogEntry::Story { .. }
+                    | AgentLogEntry::Tests { .. }
             )
         })
         .map(turn_of)
@@ -504,7 +506,8 @@ pub(crate) fn log_lines(
             | AgentLogEntry::Check { .. }
             | AgentLogEntry::Revalidation { .. }
             | AgentLogEntry::Diagrams { .. }
-            | AgentLogEntry::Story { .. } => {
+            | AgentLogEntry::Story { .. }
+            | AgentLogEntry::Tests { .. } => {
                 unreachable!("handled above")
             }
         });

@@ -12,6 +12,7 @@ pub mod hidden;
 pub mod reviews;
 pub mod stories;
 pub mod tabs;
+pub mod test_runs;
 
 pub use activity::{append_activity, read_activity};
 pub use agent::{load_agent_state, save_agent_state};
@@ -30,6 +31,7 @@ pub use stories::{
     load_story_versions, next_story_number, save_read_marks, save_story_version,
 };
 pub use tabs::{load_open_tabs, save_open_tabs};
+pub use test_runs::{delete_tests, load_tests, save_tests};
 
 /// Seconds since the Unix epoch, for quarantine suffixes.
 pub fn now_unix() -> i64 {
