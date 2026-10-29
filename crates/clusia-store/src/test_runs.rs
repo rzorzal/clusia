@@ -33,7 +33,9 @@ pub fn load_tests(paths: &Paths, pr: &PrRef) -> io::Result<TestsRecord> {
     }
 }
 
-/// Removes the record, the logs and the temp folder of `pr`; what is missing is fine.
+/// Removes the record, the logs, the temp folder and the trusted files of `pr` (its sandbox
+/// profiles, compose override and image build context, which the daemon names after the temp
+/// folder); what is missing is fine.
 pub fn delete_tests(paths: &Paths, pr: &PrRef) -> io::Result<()> {
     let ignore_missing = |result: io::Result<()>| match result {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
@@ -41,7 +43,29 @@ pub fn delete_tests(paths: &Paths, pr: &PrRef) -> io::Result<()> {
     };
     ignore_missing(fs::remove_file(paths.tests_file(pr)))?;
     ignore_missing(fs::remove_dir_all(paths.test_logs_for(pr)))?;
-    ignore_missing(fs::remove_dir_all(paths.test_tmp_for(pr)))
+    let tmp = paths.test_tmp_for(pr);
+    ignore_missing(fs::remove_dir_all(&tmp))?;
+    let Some(short) = tmp.file_name() else {
+        return Ok(());
+    };
+    ignore_missing(fs::remove_dir_all(
+        paths.tests_dir().join("build").join(short),
+    ))?;
+    // `<short>-offline.sb`, `<short>-compose.yml`, … and their `.tmp` leftovers. The short
+    // name has a fixed length, so no other review's files share the prefix.
+    let prefix = format!("{}-", short.to_string_lossy());
+    let entries = match fs::read_dir(paths.tests_dir().join("profiles")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            ignore_missing(fs::remove_file(entry.path()))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -106,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_removes_the_file_the_logs_and_the_temp_folder() {
+    fn delete_removes_the_file_the_logs_the_temp_folder_and_the_trusted_files() {
         let (_d, p) = setup();
         save_tests(&p, &pr(), &record()).unwrap();
         fs::create_dir_all(p.test_logs_for(&pr())).unwrap();
@@ -115,11 +139,51 @@ mod tests {
         fs::write(p.test_tmp_for(&pr()).join("scratch"), "x").unwrap();
         let other: PrRef = "acme/widgets#8".parse().unwrap();
         save_tests(&p, &other, &record()).unwrap();
+        let tmp_name = |pr: &PrRef| {
+            p.test_tmp_for(pr)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let profiles = p.tests_dir().join("profiles");
+        let (mine, theirs) = (tmp_name(&pr()), tmp_name(&other));
+        let suffixes = [
+            "-offline.sb",
+            "-online.sb",
+            "-compose.yml",
+            "-offline.sb.tmp",
+            "-online.sb.tmp",
+        ];
+        fs::create_dir_all(&profiles).unwrap();
+        for name in [&mine, &theirs] {
+            for suffix in suffixes {
+                fs::write(profiles.join(format!("{name}{suffix}")), "x").unwrap();
+            }
+            fs::create_dir_all(p.tests_dir().join("build").join(name)).unwrap();
+            fs::write(
+                p.tests_dir().join("build").join(name).join("Dockerfile"),
+                "x",
+            )
+            .unwrap();
+        }
 
         delete_tests(&p, &pr()).unwrap();
         assert!(!p.tests_file(&pr()).exists());
         assert!(!p.test_logs_for(&pr()).exists());
         assert!(!p.test_tmp_for(&pr()).exists());
+        for suffix in suffixes {
+            assert!(
+                !profiles.join(format!("{mine}{suffix}")).exists(),
+                "{suffix}"
+            );
+            assert!(
+                profiles.join(format!("{theirs}{suffix}")).exists(),
+                "{suffix}"
+            );
+        }
+        assert!(!p.tests_dir().join("build").join(&mine).exists());
+        assert!(p.tests_dir().join("build").join(&theirs).exists());
         assert!(p.tests_file(&other).exists(), "another review is untouched");
         delete_tests(&p, &pr()).unwrap();
     }
