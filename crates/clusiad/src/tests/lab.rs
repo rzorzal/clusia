@@ -113,7 +113,7 @@ fn options(exec: &Arc<FakeExec>, home: &Path) -> DaemonOptions {
 
 /// The answers of a machine like `machine`; added after a test's own rules, which win.
 fn machine_rules(exec: &FakeExec, machine: Machine, home: &Path) {
-    // Every git call of the daemon starts with `-C <worktree>`; R12's finds nothing shipped.
+    // Every git call of the daemon starts with -C <worktree>; the shipped-.clusia check finds nothing.
     exec.on("git", &["-C"], FakeReply::ok(""));
     if let Machine::Colima { running } = machine {
         exec.executable_at(home.join("bin/docker"));
@@ -1539,6 +1539,61 @@ async fn the_services_and_stack_steps_bring_up_the_stack_on_its_internal_network
     assert_eq!(
         value_after(&last, "--network"),
         clusia_testrun::compose::internal_network(&project)
+    );
+}
+
+#[tokio::test]
+async fn include_and_extends_are_refused_in_every_form_before_compose_runs() {
+    let forms = [
+        (
+            7,
+            "\"include\":\n  - ../../../x.yml\nservices:\n  db:\n    image: postgres:16\n",
+        ),
+        (
+            8,
+            "services:\n  db: {extends: {file: /abs/x.yml, service: db}}\n",
+        ),
+        (
+            9,
+            r#"{"include": ["../../../x.yml"], "services": {"db": {"image": "postgres:16"}}}"#,
+        ),
+    ];
+    let turns = forms
+        .iter()
+        .map(|_| answer(with_services(no_setup(recipe()))))
+        .collect();
+    let lab = lab(
+        Machine::Colima { running: true },
+        turns,
+        &[7, 8, 9],
+        |x, paths| {
+            built(x);
+            for (n, text) in forms {
+                std::fs::write(paths.worktree_for(&pr(n)).join("docker-compose.yml"), text)
+                    .unwrap();
+            }
+            x.on("docker", &["compose", "-p"], FakeReply::ok(MERGED));
+            x.on("docker", &["run"], FakeReply::ok(""));
+        },
+    );
+    for (n, _) in forms {
+        generated(&lab, n).await;
+        assert!(matches!(
+            approve(&lab, n, Approve::All).await,
+            Outcome::Ok(Reply::Ack)
+        ));
+        let view = settled(&lab, n).await;
+        let plan = view.plan.unwrap();
+        assert_eq!(
+            plan.blocked.as_deref(),
+            Some("The compose file uses include or extends, which Clúsia does not follow"),
+            "review {n}: {plan:#?}"
+        );
+    }
+    assert!(
+        lab.calls_with(&["compose", "-p"]).is_empty(),
+        "{:#?}",
+        lab.ran()
     );
 }
 

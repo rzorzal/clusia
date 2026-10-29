@@ -979,19 +979,31 @@ fn compose_text(worktree: &Path, file: &str) -> Result<String, String> {
     if text.len() as u64 > COMPOSE_MAX {
         return Err(unreadable("it is larger than 256 KiB"));
     }
-    let key = |line: &str, name: &str| {
-        line.strip_prefix(name)
-            .is_some_and(|rest| rest.trim_start().starts_with(':'))
-    };
-    let follows = text.lines().any(|line| {
-        key(line, "include") || (line.starts_with([' ', '\t']) && key(line.trim_start(), "extends"))
-    });
+    let follows = text
+        .lines()
+        .any(|line| names_key(line, "include") || names_key(line, "extends"));
     if follows {
         return Err(
             "The compose file uses include or extends, which Clúsia does not follow".into(),
         );
     }
     Ok(text)
+}
+
+/// Whether `line` holds `name` as a mapping key anywhere: after the start, a space, `{` or `,`,
+/// quoted or not, then `:`. That covers block keys, flow mappings and a file written as JSON on
+/// one line; a value that merely reads like a key is refused too, which only blocks the plan.
+fn names_key(line: &str, name: &str) -> bool {
+    line.match_indices(name).any(|(at, _)| {
+        let before = line[..at].strip_suffix(['"', '\'']).unwrap_or(&line[..at]);
+        let after = &line[at + name.len()..];
+        let after = after.strip_prefix(['"', '\'']).unwrap_or(after);
+        before
+            .chars()
+            .next_back()
+            .is_none_or(|c| c.is_whitespace() || c == '{' || c == ',')
+            && after.trim_start().starts_with(':')
+    })
 }
 
 /// The recipe's compose stack: the file read as text, then `docker compose config`, its
