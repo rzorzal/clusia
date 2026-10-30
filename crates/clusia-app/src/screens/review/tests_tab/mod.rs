@@ -693,6 +693,7 @@ impl Plugin for TestsPlugin {
                     list::place_on_scroll.run_if(any_with_component::<list::ListState>),
                     detail::fill_detail.run_if(tests_views_changed),
                     detail::update_live_log.run_if(tests_views_changed),
+                    detail::follow_log.run_if(any_with_component::<detail::LogEnd>),
                     github_checks::fill_checks.run_if(tests_views_changed),
                 )
                     .chain()

@@ -839,6 +839,7 @@ mod tests {
         NearTest, NearWhy, RunOutcome, TestRun, TestScope, TestStatus, TestsPhase, TestsView,
         Totals,
     };
+    use std::collections::HashMap;
 
     fn tests_app() -> (App, PrRef) {
         let mut app = testing::app(fixture::demo(NOW));
@@ -1317,6 +1318,60 @@ mod tests {
             app.world()
                 .get_resource::<crate::platform_open::OpenUrls>()
                 .is_none_or(|u| u.0.is_empty())
+        );
+    }
+
+    #[test]
+    fn a_full_window_keeps_its_rows_when_results_arrive() {
+        let (mut app, pr) = tests_app();
+        running(&mut app, &pr, 70);
+        let first = drawn(&mut app, &pr);
+        assert!(first.len() < 70, "the window is full: {} rows", first.len());
+        let by_name = |app: &mut App| -> HashMap<String, Entity> {
+            testing::entities::<TestRow>(app)
+                .into_iter()
+                .map(|e| (app.world().get::<TestRow>(e).unwrap().name.clone(), e))
+                .collect()
+        };
+        let before = by_name(&mut app);
+
+        send(
+            &mut app,
+            TestsTell::Result {
+                pr: pr.clone(),
+                run: "r9".into(),
+                result: case("live::broken", TestStatus::Failed, 4),
+            },
+        );
+        let names = drawn(&mut app, &pr);
+        let after = by_name(&mut app);
+        assert_eq!(names[0], "live::broken");
+        assert_eq!(names.len(), first.len(), "the window keeps its size");
+        for (name, entity) in &after {
+            if name != "live::broken" {
+                assert_eq!(before[name], *entity, "{name} was respawned");
+            }
+        }
+        let gone: Vec<&String> = before.keys().filter(|n| !after.contains_key(*n)).collect();
+        assert_eq!(gone, [first.last().unwrap()], "only the last row left");
+        assert_eq!(
+            testing::count::<TestRow>(&mut app),
+            names.len(),
+            "none left behind"
+        );
+
+        send(
+            &mut app,
+            TestsTell::Result {
+                pr: pr.clone(),
+                run: "r9".into(),
+                result: case("live::late", TestStatus::Passed, 4),
+            },
+        );
+        assert_eq!(
+            by_name(&mut app),
+            after,
+            "a result past the window changes no row"
         );
     }
 

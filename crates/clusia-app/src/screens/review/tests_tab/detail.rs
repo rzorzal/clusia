@@ -369,7 +369,7 @@ fn links(col: &mut Spawner, fill: impl FnOnce(&mut Spawner)) {
 /// The mono block of output: one text, in a box that scrolls when it is taller than its cap.
 /// A live block's text carries `LiveLog` and is replaced in place afterwards.
 fn block(col: &mut Spawner, fonts: &UiFonts, pr: &PrRef, content: String, live: bool) {
-    col.spawn((
+    let mut block = col.spawn((
         Node {
             width: percent(100),
             max_height: px(260),
@@ -382,13 +382,16 @@ fn block(col: &mut Spawner, fonts: &UiFonts, pr: &PrRef, content: String, live: 
         Fill(Swatch::Chrome),
         ScrollArea,
         ScrollPosition::default(),
-    ))
-    .with_children(|b| {
+    ));
+    block.with_children(|b| {
         let mut log = b.spawn(wrapped_text(fonts, content, Type::MONO.ink(Swatch::Fg)));
         if live {
             log.insert(LiveLog(pr.clone()));
         }
     });
+    if live {
+        block.insert(LogEnd::default());
+    }
 }
 
 /// Writes the live log's text in place, only when it differs, so an unchanged tail never marks
@@ -398,6 +401,31 @@ pub(super) fn update_live_log(models: Res<TestsModels>, mut logs: Query<(&LiveLo
         let want = models.0.get(&log.0).map(live_text).unwrap_or_default();
         if text.0 != want {
             text.0 = want;
+        }
+    }
+}
+
+/// How far the live log's block could scroll when it was last laid out. A block scrolled to
+/// that end follows the end as lines arrive; one the reviewer scrolled up keeps its place.
+#[derive(Component, Default)]
+pub(super) struct LogEnd(f32);
+
+/// Where the scroll goes when the block's end moves from `was` to `max`.
+fn followed(pos: f32, was: f32, max: f32) -> f32 {
+    if pos >= was - 1.0 { max } else { pos }
+}
+
+/// Layout updates a node's content size without marking it changed, so every live block is read
+/// each frame (there is one while a run goes or a step sets up).
+pub(super) fn follow_log(mut blocks: Query<(&mut LogEnd, &mut ScrollPosition, &ComputedNode)>) {
+    for (mut end, mut pos, node) in &mut blocks {
+        let max = ((node.content_size().y - node.size().y) * node.inverse_scale_factor).max(0.0);
+        let y = followed(pos.0.y, end.0, max);
+        if y != pos.0.y {
+            pos.0.y = y;
+        }
+        if end.0 != max {
+            end.0 = max;
         }
     }
 }
@@ -1227,5 +1255,65 @@ mod tests {
         }
         let after: Vec<Entity> = app.world().get::<Children>(region).unwrap().to_vec();
         assert_eq!(kids, after);
+    }
+
+    #[test]
+    fn the_live_log_follows_its_end_unless_scrolled_up() {
+        assert_eq!(
+            followed(0.0, 0.0, 120.0),
+            120.0,
+            "a block that fits follows"
+        );
+        assert_eq!(followed(100.0, 100.0, 160.0), 160.0, "at the end follows");
+        assert_eq!(
+            followed(99.5, 100.0, 160.0),
+            160.0,
+            "a pixel off still follows"
+        );
+        assert_eq!(followed(40.0, 100.0, 160.0), 40.0, "scrolled up stays");
+
+        let mut app = testing::layout_app(fixture::demo(NOW), UVec2::new(400, 300));
+        let fonts = app.world().resource::<crate::fonts::UiFonts>().clone();
+        let lines = |n: usize| (0..n).map(|i| format!("line {i}\n")).collect::<String>();
+        let log = app
+            .world_mut()
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: px(200),
+                    height: px(60),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+                ScrollPosition::default(),
+                LogEnd::default(),
+            ))
+            .id();
+        let body = app
+            .world_mut()
+            .spawn(crate::ui::kit::text(
+                &fonts,
+                lines(10),
+                crate::ui::kit::Type::MONO,
+            ))
+            .id();
+        app.world_mut().entity_mut(log).add_child(body);
+        let max = |app: &App| {
+            let n = app.world().get::<ComputedNode>(log).unwrap();
+            ((n.content_size().y - n.size().y) * n.inverse_scale_factor).max(0.0)
+        };
+        let y = |app: &App| app.world().get::<ScrollPosition>(log).unwrap().0.y;
+        testing::settle(&mut app);
+        assert!(max(&app) > 0.0, "the box overflows");
+        assert_eq!(y(&app), max(&app), "starts at the end");
+
+        app.world_mut().get_mut::<Text>(body).unwrap().0 = lines(20);
+        testing::settle(&mut app);
+        assert_eq!(y(&app), max(&app), "follows the new end");
+
+        app.world_mut().get_mut::<ScrollPosition>(log).unwrap().0.y = 0.0;
+        app.world_mut().get_mut::<Text>(body).unwrap().0 = lines(30);
+        testing::settle(&mut app);
+        assert_eq!(y(&app), 0.0, "the reviewer's place is kept");
     }
 }
