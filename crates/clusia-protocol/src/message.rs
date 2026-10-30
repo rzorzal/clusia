@@ -6,7 +6,8 @@ use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::revalidation::Revalidation;
 use clusia_core::story::{StoryVersion, StoryVersionState};
 use clusia_core::tests::{
-    Approve, DiskReport, KnownTest, StepState, TestCaseResult, TestRun, TestScope, TestsView,
+    Approve, DiskReport, KnownTest, StepState, TestCaseResult, TestEngineInfo, TestRun, TestScope,
+    TestsView,
 };
 use clusia_core::{
     ActivitySummary, CheckKind, CheckResult, ChecksSummary, Config, DraftItem, DraftKind,
@@ -338,6 +339,12 @@ pub enum Command {
     CleanUpTests {
         repo: Option<String>,
     },
+    /// The engine, the sandbox and the cores the tests would run with now (`Reply::TestEngine`).
+    /// With `pr` naming an open review, that review's stored environment is read again and its
+    /// view told on topic `tests`. Spends no agent turn.
+    CheckTestEngine {
+        pr: Option<PrRef>,
+    },
     /// The comments hidden in this pull request (`Reply::HiddenComments`).
     GetHiddenComments {
         pr: PrRef,
@@ -620,6 +627,7 @@ pub enum Reply {
     },
     TestList(Vec<KnownTest>),
     TestDisk(DiskReport),
+    TestEngine(TestEngineInfo),
     /// What `GetCalls` knows: the graph (none while the index is not ready), the state of the
     /// index, and the files of languages Clúsia does not read.
     Calls {
@@ -4559,6 +4567,34 @@ mod tests {
             }),
             r#"{"type":"request","id":5,"cmd":{"clean_up_tests":{"repo":"acme/widgets"}}}"#
         );
+    }
+
+    #[test]
+    fn the_engine_check_wire_format() {
+        use clusia_core::tests::TestEngineInfo;
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        assert_eq!(
+            request(Command::CheckTestEngine { pr: None }),
+            r#"{"type":"request","id":5,"cmd":{"check_test_engine":{"pr":null}}}"#
+        );
+        assert_eq!(
+            request(Command::CheckTestEngine { pr: Some(acme()) }),
+            r#"{"type":"request","id":5,"cmd":{"check_test_engine":{"pr":"acme/widgets#7"}}}"#
+        );
+        let info = TestEngineInfo {
+            engine: None,
+            sandbox_ok: true,
+            note: None,
+            cores: 10,
+        };
+        assert_eq!(
+            wire(&ServerMessage::Response {
+                id: 5,
+                result: Outcome::Ok(Reply::TestEngine(info)),
+            }),
+            r#"{"type":"response","id":5,"result":{"ok":{"test_engine":{"engine":null,"sandbox_ok":true,"note":null,"cores":10}}}}"#
+        );
+        round_trip(Command::CheckTestEngine { pr: None });
     }
 
     #[test]

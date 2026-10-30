@@ -276,6 +276,7 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::AcceptRecipe { pr } => crate::tests::accept_recipe(shared, &pr).await,
         Command::GetTestDisk => crate::tests::disk(shared).await,
         Command::CleanUpTests { repo } => crate::tests::clean_up(shared, repo).await,
+        Command::CheckTestEngine { pr } => crate::tests::check_engine(shared, pr).await,
     }
 }
 

@@ -23,6 +23,7 @@ pub mod revalidation;
 pub mod rows;
 pub mod shell;
 pub mod story;
+pub mod tests_tab;
 pub mod whats_new;
 
 pub use shell::ModalFor;
@@ -57,6 +58,7 @@ impl Plugin for ReviewPlugin {
                 revalidation::RevalidationPlugin,
                 calls::CallsPlugin,
                 story::StoryPlugin,
+                tests_tab::TestsPlugin,
                 crate::ui::composer::ComposerPlugin,
                 crate::ui::modal::ModalPlugin,
             ));

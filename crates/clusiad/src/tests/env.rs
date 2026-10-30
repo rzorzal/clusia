@@ -431,6 +431,12 @@ pub(super) async fn view(shared: &Shared, pr: &PrRef) -> TestsView {
         _ => false,
     };
     let near = near_list(shared, pr, &snap.record).await;
+    let listed = snap
+        .record
+        .listing
+        .as_ref()
+        .filter(|listing| listing.head == snap.head)
+        .map(|listing| listing.tests.len() as u32);
     TestsView {
         head: snap.head,
         phase,
@@ -442,6 +448,7 @@ pub(super) async fn view(shared: &Shared, pr: &PrRef) -> TestsView {
         near,
         github_checks,
         refresh_available,
+        listed,
     }
 }
 

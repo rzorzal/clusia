@@ -2698,6 +2698,7 @@ mod tests_against_a_scripted_daemon {
             near: Vec::new(),
             github_checks: Vec::new(),
             refresh_available: false,
+            listed: None,
         }
     }
 

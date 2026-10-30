@@ -16,9 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
-use clusia_core::tests::{Approve, TestScope, TestsPhase, TestsView};
+use clusia_core::tests::{Approve, TestEngineInfo, TestScope, TestsPhase, TestsView};
 use clusia_protocol::{ErrorCode, Event, Outcome, ProtocolError, Reply, topics};
 use clusia_testrun::exec::StopFlag;
+use clusia_testrun::{engine, sandbox};
 use tokio::sync::{Notify, watch};
 
 use crate::reviews;
@@ -31,8 +32,8 @@ const STOP_WAIT: Duration = Duration::from_secs(45);
 /// How long a shutdown waits for every activity to end.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(45);
 
-pub(super) const PROBING: &str = "Probing the environment";
-pub(super) const WRITING: &str = "Writing the recipe";
+pub(super) const PROBING: &str = clusia_core::tests::ACTIVITY_PROBING;
+pub(super) const WRITING: &str = clusia_core::tests::ACTIVITY_WRITING;
 pub(super) const GENERATE_FIRST: &str = "Generate the tests first";
 pub(super) const NO_RECIPE: &str = "There is no recipe yet; generate the tests first";
 pub(super) const SET_UP_FIRST: &str = "Set up the tests first: the setup plan has steps or test commands that are not done or not approved";
@@ -325,6 +326,33 @@ pub(super) async fn tell(shared: &Shared, pr: &PrRef) {
             view: Box::new(view),
         },
     );
+}
+
+/// `CheckTestEngine`: detects the engine and asks the sandbox's health, as the probe does.
+/// For an open review with a stored environment the engine is also read into that
+/// environment, so its view moves on without an agent turn.
+pub(crate) async fn check_engine(shared: &Arc<Shared>, pr: Option<PrRef>) -> Outcome {
+    if shared.tests.closing.load(Ordering::SeqCst) {
+        return reviews::invalid_state(STOPPING);
+    }
+    let exec = shared.test_exec.as_ref();
+    let engine = engine::detect(exec, &env::host(shared)).await;
+    let health = sandbox::health(exec, &shared.sandbox_exec_program).await;
+    if let Some(pr) = pr
+        && active(shared, &pr).is_ok()
+        && env::load(shared, &pr).env.is_some()
+        && let Ok(ctx) = env::Ctx::new(shared, &pr)
+    {
+        env::reprobe(shared, &ctx, &pr).await;
+        tell(shared, &pr).await;
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    Outcome::Ok(Reply::TestEngine(TestEngineInfo {
+        sandbox_ok: health.is_ok(),
+        note: env::note_for(engine.as_ref(), &health),
+        engine,
+        cores: cores.max(1),
+    }))
 }
 
 /// The review of `pr` when it is open with a worktree.

@@ -25,6 +25,7 @@ use clusia_core::story::{
     Chip, RemovedStep, Step, StepHistory, StorySpec, StoryUseCase, StoryVersion, StoryVersionState,
     Tone,
 };
+use clusia_core::tests::{DiskItem, DiskKind, DiskReport, Engine, EngineKind, TestEngineInfo};
 use clusia_core::time::civil_from_days;
 use clusia_core::{
     ActivitySummary, Anchor, ChecksSummary, Config, DayCount, Draft, DraftItem, DraftKind,
@@ -612,6 +613,62 @@ pub fn demo_permission_rules() -> Vec<String> {
 /// Every suggestion the demo agent can make (`--demo` accepts them by id).
 pub fn demo_suggestions() -> Vec<Suggestion> {
     vec![demo_suggestion()]
+}
+
+/// The machine the demo's Config › Tests and Tests tab describe: Colima, running, 10 cores.
+pub fn demo_test_engine() -> TestEngineInfo {
+    TestEngineInfo {
+        engine: Some(Engine {
+            kind: EngineKind::Colima,
+            cli: "/opt/homebrew/bin/docker".into(),
+            endpoint: "unix:///Users/octo/.colima/default/docker.sock".into(),
+            context: Some("colima".into()),
+            running: true,
+            start: Some("colima start".into()),
+            compose: Some("2.29.1".into()),
+        }),
+        sandbox_ok: true,
+        note: None,
+        cores: 10,
+    }
+}
+
+/// What the demo's test environments keep: 3 images 4.1 GB, caches 2.3 GB, outputs 0.8 GB.
+pub fn demo_test_disk() -> DiskReport {
+    let item = |kind, name: &str, bytes| DiskItem {
+        kind,
+        name: name.into(),
+        repo: Some("rzorzal/clusia".into()),
+        bytes,
+    };
+    DiskReport {
+        items: vec![
+            item(
+                DiskKind::Image,
+                "clusia/rzorzal-clusia:4f2a91c",
+                1_500_000_000,
+            ),
+            item(
+                DiskKind::Image,
+                "clusia/rzorzal-clusia:b17e03d",
+                1_400_000_000,
+            ),
+            item(
+                DiskKind::Image,
+                "clusia/rzorzal-blog:9c40a12",
+                1_200_000_000,
+            ),
+            item(
+                DiskKind::Volume,
+                "clusia-cache-rzorzal-clusia-cargo",
+                1_600_000_000,
+            ),
+            item(DiskKind::Cache, "rzorzal~clusia", 700_000_000),
+            item(DiskKind::WorktreeDir, "node_modules", 800_000_000),
+        ],
+        total_bytes: 7_200_000_000,
+        note: None,
+    }
 }
 
 /// A good harness test: Claude Code answered in 1.8 s.

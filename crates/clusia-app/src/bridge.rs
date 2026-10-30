@@ -22,6 +22,9 @@ use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::draft::Origin;
 use clusia_core::revalidation::{self, Revalidation};
 use clusia_core::story::StoryVersion;
+use clusia_core::tests::{
+    Approve, DiskReport, StepState, TestCaseResult, TestEngineInfo, TestRun, TestScope, TestsView,
+};
 use clusia_core::{
     Anchor, DraftKind, Paths, PrConversation, PrFilter, PrRef, Profile, Review, Side, ThreadRef,
     Verdict,
@@ -46,6 +49,7 @@ use crate::screens::review::checks::{self, Checks, proposed_comment};
 use crate::screens::review::diagrams::{Diagrams, modal};
 use crate::screens::review::revalidation::Revalidations;
 use crate::screens::review::story::model::Stories;
+use crate::screens::review::tests_tab::{TestMachine, TestsModels};
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::tab_memory::TabsRestored;
 use crate::ui::media::MediaCache;
@@ -54,6 +58,10 @@ use crate::ui::people::People;
 /// Events arriving within this window share one refresh.
 pub const COALESCE: Duration = Duration::from_millis(100);
 pub const TOAST_SECS: f64 = 4.0;
+/// What a write ask says when the daemon is not there to take it.
+pub const NOT_SENT: &str = "Not connected to clusiad — not sent";
+/// What a tests write ask says in demo mode, where nothing reaches a daemon.
+const DEMO_NOT_SENT: &str = "Demo mode: nothing is sent to the daemon";
 
 /// The `Model.rejected` key under which a refusal Giphy gave for the stored key is kept.
 pub const GIPHY_KEY_REFUSAL: &str = "giphy.key";
@@ -311,6 +319,128 @@ pub enum Ask {
         body: String,
         ticket: u64,
     },
+    /// The tests of a review as the daemon sees them now: `TestsTell::Loaded`.
+    GetTests(PrRef),
+    /// Probes the environment and has the agent write the recipe; the view follows on topic `tests`.
+    GenerateTests(PrRef),
+    /// Sets up what `approve` names, for the plan that hashes to `recipe_hash`.
+    PrepareTests {
+        pr: PrRef,
+        recipe_hash: String,
+        approve: Approve,
+    },
+    /// Starts a run: `TestsTell::RunStarted`.
+    RunTests {
+        pr: PrRef,
+        scope: TestScope,
+    },
+    /// Stops what the review's tests are doing.
+    StopTests(PrRef),
+    /// Lists the repository's tests: `TestsTell::Listed`.
+    ListTests(PrRef),
+    /// Writes the recipe the agent proposed over the reviewer's file: `TestsTell::Loaded`.
+    AcceptRecipe(PrRef),
+    /// What the test runs keep on this machine: `Tell::TestDisk`.
+    GetTestDisk,
+    /// Removes what the test runs keep of `repo`, or of every repository: `Tell::TestDisk`.
+    CleanUpTests {
+        repo: Option<String>,
+    },
+    /// The engine, the sandbox and the cores now: `Tell::TestEngine`.
+    CheckTestEngine {
+        pr: Option<PrRef>,
+    },
+}
+
+/// Which tests ask a refusal or a click belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestsAskKind {
+    Generate,
+    Prepare,
+    Run,
+    Stop,
+    List,
+    Accept,
+}
+
+/// What the tests of a review did, from the daemon's events and the answers to the tests asks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TestsTell {
+    Loaded {
+        pr: PrRef,
+        view: Box<TestsView>,
+    },
+    Step {
+        pr: PrRef,
+        step: String,
+        state: StepState,
+        tail: Option<String>,
+    },
+    Output {
+        pr: PrRef,
+        run: String,
+        tail: String,
+    },
+    Result {
+        pr: PrRef,
+        run: String,
+        result: TestCaseResult,
+    },
+    RunDone {
+        pr: PrRef,
+        run: Box<TestRun>,
+    },
+    RunStarted {
+        pr: PrRef,
+        run: String,
+    },
+    Listed {
+        pr: PrRef,
+        count: u32,
+    },
+    /// A write that did not go through: the button is free again.
+    Refused {
+        pr: PrRef,
+        ask: TestsAskKind,
+        message: String,
+    },
+}
+
+impl TestsTell {
+    pub fn pr(&self) -> &PrRef {
+        match self {
+            TestsTell::Loaded { pr, .. }
+            | TestsTell::Step { pr, .. }
+            | TestsTell::Output { pr, .. }
+            | TestsTell::Result { pr, .. }
+            | TestsTell::RunDone { pr, .. }
+            | TestsTell::RunStarted { pr, .. }
+            | TestsTell::Listed { pr, .. }
+            | TestsTell::Refused { pr, .. } => pr,
+        }
+    }
+
+    /// The tell for a tests event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<TestsTell> {
+        Some(match event.clone() {
+            Event::TestEnv { pr, view } => TestsTell::Loaded { pr, view },
+            Event::TestStep {
+                pr,
+                step,
+                state,
+                tail,
+            } => TestsTell::Step {
+                pr,
+                step,
+                state,
+                tail,
+            },
+            Event::TestOutput { pr, run, tail } => TestsTell::Output { pr, run, tail },
+            Event::TestResult { pr, run, result } => TestsTell::Result { pr, run, result },
+            Event::TestRunDone { pr, run } => TestsTell::RunDone { pr, run },
+            _ => return None,
+        })
+    }
 }
 
 /// What the agent did, for the review's chat. Built from the daemon's agent events, or by the
@@ -965,6 +1095,12 @@ pub enum Tell {
     Story(StoryTell),
     /// What the review's call graph did.
     Calls(CallsTell),
+    /// What the review's tests did.
+    Tests(TestsTell),
+    /// What the test runs keep on this machine, or why that is not known.
+    TestDisk(Result<DiskReport, String>),
+    /// The engine and the sandbox the tests would use, or why that is not known.
+    TestEngine(Result<TestEngineInfo, String>),
     /// What the revalidation of the review's draft did.
     Revalidation(RevalidationTell),
     /// The review's chat log, in answer to `Ask::AgentLog`.
@@ -1285,6 +1421,25 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
             text: "Not connected to clusiad — not sent".into(),
             warning: true,
         }),
+        // Reads are silent; the model asks again when the window is back.
+        Ask::GetTests(_) => {}
+        Ask::GenerateTests(pr) => tests_not_sent(teller, pr, TestsAskKind::Generate),
+        Ask::PrepareTests { pr, .. } => tests_not_sent(teller, pr, TestsAskKind::Prepare),
+        Ask::RunTests { pr, .. } => tests_not_sent(teller, pr, TestsAskKind::Run),
+        Ask::StopTests(pr) => tests_not_sent(teller, pr, TestsAskKind::Stop),
+        Ask::ListTests(pr) => tests_not_sent(teller, pr, TestsAskKind::List),
+        Ask::AcceptRecipe(pr) => tests_not_sent(teller, pr, TestsAskKind::Accept),
+        Ask::GetTestDisk => teller.send(Tell::TestDisk(Err("Not connected to clusiad".into()))),
+        Ask::CleanUpTests { .. } => {
+            teller.send(Tell::Notice {
+                text: NOT_SENT.into(),
+                warning: true,
+            });
+            teller.send(Tell::TestDisk(Err(NOT_SENT.into())));
+        }
+        Ask::CheckTestEngine { .. } => {
+            teller.send(Tell::TestEngine(Err("Not connected to clusiad".into())));
+        }
         _ => return false,
     }
     true
@@ -1320,6 +1475,7 @@ async fn session(
         topics::REVIEWS,
         topics::WINDOW,
         topics::AGENT,
+        topics::TESTS,
     ];
     client
         .request(Command::Subscribe {
@@ -1463,6 +1619,8 @@ async fn follow(
                 teller.send(Tell::Calls(tell));
             } else if let Some(tell) = RevalidationTell::from_event(other) {
                 teller.send(Tell::Revalidation(tell));
+            } else if let Some(tell) = TestsTell::from_event(other) {
+                teller.send(Tell::Tests(tell));
             }
         }
     }
@@ -1678,13 +1836,18 @@ async fn answer(
             notify(client, teller, Command::OpenInEditor { path, line }, "").await?;
         }
         Ask::Reconnect => {}
-        Ask::OpenReview(ref pr) => {
-            open_set(open).insert(pr.clone());
+        ask if on_worker(&ask) => {
+            if let Ask::OpenReview(pr) = &ask {
+                open_set(open).insert(pr.clone());
+            }
             spawn_worker(paths, teller, open, ask);
         }
-        Ask::Publish { .. } | Ask::FetchMedia(_) | Ask::FetchProfile(_) => {
-            spawn_worker(paths, teller, open, ask);
-        }
+        Ask::GetTests(_)
+        | Ask::GenerateTests(_)
+        | Ask::PrepareTests { .. }
+        | Ask::RunTests { .. }
+        | Ask::StopTests(_)
+        | Ask::AcceptRecipe(_) => tests_ask(client, teller, ask).await?,
         Ask::LoadConversation(pr) => match client
             .request(Command::GetConversation { pr: pr.clone() })
             .await
@@ -1809,7 +1972,6 @@ async fn answer(
             suggestion_write(client, teller, cmd, pr, id, false).await?;
         }
         Ask::AgentLog { pr } => fetch_log(client, snap, open, teller, pr).await?,
-        Ask::Probe => spawn_worker(paths, teller, open, Ask::Probe),
         Ask::PermissionAnswer { id, answer } => {
             match client
                 .request(Command::PermissionAnswer {
@@ -2075,6 +2237,8 @@ async fn answer(
             };
             finding_write(client, teller, cmd, pr, id, false).await?;
         }
+        // The asks `on_worker` names went to their own connection in the first arm.
+        _ => {}
     }
     Ok(())
 }
@@ -2509,8 +2673,164 @@ async fn work(socket: PathBuf, teller: Teller, open: OpenSet, ask: Ask) {
             teller.send(tell);
         }
         Ask::Probe => teller.send(probe(&socket).await),
+        ask @ (Ask::ListTests(_)
+        | Ask::GetTestDisk
+        | Ask::CleanUpTests { .. }
+        | Ask::CheckTestEngine { .. }) => tests_on_worker(&socket, &teller, ask).await,
         _ => {}
     }
+}
+
+/// The asks that run on a connection of their own, so the main one keeps reading events and a
+/// `StopTests` is never queued behind a slow ask.
+fn on_worker(ask: &Ask) -> bool {
+    matches!(
+        ask,
+        Ask::OpenReview(_)
+            | Ask::Publish { .. }
+            | Ask::FetchMedia(_)
+            | Ask::FetchProfile(_)
+            | Ask::Probe
+            | Ask::ListTests(_)
+            | Ask::GetTestDisk
+            | Ask::CleanUpTests { .. }
+            | Ask::CheckTestEngine { .. }
+    )
+}
+
+/// One tests ask on `client`: the answer becomes the tell the model waits for, a refusal of a
+/// write becomes a warning and a `Refused` that frees the button. A lost connection is `Err`.
+async fn tests_ask(client: &mut Client, teller: &Teller, ask: Ask) -> Result<(), String> {
+    let (cmd, pr, kind) = match &ask {
+        Ask::GetTests(pr) => (Command::GetTests { pr: pr.clone() }, Some(pr.clone()), None),
+        Ask::GenerateTests(pr) => (
+            Command::GenerateTests { pr: pr.clone() },
+            Some(pr.clone()),
+            Some(TestsAskKind::Generate),
+        ),
+        Ask::PrepareTests {
+            pr,
+            recipe_hash,
+            approve,
+        } => (
+            Command::PrepareTests {
+                pr: pr.clone(),
+                recipe_hash: recipe_hash.clone(),
+                approve: approve.clone(),
+            },
+            Some(pr.clone()),
+            Some(TestsAskKind::Prepare),
+        ),
+        Ask::RunTests { pr, scope } => (
+            Command::RunTests {
+                pr: pr.clone(),
+                scope: scope.clone(),
+            },
+            Some(pr.clone()),
+            Some(TestsAskKind::Run),
+        ),
+        Ask::StopTests(pr) => (
+            Command::StopTests { pr: pr.clone() },
+            Some(pr.clone()),
+            Some(TestsAskKind::Stop),
+        ),
+        Ask::ListTests(pr) => (
+            Command::ListTests { pr: pr.clone() },
+            Some(pr.clone()),
+            Some(TestsAskKind::List),
+        ),
+        Ask::AcceptRecipe(pr) => (
+            Command::AcceptRecipe { pr: pr.clone() },
+            Some(pr.clone()),
+            Some(TestsAskKind::Accept),
+        ),
+        Ask::GetTestDisk => (Command::GetTestDisk, None, None),
+        Ask::CleanUpTests { repo } => (Command::CleanUpTests { repo: repo.clone() }, None, None),
+        Ask::CheckTestEngine { pr } => (Command::CheckTestEngine { pr: pr.clone() }, None, None),
+        _ => return Ok(()),
+    };
+    match client.request(cmd).await {
+        Ok(Reply::Tests(view)) => {
+            if let Some(pr) = pr {
+                teller.send(Tell::Tests(TestsTell::Loaded { pr, view }));
+            }
+        }
+        Ok(Reply::TestRunStarted { run }) => {
+            if let Some(pr) = pr {
+                teller.send(Tell::Tests(TestsTell::RunStarted { pr, run }));
+            }
+        }
+        Ok(Reply::TestList(tests)) => {
+            if let Some(pr) = pr {
+                teller.send(Tell::Tests(TestsTell::Listed {
+                    pr,
+                    count: tests.len() as u32,
+                }));
+            }
+        }
+        Ok(Reply::TestDisk(report)) => teller.send(Tell::TestDisk(Ok(report))),
+        Ok(Reply::TestEngine(info)) => teller.send(Tell::TestEngine(Ok(info))),
+        Ok(_) => {}
+        Err(ClientError::Server(e)) => tests_refused(teller, &ask, pr, kind, e.message),
+        Err(e) => return Err(lost(e)),
+    }
+    Ok(())
+}
+
+fn tests_refused(
+    teller: &Teller,
+    ask: &Ask,
+    pr: Option<PrRef>,
+    kind: Option<TestsAskKind>,
+    message: String,
+) {
+    let warn = |message: &str| {
+        teller.send(Tell::Notice {
+            text: message.to_string(),
+            warning: true,
+        });
+    };
+    match (pr, kind, ask) {
+        (Some(pr), Some(kind), _) => {
+            warn(&message);
+            teller.send(Tell::Tests(TestsTell::Refused {
+                pr,
+                ask: kind,
+                message,
+            }));
+        }
+        (_, _, Ask::CleanUpTests { .. }) => {
+            warn(&message);
+            teller.send(Tell::TestDisk(Err(message)));
+        }
+        (_, _, Ask::GetTestDisk) => teller.send(Tell::TestDisk(Err(message))),
+        (_, _, Ask::CheckTestEngine { .. }) => teller.send(Tell::TestEngine(Err(message))),
+        // A refused read says nothing: the tab asks again when it has a reason to.
+        _ => {}
+    }
+}
+
+/// A worker's connection failing is the same as being offline for that ask.
+async fn tests_on_worker(socket: &Path, teller: &Teller, ask: Ask) {
+    let reached = match worker(socket).await {
+        Ok(mut client) => tests_ask(&mut client, teller, ask.clone()).await.is_ok(),
+        Err(_) => false,
+    };
+    if !reached {
+        offline(&ask, teller);
+    }
+}
+
+fn tests_not_sent(teller: &Teller, pr: &PrRef, kind: TestsAskKind) {
+    teller.send(Tell::Notice {
+        text: NOT_SENT.into(),
+        warning: true,
+    });
+    teller.send(Tell::Tests(TestsTell::Refused {
+        pr: pr.clone(),
+        ask: kind,
+        message: NOT_SENT.into(),
+    }));
 }
 
 async fn probe(socket: &Path) -> Tell {
@@ -2899,6 +3219,8 @@ pub(crate) struct ReviewModels<'w> {
     stories: ResMut<'w, Stories>,
     calls: ResMut<'w, Calls>,
     people: ResMut<'w, People>,
+    tests: ResMut<'w, TestsModels>,
+    machine: ResMut<'w, TestMachine>,
 }
 
 pub(crate) fn pump(
@@ -2927,6 +3249,8 @@ pub(crate) fn pump(
         mut stories,
         mut calls,
         mut people,
+        mut tests,
+        mut machine,
     } = models;
     // Tells are mostly about other things than the tabs, and every rebuild system wakes for a
     // tab change: the tabs are marked changed only for the tells that wrote one.
@@ -3017,6 +3341,8 @@ pub(crate) fn pump(
                     model.asking = None;
                     model.requested_code.clear();
                 }
+                tests.lost();
+                machine.lost();
             }
             Tell::Quit => {
                 exit.write(AppExit::Success);
@@ -3058,6 +3384,9 @@ pub(crate) fn pump(
                     changed = true;
                 }
             }
+            Tell::Tests(tell) => tests.apply(&tell),
+            Tell::TestDisk(report) => machine.disk_arrived(report),
+            Tell::TestEngine(info) => machine.engine_arrived(info),
             Tell::Diagrams(tell) => diagrams.apply(&tell),
             Tell::Story(tell) => stories.apply(&tell),
             Tell::Calls(tell) => {
@@ -3543,16 +3872,51 @@ pub(crate) fn demo_answers(
                 tells.push(Tell::Gifs(Ok(fixture::demo_gif_page(&query, offset))));
             }
             Ask::FetchMedia(url) => tells.push(demo_media_tell(url)),
+            Ask::GetTests(pr) => {
+                let head = tabs
+                    .0
+                    .get(&pr)
+                    .and_then(|t| t.ready())
+                    .map(|r| r.view.review.head_sha.clone());
+                if let Some(head) = head {
+                    tells.push(Tell::Tests(TestsTell::Loaded {
+                        pr,
+                        view: Box::new(TestsView::new(head)),
+                    }));
+                }
+            }
+            Ask::GetTestDisk => tells.push(Tell::TestDisk(Ok(fixture::demo_test_disk()))),
+            Ask::CheckTestEngine { .. } => {
+                tells.push(Tell::TestEngine(Ok(fixture::demo_test_engine())));
+            }
+            Ask::GenerateTests(pr) => {
+                demo_refused(&mut toasts, &time, &mut tells, pr, TestsAskKind::Generate);
+            }
+            Ask::PrepareTests { pr, .. } => {
+                demo_refused(&mut toasts, &time, &mut tells, pr, TestsAskKind::Prepare);
+            }
+            Ask::RunTests { pr, .. } => {
+                demo_refused(&mut toasts, &time, &mut tells, pr, TestsAskKind::Run);
+            }
+            Ask::StopTests(pr) => {
+                demo_refused(&mut toasts, &time, &mut tells, pr, TestsAskKind::Stop);
+            }
+            Ask::ListTests(pr) => {
+                demo_refused(&mut toasts, &time, &mut tells, pr, TestsAskKind::List);
+            }
+            Ask::AcceptRecipe(pr) => {
+                demo_refused(&mut toasts, &time, &mut tells, pr, TestsAskKind::Accept);
+            }
+            Ask::CleanUpTests { .. } => {
+                demo_toast(&mut toasts, &time);
+                tells.push(Tell::TestDisk(Err(DEMO_NOT_SENT.into())));
+            }
             Ask::FetchProfile(login) => tells.push(Tell::Profile {
                 profile: fixture::demo_profile(&login)
                     .ok_or_else(|| MediaError::refused("Demo mode knows no such person")),
                 login,
             }),
-            _ => toasts.0.push(Toast {
-                text: "Demo mode: nothing is sent to the daemon".into(),
-                warning: false,
-                until: time.elapsed_secs_f64() + TOAST_SECS,
-            }),
+            _ => demo_toast(&mut toasts, &time),
         }
     }
     if !tells.is_empty() {
@@ -3561,6 +3925,30 @@ pub(crate) fn demo_answers(
         }
         redraw.write(RequestRedraw);
     }
+}
+
+fn demo_toast(toasts: &mut Toasts, time: &Time) {
+    toasts.0.push(Toast {
+        text: DEMO_NOT_SENT.into(),
+        warning: false,
+        until: time.elapsed_secs_f64() + TOAST_SECS,
+    });
+}
+
+/// A tests write ask in demo mode: the toast, and a refusal so the button is free again.
+fn demo_refused(
+    toasts: &mut Toasts,
+    time: &Time,
+    tells: &mut Vec<Tell>,
+    pr: PrRef,
+    ask: TestsAskKind,
+) {
+    demo_toast(toasts, time);
+    tells.push(Tell::Tests(TestsTell::Refused {
+        pr,
+        ask,
+        message: DEMO_NOT_SENT.into(),
+    }));
 }
 
 /// The demo's copy of `url`, written under the temp folder where the window may read it.
@@ -4186,6 +4574,8 @@ mod tests {
             .init_resource::<Revalidations>()
             .init_resource::<Stories>()
             .init_resource::<Calls>()
+            .init_resource::<TestsModels>()
+            .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -4235,6 +4625,8 @@ mod tests {
             .init_resource::<Revalidations>()
             .init_resource::<Stories>()
             .init_resource::<Calls>()
+            .init_resource::<TestsModels>()
+            .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -4282,6 +4674,8 @@ mod tests {
             .init_resource::<Revalidations>()
             .init_resource::<Stories>()
             .init_resource::<Calls>()
+            .init_resource::<TestsModels>()
+            .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(demo_queue())
             .insert_resource(outbox)
@@ -4344,6 +4738,8 @@ mod tests {
             .init_resource::<Revalidations>()
             .init_resource::<Stories>()
             .init_resource::<Calls>()
+            .init_resource::<TestsModels>()
+            .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -4703,6 +5099,8 @@ mod tests {
             .init_resource::<Revalidations>()
             .init_resource::<Stories>()
             .init_resource::<Calls>()
+            .init_resource::<TestsModels>()
+            .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -4865,6 +5263,10 @@ mod tests {
                 .init_resource::<Revalidations>()
                 .init_resource::<Stories>()
                 .init_resource::<Calls>()
+                .init_resource::<TestsModels>()
+                .init_resource::<TestMachine>()
+                .init_resource::<TestsModels>()
+                .init_resource::<TestMachine>()
                 .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
                     mode: Mode::Demo {
@@ -5411,6 +5813,8 @@ mod tests {
             .init_resource::<Revalidations>()
             .init_resource::<Stories>()
             .init_resource::<Calls>()
+            .init_resource::<TestsModels>()
+            .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
             .insert_resource(outbox)
@@ -5501,6 +5905,8 @@ mod tests {
             .init_resource::<Revalidations>()
             .init_resource::<Stories>()
             .init_resource::<Calls>()
+            .init_resource::<TestsModels>()
+            .init_resource::<TestMachine>()
             .init_resource::<People>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .add_systems(Update, pump);
@@ -5922,6 +6328,8 @@ mod tests {
             .init_resource::<Revalidations>()
             .init_resource::<Stories>()
             .init_resource::<Calls>()
+            .init_resource::<TestsModels>()
+            .init_resource::<TestMachine>()
             .init_resource::<People>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .add_systems(Update, pump);
@@ -6044,5 +6452,187 @@ mod tests {
 
         assert_eq!(opening.await.unwrap(), Tell::News { pr, news });
         assert!(first.1.try_recv().is_err(), "nothing else was told");
+    }
+
+    fn pr7() -> PrRef {
+        "rzorzal/clusia#7".parse().unwrap()
+    }
+
+    #[test]
+    fn the_five_tests_events_become_tells_and_nothing_else_does() {
+        use clusia_core::tests::{StepState, TestCaseResult, TestStatus, TestsView};
+        let pr = pr7();
+        let view = TestsView::new("abc");
+        assert_eq!(
+            TestsTell::from_event(&Event::TestEnv {
+                pr: pr.clone(),
+                view: Box::new(view.clone()),
+            }),
+            Some(TestsTell::Loaded {
+                pr: pr.clone(),
+                view: Box::new(view),
+            })
+        );
+        assert_eq!(
+            TestsTell::from_event(&Event::TestStep {
+                pr: pr.clone(),
+                step: "image".into(),
+                state: StepState::Running,
+                tail: Some("Step 2/5".into()),
+            }),
+            Some(TestsTell::Step {
+                pr: pr.clone(),
+                step: "image".into(),
+                state: StepState::Running,
+                tail: Some("Step 2/5".into()),
+            })
+        );
+        assert_eq!(
+            TestsTell::from_event(&Event::TestOutput {
+                pr: pr.clone(),
+                run: "r1".into(),
+                tail: "running 3 tests".into(),
+            }),
+            Some(TestsTell::Output {
+                pr: pr.clone(),
+                run: "r1".into(),
+                tail: "running 3 tests".into(),
+            })
+        );
+        let result = TestCaseResult {
+            name: "auth::refresh".into(),
+            file: None,
+            status: TestStatus::Passed,
+            duration_ms: Some(4),
+            message: None,
+        };
+        let told = TestsTell::from_event(&Event::TestResult {
+            pr: pr.clone(),
+            run: "r1".into(),
+            result: result.clone(),
+        })
+        .expect("a result");
+        assert_eq!(told.pr(), &pr);
+        assert_eq!(
+            told,
+            TestsTell::Result {
+                pr: pr.clone(),
+                run: "r1".into(),
+                result,
+            }
+        );
+        assert_eq!(TestsTell::from_event(&Event::Stopping), None);
+    }
+
+    #[test]
+    fn slow_test_asks_run_on_a_worker_and_stop_does_not() {
+        let pr = pr7();
+        for ask in [
+            Ask::ListTests(pr.clone()),
+            Ask::GetTestDisk,
+            Ask::CleanUpTests { repo: None },
+            Ask::CheckTestEngine { pr: None },
+            Ask::Probe,
+            Ask::OpenReview(pr.clone()),
+        ] {
+            assert!(on_worker(&ask), "{ask:?}");
+        }
+        for ask in [
+            Ask::GetTests(pr.clone()),
+            Ask::GenerateTests(pr.clone()),
+            Ask::PrepareTests {
+                pr: pr.clone(),
+                recipe_hash: "h".into(),
+                approve: clusia_core::tests::Approve::All,
+            },
+            Ask::RunTests {
+                pr: pr.clone(),
+                scope: clusia_core::tests::TestScope::All,
+            },
+            Ask::StopTests(pr.clone()),
+            Ask::AcceptRecipe(pr.clone()),
+        ] {
+            assert!(
+                !on_worker(&ask),
+                "{ask:?} must never queue behind a slow ask"
+            );
+        }
+    }
+
+    #[test]
+    fn demo_mode_frees_every_tests_button_it_does_not_serve() {
+        use clusia_core::tests::{Approve, TestScope};
+        let pr = fixture::demo_pr();
+        let tells = demo_agent_tells(vec![
+            Ask::GenerateTests(pr.clone()),
+            Ask::PrepareTests {
+                pr: pr.clone(),
+                recipe_hash: "h".into(),
+                approve: Approve::All,
+            },
+            Ask::RunTests {
+                pr: pr.clone(),
+                scope: TestScope::All,
+            },
+            Ask::StopTests(pr.clone()),
+            Ask::ListTests(pr.clone()),
+            Ask::AcceptRecipe(pr.clone()),
+            Ask::CleanUpTests { repo: None },
+        ]);
+        let kinds: Vec<TestsAskKind> = tells
+            .iter()
+            .filter_map(|t| match t {
+                Tell::Tests(TestsTell::Refused { ask, message, .. }) => {
+                    assert_eq!(message, "Demo mode: nothing is sent to the daemon");
+                    Some(*ask)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                TestsAskKind::Generate,
+                TestsAskKind::Prepare,
+                TestsAskKind::Run,
+                TestsAskKind::Stop,
+                TestsAskKind::List,
+                TestsAskKind::Accept,
+            ]
+        );
+        assert!(tells.contains(&Tell::TestDisk(Err(
+            "Demo mode: nothing is sent to the daemon".into()
+        ))));
+        // The model a click left pending is free again once the tell is applied.
+        let mut model = crate::screens::review::tests_tab::TestsModel::default();
+        model.sent(TestsAskKind::Generate);
+        for tell in &tells {
+            if let Tell::Tests(tell) = tell {
+                model.apply(tell);
+                break;
+            }
+        }
+        assert_eq!(
+            model.pending, None,
+            "Generate tests comes back enabled after the click"
+        );
+    }
+
+    #[test]
+    fn demo_mode_answers_the_machine_asks_and_an_empty_view_for_the_tests_of_the_demo_review() {
+        let tells = demo_agent_tells(vec![
+            Ask::GetTestDisk,
+            Ask::CheckTestEngine { pr: None },
+            Ask::GetTests(fixture::demo_pr()),
+        ]);
+        assert_eq!(tells.len(), 3);
+        assert_eq!(tells[0], Tell::TestDisk(Ok(fixture::demo_test_disk())));
+        assert_eq!(tells[1], Tell::TestEngine(Ok(fixture::demo_test_engine())));
+        let Tell::Tests(TestsTell::Loaded { pr, view }) = &tells[2] else {
+            panic!("a view: {:?}", tells[2]);
+        };
+        assert_eq!(pr, &fixture::demo_pr());
+        assert_eq!(view.phase, clusia_core::tests::TestsPhase::NotGenerated);
+        assert_eq!(view.listed, None);
     }
 }

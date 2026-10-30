@@ -34,5 +34,14 @@ async fn the_test_commands_answer_through_the_socket() {
         report.items.is_empty(),
         "no engine and no cache: {report:?}"
     );
+    let Reply::TestEngine(info) = client
+        .request(Command::CheckTestEngine { pr: None })
+        .await
+        .unwrap()
+    else {
+        panic!("an engine report");
+    };
+    assert!(info.cores >= 1);
+    assert_eq!(info.engine, None, "the test daemon has no docker");
     daemon.stop().await;
 }

@@ -482,6 +482,8 @@ impl Plugin for ReviewStatePlugin {
             .init_resource::<crate::screens::review::revalidation::Revalidations>()
             .init_resource::<crate::screens::review::story::model::Stories>()
             .init_resource::<crate::screens::review::calls::Calls>()
+            .init_resource::<crate::screens::review::tests_tab::TestsModels>()
+            .init_resource::<crate::screens::review::tests_tab::TestMachine>()
             .add_message::<ReviewEvent>()
             .add_systems(Update, open_new_tabs.after(NavSystems));
     }

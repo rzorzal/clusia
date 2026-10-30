@@ -31,6 +31,14 @@ pub const STEP_STACK: &str = "stack";
 /// Approves the recipe's `all`, `one`, `some` and `list` commands.
 pub const STEP_TESTS: &str = "tests";
 
+/// The activity the daemon names while it probes the environment.
+pub const ACTIVITY_PROBING: &str = "Probing the environment";
+/// The activity the daemon names while the agent writes the recipe.
+pub const ACTIVITY_WRITING: &str = "Writing the recipe";
+/// The refusal of a setup approval whose recipe hash is no longer the plan's.
+pub const RECIPE_CHANGED: &str =
+    "The recipe changed since you saw the setup plan; look at it again";
+
 /// Where the tests run, as the reviewer or the recipe chooses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -305,7 +313,7 @@ pub struct TestRun {
     pub outcome: RunOutcome,
     pub totals: Totals,
     pub results: Vec<TestCaseResult>,
-    /// The log's file name inside the review's log folder.
+    /// The full path of the run's log file.
     pub log: Option<String>,
     pub tail: String,
 }
@@ -375,6 +383,9 @@ pub struct TestsView {
     pub near: Vec<NearTest>,
     pub github_checks: Vec<CheckRun>,
     pub refresh_available: bool,
+    /// The tests in the stored listing when its head is the view's.
+    #[serde(default)]
+    pub listed: Option<u32>,
 }
 
 impl TestsView {
@@ -390,8 +401,18 @@ impl TestsView {
             near: Vec::new(),
             github_checks: Vec::new(),
             refresh_available: false,
+            listed: None,
         }
     }
+}
+
+/// What the machine offers for running tests, as `CheckTestEngine` finds it now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestEngineInfo {
+    pub engine: Option<Engine>,
+    pub sandbox_ok: bool,
+    pub note: Option<String>,
+    pub cores: u32,
 }
 
 /// What is saved of a review's tests between sessions.
@@ -774,10 +795,43 @@ mod wire_and_limits {
         assert!(view.runs.is_empty() && view.github_checks.is_empty() && !view.refresh_available);
         assert_eq!(
             json(&TestsView::new("abc")),
-            r#"{"head":"abc","phase":"not_generated","env":null,"recipe":null,"proposal":null,"plan":null,"runs":[],"near":[],"github_checks":[],"refresh_available":false}"#
+            r#"{"head":"abc","phase":"not_generated","env":null,"recipe":null,"proposal":null,"plan":null,"runs":[],"near":[],"github_checks":[],"refresh_available":false,"listed":null}"#
         );
         let back: TestsView = serde_json::from_str(&json(&view)).unwrap();
         assert_eq!(back, view);
+    }
+
+    #[test]
+    fn a_view_says_how_many_tests_are_listed_and_an_old_one_still_reads() {
+        let mut view = TestsView::new("abc");
+        assert_eq!(view.listed, None);
+        view.listed = Some(412);
+        assert!(json(&view).ends_with(r#""refresh_available":false,"listed":412}"#));
+        let old = r#"{"head":"abc","phase":"not_generated","env":null,"recipe":null,"proposal":null,"plan":null,"runs":[],"near":[],"github_checks":[],"refresh_available":false}"#;
+        let back: TestsView = serde_json::from_str(old).unwrap();
+        assert_eq!(back, TestsView::new("abc"));
+    }
+
+    #[test]
+    fn the_engine_info_and_the_shared_texts_are_the_contracts() {
+        let info = TestEngineInfo {
+            engine: None,
+            sandbox_ok: true,
+            note: None,
+            cores: 10,
+        };
+        assert_eq!(
+            json(&info),
+            r#"{"engine":null,"sandbox_ok":true,"note":null,"cores":10}"#
+        );
+        let back: TestEngineInfo = serde_json::from_str(&json(&info)).unwrap();
+        assert_eq!(back, info);
+        assert_eq!(ACTIVITY_PROBING, "Probing the environment");
+        assert_eq!(ACTIVITY_WRITING, "Writing the recipe");
+        assert_eq!(
+            RECIPE_CHANGED,
+            "The recipe changed since you saw the setup plan; look at it again"
+        );
     }
 
     #[test]

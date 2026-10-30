@@ -29,7 +29,7 @@ use std::time::Duration;
 use crate::app::{AppPaths, StartTarget};
 use crate::bridge::{
     self, Ask, Asks, ChecksTell, Connection, Model, Outbox, RevalidationTell, ShowRequested, Tell,
-    Toasts,
+    TestsTell, Toasts,
 };
 use crate::clock::Clock;
 use crate::fixture;
@@ -536,6 +536,18 @@ pub fn decoded(app: &mut App) {
 pub fn tell(app: &mut App, tell: Tell) {
     let _ = app.world().resource::<Outbox>().0.send(tell);
     app.update();
+}
+
+/// Tells `view` as the tests of `pr` and settles.
+pub fn open_tests(app: &mut App, pr: &PrRef, view: clusia_core::tests::TestsView) {
+    tell(
+        app,
+        Tell::Tests(TestsTell::Loaded {
+            pr: pr.clone(),
+            view: Box::new(view),
+        }),
+    );
+    settle(app);
 }
 
 /// The demo app with the demo review open and ready (`fixture::demo_review` without its
