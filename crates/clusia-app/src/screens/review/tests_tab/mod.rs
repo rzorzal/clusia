@@ -363,10 +363,12 @@ impl TestsModel {
             }
             TestsTell::Refused { ask, message, .. } => {
                 self.pending = None;
-                if *ask == TestsAskKind::Prepare
-                    && let Some(modal) = self.plan.as_mut()
-                {
-                    modal.sending = false;
+                if *ask == TestsAskKind::Prepare {
+                    // A setup this window did not start is not one it lists after.
+                    self.prepared_here = false;
+                    if let Some(modal) = self.plan.as_mut() {
+                        modal.sending = false;
+                    }
                 }
                 if *ask == TestsAskKind::Run {
                     self.run_scope = None;
@@ -496,6 +498,15 @@ impl TestMachine {
         self.checking = false;
         self.cleaning = false;
     }
+}
+
+/// The model when what it shows is about `head`: the tab strip never counts the failures of an
+/// older head, even while the Tests section is not the one shown and nothing asked again.
+pub fn of_head<'a>(model: Option<&'a TestsModel>, head: Option<&str>) -> Option<&'a TestsModel> {
+    model.filter(|m| match (&m.view, head) {
+        (Some(view), Some(head)) => view.head == head,
+        _ => true,
+    })
 }
 
 /// `Tests ●` / `Tests 3` on the section tabs.
@@ -1311,6 +1322,9 @@ mod tests {
             m.asked && m.pending.is_none(),
             "a busy refusal reads nothing again"
         );
+        assert!(!m.prepared_here, "a refused setup is not one started here");
+        m.apply(&loaded(view(TestsPhase::Ready)));
+        assert!(!m.list_wanted, "a setup done elsewhere never lists");
         let mut m = model(needs_setup("h1"));
         m.sent(TestsAskKind::Prepare);
         m.apply(&TestsTell::Refused {
@@ -1896,6 +1910,40 @@ mod tests {
         )];
         testing::open_tests(&mut app, &pr, v);
         assert!(testing::shown_text(&mut app).iter().any(|t| t == "11"));
+    }
+
+    #[test]
+    fn the_tab_label_never_counts_the_failures_of_an_older_head() {
+        let (mut app, pr) = tests_app();
+        testing::set_section(&mut app, &pr, ReviewSection::Diff);
+        let head = tab_head(&app, &pr);
+        let mut v = TestsView::new(head.clone());
+        v.phase = TestsPhase::Ready;
+        v.runs = vec![run(
+            "r1",
+            &head,
+            vec![
+                result("t0", TestStatus::Failed),
+                result("t1", TestStatus::Failed),
+            ],
+        )];
+        testing::open_tests(&mut app, &pr, v);
+        assert!(testing::shown_text(&mut app).iter().any(|t| t == "2"));
+        app.world_mut()
+            .resource_mut::<ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ready_mut()
+            .unwrap()
+            .view
+            .review
+            .head_sha = "feedface".into();
+        testing::settle(&mut app);
+        assert!(
+            !testing::shown_text(&mut app).iter().any(|t| t == "2"),
+            "the section is still Diff and the model still holds the old head"
+        );
     }
 
     #[test]

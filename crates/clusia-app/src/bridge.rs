@@ -5265,8 +5265,6 @@ mod tests {
                 .init_resource::<Calls>()
                 .init_resource::<TestsModels>()
                 .init_resource::<TestMachine>()
-                .init_resource::<TestsModels>()
-                .init_resource::<TestMachine>()
                 .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
                     mode: Mode::Demo {

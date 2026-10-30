@@ -835,7 +835,13 @@ fn rebuild_top(
         let mut sections = v.sections;
         crate::screens::review::checks::badge_sections(&mut sections, checks.0.get(&top.pr));
         badge_diagrams(&mut sections, diagrams.0.get(&top.pr));
-        crate::screens::review::tests_tab::badge_tests(&mut sections, tests.0.get(&top.pr));
+        let head = tabs.0[&top.pr]
+            .ready()
+            .map(|r| r.view.review.head_sha.as_str());
+        crate::screens::review::tests_tab::badge_tests(
+            &mut sections,
+            crate::screens::review::tests_tab::of_head(tests.0.get(&top.pr), head),
+        );
         let tab = &tabs.0[&top.pr];
         let reanchor = tab.ui.reanchor.as_ref().and_then(|id| {
             let item = tab
