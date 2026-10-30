@@ -5,6 +5,9 @@
 //! text helpers make it printable and nothing in this module acts on its content.
 
 pub mod body;
+pub(crate) mod detail;
+pub(crate) mod github_checks;
+pub(crate) mod list;
 pub(crate) mod top;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -686,6 +689,11 @@ impl Plugin for TestsPlugin {
                     flush_tails.run_if(|models: Res<TestsModels>| models.pending_tail()),
                     body::fill_tests.run_if(tests_views_changed),
                     top::fill_top.run_if(tests_views_changed),
+                    list::fill_list.run_if(tests_views_changed),
+                    list::place_on_scroll.run_if(any_with_component::<list::ListState>),
+                    detail::fill_detail.run_if(tests_views_changed),
+                    detail::update_live_log.run_if(tests_views_changed),
+                    github_checks::fill_checks.run_if(tests_views_changed),
                 )
                     .chain()
                     .after(ReviewSystems),
