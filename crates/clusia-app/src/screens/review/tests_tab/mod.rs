@@ -676,6 +676,7 @@ pub struct TestsPlugin;
 impl Plugin for TestsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TestsModels>()
+            .add_observer(plan::refocus)
             .init_resource::<TestMachine>()
             .add_message::<WindowFocused>()
             .add_systems(

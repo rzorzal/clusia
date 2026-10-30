@@ -6,6 +6,7 @@
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::ButtonInput;
+use bevy::input_focus::{FocusCause, InputFocus};
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::PrRef;
@@ -112,7 +113,25 @@ impl PlanView {
 pub(super) struct PlanBuilt {
     pub view: PlanView,
     pub card: Entity,
+    slots: Slots,
 }
+
+/// The three parts of the card. They outlive a redraw, which replaces only what is inside
+/// them, so the body keeps its scroll offset.
+#[derive(Debug, Clone, Copy)]
+struct Slots {
+    head: Entity,
+    body: Entity,
+    foot: Entity,
+}
+
+/// The scrolling middle of the card.
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct PlanBody;
+
+/// On a freshly drawn checkbox: the one that held keyboard focus before the redraw.
+#[derive(Component)]
+pub(super) struct Refocus;
 
 /// What the tab and the model ask of the modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,6 +357,8 @@ pub(super) fn fill_plan(
     app_model: Res<Model>,
     fonts: Res<UiFonts>,
     roots: Query<(Entity, &ModalFor, Option<&PlanBuilt>)>,
+    focus: Res<InputFocus>,
+    boxes: Query<&PlanStepBox>,
 ) {
     let Screen::Review(pr) = &nav.screen else {
         return;
@@ -360,6 +381,7 @@ pub(super) fn fill_plan(
     match root {
         None => {
             let mut card = Entity::PLACEHOLDER;
+            let mut slots = None;
             let root = commands
                 .spawn((
                     modal_root(),
@@ -369,26 +391,45 @@ pub(super) fn fill_plan(
                     },
                 ))
                 .with_children(|r| {
-                    card = r.spawn(modal_card(820.0)).id();
+                    let mut c = r.spawn(modal_card(820.0));
+                    card = c.id();
+                    c.with_children(|c| slots = Some(skeleton(c)));
                 })
                 .id();
+            let slots = slots.expect("the card was spawned");
+            fill_slots(&mut commands, &fonts, pr, &view, slots, None);
             commands
-                .entity(card)
-                .with_children(|c| draw(c, &fonts, pr, &view));
-            commands.entity(root).insert(PlanBuilt { view, card });
+                .entity(root)
+                .insert(PlanBuilt { view, card, slots });
         }
         Some((_, _, Some(built))) if built.view == view => {}
         Some((root, _, Some(built))) => {
-            let card = built.card;
-            commands.entity(card).despawn_related::<Children>();
+            let (card, slots) = (built.card, built.slots);
+            let focused = focus
+                .get()
+                .and_then(|e| boxes.get(e).ok())
+                .map(|b| b.id.clone());
+            for slot in [slots.head, slots.body, slots.foot] {
+                commands.entity(slot).despawn_related::<Children>();
+            }
+            fill_slots(&mut commands, &fonts, pr, &view, slots, focused);
             commands
-                .entity(card)
-                .with_children(|c| draw(c, &fonts, pr, &view));
-            commands.entity(root).insert(PlanBuilt { view, card });
+                .entity(root)
+                .insert(PlanBuilt { view, card, slots });
         }
         // Spawned this frame: its content is queued already.
         Some((_, _, None)) => {}
     }
+}
+
+/// Gives keyboard focus back to a checkbox drawn again.
+pub(super) fn refocus(
+    add: On<Add, Refocus>,
+    mut focus: ResMut<InputFocus>,
+    mut commands: Commands,
+) {
+    focus.set(add.entity, FocusCause::Navigated);
+    commands.entity(add.entity).remove::<Refocus>();
 }
 
 type Spawner<'a> = ChildSpawnerCommands<'a>;
@@ -400,19 +441,54 @@ const SECTION: Type = Type {
     mono: false,
 };
 
-fn draw(card: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &PlanView) {
-    card.spawn(Node {
-        flex_direction: FlexDirection::Column,
-        row_gap: px(6),
-        padding: UiRect {
-            left: px(24),
-            right: px(24),
-            top: px(22),
-            bottom: px(10),
-        },
-        ..default()
-    })
-    .with_children(|head| {
+fn skeleton(card: &mut Spawner) -> Slots {
+    let head = card
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(6),
+            padding: UiRect {
+                left: px(24),
+                right: px(24),
+                top: px(22),
+                bottom: px(10),
+            },
+            ..default()
+        })
+        .id();
+    let body = card
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                flex_grow: 1.0,
+                min_height: px(0),
+                padding: UiRect::axes(px(24), px(4)),
+                row_gap: px(6),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollArea,
+            ScrollPosition::default(),
+            PlanBody,
+        ))
+        .id();
+    let foot = card
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            ..default()
+        })
+        .id();
+    Slots { head, body, foot }
+}
+
+fn fill_slots(
+    commands: &mut Commands,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    view: &PlanView,
+    slots: Slots,
+    focused: Option<String>,
+) {
+    commands.entity(slots.head).with_children(|head| {
         head.spawn(text(
             fonts,
             format!("Set up tests for #{}", view.number),
@@ -431,44 +507,41 @@ fn draw(card: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &PlanView) {
             Type::MUTED,
         ));
     });
-    card.spawn((
-        Node {
-            flex_direction: FlexDirection::Column,
-            flex_grow: 1.0,
-            min_height: px(0),
-            padding: UiRect::axes(px(24), px(4)),
-            row_gap: px(6),
-            overflow: Overflow::scroll_y(),
-            ..default()
-        },
-        ScrollArea,
-        ScrollPosition::default(),
-    ))
-    .with_children(|body| draw_body(body, fonts, pr, view));
-    if view.changed_note || view.stack_note.is_some() {
-        card.spawn(Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: px(4),
-            padding: UiRect::axes(px(24), px(8)),
-            ..default()
-        })
-        .with_children(|notes| {
-            if view.changed_note {
-                notes.spawn(wrapped_text(
-                    fonts,
-                    "The recipe changed. Look at the plan again before you approve.",
-                    Type::BODY.ink(Swatch::Orange),
-                ));
-            }
-            if let Some(note) = &view.stack_note {
-                notes.spawn(wrapped_text(fonts, note.clone(), Type::META));
-            }
-        });
-    }
-    draw_buttons(card, fonts, pr, view);
+    commands
+        .entity(slots.body)
+        .with_children(|body| draw_body(body, fonts, pr, view, focused.as_deref()));
+    commands.entity(slots.foot).with_children(|foot| {
+        if view.changed_note || view.stack_note.is_some() {
+            foot.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
+                padding: UiRect::axes(px(24), px(8)),
+                ..default()
+            })
+            .with_children(|notes| {
+                if view.changed_note {
+                    notes.spawn(wrapped_text(
+                        fonts,
+                        "The recipe changed. Look at the plan again before you approve.",
+                        Type::BODY.ink(Swatch::Orange),
+                    ));
+                }
+                if let Some(note) = &view.stack_note {
+                    notes.spawn(wrapped_text(fonts, note.clone(), Type::META));
+                }
+            });
+        }
+        draw_buttons(foot, fonts, pr, view);
+    });
 }
 
-fn draw_body(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &PlanView) {
+fn draw_body(
+    body: &mut Spawner,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    view: &PlanView,
+    focused: Option<&str>,
+) {
     if let Some(reason) = &view.blocked {
         body.spawn(wrapped_text(
             fonts,
@@ -480,7 +553,7 @@ fn draw_body(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &PlanView) {
         let steps = if n == 1 { "STEP" } else { "STEPS" };
         body.spawn(text(fonts, format!("SETUP · {n} {steps}"), SECTION));
         for row in &view.steps {
-            draw_step(body, fonts, pr, row);
+            draw_step(body, fonts, pr, row, focused == Some(row.id.as_str()));
         }
     }
     body.spawn(Node {
@@ -536,7 +609,7 @@ fn labelled(body: &mut Spawner, fonts: &UiFonts, label: &str, content: impl FnOn
     });
 }
 
-fn draw_step(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, row: &StepRow) {
+fn draw_step(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, row: &StepRow, focused: bool) {
     let approvable = row.kind == RowKind::Approvable;
     let host = approvable && row.place == StepPlace::Host;
     let title_ink = if approvable {
@@ -561,7 +634,7 @@ fn draw_step(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, row: &StepRow) {
     }
     e.with_children(|r| {
         if approvable {
-            r.spawn((
+            let mut b = r.spawn((
                 checkbox(row.checked),
                 PlanStepBox {
                     pr: pr.clone(),
@@ -569,6 +642,9 @@ fn draw_step(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, row: &StepRow) {
                 },
                 observe(on_toggle),
             ));
+            if focused {
+                b.insert(Refocus);
+            }
         } else {
             r.spawn(Node {
                 width: px(18),
@@ -848,6 +924,15 @@ fn send_approval(
     toasts: &mut Toasts,
     time: &Time,
 ) {
+    // The drawn view still offers the button until the next redraw: a second activation in
+    // the same frame must not send again.
+    if models
+        .0
+        .get(pr)
+        .is_some_and(|m| m.pending.is_some() || m.plan.as_ref().is_some_and(|p| p.sending))
+    {
+        return;
+    }
     let Some(ask) = approval_ask(pr, all, roots, tabs, app_model, toasts, time) else {
         return;
     };
@@ -889,6 +974,8 @@ mod tests {
     use crate::testing::{self, NOW};
     use crate::theme::Swatch;
     use crate::ui::kit::Fill;
+    use bevy::input_focus::{FocusCause, InputFocus};
+    use bevy::ui_widgets::Activate;
     use clusia_core::tests::{
         PlanCommand, PlanStep, RECIPE_CHANGED, RECIPE_FILE, StepPlace, StepState, TestsPhase,
         TestsView,
@@ -1776,5 +1863,89 @@ mod tests {
         }
         let after: Vec<Entity> = app.world().get::<Children>(card).unwrap().to_vec();
         assert_eq!(kids, after);
+    }
+
+    fn many_steps(n: usize) -> Vec<PlanStep> {
+        (0..n)
+            .map(|i| {
+                step(
+                    &format!("work:{i}"),
+                    &format!("Step {i}"),
+                    "cargo fetch",
+                    StepPlace::Container,
+                    false,
+                    StepState::Missing,
+                )
+            })
+            .collect()
+    }
+
+    fn body_scroll(app: &mut App) -> (Entity, f32) {
+        let body = testing::entities::<PlanBody>(app)[0];
+        let y = app.world().get::<ScrollPosition>(body).unwrap().0.y;
+        (body, y)
+    }
+
+    #[test]
+    fn a_redraw_keeps_the_scroll_and_the_focus() {
+        let (mut app, pr) = tests_app();
+        let view = needs_setup(&app, &pr, "h1", many_steps(40));
+        testing::open_tests(&mut app, &pr, view);
+        open_modal(&mut app, &pr);
+        let (body, _) = body_scroll(&mut app);
+        app.world_mut().get_mut::<ScrollPosition>(body).unwrap().0.y = 120.0;
+        let focused = testing::find::<PlanStepBox>(&mut app, |b| b.id == "work:30");
+        app.world_mut()
+            .resource_mut::<InputFocus>()
+            .set(focused, FocusCause::Navigated);
+        toggle(&mut app, &pr, "work:30");
+        testing::settle(&mut app);
+        assert_eq!(
+            body_scroll(&mut app),
+            (body, 120.0),
+            "a tick keeps the scroll"
+        );
+        let now = app
+            .world()
+            .resource::<InputFocus>()
+            .get()
+            .expect("focus kept");
+        assert_eq!(app.world().get::<PlanStepBox>(now).unwrap().id, "work:30");
+        assert!(
+            !model(&app, &pr)
+                .plan
+                .as_ref()
+                .unwrap()
+                .checked
+                .contains("work:30")
+        );
+        // A plan that changes while the reviewer reads keeps it too.
+        let mut steps = many_steps(40);
+        steps.push(step(
+            "extra",
+            "Seed the database",
+            "cargo run --bin seed",
+            StepPlace::Container,
+            false,
+            StepState::Missing,
+        ));
+        let view = needs_setup(&app, &pr, "h2", steps);
+        testing::open_tests(&mut app, &pr, view);
+        assert!(testing::shows(&mut app, "Seed the database"));
+        assert_eq!(
+            body_scroll(&mut app),
+            (body, 120.0),
+            "a new plan keeps the scroll"
+        );
+    }
+
+    #[test]
+    fn two_activations_in_one_frame_send_once() {
+        let (mut app, pr) = modal_app();
+        let all = testing::find::<ApproveAll>(&mut app, |b| b.0 == pr);
+        app.world_mut().trigger(Activate { entity: all });
+        app.world_mut().trigger(Activate { entity: all });
+        app.update();
+        assert_eq!(testing::recorded(&mut app).len(), 1);
     }
 }
