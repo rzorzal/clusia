@@ -339,7 +339,10 @@ pub enum Ask {
     /// Lists the repository's tests: `TestsTell::Listed`.
     ListTests(PrRef),
     /// Writes the recipe the agent proposed over the reviewer's file: `TestsTell::Loaded`.
-    AcceptRecipe(PrRef),
+    AcceptRecipe {
+        pr: PrRef,
+        recipe_hash: String,
+    },
     /// What the test runs keep on this machine: `Tell::TestDisk`.
     GetTestDisk,
     /// Removes what the test runs keep of `repo`, or of every repository: `Tell::TestDisk`.
@@ -1428,7 +1431,7 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
         Ask::RunTests { pr, .. } => tests_not_sent(teller, pr, TestsAskKind::Run),
         Ask::StopTests(pr) => tests_not_sent(teller, pr, TestsAskKind::Stop),
         Ask::ListTests(pr) => tests_not_sent(teller, pr, TestsAskKind::List),
-        Ask::AcceptRecipe(pr) => tests_not_sent(teller, pr, TestsAskKind::Accept),
+        Ask::AcceptRecipe { pr, .. } => tests_not_sent(teller, pr, TestsAskKind::Accept),
         Ask::GetTestDisk => teller.send(Tell::TestDisk(Err("Not connected to clusiad".into()))),
         Ask::CleanUpTests { .. } => {
             teller.send(Tell::Notice {
@@ -1847,7 +1850,7 @@ async fn answer(
         | Ask::PrepareTests { .. }
         | Ask::RunTests { .. }
         | Ask::StopTests(_)
-        | Ask::AcceptRecipe(_) => tests_ask(client, teller, ask).await?,
+        | Ask::AcceptRecipe { .. } => tests_ask(client, teller, ask).await?,
         Ask::LoadConversation(pr) => match client
             .request(Command::GetConversation { pr: pr.clone() })
             .await
@@ -2739,8 +2742,11 @@ async fn tests_ask(client: &mut Client, teller: &Teller, ask: Ask) -> Result<(),
             Some(pr.clone()),
             Some(TestsAskKind::List),
         ),
-        Ask::AcceptRecipe(pr) => (
-            Command::AcceptRecipe { pr: pr.clone() },
+        Ask::AcceptRecipe { pr, recipe_hash } => (
+            Command::AcceptRecipe {
+                pr: pr.clone(),
+                recipe_hash: recipe_hash.clone(),
+            },
             Some(pr.clone()),
             Some(TestsAskKind::Accept),
         ),
@@ -3904,7 +3910,7 @@ pub(crate) fn demo_answers(
             Ask::ListTests(pr) => {
                 demo_refused(&mut toasts, &time, &mut tells, pr, TestsAskKind::List);
             }
-            Ask::AcceptRecipe(pr) => {
+            Ask::AcceptRecipe { pr, .. } => {
                 demo_refused(&mut toasts, &time, &mut tells, pr, TestsAskKind::Accept);
             }
             Ask::CleanUpTests { .. } => {
@@ -6548,7 +6554,10 @@ mod tests {
                 scope: clusia_core::tests::TestScope::All,
             },
             Ask::StopTests(pr.clone()),
-            Ask::AcceptRecipe(pr.clone()),
+            Ask::AcceptRecipe {
+                pr: pr.clone(),
+                recipe_hash: "h".into(),
+            },
         ] {
             assert!(
                 !on_worker(&ask),
@@ -6574,7 +6583,10 @@ mod tests {
             },
             Ask::StopTests(pr.clone()),
             Ask::ListTests(pr.clone()),
-            Ask::AcceptRecipe(pr.clone()),
+            Ask::AcceptRecipe {
+                pr: pr.clone(),
+                recipe_hash: "h".into(),
+            },
             Ask::CleanUpTests { repo: None },
         ]);
         let kinds: Vec<TestsAskKind> = tells

@@ -582,7 +582,17 @@ async fn a_hand_edited_recipe_gets_a_proposal_not_an_overwrite() {
     );
     assert!(view.recipe.as_ref().unwrap().by_hand);
 
-    let Outcome::Ok(Reply::Tests(view)) = accept_recipe(&lab.shared, &pr(7)).await else {
+    assert_eq!(
+        refused(accept_recipe(&lab.shared, &pr(7), "not-the-shown-one").await),
+        clusia_core::tests::RECIPE_CHANGED
+    );
+    assert_eq!(
+        std::fs::read_to_string(lab.recipe_file(7)).unwrap(),
+        mine,
+        "a stale hash writes nothing"
+    );
+    let Outcome::Ok(Reply::Tests(view)) = accept_recipe(&lab.shared, &pr(7), &proposal.hash).await
+    else {
         panic!("accepted");
     };
     assert_eq!(
@@ -592,7 +602,7 @@ async fn a_hand_edited_recipe_gets_a_proposal_not_an_overwrite() {
     assert_eq!(view.proposal, None);
     assert!(!view.recipe.as_ref().unwrap().by_hand, "Clúsia's own again");
     assert_eq!(
-        refused(accept_recipe(&lab.shared, &pr(7)).await),
+        refused(accept_recipe(&lab.shared, &pr(7), &proposal.hash).await),
         "There is no recipe proposal to accept"
     );
 }
@@ -1232,7 +1242,7 @@ async fn a_review_that_is_not_open_is_refused_but_can_be_read() {
         approve(&lab, 9, Approve::All).await,
         run(&lab.shared, &pr(9), TestScope::All).await,
         list(&lab.shared, &pr(9)).await,
-        accept_recipe(&lab.shared, &pr(9)).await,
+        accept_recipe(&lab.shared, &pr(9), "h").await,
     ] {
         assert!(refused(out).contains("no review for acme/widgets#9; open it first"));
     }

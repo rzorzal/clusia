@@ -40,7 +40,7 @@ pub struct SetUpButton(pub PrRef);
 pub struct ListTestsButton(pub PrRef);
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub struct AcceptProposal(pub PrRef);
+pub struct AcceptProposal(pub PrRef, pub String);
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ProposalToggle(pub PrRef);
@@ -76,6 +76,8 @@ struct Banner {
     open: bool,
     /// The proposal's whole text, escaped, only while it is open.
     text: Option<String>,
+    /// The hash of the proposal the banner was drawn from.
+    hash: String,
     sending: bool,
 }
 
@@ -433,6 +435,7 @@ fn banner(i: &Inputs) -> Option<Banner> {
         ),
         open,
         text: open.then(|| printable_lines(&proposal.text)),
+        hash: proposal.hash.clone(),
         sending: i.model.pending == Some(TestsAskKind::Accept),
     })
 }
@@ -581,7 +584,7 @@ fn draw_banner(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, banner: &Banner) {
             } else {
                 row.spawn((
                     button(fonts, "Accept", Variant::Primary),
-                    AcceptProposal(pr.clone()),
+                    AcceptProposal(pr.clone(), banner.hash.clone()),
                     observe(on_accept),
                 ));
             }
@@ -846,6 +849,9 @@ fn on_run(
     let Ok(RunButton { pr, scope }) = buttons.get(activate.entity) else {
         return;
     };
+    if models.0.get(pr).is_some_and(|m| m.pending.is_some()) {
+        return;
+    }
     if let Some(reason) = read_only_reason(&tabs, &model, pr) {
         return not_sent(&mut toasts, &time, reason);
     }
@@ -873,6 +879,9 @@ fn on_list_tests(
     let Ok(ListTestsButton(pr)) = buttons.get(activate.entity) else {
         return;
     };
+    if models.0.get(pr).is_some_and(|m| m.pending.is_some()) {
+        return;
+    }
     if let Some(reason) = read_only_reason(&tabs, &model, pr) {
         return not_sent(&mut toasts, &time, reason);
     }
@@ -894,13 +903,19 @@ fn on_accept(
     time: Res<Time>,
     mut asks: ResMut<Asks>,
 ) {
-    let Ok(AcceptProposal(pr)) = buttons.get(activate.entity) else {
+    let Ok(AcceptProposal(pr, recipe_hash)) = buttons.get(activate.entity) else {
         return;
     };
+    if models.0.get(pr).is_some_and(|m| m.pending.is_some()) {
+        return;
+    }
     if let Some(reason) = read_only_reason(&tabs, &model, pr) {
         return not_sent(&mut toasts, &time, reason);
     }
-    asks.send(Ask::AcceptRecipe(pr.clone()));
+    asks.send(Ask::AcceptRecipe {
+        pr: pr.clone(),
+        recipe_hash: recipe_hash.clone(),
+    });
     models
         .0
         .entry(pr.clone())
@@ -1263,7 +1278,13 @@ mod tests {
         let accept = testing::find::<AcceptProposal>(&mut app, |b| b.0 == pr);
         testing::activate(&mut app, accept);
         testing::settle(&mut app);
-        assert_eq!(testing::recorded(&mut app), [Ask::AcceptRecipe(pr.clone())]);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::AcceptRecipe {
+                pr: pr.clone(),
+                recipe_hash: "h2".into()
+            }]
+        );
         assert_eq!(model(&app, &pr).pending, Some(TestsAskKind::Accept));
         assert_eq!(
             testing::count::<AcceptProposal>(&mut app),
@@ -1440,6 +1461,45 @@ mod tests {
             testing::count::<RunButton>(&mut app),
             0,
             "both wait for the answer"
+        );
+    }
+
+    #[test]
+    fn a_second_activation_before_the_redraw_sends_nothing() {
+        let (mut app, pr, _) = show(|_| {});
+        let near = testing::find::<RunButton>(&mut app, |b| b.scope == TestScope::NearChange);
+        testing::activate(&mut app, near);
+        testing::activate(&mut app, near);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::RunTests {
+                pr,
+                scope: TestScope::NearChange
+            }]
+        );
+    }
+
+    #[test]
+    fn accept_names_the_proposal_the_banner_showed() {
+        let (mut app, pr, _) = show(|v| {
+            v.proposal = Some(RecipeProposal {
+                text: "a".into(),
+                hash: "h2".into(),
+                at: NOW,
+            });
+        });
+        let accept = testing::find::<AcceptProposal>(&mut app, |b| b.0 == pr);
+        let mut models = app.world_mut().resource_mut::<TestsModels>();
+        let view = models.0.get_mut(&pr).and_then(|m| m.view.as_mut());
+        view.unwrap().proposal.as_mut().unwrap().hash = "h3".into();
+        testing::activate(&mut app, accept);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::AcceptRecipe {
+                pr,
+                recipe_hash: "h2".into()
+            }],
+            "the hash of what was drawn, not of what came after"
         );
     }
 

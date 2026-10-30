@@ -328,9 +328,11 @@ pub enum Command {
     ListTests {
         pr: PrRef,
     },
-    /// Write the recipe the agent proposed over the reviewer's file (`Reply::Tests`).
+    /// Write the recipe the agent proposed over the reviewer's file (`Reply::Tests`). It is
+    /// refused when the proposal waiting now is not the one with `recipe_hash`.
     AcceptRecipe {
         pr: PrRef,
+        recipe_hash: String,
     },
     /// What the test runs keep on this machine (`Reply::TestDisk`).
     GetTestDisk,
@@ -4550,8 +4552,11 @@ mod tests {
             r#"{"type":"request","id":5,"cmd":{"list_tests":{"pr":"acme/widgets#7"}}}"#
         );
         assert_eq!(
-            request(Command::AcceptRecipe { pr: acme() }),
-            r#"{"type":"request","id":5,"cmd":{"accept_recipe":{"pr":"acme/widgets#7"}}}"#
+            request(Command::AcceptRecipe {
+                pr: acme(),
+                recipe_hash: "abc".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"accept_recipe":{"pr":"acme/widgets#7","recipe_hash":"abc"}}}"#
         );
         assert_eq!(
             request(Command::GetTestDisk),

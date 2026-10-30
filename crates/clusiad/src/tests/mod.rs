@@ -555,7 +555,7 @@ impl Drop for Ending {
 }
 
 /// `AcceptRecipe`: the waiting proposal becomes the recipe file, Clúsia's own again.
-pub(crate) async fn accept_recipe(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
+pub(crate) async fn accept_recipe(shared: &Arc<Shared>, pr: &PrRef, recipe_hash: &str) -> Outcome {
     if let Err(out) = active(shared, pr) {
         return out;
     }
@@ -576,8 +576,12 @@ pub(crate) async fn accept_recipe(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
     {
         let _guard = reviews::lock(shared, pr).await;
         let mut record = env::load(shared, pr);
-        let Some(proposal) = record.proposal.take() else {
-            return reviews::invalid_state("There is no recipe proposal to accept");
+        let proposal = match record.proposal.take() {
+            None => return reviews::invalid_state("There is no recipe proposal to accept"),
+            Some(p) if p.hash != recipe_hash => {
+                return reviews::invalid_state(clusia_core::tests::RECIPE_CHANGED);
+            }
+            Some(p) => p,
         };
         match recipe_file::write_recipe(&worktree, &proposal.text) {
             Ok(hash) => record.written_hash = Some(hash),
