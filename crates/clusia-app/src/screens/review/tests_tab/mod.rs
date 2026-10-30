@@ -4,6 +4,8 @@
 //! Everything here comes from the pull request, its agent or its tooling in the end, so the
 //! text helpers make it printable and nothing in this module acts on its content.
 
+pub mod body;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bevy::prelude::*;
@@ -20,6 +22,7 @@ use crate::bridge::{Ask, Asks, Connection, Model, TestsAskKind, TestsTell};
 use crate::review_state::{ReviewSection, ReviewTabs};
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::activity::MARK;
+use crate::screens::review::shell::SectionBody;
 
 pub const TEST_ROW_HEIGHT: f32 = 31.0;
 pub const CHECKS_SHOWN: usize = 12;
@@ -652,6 +655,17 @@ pub fn comment_prefill(name: &str, place: Option<(&str, Option<u32>)>, in_diff: 
     }
 }
 
+/// Whether a filler of the Tests tab has anything to compare: one of the three resources it
+/// reads moved, or a section body was just spawned and has nothing drawn yet.
+pub(crate) fn tests_views_changed(
+    tabs: Res<ReviewTabs>,
+    models: Res<TestsModels>,
+    model: Res<Model>,
+    fresh: Query<(), Added<SectionBody>>,
+) -> bool {
+    tabs.is_changed() || models.is_changed() || model.is_changed() || !fresh.is_empty()
+}
+
 pub struct TestsPlugin;
 
 impl Plugin for TestsPlugin {
@@ -669,6 +683,7 @@ impl Plugin for TestsPlugin {
                             .or_eager(on_message::<WindowFocused>),
                     ),
                     flush_tails.run_if(|models: Res<TestsModels>| models.pending_tail()),
+                    body::fill_tests.run_if(tests_views_changed),
                 )
                     .chain()
                     .after(ReviewSystems),

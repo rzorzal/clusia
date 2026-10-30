@@ -721,6 +721,41 @@ pub fn set_section(app: &mut App, pr: &PrRef, section: ReviewSection) {
     settle(app);
 }
 
+/// A machine with Colima as its container engine, running or stopped.
+pub fn tests_env(running: bool) -> clusia_core::tests::EnvState {
+    use clusia_core::tests::{Engine, EngineKind, EnvState, Existing, RepoSignals, RunnerKind};
+    EnvState {
+        head: "4f2a91c".into(),
+        probed_at: NOW - 120,
+        engine: Some(Engine {
+            kind: EngineKind::Colima,
+            cli: "docker".into(),
+            endpoint: "unix:///Users/rzorzal/.colima/default/docker.sock".into(),
+            context: Some("colima".into()),
+            running,
+            start: Some("colima start".into()),
+            compose: Some("docker compose".into()),
+        }),
+        runner: RunnerKind::Container,
+        note: None,
+        sandbox_ok: true,
+        signals: RepoSignals::default(),
+        existing: Existing::default(),
+        inputs_hash: "in1".into(),
+    }
+}
+
+/// An empty tests view at the review's current head, in `phase`.
+pub fn tests_view(
+    app: &App,
+    pr: &PrRef,
+    phase: clusia_core::tests::TestsPhase,
+) -> clusia_core::tests::TestsView {
+    let mut view = clusia_core::tests::TestsView::new(ready(app, pr).view.review.head_sha.clone());
+    view.phase = phase;
+    view
+}
+
 fn right(path: &str, line: u32, commit: &str) -> Anchor {
     Anchor {
         path: path.into(),
