@@ -41,6 +41,7 @@ pub enum Section {
     GitServer,
     Repositories,
     Harness,
+    Tests,
     Editor,
     Notifications,
     Plugins,
@@ -49,12 +50,13 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 10] = [
+    pub const ALL: [Section; 11] = [
         Section::General,
         Section::Appearance,
         Section::GitServer,
         Section::Repositories,
         Section::Harness,
+        Section::Tests,
         Section::Editor,
         Section::Media,
         Section::Notifications,
@@ -69,6 +71,7 @@ impl Section {
             Section::GitServer => "Git server",
             Section::Repositories => "Repositories",
             Section::Harness => "Harness",
+            Section::Tests => "Tests",
             Section::Editor => "Editor",
             Section::Notifications => "Notifications",
             Section::Plugins => "Plugins & skills",
@@ -87,6 +90,7 @@ impl Section {
             Section::GitServer => "git",
             Section::Repositories => "repositories",
             Section::Harness => "harness",
+            Section::Tests => "tests",
             Section::Editor => "editor",
             Section::Media => "media",
             Section::Notifications => "notifications",
@@ -901,6 +905,16 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
     use bevy::window::{RequestRedraw, WindowOccluded};
     use bevy::winit::{UpdateMode, WinitSettings};
+
+    #[test]
+    fn tests_is_a_config_section_right_after_harness() {
+        let at = |s: Section| Section::ALL.iter().position(|x| *x == s).unwrap();
+        assert_eq!(at(Section::Tests), at(Section::Harness) + 1);
+        assert_eq!(Section::ALL.len(), 11);
+        assert_eq!(Section::Tests.label(), "Tests");
+        assert_eq!(Section::Tests.page_id(), "tests");
+        assert_eq!(Section::from_page("tests"), Section::Tests);
+    }
 
     #[test]
     fn a_screen_switch_brings_the_next_screen_in_and_the_first_just_appears() {

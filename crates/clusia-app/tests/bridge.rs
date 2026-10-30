@@ -1166,3 +1166,52 @@ async fn offline_test_asks_free_their_buttons() {
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tests_settings_round_trip_and_a_bad_one_is_refused() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    for (key, value) in [
+        ("tests.runner", "container"),
+        ("tests.cpus", "3"),
+        ("tests.memory_mb", "8192"),
+        ("tests.run_timeout_secs", "2700"),
+        ("tests.parallel_runs", "2"),
+    ] {
+        link.ask
+            .send(Ask::SetConfig {
+                key: key.into(),
+                value: value.into(),
+            })
+            .unwrap();
+    }
+    let snap = snapshot_where(&link, |s| s.config.tests.parallel_runs == 2);
+    assert_eq!(
+        snap.config.tests,
+        clusia_core::config::Tests {
+            runner: clusia_core::tests::RunnerChoice::Container,
+            cpus: 3,
+            memory_mb: 8192,
+            run_timeout_secs: 2700,
+            parallel_runs: 2,
+        }
+    );
+    link.ask
+        .send(Ask::SetConfig {
+            key: "tests.run_timeout_secs".into(),
+            value: "59".into(),
+        })
+        .unwrap();
+    match next(&link, |t| matches!(t, Tell::Rejected { .. })) {
+        Tell::Rejected { key, message } => {
+            assert_eq!(key, "tests.run_timeout_secs");
+            assert!(
+                message.contains("must be between 60 and 14400"),
+                "{message}"
+            );
+        }
+        _ => unreachable!(),
+    }
+    d.stop().await;
+}
