@@ -939,6 +939,8 @@ pub fn header_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, h
                         Tone::Green => Swatch::Green,
                         Tone::Orange => Swatch::Orange,
                         Tone::Neutral => Swatch::Muted,
+                        Tone::Amber => Swatch::HostInk,
+                        Tone::Blue => Swatch::NetBlue,
                     };
                     m.spawn(text(fonts, label.clone(), Type::BODY.ink(ink)));
                 }

@@ -678,6 +678,8 @@ pub enum Tone {
     Green,
     Orange,
     Neutral,
+    Amber,
+    Blue,
 }
 
 impl Tone {
@@ -687,6 +689,8 @@ impl Tone {
             Tone::Green => (Swatch::GreenSoft, Swatch::Green),
             Tone::Orange => (Swatch::OrangeSoft, Swatch::Orange),
             Tone::Neutral => (Swatch::Chrome, Swatch::Muted),
+            Tone::Amber => (Swatch::AmberSoft, Swatch::HostInk),
+            Tone::Blue => (Swatch::NetBlueSoft, Swatch::NetBlue),
         }
     }
 }
@@ -1371,6 +1375,33 @@ mod tests {
             app.update();
         }
         (app, window, b)
+    }
+
+    #[test]
+    fn amber_and_blue_tones_use_the_host_and_network_swatches() {
+        assert_eq!(Tone::Amber.swatches(), (Swatch::AmberSoft, Swatch::HostInk));
+        assert_eq!(
+            Tone::Blue.swatches(),
+            (Swatch::NetBlueSoft, Swatch::NetBlue)
+        );
+        let mut app = testing::app(Snapshot::default());
+        let fonts = UiFonts::default();
+        let host = app
+            .world_mut()
+            .spawn(badge(&fonts, "host", Tone::Amber))
+            .id();
+        let net = app
+            .world_mut()
+            .spawn(badge(&fonts, "network", Tone::Blue))
+            .id();
+        app.update();
+        assert_eq!(bg(&mut app, host), LIGHT.amber_soft);
+        assert_eq!(bg(&mut app, net), LIGHT.net_blue_soft);
+        let label = app.world().get::<Children>(net).unwrap()[0];
+        assert_eq!(
+            app.world().get::<TextColor>(label).unwrap().0,
+            LIGHT.net_blue
+        );
     }
 
     #[test]

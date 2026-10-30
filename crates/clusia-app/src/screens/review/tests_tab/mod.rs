@@ -8,6 +8,7 @@ pub mod body;
 pub(crate) mod detail;
 pub(crate) mod github_checks;
 pub(crate) mod list;
+pub(crate) mod plan;
 pub(crate) mod top;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -695,6 +696,9 @@ impl Plugin for TestsPlugin {
                     detail::update_live_log.run_if(tests_views_changed),
                     detail::follow_log.run_if(any_with_component::<detail::LogEnd>),
                     github_checks::fill_checks.run_if(tests_views_changed),
+                    plan::open_plans.run_if(plan::plan_work),
+                    plan::fill_plan.run_if(tests_views_changed),
+                    plan::cancel_plan.run_if(plan::modal_up),
                 )
                     .chain()
                     .after(ReviewSystems),

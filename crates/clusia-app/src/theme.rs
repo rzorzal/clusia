@@ -73,6 +73,13 @@ pub enum Swatch {
     /// The outline of a box that changed since the version being compared.
     Amber,
     AmberSoft,
+    /// The fill of a setup step that runs on the reviewer's machine, and the ink of its text
+    /// and its tag.
+    HostRow,
+    HostInk,
+    /// The ink of the `network` tag and its tint.
+    NetBlue,
+    NetBlueSoft,
     /// The 3D scene's background.
     SceneBg,
     Axis,
@@ -123,6 +130,10 @@ pub struct Tokens {
     pub ghost_fill: Color,
     pub amber: Color,
     pub amber_soft: Color,
+    pub host_row: Color,
+    pub host_ink: Color,
+    pub net_blue: Color,
+    pub net_blue_soft: Color,
     /// The keyword view's floor: the colour its 3D image is cleared with.
     pub scene_bg: Color,
     /// The cube's three axes, and its floor grid.
@@ -197,6 +208,10 @@ impl Tokens {
             Swatch::GhostFill => self.ghost_fill,
             Swatch::Amber => self.amber,
             Swatch::AmberSoft => self.amber_soft,
+            Swatch::HostRow => self.host_row,
+            Swatch::HostInk => self.host_ink,
+            Swatch::NetBlue => self.net_blue,
+            Swatch::NetBlueSoft => self.net_blue_soft,
             Swatch::SceneBg => self.scene_bg,
             Swatch::Axis => self.axis,
             Swatch::Grid => self.grid,
@@ -270,6 +285,10 @@ pub const LIGHT: Tokens = Tokens {
     ghost_fill: Color::srgba_u8(0x8A, 0x93, 0x8C, 0x1A),
     amber: Color::srgb_u8(0xB7, 0x79, 0x1F),
     amber_soft: Color::srgba_u8(0xB7, 0x79, 0x1F, 0x1A),
+    host_row: Color::srgba_u8(0xE0, 0x9A, 0x1F, 0x2A),
+    host_ink: Color::srgb_u8(0x7A, 0x4A, 0x08),
+    net_blue: Color::srgb_u8(0x1F, 0x4F, 0xB0),
+    net_blue_soft: Color::srgba_u8(0x2B, 0x6C, 0xD9, 0x1A),
     scene_bg: Color::srgb_u8(0xFB, 0xFB, 0xF9),
     axis: Color::srgb_u8(0x9A, 0x9D, 0x96),
     grid: Color::srgb_u8(0xE8, 0xE8, 0xE3),
@@ -349,6 +368,10 @@ pub const DARK: Tokens = Tokens {
     ghost_fill: Color::srgba_u8(0x6B, 0x74, 0x6D, 0x24),
     amber: Color::srgb_u8(0xE0, 0xA4, 0x3A),
     amber_soft: Color::srgba_u8(0xE0, 0xA4, 0x3A, 0x1F),
+    host_row: Color::srgba_u8(0xE0, 0xA4, 0x3A, 0x1C),
+    host_ink: Color::srgb_u8(0xF8, 0xD6, 0x96),
+    net_blue: Color::srgb_u8(0xCB, 0xE0, 0xFD),
+    net_blue_soft: Color::srgba_u8(0x6F, 0xA8, 0xF5, 0x2E),
     scene_bg: Color::srgb_u8(0x12, 0x14, 0x12),
     axis: Color::srgb_u8(0x6C, 0x70, 0x6A),
     grid: Color::srgb_u8(0x23, 0x26, 0x23),
@@ -604,6 +627,75 @@ mod tests {
             let (a, b) = (lum(tokens.amber), lum(ground));
             let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
             assert!(ratio >= 2.5, "amber on its tint: {ratio}");
+        }
+    }
+
+    #[test]
+    fn the_host_and_network_swatches_have_their_values() {
+        let get = |t: &Tokens, s| t.get(s);
+        assert_eq!(
+            get(&LIGHT, Swatch::HostRow),
+            Color::srgba_u8(0xE0, 0x9A, 0x1F, 0x2A)
+        );
+        assert_eq!(
+            get(&LIGHT, Swatch::HostInk),
+            Color::srgb_u8(0x7A, 0x4A, 0x08)
+        );
+        assert_eq!(
+            get(&LIGHT, Swatch::NetBlue),
+            Color::srgb_u8(0x1F, 0x4F, 0xB0)
+        );
+        assert_eq!(
+            get(&LIGHT, Swatch::NetBlueSoft),
+            Color::srgba_u8(0x2B, 0x6C, 0xD9, 0x1A)
+        );
+        assert_eq!(
+            get(&DARK, Swatch::HostRow),
+            Color::srgba_u8(0xE0, 0xA4, 0x3A, 0x1C)
+        );
+        assert_eq!(
+            get(&DARK, Swatch::HostInk),
+            Color::srgb_u8(0xF8, 0xD6, 0x96)
+        );
+        assert_eq!(
+            get(&DARK, Swatch::NetBlue),
+            Color::srgb_u8(0xCB, 0xE0, 0xFD)
+        );
+        assert_eq!(
+            get(&DARK, Swatch::NetBlueSoft),
+            Color::srgba_u8(0x6F, 0xA8, 0xF5, 0x2E)
+        );
+    }
+
+    #[test]
+    fn host_rows_and_network_tags_are_readable_in_both_themes() {
+        for (name, tokens) in [("light", LIGHT), ("dark", DARK)] {
+            let surface = tokens.surface.to_linear();
+            let host = over(surface, tokens.host_row);
+            let amber_tag_on_host = over(host, tokens.amber_soft);
+            let amber_tag_on_surface = over(surface, tokens.amber_soft);
+            let net = over(surface, tokens.net_blue_soft);
+            let net_on_host = over(host, tokens.net_blue_soft);
+            let ink = tokens.host_ink.to_linear();
+            let blue = tokens.net_blue.to_linear();
+            for (what, ratio) in [
+                ("host ink on the host row", contrast(ink, host)),
+                (
+                    "host ink on the amber tag over a host row",
+                    contrast(ink, amber_tag_on_host),
+                ),
+                (
+                    "host ink on the amber tag over the surface",
+                    contrast(ink, amber_tag_on_surface),
+                ),
+                ("network blue on its tag", contrast(blue, net)),
+                (
+                    "network blue on its tag over a host row",
+                    contrast(blue, net_on_host),
+                ),
+            ] {
+                assert!(ratio >= 4.5, "{name}: {what}: {ratio:.2}");
+            }
         }
     }
 

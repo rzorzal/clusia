@@ -121,6 +121,8 @@ pub enum Modal {
     DiagramNode,
     /// The Full view of a Calls node, for `TabUi.calls_node`.
     CallsNode,
+    /// The setup plan of a review's tests, for `TestsModel.plan`.
+    TestSetup,
 }
 
 /// What the comment editor writes.
