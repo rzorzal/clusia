@@ -18,6 +18,7 @@ use clusia_core::keywords::{
     KeywordPlan, Region, Seed, UseCase, build_map,
 };
 use clusia_core::media::MediaKind;
+use clusia_core::prdata::CheckRun;
 use clusia_core::revalidation::{
     CommitLine, Decision, Proposal, Revalidation, RoundState, Verdict, fingerprint,
 };
@@ -25,7 +26,13 @@ use clusia_core::story::{
     Chip, RemovedStep, Step, StepHistory, StorySpec, StoryUseCase, StoryVersion, StoryVersionState,
     Tone,
 };
-use clusia_core::tests::{DiskItem, DiskKind, DiskReport, Engine, EngineKind, TestEngineInfo};
+use clusia_core::tests::{
+    ACTIVITY_WRITING, DiskItem, DiskKind, DiskReport, Ecosystem, Engine, EngineKind, EnvState,
+    Existing, NearTest, NearWhy, PlanCommand, PlanStep, RecipeProposal, RecipeSummary, RepoSignals,
+    ResultsFormat, RunOutcome, RunnerChoice, RunnerKind, STEP_IMAGE, STEP_SERVICES, STEP_STACK,
+    SetupPlan, StepPlace, StepState, TestCaseResult, TestEngineInfo, TestRun, TestScope,
+    TestStatus, TestsPhase, TestsView, Totals,
+};
 use clusia_core::time::civil_from_days;
 use clusia_core::{
     ActivitySummary, Anchor, ChecksSummary, Config, DayCount, Draft, DraftItem, DraftKind,
@@ -669,6 +676,344 @@ pub fn demo_test_disk() -> DiskReport {
         total_bytes: 7_200_000_000,
         note: None,
     }
+}
+
+/// The states of the Tests tab the demo can stage; a scene is one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemoTests {
+    Empty,
+    Generating,
+    Auto,
+    Running,
+    Failed,
+    Refused,
+    Stale,
+    Proposal,
+    Setup,
+    Functions,
+    Config,
+}
+
+/// The image the demo recipe builds (the mockup's tag).
+const TESTS_IMAGE: &str = "clusia/rzorzal-clusia:4f2a91c";
+/// A commit the demo review has been past: what a stale run was made at.
+const TESTS_OLD_HEAD: &str = "3a9c1e7b5d2f4a6c8e0b1d3f5a7c9e2b4d6f8a0c";
+const TESTS_RECIPE_HASH: &str = "5d1c0f3a9b7e";
+const TESTS_FAILING: &str = "store::refresh::failed_exchange_keeps_old_token";
+/// The failure's message: libtest's panic line names the place, as `failure_place` reads it.
+const TESTS_FAILURE: &str = "thread 'refresh::failed_exchange_keeps_old_token' panicked at src/auth/refresh.rs:44:9:\nassertion `left == right` failed\n  left: Token { value: \"\", .. }\n right: Token { value: \"old\", .. }";
+
+fn demo_tests_env(now: i64) -> EnvState {
+    EnvState {
+        head: HEAD_SHA.into(),
+        probed_at: now - 600,
+        engine: demo_test_engine().engine,
+        runner: RunnerKind::Container,
+        note: None,
+        sandbox_ok: true,
+        signals: RepoSignals {
+            dockerfiles: vec!["Dockerfile".into()],
+            lockfiles: vec!["Cargo.lock".into()],
+            toolchains: vec!["rust 1.99".into()],
+            ecosystems: vec![Ecosystem::Cargo],
+            ..RepoSignals::default()
+        },
+        existing: Existing {
+            images: vec![TESTS_IMAGE.into()],
+            ..Existing::default()
+        },
+        inputs_hash: "c41f7a02".into(),
+    }
+}
+
+fn demo_tests_recipe(by_hand: bool, services: &[&str]) -> RecipeSummary {
+    RecipeSummary {
+        hash: TESTS_RECIPE_HASH.into(),
+        by_hand,
+        runner: RunnerChoice::Auto,
+        image: Some(TESTS_IMAGE.into()),
+        setup: vec!["cargo fetch --locked".into()],
+        all: "cargo test --workspace".into(),
+        one: Some("cargo test -p store -- --exact {name}".into()),
+        some: None,
+        list: Some("cargo test --workspace -- --list".into()),
+        results: ResultsFormat::Libtest,
+        env: [
+            (
+                "DATABASE_URL".to_string(),
+                "postgres://test:test@postgres/clusia".to_string(),
+            ),
+            ("API_KEY".to_string(), "fake_k3y_9a1".to_string()),
+        ]
+        .into(),
+        services: services.iter().map(|s| s.to_string()).collect(),
+        problems: Vec::new(),
+    }
+}
+
+/// The 38 results of the demo's near-the-change run: the failure first, then the four the mockup
+/// lists, then thirty-three more that pass.
+fn demo_test_results() -> Vec<TestCaseResult> {
+    let result = |name: String, status, ms, file: &str, message: Option<&str>| TestCaseResult {
+        name,
+        file: Some(file.into()),
+        status,
+        duration_ms: Some(ms),
+        message: message.map(String::from),
+    };
+    let mut results = vec![result(
+        TESTS_FAILING.into(),
+        TestStatus::Failed,
+        210,
+        "src/auth/refresh.rs",
+        Some(TESTS_FAILURE),
+    )];
+    for (name, ms) in [
+        ("store::refresh::two_callers_share_one_exchange", 1_840),
+        ("http::retries_back_off", 9_800),
+        ("store::save_round_trip", 1_200),
+        ("config::reads_token_path", 20),
+    ] {
+        results.push(result(
+            name.into(),
+            TestStatus::Passed,
+            ms,
+            "tests/refresh.rs",
+            None,
+        ));
+    }
+    for i in 6..=38u64 {
+        results.push(result(
+            format!("store::cases::case_{i:02}"),
+            TestStatus::Passed,
+            30 + i,
+            "tests/refresh.rs",
+            None,
+        ));
+    }
+    results
+}
+
+fn demo_test_run(now: i64, head: &str, age: i64) -> TestRun {
+    TestRun {
+        id: "run-3".into(),
+        head: head.into(),
+        scope: TestScope::NearChange,
+        runner: RunnerKind::Container,
+        command: "cargo test -p store refresh".into(),
+        started_at: now - age,
+        duration_ms: 48_200,
+        exit_code: Some(101),
+        outcome: RunOutcome::Failed,
+        totals: Totals {
+            passed: 37,
+            failed: 1,
+            skipped: 0,
+        },
+        results: demo_test_results(),
+        log: Some(
+            "/Users/hubot/Library/Application Support/Clusia/tests/logs/rzorzal~clusia~123/run-3.log"
+                .into(),
+        ),
+        tail: format!("running 38 tests\ntest {TESTS_FAILING} ... FAILED\n\ntest result: FAILED. 37 passed; 1 failed; 0 ignored"),
+    }
+}
+
+fn demo_github_checks() -> Vec<CheckRun> {
+    ["build", "clippy", "test (macOS)", "test (linux)"]
+        .into_iter()
+        .map(|name| CheckRun {
+            name: name.into(),
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            started_at: None,
+            completed_at: None,
+            details_url: None,
+        })
+        .collect()
+}
+
+fn demo_tests_plan(steps: Vec<PlanStep>, done: bool) -> SetupPlan {
+    let command = |key: &str, command: &str| PlanCommand {
+        key: key.into(),
+        command: command.into(),
+    };
+    SetupPlan {
+        recipe_hash: TESTS_RECIPE_HASH.into(),
+        steps,
+        commands: vec![
+            command("all", "cargo test --workspace"),
+            command("one", "cargo test -p store -- --exact {name}"),
+            command("list", "cargo test --workspace -- --list"),
+        ],
+        commands_approved: done,
+        ready: done,
+        blocked: None,
+    }
+}
+
+/// The setup plan of the mockup: build, fetch, pull a service and start Clúsia's own copy of it
+/// on the host.
+fn demo_setup_steps(state: StepState, approved: bool) -> Vec<PlanStep> {
+    let step =
+        |id: &str, title: &str, command: &str, place, network, hint: Option<&str>| PlanStep {
+            id: id.into(),
+            title: title.into(),
+            command: command.into(),
+            place,
+            network,
+            hint: hint.map(String::from),
+            state: state.clone(),
+            approved,
+        };
+    vec![
+        step(
+            STEP_IMAGE,
+            "Build the image",
+            "docker build --target test -t clusia/rzorzal-clusia:4f2a91c .",
+            StepPlace::Container,
+            true,
+            Some("Builds on top of rust:1.99; a few minutes the first time"),
+        ),
+        step(
+            "work:0",
+            "Fetch the dependencies",
+            "cargo fetch --locked",
+            StepPlace::Container,
+            true,
+            None,
+        ),
+        step(
+            STEP_SERVICES,
+            "Pull the postgres service",
+            "docker compose pull postgres",
+            StepPlace::Container,
+            true,
+            None,
+        ),
+        step(
+            STEP_STACK,
+            "Start Clúsia's own postgres",
+            "docker compose -p clusia-rzorzal-clusia-123 up -d postgres",
+            StepPlace::Host,
+            false,
+            None,
+        ),
+    ]
+}
+
+/// What the daemon would answer `GetTests` with for the demo review in `state`; `now` is the
+/// clock the ages are counted from.
+pub fn demo_tests(now: i64, state: DemoTests) -> TestsView {
+    let mut view = TestsView::new(HEAD_SHA);
+    match state {
+        DemoTests::Empty => {}
+        DemoTests::Generating => {
+            view.phase = TestsPhase::Generating {
+                activity: Some(ACTIVITY_WRITING.into()),
+            };
+            view.env = Some(demo_tests_env(now));
+        }
+        DemoTests::Setup => {
+            view.phase = TestsPhase::NeedsSetup;
+            let mut env = demo_tests_env(now);
+            env.existing.images.clear();
+            env.existing.reviewer_services = vec!["postgres".into()];
+            view.env = Some(env);
+            view.recipe = Some(demo_tests_recipe(false, &["postgres"]));
+            view.plan = Some(demo_tests_plan(
+                demo_setup_steps(StepState::Missing, false),
+                false,
+            ));
+        }
+        DemoTests::Failed => {
+            view.phase = TestsPhase::Failed {
+                message: "The recipe is not valid: `all` is missing, so there is nothing to run."
+                    .into(),
+            };
+            view.env = Some(demo_tests_env(now));
+        }
+        DemoTests::Refused => {
+            view.phase = TestsPhase::NeedsSetup;
+            view.env = Some(demo_tests_env(now));
+            view.plan = Some(SetupPlan {
+                recipe_hash: String::new(),
+                steps: Vec::new(),
+                commands: Vec::new(),
+                commands_approved: false,
+                ready: false,
+                blocked: Some(
+                    "This pull request ships its own .clusia folder. Clúsia will not run a recipe that comes with the code it tests."
+                        .into(),
+                ),
+            });
+        }
+        DemoTests::Auto
+        | DemoTests::Running
+        | DemoTests::Stale
+        | DemoTests::Proposal
+        | DemoTests::Functions
+        | DemoTests::Config => {
+            view.phase = TestsPhase::Ready;
+            view.env = Some(demo_tests_env(now));
+            view.recipe = Some(demo_tests_recipe(state == DemoTests::Proposal, &[]));
+            view.plan = Some(demo_tests_plan(
+                demo_setup_steps(StepState::Done, true)
+                    .into_iter()
+                    .filter(|s| s.id == STEP_IMAGE || s.id == "work:0")
+                    .collect(),
+                true,
+            ));
+            view.listed = Some(412);
+            view.near = demo_test_results()
+                .into_iter()
+                .map(|r| NearTest {
+                    name: r.name,
+                    why: NearWhy::File,
+                })
+                .collect();
+            view.github_checks = demo_github_checks();
+            view.runs = vec![if state == DemoTests::Stale {
+                demo_test_run(now, TESTS_OLD_HEAD, 5 * 3600)
+            } else {
+                demo_test_run(now, HEAD_SHA, 240)
+            }];
+            if state == DemoTests::Running {
+                view.phase = TestsPhase::Running {
+                    run: "run-4".into(),
+                };
+                view.runs[0].started_at = now - 3600;
+            }
+            if state == DemoTests::Proposal {
+                view.proposal = Some(RecipeProposal {
+                    text: "[tests]\nrunner = \"container\"\nall = \"cargo nextest run --workspace\"\nresults = \"junit:target/nextest/ci/junit.xml\"\n".into(),
+                    hash: "b7e2a41c88d0".into(),
+                    at: now - 120,
+                });
+            }
+        }
+    }
+    view
+}
+
+/// The twelve results the demo's running scene has so far.
+pub fn demo_live_results() -> Vec<TestCaseResult> {
+    (1..=12u64)
+        .map(|i| TestCaseResult {
+            name: format!("store::cases::case_{i:02}"),
+            file: Some("tests/refresh.rs".into()),
+            status: TestStatus::Passed,
+            duration_ms: Some(20 + i),
+            message: None,
+        })
+        .collect()
+}
+
+/// The end of the output of the demo's running scene.
+pub fn demo_live_tail() -> String {
+    (9..=12)
+        .map(|i| format!("test store::cases::case_{i:02} ... ok\n"))
+        .collect()
 }
 
 /// A good harness test: Claude Code answered in 1.8 s.
@@ -4317,5 +4662,269 @@ mod tests {
         assert!(code.lines.iter().any(|l| l.number == 38 && !l.changed));
         let gone = demo_function_code("nowhere.rs#nothing#1");
         assert!(gone.unavailable.is_some() && gone.lines.is_empty());
+    }
+
+    const ALL_TESTS_STATES: [DemoTests; 11] = [
+        DemoTests::Empty,
+        DemoTests::Generating,
+        DemoTests::Auto,
+        DemoTests::Running,
+        DemoTests::Failed,
+        DemoTests::Refused,
+        DemoTests::Stale,
+        DemoTests::Proposal,
+        DemoTests::Setup,
+        DemoTests::Functions,
+        DemoTests::Config,
+    ];
+
+    #[test]
+    fn every_demo_tests_view_is_of_the_demo_head() {
+        for state in ALL_TESTS_STATES {
+            assert_eq!(demo_tests(NOW, state).head, HEAD_SHA, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn the_auto_view_is_the_mockups_done_run() {
+        let view = demo_tests(NOW, DemoTests::Auto);
+        assert_eq!(view.phase, TestsPhase::Ready);
+        assert_eq!(view.listed, Some(412));
+        assert_eq!(view.near.len(), 38);
+        let run = &view.runs[0];
+        assert_eq!(run.head, view.head, "the run is of the view's head");
+        assert_eq!(run.scope, TestScope::NearChange);
+        assert_eq!(
+            run.totals,
+            Totals {
+                passed: 37,
+                failed: 1,
+                skipped: 0
+            }
+        );
+        assert_eq!((run.duration_ms, run.exit_code), (48_200, Some(101)));
+        assert_eq!(run.outcome, RunOutcome::Failed);
+        assert_eq!(NOW - run.started_at, 240, "four minutes ago");
+        assert_eq!(run.results.len(), 38);
+        let failed: Vec<&str> = run
+            .results
+            .iter()
+            .filter(|r| r.status == TestStatus::Failed)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(failed, ["store::refresh::failed_exchange_keeps_old_token"]);
+        assert!(
+            view.near
+                .iter()
+                .all(|n| run.results.iter().any(|r| r.name == n.name)),
+            "every near test has a result"
+        );
+        let checks: Vec<(&str, Option<&str>)> = view
+            .github_checks
+            .iter()
+            .map(|c| (c.name.as_str(), c.conclusion.as_deref()))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                ("build", Some("success")),
+                ("clippy", Some("success")),
+                ("test (macOS)", Some("success")),
+                ("test (linux)", Some("success")),
+            ]
+        );
+        let recipe = view.recipe.as_ref().unwrap();
+        assert!(!recipe.by_hand);
+        assert_eq!(recipe.runner, RunnerChoice::Auto);
+        assert!(
+            recipe.one.is_some(),
+            "the ▶ per row needs a one-test command"
+        );
+        assert!(
+            recipe.services.is_empty(),
+            "the card says services: none needed"
+        );
+        assert_eq!(
+            recipe.env.get("API_KEY").map(String::as_str),
+            Some("fake_k3y_9a1")
+        );
+        assert!(view.plan.as_ref().unwrap().ready);
+    }
+
+    #[test]
+    fn the_failure_names_a_place_in_the_demo_diff() {
+        let view = demo_tests(NOW, DemoTests::Auto);
+        let failure = &view.runs[0].results[0];
+        assert_eq!(failure.file.as_deref(), Some("src/auth/refresh.rs"));
+        assert_eq!(
+            crate::screens::review::tests_tab::failure_place(failure),
+            Some(("src/auth/refresh.rs".to_string(), Some(44)))
+        );
+        // The line is on the new side of the demo patch, so the comment goes to the diff.
+        let (review, _) = demo_review(NOW);
+        let patch = review
+            .diff
+            .iter()
+            .find(|f| f.path == "src/auth/refresh.rs")
+            .and_then(|f| f.patch.as_deref())
+            .expect("the demo diff has the file");
+        assert!(
+            clusia_core::can_comment(patch, clusia_core::Side::Right, 44),
+            "line 44 of src/auth/refresh.rs is in the demo patch"
+        );
+    }
+
+    #[test]
+    fn each_state_has_what_its_scene_draws() {
+        let phase = |s| demo_tests(NOW, s).phase;
+        assert_eq!(phase(DemoTests::Empty), TestsPhase::NotGenerated);
+        assert_eq!(
+            phase(DemoTests::Generating),
+            TestsPhase::Generating {
+                activity: Some(ACTIVITY_WRITING.into())
+            }
+        );
+        assert_eq!(
+            phase(DemoTests::Running),
+            TestsPhase::Running {
+                run: "run-4".into()
+            }
+        );
+        assert!(matches!(
+            phase(DemoTests::Failed),
+            TestsPhase::Failed { .. }
+        ));
+
+        let refused = demo_tests(NOW, DemoTests::Refused);
+        let blocked = refused.plan.as_ref().and_then(|p| p.blocked.clone());
+        assert!(blocked.is_some_and(|b| b.contains(".clusia")));
+
+        let stale = demo_tests(NOW, DemoTests::Stale);
+        assert_eq!(stale.phase, TestsPhase::Ready);
+        assert_ne!(stale.runs[0].head, stale.head, "a run of another head");
+
+        let proposal = demo_tests(NOW, DemoTests::Proposal);
+        assert!(proposal.recipe.as_ref().unwrap().by_hand);
+        assert!(
+            proposal
+                .proposal
+                .as_ref()
+                .is_some_and(|p| !p.text.is_empty())
+        );
+
+        for same in [DemoTests::Functions, DemoTests::Config] {
+            assert_eq!(
+                demo_tests(NOW, same),
+                demo_tests(NOW, DemoTests::Auto),
+                "{same:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_setup_view_has_the_mockups_four_steps_and_a_host_stack() {
+        let view = demo_tests(NOW, DemoTests::Setup);
+        assert_eq!(view.phase, TestsPhase::NeedsSetup);
+        let plan = view.plan.as_ref().unwrap();
+        assert!(plan.blocked.is_none() && !plan.ready && !plan.commands_approved);
+        let ids: Vec<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, [STEP_IMAGE, "work:0", STEP_SERVICES, STEP_STACK]);
+        assert!(
+            plan.steps
+                .iter()
+                .all(|s| s.state == StepState::Missing && !s.approved)
+        );
+        let stack = plan.steps.last().unwrap();
+        assert_eq!(stack.place, StepPlace::Host);
+        assert!(!stack.network);
+        assert!(
+            plan.steps[..3]
+                .iter()
+                .all(|s| s.place == StepPlace::Container && s.network)
+        );
+        let keys: Vec<&str> = plan.commands.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["all", "one", "list"]);
+        assert_eq!(plan.recipe_hash, view.recipe.as_ref().unwrap().hash);
+        assert_eq!(view.recipe.as_ref().unwrap().services, ["postgres"]);
+        let existing = &view.env.as_ref().unwrap().existing;
+        assert_eq!(existing.reviewer_services, ["postgres"]);
+    }
+
+    #[test]
+    fn the_live_run_has_twelve_results_and_a_short_tail() {
+        let results = demo_live_results();
+        assert_eq!(results.len(), 12);
+        assert!(results.iter().all(|r| r.status == TestStatus::Passed));
+        let tail = demo_live_tail();
+        assert!(tail.len() < clusia_core::tests::TAIL_MAX);
+        assert!(tail.contains("store::cases::case_12"));
+    }
+
+    #[test]
+    fn the_engine_and_disk_are_the_config_mockups() {
+        let info = demo_test_engine();
+        let engine = info.engine.as_ref().unwrap();
+        assert_eq!((engine.kind, engine.running), (EngineKind::Colima, true));
+        assert_eq!(
+            engine.endpoint,
+            "unix:///Users/octo/.colima/default/docker.sock"
+        );
+        assert_eq!((info.sandbox_ok, info.cores), (true, 10));
+
+        let disk = demo_test_disk();
+        let sum = |kinds: &[DiskKind]| -> u64 {
+            disk.items
+                .iter()
+                .filter(|i| kinds.contains(&i.kind))
+                .map(|i| i.bytes)
+                .sum()
+        };
+        assert_eq!(
+            disk.items
+                .iter()
+                .filter(|i| i.kind == DiskKind::Image)
+                .count(),
+            3
+        );
+        assert_eq!(sum(&[DiskKind::Image]), 4_100_000_000);
+        assert_eq!(sum(&[DiskKind::Volume, DiskKind::Cache]), 2_300_000_000);
+        assert_eq!(sum(&[DiskKind::WorktreeDir]), 800_000_000);
+        assert_eq!(disk.total_bytes, 7_200_000_000);
+        assert_eq!(
+            crate::screens::review::tests_tab::size_label(disk.total_bytes),
+            "7.2 GB"
+        );
+    }
+
+    #[test]
+    fn the_demo_tests_data_names_only_demo_owners() {
+        let mut text = String::new();
+        let mut images: Vec<String> = Vec::new();
+        for state in ALL_TESTS_STATES {
+            let view = demo_tests(NOW, state);
+            if let Some(env) = &view.env {
+                images.extend(env.existing.images.iter().cloned());
+            }
+            text.push_str(&serde_json::to_string(&view).unwrap());
+        }
+        let disk = demo_test_disk();
+        for item in &disk.items {
+            assert!(
+                item.repo
+                    .as_deref()
+                    .is_none_or(|r| r.starts_with("rzorzal/")),
+                "{item:?}"
+            );
+            if item.kind == DiskKind::Image {
+                images.push(item.name.clone());
+            }
+        }
+        text.push_str(&serde_json::to_string(&disk).unwrap());
+        assert!(!images.is_empty());
+        for image in &images {
+            assert!(image.starts_with("clusia/rzorzal-"), "{image}");
+        }
+        assert!(!text.contains("github.com/") && !text.contains("https://"));
+        assert!(text.contains("rzorzal/"));
     }
 }
