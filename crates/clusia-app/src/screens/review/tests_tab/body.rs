@@ -440,17 +440,33 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
 }
 
 /// The body's content, centered in both directions.
+/// Centers what `build` draws, and scrolls when it is taller than the window: automatic margins
+/// centre it without pushing its top out of reach, as `justify_content` would.
 fn centered(p: &mut Spawner, build: impl FnOnce(&mut Spawner)) {
-    p.spawn(Node {
-        flex_grow: 1.0,
-        min_height: px(0),
-        padding: px(25).all(),
-        flex_direction: FlexDirection::Column,
-        justify_content: JustifyContent::Center,
-        align_items: AlignItems::Center,
-        ..default()
-    })
-    .with_children(build);
+    p.spawn((
+        Node {
+            flex_grow: 1.0,
+            min_height: px(0),
+            padding: px(25).all(),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+        ScrollArea,
+        ScrollPosition::default(),
+    ))
+    .with_children(|scroller| {
+        scroller
+            .spawn(Node {
+                margin: UiRect::vertical(Val::Auto),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                width: percent(100),
+                ..default()
+            })
+            .with_children(build);
+    });
 }
 
 fn card_node() -> Node {

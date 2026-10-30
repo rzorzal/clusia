@@ -28,7 +28,8 @@ use crate::screens::review::editor::{not_sent, read_only_reason};
 use crate::screens::review::rows;
 use crate::theme::Swatch;
 use crate::ui::kit::{
-    Clickable, Fill, HoverFill, Stroke, Type, Variant, button, card, chip, divider, text,
+    Clickable, Fill, HoverFill, Preview, Stroke, Type, Variant, button, card, chip, divider, text,
+    wrapped_text,
 };
 
 /// The longest name a row shows, in characters; the rest is cut with `…`.
@@ -384,6 +385,8 @@ fn shell(commands: &mut Commands, region: Entity) -> ListState {
             width: percent(100),
             justify_content: JustifyContent::SpaceBetween,
             align_items: AlignItems::Center,
+            flex_wrap: FlexWrap::Wrap,
+            row_gap: px(6),
             flex_shrink: 0.0,
             padding: UiRect::axes(px(14), px(10)),
             ..default()
@@ -507,7 +510,7 @@ fn refresh(
             if let Some(line) = new.shape.note {
                 note.with_children(|n| {
                     n.spawn((
-                        text(fonts, line, Type::MUTED),
+                        wrapped_text(fonts, line, Type::MUTED),
                         Node {
                             margin: UiRect::all(px(14)),
                             ..default()
@@ -540,6 +543,8 @@ fn draw_header(h: &mut Spawner, fonts: &UiFonts, pr: &PrRef, head: &Head) {
     h.spawn(text(fonts, "Tests", Type::HEADING));
     h.spawn(Node {
         column_gap: px(6),
+        row_gap: px(6),
+        flex_wrap: FlexWrap::Wrap,
         ..default()
     })
     .with_children(|chips| {
@@ -700,12 +705,16 @@ fn row_content(r: &mut Spawner, fonts: &UiFonts, pr: &PrRef, result: &TestCaseRe
         TestStatus::Skipped => ("–", Swatch::Muted),
     };
     r.spawn(text(fonts, glyph, Type::BODY.ink(ink)));
-    r.spawn(Node {
-        flex_grow: 1.0,
-        min_width: px(0),
-        overflow: Overflow::clip(),
-        ..default()
-    })
+    // A name wider than the row is cut by the row; selecting it shows it whole in the detail.
+    r.spawn((
+        Node {
+            flex_grow: 1.0,
+            min_width: px(0),
+            overflow: Overflow::clip(),
+            ..default()
+        },
+        Preview,
+    ))
     .with_children(|name| {
         name.spawn((
             text(fonts, cut_name(&result.name), Type::MONO.ink(Swatch::Fg)),

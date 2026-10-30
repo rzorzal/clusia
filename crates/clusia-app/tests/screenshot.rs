@@ -87,6 +87,30 @@ fn demo_screenshots() {
             vec!["--demo", "--dark", "--scene", scene],
         ));
     }
+    // The Tests tab and Config › Tests: six scenes in both themes, five in light only.
+    for scene in [
+        "tests-empty",
+        "tests-auto",
+        "tests-setup",
+        "config-tests",
+        "tests-running",
+        "tests-failed",
+    ] {
+        shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
+        shots.push((
+            format!("{scene}-dark"),
+            vec!["--demo", "--dark", "--scene", scene],
+        ));
+    }
+    for scene in [
+        "tests-generating",
+        "tests-refused",
+        "tests-stale",
+        "tests-proposal",
+        "tests-functions",
+    ] {
+        shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
+    }
     let only = std::env::var("CLUSIA_SCREENSHOT_ONLY").ok();
     let mut rendered = 0;
     for (name, args) in &shots {
@@ -124,6 +148,10 @@ fn demo_screenshots() {
         if name.starts_with("diff-calls-") && !name.starts_with("diff-calls-unsupported") {
             let share = non_background_share(&out, (0.28, 0.25, 0.72, 0.85));
             assert!(share > 0.02, "{name}: the call graph is empty");
+        }
+        if name.starts_with("tests-auto-") || name.starts_with("tests-running-") {
+            let share = non_background_share(&out, (0.03, 0.47, 0.52, 0.85));
+            assert!(share > 0.02, "{name}: the test list is empty ({share})");
         }
         if let Ok(keep) = std::env::var("CLUSIA_SCREENSHOTS") {
             std::fs::copy(&out, Path::new(&keep).join(format!("{name}.png"))).unwrap();

@@ -94,6 +94,28 @@ pub enum Scene {
     ConfigFocus,
     /// The window after a restart, its tabs back.
     Restored,
+    /// The Tests tab before anything was generated (Tests-empty.png).
+    TestsEmpty,
+    /// The Tests tab while the recipe is written.
+    TestsGenerating,
+    /// Auto Tests with a finished run and a failure selected (Tests-tests.png).
+    TestsAuto,
+    /// Auto Tests while a run goes: the results so far and the log.
+    TestsRunning,
+    /// The Tests tab after a recipe that could not be used.
+    TestsFailed,
+    /// The Tests tab when Clúsia refuses to run the tests.
+    TestsRefused,
+    /// Auto Tests with a run of an older commit.
+    TestsStale,
+    /// Auto Tests over a recipe edited by hand, with the agent's proposal waiting.
+    TestsProposal,
+    /// The setup plan to approve, over the tab (Tests-setup.png).
+    TestsSetup,
+    /// The Run Function tests sub-tab (its note only; Tests-functions.png shows the later sub-tab).
+    TestsFunctions,
+    /// Config › Tests (Tests-config.png).
+    ConfigTests,
 }
 
 impl Scene {
@@ -126,6 +148,24 @@ impl Scene {
     /// The scenes of the Diagrams tab; each one hides the right panel, as the mockups have none.
     pub fn is_diagram(self) -> bool {
         self.diagram_kind().is_some() || self == Scene::DiagramsDrawing
+    }
+
+    /// The scenes that show a review's Tests tab; each one hides the right panel, as the
+    /// mockups have none.
+    pub fn is_tests(self) -> bool {
+        matches!(
+            self,
+            Scene::TestsEmpty
+                | Scene::TestsGenerating
+                | Scene::TestsAuto
+                | Scene::TestsRunning
+                | Scene::TestsFailed
+                | Scene::TestsRefused
+                | Scene::TestsStale
+                | Scene::TestsProposal
+                | Scene::TestsSetup
+                | Scene::TestsFunctions
+        )
     }
 
     /// The Diff view a scene shows, when it shows one (Config's *Open the Diff as* is not touched).
@@ -392,6 +432,32 @@ mod tests {
             assert!(scene.is_diagram(), "{name}");
         }
         assert!(!Scene::Diff.is_diagram() && !Scene::Audits.is_diagram());
+    }
+
+    #[test]
+    fn the_tests_scenes_parse_and_say_which_are_in_a_review() {
+        for (name, scene, in_review) in [
+            ("tests-empty", Scene::TestsEmpty, true),
+            ("tests-generating", Scene::TestsGenerating, true),
+            ("tests-auto", Scene::TestsAuto, true),
+            ("tests-running", Scene::TestsRunning, true),
+            ("tests-failed", Scene::TestsFailed, true),
+            ("tests-refused", Scene::TestsRefused, true),
+            ("tests-stale", Scene::TestsStale, true),
+            ("tests-proposal", Scene::TestsProposal, true),
+            ("tests-setup", Scene::TestsSetup, true),
+            ("tests-functions", Scene::TestsFunctions, true),
+            ("config-tests", Scene::ConfigTests, false),
+        ] {
+            assert_eq!(
+                parse(&["--demo", "--scene", name]).unwrap().scene,
+                Some(scene),
+                "{name}"
+            );
+            assert_eq!(scene.is_tests(), in_review, "{name}");
+            assert!(!scene.is_diagram(), "{name}");
+        }
+        assert!(!Scene::Diff.is_tests() && !Scene::Audits.is_tests());
     }
 
     #[test]

@@ -24,7 +24,8 @@ use crate::review_state::ReviewTabs;
 use crate::screens::review::editor::{not_sent, read_only_reason};
 use crate::theme::Swatch;
 use crate::ui::kit::{
-    Fill, Tone, Type, Variant, badge, button, card, disabled_button, text, wrapped_text,
+    Fill, Tone, Type, Variant, badge, button, card, disabled_button, disabled_wrapping_button,
+    text, wrapped_text, wrapping_button,
 };
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -824,7 +825,7 @@ fn run_button(
 ) {
     if on {
         p.spawn((
-            button(fonts, label, variant),
+            wrapping_button(fonts, label, variant),
             RunButton {
                 pr: pr.clone(),
                 scope,
@@ -832,7 +833,7 @@ fn run_button(
             observe(on_run),
         ));
     } else {
-        p.spawn(disabled_button(fonts, label));
+        p.spawn(disabled_wrapping_button(fonts, label));
     }
 }
 

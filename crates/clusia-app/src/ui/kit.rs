@@ -467,9 +467,20 @@ pub fn icon_button(icon: Icon, v: Variant, side: f32) -> impl Bundle {
 
 /// A button that cannot be used right now: same size, faint, no `Activate`.
 pub fn disabled_button(fonts: &UiFonts, label: &str) -> impl Bundle {
+    disabled_button_with(fonts, label, false)
+}
+
+/// `disabled_button` whose label breaks onto more lines, as `wrapping_button`'s does.
+pub fn disabled_wrapping_button(fonts: &UiFonts, label: &str) -> impl Bundle {
+    disabled_button_with(fonts, label, true)
+}
+
+fn disabled_button_with(fonts: &UiFonts, label: &str, wrap: bool) -> impl Bundle {
     (
         Node {
-            height: px(30),
+            height: if wrap { auto() } else { px(30) },
+            min_height: if wrap { px(30) } else { auto() },
+            max_width: if wrap { percent(100) } else { auto() },
             padding: label_padding(12.0, Type::STRONG.size),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
@@ -484,10 +495,13 @@ pub fn disabled_button(fonts: &UiFonts, label: &str) -> impl Bundle {
         Fill(Swatch::Chrome),
         BorderColor::default(),
         Stroke(Swatch::Line),
-        children![text(
-            fonts,
-            label.to_string(),
-            Type::STRONG.ink(Swatch::Faint)
+        children![(
+            text(fonts, label.to_string(), Type::STRONG.ink(Swatch::Faint)),
+            if wrap {
+                TextLayout::linebreak(LineBreak::WordOrCharacter)
+            } else {
+                TextLayout::default()
+            },
         )],
     )
 }
