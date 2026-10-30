@@ -756,6 +756,66 @@ pub fn tests_view(
     view
 }
 
+/// A finished run of the demo recipe at `head`: 48.2 s in the container, nothing listed.
+pub fn tests_run(
+    head: &str,
+    started_at: i64,
+    outcome: clusia_core::tests::RunOutcome,
+    totals: clusia_core::tests::Totals,
+) -> clusia_core::tests::TestRun {
+    use clusia_core::tests::{RunnerKind, TestRun, TestScope};
+    TestRun {
+        id: format!("r{started_at}"),
+        head: head.into(),
+        scope: TestScope::NearChange,
+        runner: RunnerKind::Container,
+        command: "cargo test -p store".into(),
+        started_at,
+        duration_ms: 48_200,
+        exit_code: Some(0),
+        outcome,
+        totals,
+        results: Vec::new(),
+        log: None,
+        tail: String::new(),
+    }
+}
+
+/// The recipe the demo review's tests use.
+pub fn tests_recipe() -> clusia_core::tests::RecipeSummary {
+    use clusia_core::tests::{RecipeSummary, ResultsFormat, RunnerChoice};
+    RecipeSummary {
+        hash: "h1".into(),
+        by_hand: false,
+        runner: RunnerChoice::Container,
+        image: Some("dockerfile: Dockerfile".into()),
+        setup: Vec::new(),
+        all: "cargo test".into(),
+        one: Some("cargo test -- --exact {name}".into()),
+        some: None,
+        list: Some("cargo test -- --list".into()),
+        results: ResultsFormat::Libtest,
+        env: Default::default(),
+        services: Vec::new(),
+        problems: Vec::new(),
+    }
+}
+
+/// A setup plan over `steps`; `approved` also makes it ready.
+pub fn tests_plan(
+    steps: Vec<clusia_core::tests::PlanStep>,
+    approved: bool,
+) -> clusia_core::tests::SetupPlan {
+    clusia_core::tests::SetupPlan {
+        recipe_hash: "h1".into(),
+        steps,
+        commands: Vec::new(),
+        commands_approved: approved,
+        ready: approved,
+        blocked: None,
+    }
+}
+
 fn right(path: &str, line: u32, commit: &str) -> Anchor {
     Anchor {
         path: path.into(),

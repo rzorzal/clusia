@@ -5,6 +5,7 @@
 //! text helpers make it printable and nothing in this module acts on its content.
 
 pub mod body;
+pub(crate) mod top;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -684,6 +685,7 @@ impl Plugin for TestsPlugin {
                     ),
                     flush_tails.run_if(|models: Res<TestsModels>| models.pending_tail()),
                     body::fill_tests.run_if(tests_views_changed),
+                    top::fill_top.run_if(tests_views_changed),
                 )
                     .chain()
                     .after(ReviewSystems),
