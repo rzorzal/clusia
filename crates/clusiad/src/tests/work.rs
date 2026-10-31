@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clusia_core::tests::{
-    Approval, Approve, EnvState, Listing, MESSAGE_MAX, PlanStep, RECIPE_FILE, RESULTS_MAX,
-    RecipePromptContext, RecipeProposal, ResultsFormat, RunOutcome, RunnerKind, STEP_ENGINE,
-    STEP_IMAGE, STEP_SERVICES, STEP_STACK, STEP_TESTS, SetupPlan, StepState, TAIL_MAX,
+    Approval, Approve, EnvState, Listing, MESSAGE_MAX, PlanStep, RECIPE_CHANGED, RECIPE_FILE,
+    RESULTS_MAX, RecipePromptContext, RecipeProposal, ResultsFormat, RunOutcome, RunnerKind,
+    STEP_ENGINE, STEP_IMAGE, STEP_SERVICES, STEP_STACK, STEP_TESTS, SetupPlan, StepState, TAIL_MAX,
     TestCaseResult, TestRun, TestScope, TestStatus, TestsPhase, Totals, keep_runs,
 };
 use clusia_core::{PrRef, Review};
@@ -412,9 +412,7 @@ pub(super) async fn accept_setup(
     let snap = env::snapshot(shared, pr).await;
     let plan = usable(snap)?.plan;
     if recipe_hash != plan.recipe_hash {
-        return Err(not_alive(
-            "The recipe changed since you saw the setup plan; look at it again".into(),
-        ));
+        return Err(not_alive(RECIPE_CHANGED.into()));
     }
     let wanted: BTreeSet<String> = match approve {
         Approve::All => plan

@@ -582,7 +582,17 @@ async fn a_hand_edited_recipe_gets_a_proposal_not_an_overwrite() {
     );
     assert!(view.recipe.as_ref().unwrap().by_hand);
 
-    let Outcome::Ok(Reply::Tests(view)) = accept_recipe(&lab.shared, &pr(7)).await else {
+    assert_eq!(
+        refused(accept_recipe(&lab.shared, &pr(7), "not-the-shown-one").await),
+        clusia_core::tests::RECIPE_CHANGED
+    );
+    assert_eq!(
+        std::fs::read_to_string(lab.recipe_file(7)).unwrap(),
+        mine,
+        "a stale hash writes nothing"
+    );
+    let Outcome::Ok(Reply::Tests(view)) = accept_recipe(&lab.shared, &pr(7), &proposal.hash).await
+    else {
         panic!("accepted");
     };
     assert_eq!(
@@ -592,7 +602,7 @@ async fn a_hand_edited_recipe_gets_a_proposal_not_an_overwrite() {
     assert_eq!(view.proposal, None);
     assert!(!view.recipe.as_ref().unwrap().by_hand, "Clúsia's own again");
     assert_eq!(
-        refused(accept_recipe(&lab.shared, &pr(7)).await),
+        refused(accept_recipe(&lab.shared, &pr(7), &proposal.hash).await),
         "There is no recipe proposal to accept"
     );
 }
@@ -1232,7 +1242,7 @@ async fn a_review_that_is_not_open_is_refused_but_can_be_read() {
         approve(&lab, 9, Approve::All).await,
         run(&lab.shared, &pr(9), TestScope::All).await,
         list(&lab.shared, &pr(9)).await,
-        accept_recipe(&lab.shared, &pr(9)).await,
+        accept_recipe(&lab.shared, &pr(9), "h").await,
     ] {
         assert!(refused(out).contains("no review for acme/widgets#9; open it first"));
     }
@@ -2060,4 +2070,140 @@ fn a_rewritten_git_file_cannot_point_a_mount_elsewhere() {
     )
     .unwrap();
     assert_eq!(env::git_dirs_of(&wt, &writable), None, "no back-pointer");
+}
+
+#[tokio::test]
+async fn the_view_counts_the_listed_tests_of_its_own_head_only() {
+    let lab = lab(Machine::NoEngine, Vec::new(), &[7], |_, _| {});
+    assert_eq!(env::view(&lab.shared, &pr(7)).await.listed, None);
+    let known = |name: &str| clusia_core::tests::KnownTest {
+        name: name.into(),
+        file: None,
+        module: None,
+    };
+    let record = TestsRecord {
+        listing: Some(clusia_core::tests::Listing {
+            head: "h1".into(),
+            tests: vec![known("a::one"), known("a::two"), known("b::three")],
+        }),
+        ..TestsRecord::default()
+    };
+    save_tests(&lab.shared.paths, &pr(7), &record).unwrap();
+    let view = env::view(&lab.shared, &pr(7)).await;
+    assert_eq!((view.head.as_str(), view.listed), ("h1", Some(3)));
+    let mut review = reviews::load_stored(&lab.shared, &pr(7)).unwrap().unwrap();
+    review.head_sha = "h2".into();
+    save_review(&lab.shared.paths, &review).unwrap();
+    assert_eq!(
+        env::view(&lab.shared, &pr(7)).await.listed,
+        None,
+        "a listing of an older head counts nothing"
+    );
+}
+
+#[tokio::test]
+async fn the_engine_check_names_the_engine_and_the_cores() {
+    let lab = lab(
+        Machine::Colima { running: true },
+        Vec::new(),
+        &[],
+        |_, _| {},
+    );
+    let Outcome::Ok(Reply::TestEngine(info)) = check_engine(&lab.shared, None).await else {
+        panic!("an answer");
+    };
+    let engine = info.engine.expect("colima is found");
+    assert_eq!(engine.kind, clusia_core::tests::EngineKind::Colima);
+    assert!(engine.running);
+    assert_eq!(info.note, None);
+    assert!(info.cores >= 1);
+}
+
+#[tokio::test]
+async fn the_engine_check_without_an_engine_says_why() {
+    let lab = lab(Machine::NoEngine, Vec::new(), &[], |_, _| {});
+    let Outcome::Ok(Reply::TestEngine(info)) = check_engine(&lab.shared, None).await else {
+        panic!("an answer");
+    };
+    assert_eq!(info.engine, None);
+    assert!(!info.sandbox_ok);
+    assert!(
+        info.note
+            .as_deref()
+            .is_some_and(|n| n.contains("sandbox-exec is missing")),
+        "{:?}",
+        info.note
+    );
+}
+
+#[tokio::test]
+async fn the_engine_check_of_a_review_reads_the_engine_again_and_tells_its_view() {
+    let mut lab = lab(
+        Machine::Colima { running: true },
+        vec![answer(recipe())],
+        &[7],
+        |_, _| {},
+    );
+    generated(&lab, 7).await;
+    // The engine was not there when the environment was probed.
+    env::update_record(&lab.shared, &pr(7), |record| {
+        let env = record.env.as_mut().expect("the probe is stored");
+        env.engine = None;
+        env.note = Some("Start your container engine.".into());
+    })
+    .await;
+    lab.drain();
+    let Outcome::Ok(Reply::TestEngine(info)) = check_engine(&lab.shared, Some(pr(7))).await else {
+        panic!("an answer");
+    };
+    assert!(info.engine.as_ref().is_some_and(|e| e.running));
+    let told = lab
+        .drain()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::TestEnv { view, .. } => Some(view),
+            _ => None,
+        })
+        .expect("the review's view is told");
+    let env = told.env.expect("an environment");
+    assert!(env.engine.as_ref().is_some_and(|e| e.running));
+    assert_eq!(env.note, None);
+    assert_eq!(
+        FakeClaude::calls(lab.fake.path()).len(),
+        1,
+        "only the recipe turn: the check spends no agent turn"
+    );
+}
+
+#[tokio::test]
+async fn the_engine_check_tells_no_view_for_a_review_that_is_not_open() {
+    let mut lab = lab(
+        Machine::Colima { running: true },
+        Vec::new(),
+        &[],
+        |_, _| {},
+    );
+    lab.drain();
+    assert!(matches!(
+        check_engine(&lab.shared, Some(pr(99))).await,
+        Outcome::Ok(Reply::TestEngine(_))
+    ));
+    assert!(
+        lab.drain()
+            .iter()
+            .all(|event| !matches!(event, Event::TestEnv { .. }))
+    );
+}
+
+#[tokio::test]
+async fn the_engine_check_is_refused_while_the_daemon_stops() {
+    let lab = lab(Machine::NoEngine, Vec::new(), &[], |_, _| {});
+    lab.shared
+        .tests
+        .closing
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        refused(check_engine(&lab.shared, None).await),
+        "clusiad is stopping"
+    );
 }

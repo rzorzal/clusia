@@ -467,9 +467,20 @@ pub fn icon_button(icon: Icon, v: Variant, side: f32) -> impl Bundle {
 
 /// A button that cannot be used right now: same size, faint, no `Activate`.
 pub fn disabled_button(fonts: &UiFonts, label: &str) -> impl Bundle {
+    disabled_button_with(fonts, label, false)
+}
+
+/// `disabled_button` whose label breaks onto more lines, as `wrapping_button`'s does.
+pub fn disabled_wrapping_button(fonts: &UiFonts, label: &str) -> impl Bundle {
+    disabled_button_with(fonts, label, true)
+}
+
+fn disabled_button_with(fonts: &UiFonts, label: &str, wrap: bool) -> impl Bundle {
     (
         Node {
-            height: px(30),
+            height: if wrap { auto() } else { px(30) },
+            min_height: if wrap { px(30) } else { auto() },
+            max_width: if wrap { percent(100) } else { auto() },
             padding: label_padding(12.0, Type::STRONG.size),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
@@ -484,10 +495,13 @@ pub fn disabled_button(fonts: &UiFonts, label: &str) -> impl Bundle {
         Fill(Swatch::Chrome),
         BorderColor::default(),
         Stroke(Swatch::Line),
-        children![text(
-            fonts,
-            label.to_string(),
-            Type::STRONG.ink(Swatch::Faint)
+        children![(
+            text(fonts, label.to_string(), Type::STRONG.ink(Swatch::Faint)),
+            if wrap {
+                TextLayout::linebreak(LineBreak::WordOrCharacter)
+            } else {
+                TextLayout::default()
+            },
         )],
     )
 }
@@ -647,8 +661,8 @@ pub fn disabled_checkbox(on: bool) -> impl Bundle {
 pub fn chip(fonts: &UiFonts, label: &str, selected: bool) -> impl Bundle {
     let (fill, hover, t) = if selected {
         (
-            Swatch::GreenSoft,
-            Swatch::GreenSoft,
+            Swatch::GreenTint,
+            Swatch::GreenTint,
             Type::STRONG.ink(Swatch::Green),
         )
     } else {
@@ -678,6 +692,8 @@ pub enum Tone {
     Green,
     Orange,
     Neutral,
+    Amber,
+    Blue,
 }
 
 impl Tone {
@@ -687,6 +703,8 @@ impl Tone {
             Tone::Green => (Swatch::GreenSoft, Swatch::Green),
             Tone::Orange => (Swatch::OrangeSoft, Swatch::Orange),
             Tone::Neutral => (Swatch::Chrome, Swatch::Muted),
+            Tone::Amber => (Swatch::AmberSoft, Swatch::HostInk),
+            Tone::Blue => (Swatch::NetBlueSoft, Swatch::NetBlue),
         }
     }
 }
@@ -1371,6 +1389,33 @@ mod tests {
             app.update();
         }
         (app, window, b)
+    }
+
+    #[test]
+    fn amber_and_blue_tones_use_the_host_and_network_swatches() {
+        assert_eq!(Tone::Amber.swatches(), (Swatch::AmberSoft, Swatch::HostInk));
+        assert_eq!(
+            Tone::Blue.swatches(),
+            (Swatch::NetBlueSoft, Swatch::NetBlue)
+        );
+        let mut app = testing::app(Snapshot::default());
+        let fonts = UiFonts::default();
+        let host = app
+            .world_mut()
+            .spawn(badge(&fonts, "host", Tone::Amber))
+            .id();
+        let net = app
+            .world_mut()
+            .spawn(badge(&fonts, "network", Tone::Blue))
+            .id();
+        app.update();
+        assert_eq!(bg(&mut app, host), LIGHT.amber_soft);
+        assert_eq!(bg(&mut app, net), LIGHT.net_blue_soft);
+        let label = app.world().get::<Children>(net).unwrap()[0];
+        assert_eq!(
+            app.world().get::<TextColor>(label).unwrap().0,
+            LIGHT.net_blue
+        );
     }
 
     #[test]

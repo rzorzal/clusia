@@ -14,6 +14,7 @@ pub mod notifications;
 mod placeholders;
 pub mod repos;
 pub mod spotlight;
+pub mod test_runs;
 
 use std::collections::HashMap;
 
@@ -33,6 +34,7 @@ use crate::clock::Clock;
 use crate::fonts::UiFonts;
 use crate::nav::{ConfigScreen, Nav, NavSystems, Screen, Section};
 use crate::platform_open::{OpenUrls, visit};
+use crate::screens::review::tests_tab::TestMachine;
 use crate::snapshot::Snapshot;
 use crate::theme::Swatch;
 use crate::ui::kit::{
@@ -51,6 +53,7 @@ pub enum PageView {
     About(about::AboutView),
     Notifications(notifications::NotificationsView),
     Harness(Box<harness::HarnessView>),
+    Tests(Box<test_runs::TestsPageView>),
     Plugins,
 }
 
@@ -63,6 +66,8 @@ pub fn page_view(
     form: &areas::AreaForm,
     switched: &harness::Switched,
     missing_font: Option<&(String, crate::fonts::Unusable)>,
+    machine: &TestMachine,
+    home: Option<&str>,
 ) -> PageView {
     match section {
         Section::General => PageView::General(general::view(snap, rejected)),
@@ -78,6 +83,7 @@ pub fn page_view(
                 .with_form(form)
                 .with_switched(switched),
         )),
+        Section::Tests => PageView::Tests(Box::new(test_runs::view(snap, rejected, machine, home))),
         Section::Plugins => PageView::Plugins,
     }
 }
@@ -126,6 +132,7 @@ impl Plugin for ConfigPlugin {
             .init_resource::<harness::Switched>()
             .init_resource::<spotlight::Spotlight>()
             .init_resource::<appearance::FontQuery>()
+            .init_resource::<TestMachine>()
             .add_systems(
                 Update,
                 (
@@ -136,7 +143,19 @@ impl Plugin for ConfigPlugin {
                     areas::reset_form_off_page,
                     harness::forget_switch,
                     repos::commit_roots,
+                    test_runs::ask_machine.run_if(
+                        resource_changed::<Nav>
+                            .or_else(resource_changed::<TestMachine>)
+                            .or_else(resource_changed::<Model>),
+                    ),
+                    test_runs::commit_minutes,
                     rebuild_config,
+                    test_runs::sync_confirm.run_if(
+                        resource_changed::<Nav>
+                            .or_else(resource_changed::<TestMachine>)
+                            .or_else(resource_changed::<Model>),
+                    ),
+                    test_runs::cancel_confirm.run_if(any_with_component::<test_runs::CleanUpModal>),
                     appearance::live_font_query,
                     appearance::rebuild_font_list,
                     spotlight::spotlight,
@@ -296,6 +315,7 @@ fn rebuild_config(
     model: Res<Model>,
     area_form: Res<areas::AreaForm>,
     switched: Res<harness::Switched>,
+    machine: Res<TestMachine>,
     paths: Res<AppPaths>,
     clock: Res<Clock>,
     fonts: Res<UiFonts>,
@@ -343,6 +363,9 @@ fn rebuild_config(
         });
         part.built = Some(section);
     }
+    let home = (section == Section::Tests)
+        .then(|| std::env::var("HOME").ok())
+        .flatten();
     let view = page_view(
         section,
         &model.snapshot,
@@ -352,6 +375,8 @@ fn rebuild_config(
         &area_form,
         &switched,
         text_face.missing.as_ref(),
+        &machine,
+        home.as_deref(),
     );
     // Half-typed input survives: a rebuild of the same page waits until the focused field is
     // committed (or reverted) so the field entity is not despawned under the cursor.
@@ -398,6 +423,7 @@ fn rebuild_config(
                 PageView::About(v) => about::build(c, fonts, v),
                 PageView::Notifications(v) => notifications::build(c, fonts, v),
                 PageView::Harness(v) => harness::build(c, fonts, v),
+                PageView::Tests(v) => test_runs::build(c, fonts, v),
                 PageView::Plugins => placeholders::plugins(c, fonts),
             });
         });
@@ -566,12 +592,12 @@ pub fn option_card(selected: bool, width: f32) -> impl Bundle {
         TabIndex(0),
         BackgroundColor::default(),
         Fill(if selected {
-            Swatch::GreenSoft
+            Swatch::GreenTint
         } else {
             Swatch::Surface
         }),
         HoverFill(if selected {
-            Swatch::GreenSoft
+            Swatch::GreenTint
         } else {
             Swatch::Hover
         }),
@@ -699,7 +725,7 @@ mod tests {
     #[test]
     fn section_list_switches_pages() {
         let mut app = config_app(Section::Appearance);
-        assert_eq!(testing::count::<ConfigNavItem>(&mut app), 10);
+        assert_eq!(testing::count::<ConfigNavItem>(&mut app), 11);
         testing::find::<PageOf>(&mut app, |p| p.0 == Section::Appearance);
         let git = testing::find::<ConfigNavItem>(&mut app, |i| i.0 == Section::GitServer);
         testing::activate(&mut app, git);

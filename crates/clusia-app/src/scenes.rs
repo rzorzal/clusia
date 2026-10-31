@@ -16,9 +16,12 @@ use clusia_protocol::{
 };
 
 use crate::args::Scene;
-use crate::bridge::{CallsTell, DiagramsTell, Model, Outbox, ProbeState, RevalidationTell, Tell};
+use crate::bridge::{
+    CallsTell, DiagramsTell, Model, Outbox, ProbeState, RevalidationTell, Tell, TestsTell,
+};
 use crate::clock::Clock;
 use crate::fixture;
+use crate::fixture::DemoTests;
 use crate::nav::{Nav, Section};
 use crate::review_state::{
     CameraPose, DiffMode, EditTarget, Editor, KeywordsUi, Modal, Phase, Ready, RevalView,
@@ -31,6 +34,7 @@ use crate::screens::review::calls::CallsRequest;
 use crate::screens::review::diagrams::Diagrams;
 use crate::screens::review::diagrams::keywords::render::{focus_pose, view_pose};
 use crate::screens::review::story::{self, StoryStage};
+use crate::screens::review::tests_tab::{SubTab, TestMachine, TestsModels};
 use crate::ui::code_select::{At, CodeLine, CodeSelection};
 use crate::ui::composer::popover::{PopoverKind, Popovers};
 use crate::ui::composer::{ComposerKey, ComposerMode, Slot};
@@ -505,6 +509,65 @@ fn stage_calls(world: &mut World, pr: &PrRef, scene: Scene) {
     }));
 }
 
+/// The state of the Tests tab a scene shows, when it shows one.
+fn tests_state(scene: Scene) -> Option<DemoTests> {
+    Some(match scene {
+        Scene::TestsEmpty => DemoTests::Empty,
+        Scene::TestsGenerating => DemoTests::Generating,
+        Scene::TestsAuto => DemoTests::Auto,
+        Scene::TestsRunning => DemoTests::Running,
+        Scene::TestsFailed => DemoTests::Failed,
+        Scene::TestsRefused => DemoTests::Refused,
+        Scene::TestsStale => DemoTests::Stale,
+        Scene::TestsProposal => DemoTests::Proposal,
+        Scene::TestsSetup => DemoTests::Setup,
+        Scene::TestsFunctions => DemoTests::Functions,
+        Scene::ConfigTests => DemoTests::Config,
+        _ => return None,
+    })
+}
+
+/// Fills the Tests model of `pr` with what the daemon would answer for `state`, the way `pump`
+/// does, and marks it as asked so the tab sends nothing.
+fn put_tests(world: &mut World, pr: &PrRef, now: i64, state: DemoTests) {
+    let mut models = world.resource_mut::<TestsModels>();
+    let model = models.0.entry(pr.clone()).or_default();
+    model.asked = true;
+    model.apply(&TestsTell::Loaded {
+        pr: pr.clone(),
+        view: Box::new(fixture::demo_tests(now, state)),
+    });
+    match state {
+        DemoTests::Running => {
+            // The view's phase starts the live run; the results and the log tail come as a
+            // run streams them.
+            for result in fixture::demo_live_results() {
+                model.apply(&TestsTell::Result {
+                    pr: pr.clone(),
+                    run: "run-4".into(),
+                    result,
+                });
+            }
+            model.apply(&TestsTell::Output {
+                pr: pr.clone(),
+                run: "run-4".into(),
+                tail: fixture::demo_live_tail(),
+            });
+        }
+        DemoTests::Setup => model.open_plan(),
+        DemoTests::Functions => model.sub = SubTab::Functions,
+        _ => {}
+    }
+}
+
+/// What Config › Tests shows once the machine has answered the two asks it makes on entry.
+fn put_test_machine(world: &mut World) {
+    let mut machine = world.resource_mut::<TestMachine>();
+    machine.engine = Some(Ok(fixture::demo_test_engine()));
+    machine.disk = Some(Ok(fixture::demo_test_disk()));
+    machine.asked = true;
+}
+
 /// Puts the demo review `rzorzal/clusia#123` in the state `scene` shows (Config pages and
 /// the first run need no review).
 pub fn stage(world: &mut World, scene: Scene) {
@@ -518,6 +581,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         }
         Scene::ConfigMedia => Some(Section::Media),
         Scene::ConfigAbout => Some(Section::About),
+        Scene::ConfigTests => Some(Section::Tests),
         Scene::ConfigAppearance => Some(Section::Appearance),
         Scene::ConfigHarness
         | Scene::ConfigHarnessCodex
@@ -531,6 +595,9 @@ pub fn stage(world: &mut World, scene: Scene) {
             nav.open_setting(section, "harness.diagrams");
         } else {
             nav.open_section(section);
+        }
+        if scene == Scene::ConfigTests {
+            put_test_machine(world);
         }
         return;
     }
@@ -594,6 +661,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::ConfigHarnessCodex
         | Scene::ConfigHarnessCustom
         | Scene::ConfigFocus
+        | Scene::ConfigTests
         | Scene::Restored => {}
         Scene::AgentChat
         | Scene::AgentChatCodex
@@ -737,6 +805,16 @@ pub fn stage(world: &mut World, scene: Scene) {
         Scene::DiagramsNoHarness | Scene::DiagramsNoAutoDraw => {
             ui.section = ReviewSection::Diagrams;
         }
+        Scene::TestsEmpty
+        | Scene::TestsGenerating
+        | Scene::TestsAuto
+        | Scene::TestsRunning
+        | Scene::TestsFailed
+        | Scene::TestsRefused
+        | Scene::TestsStale
+        | Scene::TestsProposal
+        | Scene::TestsSetup
+        | Scene::TestsFunctions => ui.section = ReviewSection::Tests,
     }
     let empty_diagrams = matches!(scene, Scene::DiagramsNoHarness | Scene::DiagramsNoAutoDraw)
         .then(|| (Vec::new(), DiagramsState::Idle));
@@ -769,6 +847,13 @@ pub fn stage(world: &mut World, scene: Scene) {
         put_diagrams(world, &pr, versions, state);
         // The mockups of the Diagrams tab have no right panel.
         world.resource_mut::<Chats>().entry(&pr).open = false;
+    }
+    if scene.is_tests() {
+        // The mockups of the Tests tab have no right panel.
+        world.resource_mut::<Chats>().entry(&pr).open = false;
+        if let Some(state) = tests_state(scene) {
+            put_tests(world, &pr, now, state);
+        }
     }
     if scene.diff_view().is_some() {
         // The mockups of Story and Calls have no right panel.
@@ -944,6 +1029,7 @@ mod tests {
                     | Scene::FirstRunCustom
                     | Scene::ConfigHarnessCustom
                     | Scene::ConfigFocus
+                    | Scene::ConfigTests
                     | Scene::Restored
             ) {
                 continue;
@@ -1024,6 +1110,7 @@ mod tests {
                 | Scene::FirstRunCustom
                 | Scene::ConfigHarnessCustom
                 | Scene::ConfigFocus
+                | Scene::ConfigTests
                 | Scene::Restored => {
                     unreachable!("skipped above")
                 }
@@ -1098,6 +1185,18 @@ mod tests {
                 }
                 Scene::DiagramsNoHarness | Scene::DiagramsNoAutoDraw => {
                     assert_eq!(tab.ui.section, ReviewSection::Diagrams, "{scene:?}");
+                }
+                Scene::TestsEmpty
+                | Scene::TestsGenerating
+                | Scene::TestsAuto
+                | Scene::TestsRunning
+                | Scene::TestsFailed
+                | Scene::TestsRefused
+                | Scene::TestsStale
+                | Scene::TestsProposal
+                | Scene::TestsSetup
+                | Scene::TestsFunctions => {
+                    assert_eq!(tab.ui.section, ReviewSection::Tests, "{scene:?}");
                 }
                 Scene::DiffStory
                 | Scene::DiffStoryStatic
@@ -1379,6 +1478,7 @@ mod tests {
             (Scene::ConfigHarness, Section::Harness),
             (Scene::ConfigHarnessCodex, Section::Harness),
             (Scene::ConfigHarnessCustom, Section::Harness),
+            (Scene::ConfigTests, Section::Tests),
             (Scene::ConfigFocus, Section::Harness),
         ] {
             let mut app = staged_outside_review(scene);
@@ -1388,6 +1488,296 @@ mod tests {
             );
             testing::find::<crate::screens::config::PageOf>(&mut app, |p| p.0 == section);
         }
+    }
+
+    const TESTS_SCENES: [Scene; 10] = [
+        Scene::TestsEmpty,
+        Scene::TestsGenerating,
+        Scene::TestsAuto,
+        Scene::TestsRunning,
+        Scene::TestsFailed,
+        Scene::TestsRefused,
+        Scene::TestsStale,
+        Scene::TestsProposal,
+        Scene::TestsSetup,
+        Scene::TestsFunctions,
+    ];
+
+    fn shows_all(app: &mut App, scene: Scene, needles: &[&str]) {
+        for needle in needles {
+            assert!(testing::shows(app, needle), "{scene:?} lacks {needle:?}");
+        }
+    }
+
+    #[test]
+    fn the_tests_scenes_open_the_tests_tab_of_the_demo_review_without_the_right_panel() {
+        for scene in TESTS_SCENES {
+            let app = staged(scene);
+            let pr = fixture::demo_pr();
+            let tabs = app.world().resource::<ReviewTabs>();
+            assert_eq!(tabs.0[&pr].ui.section, ReviewSection::Tests, "{scene:?}");
+            assert!(
+                !app.world()
+                    .resource::<Chats>()
+                    .0
+                    .get(&pr)
+                    .is_some_and(|c| c.open),
+                "{scene:?} keeps the right panel open, the mockups have none"
+            );
+            let models = app.world().resource::<TestsModels>();
+            assert!(models.0[&pr].asked, "{scene:?} would ask the daemon");
+            assert_eq!(
+                app.world().resource::<Nav>().screen,
+                crate::nav::Screen::Review(pr),
+                "{scene:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_tests_scene_asks_the_daemon_for_anything() {
+        for scene in TESTS_SCENES.into_iter().chain([Scene::ConfigTests]) {
+            let mut app = staged_outside_review(scene);
+            let asked: Vec<String> = testing::recorded(&mut app)
+                .into_iter()
+                .map(|a| format!("{a:?}"))
+                .filter(|a| {
+                    ["Tests", "TestDisk", "TestEngine", "CleanUp", "Recipe"]
+                        .iter()
+                        .any(|word| a.contains(word))
+                })
+                .collect();
+            assert!(asked.is_empty(), "{scene:?} asked {asked:?}");
+        }
+    }
+
+    #[test]
+    fn the_empty_scene_offers_generate_tests_and_nothing_else_to_run() {
+        let mut app = staged(Scene::TestsEmpty);
+        shows_all(
+            &mut app,
+            Scene::TestsEmpty,
+            &[
+                "Test this change",
+                "Run the repository's tests in isolation. Nothing has run yet for this pull request.",
+                "Check the environment",
+                "Claude Code writes the recipe",
+                "You approve the setup",
+                "Generate tests",
+                "Uses one Claude Code turn on your account",
+            ],
+        );
+        assert!(!testing::shows(&mut app, "Run all tests"));
+        assert!(
+            !testing::shows(&mut app, "Auto Tests"),
+            "no sub-tabs before the tests exist"
+        );
+    }
+
+    #[test]
+    fn the_generating_scene_lights_the_recipe_step_and_offers_stop() {
+        let mut app = staged(Scene::TestsGenerating);
+        shows_all(
+            &mut app,
+            Scene::TestsGenerating,
+            &["Generating tests", "Stop"],
+        );
+        assert!(!testing::shows(&mut app, "Run all tests"));
+    }
+
+    #[test]
+    fn the_auto_scene_is_the_mockups_done_run_with_the_failure_selected() {
+        let mut app = staged(Scene::TestsAuto);
+        shows_all(
+            &mut app,
+            Scene::TestsAuto,
+            &[
+                "Auto Tests",
+                "Run Function tests",
+                "Environment",
+                "Docker · Colima · running",
+                "Recipe by Claude Code · approved",
+                "Edit recipe",
+                "Last run",
+                "near this change",
+                "passed",
+                "failed",
+                "skipped",
+                "Run the tests",
+                "Run tests near this change · 38",
+                "Run all tests · 412",
+                "Or click ▶ on a test to run only that one.",
+                "store::refresh::failed_exchange_keeps_old_token",
+                "store::refresh::two_callers_share_one_exchange",
+                "Failed · 1",
+                "Near this change · 38",
+                "▶ Run again",
+                "Open in editor",
+                "Full log",
+                "Comment on this line",
+                "Checks on GitHub",
+                "test (macOS)",
+                "4 of 4 passed",
+            ],
+        );
+        assert!(!testing::shows(&mut app, "Stale"));
+        assert!(
+            testing::count::<crate::screens::review::tests_tab::list::TestRow>(&mut app) < 38,
+            "the list is windowed, never 38 rows for a 31 px row in this window"
+        );
+    }
+
+    #[test]
+    fn the_running_scene_counts_the_results_so_far_and_keeps_stop_in_reach() {
+        let mut app = staged(Scene::TestsRunning);
+        shows_all(
+            &mut app,
+            Scene::TestsRunning,
+            &[
+                "Running · 12 results so far",
+                "Stop",
+                "store::cases::case_12",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_failed_and_refused_scenes_say_why_in_plain_text() {
+        let mut app = staged(Scene::TestsFailed);
+        shows_all(
+            &mut app,
+            Scene::TestsFailed,
+            &[
+                "The tests could not be prepared",
+                "The recipe is not valid: `all` is missing, so there is nothing to run.",
+                "Generate tests again",
+                "Edit recipe",
+            ],
+        );
+        let mut app = staged(Scene::TestsRefused);
+        shows_all(
+            &mut app,
+            Scene::TestsRefused,
+            &[
+                "Clúsia won't run these tests",
+                "This pull request ships its own .clusia folder.",
+                "Check again",
+                "Generate tests again",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_stale_scene_never_shows_the_old_run_as_current() {
+        let mut app = staged(Scene::TestsStale);
+        shows_all(
+            &mut app,
+            Scene::TestsStale,
+            &[
+                "Stale",
+                "From an older commit; run the tests again to check this one.",
+                "Run tests near this change · 38",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_proposal_scene_shows_the_banner_over_a_recipe_edited_by_hand() {
+        let mut app = staged(Scene::TestsProposal);
+        shows_all(
+            &mut app,
+            Scene::TestsProposal,
+            &[
+                "Recipe edited by you",
+                "Claude Code proposed a new recipe. Yours stays until you accept it.",
+                "Show proposal",
+                "Accept",
+            ],
+        );
+        assert!(
+            !testing::shows(&mut app, "cargo nextest run"),
+            "the proposal's text stays folded until the reviewer shows it"
+        );
+    }
+
+    #[test]
+    fn the_setup_scene_opens_the_modal_on_a_plan_with_a_host_step() {
+        let mut app = staged(Scene::TestsSetup);
+        assert!(modal_shown(&mut app, Modal::TestSetup));
+        shows_all(
+            &mut app,
+            Scene::TestsSetup,
+            &[
+                "Set up tests for #123",
+                "Claude Code read the repository and wrote this recipe. Nothing runs until you approve it. Steps run once; the results are reused next time.",
+                "SETUP · 4 STEPS",
+                "docker build --target test",
+                "docker compose -p clusia-rzorzal-clusia-123 up -d postgres",
+                "Runs on your Mac: no host folders, no open ports, internal network",
+                "TEST COMMANDS · NO NETWORK",
+                "cargo test --workspace",
+                "fake_k3y_9a1",
+                "(fake · edit in the recipe)",
+                "will not be used",
+                "Edit recipe",
+                "Cancel",
+                "Approve selected",
+                "Approve all and set up",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_functions_scene_shows_only_the_m1c_note() {
+        let mut app = staged(Scene::TestsFunctions);
+        let pr = fixture::demo_pr();
+        assert_eq!(
+            app.world().resource::<TestsModels>().0[&pr].sub,
+            SubTab::Functions
+        );
+        shows_all(
+            &mut app,
+            Scene::TestsFunctions,
+            &[
+                "Auto Tests",
+                "Run Function tests",
+                "Run Function tests comes next: each changed function, run alone with cases Claude Code writes and values you choose.",
+            ],
+        );
+        assert!(!testing::shows(&mut app, "Run all tests"));
+    }
+
+    #[test]
+    fn the_config_tests_scene_shows_the_machine_and_the_disk() {
+        let mut app = staged_outside_review(Scene::ConfigTests);
+        assert_eq!(
+            app.world().resource::<Nav>().screen,
+            crate::nav::Screen::Config(Section::Tests)
+        );
+        let machine = app.world().resource::<TestMachine>();
+        assert!(machine.asked && machine.engine.is_some() && machine.disk.is_some());
+        shows_all(
+            &mut app,
+            Scene::ConfigTests,
+            &[
+                "Where tests run",
+                "Automatic",
+                "Always a container",
+                "Always local",
+                "Docker · Colima",
+                "running",
+                "Check again",
+                "Limits",
+                "CPUs per run",
+                "of 10",
+                "Memory per run",
+                "Stop a run after",
+                "Runs at the same time",
+                "7.2 GB",
+                "3 images 4.1 GB",
+                "Clean up…",
+            ],
+        );
     }
 
     fn demo_config(scene: Scene) -> serde_json::Value {

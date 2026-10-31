@@ -6,10 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use clusia_app::bridge::{self, AgentTell, Ask, Link, PermissionTell, Tell};
+use clusia_app::bridge::{
+    self, AgentTell, Ask, Link, PermissionTell, Tell, TestsAskKind, TestsTell,
+};
 use clusia_app::fixture;
 use clusia_app::snapshot::{GiphyKey, Snapshot};
 use clusia_core::config::Theme as ThemeChoice;
+use clusia_core::tests::TestsPhase;
 use clusia_core::{Config, DraftKind, PrRef, Review, ReviewCache, ReviewState, Verdict};
 use clusia_harness::testkit::{FakeClaude, Script, Turn};
 use clusia_protocol::{
@@ -1022,5 +1025,193 @@ async fn a_review_open_in_the_window_sends_nothing_to_the_tray() {
         Vec::<String>::new(),
         "still held after a reconnect"
     );
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_machine_asks_answer_through_workers() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask.send(Ask::CheckTestEngine { pr: None }).unwrap();
+    match next(&link, |t| matches!(t, Tell::TestEngine(_))) {
+        Tell::TestEngine(Ok(info)) => {
+            assert!(info.cores >= 1);
+            assert_eq!(info.engine, None, "the test daemon has no docker");
+        }
+        other => panic!("{other:?}"),
+    }
+    link.ask.send(Ask::GetTestDisk).unwrap();
+    match next(&link, |t| matches!(t, Tell::TestDisk(_))) {
+        Tell::TestDisk(Ok(report)) => assert!(report.items.is_empty(), "{report:?}"),
+        other => panic!("{other:?}"),
+    }
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_tests_ask_warns_and_frees_its_button() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    let pr = pr7();
+    link.ask.send(Ask::GenerateTests(pr.clone())).unwrap();
+    match next(&link, |t| matches!(t, Tell::Notice { .. })) {
+        Tell::Notice { text, warning } => {
+            assert!(warning);
+            assert_eq!(text, "no review for rzorzal/clusia#7; open it first");
+        }
+        _ => unreachable!(),
+    }
+    match next(&link, |t| {
+        matches!(t, Tell::Tests(TestsTell::Refused { .. }))
+    }) {
+        Tell::Tests(TestsTell::Refused {
+            pr: told,
+            ask,
+            message,
+        }) => {
+            assert_eq!((told, ask), (pr.clone(), TestsAskKind::Generate));
+            assert_eq!(message, "no review for rzorzal/clusia#7; open it first");
+        }
+        _ => unreachable!(),
+    }
+    // A list runs on a worker and is refused the same way.
+    link.ask.send(Ask::ListTests(pr.clone())).unwrap();
+    match next(&link, |t| {
+        matches!(t, Tell::Tests(TestsTell::Refused { .. }))
+    }) {
+        Tell::Tests(TestsTell::Refused { ask, .. }) => assert_eq!(ask, TestsAskKind::List),
+        _ => unreachable!(),
+    }
+    // A read that is refused or empty is silent: it answers with a view and no toast.
+    link.ask.send(Ask::GetTests(pr.clone())).unwrap();
+    match next(&link, |t| {
+        matches!(t, Tell::Tests(TestsTell::Loaded { .. }))
+    }) {
+        Tell::Tests(TestsTell::Loaded { view, .. }) => {
+            assert_eq!(view.phase, TestsPhase::NotGenerated);
+        }
+        _ => unreachable!(),
+    }
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tests_topic_reaches_the_window() {
+    let d = common::Daemon::start().await;
+    let pr = seed_agent_review(d.dir.path(), 7);
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    link.ask.send(Ask::GenerateTests(pr.clone())).unwrap();
+    // The daemon tells the Generating view before it answers.
+    match next(&link, |t| {
+        matches!(t, Tell::Tests(TestsTell::Loaded { .. }))
+    }) {
+        Tell::Tests(TestsTell::Loaded { pr: told, view }) => {
+            assert_eq!(told, pr);
+            assert!(
+                matches!(view.phase, TestsPhase::Generating { .. }),
+                "{:?}",
+                view.phase
+            );
+        }
+        _ => unreachable!(),
+    }
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offline_test_asks_free_their_buttons() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    d.stop().await;
+    next(&link, |t| matches!(t, Tell::Lost(_)));
+    let pr = pr7();
+    link.ask.send(Ask::StopTests(pr.clone())).unwrap();
+    match next(&link, |t| matches!(t, Tell::Notice { .. })) {
+        Tell::Notice { text, warning } => {
+            assert!(warning);
+            assert_eq!(text, "Not connected to clusiad — not sent");
+        }
+        _ => unreachable!(),
+    }
+    match next(&link, |t| {
+        matches!(t, Tell::Tests(TestsTell::Refused { .. }))
+    }) {
+        Tell::Tests(TestsTell::Refused { ask, message, .. }) => {
+            assert_eq!(ask, TestsAskKind::Stop);
+            assert_eq!(message, "Not connected to clusiad — not sent");
+        }
+        _ => unreachable!(),
+    }
+    link.ask.send(Ask::CheckTestEngine { pr: None }).unwrap();
+    match next(&link, |t| matches!(t, Tell::TestEngine(_))) {
+        Tell::TestEngine(Err(message)) => assert_eq!(message, "Not connected to clusiad"),
+        other => panic!("{other:?}"),
+    }
+    link.ask.send(Ask::CleanUpTests { repo: None }).unwrap();
+    match next(&link, |t| matches!(t, Tell::TestDisk(_))) {
+        Tell::TestDisk(Err(message)) => {
+            assert_eq!(message, "Not connected to clusiad — not sent")
+        }
+        other => panic!("{other:?}"),
+    }
+    // A read gives no toast and no refusal.
+    link.ask.send(Ask::GetTests(pr)).unwrap();
+    link.ask.send(Ask::GetTestDisk).unwrap();
+    match next(&link, |t| matches!(t, Tell::TestDisk(_))) {
+        Tell::TestDisk(Err(message)) => assert_eq!(message, "Not connected to clusiad"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tests_settings_round_trip_and_a_bad_one_is_refused() {
+    let d = common::Daemon::start().await;
+    let link = bridge::spawn(d.paths.clone(), None, || {});
+    snapshot_where(&link, |s| s.lists_loaded);
+    for (key, value) in [
+        ("tests.runner", "container"),
+        ("tests.cpus", "3"),
+        ("tests.memory_mb", "8192"),
+        ("tests.run_timeout_secs", "2700"),
+        ("tests.parallel_runs", "2"),
+    ] {
+        link.ask
+            .send(Ask::SetConfig {
+                key: key.into(),
+                value: value.into(),
+            })
+            .unwrap();
+    }
+    let snap = snapshot_where(&link, |s| s.config.tests.parallel_runs == 2);
+    assert_eq!(
+        snap.config.tests,
+        clusia_core::config::Tests {
+            runner: clusia_core::tests::RunnerChoice::Container,
+            cpus: 3,
+            memory_mb: 8192,
+            run_timeout_secs: 2700,
+            parallel_runs: 2,
+        }
+    );
+    link.ask
+        .send(Ask::SetConfig {
+            key: "tests.run_timeout_secs".into(),
+            value: "59".into(),
+        })
+        .unwrap();
+    match next(&link, |t| matches!(t, Tell::Rejected { .. })) {
+        Tell::Rejected { key, message } => {
+            assert_eq!(key, "tests.run_timeout_secs");
+            assert!(
+                message.contains("must be between 60 and 14400"),
+                "{message}"
+            );
+        }
+        _ => unreachable!(),
+    }
     d.stop().await;
 }

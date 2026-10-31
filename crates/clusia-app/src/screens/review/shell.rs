@@ -1,6 +1,5 @@
 //! The review shell (mockup `Review.png`): the pull request header, the section tabs, the
-//! center `SectionBody` (Diff and Comments fill it; the four sections that arrive later show a
-//! placeholder), the right column (its **Agent** and **Draft** tabs) and the status bar.
+//! center `SectionBody` (each section has its own filler), the right column (its **Agent** and **Draft** tabs) and the status bar.
 //!
 //! The shell is read-only while the connection is lost or when it shows the cached copy.
 
@@ -132,16 +131,11 @@ pub struct ShellView {
     pub closed: Option<String>,
 }
 
-/// The center region of a ready review. Each section has its own filler: Diff and Comments
-/// have dedicated fillers, others use `fill_placeholders`.
+/// The center region of a ready review. Each section has its own filler.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct SectionBody {
     pub pr: PrRef,
 }
-
-/// A placeholder section's content inside `SectionBody`.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Placeholder(pub ReviewSection);
 
 /// What `mount` put in a `ReviewScreen`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,32 +259,6 @@ struct RightView {
     read_only: bool,
     /// The general-note editor: (error, waiting for the daemon).
     general: Option<(Option<String>, bool)>,
-}
-
-fn is_placeholder(section: ReviewSection) -> bool {
-    !matches!(
-        section,
-        ReviewSection::Diff
-            | ReviewSection::Comments
-            | ReviewSection::Security
-            | ReviewSection::Audits
-            | ReviewSection::Diagrams
-    )
-}
-
-/// What a placeholder section says: (heading, text).
-pub fn placeholder_text(section: ReviewSection) -> (&'static str, &'static str) {
-    match section {
-        ReviewSection::Audits => ("", ""),
-        ReviewSection::Tests => (
-            "Tests",
-            "Arrives with SP4 (#9): run and read the tests this change touches.",
-        ),
-        ReviewSection::Diff
-        | ReviewSection::Comments
-        | ReviewSection::Security
-        | ReviewSection::Diagrams => ("", ""),
-    }
 }
 
 /// What the status bar says while the diagrams are planned or drawn: `Claude Code · drawing
@@ -547,7 +515,6 @@ impl Plugin for ShellPlugin {
                 sync_editor_text,
                 mount,
                 rebuild_top.run_if(shell_views_changed),
-                fill_placeholders,
                 rebuild_right.run_if(shell_views_changed),
                 rebuild_status.run_if(shell_views_changed),
                 drop_stale_modals,
@@ -798,6 +765,7 @@ pub(crate) fn shell_views_changed(
     revalidations: Res<Revalidations>,
     stories: Res<crate::screens::review::story::model::Stories>,
     calls: Res<crate::screens::review::calls::Calls>,
+    tests: Res<crate::screens::review::tests_tab::TestsModels>,
     spawned: Query<(), Or<(Added<ShellTop>, Added<RightPanel>, Added<StatusBar>)>>,
 ) -> bool {
     tabs.is_changed()
@@ -811,6 +779,7 @@ pub(crate) fn shell_views_changed(
         || revalidations.is_changed()
         || stories.is_changed()
         || calls.is_changed()
+        || tests.is_changed()
         || !spawned.is_empty()
 }
 
@@ -823,6 +792,7 @@ fn rebuild_top(
     checks: Res<crate::screens::review::checks::Checks>,
     revalidations: Res<Revalidations>,
     diagrams: Res<crate::screens::review::diagrams::Diagrams>,
+    tests: Res<crate::screens::review::tests_tab::TestsModels>,
     mut tops: Query<(Entity, &mut ShellTop)>,
 ) {
     for (entity, mut top) in &mut tops {
@@ -832,6 +802,13 @@ fn rebuild_top(
         let mut sections = v.sections;
         crate::screens::review::checks::badge_sections(&mut sections, checks.0.get(&top.pr));
         badge_diagrams(&mut sections, diagrams.0.get(&top.pr));
+        let head = tabs.0[&top.pr]
+            .ready()
+            .map(|r| r.view.review.head_sha.as_str());
+        crate::screens::review::tests_tab::badge_tests(
+            &mut sections,
+            crate::screens::review::tests_tab::of_head(tests.0.get(&top.pr), head),
+        );
         let tab = &tabs.0[&top.pr];
         let reanchor = tab.ui.reanchor.as_ref().and_then(|id| {
             let item = tab
@@ -962,6 +939,8 @@ pub fn header_block(p: &mut ChildSpawnerCommands, fonts: &UiFonts, pr: &PrRef, h
                         Tone::Green => Swatch::Green,
                         Tone::Orange => Swatch::Orange,
                         Tone::Neutral => Swatch::Muted,
+                        Tone::Amber => Swatch::HostInk,
+                        Tone::Blue => Swatch::NetBlue,
                     };
                     m.spawn(text(fonts, label.clone(), Type::BODY.ink(ink)));
                 }
@@ -1094,55 +1073,6 @@ pub fn section_tabs(
             crate::screens::review::diff::mode_switch(row, fonts, pr, mode);
         }
     });
-}
-
-/// Fills `SectionBody` for the four sections that arrive later, and empties it when the
-/// section moves to one of them or away from them.
-fn fill_placeholders(
-    mut commands: Commands,
-    tabs: Res<ReviewTabs>,
-    fonts: Res<UiFonts>,
-    bodies: Query<(Entity, &SectionBody, Option<&Children>)>,
-    placeholders: Query<&Placeholder>,
-) {
-    for (entity, body, children) in &bodies {
-        let Some(tab) = tabs.0.get(&body.pr) else {
-            continue;
-        };
-        let section = tab.ui.section;
-        let shown = children
-            .into_iter()
-            .flatten()
-            .find_map(|c| placeholders.get(*c).ok().copied());
-        if !is_placeholder(section) {
-            if shown.is_some() {
-                commands.entity(entity).despawn_related::<Children>();
-            }
-            continue;
-        }
-        if shown == Some(Placeholder(section)) {
-            continue;
-        }
-        let (heading, line) = placeholder_text(section);
-        refill(&mut commands, entity, |p| {
-            p.spawn((
-                Node {
-                    flex_grow: 1.0,
-                    flex_direction: FlexDirection::Column,
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    row_gap: px(8),
-                    padding: px(40).all(),
-                    ..default()
-                },
-                Placeholder(section),
-            ))
-            .with_children(|c| {
-                c.spawn(text(&fonts, heading, Type::HEADING));
-                c.spawn(text(&fonts, line, Type::MUTED));
-            });
-        });
-    }
 }
 
 fn rebuild_right(
@@ -2366,11 +2296,6 @@ mod tests {
         assert_eq!(testing::count::<SectionTab>(&mut app), 6);
         assert_eq!(testing::count::<DraftCardButton>(&mut app), 3);
         assert_eq!(testing::count::<FinalizeButton>(&mut app), 1);
-        assert_eq!(
-            testing::count::<Placeholder>(&mut app),
-            0,
-            "Diff is not a placeholder"
-        );
         let tests = testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Tests);
         testing::activate(&mut app, tests);
         testing::settle(&mut app);
@@ -2378,21 +2303,16 @@ mod tests {
             app.world().resource::<ReviewTabs>().0[&pr].ui.section,
             ReviewSection::Tests
         );
-        let shown = testing::find::<Placeholder>(&mut app, |_| true);
         assert_eq!(
-            app.world().get::<Placeholder>(shown),
-            Some(&Placeholder(ReviewSection::Tests))
+            testing::count::<crate::screens::review::tests_tab::body::TestsBody>(&mut app),
+            1,
+            "the Tests filler owns the section"
         );
-        let has = |app: &mut App, needle: &str| {
-            let mut q = app.world_mut().query::<&Text>();
-            q.iter(app.world()).any(|t| t.0.contains(needle))
-        };
-        assert!(has(&mut app, "Arrives with SP4 (#9)"));
         let diff = testing::find::<SectionTab>(&mut app, |t| t.section == ReviewSection::Diff);
         testing::activate(&mut app, diff);
         testing::settle(&mut app);
         assert_eq!(
-            testing::count::<Placeholder>(&mut app),
+            testing::count::<crate::screens::review::tests_tab::body::TestsBody>(&mut app),
             0,
             "Diff's filler takes over"
         );

@@ -29,7 +29,7 @@ use std::time::Duration;
 use crate::app::{AppPaths, StartTarget};
 use crate::bridge::{
     self, Ask, Asks, ChecksTell, Connection, Model, Outbox, RevalidationTell, ShowRequested, Tell,
-    Toasts,
+    TestsTell, Toasts,
 };
 use crate::clock::Clock;
 use crate::fixture;
@@ -538,6 +538,18 @@ pub fn tell(app: &mut App, tell: Tell) {
     app.update();
 }
 
+/// Tells `view` as the tests of `pr` and settles.
+pub fn open_tests(app: &mut App, pr: &PrRef, view: clusia_core::tests::TestsView) {
+    tell(
+        app,
+        Tell::Tests(TestsTell::Loaded {
+            pr: pr.clone(),
+            view: Box::new(view),
+        }),
+    );
+    settle(app);
+}
+
 /// The demo app with the demo review open and ready (`fixture::demo_review` without its
 /// What's new rows, so no modal opens), and no recorded asks.
 pub fn demo_review_app() -> App {
@@ -707,6 +719,101 @@ pub fn set_section(app: &mut App, pr: &PrRef, section: ReviewSection) {
         .ui
         .section = section;
     settle(app);
+}
+
+/// A machine with Colima as its container engine, running or stopped.
+pub fn tests_env(running: bool) -> clusia_core::tests::EnvState {
+    use clusia_core::tests::{Engine, EngineKind, EnvState, Existing, RepoSignals, RunnerKind};
+    EnvState {
+        head: "4f2a91c".into(),
+        probed_at: NOW - 120,
+        engine: Some(Engine {
+            kind: EngineKind::Colima,
+            cli: "docker".into(),
+            endpoint: "unix:///Users/rzorzal/.colima/default/docker.sock".into(),
+            context: Some("colima".into()),
+            running,
+            start: Some("colima start".into()),
+            compose: Some("docker compose".into()),
+        }),
+        runner: RunnerKind::Container,
+        note: None,
+        sandbox_ok: true,
+        signals: RepoSignals::default(),
+        existing: Existing::default(),
+        inputs_hash: "in1".into(),
+    }
+}
+
+/// An empty tests view at the review's current head, in `phase`.
+pub fn tests_view(
+    app: &App,
+    pr: &PrRef,
+    phase: clusia_core::tests::TestsPhase,
+) -> clusia_core::tests::TestsView {
+    let mut view = clusia_core::tests::TestsView::new(ready(app, pr).view.review.head_sha.clone());
+    view.phase = phase;
+    view
+}
+
+/// A finished run of the demo recipe at `head`: 48.2 s in the container, nothing listed.
+pub fn tests_run(
+    head: &str,
+    started_at: i64,
+    outcome: clusia_core::tests::RunOutcome,
+    totals: clusia_core::tests::Totals,
+) -> clusia_core::tests::TestRun {
+    use clusia_core::tests::{RunnerKind, TestRun, TestScope};
+    TestRun {
+        id: format!("r{started_at}"),
+        head: head.into(),
+        scope: TestScope::NearChange,
+        runner: RunnerKind::Container,
+        command: "cargo test -p store".into(),
+        started_at,
+        duration_ms: 48_200,
+        exit_code: Some(0),
+        outcome,
+        totals,
+        results: Vec::new(),
+        log: None,
+        tail: String::new(),
+    }
+}
+
+/// The recipe the demo review's tests use.
+pub fn tests_recipe() -> clusia_core::tests::RecipeSummary {
+    use clusia_core::tests::{RecipeSummary, ResultsFormat, RunnerChoice};
+    RecipeSummary {
+        hash: "h1".into(),
+        by_hand: false,
+        runner: RunnerChoice::Container,
+        image: Some("dockerfile: Dockerfile".into()),
+        setup: Vec::new(),
+        all: "cargo test".into(),
+        one: Some("cargo test -- --exact {name}".into()),
+        some: None,
+        list: Some("cargo test -- --list".into()),
+        results: ResultsFormat::Libtest,
+        env: Default::default(),
+        services: Vec::new(),
+        problems: Vec::new(),
+    }
+}
+
+/// A setup plan over `steps`; `approved` also makes it ready.
+pub fn tests_plan(
+    steps: Vec<clusia_core::tests::PlanStep>,
+    approved: bool,
+) -> clusia_core::tests::SetupPlan {
+    clusia_core::tests::SetupPlan {
+        recipe_hash: "h1".into(),
+        steps,
+        commands: Vec::new(),
+        commands_approved: approved,
+        ready: approved,
+        blocked: None,
+    }
 }
 
 fn right(path: &str, line: u32, commit: &str) -> Anchor {
