@@ -693,7 +693,7 @@ fn draw_last(p: &mut Spawner, fonts: &UiFonts, last: &LastCard) {
             head.spawn(text(fonts, "Last run", Type::HEADING));
             head.spawn(text(
                 fonts,
-                format!(" · {} · {}", run.scope, run.age),
+                format!("· {} · {}", run.scope, run.age),
                 Type::MUTED,
             ));
             if run.stale {

@@ -439,7 +439,6 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
     }
 }
 
-/// The body's content, centered in both directions.
 /// Centers what `build` draws, and scrolls when it is taller than the window: automatic margins
 /// centre it without pushing its top out of reach, as `justify_content` would.
 fn centered(p: &mut Spawner, build: impl FnOnce(&mut Spawner)) {

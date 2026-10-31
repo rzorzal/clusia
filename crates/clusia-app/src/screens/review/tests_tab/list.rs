@@ -700,7 +700,7 @@ fn row(_fonts: &UiFonts, pr: &PrRef, result: &TestCaseResult, key: RowKey) -> im
 
 fn row_content(r: &mut Spawner, fonts: &UiFonts, pr: &PrRef, result: &TestCaseResult, key: RowKey) {
     let (glyph, ink) = match key.status {
-        TestStatus::Failed => ("✕", Swatch::Orange),
+        TestStatus::Failed => ("×", Swatch::Orange),
         TestStatus::Passed => ("✓", Swatch::Green),
         TestStatus::Skipped => ("–", Swatch::Muted),
     };
@@ -994,7 +994,7 @@ mod tests {
         assert!(testing::shows(&mut app, "store::bad"));
         assert!(testing::shows(&mut app, "0.21 s"));
         assert!(testing::shows(&mut app, "9.80 s"));
-        assert!(testing::shows(&mut app, "✕"));
+        assert!(testing::shows(&mut app, "×"));
         assert!(testing::shows(&mut app, "✓"));
         assert!(testing::shows(&mut app, "–"));
         assert!(testing::shows(&mut app, "Tests"));

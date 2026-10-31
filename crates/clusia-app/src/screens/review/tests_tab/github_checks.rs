@@ -70,7 +70,7 @@ pub(super) fn checks_view(runs: &[CheckRun]) -> ChecksView {
 fn glyph(mark: Mark) -> (&'static str, Swatch) {
     match mark {
         Mark::Pass => ("✓", Swatch::Green),
-        Mark::Fail => ("✕", Swatch::Orange),
+        Mark::Fail => ("×", Swatch::Orange),
         Mark::Skip => ("–", Swatch::Muted),
         Mark::Pending => ("●", Swatch::Muted),
     }
@@ -231,7 +231,7 @@ mod tests {
         assert!(testing::shows(&mut app, "build"));
         assert!(testing::shows(&mut app, "test (macOS)"));
         assert!(testing::shows(&mut app, "2 of 4 passed"));
-        assert!(testing::shows(&mut app, "✕"));
+        assert!(testing::shows(&mut app, "×"));
         assert!(testing::shows(&mut app, "●"));
     }
 

@@ -166,6 +166,12 @@ Clúsia can talk to **your own Claude Code, Codex or a command of your own** abo
 - **Disk.** Images are tagged `clusia/<repo>:<hash>` and reused while the recipe's image inputs hold. Images and cache volumes go when the last worktree of the repository goes; containers are `--rm`, and the 6-hour sweep removes any orphan `clusia-*` container. Clúsia removes only what it labelled, never a base image you pulled. The last 5 runs per commit (20 in all) and their logs (10 MB each at most) are kept, and go when the review is published or discarded. Runs on an older commit show as *Stale*.
 - **Never.** Clúsia never installs an engine or a toolchain, never copies an `.env` file (the recipe lists fake values you can edit), never connects the tests to your own running services, and never runs anything you did not approve. A setup step in the local sandbox does not see your `~/.npmrc`, so a private registry needs a container engine or a project-level `.npmrc` without the token.
 - **GitHub's checks** appear by name next to the local runs.
+
+<p align="center"><img src="docs/assets/sp4-m1b-tests-empty-light.png" alt="The Tests tab before anything is generated, with the Generate tests button" width="720"></p>
+<p align="center"><img src="docs/assets/sp4-m1b-tests-auto-light.png" alt="Auto Tests: the environment, the last run, the test list, a failure's detail and GitHub's checks" width="720"></p>
+<p align="center"><img src="docs/assets/sp4-m1b-tests-setup-light.png" alt="The setup plan: each step with its command and where it runs, the test commands and the fake variables" width="720"></p>
+<p align="center"><img src="docs/assets/sp4-m1b-config-tests-light.png" alt="Config › Tests: where tests run, the limits and the disk used" width="720"></p>
+
 - **The limits.** A test run executes the pull request's own code. The container and the sandbox are what keep it in. The local sandbox relies on `sandbox-exec`, which Apple deprecated but which still works; if it stops working, the local runner refuses and asks for an engine. What else to know:
   - the dependency caches of a repository (its cache folder and volumes) are shared by every pull request of that repository, so one pull request can leave something in them that a later run uses;
   - a recipe's `runner = "local"` picks the sandbox even when an engine is installed; the setup plan shows the runner, and the approval covers it;

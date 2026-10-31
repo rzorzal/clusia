@@ -310,7 +310,7 @@ fn draw_test(col: &mut Spawner, fonts: &UiFonts, pr: &PrRef, t: &TestDetail) {
     .with_children(|head| {
         let (glyph, ink) = match t.glyph {
             Glyph::Pass => ("✓", Swatch::Green),
-            Glyph::Fail => ("✕", Swatch::Orange),
+            Glyph::Fail => ("×", Swatch::Orange),
             Glyph::Skip => ("–", Swatch::Muted),
         };
         head.spawn(Node {

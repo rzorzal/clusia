@@ -101,6 +101,12 @@ view_has() {
   clusia --json tests "$PR" 2>/dev/null | tr -d ' \n' | grep -q "$1"
 }
 
+# Whether the newest run (the first of the view's runs) ended as `$1`.
+newest_outcome_is() {
+  clusia --json tests "$PR" 2>/dev/null | tr -d ' \n' | sed 's/.*"runs":\[//' \
+    | grep -o '"outcome":"[a-z_]*"' | head -1 | grep -q "\"outcome\":\"$1\""
+}
+
 # No container of this review is left, when this Mac has a docker command to ask.
 no_container_left() {
   command -v docker >/dev/null 2>&1 || return 0
@@ -188,7 +194,7 @@ ask "Only that one test ran, and the Last run card says one test"
 say "${STEPS[6]}"
 go_on "start a run and click Stop while it goes"
 pause "wait for the run to end"
-check "the daemon records the run as stopped" view_has '"outcome":"stopped"'
+check "the daemon records the newest run as stopped" newest_outcome_is stopped
 sleep 2
 check "no container of the review is left" no_container_left
 ask "The tab shows Stopped, not a failure"
