@@ -740,7 +740,7 @@ fn draw_last(p: &mut Spawner, fonts: &UiFonts, last: &LastCard) {
 
 fn draw_run(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, run: &RunCard) {
     p.spawn(card(card_node(0.78)))
-        .insert(Fill(Swatch::GreenSoft))
+        .insert(Fill(Swatch::GreenTint))
         .with_children(|c| {
             c.spawn(text(fonts, "Run the tests", Type::HEADING));
             match run {

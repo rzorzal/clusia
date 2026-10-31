@@ -664,7 +664,7 @@ fn place(
 
 fn row_fill(selected: bool) -> Swatch {
     if selected {
-        Swatch::Selected
+        Swatch::GreenTint
     } else {
         Swatch::Clear
     }

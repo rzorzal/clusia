@@ -1040,7 +1040,7 @@ mod tests {
         };
         assert_eq!(
             selected(&mut app, RunnerChoice::Local),
-            Some(Swatch::GreenSoft)
+            Some(Swatch::GreenTint)
         );
         assert_eq!(
             selected(&mut app, RunnerChoice::Auto),

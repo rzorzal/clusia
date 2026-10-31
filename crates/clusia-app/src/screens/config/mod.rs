@@ -592,12 +592,12 @@ pub fn option_card(selected: bool, width: f32) -> impl Bundle {
         TabIndex(0),
         BackgroundColor::default(),
         Fill(if selected {
-            Swatch::GreenSoft
+            Swatch::GreenTint
         } else {
             Swatch::Surface
         }),
         HoverFill(if selected {
-            Swatch::GreenSoft
+            Swatch::GreenTint
         } else {
             Swatch::Hover
         }),

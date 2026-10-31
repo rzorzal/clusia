@@ -29,3 +29,4 @@ The renders are `docs/assets/sp4-m1b-<scene>-{light,dark}.png`, made with
 | Config disk worktree outputs | "0.8 GB" | "800 MB" | `size_label` writes whole MB under 1 GB |
 | Window chrome | traffic lights and a narrower tab bar | the app's tab bar, Config button and the review header with the author line | the render is the real window, the mockup is a drawing |
 | Dark detail block | a raised block | the card's own surface | the dark theme's surface steps |
+| Run the tests card, chosen cards, selected row and active chip | a faint green fill with a thin green border (dark); the selected row is a neutral grey | the same faint green tint (`GreenTint`) with no border on the Run card; the selected row takes the tint too | one soft fill for what is chosen or emphasised, readable under muted text in both themes |

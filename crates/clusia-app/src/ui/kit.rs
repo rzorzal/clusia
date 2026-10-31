@@ -661,8 +661,8 @@ pub fn disabled_checkbox(on: bool) -> impl Bundle {
 pub fn chip(fonts: &UiFonts, label: &str, selected: bool) -> impl Bundle {
     let (fill, hover, t) = if selected {
         (
-            Swatch::GreenSoft,
-            Swatch::GreenSoft,
+            Swatch::GreenTint,
+            Swatch::GreenTint,
             Type::STRONG.ink(Swatch::Green),
         )
     } else {

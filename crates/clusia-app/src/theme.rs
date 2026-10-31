@@ -29,6 +29,9 @@ pub enum Swatch {
     GreenPress,
     OnGreen,
     GreenSoft,
+    /// The fill of a chosen or emphasised card, row or chip: a faint green close to the surface it
+    /// sits on, so muted text stays readable on it in both themes.
+    GreenTint,
     /// A softer added-line tint (diff and code previews).
     AddedBg,
     /// The removed-line tint.
@@ -106,6 +109,7 @@ pub struct Tokens {
     pub green_press: Color,
     pub on_green: Color,
     pub green_soft: Color,
+    pub green_tint: Color,
     pub added_bg: Color,
     pub removed_bg: Color,
     pub added_strong: Color,
@@ -164,6 +168,7 @@ impl Tokens {
             Swatch::GreenPress => self.green_press,
             Swatch::OnGreen => self.on_green,
             Swatch::GreenSoft => self.green_soft,
+            Swatch::GreenTint => self.green_tint,
             Swatch::AddedBg => self.added_bg,
             Swatch::RemovedBg => self.removed_bg,
             Swatch::AddedStrong => self.added_strong,
@@ -239,6 +244,7 @@ pub const LIGHT: Tokens = Tokens {
     green_press: Color::srgb_u8(0x1F, 0x78, 0x30),
     on_green: Color::srgb_u8(0xFF, 0xFF, 0xFF),
     green_soft: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x24),
+    green_tint: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x24),
     added_bg: Color::srgb_u8(0xE9, 0xF6, 0xEB),
     removed_bg: Color::srgb_u8(0xFC, 0xEE, 0xE8),
     added_strong: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x42),
@@ -324,6 +330,7 @@ pub const DARK: Tokens = Tokens {
     green_press: Color::srgb_u8(0x47, 0xB5, 0x59),
     on_green: Color::srgb_u8(0x0C, 0x1A, 0x0F),
     green_soft: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x29),
+    green_tint: Color::srgb_u8(0x1E, 0x2B, 0x22),
     added_bg: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x0C),
     removed_bg: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x0C),
     added_strong: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x18),
@@ -695,6 +702,22 @@ mod tests {
                 ),
             ] {
                 assert!(ratio >= 4.5, "{name}: {what}: {ratio:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn muted_and_normal_text_are_readable_on_the_green_tint_in_both_themes() {
+        for (name, tokens) in [("light", LIGHT), ("dark", DARK)] {
+            for (under, base) in [("surface", tokens.surface), ("page", tokens.bg)] {
+                let tint = over(base.to_linear(), tokens.green_tint);
+                for (what, ink) in [("text", tokens.fg), ("muted text", tokens.muted)] {
+                    let ratio = contrast(ink.to_linear(), tint);
+                    assert!(
+                        ratio >= 4.5,
+                        "{name}: {what} on the tint over the {under}: {ratio:.2}"
+                    );
+                }
             }
         }
     }
