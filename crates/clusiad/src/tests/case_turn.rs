@@ -181,11 +181,24 @@ pub(crate) async fn write_cases(
                     if turn.fired() || !env::alive(&shared, &pr) {
                         return None;
                     }
-                    cases::apply_block(&worktree, &target, &block, &ask, now_unix())
-                        .err()
-                        .map(|reasons| {
-                            format!("{name}'s cases are not valid: {}", reasons.join("; "))
-                        })
+                    match cases::apply_block(&worktree, &target, &block, &ask, now_unix()) {
+                        Ok(()) => {
+                            if ask == CasesAsk::Fresh {
+                                let mut record = env::load(&shared, &pr);
+                                cases::forget_replaced_results(
+                                    &worktree,
+                                    &target.slug,
+                                    &mut record,
+                                );
+                                env::save(&shared, &pr, &record);
+                            }
+                            None
+                        }
+                        Err(reasons) => Some(format!(
+                            "{name}'s cases are not valid: {}",
+                            reasons.join("; ")
+                        )),
+                    }
                 }
                 Ok(None) => Some(format!("{name}'s answer holds no clusia-function block")),
                 Err(_) if turn.fired() => None,

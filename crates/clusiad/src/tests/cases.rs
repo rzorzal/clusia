@@ -21,6 +21,7 @@ use clusia_core::functions::{
     StoredFunction, Support, case_hash, check_case_input, check_value, function_hash,
     function_slug, lang_of, valid_slug, view_hash,
 };
+use clusia_core::tests::TestsRecord;
 use clusia_protocol::{CallsIndexState, ErrorCode, Event, Outcome, ProtocolError, Reply, topics};
 use clusia_testrun::names::sha256_hex;
 
@@ -164,6 +165,8 @@ pub(super) fn effective(stored: Option<&StoredFunction>, edits: &Edits) -> Vec<E
 pub(super) struct Facts<'a> {
     pub stored: Option<&'a StoredFunction>,
     pub folder_refused: bool,
+    /// Why the function's folder could not be opened, when it is not a link.
+    pub folder_problem: Option<&'a str>,
     pub no_package: bool,
     /// The signature at head; empty when it could not be read.
     pub signature: &'a str,
@@ -187,8 +190,15 @@ pub(super) fn support_of(facts: &Facts<'_>) -> Support {
             reason: FOLDER_REFUSED.into(),
         };
     }
+    if let Some(problem) = facts.folder_problem {
+        return Support::Unsupported {
+            reason: problem.to_string(),
+        };
+    }
+    // A signature that could not be read, then or now, says nothing about a change.
     if let Some(stored) = facts.stored
         && !facts.signature.is_empty()
+        && !stored.signature.is_empty()
         && stored.signature != facts.signature
     {
         return Support::Stale {
@@ -393,6 +403,8 @@ pub(super) struct Stored {
     pub edits: Edits,
     /// Its folder or one of its files is not plain: nothing was read.
     pub refused: bool,
+    /// Why its folder could not be opened, when that is not a link: nothing was read.
+    pub problem: Option<String>,
 }
 
 /// Reads what is stored for `slug`. A `function.json` that does not parse is no stored
@@ -408,7 +420,10 @@ pub(super) fn load_stored(worktree: &Path, slug: &str) -> Stored {
         Err(Refusal::NotPlain) => return refused,
         Err(Refusal::Io(message)) => {
             tracing::warn!(slug, message, "cannot open the folder of a function");
-            return Stored::default();
+            return Stored {
+                problem: Some(message),
+                ..Stored::default()
+            };
         }
     };
     let function = match read_capped(&dir, FUNCTION_FILE, STORED_MAX) {
@@ -463,6 +478,7 @@ pub(super) fn load_stored(worktree: &Path, slug: &str) -> Stored {
         function,
         edits,
         refused: false,
+        problem: None,
     }
 }
 
@@ -602,6 +618,9 @@ pub(super) fn apply_block(
             if stored.refused {
                 return Err(one(FOLDER_REFUSED.into()));
             }
+            if let Some(problem) = stored.problem {
+                return Err(one(problem));
+            }
             let first = stored.function.as_ref().map_or(1, |f| f.next.max(1));
             let cases: Vec<Case> = block
                 .cases
@@ -636,20 +655,33 @@ pub(super) fn apply_block(
             };
             save_function(worktree, &target.slug, &function, block.driver.as_deref())
                 .map_err(one)?;
-            if same_params {
-                let mut edits = stored.edits;
-                let ids: BTreeSet<&str> = function.cases.iter().map(|c| c.id.as_str()).collect();
-                edits.values.retain(|id, _| ids.contains(id.as_str()));
-                edits.names.retain(|id, _| ids.contains(id.as_str()));
-                save_edits(worktree, &target.slug, &edits).map_err(one)
+            // Every agent id is new, so no overlay applies any more; the reviewer's cases stay
+            // only for the same params. `next` always stays, so their ids are never reused.
+            let edits = if same_params {
+                Edits {
+                    values: BTreeMap::new(),
+                    names: BTreeMap::new(),
+                    ..stored.edits
+                }
             } else {
+                Edits {
+                    next: stored.edits.next,
+                    ..Edits::default()
+                }
+            };
+            if edits == Edits::default() {
                 remove_edits(worktree, &target.slug).map_err(one)
+            } else {
+                save_edits(worktree, &target.slug, &edits).map_err(one)
             }
         }
         CasesAsk::More => {
             let stored = load_stored(worktree, &target.slug);
             if stored.refused {
                 return Err(one(FOLDER_REFUSED.into()));
+            }
+            if let Some(problem) = stored.problem {
+                return Err(one(problem));
             }
             let Some(mut function) = stored.function.clone().filter(|f| !f.cases.is_empty()) else {
                 return Err(one("There are no cases to add to".into()));
@@ -685,6 +717,9 @@ pub(super) fn apply_block(
             if stored.refused {
                 return Err(one(FOLDER_REFUSED.into()));
             }
+            if let Some(problem) = stored.problem {
+                return Err(one(problem));
+            }
             let answer = &block.cases[0];
             let mut edits = stored.edits;
             let Some(mut function) = stored.function else {
@@ -716,12 +751,33 @@ pub(super) fn apply_block(
     }
 }
 
+/// After a `Fresh`, drops every stored result of `slug` that could be read as a new case's:
+/// all of the agent's, whose cases were all replaced (a lost `function.json` numbers them from
+/// `a1` again), and the reviewer's whose case is gone. The caller holds the review lock.
+pub(super) fn forget_replaced_results(worktree: &Path, slug: &str, record: &mut TestsRecord) {
+    let Some(results) = record.case_results.get_mut(slug) else {
+        return;
+    };
+    let kept: BTreeSet<String> = load_stored(worktree, slug)
+        .edits
+        .added
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    results.retain(|id, _| kept.contains(id));
+    if results.is_empty() {
+        record.case_results.remove(slug);
+    }
+}
+
 /// One listed function with what is stored for it.
 pub(super) struct Item {
     pub brief: FunctionBrief,
     pub stored: Option<StoredFunction>,
     pub edits: Edits,
     pub refused: bool,
+    /// Why its folder could not be opened, when that is not a link.
+    pub problem: Option<String>,
     /// The recipe's command for its language.
     pub command: Option<String>,
 }
@@ -868,6 +924,7 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
         let support = support_of(&Facts {
             stored: stored.function.as_ref(),
             folder_refused: stored.refused,
+            folder_problem: stored.problem.as_deref(),
             no_package: false,
             signature: &signature,
             cases: cases.len(),
@@ -941,6 +998,7 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
             stored: stored.function,
             edits: stored.edits,
             refused: stored.refused,
+            problem: stored.problem,
             command,
         });
     }
@@ -987,6 +1045,9 @@ pub(super) async fn writable(
     };
     if read.items[at].refused {
         return Err(reviews::invalid_state(FOLDER_REFUSED));
+    }
+    if let Some(problem) = &read.items[at].problem {
+        return Err(reviews::invalid_state(problem.clone()));
     }
     Ok((read, at))
 }
@@ -1069,6 +1130,7 @@ pub(super) async fn briefs(shared: &Arc<Shared>, pr: &PrRef, head: &str) -> Vec<
 /// The caller holds the review lock.
 pub(super) fn adopt_blocks(
     worktree: &Path,
+    record: &mut TestsRecord,
     briefs: &[FunctionBrief],
     blocks: &[serde_json::Value],
     head: &str,
@@ -1093,9 +1155,12 @@ pub(super) fn adopt_blocks(
             signature: brief.signature.clone(),
             head: head.to_string(),
         };
-        if let Err(reasons) = apply_block(worktree, &target, block, &CasesAsk::Fresh, now) {
-            unreadable += 1;
-            tracing::warn!(reasons = ?reasons, "a clusia-function block could not be used");
+        match apply_block(worktree, &target, block, &CasesAsk::Fresh, now) {
+            Ok(()) => forget_replaced_results(worktree, &target.slug, record),
+            Err(reasons) => {
+                unreadable += 1;
+                tracing::warn!(reasons = ?reasons, "a clusia-function block could not be used");
+            }
         }
     }
     unreadable
@@ -1166,6 +1231,9 @@ fn editing(read: &Read, at: usize, slug: &str, name: &str) -> Result<Editing, Ou
     let stored = load_stored(&worktree, slug);
     if stored.refused {
         return Err(reviews::invalid_state(FOLDER_REFUSED));
+    }
+    if let Some(problem) = stored.problem {
+        return Err(reviews::invalid_state(problem));
     }
     let Some(function) = stored.function.filter(|f| !f.cases.is_empty()) else {
         return Err(reviews::invalid_state(format!(
@@ -1574,6 +1642,7 @@ mod tests {
             support_of(&Facts {
                 stored,
                 folder_refused: refused,
+                folder_problem: None,
                 no_package,
                 signature: sig,
                 cases,
@@ -1635,6 +1704,47 @@ mod tests {
             facts(Some(&base), false, false, "", 2, Some(command)),
             Support::Ready,
             "an unread signature is not a change"
+        );
+        let mut unsigned = base.clone();
+        unsigned.signature = String::new();
+        assert_eq!(
+            facts(Some(&unsigned), false, false, &sig, 2, Some(command)),
+            Support::Ready,
+            "cases written while the signature was unread are not stale"
+        );
+        assert_eq!(
+            support_of(&Facts {
+                stored: None,
+                folder_refused: false,
+                folder_problem: Some("cannot open functions: Permission denied"),
+                no_package: false,
+                signature: &sig,
+                cases: 0,
+                lang: Some(FunctionLang::Rust),
+                command: Some(command),
+            }),
+            Support::Unsupported {
+                reason: "cannot open functions: Permission denied".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_opened_says_why() {
+        use std::os::unix::fs::PermissionsExt;
+        let wt = tempfile::tempdir().unwrap();
+        save_function(wt.path(), &slug(), &stored(), None).unwrap();
+        let functions = wt.path().join(".clusia/functions");
+        fs::set_permissions(&functions, fs::Permissions::from_mode(0o000)).unwrap();
+        let read = load_stored(wt.path(), &slug());
+        fs::set_permissions(&functions, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!read.refused && read.function.is_none());
+        assert!(
+            read.problem
+                .as_deref()
+                .is_some_and(|p| p.starts_with("cannot open ")),
+            "{:?}",
+            read.problem
         );
     }
 
@@ -1945,7 +2055,15 @@ mod tests {
         let mut other = block(two_cases());
         other["params"][1]["kind"] = json!("text");
         apply_block(wt.path(), &target(), &other, &CasesAsk::Fresh, 3).unwrap();
-        assert!(!folder_of(&wt).join("edits.json").exists());
+        let edits = load_stored(wt.path(), &slug()).edits;
+        assert_eq!(
+            edits,
+            Edits {
+                next: 2,
+                ..Edits::default()
+            },
+            "other params drop every edit but keep the next reviewer id"
+        );
     }
 
     #[test]

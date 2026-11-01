@@ -923,3 +923,72 @@ async fn a_shipped_clusia_folder_empties_the_view_and_refuses_every_write() {
         shipped
     );
 }
+
+/// Stores a passed result for each case of `TokenStore::refresh` named in `ids`.
+async fn put_results(lab: &Lab, ids: &[&str]) {
+    env::update_record(&lab.shared, &pr(7), |record| {
+        for id in ids {
+            record
+                .case_results
+                .entry(refresh())
+                .or_default()
+                .insert(id.to_string(), sample_result(id));
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_new_case_never_takes_an_old_result() {
+    let mut other = refresh_block(two_cases());
+    other["params"][1]["kind"] = json!("text");
+    let mut lab = functions_lab(vec![
+        generate_answer(),
+        Turn::answer_blocks("x", &[function_block(other)]),
+        Turn::answer_blocks("x", &[function_block(refresh_block(two_cases()))]),
+    ]);
+    generated(&lab, 7).await;
+    view_of(
+        save_case(
+            &lab.shared,
+            &pr(7),
+            &refresh(),
+            input(None, "Mine", "old", "500"),
+        )
+        .await,
+    );
+    put_results(&lab, &["a1", "r1"]).await;
+
+    // Other params: the agent's cases are new and the reviewer's go.
+    lab.drain();
+    write_cases(&lab.shared, &pr(7), &refresh(), CasesAsk::Fresh).await;
+    told(&mut lab, "other params", |v| v.activity.is_none()).await;
+    assert!(
+        !env::load(&lab.shared, &pr(7))
+            .case_results
+            .contains_key(&refresh())
+    );
+    let again = view_of(
+        save_case(
+            &lab.shared,
+            &pr(7),
+            &refresh(),
+            input(None, "Mine", "old", "500"),
+        )
+        .await,
+    );
+    let mine = of(&again, &refresh()).cases.last().unwrap().clone();
+    assert_eq!(mine.id, "r2", "the reviewer's ids are never reused");
+    assert!(mine.result.is_none());
+
+    // A lost function.json numbers the agent's cases from a1 again; no old a1 result shows.
+    put_results(&lab, &["a1"]).await;
+    let folder = lab.worktree(7).join(".clusia/functions").join(refresh());
+    std::fs::remove_file(folder.join("function.json")).unwrap();
+    lab.drain();
+    write_cases(&lab.shared, &pr(7), &refresh(), CasesAsk::Fresh).await;
+    let done = told(&mut lab, "restarted", |v| v.activity.is_none()).await;
+    let f = of(&done, &refresh());
+    assert_eq!(f.cases[0].id, "a1");
+    assert!(f.cases.iter().all(|c| c.result.is_none()), "{:?}", f.cases);
+}

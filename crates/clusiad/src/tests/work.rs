@@ -393,6 +393,7 @@ pub(super) async fn generate(
     }
     let unused = super::cases::adopt_blocks(
         &ctx.worktree,
+        &mut record,
         &briefs,
         &answer_functions,
         &review.head_sha,
