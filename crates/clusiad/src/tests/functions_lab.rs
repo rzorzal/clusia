@@ -992,3 +992,580 @@ async fn a_new_case_never_takes_an_old_result() {
     assert_eq!(f.cases[0].id, "a1");
     assert!(f.cases.iter().all(|c| c.result.is_none()), "{:?}", f.cases);
 }
+
+use super::lab::{approve, args_of, idle, ready_after};
+use clusia_core::functions::{CaseResult, CaseStatus, StateCheck};
+use clusia_core::tests::{Approve, STEP_TESTS};
+use clusia_testrun::exec::{CommandSpec, Stream};
+
+/// What the driver prints for `TokenStore::refresh`: a1's expectations met, a2's not.
+fn driver_output() -> FakeReply {
+    FakeReply::marked(
+        vec![
+            (Stream::Out, "   Compiling widgets v0.1.0\n@MARK@ returned Err(Http(500))\n@MARK@ state token old\n@MARK@ took 210\n@MARK@ done\n".into()),
+            (Stream::Err, "WARN refresh failed: 500\n".into()),
+        ],
+        0,
+    )
+}
+
+/// Review 7 in the local sandbox, with the index of `h1`; `driver` answers every case run.
+fn local_lab(turns: Vec<Turn>, driver: FakeReply) -> Lab {
+    let lab = lab(Machine::NoEngine, turns, &[7], |x, _| {
+        x.on("sandbox-exec", &["-p"], FakeReply::ok(""));
+        x.on("sandbox-exec", &["-f"], driver);
+    });
+    lab.exec
+        .executable_at(lab.home.path().join("bin/sandbox-exec"));
+    index(&lab, 7, "h1", REFRESH_SIG);
+    lab
+}
+
+async fn local_ready(turns: Vec<Turn>, driver: FakeReply) -> Lab {
+    let lab = local_lab(turns, driver);
+    generated(&lab, 7).await;
+    ready_after(&lab, 7).await;
+    lab
+}
+
+fn seen_for(view: &FunctionsView, scope: &CaseScope) -> String {
+    match scope {
+        CaseScope::All => view.hash.clone(),
+        CaseScope::Function { function } | CaseScope::Case { function, .. } => {
+            of(view, function).hash.clone()
+        }
+    }
+}
+
+/// Starts a run of `scope` with the hash of the view now; answers its id.
+async fn start(lab: &Lab, scope: CaseScope) -> String {
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    let seen = seen_for(&view, &scope);
+    match run_cases(&lab.shared, &pr(7), scope, seen).await {
+        Outcome::Ok(Reply::CasesStarted { run }) => run,
+        other => panic!("not started: {other:?}"),
+    }
+}
+
+/// The results run `run` sent, once the run ended and the view said so.
+async fn results(lab: &mut Lab, run: &str) -> Vec<CaseResult> {
+    let give_up = Instant::now() + clusia_core::testkit::HANG_BOUND;
+    let mut done = Vec::new();
+    let mut ended = false;
+    loop {
+        // Read before draining: once the run is idle, every one of its events is already sent.
+        let finished = idle(&lab.shared, 7);
+        for event in lab.drain() {
+            match event {
+                Event::CaseDone {
+                    run: id, result, ..
+                } if id == run => done.push(*result),
+                Event::FunctionsChanged { view, .. } if view.activity.is_none() => ended = true,
+                _ => {}
+            }
+        }
+        if finished && ended {
+            return done;
+        }
+        assert!(Instant::now() < give_up, "run {run} did not end");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+fn case_calls(lab: &Lab) -> Vec<CommandSpec> {
+    lab.exec
+        .calls()
+        .into_iter()
+        .filter(|c| args_of(c).last().is_some_and(|a| a.contains("clusia_case")))
+        .collect()
+}
+
+fn env_of(call: &CommandSpec) -> Vec<(String, String)> {
+    call.env
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+fn placed(lab: &Lab) -> std::path::PathBuf {
+    lab.worktree(7)
+        .join("tests")
+        .join(clusia_testrun::functions::driver_target(&refresh()) + ".rs")
+}
+
+#[tokio::test]
+async fn a_function_run_reports_each_case_and_removes_its_driver() {
+    let mut lab = local_ready(vec![generate_answer()], driver_output()).await;
+    lab.drain();
+    let run = start(
+        &lab,
+        CaseScope::Function {
+            function: refresh(),
+        },
+    )
+    .await;
+    let done = results(&mut lab, &run).await;
+    assert_eq!(
+        done.iter().map(|r| r.case.as_str()).collect::<Vec<_>>(),
+        ["a1", "a2"]
+    );
+    let (a1, a2) = (&done[0], &done[1]);
+    assert_eq!(a1.status, CaseStatus::Passed);
+    assert_eq!(a1.returned.as_deref(), Some("Err(Http(500))"));
+    assert_eq!(a1.returned_expected.as_deref(), Some("Err(Http(500))"));
+    assert_eq!(
+        a1.state,
+        [StateCheck {
+            name: "token".into(),
+            got: Some("old".into()),
+            expected: Some("old".into())
+        }]
+    );
+    assert_eq!(a1.took_ms, 210);
+    assert_eq!(
+        a1.output,
+        "   Compiling widgets v0.1.0\nWARN refresh failed: 500\n"
+    );
+    assert_eq!(
+        (a1.head.as_str(), a1.runner, a1.exit_code),
+        ("h1", clusia_core::tests::RunnerKind::Local, Some(0))
+    );
+    assert_eq!(a2.status, CaseStatus::Failed, "a2 expected Ok(1)");
+
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    let f = of(&view, &refresh());
+    assert_eq!(f.cases[0].result.as_ref().unwrap().hash, f.cases[0].hash);
+    assert_eq!(
+        f.cases[1].result.as_ref().unwrap().status,
+        CaseStatus::Failed
+    );
+    assert!(
+        !placed(&lab).exists(),
+        "the driver is removed after the run"
+    );
+    assert!(env::load(&lab.shared, &pr(7)).placed.is_empty());
+    assert_eq!(case_calls(&lab).len(), 2, "one process per case");
+    assert_eq!(
+        env::view(&lab.shared, &pr(7)).await.phase,
+        TestsPhase::Ready
+    );
+}
+
+#[tokio::test]
+async fn case_runs_use_the_offline_runner_and_its_mounts() {
+    // The local sandbox: the offline profile, a cleared environment, `/bin/sh -c` and the command.
+    let mut lab = local_ready(vec![generate_answer()], driver_output()).await;
+    let run = start(
+        &lab,
+        CaseScope::Case {
+            function: refresh(),
+            case: "a1".into(),
+        },
+    )
+    .await;
+    results(&mut lab, &run).await;
+    let call = case_calls(&lab).remove(0);
+    let args = args_of(&call);
+    assert!(args[1].ends_with("-offline.sb"), "{args:?}");
+    let target = clusia_testrun::functions::driver_target(&refresh());
+    assert_eq!(
+        args[2..],
+        [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "cargo test --offline -p 'widgets' --test '{target}' -- --exact clusia_case --nocapture"
+            ),
+        ]
+    );
+    assert!(call.clear_env);
+    let env = env_of(&call);
+    let root = lab.worktree(7).display().to_string();
+    assert!(env.contains(&("CLUSIA_ROOT".to_string(), root)));
+    assert!(env.contains(&("CLUSIA_CASE".to_string(), "a1".to_string())));
+    let marks: Vec<&(String, String)> = env.iter().filter(|(k, _)| k == "CLUSIA_MARK").collect();
+    assert_eq!(marks.len(), 1);
+    assert!(marks[0].1.len() == 16 && marks[0].1.chars().all(|c| c.is_ascii_hexdigit()));
+
+    // A container: no network, the worktree's mounts with `.clusia` read-only, `-e` pairs.
+    // `lab` names the local lab here, so the builder is called by its path.
+    let mut lab = super::lab::lab(
+        Machine::Colima { running: true },
+        vec![generate_answer()],
+        &[7],
+        |x, _| {
+            built(x);
+            x.on("docker", &["run"], driver_output());
+        },
+    );
+    index(&lab, 7, "h1", REFRESH_SIG);
+    generated(&lab, 7).await;
+    ready_after(&lab, 7).await;
+    let run = start(
+        &lab,
+        CaseScope::Case {
+            function: refresh(),
+            case: "a1".into(),
+        },
+    )
+    .await;
+    let done = results(&mut lab, &run).await;
+    assert_eq!(done[0].runner, clusia_core::tests::RunnerKind::Container);
+    let call = case_calls(&lab).remove(0);
+    let args = args_of(&call);
+    let at = |flag: &str, value: &str| args.windows(2).any(|w| w[0] == flag && w[1] == value);
+    let wt = lab.worktree(7).display().to_string();
+    assert!(at("--network", "none"), "{args:?}");
+    assert!(at("-v", &format!("{wt}/.clusia:/work/.clusia:ro")));
+    assert!(at("-e", "CLUSIA_ROOT=/work"));
+    assert!(at("-e", "CLUSIA_CASE=a1"));
+    assert!(at("-e", "CLUSIA_ARG_STORED_TOKEN=old"));
+    assert_eq!(args[args.len() - 2], "-c");
+    assert!(
+        args.last()
+            .unwrap()
+            .starts_with("cargo test --offline -p 'widgets'")
+    );
+}
+
+#[tokio::test]
+async fn values_reach_the_driver_only_as_env() {
+    let hostile = "$(touch /tmp/pwned)'; rm -rf ~ #";
+    let mut lab = local_ready(vec![generate_answer()], driver_output()).await;
+    view_of(
+        save_case(
+            &lab.shared,
+            &pr(7),
+            &refresh(),
+            input(Some("a1"), "Endpoint fails, old token kept", hostile, "500"),
+        )
+        .await,
+    );
+    let run = start(
+        &lab,
+        CaseScope::Case {
+            function: refresh(),
+            case: "a1".into(),
+        },
+    )
+    .await;
+    results(&mut lab, &run).await;
+    let call = case_calls(&lab).remove(0);
+    for arg in args_of(&call) {
+        assert!(!arg.contains("pwned"), "a value in the command line: {arg}");
+    }
+    let env = env_of(&call);
+    let carried: Vec<&(String, String)> = env.iter().filter(|(_, v)| v.contains("pwned")).collect();
+    assert_eq!(
+        carried,
+        [&("CLUSIA_ARG_STORED_TOKEN".to_string(), hostile.to_string())]
+    );
+    let driver = std::fs::read_to_string(
+        lab.worktree(7)
+            .join(".clusia/functions")
+            .join(refresh())
+            .join("driver.rs"),
+    )
+    .unwrap();
+    assert!(!driver.contains("pwned"), "the driver holds no value");
+
+    // A container: the value is exactly one `-e` argument, and in no other argument.
+    let mut boxed = super::lab::lab(
+        Machine::Colima { running: true },
+        vec![generate_answer()],
+        &[7],
+        |x, _| {
+            built(x);
+            x.on("docker", &["run"], driver_output());
+        },
+    );
+    index(&boxed, 7, "h1", REFRESH_SIG);
+    generated(&boxed, 7).await;
+    ready_after(&boxed, 7).await;
+    view_of(
+        save_case(
+            &boxed.shared,
+            &pr(7),
+            &refresh(),
+            input(Some("a1"), "Endpoint fails, old token kept", hostile, "500"),
+        )
+        .await,
+    );
+    let run = start(
+        &boxed,
+        CaseScope::Case {
+            function: refresh(),
+            case: "a1".into(),
+        },
+    )
+    .await;
+    results(&mut boxed, &run).await;
+    let args = args_of(&case_calls(&boxed).remove(0));
+    let entry = format!("CLUSIA_ARG_STORED_TOKEN={hostile}");
+    let at: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.contains("pwned"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(at.len(), 1, "{args:?}");
+    assert_eq!(args[at[0]], entry);
+    assert_eq!(args[at[0] - 1], "-e");
+}
+
+#[tokio::test]
+async fn cases_do_not_run_before_the_function_command_is_approved() {
+    let lab = local_lab(vec![generate_answer()], driver_output());
+    generated(&lab, 7).await;
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    let one = CaseScope::Case {
+        function: refresh(),
+        case: "a1".into(),
+    };
+    assert!(
+        refused(run_cases(&lab.shared, &pr(7), one.clone(), seen_for(&view, &one)).await)
+            .starts_with("Set up the tests first")
+    );
+    let plan = env::view(&lab.shared, &pr(7)).await.plan.unwrap();
+    assert!(
+        plan.commands
+            .iter()
+            .any(|c| c.key == "functions.rust" && c.command == RUST_COMMAND),
+        "the setup plan shows the function command: {plan:#?}"
+    );
+    ready_after(&lab, 7).await;
+    // A recipe whose function command changed asks again.
+    let file = lab.worktree(7).join(".clusia/recipe.toml");
+    let text = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace("--nocapture", "--nocapture --quiet");
+    std::fs::write(&file, text).unwrap();
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    assert!(
+        refused(run_cases(&lab.shared, &pr(7), one.clone(), seen_for(&view, &one)).await)
+            .starts_with("Set up the tests first")
+    );
+    assert!(case_calls(&lab).is_empty(), "no driver ran");
+    assert!(matches!(
+        approve(&lab, 7, Approve::Steps(vec![STEP_TESTS.into()])).await,
+        Outcome::Ok(Reply::Ack)
+    ));
+    settled(&lab, 7).await;
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    assert!(matches!(
+        run_cases(&lab.shared, &pr(7), one.clone(), seen_for(&view, &one)).await,
+        Outcome::Ok(Reply::CasesStarted { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_stale_function_refuses_to_run() {
+    let lab = local_ready(vec![generate_answer()], driver_output()).await;
+    let mut review = crate::reviews::load_stored(&lab.shared, &pr(7))
+        .unwrap()
+        .unwrap();
+    review.head_sha = "h3".into();
+    save_review(&lab.shared.paths, &review).unwrap();
+    index(
+        &lab,
+        7,
+        "h3",
+        "pub fn refresh(&self, now: u64, force: bool) -> Result<u32, String> {",
+    );
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    let whole = CaseScope::Function {
+        function: refresh(),
+    };
+    assert_eq!(
+        refused(run_cases(&lab.shared, &pr(7), whole.clone(), seen_for(&view, &whole)).await),
+        "The signature changed since these cases were written"
+    );
+    let backoff_scope = CaseScope::Function {
+        function: backoff(),
+    };
+    assert_eq!(
+        refused(
+            run_cases(
+                &lab.shared,
+                &pr(7),
+                backoff_scope.clone(),
+                seen_for(&view, &backoff_scope)
+            )
+            .await
+        ),
+        clusia_core::functions::NO_CASES
+    );
+    assert_eq!(
+        refused(run_cases(&lab.shared, &pr(7), CaseScope::All, view.hash.clone()).await),
+        clusia_core::functions::NO_CASES,
+        "no Ready function is left"
+    );
+    let old = CaseScope::Function {
+        function: refresh(),
+    };
+    assert_eq!(
+        refused(run_cases(&lab.shared, &pr(7), old, "0".repeat(64)).await),
+        CASES_CHANGED
+    );
+    assert!(case_calls(&lab).is_empty());
+}
+
+#[tokio::test]
+async fn a_symlinked_tests_folder_refuses_the_rust_driver() {
+    let mut lab = local_ready(vec![generate_answer()], driver_output()).await;
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), lab.worktree(7).join("tests")).unwrap();
+    let run = start(
+        &lab,
+        CaseScope::Function {
+            function: refresh(),
+        },
+    )
+    .await;
+    let done = results(&mut lab, &run).await;
+    assert_eq!(done.len(), 2);
+    for result in &done {
+        assert_eq!(result.status, CaseStatus::Error);
+        assert_eq!(
+            result.message.as_deref(),
+            Some("Clúsia won't place the driver: tests is not a plain folder")
+        );
+    }
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    assert!(case_calls(&lab).is_empty());
+}
+
+#[tokio::test]
+async fn the_placed_driver_is_removed_even_when_stopped() {
+    let mut lab = local_ready(vec![generate_answer()], FakeReply::hang()).await;
+    let run = start(
+        &lab,
+        CaseScope::Function {
+            function: refresh(),
+        },
+    )
+    .await;
+    let give_up = Instant::now() + clusia_core::testkit::HANG_BOUND;
+    while case_calls(&lab).is_empty() {
+        assert!(Instant::now() < give_up, "the case never started");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(placed(&lab)).unwrap(),
+        DRIVER,
+        "placed while it runs"
+    );
+    assert_eq!(
+        env::load(&lab.shared, &pr(7)).placed,
+        [format!(
+            "tests/{}.rs",
+            clusia_testrun::functions::driver_target(&refresh())
+        )]
+    );
+    assert!(matches!(stop(&lab.shared, &pr(7)), Outcome::Ok(Reply::Ack)));
+    let done = results(&mut lab, &run).await;
+    assert_eq!(
+        done.iter().map(|r| r.status).collect::<Vec<_>>(),
+        [CaseStatus::Stopped],
+        "a2 never ran"
+    );
+    assert!(!placed(&lab).exists());
+    assert!(env::load(&lab.shared, &pr(7)).placed.is_empty());
+    assert_eq!(case_calls(&lab).len(), 1);
+}
+
+#[tokio::test]
+async fn a_leftover_placed_driver_goes_at_the_next_run() {
+    let mut lab = local_ready(vec![generate_answer()], driver_output()).await;
+    let leftover = lab.worktree(7).join("tests/clusia_driver_aaaaaaaaaa.rs");
+    std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
+    std::fs::write(&leftover, "// left behind\n").unwrap();
+    env::update_record(&lab.shared, &pr(7), |record| {
+        record.placed = vec!["tests/clusia_driver_aaaaaaaaaa.rs".into()];
+    })
+    .await;
+    let run = start(
+        &lab,
+        CaseScope::Case {
+            function: refresh(),
+            case: "a1".into(),
+        },
+    )
+    .await;
+    results(&mut lab, &run).await;
+    assert!(!leftover.exists());
+    assert!(env::load(&lab.shared, &pr(7)).placed.is_empty());
+}
+
+#[tokio::test]
+async fn running_cases_takes_the_slot_and_reports_progress() {
+    let slow = FakeReply::after(std::time::Duration::from_millis(300), driver_output());
+    let mut lab = local_ready(vec![generate_answer()], slow).await;
+    lab.drain();
+    let run = start(&lab, CaseScope::All).await;
+    let busy = "The tests of acme/widgets#7 are busy running cases; wait for it or stop it";
+    assert_eq!(
+        refused(super::run(&lab.shared, &pr(7), TestScope::All).await),
+        busy
+    );
+    assert_eq!(
+        refused(write_cases(&lab.shared, &pr(7), &refresh(), CasesAsk::Fresh).await),
+        busy
+    );
+    let running = told(&mut lab, "running", |v| {
+        matches!(
+            &v.activity,
+            Some(FunctionsActivity::Running {
+                current: Some(_),
+                ..
+            })
+        )
+    })
+    .await;
+    let Some(FunctionsActivity::Running {
+        run: id,
+        scope,
+        total,
+        ..
+    }) = running.activity
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (id.as_str(), scope, total),
+        (run.as_str(), CaseScope::All, 2)
+    );
+    let done = results(&mut lab, &run).await;
+    assert_eq!(done.len(), 2, "only the Ready function's cases ran");
+    assert_eq!(
+        env::view(&lab.shared, &pr(7)).await.phase,
+        TestsPhase::Ready
+    );
+}
+
+#[tokio::test]
+async fn a_case_past_its_limit_is_timed_out_and_the_rest_do_not_run() {
+    let mut lab = local_lab(vec![generate_answer()], FakeReply::hang());
+    lab.shared.config.write().await.tests.run_timeout_secs = 1;
+    generated(&lab, 7).await;
+    ready_after(&lab, 7).await;
+    let run = start(
+        &lab,
+        CaseScope::Function {
+            function: refresh(),
+        },
+    )
+    .await;
+    let done = results(&mut lab, &run).await;
+    assert_eq!(
+        done.iter().map(|r| r.status).collect::<Vec<_>>(),
+        [CaseStatus::TimedOut]
+    );
+    assert_eq!(done[0].exit_code, None);
+    assert!(!placed(&lab).exists());
+}

@@ -8,6 +8,7 @@ pub mod docker;
 pub mod eco;
 pub mod engine;
 pub mod exec;
+pub mod functions;
 pub mod image;
 pub mod local;
 pub mod log;

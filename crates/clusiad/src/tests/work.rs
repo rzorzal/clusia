@@ -2,6 +2,7 @@
 //! listing the tests, and where their output goes.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::future::Future;
 use std::io;
 use std::path::Path;
@@ -298,13 +299,13 @@ fn usable(snap: Snapshot) -> Result<Usable, Outcome> {
     })
 }
 
-struct Usable {
-    head: String,
-    ctx: Ctx,
-    env: EnvState,
-    recipe: Recipe,
-    plan: SetupPlan,
-    image: Option<ImagePlan>,
+pub(super) struct Usable {
+    pub head: String,
+    pub ctx: Ctx,
+    pub env: EnvState,
+    pub recipe: Recipe,
+    pub plan: SetupPlan,
+    pub image: Option<ImagePlan>,
 }
 
 /// The recipe turn and its adoption.
@@ -1080,7 +1081,7 @@ pub(super) struct RunJob {
 /// What a run or a list needs: everything `usable` checks, a plan that is ready, and an engine
 /// asked again.
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
-async fn ready_to_run(shared: &Arc<Shared>, pr: &PrRef) -> Result<Usable, Outcome> {
+pub(super) async fn ready_to_run(shared: &Arc<Shared>, pr: &PrRef) -> Result<Usable, Outcome> {
     let ctx = Ctx::new(shared, pr).map_err(not_alive)?;
     env::refresh_shipped(shared, &ctx).await;
     env::reprobe(shared, &ctx, pr).await;
@@ -1093,7 +1094,12 @@ async fn ready_to_run(shared: &Arc<Shared>, pr: &PrRef) -> Result<Usable, Outcom
     Ok(usable)
 }
 
-fn job_of(usable: Usable, id: String, scope: TestScope, commands: Vec<String>) -> RunJob {
+pub(super) fn job_of(
+    usable: Usable,
+    id: String,
+    scope: TestScope,
+    commands: Vec<String>,
+) -> RunJob {
     let network = match &usable.recipe.services {
         Some(_) => ContainerNet::Internal(compose::internal_network(&names::compose_project(
             &usable.ctx.slug,
@@ -1206,7 +1212,20 @@ pub(super) async fn run(
             ended_by = Some(RunOutcome::TimedOut);
             break;
         }
-        match run_command(&shared, &pr, act, &job, command, left, &stop, &mut sink).await {
+        let mut chunk = |stream, bytes: &[u8]| sink.chunk(stream, bytes);
+        match run_command(
+            &shared,
+            &pr,
+            act,
+            &job,
+            command,
+            left,
+            &stop,
+            &mut chunk,
+            &[],
+        )
+        .await
+        {
             Ok(Ended::Exited(Some(0))) => {}
             Ok(Ended::Exited(code)) => {
                 first_failure.get_or_insert(code);
@@ -1291,10 +1310,11 @@ fn totals_of(results: &[TestCaseResult]) -> Totals {
     totals
 }
 
-/// One command of a run or a list, in a container of the recipe's image or in the local
-/// sandbox with no network.
+/// One command of a run, a list or a case, in a container of the recipe's image or in the
+/// local sandbox with no network. `extra_env` comes after the recipe's own environment: as
+/// `-e` arguments in a container, as entries of the cleared environment locally.
 #[allow(clippy::too_many_arguments)]
-async fn run_command(
+pub(super) async fn run_command(
     shared: &Shared,
     pr: &PrRef,
     act: u64,
@@ -1302,11 +1322,11 @@ async fn run_command(
     command: &str,
     limit: Duration,
     stop: &StopFlag,
-    sink: &mut Sink<'_>,
+    chunk: &mut (dyn FnMut(Stream, &[u8]) + Send),
+    extra_env: &[(String, String)],
 ) -> io::Result<Ended> {
     let exec = shared.test_exec.as_ref();
     let (ctx, env) = (&job.ctx, &job.env);
-    let mut chunk = |stream, bytes: &[u8]| sink.chunk(stream, bytes);
     if env.runner == RunnerKind::Container {
         let (Some(engine), Some(image)) = (&env.engine, &job.image) else {
             return Err(io::Error::other("no container engine or image"));
@@ -1318,7 +1338,10 @@ async fn run_command(
             name: name.clone(),
             image: image.clone(),
             command: command.to_string(),
-            env: docker::job_env(&env.signals.ecosystems, &job.recipe.tests.env),
+            env: docker::job_env(&env.signals.ecosystems, &job.recipe.tests.env)
+                .into_iter()
+                .chain(extra_env.iter().cloned())
+                .collect(),
             net: job.network.clone(),
             cpus: Some(config.cpus_for(cores())),
             memory_mb: Some(config.memory_mb),
@@ -1332,7 +1355,7 @@ async fn run_command(
             &mounts(ctx, env),
             limit,
             stop,
-            &mut chunk,
+            chunk,
         )
         .await;
         super::set_container(shared, pr, act, None);
@@ -1340,19 +1363,25 @@ async fn run_command(
     }
     let roots = env::roots(shared, ctx)?;
     let profile = env::profile_file(shared, ctx, NetMode::Offline)?;
+    let mut vars = sandbox::base_env(
+        &roots,
+        &env::local_path(shared),
+        &env.signals.ecosystems,
+        &job.recipe.tests.env,
+    );
+    vars.extend(
+        extra_env
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
+    );
     let cmd = sandbox::local_command(
         &shared.sandbox_exec_program,
         &profile,
         command,
-        sandbox::base_env(
-            &roots,
-            &env::local_path(shared),
-            &env.signals.ecosystems,
-            &job.recipe.tests.env,
-        ),
+        vars,
         &ctx.worktree,
     );
-    local::run_local(exec, &cmd, limit, stop, &mut chunk).await
+    local::run_local(exec, &cmd, limit, stop, chunk).await
 }
 
 /// The list command, with a place, answered as the tests it found.
@@ -1379,7 +1408,8 @@ pub(super) async fn list(shared: &Arc<Shared>, pr: &PrRef, id: u64, stop: &StopF
         .min(LIST_MAX_SECS);
     let limit = Duration::from_secs(u64::from(secs));
     let mut sink = Sink::new(shared, pr, To::Quiet, None, None);
-    let ended = run_command(shared, pr, id, &job, &command, limit, stop, &mut sink).await;
+    let mut chunk = |stream, bytes: &[u8]| sink.chunk(stream, bytes);
+    let ended = run_command(shared, pr, id, &job, &command, limit, stop, &mut chunk, &[]).await;
     sink.flush();
     let failure = match ended {
         Ok(Ended::Exited(Some(0))) => {

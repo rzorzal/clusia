@@ -182,7 +182,7 @@ pub(super) fn support_of(facts: &Facts<'_>) -> Support {
     }
     if facts.no_package {
         return Support::Unsupported {
-            reason: "No Cargo package holds this file".into(),
+            reason: clusia_testrun::functions::NO_PACKAGE.into(),
         };
     }
     if facts.folder_refused {
@@ -780,6 +780,9 @@ pub(super) struct Item {
     pub problem: Option<String>,
     /// The recipe's command for its language.
     pub command: Option<String>,
+    /// For a Rust function, the folder and name of the Cargo package that holds its file, or
+    /// why none does.
+    pub package: Option<Result<(String, String), String>>,
 }
 
 /// The view and what it was read from; `items[i]` belongs to `view.functions[i]`.
@@ -921,11 +924,13 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
             .and_then(|lang| spec.as_ref()?.command(lang))
             .map(String::from);
         let cases = effective(stored.function.as_ref(), &stored.edits);
+        let package = (lang == Some(FunctionLang::Rust))
+            .then(|| clusia_testrun::functions::package_for(&ctx.worktree, &f.path));
         let support = support_of(&Facts {
             stored: stored.function.as_ref(),
             folder_refused: stored.refused,
             folder_problem: stored.problem.as_deref(),
-            no_package: false,
+            no_package: matches!(package, Some(Err(_))),
             signature: &signature,
             cases: cases.len(),
             lang,
@@ -1000,6 +1005,7 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
             refused: stored.refused,
             problem: stored.problem,
             command,
+            package,
         });
     }
     view.hash = view_hash(&view.functions);
@@ -1055,7 +1061,6 @@ pub(super) async fn writable(
 /// Whether what the reviewer saw (`seen`, a function's hash or, for `All`, the view's) is
 /// still what would run.
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn check_seen(
     view: &FunctionsView,
     pr: &PrRef,

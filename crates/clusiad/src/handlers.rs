@@ -293,7 +293,9 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
             crate::tests::write_cases(shared, &pr, &function, ask).await
         }
         Command::GetDriver { pr, function } => crate::tests::driver(shared, &pr, &function).await,
-        Command::RunCases { .. } => functions_not_ready(),
+        Command::RunCases { pr, scope, seen } => {
+            crate::tests::run_cases(shared, &pr, scope, seen).await
+        }
     }
 }
 
@@ -303,13 +305,6 @@ fn key_error(e: ConfigKeyError) -> Outcome {
         ConfigKeyError::Invalid { .. } => ErrorCode::InvalidConfigValue,
     };
     Outcome::Err(ProtocolError::new(code, e.to_string()))
-}
-
-const FUNCTIONS_NOT_READY: &str = "Run Function tests is not ready in this daemon";
-
-/// The answer to a function-case command this daemon does not serve yet.
-fn functions_not_ready() -> Outcome {
-    reviews::invalid_state(FUNCTIONS_NOT_READY)
 }
 
 async fn open_in_editor(shared: &Shared, path: &str, line: Option<u32>) -> Outcome {

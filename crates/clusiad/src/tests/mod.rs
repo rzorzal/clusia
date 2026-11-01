@@ -2,6 +2,7 @@
 //! their storage. A review does one thing at a time (generate, set up, list or run), and at most
 //! `tests.parallel_runs` setups, lists and runs go at once across all reviews.
 
+mod case_run;
 pub(crate) mod case_turn;
 pub(super) mod cases;
 mod env;
@@ -31,6 +32,7 @@ use crate::reviews;
 use crate::state::Shared;
 use crate::turns::{Stop, Why};
 
+pub(crate) use case_run::run_cases;
 pub(crate) use case_turn::write_cases;
 pub(crate) use cases::{driver, functions, remove_case, reset_case, save_case};
 
@@ -56,6 +58,7 @@ pub(super) enum Doing {
     List,
     Run,
     Cases,
+    RunCases,
 }
 
 impl Doing {
@@ -66,12 +69,13 @@ impl Doing {
             Doing::List => "listing the tests",
             Doing::Run => "running the tests",
             Doing::Cases => "writing cases",
+            Doing::RunCases => "running cases",
         }
     }
 
     /// Whether the activity is about the function cases, which leave the tests' phase alone.
     pub(super) fn is_functions(self) -> bool {
-        matches!(self, Doing::Cases)
+        matches!(self, Doing::Cases | Doing::RunCases)
     }
 }
 
