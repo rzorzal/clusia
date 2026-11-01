@@ -966,6 +966,7 @@ mod tests {
             work_marker(&step, None, "abc123")
         );
     }
+
     #[test]
     fn function_commands_follow_the_test_commands() {
         let mut recipe = recipe();

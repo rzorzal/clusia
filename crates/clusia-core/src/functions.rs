@@ -175,7 +175,7 @@ pub struct Edits {
 }
 
 /// Who wrote a case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaseOrigin {
     Agent,
@@ -183,7 +183,7 @@ pub enum CaseOrigin {
 }
 
 /// How the pull request changed a function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FunctionChange {
     Changed,

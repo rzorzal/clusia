@@ -1557,6 +1557,7 @@ env = { RUST_BACKTRACE = "1" }
         assert_eq!(commands.len(), 1);
         assert!(commands[0].ends_with("'t29'") && !commands[0].contains("'t30'"));
     }
+
     fn with_functions(functions: serde_json::Value) -> Result<Recipe, Vec<String>> {
         Recipe::from_json(&json!({"tests": {"all": "cargo test"}, "functions": functions}))
     }

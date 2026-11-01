@@ -1,4 +1,4 @@
-//! Finds the recipe and the near-tests list in the answer of a recipe turn.
+//! Finds the recipe, the near-tests list and the function cases in the answer of a recipe turn.
 
 use clusia_core::printable::is_invisible;
 use serde_json::Value;
@@ -30,11 +30,11 @@ pub struct RecipeBlocks {
     pub unreadable: u32,
 }
 
-/// The recipe and the near tests of `text`.
+/// The recipe, the near tests and the function blocks of `text`.
 ///
-/// A block is a line of exactly ```` ```clusia-recipe ```` or ```` ```clusia-near-tests ````,
-/// up to the next line of exactly ```` ``` ````; one that never closes stays in the text and is
-/// not counted. Only the first recipe that is a JSON object is kept; every other recipe block
+/// A block is a line of exactly ```` ```clusia-recipe ````, ```` ```clusia-near-tests ```` or
+/// ```` ```clusia-function ````, up to the next line of exactly ```` ``` ````; one that never
+/// closes stays in the text and is not counted. Only the first recipe that is a JSON object is kept; every other recipe block
 /// counts as unreadable. A near-tests block is `{"tests": [..]}`; a name that is not a string,
 /// is blank, is over 300 characters, holds a control or invisible character or comes past the
 /// 200th is dropped, and a block that dropped one counts once as unreadable. A `clusia-function`
