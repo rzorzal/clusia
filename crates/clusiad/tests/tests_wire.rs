@@ -48,28 +48,15 @@ async fn the_test_commands_answer_through_the_socket() {
 
 #[tokio::test]
 async fn functions_commands_are_refused_until_served() {
-    use clusia_core::functions::{CaseScope, CasesAsk};
+    use clusia_core::functions::CaseScope;
     let daemon = TestDaemon::start().await;
     let mut client = daemon.client().await;
     let pr: PrRef = "acme/widgets#7".parse().unwrap();
-    let f = "tokenstore_refresh-0123456789".to_string();
-    for cmd in [
-        Command::GetFunctions { pr: pr.clone() },
-        Command::WriteCases {
-            pr: pr.clone(),
-            function: f.clone(),
-            ask: CasesAsk::More,
-        },
-        Command::RunCases {
-            pr: pr.clone(),
-            scope: CaseScope::All,
-            seen: "x".into(),
-        },
-        Command::GetDriver {
-            pr: pr.clone(),
-            function: f.clone(),
-        },
-    ] {
+    for cmd in [Command::RunCases {
+        pr: pr.clone(),
+        scope: CaseScope::All,
+        seen: "x".into(),
+    }] {
         let Err(ClientError::Server(refusal)) = client.request(cmd).await else {
             panic!("refused");
         };

@@ -24,6 +24,8 @@ pub(crate) struct RecipeAnswer {
     pub near: Vec<String>,
     /// How many blocks of its answer could not be used.
     pub unreadable: u32,
+    /// Its `clusia-function` blocks, not checked yet.
+    pub functions: Vec<serde_json::Value>,
 }
 
 /// Runs the recipe turn. `Err` is why no answer came (the program failed, the limit passed, a
@@ -112,10 +114,11 @@ fn answer_of(text: String) -> RecipeAnswer {
         recipe,
         near: blocks.near_tests,
         unreadable: blocks.unreadable,
+        functions: blocks.functions,
     }
 }
 
-fn note_log(shared: &Shared, pr: &PrRef, turn: u64, state: &str) {
+pub(super) fn note_log(shared: &Shared, pr: &PrRef, turn: u64, state: &str) {
     let entry = AgentLogEntry::Tests {
         at: now_unix(),
         turn,
@@ -128,17 +131,17 @@ fn note_log(shared: &Shared, pr: &PrRef, turn: u64, state: &str) {
 
 /// Reads what the turn says. The session id is ignored on purpose: a fork never becomes the
 /// chat's.
-struct RecipeSink<'a> {
-    shared: Arc<Shared>,
-    pr: PrRef,
-    turn: u64,
+pub(super) struct RecipeSink<'a> {
+    pub shared: Arc<Shared>,
+    pub pr: PrRef,
+    pub turn: u64,
     /// The text streamed so far, used when no result line carries the answer.
-    streamed: String,
-    answer: Option<String>,
-    saw_final: bool,
-    failed: bool,
-    message: Option<String>,
-    activity: &'a mut (dyn FnMut(String) + Send),
+    pub streamed: String,
+    pub answer: Option<String>,
+    pub saw_final: bool,
+    pub failed: bool,
+    pub message: Option<String>,
+    pub activity: &'a mut (dyn FnMut(String) + Send),
 }
 
 impl RecipeSink<'_> {

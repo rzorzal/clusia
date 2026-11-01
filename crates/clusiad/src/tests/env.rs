@@ -389,7 +389,12 @@ pub(super) async fn view(shared: &Shared, pr: &PrRef) -> TestsView {
     let snap = snapshot(shared, pr).await;
     let (live, failed) = shared.tests.with(pr, |entry| {
         (
-            entry.activity.as_ref().map(|a| a.phase.clone()),
+            // A functions activity has no phase of the tests'.
+            entry
+                .activity
+                .as_ref()
+                .filter(|a| !a.doing.is_functions())
+                .map(|a| a.phase.clone()),
             entry.failed.clone(),
         )
     });

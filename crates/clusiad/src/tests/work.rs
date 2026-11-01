@@ -343,14 +343,15 @@ pub(super) async fn generate(
         .unwrap_or_default();
     let current = recipe_file::read_recipe(&ctx.worktree)?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let briefs = super::cases::briefs(&shared, &pr, &review.head_sha).await;
     let prompt = RecipePromptContext {
         pr_title: review.title.clone(),
         files,
         forked: false,
         env: env.clone(),
         current,
-        cases: false,
-        functions: Vec::new(),
+        cases: !briefs.is_empty(),
+        functions: briefs.clone(),
     };
     let answer = match recipe_turn::run_recipe_turn(&shared, &pr, prompt, turn.clone()).await {
         Ok(answer) => answer,
@@ -361,6 +362,7 @@ pub(super) async fn generate(
         tracing::warn!(pr = %pr, unreadable = answer.unreadable, "the recipe answer held blocks that could not be read");
     }
     let near = answer.near;
+    let answer_functions = answer.functions;
     let recipe = answer
         .recipe
         .map_err(|reasons| format!("The agent's recipe is not valid: {}", reasons.join("; ")))?;
@@ -388,6 +390,16 @@ pub(super) async fn generate(
                 at: now_unix(),
             });
         }
+    }
+    let unused = super::cases::adopt_blocks(
+        &ctx.worktree,
+        &briefs,
+        &answer_functions,
+        &review.head_sha,
+        now_unix(),
+    );
+    if unused > 0 {
+        tracing::warn!(pr = %pr, unused, "the recipe answer held function blocks that could not be used");
     }
     record.agent_near = near;
     record.generated_inputs = Some(env.inputs_hash.clone());

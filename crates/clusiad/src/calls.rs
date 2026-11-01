@@ -665,17 +665,17 @@ async fn ready_for_review(shared: &Arc<Shared>, pr: &PrRef) -> Result<Arc<Built>
     }
 }
 
-/// Fills the signature of each node with a function, reading only the files of nodes not
-/// signed before.
-async fn sign(shared: &Shared, pr: &PrRef, built: &Built, graph: &mut CallGraph) {
-    let missing: HashSet<FunctionId> = {
+/// The signatures of `ids`, reading only the files of functions not signed before; a function
+/// whose file cannot be read is left out.
+pub(crate) async fn signatures_of(
+    shared: &Shared,
+    pr: &PrRef,
+    built: &Built,
+    ids: &[FunctionId],
+) -> HashMap<FunctionId, String> {
+    let missing: HashSet<&FunctionId> = {
         let known = built.signatures.lock().unwrap_or_else(|p| p.into_inner());
-        graph
-            .nodes
-            .iter()
-            .filter_map(|n| n.function.clone())
-            .filter(|id| !known.contains_key(id))
-            .collect()
+        ids.iter().filter(|id| !known.contains_key(*id)).collect()
     };
     if !missing.is_empty() {
         let functions: Vec<&Function> = built
@@ -690,9 +690,13 @@ async fn sign(shared: &Shared, pr: &PrRef, built: &Built, graph: &mut CallGraph)
             .filter_map(|path| built.oids.get(path).map(|oid| (path, oid)))
             .collect();
         let oids: Vec<String> = files.iter().map(|(_, oid)| (*oid).clone()).collect();
-        let read = match repo_of_worktree(&shared.paths.worktree_for(pr)).await {
-            Ok(repo) => read_blobs(&repo, &oids, MAX_FILE_BYTES).await.ok(),
-            Err(_) => None,
+        let read = if oids.is_empty() {
+            None
+        } else {
+            match repo_of_worktree(&shared.paths.worktree_for(pr)).await {
+                Ok(repo) => read_blobs(&repo, &oids, MAX_FILE_BYTES).await.ok(),
+                Err(_) => None,
+            }
         };
         if let Some(read) = read {
             let text_of: HashMap<&str, String> = files
@@ -709,6 +713,20 @@ async fn sign(shared: &Shared, pr: &PrRef, built: &Built, graph: &mut CallGraph)
         }
     }
     let known = built.signatures.lock().unwrap_or_else(|p| p.into_inner());
+    ids.iter()
+        .filter_map(|id| known.get(id).map(|s| (id.clone(), s.clone())))
+        .collect()
+}
+
+/// Fills the signature of each node with a function, reading only the files of nodes not
+/// signed before.
+async fn sign(shared: &Shared, pr: &PrRef, built: &Built, graph: &mut CallGraph) {
+    let ids: Vec<FunctionId> = graph
+        .nodes
+        .iter()
+        .filter_map(|n| n.function.clone())
+        .collect();
+    let known = signatures_of(shared, pr, built, &ids).await;
     for node in &mut graph.nodes {
         if let Some(signature) = node.function.as_ref().and_then(|id| known.get(id)) {
             node.signature = signature.clone();
@@ -855,7 +873,7 @@ fn added_at_head(hunks: &[FileHunks], path: &str) -> BTreeSet<u32> {
 }
 
 /// The lines of `function` in the first hunk of its file that adds lines inside it.
-fn first_changed_lines(hunks: &[FileHunks], function: &Function) -> Option<(u32, u32)> {
+pub(crate) fn first_changed_lines(hunks: &[FileHunks], function: &Function) -> Option<(u32, u32)> {
     hunks
         .iter()
         .filter(|f| f.new_path.as_deref() == Some(function.path.as_str()))
@@ -1852,6 +1870,92 @@ pub fn untouched_helper() -> u32 {
             oids: HashMap::new(),
             signatures: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// A built index of `commit` holding `functions` with their change and their signature
+    /// already read; removed ones sit in the base index only. `unsupported` lists files of a
+    /// language with no pack, which the hunks must touch to count.
+    pub(crate) fn built_of(
+        commit: &str,
+        functions: &[(Function, ChangeKind, &str)],
+        hunks: Vec<FileHunks>,
+        unsupported: &[&str],
+    ) -> Arc<Built> {
+        let index = |commit: &str, functions: Vec<Function>| CallIndex {
+            commit: commit.into(),
+            functions,
+            calls: Vec::new(),
+            imports: Vec::new(),
+            skipped: Vec::new(),
+            unsupported: unsupported.iter().map(|p| p.to_string()).collect(),
+            dependencies: Vec::new(),
+            cut: false,
+        };
+        let at_head: Vec<Function> = functions
+            .iter()
+            .filter(|(_, kind, _)| *kind != ChangeKind::Removed)
+            .map(|(f, _, _)| f.clone())
+            .collect();
+        let removed: Vec<Function> = functions
+            .iter()
+            .filter(|(_, kind, _)| *kind == ChangeKind::Removed)
+            .map(|(f, _, _)| f.clone())
+            .collect();
+        Arc::new(Built {
+            index: index(commit, at_head),
+            base: "b".into(),
+            base_index: index("b", removed),
+            resolved: Resolved {
+                edges: Vec::new(),
+                unresolved: 0,
+            },
+            changed: functions
+                .iter()
+                .map(|(f, kind, _)| ChangedFunction {
+                    id: f.id.clone(),
+                    kind: *kind,
+                    added: 1,
+                    removed: 1,
+                    moved_from: None,
+                })
+                .collect(),
+            hunks,
+            oids: HashMap::new(),
+            signatures: Mutex::new(
+                functions
+                    .iter()
+                    .map(|(f, _, sig)| (f.id.clone(), sig.to_string()))
+                    .collect(),
+            ),
+        })
+    }
+
+    /// Puts `built` in memory as the index of its commit for `pr`.
+    pub(crate) fn install(shared: &Shared, pr: &PrRef, built: Arc<Built>) {
+        shared.indexes.insert(pr, built);
+    }
+
+    #[tokio::test]
+    async fn signatures_of_answers_the_known_ones_without_reading() {
+        let (_home, _fake, shared) = lab(Script::one(Turn::hanging()), 1, |_| {});
+        let f = Function {
+            id: FunctionId("src/a.rs#a#1".into()),
+            qualified: "a".into(),
+            name: "a".into(),
+            path: "src/a.rs".into(),
+            start_line: 1,
+            end_line: 2,
+            signature_lines: 1,
+            lang: "rust".into(),
+        };
+        let built = built_of(
+            "h1",
+            &[(f.clone(), ChangeKind::New, "pub fn a() {")],
+            Vec::new(),
+            &[],
+        );
+        let found = signatures_of(&shared, &pr(1), &built, std::slice::from_ref(&f.id)).await;
+        assert_eq!(found.get(&f.id).map(String::as_str), Some("pub fn a() {"));
     }
 
     #[test]
