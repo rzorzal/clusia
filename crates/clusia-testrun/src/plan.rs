@@ -225,6 +225,9 @@ fn commands(recipe: &Recipe) -> Vec<PlanCommand> {
             out.push(command(key, text));
         }
     }
+    for (lang, text) in recipe.functions.iter().flat_map(|s| s.entries()) {
+        out.push(command(&format!("functions.{}", lang.key()), text));
+    }
     out
 }
 
@@ -333,6 +336,7 @@ mod tests {
 
     fn recipe() -> Recipe {
         Recipe {
+            functions: None,
             runner: RunnerChoice::Auto,
             image: Some(ImageSource::Base {
                 image: "rust:1.86".into(),
@@ -960,6 +964,48 @@ mod tests {
         assert_ne!(
             work_marker(&step, None, "other"),
             work_marker(&step, None, "abc123")
+        );
+    }
+    #[test]
+    fn function_commands_follow_the_test_commands() {
+        let mut recipe = recipe();
+        recipe.functions = Some(crate::recipe::FunctionsSpec {
+            rust: Some("cargo test -p {package} --test {driver}".into()),
+            javascript: Some("node {driver}".into()),
+            ..Default::default()
+        });
+        let plan = setup_plan(
+            &recipe,
+            HASH,
+            &env(RunnerKind::Container, Some(colima())),
+            &running(),
+            None,
+        );
+        let keys: Vec<&str> = plan.commands.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "all",
+                "one",
+                "list",
+                "functions.rust",
+                "functions.javascript"
+            ]
+        );
+        assert_eq!(
+            plan.commands[3].command,
+            "cargo test -p {package} --test {driver}"
+        );
+        let approved = setup_plan(
+            &recipe,
+            HASH,
+            &env(RunnerKind::Container, Some(colima())),
+            &done(),
+            Some(&approval(&EVERYTHING)),
+        );
+        assert!(
+            approved.commands_approved,
+            "the tests step approves the function commands too"
         );
     }
 }

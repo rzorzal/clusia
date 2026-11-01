@@ -180,7 +180,9 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         | Event::TestStep { .. }
         | Event::TestOutput { .. }
         | Event::TestResult { .. }
-        | Event::TestRunDone { .. } => {}
+        | Event::TestRunDone { .. }
+        | Event::FunctionsChanged { .. }
+        | Event::CaseDone { .. } => {}
     }
     (r, None)
 }

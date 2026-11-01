@@ -350,6 +350,7 @@ pub(super) async fn generate(
         env: env.clone(),
         current,
         cases: false,
+        functions: Vec::new(),
     };
     let answer = match recipe_turn::run_recipe_turn(&shared, &pr, prompt, turn.clone()).await {
         Ok(answer) => answer,

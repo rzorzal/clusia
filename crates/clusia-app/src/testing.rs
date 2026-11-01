@@ -796,6 +796,7 @@ pub fn tests_recipe() -> clusia_core::tests::RecipeSummary {
         list: Some("cargo test -- --list".into()),
         results: ResultsFormat::Libtest,
         env: Default::default(),
+        functions: Default::default(),
         services: Vec::new(),
         problems: Vec::new(),
     }

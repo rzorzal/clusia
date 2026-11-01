@@ -279,6 +279,13 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::GetTestDisk => crate::tests::disk(shared).await,
         Command::CleanUpTests { repo } => crate::tests::clean_up(shared, repo).await,
         Command::CheckTestEngine { pr } => crate::tests::check_engine(shared, pr).await,
+        Command::GetFunctions { .. }
+        | Command::SaveCase { .. }
+        | Command::ResetCase { .. }
+        | Command::RemoveCase { .. }
+        | Command::WriteCases { .. }
+        | Command::RunCases { .. }
+        | Command::GetDriver { .. } => functions_not_ready(),
     }
 }
 
@@ -288,6 +295,13 @@ fn key_error(e: ConfigKeyError) -> Outcome {
         ConfigKeyError::Invalid { .. } => ErrorCode::InvalidConfigValue,
     };
     Outcome::Err(ProtocolError::new(code, e.to_string()))
+}
+
+const FUNCTIONS_NOT_READY: &str = "Run Function tests is not ready in this daemon";
+
+/// The answer to a function-case command this daemon does not serve yet.
+fn functions_not_ready() -> Outcome {
+    reviews::invalid_state(FUNCTIONS_NOT_READY)
 }
 
 async fn open_in_editor(shared: &Shared, path: &str, line: Option<u32>) -> Outcome {

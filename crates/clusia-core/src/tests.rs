@@ -183,6 +183,9 @@ pub struct RecipeSummary {
     pub list: Option<String>,
     pub results: ResultsFormat,
     pub env: BTreeMap<String, String>,
+    /// The function run commands, by language key.
+    #[serde(default)]
+    pub functions: BTreeMap<String, String>,
     pub services: Vec<String>,
     pub problems: Vec<String>,
 }
@@ -433,6 +436,12 @@ pub struct TestsRecord {
     /// The compose project of the review's running stack.
     pub stack: Option<String>,
     pub generated_at: Option<i64>,
+    /// The newest result of each case, by function slug, then case id.
+    #[serde(default)]
+    pub case_results: BTreeMap<String, BTreeMap<String, crate::functions::CaseResult>>,
+    /// Drivers placed in the worktree and not yet removed, relative to it.
+    #[serde(default)]
+    pub placed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -470,6 +479,8 @@ pub struct RecipePromptContext {
     pub current: Option<String>,
     /// Whether the agent is also asked for test cases.
     pub cases: bool,
+    /// The changed functions the agent writes cases for.
+    pub functions: Vec<crate::functions::FunctionBrief>,
 }
 
 /// Drops what the storage rules keep out: runs are newest first, at most `RUNS_PER_HEAD` of one
@@ -887,6 +898,11 @@ mod wire_and_limits {
             runs: vec![run("r1", "h")],
             stack: Some("clusia-rzorzal-clusia-ab12cd-7".into()),
             generated_at: Some(8),
+            case_results: BTreeMap::from([(
+                "tokenstore_refresh-f3910adf0e".to_string(),
+                BTreeMap::new(),
+            )]),
+            placed: vec!["store/tests/clusia_driver_f3910adf0e.rs".into()],
         };
         let back: TestsRecord = serde_json::from_str(&json(&record)).unwrap();
         assert_eq!(back, record);
@@ -947,6 +963,7 @@ mod wire_and_limits {
             .unwrap(),
             current: None,
             cases: false,
+            functions: Vec::new(),
         };
         let prompt: String = recipe_prompt(&ctx);
         drop(prompt);

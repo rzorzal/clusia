@@ -100,6 +100,7 @@ async fn a_real_engine_builds_runs_stops_and_cleans_up() {
     let slug = names::repo_slug("rzorzal", "clusia-docker-test");
 
     let recipe = Recipe {
+        functions: None,
         runner: RunnerChoice::Container,
         image: Some(ImageSource::Base {
             image: "alpine:3.20".into(),

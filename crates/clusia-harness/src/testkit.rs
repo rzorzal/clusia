@@ -216,6 +216,11 @@ pub fn near_tests_block(json: serde_json::Value) -> String {
     format!("```clusia-near-tests\n{json}\n```")
 }
 
+/// A fenced `clusia-function` block holding `json`.
+pub fn function_block(json: serde_json::Value) -> String {
+    format!("```clusia-function\n{json}\n```")
+}
+
 /// The turns the fake plays, one per call.
 #[derive(Debug, Clone)]
 pub struct Script {

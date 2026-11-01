@@ -45,3 +45,39 @@ async fn the_test_commands_answer_through_the_socket() {
     assert_eq!(info.engine, None, "the test daemon has no docker");
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn functions_commands_are_refused_until_served() {
+    use clusia_core::functions::{CaseScope, CasesAsk};
+    let daemon = TestDaemon::start().await;
+    let mut client = daemon.client().await;
+    let pr: PrRef = "acme/widgets#7".parse().unwrap();
+    let f = "tokenstore_refresh-0123456789".to_string();
+    for cmd in [
+        Command::GetFunctions { pr: pr.clone() },
+        Command::WriteCases {
+            pr: pr.clone(),
+            function: f.clone(),
+            ask: CasesAsk::More,
+        },
+        Command::RunCases {
+            pr: pr.clone(),
+            scope: CaseScope::All,
+            seen: "x".into(),
+        },
+        Command::GetDriver {
+            pr: pr.clone(),
+            function: f.clone(),
+        },
+    ] {
+        let Err(ClientError::Server(refusal)) = client.request(cmd).await else {
+            panic!("refused");
+        };
+        assert_eq!(refusal.code, ErrorCode::InvalidState);
+        assert_eq!(
+            refusal.message,
+            "Run Function tests is not ready in this daemon"
+        );
+    }
+    daemon.stop().await;
+}

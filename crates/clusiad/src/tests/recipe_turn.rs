@@ -245,6 +245,7 @@ mod tests {
             },
             current: None,
             cases: false,
+            functions: Vec::new(),
         }
     }
 

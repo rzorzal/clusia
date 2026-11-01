@@ -746,6 +746,7 @@ fn demo_tests_recipe(by_hand: bool, services: &[&str]) -> RecipeSummary {
             ("API_KEY".to_string(), "fake_k3y_9a1".to_string()),
         ]
         .into(),
+        functions: BTreeMap::new(),
         services: services.iter().map(|s| s.to_string()).collect(),
         problems: Vec::new(),
     }

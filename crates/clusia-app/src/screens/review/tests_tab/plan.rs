@@ -81,7 +81,8 @@ pub(super) struct PlanView {
     /// `printable_lines`.
     pub blocked: Option<String>,
     pub steps: Vec<StepRow>,
-    /// (label, command) in the order All, One test, Some tests, List; commands `printable_lines`.
+    /// (label, command) in the order All, One test, Some tests, List, then the function commands;
+    /// commands `printable_lines`.
     pub commands: Vec<(&'static str, String)>,
     /// `KEY=value  KEY=value`, each pair `printable`; `None` without variables.
     pub variables: Option<String>,
@@ -142,11 +143,15 @@ pub(super) enum Work {
     Close,
 }
 
-const COMMAND_KEYS: [(&str, &str); 4] = [
+const COMMAND_KEYS: [(&str, &str); 8] = [
     ("all", "All"),
     ("one", "One test"),
     ("some", "Some tests"),
     ("list", "List"),
+    ("functions.rust", "Rust functions"),
+    ("functions.python", "Python functions"),
+    ("functions.typescript", "TypeScript functions"),
+    ("functions.javascript", "JavaScript functions"),
 ];
 
 pub(super) fn plan_view(
@@ -1100,6 +1105,38 @@ mod tests {
         testing::activate(app, set_up);
         testing::settle(app);
         testing::recorded(app);
+    }
+
+    #[test]
+    fn function_commands_show_with_the_test_commands() {
+        let (mut app, pr) = setup_app(|view| {
+            let plan = view.plan.as_mut().expect("a plan");
+            for (key, command) in [
+                ("functions.rust", "cargo test -p {package} --test {driver}"),
+                ("functions.python", "python3 {driver}"),
+                ("functions.typescript", "npx --no-install tsx {driver}"),
+                ("functions.javascript", "node {driver}"),
+            ] {
+                plan.commands.push(clusia_core::tests::PlanCommand {
+                    key: key.into(),
+                    command: command.into(),
+                });
+            }
+        });
+        open_modal(&mut app, &pr);
+        for label in [
+            "Rust functions",
+            "Python functions",
+            "TypeScript functions",
+            "JavaScript functions",
+        ] {
+            assert!(testing::shows(&mut app, label), "{label}");
+        }
+        assert!(testing::shows(
+            &mut app,
+            "cargo test -p {package} --test {driver}"
+        ));
+        assert!(testing::shows(&mut app, "node {driver}"));
     }
 
     fn modal_app() -> (App, PrRef) {

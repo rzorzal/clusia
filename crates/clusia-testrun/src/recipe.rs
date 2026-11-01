@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use clusia_core::functions::FunctionLang;
 use clusia_core::printable::{is_invisible, plain_relative};
 use clusia_core::tests::{NEAR_MAX, RecipeSummary, ResultsFormat, RunnerChoice, TestScope};
 use serde::Deserialize;
@@ -51,6 +52,16 @@ pub const FORBIDDEN_ENV: &[&str] = &[
     "GEM_HOME",
 ];
 
+/// The run command of each language's function driver, with `{driver}` (and, for Rust,
+/// `{package}`) as placeholders.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FunctionsSpec {
+    pub rust: Option<String>,
+    pub python: Option<String>,
+    pub typescript: Option<String>,
+    pub javascript: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recipe {
     pub runner: RunnerChoice,
@@ -58,6 +69,8 @@ pub struct Recipe {
     pub setup: Vec<SetupStep>,
     pub services: Option<Services>,
     pub tests: TestsSpec,
+    /// How to run a function's driver, per language; none when the recipe sets no command.
+    pub functions: Option<FunctionsSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +127,7 @@ struct RawRecipe {
     setup: Vec<RawStep>,
     services: Option<Services>,
     tests: RawTests,
+    functions: Option<RawFunctions>,
 }
 
 #[derive(Deserialize)]
@@ -138,6 +152,15 @@ struct RawStep {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawFunctions {
+    rust: Option<String>,
+    python: Option<String>,
+    typescript: Option<String>,
+    javascript: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawTests {
     all: String,
     one: Option<String>,
@@ -149,7 +172,8 @@ struct RawTests {
 }
 
 /// A problem and the rank of its field, so the reading and validation problems merge in field
-/// order: image 0, setup 1, services 2, tests.all 3, one 4, some 5, list 6, results 7, env 8.
+/// order: image 0, setup 1, services 2, tests.all 3, one 4, some 5, list 6, results 7, env 8,
+/// functions 9.
 type Ranked = (u8, String);
 
 const IMAGE: u8 = 0;
@@ -161,6 +185,27 @@ const SOME: u8 = 5;
 const LIST: u8 = 6;
 const RESULTS: u8 = 7;
 const ENV: u8 = 8;
+const FUNCTIONS: u8 = 9;
+
+impl FunctionsSpec {
+    /// The command of `lang`, when the recipe sets one.
+    pub fn command(&self, lang: FunctionLang) -> Option<&str> {
+        match lang {
+            FunctionLang::Rust => self.rust.as_deref(),
+            FunctionLang::Python => self.python.as_deref(),
+            FunctionLang::TypeScript => self.typescript.as_deref(),
+            FunctionLang::JavaScript => self.javascript.as_deref(),
+        }
+    }
+
+    /// The commands that are set, in `FunctionLang::ALL` order.
+    pub fn entries(&self) -> Vec<(FunctionLang, &str)> {
+        FunctionLang::ALL
+            .iter()
+            .filter_map(|lang| Some((*lang, self.command(*lang)?)))
+            .collect()
+    }
+}
 
 impl RawRecipe {
     fn into_recipe(self) -> (Recipe, Vec<Ranked>) {
@@ -200,6 +245,15 @@ impl RawRecipe {
                 results,
                 env: self.tests.env,
             },
+            functions: self
+                .functions
+                .map(|f| FunctionsSpec {
+                    rust: f.rust,
+                    python: f.python,
+                    typescript: f.typescript,
+                    javascript: f.javascript,
+                })
+                .filter(|spec| !spec.entries().is_empty()),
         };
         (recipe, problems)
     }
@@ -281,6 +335,7 @@ impl Recipe {
         self.setup_problems(&mut out);
         self.services_problems(&mut out);
         self.tests_problems(&mut out);
+        self.functions_problems(&mut out);
         out
     }
 
@@ -379,6 +434,21 @@ impl Recipe {
         self.env_problems(out);
     }
 
+    fn functions_problems(&self, out: &mut Vec<Ranked>) {
+        let Some(spec) = &self.functions else { return };
+        for (lang, text) in spec.entries() {
+            let field = format!("functions.{}", lang.key());
+            let problem = check_text(&field, text, COMMAND_MAX)
+                .or_else(|| placeholder_problem(&field, text, "{driver}"))
+                .or_else(|| match (lang, text.contains("{package}")) {
+                    (FunctionLang::Rust, true) => placeholder_problem(&field, text, "{package}"),
+                    (_, true) => Some(format!("{field} may not use {{package}}")),
+                    _ => None,
+                });
+            out.extend(problem.map(|p| (FUNCTIONS, p)));
+        }
+    }
+
     fn env_problems(&self, out: &mut Vec<Ranked>) {
         let env = &self.tests.env;
         if env.len() > ENV_MAX {
@@ -470,6 +540,12 @@ impl Recipe {
                 .collect();
             let _ = writeln!(out, "env = {{ {} }}", pairs.join(", "));
         }
+        if let Some(spec) = &self.functions {
+            out.push_str("\n[functions]\n");
+            for (lang, text) in spec.entries() {
+                let _ = writeln!(out, "{} = {}", lang.key(), quoted(text));
+            }
+        }
         out
     }
 
@@ -494,6 +570,12 @@ impl Recipe {
             list: self.tests.list.clone(),
             results: self.tests.results.clone(),
             env: self.tests.env.clone(),
+            functions: self
+                .functions
+                .iter()
+                .flat_map(|s| s.entries())
+                .map(|(l, t)| (l.key().to_string(), t.to_string()))
+                .collect(),
             services: self
                 .services
                 .as_ref()
@@ -713,6 +795,7 @@ pub fn commands_for(
 
 #[cfg(test)]
 mod tests {
+    use clusia_core::functions::FunctionLang;
     use serde_json::json;
 
     use super::*;
@@ -757,6 +840,7 @@ env = { RUST_BACKTRACE = "1" }
                 compose: "docker-compose.yml".into(),
                 names: vec!["postgres".into()],
             }),
+            functions: None,
             tests: TestsSpec {
                 all: "cargo test --workspace".into(),
                 one: Some("cargo test --workspace -- --exact {name}".into()),
@@ -945,6 +1029,7 @@ env = { RUST_BACKTRACE = "1" }
                 list: Some("cargo test --workspace -- --list --format terse".into()),
                 results: ResultsFormat::Libtest,
                 env: BTreeMap::from([("RUST_BACKTRACE".to_string(), "1".to_string())]),
+                functions: BTreeMap::new(),
                 services: vec!["postgres".into()],
                 problems: Vec::new(),
             }
@@ -1471,5 +1556,122 @@ env = { RUST_BACKTRACE = "1" }
         let commands = commands_for(&some, &TestScope::NearChange, &names).unwrap();
         assert_eq!(commands.len(), 1);
         assert!(commands[0].ends_with("'t29'") && !commands[0].contains("'t30'"));
+    }
+    fn with_functions(functions: serde_json::Value) -> Result<Recipe, Vec<String>> {
+        Recipe::from_json(&json!({"tests": {"all": "cargo test"}, "functions": functions}))
+    }
+
+    #[test]
+    fn function_commands_read_from_json_and_toml_and_write_back() {
+        let recipe = with_functions(json!({
+            "rust": "cargo test --offline -p {package} --test {driver} -- --exact clusia_case --nocapture",
+            "python": "python3 {driver}"
+        }))
+        .unwrap();
+        let spec = recipe.functions.clone().unwrap();
+        assert_eq!(
+            spec.command(FunctionLang::Rust),
+            Some(
+                "cargo test --offline -p {package} --test {driver} -- --exact clusia_case --nocapture"
+            )
+        );
+        assert_eq!(spec.command(FunctionLang::Python), Some("python3 {driver}"));
+        assert_eq!(spec.command(FunctionLang::TypeScript), None);
+        assert_eq!(
+            spec.entries().iter().map(|(l, _)| *l).collect::<Vec<_>>(),
+            [FunctionLang::Rust, FunctionLang::Python]
+        );
+        let text = recipe.to_toml();
+        assert!(text.ends_with(
+            "\n[functions]\nrust = \"cargo test --offline -p {package} --test {driver} -- --exact clusia_case --nocapture\"\npython = \"python3 {driver}\"\n"
+        ));
+        assert_eq!(Recipe::parse_toml(&text), Ok(recipe.clone()));
+        assert_eq!(
+            recipe.summary("h", false).functions,
+            BTreeMap::from([
+                ("python".to_string(), "python3 {driver}".to_string()),
+                (
+                    "rust".to_string(),
+                    "cargo test --offline -p {package} --test {driver} -- --exact clusia_case --nocapture".to_string()
+                ),
+            ])
+        );
+        assert_eq!(with_functions(json!({})).unwrap().functions, None);
+        assert!(
+            !with_functions(json!({}))
+                .unwrap()
+                .to_toml()
+                .contains("[functions]")
+        );
+        assert_eq!(Recipe::parse_toml(FULL_TOML).unwrap().functions, None);
+    }
+
+    #[test]
+    fn function_commands_take_placeholders_as_words_only() {
+        assert!(with_functions(json!({"typescript": "npx --no-install tsx {driver}"})).is_ok());
+        assert!(with_functions(json!({"rust": "cargo test --test {driver}"})).is_ok());
+        let cases = [
+            (
+                json!({"python": "python3 main.py"}),
+                "functions.python must contain {driver}",
+            ),
+            (
+                json!({"python": "python3 '{driver}'"}),
+                "functions.python must use {driver} as a word of its own, outside quotes",
+            ),
+            (
+                json!({"javascript": "node x{driver}"}),
+                "functions.javascript must use {driver} as a word of its own, outside quotes",
+            ),
+            (
+                json!({"rust": "cargo test -p \"{package}\" --test {driver}"}),
+                "functions.rust must use {package} as a word of its own, outside quotes",
+            ),
+            (
+                json!({"python": "python3 {driver} {package}"}),
+                "functions.python may not use {package}",
+            ),
+            (
+                json!({"rust": "cargo test --test {driver} <<EOF"}),
+                "functions.rust must use {driver} as a word of its own, outside quotes",
+            ),
+            (
+                json!({"python": "python3 {driver}\u{202e}"}),
+                "functions.python holds an invisible character",
+            ),
+            (
+                json!({"python": ""}),
+                "functions.python must be between 1 and 2000 characters",
+            ),
+        ];
+        for (functions, problem) in cases {
+            assert_eq!(
+                with_functions(functions.clone()),
+                Err(vec![problem.to_string()]),
+                "{functions}"
+            );
+        }
+        assert_eq!(
+            with_functions(json!({"go": "go run {driver}"}))
+                .unwrap_err()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn function_problems_come_after_the_tests_problems() {
+        let problems = Recipe::from_json(&json!({
+            "tests": {"all": "cargo test", "env": {"PATH": "/x"}},
+            "functions": {"python": "python3 main.py"}
+        }))
+        .unwrap_err();
+        assert_eq!(
+            problems,
+            vec![
+                "tests.env key \"PATH\" is reserved".to_string(),
+                "functions.python must contain {driver}".into(),
+            ]
+        );
     }
 }
