@@ -142,6 +142,19 @@ pub enum Command {
         /// List the tests the recipe's list command finds.
         #[arg(long)]
         list: bool,
+        /// List the changed functions, their cases and the last result of each case.
+        #[arg(long)]
+        functions: bool,
+        /// Run the cases of the changed functions and stream the results; the exit code is the
+        /// run's (0 passed, 1 failed, 124 timed out, 130 stopped).
+        #[arg(long)]
+        run_cases: bool,
+        /// With --run-cases: only this function, by id or exact name.
+        #[arg(long, requires = "run_cases", value_name = "SLUG_OR_NAME")]
+        function: Option<String>,
+        /// With --function: only this case.
+        #[arg(long, requires = "function", value_name = "ID")]
+        case: Option<String>,
     },
     /// Check a custom command against Clúsia's JSON-lines protocol.
     #[command(subcommand)]

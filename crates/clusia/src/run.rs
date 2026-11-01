@@ -128,6 +128,10 @@ pub async fn run(
             near,
             one,
             list,
+            functions,
+            run_cases,
+            function,
+            case,
         } => {
             let scope = run.then_some(match one {
                 Some(name) => TestScope::One { name },
@@ -140,6 +144,8 @@ pub async fn run(
                 yes,
                 list,
                 run: scope,
+                functions,
+                run_cases: run_cases.then_some(tests_cmd::CasesWanted { function, case }),
             };
             tests_cmd::tests(paths, home, &pr, wanted, json).await
         }

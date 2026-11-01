@@ -2355,6 +2355,9 @@ fn tests_flags_that_need_another_are_usage_errors() {
         &["tests", "acme/widgets#7", "--one", "store::refresh"][..],
         &["tests", "acme/widgets#7", "--run", "--all", "--near"][..],
         &["tests", "acme/widgets#7", "--run", "--near", "--one", "x"][..],
+        &["tests", "acme/widgets#7", "--function", "x"][..],
+        &["tests", "acme/widgets#7", "--run-cases", "--case", "a1"][..],
+        &["tests", "acme/widgets#7", "--case", "a1", "--function", "x"][..],
     ] {
         let out = home.clusia(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
@@ -2437,7 +2440,18 @@ mod check_against_a_scripted_daemon {
     pub(super) fn daemon(
         rt: &tokio::runtime::Runtime,
         socket: &Path,
-        answer: impl FnMut(&Request, &Say) -> Option<Reply> + Send + 'static,
+        mut answer: impl FnMut(&Request, &Say) -> Option<Reply> + Send + 'static,
+    ) {
+        daemon_result(rt, socket, move |cmd, say| answer(cmd, say).map(Ok));
+    }
+
+    /// `daemon`, where the answer may also be a refusal.
+    pub(super) fn daemon_result(
+        rt: &tokio::runtime::Runtime,
+        socket: &Path,
+        answer: impl FnMut(&Request, &Say) -> Option<Result<Reply, clusia_protocol::ProtocolError>>
+        + Send
+        + 'static,
     ) {
         let listener = {
             let _guard = rt.enter();
@@ -2454,7 +2468,9 @@ mod check_against_a_scripted_daemon {
     /// One client of `daemon`: the hello, then every request answered as `answer` says.
     async fn serve<F>(stream: tokio::net::UnixStream, answer: Arc<std::sync::Mutex<F>>)
     where
-        F: FnMut(&Request, &Say) -> Option<Reply> + Send + 'static,
+        F: FnMut(&Request, &Say) -> Option<Result<Reply, clusia_protocol::ProtocolError>>
+            + Send
+            + 'static,
     {
         let (read, mut write) = stream.into_split();
         let mut read = MessageReader::new(read);
@@ -2476,12 +2492,12 @@ mod check_against_a_scripted_daemon {
         while let Ok(Some(ClientMessage::Request { id, cmd })) = read.next::<ClientMessage>().await
         {
             let reply = (answer.lock().unwrap())(&cmd, &say);
-            if let Some(reply) = reply {
-                let _ = say.send(ServerMessage::Response {
-                    id,
-                    result: Outcome::Ok(reply),
-                });
-            }
+            let result = match reply {
+                Some(Ok(reply)) => Outcome::Ok(reply),
+                Some(Err(e)) => Outcome::Err(e),
+                None => continue,
+            };
+            let _ = say.send(ServerMessage::Response { id, result });
         }
     }
 
@@ -3183,5 +3199,447 @@ mod tests_against_a_scripted_daemon {
         assert_eq!(code, Some(0), "{}", stderr_of(&mut child));
         let asked = asked.lock().unwrap();
         assert!(asked.iter().all(|c| c.starts_with("GetTests")), "{asked:?}");
+    }
+
+    use clusia_core::functions::{
+        CASES_CHANGED, CaseOrigin, CaseResult, CaseScope, CaseStatus, CaseView, Expect,
+        FunctionChange, FunctionLang, FunctionView, FunctionsActivity, FunctionsView, Support,
+    };
+
+    const REFRESH: &str = "tokenstore_refresh-0123456789";
+
+    fn fresult(case: &str, hash: &str, status: CaseStatus, ms: u64) -> CaseResult {
+        CaseResult {
+            case: case.into(),
+            head: "9be1d07".into(),
+            hash: hash.into(),
+            status,
+            returned: None,
+            returned_expected: None,
+            error: None,
+            state: Vec::new(),
+            output: String::new(),
+            took_ms: ms,
+            runner: RunnerKind::Container,
+            exit_code: Some(0),
+            message: None,
+            at: 1_761_600_000,
+        }
+    }
+
+    fn fcase(id: &str, name: &str, hash: &str) -> CaseView {
+        CaseView {
+            id: id.into(),
+            name: name.into(),
+            origin: CaseOrigin::Agent,
+            edited: false,
+            values: Default::default(),
+            expect: Expect::default(),
+            hash: hash.into(),
+            result: None,
+        }
+    }
+
+    fn fview(hash_of_function: &str) -> FunctionsView {
+        FunctionsView {
+            functions: vec![FunctionView {
+                slug: REFRESH.into(),
+                qualified: "TokenStore::refresh".into(),
+                name: "refresh".into(),
+                file: "store/refresh.rs".into(),
+                lang: Some(FunctionLang::Rust),
+                change: FunctionChange::Changed,
+                signature: "pub async fn refresh(&self)".into(),
+                start_line: 40,
+                diff_lines: None,
+                params: Vec::new(),
+                state_label: None,
+                support: Support::Ready,
+                cases: vec![
+                    fcase("a1", "Endpoint fails, old token kept", "h1"),
+                    fcase("a2", "Valid token, no exchange", "h2"),
+                ],
+                driver: None,
+                hash: hash_of_function.into(),
+            }],
+            unsupported: vec!["ui/badge.swift".into()],
+            hash: "view-hash".into(),
+            ..FunctionsView::new("9be1d07")
+        }
+    }
+
+    fn changed(view: FunctionsView) -> ServerMessage {
+        event(Event::FunctionsChanged {
+            pr: pr(),
+            view: Box::new(view),
+        })
+    }
+
+    fn done(case: &str, status: CaseStatus, ms: u64) -> ServerMessage {
+        let mut result = fresult(case, if case == "a1" { "h1" } else { "h2" }, status, ms);
+        if status == CaseStatus::Failed {
+            result.returned = Some("Err(RefreshError::Http(500))".into());
+            result.output = "WARN refresh failed: 500\n".into();
+        }
+        event(Event::CaseDone {
+            pr: pr(),
+            run: "run-1".into(),
+            function: REFRESH.into(),
+            result: Box::new(result),
+        })
+    }
+
+    #[test]
+    fn functions_are_listed_and_nothing_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked =
+            recording_daemon(
+                dir.path(),
+                &rt,
+                view(TestsPhase::Ready, None),
+                |cmd, _| match cmd {
+                    Request::GetFunctions { .. } => {
+                        Some(Reply::ChangedFunctions(Box::new(fview("fh"))))
+                    }
+                    _ => Some(Reply::Ack),
+                },
+            );
+        let mut child = tests_cmd(dir.path(), &["--functions"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert!(
+            out.contains("TokenStore::refresh  store/refresh.rs · changed · 2 cases"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  ----  a1  Endpoint fails, old token kept"),
+            "{out}"
+        );
+        assert!(out.contains("ui/badge.swift · not supported yet"), "{out}");
+        assert!(
+            !asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("RunCases")),
+            "{:?}",
+            asked.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_view_still_being_read_is_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            |cmd, say| match cmd {
+                Request::GetFunctions { .. } => {
+                    let reading = FunctionsView {
+                        reading: true,
+                        ..FunctionsView::new("9be1d07")
+                    };
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        let _ = say.send(changed(fview("fh")));
+                    });
+                    Some(Reply::ChangedFunctions(Box::new(reading)))
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--functions"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert!(out.contains("TokenStore::refresh"), "{out}");
+    }
+
+    #[test]
+    fn run_cases_streams_each_case_and_ends_with_the_totals_and_the_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            |cmd, say| match cmd {
+                Request::GetFunctions { .. } => {
+                    Some(Reply::ChangedFunctions(Box::new(fview("fh"))))
+                }
+                Request::RunCases { scope, seen, .. } => {
+                    assert_eq!(*scope, CaseScope::All);
+                    assert_eq!(seen, "view-hash", "the hash it read");
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let mut running = fview("fh");
+                        running.activity = Some(FunctionsActivity::Running {
+                            run: "run-1".into(),
+                            scope: CaseScope::All,
+                            total: 2,
+                            done: 0,
+                            current: None,
+                        });
+                        let _ = say.send(changed(running));
+                        let _ = say.send(done("a1", CaseStatus::Failed, 210));
+                        let _ = say.send(done("a2", CaseStatus::Passed, 10));
+                        let _ = say.send(changed(fview("fh")));
+                    });
+                    Some(Reply::CasesStarted {
+                        run: "run-1".into(),
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-cases"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(1), "{out}\n{err}");
+        assert!(
+            out.contains("FAIL  TokenStore::refresh  a1  Endpoint fails, old token kept  210 ms"),
+            "{out}"
+        );
+        assert!(
+            out.contains("PASS  TokenStore::refresh  a2  Valid token, no exchange  10 ms"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  returned: Err(RefreshError::Http(500))"),
+            "{out}"
+        );
+        assert!(out.contains("    WARN refresh failed: 500"), "{out}");
+        assert_eq!(
+            out.trim_end().lines().last(),
+            Some("1 passed, 1 failed in 220 ms (container · Colima)"),
+            "{out}"
+        );
+        assert!(err.contains("cases failed"), "{err}");
+        assert!(
+            asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("RunCases"))
+        );
+    }
+
+    #[test]
+    fn a_passing_run_exits_0_and_json_streams_the_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            |cmd, say| match cmd {
+                Request::GetFunctions { .. } => {
+                    Some(Reply::ChangedFunctions(Box::new(fview("fh"))))
+                }
+                Request::RunCases { scope, seen, .. } => {
+                    assert_eq!(
+                        *scope,
+                        CaseScope::Case {
+                            function: REFRESH.into(),
+                            case: "a2".into()
+                        }
+                    );
+                    assert_eq!(seen, "fh", "a function's own hash");
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let _ = say.send(done("a2", CaseStatus::Passed, 10));
+                    });
+                    Some(Reply::CasesStarted {
+                        run: "run-1".into(),
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(
+            dir.path(),
+            &[
+                "--run-cases",
+                "--function",
+                "TokenStore::refresh",
+                "--case",
+                "a2",
+                "--json",
+            ],
+        );
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        let lines: Vec<serde_json::Value> = out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[0]["case"], "a2", "{out}");
+        let last = lines.last().unwrap();
+        assert_eq!(last["cases"]["passed"], 1, "{out}");
+        assert_eq!(last["cases"]["failed"], 0, "{out}");
+    }
+
+    #[test]
+    fn a_changed_hash_is_read_again_once_and_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let reads = Arc::new(Mutex::new(0u32));
+        let seen_hashes: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (counted, hashes) = (reads.clone(), seen_hashes.clone());
+        super::check_against_a_scripted_daemon::daemon_result(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, say| match cmd {
+                Request::GetTests { .. } => {
+                    Some(Ok(Reply::Tests(Box::new(view(TestsPhase::Ready, None)))))
+                }
+                Request::GetFunctions { .. } => {
+                    let mut n = counted.lock().unwrap();
+                    *n += 1;
+                    let hash = if *n == 1 { "old" } else { "new" };
+                    Some(Ok(Reply::ChangedFunctions(Box::new(fview(hash)))))
+                }
+                Request::RunCases { seen, .. } => {
+                    hashes.lock().unwrap().push(seen.clone());
+                    if seen == "old" {
+                        return Some(Err(clusia_protocol::ProtocolError::new(
+                            clusia_protocol::ErrorCode::InvalidState,
+                            CASES_CHANGED,
+                        )));
+                    }
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(done("a1", CaseStatus::Passed, 5));
+                        let _ = say.send(done("a2", CaseStatus::Passed, 5));
+                    });
+                    Some(Ok(Reply::CasesStarted {
+                        run: "run-1".into(),
+                    }))
+                }
+                _ => Some(Ok(Reply::Ack)),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-cases", "--function", REFRESH]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert_eq!(*seen_hashes.lock().unwrap(), ["old", "new"], "{err}");
+        assert_eq!(*reads.lock().unwrap(), 2, "one re-read, no more");
+    }
+
+    #[test]
+    fn a_second_refusal_ends_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        super::check_against_a_scripted_daemon::daemon_result(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, _| match cmd {
+                Request::GetTests { .. } => {
+                    Some(Ok(Reply::Tests(Box::new(view(TestsPhase::Ready, None)))))
+                }
+                Request::GetFunctions { .. } => {
+                    Some(Ok(Reply::ChangedFunctions(Box::new(fview("fh")))))
+                }
+                Request::RunCases { .. } => Some(Err(clusia_protocol::ProtocolError::new(
+                    clusia_protocol::ErrorCode::InvalidState,
+                    CASES_CHANGED,
+                ))),
+                _ => Some(Ok(Reply::Ack)),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-cases"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(err.contains(CASES_CHANGED), "{err}");
+    }
+
+    #[test]
+    fn an_ambiguous_function_name_exits_2_and_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut two = fview("fh");
+        let mut other = two.functions[0].clone();
+        other.slug = "tokenstore_refresh-ffffffffff".into();
+        two.functions.push(other);
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, _| match cmd {
+                Request::GetFunctions { .. } => {
+                    Some(Reply::ChangedFunctions(Box::new(two.clone())))
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(
+            dir.path(),
+            &["--run-cases", "--function", "TokenStore::refresh"],
+        );
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(2), "{err}");
+        assert!(
+            err.contains(REFRESH) && err.contains("tokenstore_refresh-ffffffffff"),
+            "{err}"
+        );
+        assert!(
+            !asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("RunCases"))
+        );
+    }
+
+    #[test]
+    fn setup_approves_the_printed_steps_not_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let plan = one_step_plan("Fetch dependencies", None, StepState::Missing);
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::NeedsSetup, Some(plan)),
+            |cmd, say| match cmd {
+                Request::PrepareTests { .. } => {
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(event(Event::TestEnv {
+                            pr: pr(),
+                            view: Box::new(view(TestsPhase::Ready, None)),
+                        }));
+                    });
+                    Some(Reply::Ack)
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--setup", "--yes"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(0), "{err}");
+        let asked = asked.lock().unwrap();
+        let prepare = asked
+            .iter()
+            .find(|c| c.starts_with("PrepareTests"))
+            .expect("approved");
+        assert!(
+            prepare.contains("Steps([\"work:0\", \"tests\"])"),
+            "{prepare}"
+        );
+        assert!(!prepare.contains("All"), "{prepare}");
     }
 }
