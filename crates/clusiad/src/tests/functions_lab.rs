@@ -1569,3 +1569,61 @@ async fn a_case_past_its_limit_is_timed_out_and_the_rest_do_not_run() {
     assert_eq!(done[0].exit_code, None);
     assert!(!placed(&lab).exists());
 }
+
+#[tokio::test]
+async fn no_driver_is_placed_after_a_stop() {
+    let lab = local_ready(vec![generate_answer()], driver_output()).await;
+    let Ok(usable) = work::ready_to_run(&lab.shared, &pr(7)).await else {
+        panic!("the review is ready");
+    };
+    let job = work::job_of(usable, "stopped".into(), TestScope::All, Vec::new());
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    let planned = vec![case_run::Planned {
+        slug: refresh(),
+        lang: clusia_core::functions::FunctionLang::Rust,
+        driver: DRIVER.into(),
+        package: Some((String::new(), "widgets".into())),
+        template: RUST_COMMAND.into(),
+        cases: of(&view, &refresh()).cases.clone(),
+    }];
+    // The stop came after the previous function's last case, before this one began.
+    let stop = clusia_testrun::exec::StopFlag::new();
+    stop.fire();
+    let root = lab.worktree(7).display().to_string();
+    case_run::run_planned(&lab.shared, &pr(7), 0, &stop, &job, planned, &root).await;
+    assert!(
+        !lab.worktree(7).join("tests").exists(),
+        "nothing is written after a stop"
+    );
+    assert!(env::load(&lab.shared, &pr(7)).placed.is_empty());
+    assert!(case_calls(&lab).is_empty());
+}
+
+#[tokio::test]
+async fn a_placed_entry_that_is_not_a_driver_path_is_dropped() {
+    let mut lab = local_ready(vec![generate_answer()], driver_output()).await;
+    let kept = lab.worktree(7).join("src/main.rs");
+    std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    std::fs::write(&kept, "fn main() {}\n").unwrap();
+    env::update_record(&lab.shared, &pr(7), |record| {
+        record.placed = vec![
+            "src/main.rs".into(),
+            "../tests/clusia_driver_aaaaaaaaaa.rs".into(),
+        ];
+    })
+    .await;
+    let run = start(
+        &lab,
+        CaseScope::Case {
+            function: refresh(),
+            case: "a1".into(),
+        },
+    )
+    .await;
+    results(&mut lab, &run).await;
+    assert!(
+        env::load(&lab.shared, &pr(7)).placed.is_empty(),
+        "never placed by Clúsia, so never retried"
+    );
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "fn main() {}\n");
+}

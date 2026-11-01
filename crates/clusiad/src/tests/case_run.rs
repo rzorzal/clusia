@@ -111,14 +111,14 @@ impl CaseSink {
 }
 
 /// One function of an accepted run, with the cases to run in list order.
-struct Planned {
-    slug: String,
-    lang: FunctionLang,
-    driver: String,
+pub(super) struct Planned {
+    pub slug: String,
+    pub lang: FunctionLang,
+    pub driver: String,
     /// The Cargo package's folder and name, for a Rust function.
-    package: Option<(String, String)>,
-    template: String,
-    cases: Vec<CaseView>,
+    pub package: Option<(String, String)>,
+    pub template: String,
+    pub cases: Vec<CaseView>,
 }
 
 fn not_ready(reason: &Support, lang: Option<FunctionLang>, qualified: &str) -> Option<String> {
@@ -275,10 +275,15 @@ fn placed_path(package_dir: &str, target: &str) -> String {
     }
 }
 
-/// Removes a placed driver and forgets it, or keeps it in the record for the next run.
+/// Removes a placed driver and forgets it, or keeps it in the record for the next run. A path
+/// that is not of the placed form was never placed by Clúsia and is forgotten untouched.
 async fn unplace(shared: &Shared, pr: &PrRef, worktree: &std::path::Path, placed: &str) {
     match remove_driver(worktree, placed) {
         Ok(()) => {
+            env::update_record(shared, pr, |record| record.placed.retain(|p| p != placed)).await;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            tracing::warn!(pr = %pr, path = placed, "forgetting a placed path that is not a driver's");
             env::update_record(shared, pr, |record| record.placed.retain(|p| p != placed)).await;
         }
         Err(e) => {
@@ -392,7 +397,6 @@ async fn run(
     job: RunJob,
     planned: Vec<Planned>,
 ) {
-    let budget = Duration::from_secs(u64::from(shared.config.read().await.tests.run_timeout_secs));
     let Some(_place) = super::place(&shared, &pr, act, &stop).await else {
         return;
     };
@@ -407,10 +411,27 @@ async fn run(
             .display()
             .to_string(),
     };
+    run_planned(&shared, &pr, act, &stop, &job, planned, &root).await;
+}
+
+/// The planned functions in order, once the run has its place: each function's cases, each in
+/// a process of its own, within the run's budget.
+pub(super) async fn run_planned(
+    shared: &Arc<Shared>,
+    pr: &PrRef,
+    act: u64,
+    stop: &StopFlag,
+    job: &RunJob,
+    planned: Vec<Planned>,
+    root: &str,
+) {
+    let budget = Duration::from_secs(u64::from(shared.config.read().await.tests.run_timeout_secs));
+    let worktree = job.ctx.worktree.clone();
     let began = Instant::now();
     let mut ended_run = false;
     for function in planned {
-        if ended_run {
+        // A stop between two functions places no further driver.
+        if ended_run || stop.fired() {
             break;
         }
         let mut placed = None;
@@ -421,7 +442,7 @@ async fn run(
                 let path = placed_path(&dir, &target);
                 // Recorded before it exists, so a run that dies after placing it still lets
                 // the next run remove it.
-                env::update_record(&shared, &pr, |record| {
+                env::update_record(shared, pr, |record| {
                     if !record.placed.contains(&path) {
                         record.placed.push(path.clone());
                     }
@@ -433,7 +454,7 @@ async fn run(
                         function_command(&function.template, &target, Some(&name))
                     }
                     Err(message) => {
-                        env::update_record(&shared, &pr, |record| {
+                        env::update_record(shared, pr, |record| {
                             record.placed.retain(|p| *p != path)
                         })
                         .await;
@@ -464,11 +485,11 @@ async fn run(
                         ended_run = true;
                         break;
                     }
-                    progress(&shared, &pr, act, Some(current.clone()), false);
-                    cases::tell_functions(&shared, &pr).await;
+                    progress(shared, pr, act, Some(current.clone()), false);
+                    cases::tell_functions(shared, pr).await;
                     let limit = left.min(Duration::from_secs(CASE_TIMEOUT_SECS));
                     let out =
-                        run_case(&shared, &pr, act, &job, &stop, command, case, &root, limit).await;
+                        run_case(shared, pr, act, job, stop, command, case, root, limit).await;
                     let past_budget = out.status == CaseStatus::TimedOut && limit == left;
                     if out.status == CaseStatus::Stopped || past_budget {
                         ended_run = true;
@@ -476,15 +497,15 @@ async fn run(
                     out
                 }
             };
-            record_result(&shared, &pr, &job, &function.slug, case, out).await;
-            progress(&shared, &pr, act, None, true);
-            cases::tell_functions(&shared, &pr).await;
+            record_result(shared, pr, job, &function.slug, case, out).await;
+            progress(shared, pr, act, None, true);
+            cases::tell_functions(shared, pr).await;
             if ended_run {
                 break;
             }
         }
         if let Some(placed) = placed {
-            unplace(&shared, &pr, &worktree, &placed).await;
+            unplace(shared, pr, &worktree, &placed).await;
         }
     }
 }
