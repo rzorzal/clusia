@@ -7,8 +7,9 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_core::printable::{printable, printable_lines};
-use clusia_core::tests::{ACTIVITY_WRITING, RECIPE_FILE, TestsView};
+use clusia_core::tests::{ACTIVITY_WRITING, RECIPE_FILE, RunnerKind, TestsView};
 
+use super::functions::{self, FunctionsBody};
 use super::{SubTab, TabState, TestsModel, TestsModels, engine_label, tab_state};
 use crate::agent_name;
 use crate::bridge::{Ask, Asks, Model, TestsAskKind, Toasts};
@@ -54,10 +55,10 @@ pub(super) enum Shape {
         reason: String,
         actions: Actions,
     },
-    /// `agent` is `Some` only under Run Function tests, whose note names it.
+    /// `bar` is `Some` only under Run Function tests: the engine and whether it is set up.
     Auto {
         sub: SubTab,
-        agent: Option<String>,
+        bar: Option<String>,
     },
 }
 
@@ -131,6 +132,26 @@ fn engine_here(view: &TestsView) -> Option<String> {
     )))
 }
 
+/// The right-aligned label of the sub-tab bar under Run Function tests: where the cases run, and
+/// whether the setup that lets them run is done. The engine is the one a container runner uses;
+/// a local runner is the macOS sandbox; with no probe yet, Docker.
+fn bar_label(view: &TestsView) -> String {
+    let env = view.env.as_ref();
+    let place = match env {
+        Some(env) if env.runner == RunnerKind::Container => env
+            .engine
+            .as_ref()
+            .map_or_else(|| "Docker".to_string(), engine_label),
+        Some(env) if env.runner == RunnerKind::Local => "macOS sandbox".to_string(),
+        _ => "Docker".to_string(),
+    };
+    let ready = view.plan.as_ref().is_some_and(|p| p.ready);
+    printable(&format!(
+        "{place} · {}",
+        if ready { "ready" } else { "set up first" }
+    ))
+}
+
 pub(super) fn body_view(i: &Inputs) -> Shape {
     let pending = i.model.and_then(|m| m.pending);
     let Some((model, view)) = i.model.and_then(|m| Some((m, m.view.as_ref()?))) else {
@@ -175,7 +196,7 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
         },
         _ => Shape::Auto {
             sub: model.sub,
-            agent: (model.sub == SubTab::Functions).then(|| i.agent.to_string()),
+            bar: (model.sub == SubTab::Functions).then(|| bar_label(view)),
         },
     }
 }
@@ -435,7 +456,7 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
                 },
             );
         }),
-        Shape::Auto { sub, agent } => auto(p, fonts, pr, *sub, agent.as_deref()),
+        Shape::Auto { sub, bar } => auto(p, fonts, pr, *sub, bar.as_deref()),
     }
 }
 
@@ -627,8 +648,10 @@ fn step_dot(p: &mut Spawner, fonts: &UiFonts, n: u8, light: Light) {
     .with_child(text(fonts, label, Type::STRONG.size(12.0).ink(ink)));
 }
 
-fn auto(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, sub: SubTab, agent: Option<&str>) {
+fn auto(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, sub: SubTab, bar: Option<&str>) {
     p.spawn(Node {
+        justify_content: JustifyContent::SpaceBetween,
+        align_items: AlignItems::Center,
         padding: UiRect::new(px(25), px(25), px(14), px(0)),
         ..default()
     })
@@ -648,28 +671,52 @@ fn auto(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, sub: SubTab, agent: Option
                 ));
             }
         });
+        if let Some(bar) = bar {
+            row.spawn(text(fonts, bar.to_string(), Type::MUTED));
+        }
     });
     if sub == SubTab::Functions {
-        let agent = agent.unwrap_or_default();
-        return centered(p, |c| {
-            c.spawn(Node {
-                max_width: px(460),
+        p.spawn((
+            Node {
+                flex_grow: 1.0,
+                min_height: px(0),
+                column_gap: px(16),
+                padding: UiRect::new(px(25), px(12), px(25), px(14)),
                 ..default()
-            })
-            .with_child((
-                text(
-                    fonts,
-                    format!(
-                        "Run Function tests comes next: each changed function, run alone with cases {agent} writes and values you choose."
-                    ),
-                    Type::MUTED,
-                ),
-                TextLayout::new(
-                    bevy::text::Justify::Center,
-                    bevy::text::LineBreak::WordOrCharacter,
-                ),
+            },
+            FunctionsBody(pr.clone()),
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Node {
+                    width: px(280),
+                    flex_shrink: 0.0,
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                functions::list::FunctionsList(pr.clone()),
+            ));
+            row.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    flex_basis: px(0),
+                    min_width: px(0),
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                functions::cases::FunctionsCases(pr.clone()),
+            ));
+            row.spawn((
+                Node {
+                    width: px(340),
+                    flex_shrink: 0.0,
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                functions::FunctionsResult(pr.clone()),
             ));
         });
+        return;
     }
     p.spawn((
         Node {
@@ -1051,10 +1098,8 @@ mod tests {
         let functions = testing::find::<SubTabButton>(&mut app, |b| b.sub == SubTab::Functions);
         testing::activate(&mut app, functions);
         testing::settle(&mut app);
-        assert!(testing::shows(
-            &mut app,
-            "Run Function tests comes next: each changed function, run alone with cases Claude Code writes and values you choose."
-        ));
+        assert!(!testing::shows(&mut app, "comes next"));
+        assert_eq!(testing::count::<functions::FunctionsBody>(&mut app), 1);
         assert_eq!(testing::count::<TopRegion>(&mut app), 0);
         assert_eq!(testing::count::<SubTabButton>(&mut app), 2, "the tabs stay");
         let auto = testing::find::<SubTabButton>(&mut app, |b| b.sub == SubTab::Auto);
@@ -1062,6 +1107,40 @@ mod tests {
         testing::settle(&mut app);
         assert_eq!(testing::count::<TopRegion>(&mut app), 1);
         assert_eq!(model(&app, &pr).sub, SubTab::Auto);
+    }
+
+    #[test]
+    fn the_functions_sub_tab_draws_three_regions_and_no_placeholder() {
+        let (mut app, pr) = tests_app();
+        let view = fixture::demo_functions(NOW, fixture::DemoFunctions::Mockup);
+        testing::open_functions(&mut app, &pr, view);
+        assert_eq!(testing::count::<functions::FunctionsBody>(&mut app), 1);
+        for n in [
+            testing::count::<functions::list::FunctionsList>(&mut app),
+            testing::count::<functions::cases::FunctionsCases>(&mut app),
+            testing::count::<functions::FunctionsResult>(&mut app),
+        ] {
+            assert_eq!(n, 1);
+        }
+        assert!(!testing::shows(&mut app, "comes next"));
+    }
+
+    #[test]
+    fn the_bar_names_the_engine_and_whether_the_setup_is_done() {
+        let (mut app, pr) = tests_app();
+        let mut tests = testing::tests_view(&app, &pr, TestsPhase::Ready);
+        tests.env = Some(testing::tests_env(true));
+        tests.plan = Some(testing::tests_plan(Vec::new(), true));
+        testing::open_tests(&mut app, &pr, tests.clone());
+        testing::open_functions(
+            &mut app,
+            &pr,
+            fixture::demo_functions(NOW, fixture::DemoFunctions::Mockup),
+        );
+        assert!(testing::shows(&mut app, "Docker · Colima · ready"));
+        tests.plan = Some(testing::tests_plan(Vec::new(), false));
+        testing::open_tests(&mut app, &pr, tests);
+        assert!(testing::shows(&mut app, "Docker · Colima · set up first"));
     }
 
     #[test]

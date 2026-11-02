@@ -1728,7 +1728,7 @@ mod tests {
     }
 
     #[test]
-    fn the_functions_scene_shows_only_the_m1c_note() {
+    fn the_functions_scene_shows_both_tabs() {
         let mut app = staged(Scene::TestsFunctions);
         let pr = fixture::demo_pr();
         assert_eq!(
@@ -1738,12 +1738,9 @@ mod tests {
         shows_all(
             &mut app,
             Scene::TestsFunctions,
-            &[
-                "Auto Tests",
-                "Run Function tests",
-                "Run Function tests comes next: each changed function, run alone with cases Claude Code writes and values you choose.",
-            ],
+            &["Auto Tests", "Run Function tests"],
         );
+        assert!(!testing::shows(&mut app, "comes next"));
         assert!(!testing::shows(&mut app, "Run all tests"));
     }
 

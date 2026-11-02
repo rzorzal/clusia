@@ -550,6 +550,38 @@ pub fn open_tests(app: &mut App, pr: &PrRef, view: clusia_core::tests::TestsView
     settle(app);
 }
 
+/// Opens the Tests tab of `pr` ready on its Functions sub-tab and tells `view` as its changed
+/// functions, then settles.
+pub fn open_functions(app: &mut App, pr: &PrRef, view: clusia_core::functions::FunctionsView) {
+    use crate::screens::review::tests_tab::{SubTab, TestsModels};
+    let mut tests = tests_view(app, pr, clusia_core::tests::TestsPhase::Ready);
+    // The machine a test already told stays.
+    tests.env = app
+        .world()
+        .resource::<TestsModels>()
+        .0
+        .get(pr)
+        .and_then(|m| m.view.as_ref())
+        .and_then(|v| v.env.clone());
+    tests.plan = Some(tests_plan(Vec::new(), true));
+    tests.recipe = Some(tests_recipe());
+    open_tests(app, pr, tests);
+    app.world_mut()
+        .resource_mut::<TestsModels>()
+        .0
+        .entry(pr.clone())
+        .or_default()
+        .sub = SubTab::Functions;
+    tell(
+        app,
+        Tell::Functions(crate::bridge::FunctionsTell::Loaded {
+            pr: pr.clone(),
+            view: Box::new(view),
+        }),
+    );
+    settle(app);
+}
+
 /// The demo app with the demo review open and ready (`fixture::demo_review` without its
 /// What's new rows, so no modal opens), and no recorded asks.
 pub fn demo_review_app() -> App {
@@ -611,8 +643,15 @@ pub fn open_ready(app: &mut App, news: bool) -> PrRef {
 /// and every other `Text` as it is.
 pub fn shown_text(app: &mut App) -> Vec<String> {
     let mut out = Vec::new();
-    let mut texts = app.world_mut().query::<&Text>();
-    out.extend(texts.iter(app.world()).map(|t| t.0.clone()));
+    let mut texts = app.world_mut().query::<(Entity, &Text)>();
+    for (entity, text) in texts.iter(app.world()) {
+        // A text with runs reads as one: its own text, then each run's.
+        let mut whole = text.0.clone();
+        for span in app.world().get::<Children>(entity).into_iter().flatten() {
+            whole.push_str(app.world().get::<TextSpan>(*span).map_or("", |s| &s.0));
+        }
+        out.push(whole);
+    }
     let mut rows = app.world_mut().query::<(&Node, &Children)>();
     for (node, children) in rows.iter(app.world()) {
         if node.flex_wrap != FlexWrap::Wrap {

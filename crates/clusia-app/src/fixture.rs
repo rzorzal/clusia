@@ -1197,6 +1197,8 @@ pub fn demo_functions(now: i64, state: DemoFunctions) -> FunctionsView {
                 demo_expect("Err(RefreshError::Http(500))", &[("token", "\"old\"")]),
                 210,
             );
+            // The mockup shows the reviewer's change to this agent case, and its Reset.
+            a1.edited = true;
             if let Some(r) = a1.result.as_mut() {
                 r.status = CaseStatus::Failed;
                 r.state = vec![StateCheck {

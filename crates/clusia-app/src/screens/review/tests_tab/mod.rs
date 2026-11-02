@@ -29,6 +29,7 @@ use crate::review_state::{ReviewSection, ReviewTabs};
 use crate::screens::review::ReviewSystems;
 use crate::screens::review::activity::MARK;
 use crate::screens::review::shell::SectionBody;
+use crate::ui::kit::FieldCommitted;
 
 pub const TEST_ROW_HEIGHT: f32 = 31.0;
 pub const CHECKS_SHOWN: usize = 12;
@@ -731,6 +732,9 @@ impl Plugin for TestsPlugin {
                     plan::open_plans.run_if(plan::plan_work),
                     plan::fill_plan.run_if(tests_views_changed),
                     plan::cancel_plan.run_if(plan::modal_up),
+                    functions::cases::commit_fields.run_if(on_message::<FieldCommitted>),
+                    functions::list::fill_list.run_if(functions::functions_changed),
+                    functions::cases::fill_cases.run_if(functions::functions_changed),
                 )
                     .chain()
                     .after(ReviewSystems),

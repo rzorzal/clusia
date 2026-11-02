@@ -2,6 +2,9 @@
 //! the open case, the reviewer's edits on their way to the daemon, and what is busy. Everything
 //! the daemon sent is text here: nothing in this file draws it, parses it as a path or opens it.
 
+pub mod cases;
+pub mod list;
+
 use std::collections::{BTreeMap, HashMap};
 
 use bevy::prelude::*;
@@ -16,6 +19,7 @@ use crate::bridge::{
     Ask, Asks, Connection, FunctionsAskKind, FunctionsTell, Model, TOAST_SECS, Toast, Toasts,
 };
 use crate::review_state::{ReviewSection, ReviewTabs};
+use crate::screens::review::editor::read_only_reason;
 
 /// The height of one case row; the open case's fields sit under it.
 pub const CASE_ROW_HEIGHT: f32 = 35.0;
@@ -23,6 +27,10 @@ pub const CASE_ROW_HEIGHT: f32 = 35.0;
 /// The root of the Run Function tests sub-tab of a review.
 #[derive(Component)]
 pub struct FunctionsBody(pub PrRef);
+
+/// The column that shows the result of the open case.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct FunctionsResult(pub PrRef);
 
 /// The functions of every open review, by review.
 #[derive(Resource, Default)]
@@ -531,14 +539,19 @@ impl FunctionsModels {
 }
 
 /// Whether a region of the sub-tab has anything to compare: one of the resources it reads
-/// moved, or the body was just spawned and has nothing drawn yet.
+/// moved (the tests' models too: they decide why a run button is off), or the body was just spawned and has nothing drawn yet.
 pub fn functions_changed(
     tabs: Res<ReviewTabs>,
     models: Res<FunctionsModels>,
+    tests: Res<TestsModels>,
     model: Res<Model>,
     fresh: Query<(), Added<FunctionsBody>>,
 ) -> bool {
-    tabs.is_changed() || models.is_changed() || model.is_changed() || !fresh.is_empty()
+    tabs.is_changed()
+        || models.is_changed()
+        || tests.is_changed()
+        || model.is_changed()
+        || !fresh.is_empty()
 }
 
 /// The model when what it shows is about `head`: the tab strip never shows work of an older
@@ -573,6 +586,45 @@ pub fn run_disabled_reason(
         return Some("Function cases are running");
     }
     None
+}
+
+/// Why no ask of the Functions sub-tab can be sent now, the first that holds: a read-only or
+/// offline review, then, for the buttons that run cases, the setup not done, the Auto Tests busy
+/// or function cases running; for the ones that only write, the Auto Tests busy (apart from the
+/// functions' own mirrored flag) or function cases running. A write in flight is for the callers
+/// to look at through `pending`.
+pub(super) fn disabled_reason(
+    tabs: &ReviewTabs,
+    app_model: &Model,
+    tests: Option<&TestsModel>,
+    functions: &FunctionsModel,
+    pr: &PrRef,
+    run: bool,
+) -> Option<&'static str> {
+    if let Some(reason) = read_only_reason(tabs, app_model, pr) {
+        return Some(reason);
+    }
+    if run {
+        return run_disabled_reason(Some(functions), tests);
+    }
+    if tests.is_some_and(TestsModel::tests_busy) {
+        return Some("The tests are busy");
+    }
+    functions.busy().then_some("Function cases are running")
+}
+
+/// `(bold, rest)`: the signature up to and including the first `name(` or `name<`, and what
+/// follows; all of it in `rest` when the name isn't found.
+pub(super) fn signature_parts(signature: &str, name: &str) -> (String, String) {
+    let end = [format!("{name}("), format!("{name}<")]
+        .iter()
+        .filter(|needle| !name.is_empty() || needle.len() > 1)
+        .filter_map(|needle| signature.find(needle.as_str()).map(|at| at + needle.len()))
+        .min();
+    match end {
+        Some(end) => (signature[..end].to_string(), signature[end..].to_string()),
+        None => (String::new(), signature.to_string()),
+    }
 }
 
 /// Asks for the functions the first time a ready, live tab shows its Tests section, when the
@@ -1411,6 +1463,27 @@ mod tests {
             run_all_buttons(&mut app),
             0,
             "a disabled button carries no marker, so no click reaches it"
+        );
+    }
+
+    #[test]
+    fn the_signature_is_bold_up_to_the_name_and_its_opening_bracket() {
+        let parts = |sig: &str, name: &str| super::signature_parts(sig, name);
+        assert_eq!(
+            parts("pub async fn refresh(&self, now: Instant)", "refresh"),
+            (
+                "pub async fn refresh(".into(),
+                "&self, now: Instant)".into()
+            )
+        );
+        assert_eq!(
+            parts("fn parse<T>(x: T)", "parse"),
+            ("fn parse<".into(), "T>(x: T)".into())
+        );
+        assert_eq!(
+            parts("fn other(x: u8)", "missing"),
+            (String::new(), "fn other(x: u8)".into()),
+            "nothing is bold when the name is not found"
         );
     }
 }
