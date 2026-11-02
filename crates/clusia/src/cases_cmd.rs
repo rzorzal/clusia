@@ -386,7 +386,7 @@ pub(crate) async fn read_functions(
 }
 
 /// The scope a wish makes in `view`, and how many cases it runs; refuses what cannot run.
-fn plan_run(
+pub(crate) fn plan_run(
     view: &FunctionsView,
     function: Option<&str>,
     case: Option<&str>,
@@ -491,6 +491,10 @@ pub(crate) async fn run_cases(
     // The last view told, with each result laid on its case: the run's end is told with the
     // view, and a run that ended by its count may end before that is told.
     let mut after = latest.unwrap_or(view);
+    // A run that ended by its count may end before the daemon tells the view without activity.
+    if matches!(&after.activity, Some(FunctionsActivity::Running { run, .. }) if *run == id) {
+        after.activity = None;
+    }
     for (result, slug) in results.iter().zip(&slugs) {
         let case = after
             .functions

@@ -3642,4 +3642,197 @@ mod tests_against_a_scripted_daemon {
         );
         assert!(!prepare.contains("All"), "{prepare}");
     }
+
+    fn running(view: &mut FunctionsView, total: u32, scope: CaseScope) {
+        view.activity = Some(FunctionsActivity::Running {
+            run: "run-1".into(),
+            scope,
+            total,
+            done: 0,
+            current: None,
+        });
+    }
+
+    fn case_scope_a2() -> CaseScope {
+        CaseScope::Case {
+            function: REFRESH.into(),
+            case: "a2".into(),
+        }
+    }
+
+    #[test]
+    fn the_final_view_of_a_run_that_ended_by_its_count_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            |cmd, say| match cmd {
+                Request::GetFunctions { .. } => {
+                    Some(Reply::ChangedFunctions(Box::new(fview("fh"))))
+                }
+                Request::RunCases { .. } => {
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let mut live = fview("fh");
+                        running(&mut live, 1, case_scope_a2());
+                        let _ = say.send(changed(live));
+                        let _ = say.send(done("a2", CaseStatus::Passed, 10));
+                    });
+                    Some(Reply::CasesStarted {
+                        run: "run-1".into(),
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(
+            dir.path(),
+            &[
+                "--run-cases",
+                "--function",
+                REFRESH,
+                "--case",
+                "a2",
+                "--json",
+            ],
+        );
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        let last: serde_json::Value = serde_json::from_str(out.lines().last().unwrap()).unwrap();
+        assert!(last["functions"]["activity"].is_null(), "{out}");
+        let a2 = &last["functions"]["functions"][0]["cases"][1];
+        assert_eq!(a2["result"]["status"], "passed", "{out}");
+    }
+
+    #[test]
+    fn a_run_stopped_before_any_case_ran_exits_130() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            |cmd, say| match cmd {
+                Request::GetFunctions { .. } => {
+                    Some(Reply::ChangedFunctions(Box::new(fview("fh"))))
+                }
+                Request::RunCases { .. } => {
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let mut live = fview("fh");
+                        running(&mut live, 2, CaseScope::All);
+                        let _ = say.send(changed(live));
+                        let _ = say.send(changed(fview("fh")));
+                    });
+                    Some(Reply::CasesStarted {
+                        run: "run-1".into(),
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-cases"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(130), "{err}");
+        assert!(err.contains("the run was stopped"), "{err}");
+    }
+
+    #[test]
+    fn a_case_done_of_another_run_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            |cmd, say| match cmd {
+                Request::GetFunctions { .. } => {
+                    Some(Reply::ChangedFunctions(Box::new(fview("fh"))))
+                }
+                Request::RunCases { .. } => {
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let _ = say.send(event(Event::CaseDone {
+                            pr: pr(),
+                            run: "run-0".into(),
+                            function: REFRESH.into(),
+                            result: Box::new(fresult("a1", "h1", CaseStatus::Failed, 99)),
+                        }));
+                        let _ = say.send(done("a2", CaseStatus::Passed, 10));
+                    });
+                    Some(Reply::CasesStarted {
+                        run: "run-1".into(),
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(
+            dir.path(),
+            &["--run-cases", "--function", REFRESH, "--case", "a2"],
+        );
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert!(!out.contains("99 ms") && !out.contains("FAIL"), "{out}");
+        assert!(out.contains("1 passed, 0 failed in 10 ms"), "{out}");
+    }
+
+    fn refused_without_running(
+        edit: impl Fn(&mut FunctionsView) + Send + 'static,
+        args: &[&str],
+    ) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, _| match cmd {
+                Request::GetFunctions { .. } => {
+                    let mut v = fview("fh");
+                    edit(&mut v);
+                    Some(Reply::ChangedFunctions(Box::new(v)))
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), args);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            !asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("RunCases"))
+        );
+        err
+    }
+
+    #[test]
+    fn nothing_to_run_ends_with_no_cases() {
+        let err = refused_without_running(|v| v.functions[0].cases.clear(), &["--run-cases"]);
+        assert!(err.contains(clusia_core::functions::NO_CASES), "{err}");
+    }
+
+    #[test]
+    fn a_function_that_cannot_run_ends_with_its_reason() {
+        let err = refused_without_running(
+            |v| v.functions[0].support = Support::NoCases,
+            &["--run-cases", "--function", REFRESH],
+        );
+        assert!(
+            err.contains("No cases written yet; run with --generate"),
+            "{err}"
+        );
+    }
 }

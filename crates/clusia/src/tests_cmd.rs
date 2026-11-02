@@ -16,7 +16,7 @@ use serde_json::json;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::cases_cmd::{
-    case_failure_lines, cases_exit_code, cases_totals_line, function_lines, names_of,
+    case_failure_lines, cases_exit_code, cases_totals_line, function_lines, names_of, plan_run,
     read_functions, run_cases,
 };
 use crate::check::line_of;
@@ -797,6 +797,7 @@ pub(crate) async fn tests(
     }
     let mut cases_code = None;
     if let (Some(cases), Some(read)) = (&wanted.run_cases, functions.take()) {
+        let total = plan_run(&read, cases.function.as_deref(), cases.case.as_deref(), &pr)?.1;
         let (results, after, slugs) =
             run_cases(&mut client, &pr, read, cases, json, &mut stop).await?;
         view = view_of(&mut client, &pr, &mut stop).await?;
@@ -807,7 +808,11 @@ pub(crate) async fn tests(
             }
         }
         human.push(cases_totals_line(&results, view.env.as_ref()));
-        let code = cases_exit_code(&results);
+        // A run cut short before every case had a result was stopped, whatever the few results say.
+        let code = match cases_exit_code(&results) {
+            0 if results.len() < total as usize => 130,
+            code => code,
+        };
         object.insert("functions".into(), json!(after));
         object.insert(
             "cases".into(),
