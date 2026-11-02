@@ -6,6 +6,7 @@
 
 pub mod body;
 pub(crate) mod detail;
+pub mod functions;
 pub(crate) mod github_checks;
 pub(crate) mod list;
 pub(crate) mod plan;
@@ -75,6 +76,8 @@ pub struct TestsModel {
     pub list_wanted: bool,
     /// The scope of the run this window asked for, until the daemon says it started.
     pub run_scope: Option<TestScope>,
+    /// Function cases are being written or run, which the Auto Tests run buttons wait for.
+    pub functions_busy: bool,
 }
 
 /// The run that goes now: its results so far and the end of its output.
@@ -216,7 +219,7 @@ fn status_rank(status: TestStatus) -> u8 {
 }
 
 impl TestsModel {
-    fn touch(&mut self) {
+    pub(crate) fn touch(&mut self) {
         self.version += 1;
     }
 
@@ -248,6 +251,12 @@ impl TestsModel {
 
     /// Whether the daemon is doing something for this review.
     pub fn busy(&self) -> bool {
+        self.functions_busy || self.tests_busy()
+    }
+
+    /// Whether the daemon is generating, setting up or running the Auto Tests, whatever the
+    /// function cases do.
+    pub fn tests_busy(&self) -> bool {
         self.view.as_ref().is_some_and(|v| {
             matches!(
                 v.phase,
@@ -517,9 +526,20 @@ pub fn of_head<'a>(model: Option<&'a TestsModel>, head: Option<&str>) -> Option<
     })
 }
 
-/// `Tests ●` / `Tests 3` on the section tabs.
-pub fn badge_tests(sections: &mut [(ReviewSection, String, bool)], model: Option<&TestsModel>) {
-    let Some(mark) = model.and_then(TestsModel::badge) else {
+/// `Tests ●` / `Tests 3` on the section tabs. The dot also shows while function cases are
+/// written or run; failed cases never set the number.
+pub fn badge_tests(
+    sections: &mut [(ReviewSection, String, bool)],
+    model: Option<&TestsModel>,
+    functions: Option<&functions::FunctionsModel>,
+) {
+    let working = functions
+        .and_then(|f| f.view.as_ref())
+        .is_some_and(|v| v.activity.is_some());
+    let Some(mark) = working
+        .then(|| MARK.to_string())
+        .or_else(|| model.and_then(TestsModel::badge))
+    else {
         return;
     };
     if let Some((section, label, _)) = sections
@@ -676,6 +696,7 @@ pub struct TestsPlugin;
 impl Plugin for TestsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TestsModels>()
+            .init_resource::<functions::FunctionsModels>()
             .add_observer(plan::refocus)
             .init_resource::<TestMachine>()
             .add_message::<WindowFocused>()
@@ -688,6 +709,13 @@ impl Plugin for TestsPlugin {
                             .or_eager(resource_changed::<TestsModels>)
                             .or_eager(on_message::<WindowFocused>),
                     ),
+                    functions::load_functions.run_if(
+                        resource_changed::<ReviewTabs>
+                            .or_eager(resource_changed::<Model>)
+                            .or_eager(resource_changed::<functions::FunctionsModels>),
+                    ),
+                    functions::send_queued.run_if(resource_changed::<functions::FunctionsModels>),
+                    functions::mirror_busy.run_if(resource_changed::<functions::FunctionsModels>),
                     flush_tails.run_if(|models: Res<TestsModels>| models.pending_tail()),
                     body::fill_tests.run_if(tests_views_changed),
                     top::fill_top.run_if(tests_views_changed),
@@ -1059,6 +1087,17 @@ mod tests {
     }
 
     #[test]
+    fn the_functions_model_is_a_resource_of_the_plugin() {
+        let mut app = testing::demo_review_app();
+        assert!(
+            app.world()
+                .get_resource::<functions::FunctionsModels>()
+                .is_some()
+        );
+        let _ = &mut app;
+    }
+
+    #[test]
     fn the_section_tab_label_carries_the_badge() {
         use crate::review_state::ReviewSection;
         let mut done = view(TestsPhase::Ready);
@@ -1068,13 +1107,13 @@ mod tests {
             .iter()
             .map(|s| (*s, s.label().to_string(), false))
             .collect();
-        badge_tests(&mut sections, Some(&m));
+        badge_tests(&mut sections, Some(&m), None);
         let labels: Vec<&str> = sections.iter().map(|(_, l, _)| l.as_str()).collect();
         assert!(labels.contains(&"Tests 1"), "{labels:?}");
         assert!(labels.contains(&"Diff"), "no other tab changes: {labels:?}");
         let mut none: Vec<(ReviewSection, String, bool)> =
             vec![(ReviewSection::Tests, "Tests".into(), false)];
-        badge_tests(&mut none, None);
+        badge_tests(&mut none, None, None);
         assert_eq!(none[0].1, "Tests");
     }
 

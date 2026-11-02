@@ -20,6 +20,9 @@ use clusia_calls::{CallGraph, StaticStep};
 use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass};
 use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::draft::Origin;
+use clusia_core::functions::{
+    CaseInput, CaseResult, CaseScope, CasesAsk, DriverCode, FunctionsView,
+};
 use clusia_core::revalidation::{self, Revalidation};
 use clusia_core::story::StoryVersion;
 use clusia_core::tests::{
@@ -49,6 +52,7 @@ use crate::screens::review::checks::{self, Checks, proposed_comment};
 use crate::screens::review::diagrams::{Diagrams, modal};
 use crate::screens::review::revalidation::Revalidations;
 use crate::screens::review::story::model::Stories;
+use crate::screens::review::tests_tab::functions::FunctionsModels;
 use crate::screens::review::tests_tab::{TestMachine, TestsModels};
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
 use crate::tab_memory::TabsRestored;
@@ -343,6 +347,44 @@ pub enum Ask {
         pr: PrRef,
         recipe_hash: String,
     },
+    /// The changed functions of a review and their cases: `FunctionsTell::Loaded`.
+    GetFunctions(PrRef),
+    /// Saves the reviewer's values of a case, or adds a case when `case.id` is none:
+    /// `FunctionsTell::Loaded`.
+    SaveCase {
+        pr: PrRef,
+        function: String,
+        case: CaseInput,
+    },
+    /// Drops the reviewer's edits of an agent case: `FunctionsTell::Loaded`.
+    ResetCase {
+        pr: PrRef,
+        function: String,
+        case: String,
+    },
+    /// Deletes one of the reviewer's cases: `FunctionsTell::Loaded`.
+    RemoveCase {
+        pr: PrRef,
+        function: String,
+        case: String,
+    },
+    /// Has the agent write cases; the view follows on topic `tests`.
+    WriteCases {
+        pr: PrRef,
+        function: String,
+        ask: CasesAsk,
+    },
+    /// Runs cases of the functions `seen` describes: `FunctionsTell::Started`.
+    RunCases {
+        pr: PrRef,
+        scope: CaseScope,
+        seen: String,
+    },
+    /// A function's driver: `FunctionsTell::Driver`.
+    GetDriver {
+        pr: PrRef,
+        function: String,
+    },
     /// What the test runs keep on this machine: `Tell::TestDisk`.
     GetTestDisk,
     /// Removes what the test runs keep of `repo`, or of every repository: `Tell::TestDisk`.
@@ -441,6 +483,78 @@ impl TestsTell {
             Event::TestOutput { pr, run, tail } => TestsTell::Output { pr, run, tail },
             Event::TestResult { pr, run, result } => TestsTell::Result { pr, run, result },
             Event::TestRunDone { pr, run } => TestsTell::RunDone { pr, run },
+            _ => return None,
+        })
+    }
+}
+
+/// Which functions ask a refusal or a click belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionsAskKind {
+    Save,
+    Reset,
+    Remove,
+    Write,
+    Run,
+    Driver,
+}
+
+/// What the functions of a review did, from the daemon's events and the answers to the
+/// functions asks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FunctionsTell {
+    Loaded {
+        pr: PrRef,
+        view: Box<FunctionsView>,
+    },
+    CaseDone {
+        pr: PrRef,
+        run: String,
+        function: String,
+        result: Box<CaseResult>,
+    },
+    Started {
+        pr: PrRef,
+        run: String,
+    },
+    Driver {
+        pr: PrRef,
+        code: Box<DriverCode>,
+    },
+    /// An ask that did not go through: its button is free again.
+    Refused {
+        pr: PrRef,
+        ask: FunctionsAskKind,
+        message: String,
+    },
+}
+
+impl FunctionsTell {
+    pub fn pr(&self) -> &PrRef {
+        match self {
+            FunctionsTell::Loaded { pr, .. }
+            | FunctionsTell::CaseDone { pr, .. }
+            | FunctionsTell::Started { pr, .. }
+            | FunctionsTell::Driver { pr, .. }
+            | FunctionsTell::Refused { pr, .. } => pr,
+        }
+    }
+
+    /// The tell for a functions event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<FunctionsTell> {
+        Some(match event.clone() {
+            Event::FunctionsChanged { pr, view } => FunctionsTell::Loaded { pr, view },
+            Event::CaseDone {
+                pr,
+                run,
+                function,
+                result,
+            } => FunctionsTell::CaseDone {
+                pr,
+                run,
+                function,
+                result,
+            },
             _ => return None,
         })
     }
@@ -1100,6 +1214,8 @@ pub enum Tell {
     Calls(CallsTell),
     /// What the review's tests did.
     Tests(TestsTell),
+    /// What the review's function cases did.
+    Functions(FunctionsTell),
     /// What the test runs keep on this machine, or why that is not known.
     TestDisk(Result<DiskReport, String>),
     /// The engine and the sandbox the tests would use, or why that is not known.
@@ -1432,6 +1548,13 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
         Ask::StopTests(pr) => tests_not_sent(teller, pr, TestsAskKind::Stop),
         Ask::ListTests(pr) => tests_not_sent(teller, pr, TestsAskKind::List),
         Ask::AcceptRecipe { pr, .. } => tests_not_sent(teller, pr, TestsAskKind::Accept),
+        Ask::GetFunctions(_) => {}
+        Ask::SaveCase { pr, .. } => functions_not_sent(teller, pr, FunctionsAskKind::Save),
+        Ask::ResetCase { pr, .. } => functions_not_sent(teller, pr, FunctionsAskKind::Reset),
+        Ask::RemoveCase { pr, .. } => functions_not_sent(teller, pr, FunctionsAskKind::Remove),
+        Ask::WriteCases { pr, .. } => functions_not_sent(teller, pr, FunctionsAskKind::Write),
+        Ask::RunCases { pr, .. } => functions_not_sent(teller, pr, FunctionsAskKind::Run),
+        Ask::GetDriver { pr, .. } => functions_not_sent(teller, pr, FunctionsAskKind::Driver),
         Ask::GetTestDisk => teller.send(Tell::TestDisk(Err("Not connected to clusiad".into()))),
         Ask::CleanUpTests { .. } => {
             teller.send(Tell::Notice {
@@ -1624,6 +1747,8 @@ async fn follow(
                 teller.send(Tell::Revalidation(tell));
             } else if let Some(tell) = TestsTell::from_event(other) {
                 teller.send(Tell::Tests(tell));
+            } else if let Some(tell) = FunctionsTell::from_event(other) {
+                teller.send(Tell::Functions(tell));
             }
         }
     }
@@ -1851,6 +1976,13 @@ async fn answer(
         | Ask::RunTests { .. }
         | Ask::StopTests(_)
         | Ask::AcceptRecipe { .. } => tests_ask(client, teller, ask).await?,
+        Ask::GetFunctions(_)
+        | Ask::SaveCase { .. }
+        | Ask::ResetCase { .. }
+        | Ask::RemoveCase { .. }
+        | Ask::WriteCases { .. }
+        | Ask::RunCases { .. }
+        | Ask::GetDriver { .. } => functions_ask(client, teller, ask).await?,
         Ask::LoadConversation(pr) => match client
             .request(Command::GetConversation { pr: pr.clone() })
             .await
@@ -2783,6 +2915,124 @@ async fn tests_ask(client: &mut Client, teller: &Teller, ask: Ask) -> Result<(),
     Ok(())
 }
 
+/// The tell a reply to a functions ask becomes; an acked write tells nothing.
+fn functions_tell(pr: &PrRef, reply: Reply) -> Option<FunctionsTell> {
+    match reply {
+        Reply::ChangedFunctions(view) => Some(FunctionsTell::Loaded {
+            pr: pr.clone(),
+            view,
+        }),
+        Reply::CasesStarted { run } => Some(FunctionsTell::Started {
+            pr: pr.clone(),
+            run,
+        }),
+        Reply::Driver(code) => Some(FunctionsTell::Driver {
+            pr: pr.clone(),
+            code,
+        }),
+        _ => None,
+    }
+}
+
+/// One functions ask on `client`: the answer becomes the tell the model waits for, a refusal of
+/// anything but the read becomes a warning and a `Refused` that frees the button. A lost
+/// connection is `Err`.
+async fn functions_ask(client: &mut Client, teller: &Teller, ask: Ask) -> Result<(), String> {
+    let (cmd, pr, kind) = match ask {
+        Ask::GetFunctions(pr) => (Command::GetFunctions { pr: pr.clone() }, pr, None),
+        Ask::SaveCase { pr, function, case } => (
+            Command::SaveCase {
+                pr: pr.clone(),
+                function,
+                case,
+            },
+            pr,
+            Some(FunctionsAskKind::Save),
+        ),
+        Ask::ResetCase { pr, function, case } => (
+            Command::ResetCase {
+                pr: pr.clone(),
+                function,
+                case,
+            },
+            pr,
+            Some(FunctionsAskKind::Reset),
+        ),
+        Ask::RemoveCase { pr, function, case } => (
+            Command::RemoveCase {
+                pr: pr.clone(),
+                function,
+                case,
+            },
+            pr,
+            Some(FunctionsAskKind::Remove),
+        ),
+        Ask::WriteCases { pr, function, ask } => (
+            Command::WriteCases {
+                pr: pr.clone(),
+                function,
+                ask,
+            },
+            pr,
+            Some(FunctionsAskKind::Write),
+        ),
+        Ask::RunCases { pr, scope, seen } => (
+            Command::RunCases {
+                pr: pr.clone(),
+                scope,
+                seen,
+            },
+            pr,
+            Some(FunctionsAskKind::Run),
+        ),
+        Ask::GetDriver { pr, function } => (
+            Command::GetDriver {
+                pr: pr.clone(),
+                function,
+            },
+            pr,
+            Some(FunctionsAskKind::Driver),
+        ),
+        _ => return Ok(()),
+    };
+    match client.request(cmd).await {
+        Ok(reply) => {
+            if let Some(tell) = functions_tell(&pr, reply) {
+                teller.send(Tell::Functions(tell));
+            }
+        }
+        // A refused read says nothing: the tab asks again when it has a reason to.
+        Err(ClientError::Server(_)) if kind.is_none() => {}
+        Err(ClientError::Server(e)) => {
+            if let Some(ask) = kind {
+                teller.send(Tell::Notice {
+                    text: e.message.clone(),
+                    warning: true,
+                });
+                teller.send(Tell::Functions(FunctionsTell::Refused {
+                    pr,
+                    ask,
+                    message: e.message,
+                }));
+            }
+        }
+        Err(e) => return Err(lost(e)),
+    }
+    Ok(())
+}
+
+fn functions_not_sent(teller: &Teller, pr: &PrRef, kind: FunctionsAskKind) {
+    teller.send(Tell::Notice {
+        text: NOT_SENT.into(),
+        warning: true,
+    });
+    teller.send(Tell::Functions(FunctionsTell::Refused {
+        pr: pr.clone(),
+        ask: kind,
+        message: NOT_SENT.into(),
+    }));
+}
+
 fn tests_refused(
     teller: &Teller,
     ask: &Ask,
@@ -3226,6 +3476,7 @@ pub(crate) struct ReviewModels<'w> {
     calls: ResMut<'w, Calls>,
     people: ResMut<'w, People>,
     tests: ResMut<'w, TestsModels>,
+    functions: ResMut<'w, FunctionsModels>,
     machine: ResMut<'w, TestMachine>,
 }
 
@@ -3256,6 +3507,7 @@ pub(crate) fn pump(
         mut calls,
         mut people,
         mut tests,
+        mut functions,
         mut machine,
     } = models;
     // Tells are mostly about other things than the tabs, and every rebuild system wakes for a
@@ -3348,6 +3600,7 @@ pub(crate) fn pump(
                     model.requested_code.clear();
                 }
                 tests.lost();
+                functions.lost();
                 machine.lost();
             }
             Tell::Quit => {
@@ -3391,6 +3644,26 @@ pub(crate) fn pump(
                 }
             }
             Tell::Tests(tell) => tests.apply(&tell),
+            Tell::Functions(tell) => {
+                // A turn that ended badly says why once: the same text again is the same
+                // news.
+                if let FunctionsTell::Loaded { pr, view } = &tell
+                    && let Some(message) = view.failed.as_deref()
+                    && functions
+                        .0
+                        .get(pr)
+                        .and_then(|m| m.view.as_ref())
+                        .and_then(|v| v.failed.as_deref())
+                        != Some(message)
+                {
+                    toasts.0.push(Toast {
+                        text: clusia_core::printable::printable(message),
+                        warning: true,
+                        until: time.elapsed_secs_f64() + TOAST_SECS,
+                    });
+                }
+                functions.apply(&tell);
+            }
             Tell::TestDisk(report) => machine.disk_arrived(report),
             Tell::TestEngine(info) => machine.engine_arrived(info),
             Tell::Diagrams(tell) => diagrams.apply(&tell),
@@ -3891,6 +4164,48 @@ pub(crate) fn demo_answers(
                     }));
                 }
             }
+            Ask::GetFunctions(pr) => {
+                let ready = tabs.0.get(&pr).and_then(|t| t.ready()).is_some();
+                if ready {
+                    tells.push(Tell::Functions(FunctionsTell::Loaded {
+                        pr,
+                        view: Box::new(fixture::demo_functions(
+                            clock.now(),
+                            fixture::DemoFunctions::Mockup,
+                        )),
+                    }));
+                }
+            }
+            Ask::GetDriver { pr, function } => {
+                tells.push(Tell::Functions(FunctionsTell::Driver {
+                    pr,
+                    code: Box::new(DriverCode {
+                        function,
+                        ..fixture::demo_driver()
+                    }),
+                }));
+            }
+            Ask::SaveCase { pr, .. } => {
+                demo_functions_refused(&mut toasts, &time, &mut tells, pr, FunctionsAskKind::Save);
+            }
+            Ask::ResetCase { pr, .. } => {
+                demo_functions_refused(&mut toasts, &time, &mut tells, pr, FunctionsAskKind::Reset);
+            }
+            Ask::RemoveCase { pr, .. } => {
+                demo_functions_refused(
+                    &mut toasts,
+                    &time,
+                    &mut tells,
+                    pr,
+                    FunctionsAskKind::Remove,
+                );
+            }
+            Ask::WriteCases { pr, .. } => {
+                demo_functions_refused(&mut toasts, &time, &mut tells, pr, FunctionsAskKind::Write);
+            }
+            Ask::RunCases { pr, .. } => {
+                demo_functions_refused(&mut toasts, &time, &mut tells, pr, FunctionsAskKind::Run);
+            }
             Ask::GetTestDisk => tells.push(Tell::TestDisk(Ok(fixture::demo_test_disk()))),
             Ask::CheckTestEngine { .. } => {
                 tells.push(Tell::TestEngine(Ok(fixture::demo_test_engine())));
@@ -3951,6 +4266,22 @@ fn demo_refused(
 ) {
     demo_toast(toasts, time);
     tells.push(Tell::Tests(TestsTell::Refused {
+        pr,
+        ask,
+        message: DEMO_NOT_SENT.into(),
+    }));
+}
+
+/// A functions write ask in demo mode: the toast, and a refusal so the button is free again.
+fn demo_functions_refused(
+    toasts: &mut Toasts,
+    time: &Time,
+    tells: &mut Vec<Tell>,
+    pr: PrRef,
+    ask: FunctionsAskKind,
+) {
+    demo_toast(toasts, time);
+    tells.push(Tell::Functions(FunctionsTell::Refused {
         pr,
         ask,
         message: DEMO_NOT_SENT.into(),
@@ -4581,6 +4912,7 @@ mod tests {
             .init_resource::<Stories>()
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
+            .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -4632,6 +4964,7 @@ mod tests {
             .init_resource::<Stories>()
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
+            .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -4681,6 +5014,7 @@ mod tests {
             .init_resource::<Stories>()
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
+            .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(demo_queue())
@@ -4745,6 +5079,7 @@ mod tests {
             .init_resource::<Stories>()
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
+            .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -5106,6 +5441,7 @@ mod tests {
             .init_resource::<Stories>()
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
+            .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -5270,6 +5606,7 @@ mod tests {
                 .init_resource::<Stories>()
                 .init_resource::<Calls>()
                 .init_resource::<TestsModels>()
+                .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
                 .init_resource::<TestMachine>()
                 .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
@@ -5818,6 +6155,7 @@ mod tests {
             .init_resource::<Stories>()
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
+            .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -5910,6 +6248,7 @@ mod tests {
             .init_resource::<Stories>()
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
+            .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
             .init_resource::<TestMachine>()
             .init_resource::<People>()
             .insert_resource(Clock(Some(1_790_000_000)))
@@ -6333,6 +6672,7 @@ mod tests {
             .init_resource::<Stories>()
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
+            .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
             .init_resource::<TestMachine>()
             .init_resource::<People>()
             .insert_resource(Clock(Some(1_790_000_000)))
@@ -6644,5 +6984,267 @@ mod tests {
         assert_eq!(pr, &fixture::demo_pr());
         assert_eq!(view.phase, clusia_core::tests::TestsPhase::NotGenerated);
         assert_eq!(view.listed, None);
+    }
+
+    #[test]
+    fn the_functions_events_become_tells_and_nothing_else_does() {
+        let pr = pr7();
+        let view = clusia_core::functions::FunctionsView::new("abc");
+        assert_eq!(
+            FunctionsTell::from_event(&Event::FunctionsChanged {
+                pr: pr.clone(),
+                view: Box::new(view.clone())
+            }),
+            Some(FunctionsTell::Loaded {
+                pr: pr.clone(),
+                view: Box::new(view)
+            })
+        );
+        let result = fixture::demo_functions(1_790_000_000, fixture::DemoFunctions::Mockup)
+            .functions[0]
+            .cases[0]
+            .result
+            .clone()
+            .unwrap();
+        assert_eq!(
+            FunctionsTell::from_event(&Event::CaseDone {
+                pr: pr.clone(),
+                run: "run-1".into(),
+                function: "f-0123456789".into(),
+                result: Box::new(result.clone()),
+            }),
+            Some(FunctionsTell::CaseDone {
+                pr: pr.clone(),
+                run: "run-1".into(),
+                function: "f-0123456789".into(),
+                result: Box::new(result),
+            })
+        );
+        assert_eq!(
+            FunctionsTell::from_event(&Event::TestOutput {
+                pr,
+                run: "r".into(),
+                tail: String::new()
+            }),
+            None
+        );
+        assert_eq!(
+            TestsTell::from_event(&Event::FunctionsChanged {
+                pr: pr7(),
+                view: Box::new(clusia_core::functions::FunctionsView::new("abc")),
+            }),
+            None,
+            "the tests events and the functions events do not overlap"
+        );
+    }
+
+    #[test]
+    fn replies_to_the_functions_asks_become_their_tells() {
+        use clusia_core::functions::FunctionsView;
+        let pr = pr7();
+        let view = FunctionsView::new("abc");
+        assert_eq!(
+            functions_tell(&pr, Reply::ChangedFunctions(Box::new(view.clone()))),
+            Some(FunctionsTell::Loaded {
+                pr: pr.clone(),
+                view: Box::new(view)
+            })
+        );
+        assert_eq!(
+            functions_tell(
+                &pr,
+                Reply::CasesStarted {
+                    run: "run-9".into()
+                }
+            ),
+            Some(FunctionsTell::Started {
+                pr: pr.clone(),
+                run: "run-9".into()
+            })
+        );
+        let code = fixture::demo_driver();
+        assert_eq!(
+            functions_tell(&pr, Reply::Driver(Box::new(code.clone()))),
+            Some(FunctionsTell::Driver {
+                pr: pr.clone(),
+                code: Box::new(code)
+            })
+        );
+        assert_eq!(
+            functions_tell(&pr, Reply::Ack),
+            None,
+            "an acked write tells nothing"
+        );
+    }
+
+    #[test]
+    fn the_functions_asks_stay_on_the_main_connection() {
+        use clusia_core::functions::{CaseInput, CaseScope, CasesAsk};
+        let pr = pr7();
+        for ask in [
+            Ask::GetFunctions(pr.clone()),
+            Ask::SaveCase {
+                pr: pr.clone(),
+                function: "f".into(),
+                case: CaseInput {
+                    id: None,
+                    name: "n".into(),
+                    values: Default::default(),
+                },
+            },
+            Ask::ResetCase {
+                pr: pr.clone(),
+                function: "f".into(),
+                case: "a1".into(),
+            },
+            Ask::RemoveCase {
+                pr: pr.clone(),
+                function: "f".into(),
+                case: "r1".into(),
+            },
+            Ask::WriteCases {
+                pr: pr.clone(),
+                function: "f".into(),
+                ask: CasesAsk::Fresh,
+            },
+            Ask::RunCases {
+                pr: pr.clone(),
+                scope: CaseScope::All,
+                seen: "h".into(),
+            },
+            Ask::GetDriver {
+                pr: pr.clone(),
+                function: "f".into(),
+            },
+        ] {
+            assert!(
+                !on_worker(&ask),
+                "{ask:?} must never queue behind a slow ask"
+            );
+        }
+    }
+
+    #[test]
+    fn demo_mode_answers_the_reads_and_frees_every_functions_write() {
+        use clusia_core::functions::{CaseInput, CaseScope, CasesAsk};
+        let pr = fixture::demo_pr();
+        let tells = demo_agent_tells(vec![
+            Ask::GetFunctions(pr.clone()),
+            Ask::GetDriver {
+                pr: pr.clone(),
+                function: "tokenstore_refresh-0123456789".into(),
+            },
+            Ask::SaveCase {
+                pr: pr.clone(),
+                function: "f".into(),
+                case: CaseInput {
+                    id: None,
+                    name: "n".into(),
+                    values: Default::default(),
+                },
+            },
+            Ask::ResetCase {
+                pr: pr.clone(),
+                function: "f".into(),
+                case: "a1".into(),
+            },
+            Ask::RemoveCase {
+                pr: pr.clone(),
+                function: "f".into(),
+                case: "r1".into(),
+            },
+            Ask::WriteCases {
+                pr: pr.clone(),
+                function: "f".into(),
+                ask: CasesAsk::More,
+            },
+            Ask::RunCases {
+                pr: pr.clone(),
+                scope: CaseScope::All,
+                seen: "h".into(),
+            },
+        ]);
+        let loaded = tells.iter().find_map(|t| match t {
+            Tell::Functions(FunctionsTell::Loaded { view, .. }) => Some(view),
+            _ => None,
+        });
+        assert_eq!(
+            **loaded.expect("the demo view"),
+            fixture::demo_functions(1_790_000_000, fixture::DemoFunctions::Mockup)
+        );
+        let driver = tells.iter().find_map(|t| match t {
+            Tell::Functions(FunctionsTell::Driver { code, .. }) => Some(code),
+            _ => None,
+        });
+        assert_eq!(
+            driver.expect("the demo driver").function,
+            "tokenstore_refresh-0123456789"
+        );
+        let kinds: Vec<FunctionsAskKind> = tells
+            .iter()
+            .filter_map(|t| match t {
+                Tell::Functions(FunctionsTell::Refused { ask, message, .. }) => {
+                    assert_eq!(message, "Demo mode: nothing is sent to the daemon");
+                    Some(*ask)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                FunctionsAskKind::Save,
+                FunctionsAskKind::Reset,
+                FunctionsAskKind::Remove,
+                FunctionsAskKind::Write,
+                FunctionsAskKind::Run,
+            ]
+        );
+    }
+
+    #[test]
+    fn offline_functions_writes_are_refused_and_the_read_is_silent() {
+        use clusia_core::functions::{CaseScope, CasesAsk};
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let pr = pr7();
+        assert!(offline(&Ask::GetFunctions(pr.clone()), &teller));
+        assert!(rx.try_recv().is_err(), "a read says nothing");
+        assert!(offline(
+            &Ask::RunCases {
+                pr: pr.clone(),
+                scope: CaseScope::All,
+                seen: "h".into()
+            },
+            &teller
+        ));
+        assert!(offline(
+            &Ask::WriteCases {
+                pr: pr.clone(),
+                function: "f".into(),
+                ask: CasesAsk::Fresh
+            },
+            &teller
+        ));
+        let told: Vec<Tell> = rx.try_iter().collect();
+        assert!(
+            told.iter()
+                .any(|t| matches!(t, Tell::Notice { text, warning: true } if text == NOT_SENT))
+        );
+        let refused: Vec<FunctionsAskKind> = told
+            .iter()
+            .filter_map(|t| match t {
+                Tell::Functions(FunctionsTell::Refused { ask, message, .. })
+                    if message == NOT_SENT =>
+                {
+                    Some(*ask)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refused, [FunctionsAskKind::Run, FunctionsAskKind::Write]);
     }
 }
