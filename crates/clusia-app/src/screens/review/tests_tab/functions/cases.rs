@@ -331,9 +331,11 @@ fn focused_key(
     focus: &InputFocus,
     fields: &Query<(&CaseField, &EditableText, &Field)>,
     pr: &PrRef,
+    function: &str,
 ) -> Option<(String, String)> {
     let (field, ..) = fields.get(focus.get()?).ok()?;
-    (field.pr == *pr).then(|| (field.case.clone(), field.param.clone()))
+    (field.pr == *pr && field.function == function)
+        .then(|| (field.case.clone(), field.param.clone()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -370,12 +372,12 @@ pub fn fill_cases(
         if built.is_some_and(|b| b.0 == view) {
             continue;
         }
-        let focused = focused_key(&focus, &fields, pr);
+        let focused = focused_key(&focus, &fields, pr, &view.function);
         // What a person typed and has not saved, and a refused text under its message, stay in
         // their fields: the region redraws for results and button states, not for edits.
         let typed: HashMap<(String, String), String> = fields
             .iter()
-            .filter(|(f, ..)| f.pr == *pr)
+            .filter(|(f, ..)| f.pr == *pr && f.function == view.function)
             .filter(|(f, text, kept)| {
                 text.value().to_string() != kept.committed
                     || model.field_errors.contains_key(&(
@@ -1799,5 +1801,59 @@ mod tests {
             text.pending_edits.as_slice(),
             [TextEdit::TextStart(false)]
         ));
+    }
+
+    #[test]
+    fn typed_text_stays_with_its_function() {
+        let mut view = mockup();
+        let mut twin = view.functions[0].clone();
+        twin.slug = "twin-fn".into();
+        twin.name = "twin".into();
+        twin.cases[0]
+            .values
+            .insert("endpoint_status".into(), "418".into());
+        view.functions.insert(1, twin);
+        let (mut app, pr) = app_on_first(view);
+        let status = field(&mut app, "a1", "endpoint_status");
+        testing::type_into(&mut app, status, "7");
+        app.world_mut()
+            .write_message(crate::ui::kit::FieldCommitted {
+                entity: status,
+                value: "seven".into(),
+            });
+        app.update();
+        testing::recorded(&mut app);
+        let status = field(&mut app, "a1", "endpoint_status");
+        let typed = app
+            .world()
+            .get::<EditableText>(status)
+            .unwrap()
+            .value()
+            .to_string();
+        assert!(typed.contains('7'), "{typed}");
+        {
+            let mut models = app.world_mut().resource_mut::<FunctionsModels>();
+            let model = models.0.get_mut(&pr).unwrap();
+            model.select("twin-fn");
+            model.open("a1");
+        }
+        testing::settle(&mut app);
+        let status = field(&mut app, "a1", "endpoint_status");
+        assert_eq!(
+            app.world()
+                .get::<EditableText>(status)
+                .unwrap()
+                .value()
+                .to_string(),
+            "418",
+            "the other function's field shows its own saved value"
+        );
+        let run = testing::find::<RunThisCase>(&mut app, |r| r.case == "a1");
+        testing::activate(&mut app, run);
+        let asks = testing::recorded(&mut app);
+        assert!(
+            matches!(asks.as_slice(), [Ask::RunCases { .. }]),
+            "nothing typed elsewhere is saved: {asks:?}"
+        );
     }
 }
