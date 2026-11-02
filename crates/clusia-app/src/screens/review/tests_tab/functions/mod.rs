@@ -218,7 +218,7 @@ impl FunctionsModel {
                         .iter()
                         .find(|c| {
                             self.current_result(c)
-                                .is_none_or(|r| r.status != CaseStatus::Passed)
+                                .is_some_and(|r| r.status != CaseStatus::Passed)
                         })
                         .or(f.cases.first())
                         .map(|c| c.id.clone())
@@ -432,7 +432,10 @@ impl FunctionsModel {
                 }
             }
             FunctionsTell::Started { run, .. } => {
-                self.live = Some(run.clone());
+                // A run that already ended (its idle view came first) must not stay live.
+                if self.view.as_ref().is_some_and(|v| v.activity.is_some()) {
+                    self.live = Some(run.clone());
+                }
                 if self.pending == Some(FunctionsAskKind::Run) {
                     self.pending = None;
                 }
@@ -462,7 +465,7 @@ impl FunctionsModel {
                     FunctionsAskKind::Reset | FunctionsAskKind::Remove => self.asked = false,
                     FunctionsAskKind::Write => self.write_started = false,
                     FunctionsAskKind::Driver => self.driver = None,
-                    FunctionsAskKind::Run => {}
+                    FunctionsAskKind::Run => self.queued_run = None,
                 }
                 self.touch();
             }
@@ -649,7 +652,8 @@ pub fn send_queued(
 }
 
 /// Copies whether function cases are busy into each tab's tests model, which the Auto Tests run
-/// buttons read, and wakes the tests' regions only when it changed.
+/// buttons read, and wakes the tests' regions only when it changed. It also looks when the tests
+/// models changed, so one created while cases were busy gets the flag.
 pub fn mirror_busy(functions: Res<FunctionsModels>, mut tests: ResMut<TestsModels>) {
     let mut wrote = false;
     let models = tests.bypass_change_detection();
@@ -704,6 +708,60 @@ mod tests {
 
     fn refresh_slug() -> String {
         function_slug("store/refresh.rs", "TokenStore::refresh")
+    }
+
+    #[test]
+    fn an_unrun_case_does_not_outrank_a_failed_one() {
+        let mut view = mockup();
+        let f = &mut view.functions[0];
+        f.cases[0].result = None;
+        f.cases[1].result.as_mut().unwrap().status = CaseStatus::Failed;
+        let mut m = FunctionsModel::default();
+        m.apply(&loaded(view));
+        assert_eq!(
+            m.open_case.as_deref(),
+            Some("a2"),
+            "the failure, not the unrun a1"
+        );
+    }
+
+    #[test]
+    fn a_run_that_ended_before_its_start_reply_is_not_live() {
+        let mut m = model();
+        m.sent(FunctionsAskKind::Run);
+        m.apply(&FunctionsTell::Started {
+            pr: pr(),
+            run: "run-1".into(),
+        });
+        assert!(!m.busy());
+        let mut running = mockup();
+        running.activity = Some(FunctionsActivity::Writing {
+            function: None,
+            ask: None,
+        });
+        m.apply(&loaded(running));
+        m.apply(&FunctionsTell::Started {
+            pr: pr(),
+            run: "run-2".into(),
+        });
+        assert_eq!(m.live.as_deref(), Some("run-2"));
+    }
+
+    #[test]
+    fn a_refused_run_drops_a_queued_run() {
+        let mut m = model();
+        m.queued_run = Some(QueuedRun {
+            function: refresh_slug(),
+            case: "a1".into(),
+            values: BTreeMap::new(),
+        });
+        m.sent(FunctionsAskKind::Run);
+        m.apply(&FunctionsTell::Refused {
+            pr: pr(),
+            ask: FunctionsAskKind::Run,
+            message: "x".into(),
+        });
+        assert!(m.queued_run.is_none() && m.pending.is_none());
     }
 
     #[test]

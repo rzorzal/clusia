@@ -715,7 +715,10 @@ impl Plugin for TestsPlugin {
                             .or_eager(resource_changed::<functions::FunctionsModels>),
                     ),
                     functions::send_queued.run_if(resource_changed::<functions::FunctionsModels>),
-                    functions::mirror_busy.run_if(resource_changed::<functions::FunctionsModels>),
+                    functions::mirror_busy.run_if(
+                        resource_changed::<functions::FunctionsModels>
+                            .or_eager(resource_changed::<TestsModels>),
+                    ),
                     flush_tails.run_if(|models: Res<TestsModels>| models.pending_tail()),
                     body::fill_tests.run_if(tests_views_changed),
                     top::fill_top.run_if(tests_views_changed),
@@ -1088,13 +1091,12 @@ mod tests {
 
     #[test]
     fn the_functions_model_is_a_resource_of_the_plugin() {
-        let mut app = testing::demo_review_app();
+        let app = testing::demo_review_app();
         assert!(
             app.world()
                 .get_resource::<functions::FunctionsModels>()
                 .is_some()
         );
-        let _ = &mut app;
     }
 
     #[test]
