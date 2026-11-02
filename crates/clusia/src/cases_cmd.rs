@@ -386,7 +386,7 @@ pub(crate) async fn read_functions(
 }
 
 /// The scope a wish makes in `view`, and how many cases it runs; refuses what cannot run.
-pub(crate) fn plan_run(
+fn plan_run(
     view: &FunctionsView,
     function: Option<&str>,
     case: Option<&str>,
@@ -413,7 +413,7 @@ pub(crate) fn plan_run(
 }
 
 /// Runs the cases `wanted` names and streams each result. Returns the results, the view as of
-/// the run's end (no further read of the daemon), and the slug of the function each result belongs to (in result order).
+/// the run's end (no further read of the daemon), the cases the run was started with, and the slug of the function each result belongs to (in result order).
 pub(crate) async fn run_cases(
     client: &mut Client,
     pr: &PrRef,
@@ -421,7 +421,7 @@ pub(crate) async fn run_cases(
     wanted: &CasesWanted,
     json: bool,
     stop: &mut Interrupts<'_>,
-) -> Result<(Vec<CaseResult>, FunctionsView, Vec<String>), CliError> {
+) -> Result<(Vec<CaseResult>, FunctionsView, Vec<String>, u32), CliError> {
     let mut view = view;
     let mut function = wanted.function.clone();
     let mut retried = false;
@@ -506,7 +506,7 @@ pub(crate) async fn run_cases(
             case.result = Some(result.clone());
         }
     }
-    Ok((results, after, slugs))
+    Ok((results, after, slugs, total))
 }
 
 #[cfg(test)]

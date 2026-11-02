@@ -16,7 +16,7 @@ use serde_json::json;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::cases_cmd::{
-    case_failure_lines, cases_exit_code, cases_totals_line, function_lines, names_of, plan_run,
+    case_failure_lines, cases_exit_code, cases_totals_line, function_lines, names_of,
     read_functions, run_cases,
 };
 use crate::check::line_of;
@@ -797,8 +797,7 @@ pub(crate) async fn tests(
     }
     let mut cases_code = None;
     if let (Some(cases), Some(read)) = (&wanted.run_cases, functions.take()) {
-        let total = plan_run(&read, cases.function.as_deref(), cases.case.as_deref(), &pr)?.1;
-        let (results, after, slugs) =
+        let (results, after, slugs, total) =
             run_cases(&mut client, &pr, read, cases, json, &mut stop).await?;
         view = view_of(&mut client, &pr, &mut stop).await?;
         for (result, slug) in results.iter().zip(&slugs) {

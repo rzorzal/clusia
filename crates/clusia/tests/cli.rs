@@ -3835,4 +3835,51 @@ mod tests_against_a_scripted_daemon {
             "{err}"
         );
     }
+
+    #[test]
+    fn a_retry_that_shrinks_the_run_still_passes_with_exit_0() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let reads = Arc::new(Mutex::new(0u32));
+        super::check_against_a_scripted_daemon::daemon_result(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, say| match cmd {
+                Request::GetTests { .. } => {
+                    Some(Ok(Reply::Tests(Box::new(view(TestsPhase::Ready, None)))))
+                }
+                Request::GetFunctions { .. } => {
+                    let mut n = reads.lock().unwrap();
+                    *n += 1;
+                    let mut v = fview(if *n == 1 { "old" } else { "new" });
+                    if *n > 1 {
+                        v.functions[0].cases.truncate(1);
+                    }
+                    Some(Ok(Reply::ChangedFunctions(Box::new(v))))
+                }
+                Request::RunCases { seen, .. } => {
+                    if seen == "old" {
+                        return Some(Err(clusia_protocol::ProtocolError::new(
+                            clusia_protocol::ErrorCode::InvalidState,
+                            CASES_CHANGED,
+                        )));
+                    }
+                    let say = say.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(done("a1", CaseStatus::Passed, 5));
+                    });
+                    Some(Ok(Reply::CasesStarted {
+                        run: "run-1".into(),
+                    }))
+                }
+                _ => Some(Ok(Reply::Ack)),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-cases", "--function", REFRESH]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert!(out.contains("1 passed, 0 failed"), "{out}");
+    }
 }
