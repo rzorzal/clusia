@@ -123,6 +123,8 @@ pub enum Modal {
     CallsNode,
     /// The setup plan of a review's tests, for `TestsModel.plan`.
     TestSetup,
+    /// The driver of a changed function, for `FunctionsModel.driver`.
+    DriverCode,
 }
 
 /// What the comment editor writes.

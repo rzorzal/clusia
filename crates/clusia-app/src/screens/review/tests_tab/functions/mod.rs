@@ -3,7 +3,9 @@
 //! the daemon sent is text here: nothing in this file draws it, parses it as a path or opens it.
 
 pub mod cases;
+pub mod driver;
 pub mod list;
+pub mod result;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -450,6 +452,9 @@ impl FunctionsModel {
                 self.touch();
             }
             FunctionsTell::Driver { code, .. } => {
+                if self.pending == Some(FunctionsAskKind::Driver) {
+                    self.pending = None;
+                }
                 if let Some(modal) = self
                     .driver
                     .as_mut()

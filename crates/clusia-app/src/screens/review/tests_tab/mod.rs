@@ -721,7 +721,10 @@ impl Plugin for TestsPlugin {
                             .or_eager(resource_changed::<TestsModels>),
                     ),
                     flush_tails.run_if(|models: Res<TestsModels>| models.pending_tail()),
-                    body::fill_tests.run_if(tests_views_changed),
+                    body::fill_tests.run_if(
+                        tests_views_changed
+                            .or_eager(resource_changed::<functions::FunctionsModels>),
+                    ),
                     top::fill_top.run_if(tests_views_changed),
                     list::fill_list.run_if(tests_views_changed),
                     list::place_on_scroll.run_if(any_with_component::<list::ListState>),
@@ -738,6 +741,16 @@ impl Plugin for TestsPlugin {
                 )
                     .chain()
                     .after(ReviewSystems),
+            )
+            .add_systems(
+                Update,
+                (
+                    functions::result::fill_result.run_if(functions::functions_changed),
+                    functions::driver::fill_driver.run_if(functions::functions_changed),
+                    functions::driver::cancel_driver.run_if(functions::driver::driver_up),
+                )
+                    .chain()
+                    .after(functions::cases::fill_cases),
             );
     }
 }

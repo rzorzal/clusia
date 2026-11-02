@@ -6,10 +6,11 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::PrRef;
+use clusia_core::functions::{FUNCTIONS_MAX, FunctionsView};
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::tests::{ACTIVITY_WRITING, RECIPE_FILE, RunnerKind, TestsView};
 
-use super::functions::{self, FunctionsBody};
+use super::functions::{self, FunctionsBody, FunctionsModel, FunctionsModels};
 use super::{SubTab, TabState, TestsModel, TestsModels, engine_label, tab_state};
 use crate::agent_name;
 use crate::bridge::{Ask, Asks, Model, TestsAskKind, Toasts};
@@ -41,11 +42,13 @@ pub(super) enum Shape {
         engine: Option<String>,
         off: Option<&'static str>,
         starting: bool,
+        cases: CasesCopy,
     },
     Generating {
         agent: String,
         step: u8,
         stopping: bool,
+        cases: CasesCopy,
     },
     Failed {
         message: String,
@@ -62,8 +65,36 @@ pub(super) enum Shape {
     },
 }
 
+/// How many changed functions the cases of step 2 are for: the ones with a language pack in a
+/// loaded view; `None` when none is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CasesCopy(pub Option<usize>);
+
+/// The number of functions the Generate click writes cases for, from the loaded view. A view
+/// still being read has no functions yet, so it counts none.
+pub(super) fn cases_copy(view: Option<&FunctionsView>) -> CasesCopy {
+    CasesCopy(view.filter(|v| !v.reading).map(|v| {
+        v.functions
+            .iter()
+            .filter(|f| f.lang.is_some())
+            .count()
+            .min(FUNCTIONS_MAX)
+    }))
+}
+
+/// The line under step 2's title.
+pub(super) fn copy_line(cases: CasesCopy) -> String {
+    let which = match cases.0 {
+        Some(n) if n >= 2 => format!("the {n} changed functions"),
+        Some(1) => "the changed function".to_string(),
+        _ => "the changed functions".to_string(),
+    };
+    format!("How to set up and run the tests, and cases for {which}. It only reads the code.")
+}
+
 pub(super) struct Inputs<'a> {
     pub model: Option<&'a TestsModel>,
+    pub functions: Option<&'a FunctionsModel>,
     pub agent: &'a str,
     pub read_only: Option<&'static str>,
     pub can_edit: bool,
@@ -162,9 +193,11 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
                 engine: None,
                 off: Some(off),
                 starting: false,
+                cases: cases_copy(None),
             },
         };
     };
+    let cases = cases_copy(i.functions.and_then(|f| f.view.as_ref()));
     let actions = || Actions {
         off: i.read_only,
         starting: pending == Some(TestsAskKind::Generate),
@@ -176,6 +209,7 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
             engine: engine_here(view),
             off: i.read_only,
             starting: pending == Some(TestsAskKind::Generate),
+            cases,
         },
         TabState::Generating { activity } => Shape::Generating {
             agent: i.agent.to_string(),
@@ -185,6 +219,7 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
                 1
             },
             stopping: pending == Some(TestsAskKind::Stop),
+            cases,
         },
         TabState::Failed { message } => Shape::Failed {
             message: printable_lines(&message),
@@ -303,6 +338,7 @@ pub(super) fn fill_tests(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
     models: Res<TestsModels>,
+    functions: Res<FunctionsModels>,
     model: Res<Model>,
     fonts: Res<UiFonts>,
     bodies: Query<(Entity, &SectionBody, Option<&Children>)>,
@@ -328,6 +364,7 @@ pub(super) fn fill_tests(
         let agent = agent_name::of_tab(&model.snapshot, tab);
         let shape = body_view(&Inputs {
             model: models.0.get(&body.pr),
+            functions: functions.0.get(&body.pr),
             agent: &agent,
             read_only: read_only_reason(&tabs, &model, &body.pr),
             can_edit: ready.view.worktree.is_some(),
@@ -366,6 +403,7 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
             engine,
             off,
             starting,
+            cases,
         } => centered(p, |c| {
             steps_card(
                 c,
@@ -373,6 +411,7 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
                 "Test this change",
                 agent,
                 engine.as_deref(),
+                *cases,
                 [Light::Idle; 3],
                 |row| {
                     if *starting {
@@ -394,23 +433,33 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
             agent,
             step,
             stopping,
+            cases,
         } => centered(p, |c| {
             let lights = if *step == 2 {
                 [Light::Done, Light::Lit, Light::Waiting]
             } else {
                 [Light::Lit, Light::Waiting, Light::Waiting]
             };
-            steps_card(c, fonts, "Generating tests", agent, None, lights, |row| {
-                if *stopping {
-                    row.spawn(disabled_button(fonts, "Stopping…"));
-                } else {
-                    row.spawn((
-                        button(fonts, "Stop", Variant::Secondary),
-                        StopButton(pr.clone()),
-                        observe(on_stop),
-                    ));
-                }
-            });
+            steps_card(
+                c,
+                fonts,
+                "Generating tests",
+                agent,
+                None,
+                *cases,
+                lights,
+                |row| {
+                    if *stopping {
+                        row.spawn(disabled_button(fonts, "Stopping…"));
+                    } else {
+                        row.spawn((
+                            button(fonts, "Stop", Variant::Secondary),
+                            StopButton(pr.clone()),
+                            observe(on_stop),
+                        ));
+                    }
+                },
+            );
         }),
         Shape::Failed { message, actions } => centered(p, |c| {
             outcome_card(
@@ -561,12 +610,14 @@ fn outcome_card(
 
 /// The card of the empty and generating states: a title, the three steps and `footer` (the
 /// buttons) in a row at the bottom.
+#[allow(clippy::too_many_arguments)]
 fn steps_card(
     p: &mut Spawner,
     fonts: &UiFonts,
     title: &str,
     agent: &str,
     engine: Option<&str>,
+    cases: CasesCopy,
     lights: [Light; 3],
     footer: impl FnOnce(&mut Spawner),
 ) {
@@ -579,8 +630,8 @@ fn steps_card(
     let steps = [
         ("Check the environment".to_string(), found),
         (
-            format!("{agent} writes the recipe"),
-            "How to set up and run the tests. It only reads the code.".into(),
+            format!("{agent} writes the recipe and the cases"),
+            copy_line(cases),
         ),
         (
             "You approve the setup".to_string(),
@@ -591,7 +642,7 @@ fn steps_card(
         c.spawn(text(fonts, title, Type::HEADING.size(18.0)));
         c.spawn(wrapped_text(
             fonts,
-            "Run the repository's tests in isolation. Nothing has run yet for this pull request.",
+            "Run the repository's tests in isolation, and try each changed function with values you choose. Nothing has run yet for this pull request.",
             Type::MUTED,
         ));
         for (i, (head, line)) in steps.into_iter().enumerate() {
@@ -837,11 +888,11 @@ mod tests {
         testing::settle(&mut app);
         for needle in [
             "Test this change",
-            "Run the repository's tests in isolation. Nothing has run yet for this pull request.",
+            "Run the repository's tests in isolation, and try each changed function with values you choose. Nothing has run yet for this pull request.",
             "Check the environment",
             "Finds a container engine and what is already built for this repository.",
-            "Claude Code writes the recipe",
-            "How to set up and run the tests. It only reads the code.",
+            "Claude Code writes the recipe and the cases",
+            "How to set up and run the tests, and cases for the changed functions. It only reads the code.",
             "You approve the setup",
             "You see every command before it runs. Tests run with no network.",
             "Generate tests",
@@ -1205,6 +1256,7 @@ mod tests {
                 agent: "Claude Code",
                 read_only,
                 can_edit: false,
+                functions: None,
             }
         }
         assert_eq!(body_view(&inputs(None, None)), Shape::Loading);
@@ -1215,7 +1267,68 @@ mod tests {
                 engine: None,
                 off: Some("Not connected to clusiad — not sent"),
                 starting: false,
+                cases: CasesCopy(None),
             }
         );
+    }
+
+    #[test]
+    fn step_two_counts_the_functions_with_a_language_pack() {
+        for (n, line) in [
+            (
+                None,
+                "How to set up and run the tests, and cases for the changed functions. It only reads the code.",
+            ),
+            (
+                Some(0),
+                "How to set up and run the tests, and cases for the changed functions. It only reads the code.",
+            ),
+            (
+                Some(1),
+                "How to set up and run the tests, and cases for the changed function. It only reads the code.",
+            ),
+            (
+                Some(5),
+                "How to set up and run the tests, and cases for the 5 changed functions. It only reads the code.",
+            ),
+        ] {
+            assert_eq!(copy_line(CasesCopy(n)), line);
+        }
+    }
+
+    #[test]
+    fn the_count_ignores_functions_without_a_pack_and_a_view_still_reading() {
+        let mut view =
+            crate::fixture::demo_functions(testing::NOW, crate::fixture::DemoFunctions::Mockup);
+        assert_eq!(
+            cases_copy(Some(&view)),
+            CasesCopy(Some(4)),
+            "the Swift file has no function"
+        );
+        view.functions[3].lang = None;
+        assert_eq!(
+            cases_copy(Some(&view)),
+            CasesCopy(Some(3)),
+            "one has no pack"
+        );
+        view.reading = true;
+        assert_eq!(cases_copy(Some(&view)), CasesCopy(None));
+        assert_eq!(cases_copy(None), CasesCopy(None));
+    }
+
+    #[test]
+    fn the_generating_card_names_the_cases_too() {
+        let (mut app, pr) = tests_app();
+        open(
+            &mut app,
+            &pr,
+            TestsPhase::Generating {
+                activity: Some(ACTIVITY_WRITING.into()),
+            },
+        );
+        assert!(testing::shows(
+            &mut app,
+            "Claude Code writes the recipe and the cases"
+        ));
     }
 }

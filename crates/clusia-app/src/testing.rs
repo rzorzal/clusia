@@ -1356,3 +1356,52 @@ pub fn left_press(app: &mut App) {
     });
     app.update();
 }
+
+/// Esc goes down and comes up, as the window sends it, and the frames that settle.
+pub fn press_escape(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Escape);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset_all();
+    settle(app);
+}
+
+/// A click on the dimmed layer of the functions' driver dialog, and the frames that settle.
+pub fn click_backdrop(app: &mut App) {
+    use crate::review_state::Modal;
+    use crate::screens::review::shell::ModalFor;
+    let root = find::<ModalFor>(app, |m| m.modal == Modal::DriverCode);
+    click(app, root);
+    settle(app);
+}
+
+/// Gives the diff of `pr` a patch for `file` in which `line` of the new side can carry a
+/// comment, replacing the file's own patch.
+pub fn allow_comments_on(app: &mut App, pr: &PrRef, file: &str, line: u32) {
+    let patch = format!("@@ -{line},1 +{line},1 @@\n-old\n+new\n");
+    let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+    let ready = tabs
+        .0
+        .get_mut(pr)
+        .and_then(|t| t.ready_mut())
+        .expect("a ready review");
+    ready.view.diff.retain(|f| f.path != file);
+    ready.view.diff.push(clusia_core::FileDiff {
+        path: file.into(),
+        previous_path: None,
+        status: "modified".into(),
+        additions: 1,
+        deletions: 1,
+        patch: Some(patch),
+    });
+    app.update();
+}
+
+/// The daemon is gone: the window is read-only.
+pub fn go_offline(app: &mut App) {
+    app.world_mut().resource_mut::<Model>().connection = bridge::Connection::Lost("gone".into());
+    app.update();
+}

@@ -1559,9 +1559,10 @@ mod tests {
             Scene::TestsEmpty,
             &[
                 "Test this change",
-                "Run the repository's tests in isolation. Nothing has run yet for this pull request.",
+                "Run the repository's tests in isolation, and try each changed function with values you choose. Nothing has run yet for this pull request.",
                 "Check the environment",
-                "Claude Code writes the recipe",
+                "Claude Code writes the recipe and the cases",
+                "How to set up and run the tests, and cases for the changed functions. It only reads the code.",
                 "You approve the setup",
                 "Generate tests",
                 "Uses one Claude Code turn on your account",
