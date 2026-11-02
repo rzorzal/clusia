@@ -10,7 +10,7 @@ use bevy::input_focus::InputFocus;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::text::{EditableText, TextSpan};
+use bevy::text::{EditableText, TextEdit, TextSpan};
 use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
 use clusia_core::PrRef;
 use clusia_core::functions::{
@@ -28,7 +28,7 @@ use crate::screens::review::tests_tab::plan::Refocus;
 use crate::screens::review::tests_tab::{TestsModel, TestsModels, row_duration};
 use crate::theme::Swatch;
 use crate::ui::kit::{
-    Clickable, FieldCommitted, Fill, HoverFill, Ink, Stroke, Type, Variant, button, card,
+    Clickable, Field, FieldCommitted, Fill, HoverFill, Ink, Stroke, Type, Variant, button, card,
     disabled_button, font, text, text_field, wrapped_text,
 };
 
@@ -139,7 +139,8 @@ pub(super) struct FieldView {
 pub(super) struct OpenCase {
     pub fields: Vec<FieldView>,
     pub run_off: Option<&'static str>,
-    pub new_off: Option<&'static str>,
+    /// Why the buttons that edit or write (New fake values, Reset, Remove) are off.
+    pub edit_off: Option<&'static str>,
     pub reset: bool,
     pub remove: bool,
 }
@@ -268,7 +269,7 @@ pub(super) fn cases_view(
                                 })
                                 .collect(),
                             run_off: run_reason,
-                            new_off: write_reason,
+                            edit_off: write_reason,
                             reset: c.origin == CaseOrigin::Agent && c.edited,
                             remove: c.origin == CaseOrigin::Reviewer,
                         });
@@ -328,10 +329,10 @@ type Spawner<'a> = ChildSpawnerCommands<'a>;
 /// `(case, param)` of the field that holds keyboard focus, when it is one of `pr`'s.
 fn focused_key(
     focus: &InputFocus,
-    fields: &Query<(&CaseField, &EditableText)>,
+    fields: &Query<(&CaseField, &EditableText, &Field)>,
     pr: &PrRef,
 ) -> Option<(String, String)> {
-    let (field, _) = fields.get(focus.get()?).ok()?;
+    let (field, ..) = fields.get(focus.get()?).ok()?;
     (field.pr == *pr).then(|| (field.case.clone(), field.param.clone()))
 }
 
@@ -344,7 +345,7 @@ pub fn fill_cases(
     app_model: Res<Model>,
     fonts: Res<UiFonts>,
     focus: Res<InputFocus>,
-    fields: Query<(&CaseField, &EditableText)>,
+    fields: Query<(&CaseField, &EditableText, &Field)>,
     regions: Query<(Entity, &FunctionsCases, Option<&CasesBuilt>)>,
 ) {
     for (entity, region, built) in &regions {
@@ -370,18 +371,20 @@ pub fn fill_cases(
             continue;
         }
         let focused = focused_key(&focus, &fields, pr);
-        // A refused text stays in its field, under its message.
+        // What a person typed and has not saved, and a refused text under its message, stay in
+        // their fields: the region redraws for results and button states, not for edits.
         let typed: HashMap<(String, String), String> = fields
             .iter()
-            .filter(|(f, _)| f.pr == *pr)
-            .filter(|(f, _)| {
-                model.field_errors.contains_key(&(
-                    f.function.clone(),
-                    f.case.clone(),
-                    f.param.clone(),
-                ))
+            .filter(|(f, ..)| f.pr == *pr)
+            .filter(|(f, text, kept)| {
+                text.value().to_string() != kept.committed
+                    || model.field_errors.contains_key(&(
+                        f.function.clone(),
+                        f.case.clone(),
+                        f.param.clone(),
+                    ))
             })
-            .map(|(f, t)| ((f.case.clone(), f.param.clone()), t.value().to_string()))
+            .map(|(f, t, _)| ((f.case.clone(), f.param.clone()), t.value().to_string()))
             .collect();
         commands.entity(entity).despawn_related::<Children>();
         commands
@@ -418,7 +421,8 @@ fn draw(
             })
             .with_children(|head| {
                 let t = Type::MONO.ink(Swatch::Fg).size(13.0);
-                let bold = Type { weight: 600, ..t };
+                // JetBrains Mono's weight axis runs to 800; 600 is hard to tell from 400 at this size.
+                let bold = Type { weight: 700, ..t };
                 head.spawn((
                     text(fonts, h.bold.clone(), bold),
                     TextLayout::linebreak(bevy::text::LineBreak::WordOrCharacter),
@@ -688,7 +692,7 @@ fn draw_open(
                 }
                 Some(reason) => off(buttons, fonts, "▶ Run this case", reason),
             }
-            match open.new_off {
+            match open.edit_off {
                 None => {
                     buttons.spawn((
                         button(fonts, "New fake values", Variant::Secondary),
@@ -700,31 +704,39 @@ fn draw_open(
                         observe(on_new_values),
                     ));
                 }
-                Some(_) => {
-                    buttons.spawn(disabled_button(fonts, "New fake values"));
-                }
+                Some(reason) => off(buttons, fonts, "New fake values", reason),
             }
             if open.reset {
-                buttons.spawn((
-                    button(fonts, "Reset", Variant::Secondary),
-                    ResetCaseButton {
-                        pr: pr.clone(),
-                        function: function.clone(),
-                        case: case.clone(),
-                    },
-                    observe(on_reset),
-                ));
+                match open.edit_off {
+                    None => {
+                        buttons.spawn((
+                            button(fonts, "Reset", Variant::Secondary),
+                            ResetCaseButton {
+                                pr: pr.clone(),
+                                function: function.clone(),
+                                case: case.clone(),
+                            },
+                            observe(on_reset),
+                        ));
+                    }
+                    Some(reason) => off(buttons, fonts, "Reset", reason),
+                }
             }
             if open.remove {
-                buttons.spawn((
-                    button(fonts, "Remove", Variant::Danger),
-                    RemoveCaseButton {
-                        pr: pr.clone(),
-                        function: function.clone(),
-                        case: case.clone(),
-                    },
-                    observe(on_remove),
-                ));
+                match open.edit_off {
+                    None => {
+                        buttons.spawn((
+                            button(fonts, "Remove", Variant::Danger),
+                            RemoveCaseButton {
+                                pr: pr.clone(),
+                                function: function.clone(),
+                                case: case.clone(),
+                            },
+                            observe(on_remove),
+                        ));
+                    }
+                    Some(reason) => off(buttons, fonts, "Remove", reason),
+                }
             }
         });
     });
@@ -761,17 +773,16 @@ fn field(
             })
             .with_child(text(fonts, f.label.clone(), Type::MUTED));
             let key = (case.to_string(), f.param.clone());
-            let shown = typed
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| printable(&f.value));
+            let saved = printable(&f.value);
+            let shown = typed.get(&key).unwrap_or(&saved).clone();
+            let editable = text_field(
+                fonts,
+                &shown,
+                if f.whole_row { WHOLE_WIDTH } else { PAIR_WIDTH },
+                true,
+            );
             let mut field = pair.spawn((
-                text_field(
-                    fonts,
-                    &shown,
-                    if f.whole_row { WHOLE_WIDTH } else { PAIR_WIDTH },
-                    true,
-                ),
+                editable,
                 CaseField {
                     pr: pr.clone(),
                     function: function.to_string(),
@@ -779,8 +790,20 @@ fn field(
                     param: f.param.clone(),
                 },
             ));
+            // The saved value stays the field's committed one, so unsaved text is still an
+            // edit to commit.
+            field.insert(Field { committed: saved });
             if focused == Some(&key) {
                 field.insert(Refocus);
+            } else {
+                // A field nobody is in shows the start of its value, not the end the cursor
+                // is created at.
+                field.queue(|mut e: EntityWorldMut| {
+                    if let Some(mut t) = e.get_mut::<EditableText>() {
+                        t.pending_edits.clear();
+                        t.queue_edit(TextEdit::TextStart(false));
+                    }
+                });
             }
         });
         if let Some(error) = &f.error {
@@ -825,7 +848,7 @@ fn draw_tail(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, function: &str, tail:
             ));
         } else if tail.off.is_none() {
             t.spawn((
-                button(fonts, "＋ Add a case", Variant::Ghost),
+                button(fonts, "+ Add a case", Variant::Ghost),
                 AddCase {
                     pr: pr.clone(),
                     function: function.to_string(),
@@ -833,7 +856,7 @@ fn draw_tail(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, function: &str, tail:
                 observe(on_add),
             ));
         } else {
-            t.spawn(disabled_button(fonts, "＋ Add a case"));
+            t.spawn(disabled_button(fonts, "+ Add a case"));
         }
         if tail.off.is_none() {
             t.spawn((
@@ -1285,7 +1308,7 @@ mod tests {
             "▶ Run this case",
             "New fake values",
             "Reset",
-            "＋ Add a case",
+            "+ Add a case",
             "Ask Claude Code for more cases",
         ] {
             assert!(testing::shows(&mut app, line), "missing {line:?}");
@@ -1585,5 +1608,196 @@ mod tests {
             "nothing here is parsed as markdown"
         );
         assert_eq!(testing::count::<crate::ui::markdown::MdLink>(&mut app), 0);
+        let token = field(&mut app, "a1", "stored_token");
+        assert_eq!(
+            app.world()
+                .get::<EditableText>(token)
+                .unwrap()
+                .value()
+                .to_string(),
+            "[y](https://example.test)\\u{1b}[31m"
+        );
+    }
+
+    fn texts_equal(app: &mut App, line: &str) -> usize {
+        testing::shown_text(app)
+            .iter()
+            .filter(|t| *t == line)
+            .count()
+    }
+
+    fn loaded(app: &mut App, pr: &PrRef, view: clusia_core::functions::FunctionsView) {
+        testing::tell(
+            app,
+            crate::bridge::Tell::Functions(crate::bridge::FunctionsTell::Loaded {
+                pr: pr.clone(),
+                view: Box::new(view),
+            }),
+        );
+    }
+
+    #[test]
+    fn text_typed_into_a_field_survives_a_change_of_the_view() {
+        let (mut app, pr) = app_with(mockup());
+        let token = field(&mut app, "a1", "stored_token");
+        testing::type_into(&mut app, token, "X");
+        let before = app
+            .world()
+            .get::<EditableText>(token)
+            .unwrap()
+            .value()
+            .to_string();
+        assert!(before.contains('X'));
+        // A case finished: its glyph and duration change, the fields are not meant to.
+        let mut view = mockup();
+        view.functions[0].cases[1].result = None;
+        loaded(&mut app, &pr, view);
+        let token = field(&mut app, "a1", "stored_token");
+        let after = app
+            .world()
+            .get::<EditableText>(token)
+            .unwrap()
+            .value()
+            .to_string();
+        assert_eq!(after, before);
+        // Still an unsaved edit: a second change keeps it, and a click on run reads it.
+        let mut view = mockup();
+        view.functions[0].cases[2].result = None;
+        loaded(&mut app, &pr, view);
+        let token = field(&mut app, "a1", "stored_token");
+        let again = app
+            .world()
+            .get::<EditableText>(token)
+            .unwrap()
+            .value()
+            .to_string();
+        assert_eq!(again, before);
+        let run = testing::find::<RunThisCase>(&mut app, |r| r.case == "a1");
+        testing::activate(&mut app, run);
+        let asks = testing::recorded(&mut app);
+        let Some(Ask::SaveCase { case, .. }) = asks.first() else {
+            panic!("the unsaved edit is saved first: {asks:?}");
+        };
+        assert_eq!(case.values["stored_token"], before);
+    }
+
+    #[test]
+    fn the_signature_up_to_its_name_is_heavier_than_the_rest() {
+        let (mut app, _pr) = app_with(mockup());
+        let mut q = app
+            .world_mut()
+            .query::<(&Text, &TextFont, Option<&Children>)>();
+        let (_, root, kids) = q
+            .iter(app.world())
+            .find(|(t, _, _)| t.0 == "pub async fn refresh(")
+            .expect("the signature's bold part");
+        let bold = root.weight.0;
+        let kid = kids.unwrap()[0];
+        let rest = app.world().get::<TextFont>(kid).unwrap().weight.0;
+        assert!(bold > rest, "bold {bold}, rest {rest}");
+        assert!(
+            app.world()
+                .get::<TextSpan>(kid)
+                .unwrap()
+                .0
+                .starts_with("&self"),
+            "the rest follows the name"
+        );
+    }
+
+    #[test]
+    fn while_a_write_is_in_flight_every_button_that_edits_is_off_with_its_reason() {
+        let mut view = mockup();
+        view.functions[0].cases[0].edited = true;
+        let (mut app, _pr) = app_with(view);
+        let fresh = testing::find::<NewValues>(&mut app, |n| n.case == "a1");
+        testing::activate(&mut app, fresh);
+        testing::recorded(&mut app);
+        for (name, n) in [
+            ("Reset", testing::count::<ResetCaseButton>(&mut app)),
+            ("New fake values", testing::count::<NewValues>(&mut app)),
+            ("Run this case", testing::count::<RunThisCase>(&mut app)),
+        ] {
+            assert_eq!(n, 0, "{name} is not a live button");
+            assert!(testing::shows(&mut app, name), "{name} is still drawn");
+        }
+        assert_eq!(
+            texts_equal(&mut app, "Function cases are running"),
+            4,
+            "Run this case, New fake values and Reset each say why, and so does Run all cases"
+        );
+    }
+
+    #[test]
+    fn a_reviewers_case_cannot_be_removed_while_a_write_is_in_flight() {
+        let mut view = mockup();
+        let mut mine = view.functions[0].cases[0].clone();
+        mine.id = "r1".into();
+        mine.origin = clusia_core::functions::CaseOrigin::Reviewer;
+        mine.result = None;
+        view.functions[0].cases.push(mine);
+        let (mut app, pr) = app_with(view);
+        let model = &mut app.world_mut().resource_mut::<FunctionsModels>().0;
+        model.get_mut(&pr).unwrap().open_case = Some("r1".into());
+        model.get_mut(&pr).unwrap().touch();
+        app.update();
+        let more = testing::find::<MoreCases>(&mut app, |m| m.pr == pr);
+        testing::activate(&mut app, more);
+        assert_eq!(testing::count::<RemoveCaseButton>(&mut app), 0);
+        assert!(testing::shows(&mut app, "Remove"));
+        assert_eq!(texts_equal(&mut app, "Function cases are running"), 4);
+    }
+
+    #[test]
+    fn a_case_whose_values_changed_after_its_result_shows_no_glyph_and_no_duration() {
+        let (mut app, pr) = app_with(mockup());
+        assert_eq!(texts_equal(&mut app, "✓"), 3);
+        assert!(testing::shows(&mut app, "0.01 s"));
+        let mut view = mockup();
+        let case = &mut view.functions[0].cases[1];
+        case.values.insert("endpoint_status".into(), "418".into());
+        case.hash = "after-the-result".into();
+        loaded(&mut app, &pr, view);
+        assert!(!testing::shows(&mut app, "0.01 s"));
+        assert_eq!(texts_equal(&mut app, "✓"), 2);
+        assert!(testing::shows(&mut app, "Valid token, no exchange"));
+    }
+
+    #[test]
+    fn committing_a_field_nobody_changed_sends_nothing() {
+        let mut view = mockup();
+        view.functions[0].cases[0].values.insert(
+            "stored_token".into(),
+            "[y](https://example.test)\u{1b}[31m".into(),
+        );
+        let (mut app, _pr) = app_with(view);
+        for param in ["stored_token", "endpoint_status"] {
+            let entity = field(&mut app, "a1", param);
+            let value = app
+                .world()
+                .get::<EditableText>(entity)
+                .unwrap()
+                .value()
+                .to_string();
+            app.world_mut()
+                .write_message(crate::ui::kit::FieldCommitted { entity, value });
+            app.update();
+            assert!(
+                testing::recorded(&mut app).is_empty(),
+                "{param} is unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unfocused_field_shows_the_start_of_its_value() {
+        let (mut app, _pr) = app_with(mockup());
+        let token = field(&mut app, "a1", "stored_token");
+        // The window's text plugin applies it with a layout, which the headless app lacks.
+        let text = app.world().get::<EditableText>(token).unwrap();
+        assert!(matches!(
+            text.pending_edits.as_slice(),
+            [TextEdit::TextStart(false)]
+        ));
     }
 }

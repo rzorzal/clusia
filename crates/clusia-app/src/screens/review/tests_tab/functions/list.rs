@@ -302,13 +302,17 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &ListView) {
         .with_children(|foot| match &view.footer {
             Footer::RunAll { n } => {
                 foot.spawn((
-                    button(fonts, &format!("Run all cases · {n}"), Variant::Primary),
+                    button(fonts, &format!("Run all cases · {n}"), Variant::Secondary),
                     RunAllCases(pr.clone()),
                     observe(on_run_all),
-                ));
+                ))
+                .entry::<Node>()
+                .and_modify(wide);
             }
             Footer::Off { reason, n } => {
-                foot.spawn(disabled_button(fonts, &format!("Run all cases · {n}")));
+                foot.spawn(disabled_button(fonts, &format!("Run all cases · {n}")))
+                    .entry::<Node>()
+                    .and_modify(wide);
                 foot.spawn(wrapped_text(fonts, *reason, Type::META));
             }
             Footer::Stop => {
@@ -316,10 +320,17 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &ListView) {
                     button(fonts, "Stop", Variant::Secondary),
                     StopCases(pr.clone()),
                     observe(on_stop),
-                ));
+                ))
+                .entry::<Node>()
+                .and_modify(wide);
             }
         });
     });
+}
+
+/// A button's own `align_self` keeps it content-wide; the footer's buttons take the row.
+fn wide(mut node: Mut<Node>) {
+    node.align_self = AlignSelf::Stretch;
 }
 
 fn draw_row(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, row: &RowView) {
@@ -671,5 +682,18 @@ mod tests {
             "the list is the same entities"
         );
         assert_eq!(testing::tree_signature(&app, result), result_before);
+    }
+
+    #[test]
+    fn run_all_cases_is_a_full_width_secondary_button() {
+        let (mut app, pr) = app_with(mockup());
+        let run = testing::find::<RunAllCases>(&mut app, |r| r.0 == pr);
+        let node = app.world().get::<Node>(run).unwrap();
+        assert_eq!(node.align_self, AlignSelf::Stretch);
+        let secondary = crate::ui::kit::Fill(Swatch::Surface);
+        assert_eq!(
+            app.world().get::<crate::ui::kit::Fill>(run),
+            Some(&secondary)
+        );
     }
 }

@@ -539,7 +539,8 @@ impl FunctionsModels {
 }
 
 /// Whether a region of the sub-tab has anything to compare: one of the resources it reads
-/// moved (the tests' models too: they decide why a run button is off), or the body was just spawned and has nothing drawn yet.
+/// moved (the tests' models too: they decide why a run button is off), or the body was just
+/// spawned and has nothing drawn yet.
 pub fn functions_changed(
     tabs: Res<ReviewTabs>,
     models: Res<FunctionsModels>,
