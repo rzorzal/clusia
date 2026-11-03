@@ -6,6 +6,7 @@ use bevy::ui_widgets::ScrollArea;
 use clusia_core::checks::{AuditArea, default_areas};
 use clusia_core::diagram::{Change, DiagramKind, DiagramVersion, EntryState, VersionPhase};
 use clusia_core::draft::{DraftKind, ThreadRef};
+use clusia_core::functions::Support;
 use clusia_core::hidden::{issue_comment_key, thread_key};
 use clusia_core::keywords::KeywordMap;
 use clusia_core::{Anchor, Origin, PrRef, ReviewState, Side, Verdict};
@@ -17,11 +18,12 @@ use clusia_protocol::{
 
 use crate::args::Scene;
 use crate::bridge::{
-    CallsTell, DiagramsTell, Model, Outbox, ProbeState, RevalidationTell, Tell, TestsTell,
+    CallsTell, DiagramsTell, FunctionsTell, Model, Outbox, ProbeState, RevalidationTell, Tell,
+    TestsTell,
 };
 use crate::clock::Clock;
 use crate::fixture;
-use crate::fixture::DemoTests;
+use crate::fixture::{DemoFunctions, DemoTests};
 use crate::nav::{Nav, Section};
 use crate::review_state::{
     CameraPose, DiffMode, EditTarget, Editor, KeywordsUi, Modal, Phase, Ready, RevalView,
@@ -34,6 +36,7 @@ use crate::screens::review::calls::CallsRequest;
 use crate::screens::review::diagrams::Diagrams;
 use crate::screens::review::diagrams::keywords::render::{focus_pose, view_pose};
 use crate::screens::review::story::{self, StoryStage};
+use crate::screens::review::tests_tab::functions::{DriverModal, FunctionsModels};
 use crate::screens::review::tests_tab::{SubTab, TestMachine, TestsModels};
 use crate::ui::code_select::{At, CodeLine, CodeSelection};
 use crate::ui::composer::popover::{PopoverKind, Popovers};
@@ -521,7 +524,10 @@ fn tests_state(scene: Scene) -> Option<DemoTests> {
         Scene::TestsStale => DemoTests::Stale,
         Scene::TestsProposal => DemoTests::Proposal,
         Scene::TestsSetup => DemoTests::Setup,
-        Scene::TestsFunctions => DemoTests::Functions,
+        Scene::TestsFunctions
+        | Scene::TestsFunctionsRunning
+        | Scene::TestsFunctionsStale
+        | Scene::TestsFunctionsDriver => DemoTests::Functions,
         Scene::ConfigTests => DemoTests::Config,
         _ => return None,
     })
@@ -557,6 +563,55 @@ fn put_tests(world: &mut World, pr: &PrRef, now: i64, state: DemoTests) {
         DemoTests::Setup => model.open_plan(),
         DemoTests::Functions => model.sub = SubTab::Functions,
         _ => {}
+    }
+}
+
+/// The demo data of the Run Function tests sub-tab a scene shows, when it shows it.
+fn functions_state(scene: Scene) -> Option<DemoFunctions> {
+    Some(match scene {
+        Scene::TestsFunctions => DemoFunctions::Mockup,
+        Scene::TestsFunctionsRunning => DemoFunctions::Running,
+        Scene::TestsFunctionsStale => DemoFunctions::Stale,
+        Scene::TestsFunctionsDriver => DemoFunctions::Driver,
+        _ => return None,
+    })
+}
+
+/// Fills the functions model of `pr` with what the daemon would answer for `state`, and marks
+/// it as asked so the sub-tab sends nothing.
+fn put_functions(world: &mut World, pr: &PrRef, now: i64, state: DemoFunctions) {
+    // The tab asks again for a head it has not asked for, so the staged one is the review's.
+    let head = world.resource::<ReviewTabs>().0[pr]
+        .ready()
+        .map(|r| r.view.review.head_sha.clone());
+    let mut models = world.resource_mut::<FunctionsModels>();
+    let model = models.0.entry(pr.clone()).or_default();
+    model.asked = true;
+    model.asked_head = head;
+    model.apply(&FunctionsTell::Loaded {
+        pr: pr.clone(),
+        view: Box::new(fixture::demo_functions(now, state)),
+    });
+    match state {
+        DemoFunctions::Stale => {
+            let stale = model.view.as_ref().and_then(|v| {
+                v.functions
+                    .iter()
+                    .find(|f| matches!(f.support, Support::Stale { .. }))
+                    .map(|f| f.slug.clone())
+            });
+            if let Some(slug) = stale {
+                model.select(&slug);
+            }
+        }
+        DemoFunctions::Driver => {
+            model.driver = Some(DriverModal {
+                function: model.selected.clone().unwrap_or_default(),
+                code: Some(fixture::demo_driver()),
+                loading: false,
+            });
+        }
+        DemoFunctions::Mockup | DemoFunctions::Running => {}
     }
 }
 
@@ -814,7 +869,15 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::TestsStale
         | Scene::TestsProposal
         | Scene::TestsSetup
-        | Scene::TestsFunctions => ui.section = ReviewSection::Tests,
+        | Scene::TestsFunctions
+        | Scene::TestsFunctionsRunning
+        | Scene::TestsFunctionsStale
+        | Scene::TestsFunctionsDriver => {
+            ui.section = ReviewSection::Tests;
+            if scene == Scene::TestsFunctionsDriver {
+                ui.modal = Some(Modal::DriverCode);
+            }
+        }
     }
     let empty_diagrams = matches!(scene, Scene::DiagramsNoHarness | Scene::DiagramsNoAutoDraw)
         .then(|| (Vec::new(), DiagramsState::Idle));
@@ -853,6 +916,9 @@ pub fn stage(world: &mut World, scene: Scene) {
         world.resource_mut::<Chats>().entry(&pr).open = false;
         if let Some(state) = tests_state(scene) {
             put_tests(world, &pr, now, state);
+        }
+        if let Some(state) = functions_state(scene) {
+            put_functions(world, &pr, now, state);
         }
     }
     if scene.diff_view().is_some() {
@@ -1195,7 +1261,10 @@ mod tests {
                 | Scene::TestsStale
                 | Scene::TestsProposal
                 | Scene::TestsSetup
-                | Scene::TestsFunctions => {
+                | Scene::TestsFunctions
+                | Scene::TestsFunctionsRunning
+                | Scene::TestsFunctionsStale
+                | Scene::TestsFunctionsDriver => {
                     assert_eq!(tab.ui.section, ReviewSection::Tests, "{scene:?}");
                 }
                 Scene::DiffStory
@@ -1490,7 +1559,7 @@ mod tests {
         }
     }
 
-    const TESTS_SCENES: [Scene; 10] = [
+    const TESTS_SCENES: [Scene; 13] = [
         Scene::TestsEmpty,
         Scene::TestsGenerating,
         Scene::TestsAuto,
@@ -1501,6 +1570,9 @@ mod tests {
         Scene::TestsProposal,
         Scene::TestsSetup,
         Scene::TestsFunctions,
+        Scene::TestsFunctionsRunning,
+        Scene::TestsFunctionsStale,
+        Scene::TestsFunctionsDriver,
     ];
 
     fn shows_all(app: &mut App, scene: Scene, needles: &[&str]) {
@@ -1729,7 +1801,7 @@ mod tests {
     }
 
     #[test]
-    fn the_functions_scene_shows_both_tabs() {
+    fn the_functions_scene_is_the_mockup() {
         let mut app = staged(Scene::TestsFunctions);
         let pr = fixture::demo_pr();
         assert_eq!(
@@ -1739,10 +1811,102 @@ mod tests {
         shows_all(
             &mut app,
             Scene::TestsFunctions,
-            &["Auto Tests", "Run Function tests"],
+            &[
+                "Auto Tests",
+                "Run Function tests",
+                "Docker · Colima · ready",
+                "CHANGED FUNCTIONS · 5",
+                "TokenStore::refresh",
+                "store/refresh.rs · changed · 4 cases",
+                "3 passed",
+                "1 failed",
+                "TokenStore::exchange",
+                "backoff_delay",
+                "Config::token_path",
+                "badge.swift",
+                "ui/badge.swift · not supported yet",
+                "Run all cases · 14",
+                "pub async fn refresh(&self, now: Instant) -> Result<Token, RefreshError>",
+                "Cases written by Claude Code from the diff and the existing tests. Edit any value, or add your own.",
+                "Endpoint fails, old token kept",
+                "▶ Run this case",
+                "New fake values",
+                "+ Add a case",
+                "Ask Claude Code for more cases",
+                "Result",
+                "Err(RefreshError::Http(500))",
+                "Store after the call",
+                "token = \"\" ← expected \"old\"",
+                "WARN refresh failed: 500",
+                "0.21 s · container · no network",
+                "Show driver code",
+                "Comment on the function",
+            ],
         );
         assert!(!testing::shows(&mut app, "comes next"));
-        assert!(!testing::shows(&mut app, "Run all tests"));
+        // Opening any review asks for its marks, checks and log; the sub-tab asks for nothing.
+        let asks = testing::recorded(&mut app);
+        assert!(
+            !asks
+                .iter()
+                .any(|a| matches!(a, Ask::GetFunctions(_) | Ask::GetTests(_))),
+            "the staged tab does not ask for its view: {asks:?}"
+        );
+    }
+
+    #[test]
+    fn the_running_functions_scene_offers_stop_and_marks_the_running_function() {
+        let mut app = staged(Scene::TestsFunctionsRunning);
+        shows_all(
+            &mut app,
+            Scene::TestsFunctionsRunning,
+            &["running…", "Stop", "TokenStore::exchange"],
+        );
+        assert!(!testing::shows(&mut app, "Run all cases · 14"));
+    }
+
+    #[test]
+    fn the_stale_functions_scene_offers_new_cases_not_a_run() {
+        let mut app = staged(Scene::TestsFunctionsStale);
+        shows_all(
+            &mut app,
+            Scene::TestsFunctionsStale,
+            &[
+                "Config::token_path",
+                "The signature changed since these cases were written",
+                "Write new cases",
+            ],
+        );
+        assert!(!testing::shows(&mut app, "▶ Run this case"));
+    }
+
+    #[test]
+    fn the_driver_scene_opens_the_driver_as_plain_text() {
+        let mut app = staged(Scene::TestsFunctionsDriver);
+        assert!(modal_shown(&mut app, Modal::DriverCode));
+        shows_all(
+            &mut app,
+            Scene::TestsFunctionsDriver,
+            &[
+                "Driver for TokenStore::refresh",
+                "fn clusia_case()",
+                "Open in editor",
+                "Close",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_empty_scene_says_the_same_click_writes_the_cases() {
+        let mut app = staged(Scene::TestsEmpty);
+        shows_all(
+            &mut app,
+            Scene::TestsEmpty,
+            &[
+                "Run the repository's tests in isolation, and try each changed function with values you choose. Nothing has run yet for this pull request.",
+                "Claude Code writes the recipe and the cases",
+            ],
+        );
     }
 
     #[test]

@@ -112,8 +112,15 @@ pub enum Scene {
     TestsProposal,
     /// The setup plan to approve, over the tab (Tests-setup.png).
     TestsSetup,
-    /// The Run Function tests sub-tab (its note only; Tests-functions.png shows the later sub-tab).
+    /// The Run Function tests sub-tab as Tests-functions.png shows it: the changed functions,
+    /// the failed case open and its result.
     TestsFunctions,
+    /// The Run Function tests sub-tab while every case runs: the progress and Stop.
+    TestsFunctionsRunning,
+    /// The Run Function tests sub-tab with a function whose signature changed since its cases.
+    TestsFunctionsStale,
+    /// The Run Function tests sub-tab with a function's driver open as plain text.
+    TestsFunctionsDriver,
     /// Config › Tests (Tests-config.png).
     ConfigTests,
 }
@@ -165,6 +172,9 @@ impl Scene {
                 | Scene::TestsProposal
                 | Scene::TestsSetup
                 | Scene::TestsFunctions
+                | Scene::TestsFunctionsRunning
+                | Scene::TestsFunctionsStale
+                | Scene::TestsFunctionsDriver
         )
     }
 
@@ -447,6 +457,13 @@ mod tests {
             ("tests-proposal", Scene::TestsProposal, true),
             ("tests-setup", Scene::TestsSetup, true),
             ("tests-functions", Scene::TestsFunctions, true),
+            (
+                "tests-functions-running",
+                Scene::TestsFunctionsRunning,
+                true,
+            ),
+            ("tests-functions-stale", Scene::TestsFunctionsStale, true),
+            ("tests-functions-driver", Scene::TestsFunctionsDriver, true),
             ("config-tests", Scene::ConfigTests, false),
         ] {
             assert_eq!(

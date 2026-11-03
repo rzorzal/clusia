@@ -87,7 +87,7 @@ fn demo_screenshots() {
             vec!["--demo", "--dark", "--scene", scene],
         ));
     }
-    // The Tests tab and Config › Tests: six scenes in both themes, five in light only.
+    // The Tests tab and Config › Tests: seven scenes in both themes, seven in light only.
     for scene in [
         "tests-empty",
         "tests-auto",
@@ -95,6 +95,7 @@ fn demo_screenshots() {
         "config-tests",
         "tests-running",
         "tests-failed",
+        "tests-functions",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((
@@ -107,7 +108,9 @@ fn demo_screenshots() {
         "tests-refused",
         "tests-stale",
         "tests-proposal",
-        "tests-functions",
+        "tests-functions-running",
+        "tests-functions-stale",
+        "tests-functions-driver",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
     }
@@ -152,6 +155,10 @@ fn demo_screenshots() {
         if name.starts_with("tests-auto-") || name.starts_with("tests-running-") {
             let share = non_background_share(&out, (0.03, 0.47, 0.52, 0.85));
             assert!(share > 0.02, "{name}: the test list is empty ({share})");
+        }
+        if name.starts_with("tests-functions-") && !name.contains("driver") {
+            let share = non_background_share(&out, (0.03, 0.28, 0.25, 0.85));
+            assert!(share > 0.02, "{name}: the function list is empty ({share})");
         }
         if let Ok(keep) = std::env::var("CLUSIA_SCREENSHOTS") {
             std::fs::copy(&out, Path::new(&keep).join(format!("{name}.png"))).unwrap();

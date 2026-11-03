@@ -29,7 +29,8 @@ use crate::screens::review::tests_tab::{TestsModel, TestsModels, row_duration};
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Field, FieldCommitted, Fill, HoverFill, Ink, Stroke, Type, Variant, button, card,
-    disabled_button, font, text, text_field, wrapped_text,
+    disabled_button, disabled_wrapping_button, font, text, text_field, wrapped_text,
+    wrapping_button,
 };
 
 /// The card of the selected function's cases.
@@ -529,8 +530,9 @@ fn draw_case(
     shell.with_children(|s| {
         s.spawn(Node {
             width: percent(100),
-            height: px(super::CASE_ROW_HEIGHT),
-            align_items: AlignItems::Center,
+            // A name that wraps at a larger text size grows the row rather than spilling out.
+            min_height: px(super::CASE_ROW_HEIGHT),
+            align_items: AlignItems::Stretch,
             ..default()
         })
         .with_children(|line| {
@@ -538,7 +540,6 @@ fn draw_case(
                 Node {
                     flex_grow: 1.0,
                     min_width: px(0),
-                    height: percent(100),
                     align_items: AlignItems::Center,
                     column_gap: px(10),
                     padding: UiRect::left(px(16)),
@@ -583,7 +584,6 @@ fn draw_case(
                     line.spawn((
                         Node {
                             width: px(34),
-                            height: percent(100),
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::Center,
                             ..default()
@@ -606,6 +606,7 @@ fn draw_case(
                 Some(_) => {
                     line.spawn(Node {
                         width: px(34),
+                        align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         ..default()
                     })
@@ -660,6 +661,8 @@ fn draw_open(
             b.spawn(Node {
                 width: percent(100),
                 column_gap: px(10),
+                row_gap: px(8),
+                flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::FlexStart,
                 ..default()
             })
@@ -764,9 +767,12 @@ fn field(
         cell.spawn(Node {
             align_items: AlignItems::Center,
             column_gap: px(8),
+            row_gap: px(3),
+            flex_wrap: FlexWrap::Wrap,
             ..default()
         })
         .with_children(|pair| {
+            // A label and its field wrap under each other when the column is narrower than both.
             pair.spawn(Node {
                 width: px(LABEL_WIDTH),
                 flex_shrink: 0.0,
@@ -822,7 +828,7 @@ fn field(
     });
 }
 
-const LABEL_WIDTH: f32 = 120.0;
+const LABEL_WIDTH: f32 = 112.0;
 const PAIR_WIDTH: f32 = 150.0;
 const WHOLE_WIDTH: f32 = 420.0;
 
@@ -850,7 +856,7 @@ fn draw_tail(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, function: &str, tail:
             ));
         } else if tail.off.is_none() {
             t.spawn((
-                button(fonts, "+ Add a case", Variant::Ghost),
+                wrapping_button(fonts, "+ Add a case", Variant::Ghost),
                 AddCase {
                     pr: pr.clone(),
                     function: function.to_string(),
@@ -858,11 +864,11 @@ fn draw_tail(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, function: &str, tail:
                 observe(on_add),
             ));
         } else {
-            t.spawn(disabled_button(fonts, "+ Add a case"));
+            t.spawn(disabled_wrapping_button(fonts, "+ Add a case"));
         }
         if tail.off.is_none() {
             t.spawn((
-                button(fonts, &tail.more, Variant::Ghost),
+                wrapping_button(fonts, &tail.more, Variant::Ghost),
                 MoreCases {
                     pr: pr.clone(),
                     function: function.to_string(),
@@ -870,7 +876,7 @@ fn draw_tail(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, function: &str, tail:
                 observe(on_more),
             ));
         } else {
-            t.spawn(disabled_button(fonts, &tail.more));
+            t.spawn(disabled_wrapping_button(fonts, &tail.more));
         }
     });
 }

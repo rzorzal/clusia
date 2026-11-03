@@ -198,13 +198,20 @@ pub fn fill_result(
         }
         commands.entity(entity).despawn_related::<Children>();
         commands.entity(entity).with_children(|p| {
-            p.spawn(card(Node {
-                flex_grow: 1.0,
-                flex_direction: FlexDirection::Column,
-                row_gap: px(10),
-                padding: UiRect::all(px(16)),
-                ..default()
-            }))
+            p.spawn((
+                card(Node {
+                    flex_grow: 1.0,
+                    flex_basis: px(0),
+                    min_height: px(0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(10),
+                    padding: UiRect::all(px(16)),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                }),
+                ScrollArea,
+                ScrollPosition::default(),
+            ))
             .with_children(|c| draw(c, &fonts, pr, &view));
         });
         commands.entity(entity).insert(ResultBuilt(view));
@@ -255,7 +262,7 @@ fn draw_result(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, r: &ShownResult) {
     }
     if let Some((returned, unmet)) = &r.returned {
         c.spawn(text(fonts, "Returned", Type::META));
-        block(c, fonts, returned.clone(), *unmet, false);
+        block(c, fonts, returned.clone(), *unmet);
     }
     if !r.state.is_empty() {
         c.spawn(text(
@@ -289,13 +296,13 @@ fn draw_result(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, r: &ShownResult) {
     }
     if let Some(error) = &r.error {
         c.spawn(text(fonts, "Error", Type::META));
-        block(c, fonts, error.clone(), true, false);
+        block(c, fonts, error.clone(), true);
     }
     c.spawn(text(fonts, "Output", Type::META));
     if r.output.is_empty() {
         c.spawn(text(fonts, "No output", Type::MUTED));
     } else {
-        block(c, fonts, r.output.clone(), false, true);
+        block(c, fonts, r.output.clone(), false);
     }
     c.spawn(wrapped_text(fonts, r.meta.clone(), Type::MUTED));
     links(c, fonts, pr, &r.function, r.driver);
@@ -330,8 +337,8 @@ fn links(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, function: &str, driver: b
     });
 }
 
-/// A mono block: orange when `unmet`, scrolling past its cap when `capped`.
-fn block(c: &mut Spawner, fonts: &UiFonts, content: String, unmet: bool, capped: bool) {
+/// A mono block: orange when `unmet`.
+fn block(c: &mut Spawner, fonts: &UiFonts, content: String, unmet: bool) {
     let (fill, ink) = if unmet {
         (Swatch::OrangeSoft, Swatch::Orange)
     } else {
@@ -347,23 +354,6 @@ fn block(c: &mut Spawner, fonts: &UiFonts, content: String, unmet: bool, capped:
         BackgroundColor::default(),
         Fill(fill),
     ));
-    if capped {
-        block.insert((
-            Node {
-                width: percent(100),
-                flex_grow: 1.0,
-                flex_basis: px(0),
-                min_height: px(60),
-                max_height: px(260),
-                padding: UiRect::all(px(12)),
-                border_radius: BorderRadius::all(px(8)),
-                overflow: Overflow::scroll_y(),
-                ..default()
-            },
-            ScrollArea,
-            ScrollPosition::default(),
-        ));
-    }
     block.with_child(wrapped_text(fonts, content, Type::MONO.ink(ink)));
 }
 
