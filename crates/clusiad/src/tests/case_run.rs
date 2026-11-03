@@ -438,15 +438,24 @@ pub(super) async fn run_planned(
                 let (dir, name) = function.package.clone().unwrap_or_default();
                 let target = driver_target(&function.slug);
                 let path = placed_path(&dir, &target);
-                // Recorded before it exists, so a run that dies after placing it still lets
-                // the next run remove it.
+                // Only a file the record holds is Clúsia's to replace; any other at that name
+                // is the worktree's own. Recorded before it exists, so a run that dies after
+                // placing it still lets the next run remove it.
+                let mut leftover = false;
                 env::update_record(shared, pr, |record| {
-                    if !record.placed.contains(&path) {
+                    leftover = record.placed.contains(&path);
+                    if !leftover {
                         record.placed.push(path.clone());
                     }
                 })
                 .await;
-                match place_driver(&worktree, &dir, &target, function.driver.as_bytes()) {
+                match place_driver(
+                    &worktree,
+                    &dir,
+                    &target,
+                    function.driver.as_bytes(),
+                    leftover,
+                ) {
                     Ok(at) => {
                         placed = Some(at);
                         function_command(&function.template, &target, Some(&name))

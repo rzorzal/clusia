@@ -1743,3 +1743,48 @@ async fn an_edited_driver_makes_the_cases_stale() {
     );
     assert!(case_calls(&lab).is_empty());
 }
+
+#[tokio::test]
+async fn a_driver_file_the_pull_request_ships_is_never_removed() {
+    let mut lab = local_ready(vec![generate_answer()], driver_output()).await;
+    let tracked = placed(&lab);
+    std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+    std::fs::write(&tracked, "// shipped by the pull request\n").unwrap();
+    let run = start(
+        &lab,
+        CaseScope::Function {
+            function: refresh(),
+        },
+    )
+    .await;
+    let done = results(&mut lab, &run).await;
+    let path = format!(
+        "tests/{}.rs",
+        clusia_testrun::functions::driver_target(&refresh())
+    );
+    assert_eq!(done.len(), 2);
+    for result in &done {
+        assert_eq!(result.status, CaseStatus::Error);
+        assert_eq!(
+            result.message.clone(),
+            Some(format!(
+                "Clúsia won't place the driver: {path} already exists"
+            ))
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&tracked).unwrap(),
+        "// shipped by the pull request\n"
+    );
+    assert!(env::load(&lab.shared, &pr(7)).placed.is_empty());
+    assert!(case_calls(&lab).is_empty());
+    let again = start(
+        &lab,
+        CaseScope::Function {
+            function: refresh(),
+        },
+    )
+    .await;
+    results(&mut lab, &again).await;
+    assert!(tracked.exists(), "a later run does not remove it either");
+}

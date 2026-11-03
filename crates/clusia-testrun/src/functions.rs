@@ -144,13 +144,16 @@ fn valid_target(target: &str) -> bool {
 
 /// Writes `text` as `<package_dir>/tests/<target>.rs` and answers that path, relative to the
 /// worktree. Every folder is opened without following a link and `tests` is made when it is
-/// missing; a link or a non-folder on the way refuses before anything is written. A leftover
-/// file of that name (a link included, never what it points to) is removed first.
+/// missing; a link or a non-folder on the way refuses before anything is written. A file
+/// already at that name (a link included, never what it points to) is removed first only when
+/// `leftover` says Clúsia placed it; otherwise it is the worktree's own and the driver is
+/// refused.
 pub fn place_driver(
     worktree: &Path,
     package_dir: &str,
     target: &str,
     text: &[u8],
+    leftover: bool,
 ) -> Result<String, String> {
     if !valid_target(target) {
         return Err(format!("Clúsia won't place a driver named {target}"));
@@ -184,22 +187,31 @@ pub fn place_driver(
         };
     }
     let file_name = format!("{target}.rs");
-    match unlink_at(&dir, &file_name) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(failed(e)),
+    walked.push(&file_name);
+    let path = walked.join("/");
+    if leftover {
+        match unlink_at(&dir, &file_name) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(failed(e)),
+        }
     }
+    // `O_EXCL` fails on any name already there, a link included, without following it.
     let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL;
-    let written = open_file_at(&dir, &file_name, flags, 0o644).and_then(|mut file| {
-        file.write_all(text)?;
-        file.sync_all()
-    });
-    if let Err(e) = written {
+    let mut file = match open_file_at(&dir, &file_name, flags, 0o644) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(format!(
+                "Clúsia won't place the driver: {path} already exists"
+            ));
+        }
+        Err(e) => return Err(failed(e)),
+    };
+    if let Err(e) = file.write_all(text).and_then(|()| file.sync_all()) {
         let _ = unlink_at(&dir, &file_name);
         return Err(failed(e));
     }
-    walked.push(&file_name);
-    Ok(walked.join("/"))
+    Ok(path)
 }
 
 /// Removes a file `place_driver` placed, through freshly opened folders that are never links.
@@ -641,6 +653,7 @@ mod tests {
             "crates/store",
             target,
             b"#[test]\nfn clusia_case() {}\n",
+            false,
         )
         .unwrap();
         assert_eq!(placed, "crates/store/tests/clusia_driver_0123456789.rs");
@@ -648,8 +661,8 @@ mod tests {
             fs::read(wt.path().join(&placed)).unwrap(),
             b"#[test]\nfn clusia_case() {}\n"
         );
-        // A leftover is replaced.
-        let again = place_driver(wt.path(), "crates/store", target, b"// second\n").unwrap();
+        // A leftover of an earlier run is replaced.
+        let again = place_driver(wt.path(), "crates/store", target, b"// second\n", true).unwrap();
         assert_eq!(fs::read(wt.path().join(&again)).unwrap(), b"// second\n");
         remove_driver(wt.path(), &placed).unwrap();
         assert!(!wt.path().join(&placed).exists());
@@ -661,7 +674,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         assert_eq!(
-            place_driver(root.path(), "", target, b"x").unwrap(),
+            place_driver(root.path(), "", target, b"x", false).unwrap(),
             "tests/clusia_driver_0123456789.rs"
         );
         for bad in [
@@ -669,9 +682,12 @@ mod tests {
             "../evil",
             "clusia_driver_0123456789/x",
         ] {
-            assert!(place_driver(root.path(), "", bad, b"x").is_err(), "{bad}");
+            assert!(
+                place_driver(root.path(), "", bad, b"x", false).is_err(),
+                "{bad}"
+            );
         }
-        assert!(place_driver(root.path(), "../x", target, b"x").is_err());
+        assert!(place_driver(root.path(), "../x", target, b"x", false).is_err());
         for bad in [
             "src/main.rs",
             "tests/other.rs",
@@ -686,6 +702,31 @@ mod tests {
     }
 
     #[test]
+    fn a_file_clusia_did_not_place_is_never_replaced() {
+        let wt = tempfile::tempdir().unwrap();
+        let target = "clusia_driver_0123456789";
+        let file = wt.path().join("tests/clusia_driver_0123456789.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "// tracked\n").unwrap();
+        assert_eq!(
+            place_driver(wt.path(), "", target, b"x", false).unwrap_err(),
+            "Clúsia won't place the driver: tests/clusia_driver_0123456789.rs already exists"
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"// tracked\n");
+        let outside = tempfile::tempdir().unwrap();
+        fs::remove_file(&file).unwrap();
+        symlink(outside.path().join("x.rs"), &file).unwrap();
+        assert!(place_driver(wt.path(), "", target, b"x", false).is_err());
+        assert!(
+            fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!outside.path().join("x.rs").exists());
+    }
+
+    #[test]
     fn a_symlinked_tests_folder_refuses_the_rust_driver() {
         let outside = tempfile::tempdir().unwrap();
         let wt = tempfile::tempdir().unwrap();
@@ -693,19 +734,19 @@ mod tests {
         symlink(outside.path(), wt.path().join("crates/store/tests")).unwrap();
         let target = "clusia_driver_0123456789";
         assert_eq!(
-            place_driver(wt.path(), "crates/store", target, b"x").unwrap_err(),
+            place_driver(wt.path(), "crates/store", target, b"x", false).unwrap_err(),
             "Clúsia won't place the driver: crates/store/tests is not a plain folder"
         );
         let linked = tempfile::tempdir().unwrap();
         symlink(outside.path(), linked.path().join("crates")).unwrap();
         assert_eq!(
-            place_driver(linked.path(), "crates/store", target, b"x").unwrap_err(),
+            place_driver(linked.path(), "crates/store", target, b"x", false).unwrap_err(),
             "Clúsia won't place the driver: crates is not a plain folder"
         );
         let filed = tempfile::tempdir().unwrap();
         fs::write(filed.path().join("tests"), "x").unwrap();
         assert_eq!(
-            place_driver(filed.path(), "", target, b"x").unwrap_err(),
+            place_driver(filed.path(), "", target, b"x", false).unwrap_err(),
             "Clúsia won't place the driver: tests is not a plain folder"
         );
         assert_eq!(
