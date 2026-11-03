@@ -30,7 +30,12 @@ pub(super) enum Head {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Body {
-    Hint(&'static str),
+    /// Nothing to show yet; the links stay, so the driver and a comment are one click away.
+    Hint {
+        line: &'static str,
+        function: String,
+        driver: bool,
+    },
     Result(Box<ShownResult>),
 }
 
@@ -66,16 +71,16 @@ fn shown(model: &FunctionsModel, result: &CaseResult, note: Option<&'static str>
     let function = model.selected_view();
     let case = model.open_view();
     let line = |text: &str| printable(text);
-    let returned = result.returned.as_ref().map(|got| {
-        match result
-            .returned_expected
-            .as_ref()
-            .filter(|want| want.trim() != got.trim())
-        {
-            Some(want) => (format!("{} ← expected {}", line(got), line(want)), true),
-            None => (line(got), false),
-        }
-    });
+    let returned = match (&result.returned, &result.returned_expected) {
+        (Some(got), want) => Some(
+            match want.as_ref().filter(|want| want.trim() != got.trim()) {
+                Some(want) => (format!("{} ← expected {}", line(got), line(want)), true),
+                None => (line(got), false),
+            },
+        ),
+        (None, Some(want)) => Some((format!("missing ← expected {}", line(want)), true)),
+        (None, None) => None,
+    };
     let state = result
         .state
         .iter()
@@ -121,11 +126,15 @@ fn shown(model: &FunctionsModel, result: &CaseResult, note: Option<&'static str>
 
 /// What the column shows; `None` with no view or no selected function.
 pub(super) fn result_view(model: &FunctionsModel) -> Option<ResultView> {
-    let view = model.view.as_ref()?;
-    model.selected_view()?;
+    model.view.as_ref()?;
+    let function = model.selected_view()?;
     let hint = ResultView {
         head: Head::Plain,
-        body: Body::Hint(RUN_HINT),
+        body: Body::Hint {
+            line: RUN_HINT,
+            function: function.slug.clone(),
+            driver: function.driver.is_some(),
+        },
     };
     let Some(case) = model.open_view() else {
         return Some(hint);
@@ -137,7 +146,6 @@ pub(super) fn result_view(model: &FunctionsModel) -> Option<ResultView> {
         let note = if result.hash != case.hash {
             "These values changed since this ran."
         } else {
-            debug_assert!(result.head != view.head);
             "From an older commit."
         };
         return Some(ResultView {
@@ -219,8 +227,13 @@ fn draw(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &ResultView) {
         }
     });
     match &view.body {
-        Body::Hint(line) => {
+        Body::Hint {
+            line,
+            function,
+            driver,
+        } => {
             c.spawn(wrapped_text(fonts, *line, Type::MUTED));
+            links(c, fonts, pr, function, *driver);
         }
         Body::Result(shown) => draw_result(c, fonts, pr, shown),
     }
@@ -285,18 +298,23 @@ fn draw_result(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, r: &ShownResult) {
         block(c, fonts, r.output.clone(), false, true);
     }
     c.spawn(wrapped_text(fonts, r.meta.clone(), Type::MUTED));
+    links(c, fonts, pr, &r.function, r.driver);
+}
+
+/// Show driver code (when the function has a driver) and Comment on the function.
+fn links(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, function: &str, driver: bool) {
     c.spawn(Node {
         flex_wrap: FlexWrap::Wrap,
         column_gap: px(14),
         ..default()
     })
     .with_children(|links| {
-        if r.driver {
+        if driver {
             links.spawn((
                 button(fonts, "Show driver code", Variant::Ghost),
                 ShowDriver {
                     pr: pr.clone(),
-                    function: r.function.clone(),
+                    function: function.to_string(),
                 },
                 observe(on_show),
             ));
@@ -305,7 +323,7 @@ fn draw_result(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, r: &ShownResult) {
             button(fonts, "Comment on the function", Variant::Ghost),
             CommentOnFunction {
                 pr: pr.clone(),
-                function: r.function.clone(),
+                function: function.to_string(),
             },
             observe(on_comment),
         ));
@@ -411,6 +429,31 @@ mod tests {
             "Run this case to see what it returns."
         ));
         assert!(!testing::shows(&mut app, "Returned"));
+        assert!(testing::shows(&mut app, "Show driver code"));
+        assert!(testing::shows(&mut app, "Comment on the function"));
+    }
+
+    #[test]
+    fn a_case_that_never_ran_has_no_driver_link_when_the_function_has_no_driver() {
+        let mut view = mockup();
+        view.functions[0].cases[0].result = None;
+        view.functions[0].driver = None;
+        let (mut app, _pr) = app_with(view);
+        assert!(!testing::shows(&mut app, "Show driver code"));
+        assert!(testing::shows(&mut app, "Comment on the function"));
+    }
+
+    #[test]
+    fn a_failure_that_returned_nothing_shows_what_was_expected() {
+        let mut view = mockup();
+        let result = view.functions[0].cases[0].result.as_mut().unwrap();
+        result.returned = None;
+        result.returned_expected = Some("Err(RefreshError::Http(500))".into());
+        let (mut app, _pr) = app_with(view);
+        assert!(testing::shows(
+            &mut app,
+            "missing ← expected Err(RefreshError::Http(500))"
+        ));
     }
 
     #[test]
@@ -532,8 +575,9 @@ mod tests {
         );
         assert_eq!(testing::count::<crate::ui::markdown::MdLink>(&mut app), 0);
         // Clicking drawn text does nothing: no ask leaves the window.
+        let region = testing::find::<FunctionsResult>(&mut app, |r| r.0 == pr);
+        testing::click(&mut app, region);
         assert!(testing::recorded(&mut app).is_empty());
-        let _ = pr;
     }
 
     #[test]

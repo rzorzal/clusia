@@ -88,13 +88,13 @@ fn editor_path(model: &FunctionsModel, worktree: Option<&str>) -> Option<String>
     Some(format!("{}/{}", worktree?, own_path(model)?))
 }
 
-/// The end of `text` that still fits a driver, cut on a character boundary.
-fn driver_text(text: &str) -> &str {
+/// The start of `text` that fits a driver, cut on a character boundary, and whether it was cut.
+fn driver_text(text: &str) -> (&str, bool) {
     let mut end = text.len().min(DRIVER_MAX_BYTES);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    &text[..end]
+    (&text[..end], end < text.len())
 }
 
 pub(super) fn driver_view(
@@ -113,7 +113,14 @@ pub(super) fn driver_view(
         Some(code) if !modal.loading => DriverView {
             title,
             meta: format!("{} · written by {agent}", printable(&code.path)),
-            text: Some(printable_lines(driver_text(&code.text))),
+            text: Some({
+                let (kept, cut) = driver_text(&code.text);
+                let mut shown = printable_lines(kept);
+                if cut {
+                    shown.push('…');
+                }
+                shown
+            }),
             can_open: editor_path(model, worktree).is_some(),
         },
         _ => DriverView {
@@ -151,6 +158,10 @@ pub fn fill_driver(
                 }
             }
             Some(modal) if !modal.loading && modal.code.is_none() => dead.push(pr.clone()),
+            // Another dialog is up: the driver the reviewer asked for is not wanted any more.
+            Some(_) if tab.ui.modal.is_some_and(|m| m != Modal::DriverCode) => {
+                dead.push(pr.clone());
+            }
             Some(_) => {
                 if tab.ui.modal.is_none() && nav.screen == Screen::Review(pr.clone()) {
                     open.push(pr.clone());
@@ -754,5 +765,73 @@ mod tests {
         let button = testing::find::<CommentOnFunction>(&mut app, |c| c.pr == pr);
         testing::activate(&mut app, button);
         assert!(testing::tab(&app, &pr).ui.editor.is_none());
+        assert!(
+            app.world()
+                .resource::<crate::bridge::Toasts>()
+                .0
+                .iter()
+                .any(|t| t.warning),
+            "a read-only review says why nothing opened"
+        );
+    }
+
+    #[test]
+    fn a_driver_that_comes_while_another_modal_is_up_is_dropped() {
+        let (mut app, pr) = app_with(mockup());
+        let function = open_driver(&mut app, &pr);
+        testing::tab(&app, &pr);
+        app.world_mut()
+            .resource_mut::<crate::review_state::ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .modal = Some(Modal::Finalize);
+        app.update();
+        deliver(
+            &mut app,
+            &pr,
+            &function,
+            ".clusia/functions/x/driver.rs",
+            "a",
+        );
+        assert!(
+            app.world().resource::<FunctionsModels>().0[&pr]
+                .driver
+                .is_none()
+        );
+        app.world_mut()
+            .resource_mut::<crate::review_state::ReviewTabs>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .ui
+            .modal = None;
+        app.update();
+        assert_eq!(
+            testing::tab(&app, &pr).ui.modal,
+            None,
+            "it does not open later"
+        );
+    }
+
+    #[test]
+    fn a_driver_cut_at_the_cap_ends_with_an_ellipsis() {
+        let (mut app, pr) = app_with(mockup());
+        let function = open_driver(&mut app, &pr);
+        let text = format!("{}END", "x".repeat(DRIVER_MAX_BYTES));
+        deliver(
+            &mut app,
+            &pr,
+            &function,
+            ".clusia/functions/x/driver.rs",
+            &text,
+        );
+        assert!(!testing::shows(&mut app, "END"));
+        assert!(
+            testing::shown_text(&mut app)
+                .iter()
+                .any(|t| t.starts_with('x') && t.ends_with('…'))
+        );
     }
 }
