@@ -566,10 +566,10 @@ fn put_tests(world: &mut World, pr: &PrRef, now: i64, state: DemoTests) {
     }
 }
 
-/// The demo data of the Run Function tests sub-tab a scene shows, when it shows it.
+/// The demo data of the Run Function tests sub-tab a scene shows, or the one its copy counts.
 fn functions_state(scene: Scene) -> Option<DemoFunctions> {
     Some(match scene {
-        Scene::TestsFunctions => DemoFunctions::Mockup,
+        Scene::TestsFunctions | Scene::TestsEmpty => DemoFunctions::Mockup,
         Scene::TestsFunctionsRunning => DemoFunctions::Running,
         Scene::TestsFunctionsStale => DemoFunctions::Stale,
         Scene::TestsFunctionsDriver => DemoFunctions::Driver,
@@ -1634,7 +1634,8 @@ mod tests {
                 "Run the repository's tests in isolation, and try each changed function with values you choose. Nothing has run yet for this pull request.",
                 "Check the environment",
                 "Claude Code writes the recipe and the cases",
-                "How to set up and run the tests, and cases for the changed functions. It only reads the code.",
+                "Finds Docker (here: Colima, running) and what is already built for this repository.",
+                "How to set up and run the tests, and cases for the 5 changed functions. It only reads the code.",
                 "You approve the setup",
                 "Generate tests",
                 "Uses one Claude Code turn on your account",

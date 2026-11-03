@@ -7,7 +7,7 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
 use bevy::ui_widgets::{ScrollArea, observe};
 use clusia_core::PrRef;
-use clusia_core::functions::{CaseResult, CaseStatus};
+use clusia_core::functions::{CaseResult, CaseStatus, Support};
 use clusia_core::printable::{printable, printable_lines};
 
 use super::driver::{CommentOnFunction, ShowDriver, on_comment, on_show};
@@ -21,6 +21,15 @@ use crate::ui::kit::{Fill, Tone, Type, Variant, badge, button, card, text, wrapp
 
 /// The line of a column with nothing to show yet.
 const RUN_HINT: &str = "Run this case to see what it returns.";
+
+/// The line of a column whose function has no case that can run.
+const BLOCKED_HINT: &str = "No case of this function can run until its cases match it.";
+
+/// The column's heading: the mockup's bold, one step above the weight of a label.
+const HEADING: Type = Type {
+    weight: 700,
+    ..Type::STRONG
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Head {
@@ -131,7 +140,11 @@ pub(super) fn result_view(model: &FunctionsModel) -> Option<ResultView> {
     let hint = ResultView {
         head: Head::Plain,
         body: Body::Hint {
-            line: RUN_HINT,
+            line: if matches!(function.support, Support::Ready) {
+                RUN_HINT
+            } else {
+                BLOCKED_HINT
+            },
             function: function.slug.clone(),
             driver: function.driver.is_some(),
         },
@@ -227,7 +240,7 @@ fn draw(c: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &ResultView) {
         ..default()
     })
     .with_children(|head| {
-        head.spawn(text(fonts, "Result", Type::STRONG));
+        head.spawn(text(fonts, "Result", HEADING));
         if let Head::Pill(status) = &view.head {
             let (label, tone) = pill(*status);
             head.spawn(badge(fonts, label, tone));
@@ -421,6 +434,44 @@ mod tests {
         assert!(!testing::shows(&mut app, "Returned"));
         assert!(testing::shows(&mut app, "Show driver code"));
         assert!(testing::shows(&mut app, "Comment on the function"));
+    }
+
+    #[test]
+    fn a_function_whose_cases_cannot_run_does_not_ask_for_a_run() {
+        let mut view = mockup();
+        view.functions[0].cases[0].result = None;
+        view.functions[0].support = Support::Stale {
+            reason: "the signature changed".into(),
+        };
+        let slug = view.functions[0].slug.clone();
+        let (mut app, pr) = app_with(view);
+        app.world_mut()
+            .resource_mut::<FunctionsModels>()
+            .0
+            .get_mut(&pr)
+            .unwrap()
+            .select(&slug);
+        testing::settle(&mut app);
+        assert!(!testing::shows(
+            &mut app,
+            "Run this case to see what it returns."
+        ));
+        assert!(testing::shows(
+            &mut app,
+            "No case of this function can run until its cases match it."
+        ));
+    }
+
+    #[test]
+    fn the_heading_is_bold() {
+        let (mut app, _pr) = app_with(mockup());
+        let weight = app
+            .world_mut()
+            .query::<(&Text, &TextFont)>()
+            .iter(app.world())
+            .find(|(t, _)| t.0 == "Result")
+            .map(|(_, f)| f.weight.0);
+        assert_eq!(weight, Some(700));
     }
 
     #[test]

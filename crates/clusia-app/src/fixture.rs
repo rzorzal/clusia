@@ -913,7 +913,7 @@ fn demo_setup_steps(state: StepState, approved: bool) -> Vec<PlanStep> {
 pub fn demo_tests(now: i64, state: DemoTests) -> TestsView {
     let mut view = TestsView::new(HEAD_SHA);
     match state {
-        DemoTests::Empty => {}
+        DemoTests::Empty => view.env = Some(demo_tests_env(now)),
         DemoTests::Generating => {
             view.phase = TestsPhase::Generating {
                 activity: Some(ACTIVITY_WRITING.into()),
