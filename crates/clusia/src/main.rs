@@ -1,5 +1,6 @@
 mod agent;
 mod calls;
+mod cases_cmd;
 mod check;
 mod cli;
 mod diagrams;

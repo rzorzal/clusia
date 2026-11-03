@@ -20,6 +20,11 @@ enum Reply {
         chunks: Vec<(Stream, String)>,
         code: i32,
     },
+    /// `Chunks` whose `@MARK@` becomes the call's `CLUSIA_MARK`.
+    Marked {
+        chunks: Vec<(Stream, String)>,
+        code: i32,
+    },
     Hang,
     Missing,
     Slow {
@@ -50,6 +55,12 @@ impl FakeReply {
 
     pub fn chunks(chunks: Vec<(Stream, String)>, code: i32) -> Self {
         Self(Reply::Chunks { chunks, code })
+    }
+
+    /// Like `chunks`, with each `@MARK@` in the texts replaced by the call's `CLUSIA_MARK`: the
+    /// value of that entry of the call's environment, else of a `CLUSIA_MARK=<v>` argument.
+    pub fn marked(chunks: Vec<(Stream, String)>, code: i32) -> Self {
+        Self(Reply::Marked { chunks, code })
     }
 
     /// Never ends on its own: only the limit or a stop does.
@@ -146,10 +157,47 @@ impl FakeExec {
             if program.ends_with(&rule.suffix) && args.starts_with(&rule.prefix) {
                 let reply = rule.replies[rule.used.min(rule.replies.len() - 1)].clone();
                 rule.used += 1;
-                return reply.0;
+                return with_mark(reply.0, cmd);
             }
         }
         Reply::Missing
+    }
+}
+
+/// The mark of a call: its `CLUSIA_MARK` environment entry, else a `CLUSIA_MARK=<v>` argument.
+fn mark_of(cmd: &CommandSpec) -> Option<String> {
+    let from_env = cmd
+        .env
+        .iter()
+        .find(|(k, _)| k == "CLUSIA_MARK")
+        .map(|(_, v)| v.to_string_lossy().into_owned());
+    from_env.or_else(|| {
+        cmd.args.iter().find_map(|a| {
+            a.to_string_lossy()
+                .strip_prefix("CLUSIA_MARK=")
+                .map(str::to_string)
+        })
+    })
+}
+
+/// `reply` with a `Marked` reply (also one inside `Slow`) turned into the `Chunks` it stands for.
+fn with_mark(reply: Reply, cmd: &CommandSpec) -> Reply {
+    match reply {
+        Reply::Marked { chunks, code } => {
+            let chunks = match mark_of(cmd) {
+                Some(mark) => chunks
+                    .into_iter()
+                    .map(|(stream, text)| (stream, text.replace("@MARK@", &mark)))
+                    .collect(),
+                None => chunks,
+            };
+            Reply::Chunks { chunks, code }
+        }
+        Reply::Slow { after, then } => Reply::Slow {
+            after,
+            then: Box::new(with_mark(*then, cmd)),
+        },
+        reply => reply,
     }
 }
 
@@ -198,7 +246,7 @@ impl Exec for FakeExec {
                     stderr: stderr.into_bytes(),
                     timed_out: false,
                 }),
-                Reply::Chunks { chunks, code } => {
+                Reply::Chunks { chunks, code } | Reply::Marked { chunks, code } => {
                     let mut out = Output {
                         code: Some(code),
                         ..Output::default()
@@ -241,7 +289,7 @@ impl Exec for FakeExec {
                         _ = tokio::time::sleep(limit) => Ended::TimedOut,
                     });
                 }
-                Reply::Chunks { chunks, code } => (chunks, code),
+                Reply::Chunks { chunks, code } | Reply::Marked { chunks, code } => (chunks, code),
                 Reply::Done {
                     code,
                     stdout,
@@ -445,6 +493,57 @@ mod tests {
             args,
             vec![vec![OsString::from("one")], vec![OsString::from("two")]]
         );
+    }
+
+    #[tokio::test]
+    async fn a_marked_reply_carries_the_calls_mark() {
+        let fake = FakeExec::new();
+        fake.on(
+            "sandbox-exec",
+            &["-f"],
+            FakeReply::marked(
+                vec![
+                    (Stream::Out, "@MARK@ done\n".into()),
+                    (Stream::Err, "warn\n".into()),
+                ],
+                0,
+            ),
+        );
+        fake.on(
+            "docker",
+            &["run"],
+            FakeReply::marked(vec![(Stream::Out, "@MARK@ done\n".into())], 1),
+        );
+        let local = CommandSpec::new("/usr/bin/sandbox-exec")
+            .args(["-f", "p.sb", "/bin/sh", "-c", "x"])
+            .env("CLUSIA_MARK", "aaaa");
+        let stop = StopFlag::new();
+        let mut seen = Vec::new();
+        let ended = fake
+            .stream(&local, Duration::from_secs(1), &stop, &mut |s, b: &[u8]| {
+                seen.push((s, String::from_utf8_lossy(b).into_owned()))
+            })
+            .await
+            .unwrap();
+        assert_eq!(ended, Ended::Exited(Some(0)));
+        assert_eq!(
+            seen,
+            [
+                (Stream::Out, "aaaa done\n".to_string()),
+                (Stream::Err, "warn\n".to_string())
+            ]
+        );
+        let container = CommandSpec::new("/opt/homebrew/bin/docker").args([
+            "run",
+            "-e",
+            "CLUSIA_MARK=bbbb",
+            "img",
+        ]);
+        let out = fake
+            .output(&container, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!((out.code, out.stdout), (Some(1), b"bbbb done\n".to_vec()));
     }
 
     #[test]

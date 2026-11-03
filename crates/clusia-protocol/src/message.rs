@@ -3,6 +3,9 @@
 use clusia_calls::{CallGraph, StaticStep};
 pub use clusia_core::OpenTarget;
 use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
+use clusia_core::functions::{
+    CaseInput, CaseResult, CaseScope, CasesAsk, DriverCode, FunctionsView,
+};
 use clusia_core::revalidation::Revalidation;
 use clusia_core::story::{StoryVersion, StoryVersionState};
 use clusia_core::tests::{
@@ -29,7 +32,8 @@ pub mod topics {
     pub const TRAY: &str = "tray";
     /// The review agent's chat: every `Agent*` event and `SessionState`.
     pub const AGENT: &str = "agent";
-    /// The test setup and the test runs: every `Test*` event.
+    /// The test setup, the test runs and the function cases: every `Test*`, `FunctionsChanged`
+    /// and `CaseDone` event.
     pub const TESTS: &str = "tests";
 }
 
@@ -347,6 +351,48 @@ pub enum Command {
     CheckTestEngine {
         pr: Option<PrRef>,
     },
+    /// The pull request's changed functions with their cases and results
+    /// (`Reply::ChangedFunctions`). Any pull request answers.
+    GetFunctions {
+        pr: PrRef,
+    },
+    /// Save the reviewer's values of one case, or add a case when `case.id` is none
+    /// (`Reply::ChangedFunctions`).
+    SaveCase {
+        pr: PrRef,
+        function: String,
+        case: CaseInput,
+    },
+    /// Drop the reviewer's edits of one of the agent's cases (`Reply::ChangedFunctions`).
+    ResetCase {
+        pr: PrRef,
+        function: String,
+        case: String,
+    },
+    /// Delete one of the reviewer's cases (`Reply::ChangedFunctions`).
+    RemoveCase {
+        pr: PrRef,
+        function: String,
+        case: String,
+    },
+    /// Ask the agent for cases, more cases or new values of one case, in the background.
+    WriteCases {
+        pr: PrRef,
+        function: String,
+        ask: CasesAsk,
+    },
+    /// Run cases (`Reply::CasesStarted`). `seen` is the hash of the function, or of the whole
+    /// view for `All`, that the reviewer saw; another one is refused.
+    RunCases {
+        pr: PrRef,
+        scope: CaseScope,
+        seen: String,
+    },
+    /// The driver of one function (`Reply::Driver`).
+    GetDriver {
+        pr: PrRef,
+        function: String,
+    },
     /// The comments hidden in this pull request (`Reply::HiddenComments`).
     GetHiddenComments {
         pr: PrRef,
@@ -630,6 +676,13 @@ pub enum Reply {
     TestList(Vec<KnownTest>),
     TestDisk(DiskReport),
     TestEngine(TestEngineInfo),
+    /// What `GetFunctions` and the case writes know.
+    ChangedFunctions(Box<FunctionsView>),
+    /// A case run was accepted and has this id; its events follow on topic `tests`.
+    CasesStarted {
+        run: String,
+    },
+    Driver(Box<DriverCode>),
     /// What `GetCalls` knows: the graph (none while the index is not ready), the state of the
     /// index, and the files of languages Clúsia does not read.
     Calls {
@@ -1029,6 +1082,18 @@ pub enum Event {
         pr: PrRef,
         run: Box<TestRun>,
     },
+    /// The changed functions, their cases or what runs for them changed (topic `tests`).
+    FunctionsChanged {
+        pr: PrRef,
+        view: Box<FunctionsView>,
+    },
+    /// One case of a run ended (topic `tests`).
+    CaseDone {
+        pr: PrRef,
+        run: String,
+        function: String,
+        result: Box<CaseResult>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1426,7 +1491,7 @@ pub struct PermissionRequest {
 }
 
 /// Who runs a turn of the agent: the review chat, one of the two checks, the revalidation, the
-/// drawing of diagrams, the writing of the Story, or the recipe of the tests.
+/// drawing of diagrams, the writing of the Story, or the recipe or the cases of the tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOrigin {
@@ -1438,6 +1503,7 @@ pub enum TurnOrigin {
     Diagrams,
     Story,
     Recipe,
+    Cases,
 }
 
 impl TurnOrigin {
@@ -4600,6 +4666,189 @@ mod tests {
             r#"{"type":"response","id":5,"result":{"ok":{"test_engine":{"engine":null,"sandbox_ok":true,"note":null,"cores":10}}}}"#
         );
         round_trip(Command::CheckTestEngine { pr: None });
+    }
+
+    #[test]
+    fn function_commands_wire_format() {
+        use clusia_core::functions::{CaseInput, CaseScope, CasesAsk};
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        let f = "tokenstore_refresh-0123456789";
+        assert_eq!(
+            request(Command::GetFunctions { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"get_functions":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::SaveCase {
+                pr: acme(),
+                function: f.into(),
+                case: CaseInput {
+                    id: None,
+                    name: "New case".into(),
+                    values: [("now".to_string(), "+15 s".to_string())].into(),
+                },
+            }),
+            r#"{"type":"request","id":5,"cmd":{"save_case":{"pr":"acme/widgets#7","function":"tokenstore_refresh-0123456789","case":{"id":null,"name":"New case","values":{"now":"+15 s"}}}}}"#
+        );
+        assert_eq!(
+            request(Command::ResetCase {
+                pr: acme(),
+                function: f.into(),
+                case: "a1".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"reset_case":{"pr":"acme/widgets#7","function":"tokenstore_refresh-0123456789","case":"a1"}}}"#
+        );
+        assert_eq!(
+            request(Command::RemoveCase {
+                pr: acme(),
+                function: f.into(),
+                case: "r1".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"remove_case":{"pr":"acme/widgets#7","function":"tokenstore_refresh-0123456789","case":"r1"}}}"#
+        );
+        assert_eq!(
+            request(Command::WriteCases {
+                pr: acme(),
+                function: f.into(),
+                ask: CasesAsk::Values { case: "a1".into() },
+            }),
+            r#"{"type":"request","id":5,"cmd":{"write_cases":{"pr":"acme/widgets#7","function":"tokenstore_refresh-0123456789","ask":{"values":{"case":"a1"}}}}}"#
+        );
+        assert_eq!(
+            request(Command::WriteCases {
+                pr: acme(),
+                function: f.into(),
+                ask: CasesAsk::More
+            }),
+            r#"{"type":"request","id":5,"cmd":{"write_cases":{"pr":"acme/widgets#7","function":"tokenstore_refresh-0123456789","ask":"more"}}}"#
+        );
+        assert_eq!(
+            request(Command::RunCases {
+                pr: acme(),
+                scope: CaseScope::Case {
+                    function: f.into(),
+                    case: "a1".into()
+                },
+                seen: "abc".into(),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"run_cases":{"pr":"acme/widgets#7","scope":{"case":{"function":"tokenstore_refresh-0123456789","case":"a1"}},"seen":"abc"}}}"#
+        );
+        assert_eq!(
+            request(Command::RunCases {
+                pr: acme(),
+                scope: CaseScope::All,
+                seen: "abc".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"run_cases":{"pr":"acme/widgets#7","scope":"all","seen":"abc"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetDriver {
+                pr: acme(),
+                function: f.into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"get_driver":{"pr":"acme/widgets#7","function":"tokenstore_refresh-0123456789"}}}"#
+        );
+        round_trip(Command::RunCases {
+            pr: acme(),
+            scope: CaseScope::Function { function: f.into() },
+            seen: "abc".into(),
+        });
+    }
+
+    #[test]
+    fn function_replies_and_events_wire_format() {
+        use clusia_core::functions::{CaseResult, CaseStatus, DriverCode, FunctionsView};
+        use clusia_core::tests::RunnerKind;
+        let reply = |reply| {
+            wire(&ServerMessage::Response {
+                id: 5,
+                result: Outcome::Ok(reply),
+            })
+        };
+        let view = FunctionsView::new("abc");
+        assert_eq!(
+            reply(Reply::ChangedFunctions(Box::new(view.clone()))),
+            format!(
+                r#"{{"type":"response","id":5,"result":{{"ok":{{"changed_functions":{}}}}}}}"#,
+                wire(&view)
+            )
+        );
+        assert_eq!(
+            reply(Reply::CasesStarted {
+                run: "cases-1-2".into()
+            }),
+            r#"{"type":"response","id":5,"result":{"ok":{"cases_started":{"run":"cases-1-2"}}}}"#
+        );
+        let code = DriverCode {
+            function: "f-0123456789".into(),
+            path: ".clusia/functions/f-0123456789/driver.py".into(),
+            text: "print(1)\n".into(),
+            hash: "d".into(),
+        };
+        assert_eq!(
+            reply(Reply::Driver(Box::new(code.clone()))),
+            r#"{"type":"response","id":5,"result":{"ok":{"driver":{"function":"f-0123456789","path":".clusia/functions/f-0123456789/driver.py","text":"print(1)\n","hash":"d"}}}}"#
+        );
+        round_trip(Reply::Driver(Box::new(code)));
+        let event = |event| {
+            wire(&ServerMessage::Event {
+                topic: topics::TESTS.into(),
+                event,
+            })
+        };
+        assert_eq!(
+            event(Event::FunctionsChanged {
+                pr: acme(),
+                view: Box::new(view.clone())
+            }),
+            format!(
+                r#"{{"type":"event","topic":"tests","event":{{"functions_changed":{{"pr":"acme/widgets#7","view":{}}}}}}}"#,
+                wire(&view)
+            )
+        );
+        let result = CaseResult {
+            case: "a1".into(),
+            head: "abc".into(),
+            hash: "h".into(),
+            status: CaseStatus::Failed,
+            returned: Some("Err(RefreshError::Http(500))".into()),
+            returned_expected: None,
+            error: None,
+            state: Vec::new(),
+            output: "WARN refresh failed: 500".into(),
+            took_ms: 210,
+            runner: RunnerKind::Container,
+            exit_code: Some(0),
+            message: None,
+            at: 9,
+        };
+        assert_eq!(
+            event(Event::CaseDone {
+                pr: acme(),
+                run: "cases-1-2".into(),
+                function: "f-0123456789".into(),
+                result: Box::new(result.clone()),
+            }),
+            format!(
+                r#"{{"type":"event","topic":"tests","event":{{"case_done":{{"pr":"acme/widgets#7","run":"cases-1-2","function":"f-0123456789","result":{}}}}}}}"#,
+                wire(&result)
+            )
+        );
+        round_trip(Event::CaseDone {
+            pr: acme(),
+            run: "r".into(),
+            function: "f-0123456789".into(),
+            result: Box::new(result),
+        });
+        round_trip(Event::FunctionsChanged {
+            pr: acme(),
+            view: Box::new(view),
+        });
+    }
+
+    #[test]
+    fn a_cases_turn_is_not_a_chat_turn() {
+        assert_eq!(wire(&TurnOrigin::Cases), r#""cases""#);
+        assert!(!TurnOrigin::Cases.is_chat());
     }
 
     #[test]

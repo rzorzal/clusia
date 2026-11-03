@@ -279,6 +279,23 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::GetTestDisk => crate::tests::disk(shared).await,
         Command::CleanUpTests { repo } => crate::tests::clean_up(shared, repo).await,
         Command::CheckTestEngine { pr } => crate::tests::check_engine(shared, pr).await,
+        Command::GetFunctions { pr } => crate::tests::functions(shared, &pr).await,
+        Command::SaveCase { pr, function, case } => {
+            crate::tests::save_case(shared, &pr, &function, case).await
+        }
+        Command::ResetCase { pr, function, case } => {
+            crate::tests::reset_case(shared, &pr, &function, &case).await
+        }
+        Command::RemoveCase { pr, function, case } => {
+            crate::tests::remove_case(shared, &pr, &function, &case).await
+        }
+        Command::WriteCases { pr, function, ask } => {
+            crate::tests::write_cases(shared, &pr, &function, ask).await
+        }
+        Command::GetDriver { pr, function } => crate::tests::driver(shared, &pr, &function).await,
+        Command::RunCases { pr, scope, seen } => {
+            crate::tests::run_cases(shared, &pr, scope, seen).await
+        }
     }
 }
 

@@ -4,16 +4,21 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use clusia_core::functions::CaseStatus;
 use clusia_core::printable::printable_lines;
 use clusia_core::tests::{
-    Approve, EngineKind, EnvState, KnownTest, RunOutcome, RunnerKind, SetupPlan, StepPlace,
-    StepState, TestCaseResult, TestRun, TestScope, TestStatus, TestsPhase, TestsView,
+    Approve, EngineKind, EnvState, KnownTest, RunOutcome, RunnerKind, STEP_TESTS, SetupPlan,
+    StepPlace, StepState, TestCaseResult, TestRun, TestScope, TestStatus, TestsPhase, TestsView,
 };
 use clusia_core::{Paths, PrRef};
 use clusia_protocol::{Client, Command as Request, Event, Reply, topics};
 use serde_json::json;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
+use crate::cases_cmd::{
+    case_failure_lines, cases_exit_code, cases_totals_line, function_lines, names_of,
+    read_functions, run_cases,
+};
 use crate::check::line_of;
 use crate::review::parse_pr;
 use crate::run::{CliError, Output, connect, unexpected};
@@ -32,6 +37,14 @@ pub(crate) struct Wanted {
     pub yes: bool,
     pub list: bool,
     pub run: Option<TestScope>,
+    pub functions: bool,
+    pub run_cases: Option<CasesWanted>,
+}
+
+/// What `--run-cases` was narrowed to: a function by id or exact name, and one of its cases.
+pub(crate) struct CasesWanted {
+    pub function: Option<String>,
+    pub case: Option<String>,
 }
 
 pub(crate) fn duration_text(ms: u64) -> String {
@@ -233,13 +246,26 @@ pub(crate) fn plan_lines(plan: &SetupPlan) -> Vec<String> {
     lines
 }
 
+/// What a setup approves: the steps the printed plan marks `todo` or `failed`, in plan order, and
+/// the test commands. A step the daemon adds later is not among them, so it is asked again.
+pub(crate) fn approval_of(plan: &SetupPlan) -> Approve {
+    let mut ids: Vec<String> = plan
+        .steps
+        .iter()
+        .filter(|s| matches!(s.state, StepState::Missing | StepState::Failed { .. }))
+        .map(|s| s.id.clone())
+        .collect();
+    ids.push(STEP_TESTS.into());
+    Approve::Steps(ids)
+}
+
 fn io_error(e: io::Error) -> CliError {
     CliError::Other(e.to_string())
 }
 
 /// What a Ctrl-C needs: where to reach the daemon again, which review, and whether a request
 /// that starts an activity has gone out.
-struct Interrupts<'a> {
+pub(crate) struct Interrupts<'a> {
     signal: Signal,
     paths: &'a Paths,
     home: Option<&'a Path>,
@@ -274,7 +300,7 @@ impl Interrupts<'_> {
     }
 
     /// `request` on `client`, ended by a Ctrl-C. `acts` marks a request that starts an activity.
-    async fn ask(
+    pub(crate) async fn ask(
         &mut self,
         client: &mut Client,
         request: Request,
@@ -289,7 +315,11 @@ impl Interrupts<'_> {
     }
 
     /// The next event, ended by a Ctrl-C.
-    async fn event(&mut self, client: &mut Client, what: &str) -> Result<Event, CliError> {
+    pub(crate) async fn event(
+        &mut self,
+        client: &mut Client,
+        what: &str,
+    ) -> Result<Event, CliError> {
         tokio::select! {
             event = client.next_event() => Ok(event?.1),
             _ = self.signal.recv() => self.end(what).await,
@@ -297,7 +327,7 @@ impl Interrupts<'_> {
     }
 }
 
-async fn view_of(
+pub(crate) async fn view_of(
     client: &mut Client,
     pr: &PrRef,
     stop: &mut Interrupts<'_>,
@@ -494,7 +524,7 @@ async fn setup(
     let request = Request::PrepareTests {
         pr: pr.clone(),
         recipe_hash: plan.recipe_hash.clone(),
-        approve: Approve::All,
+        approve: approval_of(&plan),
     };
     stop.ask(client, request, true, "the setup").await?;
     let (lines, told_end) = told_before_ack(client.take_events(), pr, &plan);
@@ -579,7 +609,37 @@ async fn run_tests(
         Reply::TestRunStarted { run } => run,
         other => return Err(unexpected(other)),
     };
-    // After a Ctrl-C: the stop was asked for, and the run's end is awaited until then.
+    follow(client, pr, stop, |event| match event {
+        Event::TestResult {
+            pr: of,
+            run,
+            result,
+        } if of == *pr && run == id => {
+            if !json {
+                println!("{}", result_line(&result));
+            }
+            None
+        }
+        Event::TestRunDone { pr: of, run } if of == *pr && run.id == id => Some(*run),
+        _ => None,
+    })
+    .await
+}
+
+/// Reads events until `on_event` ends with a value. A Ctrl-C asks the daemon to stop and the end
+/// is awaited for up to `STOP_WAIT`; a second one, or no end by then, exits.
+pub(crate) async fn follow<T>(
+    client: &mut Client,
+    pr: &PrRef,
+    stop: &mut Interrupts<'_>,
+    mut on_event: impl FnMut(Event) -> Option<T>,
+) -> Result<T, CliError> {
+    // What was told while a request waited for its answer comes first.
+    for (_, event) in client.take_events() {
+        if let Some(end) = on_event(event) {
+            return Ok(end);
+        }
+    }
     let mut stopping: Option<Instant> = None;
     loop {
         let wait = stopping.map_or(NO_DEADLINE, |at| STOP_WAIT.saturating_sub(at.elapsed()));
@@ -607,18 +667,8 @@ async fn run_tests(
                 std::process::exit(130);
             }
         };
-        match event {
-            Event::TestResult {
-                pr: of,
-                run,
-                result,
-            } if of == *pr && run == id => {
-                if !json {
-                    println!("{}", result_line(&result));
-                }
-            }
-            Event::TestRunDone { pr: of, run } if of == *pr && run.id == id => return Ok(*run),
-            _ => {}
+        if let Some(end) = on_event(event) {
+            return Ok(end);
         }
     }
 }
@@ -672,7 +722,12 @@ pub(crate) async fn tests(
         acting: false,
     };
     let mut client = connect(paths, home).await?;
-    let acts = wanted.generate || wanted.setup || wanted.list || wanted.run.is_some();
+    let acts = wanted.generate
+        || wanted.setup
+        || wanted.list
+        || wanted.run.is_some()
+        || wanted.functions
+        || wanted.run_cases.is_some();
     if acts {
         // The requests read the review's worktree, which opening prepares.
         let topics = vec![topics::TESTS.into()];
@@ -730,25 +785,75 @@ pub(crate) async fn tests(
         object.insert("run".into(), json!(run));
         ended = Some(run);
     }
+    let mut functions = None;
+    if wanted.functions || wanted.run_cases.is_some() {
+        functions = Some(read_functions(&mut client, &pr, &mut stop).await?);
+    }
+    if wanted.functions
+        && let Some(read) = &functions
+    {
+        human.extend(function_lines(read));
+        object.insert("functions".into(), json!(read));
+    }
+    let mut cases_code = None;
+    if let (Some(cases), Some(read)) = (&wanted.run_cases, functions.take()) {
+        let (results, after, slugs, total) =
+            run_cases(&mut client, &pr, read, cases, json, &mut stop).await?;
+        view = view_of(&mut client, &pr, &mut stop).await?;
+        for (result, slug) in results.iter().zip(&slugs) {
+            if result.status != CaseStatus::Passed {
+                let (qualified, name) = names_of(&after, slug, result);
+                human.extend(case_failure_lines(&qualified, &name, result));
+            }
+        }
+        human.push(cases_totals_line(&results, view.env.as_ref()));
+        // A run cut short before every case had a result was stopped, whatever the few results say.
+        let code = match cases_exit_code(&results) {
+            0 if results.len() < total as usize => 130,
+            code => code,
+        };
+        object.insert("functions".into(), json!(after));
+        object.insert(
+            "cases".into(),
+            json!({
+                "passed": results.iter().filter(|r| r.status == CaseStatus::Passed).count(),
+                "failed": results.iter().filter(|r| r.status != CaseStatus::Passed).count(),
+                "took_ms": results.iter().map(|r| r.took_ms).sum::<u64>(),
+            }),
+        );
+        cases_code = Some(code);
+    }
     object.insert("view".into(), json!(view));
     let output = Output {
         human: human.join("\n"),
         json: serde_json::Value::Object(object),
     };
-    let Some(run) = ended.filter(|_| code != 0) else {
+    let cases_failed = cases_code.filter(|c| *c != 0);
+    if ended.as_ref().is_none_or(|_| code == 0) && cases_failed.is_none() {
         return Ok(output);
-    };
+    }
     if json {
         println!("{}", output.json);
     } else {
         println!("{}", crate::agent::streamed(&output.human));
     }
-    let message = match &run.outcome {
-        RunOutcome::Failed => format!("tests failed (exit code {code})"),
-        RunOutcome::TimedOut => "the run passed its time limit and was stopped".into(),
-        RunOutcome::Stopped => "the run was stopped".into(),
-        RunOutcome::Error { message } => line_of(message),
-        RunOutcome::Passed => unreachable!("a passed run has exit code 0"),
+    if let Some(code) = cases_failed {
+        let message = match code {
+            130 => "the run was stopped",
+            124 => "a case passed its time limit and was stopped",
+            _ => "cases failed",
+        };
+        return Err(CliError::Exit {
+            code,
+            message: message.into(),
+        });
+    }
+    let message = match ended.as_ref().map(|run| &run.outcome) {
+        Some(RunOutcome::Failed) => format!("tests failed (exit code {code})"),
+        Some(RunOutcome::TimedOut) => "the run passed its time limit and was stopped".into(),
+        Some(RunOutcome::Stopped) => "the run was stopped".into(),
+        Some(RunOutcome::Error { message }) => line_of(message),
+        _ => unreachable!("a run that did not pass has an exit code"),
     };
     Err(CliError::Exit { code, message })
 }
@@ -756,9 +861,9 @@ pub(crate) async fn tests(
 #[cfg(test)]
 mod tests {
     use clusia_core::tests::{
-        Engine, EngineKind, EnvState, Existing, PlanCommand, PlanStep, RepoSignals, RunOutcome,
-        RunnerKind, SetupPlan, StepPlace, StepState, TestCaseResult, TestRun, TestScope,
-        TestStatus, TestsPhase, Totals,
+        Approve, Engine, EngineKind, EnvState, Existing, PlanCommand, PlanStep, RepoSignals,
+        RunOutcome, RunnerKind, STEP_TESTS, SetupPlan, StepPlace, StepState, TestCaseResult,
+        TestRun, TestScope, TestStatus, TestsPhase, Totals,
     };
 
     use super::*;
@@ -1174,6 +1279,42 @@ mod tests {
         assert_eq!(
             plan_lines(&hostile)[0],
             "Blocked: Colima can't see /x\\u{1b}[2J\\u{202e}"
+        );
+    }
+
+    #[test]
+    fn the_setup_approves_the_missing_and_failed_steps_then_the_commands() {
+        let step = |id: &str, state| PlanStep {
+            id: id.into(),
+            title: id.into(),
+            command: "x".into(),
+            place: StepPlace::Container,
+            network: false,
+            hint: None,
+            state,
+            approved: false,
+        };
+        let plan = SetupPlan {
+            recipe_hash: "ab".into(),
+            steps: vec![
+                step("image", StepState::Done),
+                step("work:0", StepState::Missing),
+                step("services", StepState::Skipped { why: "none".into() }),
+                step(
+                    "work:1",
+                    StepState::Failed {
+                        message: "exit 1".into(),
+                    },
+                ),
+            ],
+            commands: Vec::new(),
+            commands_approved: false,
+            ready: false,
+            blocked: None,
+        };
+        assert_eq!(
+            approval_of(&plan),
+            Approve::Steps(vec!["work:0".into(), "work:1".into(), STEP_TESTS.into()])
         );
     }
 }

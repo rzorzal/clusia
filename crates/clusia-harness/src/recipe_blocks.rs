@@ -1,4 +1,4 @@
-//! Finds the recipe and the near-tests list in the answer of a recipe turn.
+//! Finds the recipe, the near-tests list and the function cases in the answer of a recipe turn.
 
 use clusia_core::printable::is_invisible;
 use serde_json::Value;
@@ -7,6 +7,9 @@ use crate::fenced::fenced_blocks;
 
 pub const RECIPE_INFO: &str = "clusia-recipe";
 pub const NEAR_TESTS_INFO: &str = "clusia-near-tests";
+pub use clusia_core::functions::FUNCTION_INFO;
+/// The most clusia-function blocks an answer keeps.
+pub const FUNCTION_BLOCKS_MAX: usize = 24;
 /// The most near-test names an answer keeps.
 const NEAR_NAMES_MAX: usize = 200;
 /// The longest near-test name, in characters.
@@ -21,27 +24,38 @@ pub struct RecipeBlocks {
     pub recipe: Option<Value>,
     /// The names of the `clusia-near-tests` blocks, trimmed and unique, in order.
     pub near_tests: Vec<String>,
+    /// The clusia-function blocks that are JSON objects, in order, at most FUNCTION_BLOCKS_MAX.
+    pub functions: Vec<Value>,
     /// The blocks that could not be used, or could be used only in part.
     pub unreadable: u32,
 }
 
-/// The recipe and the near tests of `text`.
+/// The recipe, the near tests and the function blocks of `text`.
 ///
-/// A block is a line of exactly ```` ```clusia-recipe ```` or ```` ```clusia-near-tests ````,
-/// up to the next line of exactly ```` ``` ````; one that never closes stays in the text and is
-/// not counted. Only the first recipe that is a JSON object is kept; every other recipe block
+/// A block is a line of exactly ```` ```clusia-recipe ````, ```` ```clusia-near-tests ```` or
+/// ```` ```clusia-function ````, up to the next line of exactly ```` ``` ````; one that never
+/// closes stays in the text and is not counted. Only the first recipe that is a JSON object is kept; every other recipe block
 /// counts as unreadable. A near-tests block is `{"tests": [..]}`; a name that is not a string,
 /// is blank, is over 300 characters, holds a control or invisible character or comes past the
-/// 200th is dropped, and a block that dropped one counts once as unreadable.
+/// 200th is dropped, and a block that dropped one counts once as unreadable. A `clusia-function`
+/// block is kept when its body is a JSON object, up to 24; any other counts as unreadable.
 pub fn extract_recipe_blocks(text: &str) -> RecipeBlocks {
-    let (kept, blocks) = fenced_blocks(text, &[RECIPE_INFO, NEAR_TESTS_INFO]);
+    let (kept, blocks) = fenced_blocks(text, &[RECIPE_INFO, NEAR_TESTS_INFO, FUNCTION_INFO]);
     let mut recipe = None;
+    let mut functions = Vec::new();
     let mut near_tests = Vec::new();
     let mut unreadable = 0u32;
     for (info, body) in blocks {
         if info == RECIPE_INFO {
             match serde_json::from_str::<Value>(&body) {
                 Ok(value) if value.is_object() && recipe.is_none() => recipe = Some(value),
+                _ => unreadable += 1,
+            }
+        } else if info == FUNCTION_INFO {
+            match serde_json::from_str::<Value>(&body) {
+                Ok(value) if value.is_object() && functions.len() < FUNCTION_BLOCKS_MAX => {
+                    functions.push(value)
+                }
                 _ => unreadable += 1,
             }
         } else {
@@ -52,6 +66,7 @@ pub fn extract_recipe_blocks(text: &str) -> RecipeBlocks {
         text: kept,
         recipe,
         near_tests,
+        functions,
         unreadable,
     }
 }
@@ -96,7 +111,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::testkit::{near_tests_block, recipe_block};
+    use crate::testkit::{function_block, near_tests_block, recipe_block};
 
     fn recipe() -> serde_json::Value {
         json!({"runner": "auto", "tests": {"all": "cargo test --workspace", "results": "libtest"}})
@@ -218,5 +233,31 @@ mod tests {
         let value = json!({"runner": "auto", "tests": {"all": "echo ```", "results": "plain"}});
         let blocks = extract_recipe_blocks(&recipe_block(value.clone()));
         assert_eq!(blocks.recipe, Some(value));
+    }
+
+    #[test]
+    fn function_blocks_are_kept_in_order_and_bad_ones_counted() {
+        let f = |name: &str| json!({"function": name, "file": "src/lib.rs"});
+        let answer = format!(
+            "{}\n{}\n```clusia-function\n[1, 2]\n```\n```clusia-function\nnot json\n```\n{}",
+            recipe_block(recipe()),
+            function_block(f("a")),
+            function_block(f("b"))
+        );
+        let blocks = extract_recipe_blocks(&answer);
+        assert_eq!(blocks.recipe, Some(recipe()));
+        assert_eq!(blocks.functions, vec![f("a"), f("b")]);
+        assert_eq!(blocks.unreadable, 2);
+        assert!(!blocks.text.contains("clusia-function"));
+
+        let many: String = (0..26)
+            .map(|i| function_block(f(&format!("f{i}"))))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let blocks = extract_recipe_blocks(&many);
+        assert_eq!(blocks.functions.len(), FUNCTION_BLOCKS_MAX);
+        assert_eq!(blocks.functions[23], f("f23"));
+        assert_eq!(blocks.unreadable, 2);
+        assert_eq!(FUNCTION_INFO, "clusia-function");
     }
 }

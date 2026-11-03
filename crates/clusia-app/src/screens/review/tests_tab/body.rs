@@ -6,9 +6,11 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::PrRef;
+use clusia_core::functions::{FUNCTIONS_MAX, FunctionsView};
 use clusia_core::printable::{printable, printable_lines};
-use clusia_core::tests::{ACTIVITY_WRITING, RECIPE_FILE, TestsView};
+use clusia_core::tests::{ACTIVITY_WRITING, RECIPE_FILE, RunnerKind, TestsView};
 
+use super::functions::{self, FunctionsBody, FunctionsModel, FunctionsModels};
 use super::{SubTab, TabState, TestsModel, TestsModels, engine_label, tab_state};
 use crate::agent_name;
 use crate::bridge::{Ask, Asks, Model, TestsAskKind, Toasts};
@@ -40,11 +42,13 @@ pub(super) enum Shape {
         engine: Option<String>,
         off: Option<&'static str>,
         starting: bool,
+        cases: CasesCopy,
     },
     Generating {
         agent: String,
         step: u8,
         stopping: bool,
+        cases: CasesCopy,
     },
     Failed {
         message: String,
@@ -54,15 +58,44 @@ pub(super) enum Shape {
         reason: String,
         actions: Actions,
     },
-    /// `agent` is `Some` only under Run Function tests, whose note names it.
+    /// `bar` is `Some` only under Run Function tests: the engine and whether it is set up.
     Auto {
         sub: SubTab,
-        agent: Option<String>,
+        bar: Option<String>,
     },
+}
+
+/// How many changed functions the cases of step 2 are for: the ones with a language pack in a
+/// loaded view; `None` when none is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CasesCopy(pub Option<usize>);
+
+/// The number of functions the Generate click writes cases for, from the loaded view. Files no
+/// pack reads are not functions. A view still being read has no functions yet, so it counts
+/// none.
+pub(super) fn cases_copy(view: Option<&FunctionsView>) -> CasesCopy {
+    CasesCopy(view.filter(|v| !v.reading).map(|v| {
+        v.functions
+            .iter()
+            .filter(|f| f.lang.is_some())
+            .count()
+            .min(FUNCTIONS_MAX)
+    }))
+}
+
+/// The line under step 2's title.
+pub(super) fn copy_line(cases: CasesCopy) -> String {
+    let which = match cases.0 {
+        Some(n) if n >= 2 => format!("the {n} changed functions"),
+        Some(1) => "the changed function".to_string(),
+        _ => "the changed functions".to_string(),
+    };
+    format!("How to set up and run the tests, and cases for {which}. It only reads the code.")
 }
 
 pub(super) struct Inputs<'a> {
     pub model: Option<&'a TestsModel>,
+    pub functions: Option<&'a FunctionsModel>,
     pub agent: &'a str,
     pub read_only: Option<&'static str>,
     pub can_edit: bool,
@@ -131,6 +164,26 @@ fn engine_here(view: &TestsView) -> Option<String> {
     )))
 }
 
+/// The right-aligned label of the sub-tab bar under Run Function tests: where the cases run, and
+/// whether the setup that lets them run is done. The engine is the one a container runner uses;
+/// a local runner is the macOS sandbox; with no probe yet, Docker.
+fn bar_label(view: &TestsView) -> String {
+    let env = view.env.as_ref();
+    let place = match env {
+        Some(env) if env.runner == RunnerKind::Container => env
+            .engine
+            .as_ref()
+            .map_or_else(|| "Docker".to_string(), engine_label),
+        Some(env) if env.runner == RunnerKind::Local => "macOS sandbox".to_string(),
+        _ => "Docker".to_string(),
+    };
+    let ready = view.plan.as_ref().is_some_and(|p| p.ready);
+    printable(&format!(
+        "{place} · {}",
+        if ready { "ready" } else { "set up first" }
+    ))
+}
+
 pub(super) fn body_view(i: &Inputs) -> Shape {
     let pending = i.model.and_then(|m| m.pending);
     let Some((model, view)) = i.model.and_then(|m| Some((m, m.view.as_ref()?))) else {
@@ -141,9 +194,11 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
                 engine: None,
                 off: Some(off),
                 starting: false,
+                cases: cases_copy(None),
             },
         };
     };
+    let cases = cases_copy(i.functions.and_then(|f| f.view.as_ref()));
     let actions = || Actions {
         off: i.read_only,
         starting: pending == Some(TestsAskKind::Generate),
@@ -155,6 +210,7 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
             engine: engine_here(view),
             off: i.read_only,
             starting: pending == Some(TestsAskKind::Generate),
+            cases,
         },
         TabState::Generating { activity } => Shape::Generating {
             agent: i.agent.to_string(),
@@ -164,6 +220,7 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
                 1
             },
             stopping: pending == Some(TestsAskKind::Stop),
+            cases,
         },
         TabState::Failed { message } => Shape::Failed {
             message: printable_lines(&message),
@@ -175,7 +232,7 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
         },
         _ => Shape::Auto {
             sub: model.sub,
-            agent: (model.sub == SubTab::Functions).then(|| i.agent.to_string()),
+            bar: (model.sub == SubTab::Functions).then(|| bar_label(view)),
         },
     }
 }
@@ -282,6 +339,7 @@ pub(super) fn fill_tests(
     mut commands: Commands,
     tabs: Res<ReviewTabs>,
     models: Res<TestsModels>,
+    functions: Res<FunctionsModels>,
     model: Res<Model>,
     fonts: Res<UiFonts>,
     bodies: Query<(Entity, &SectionBody, Option<&Children>)>,
@@ -307,6 +365,7 @@ pub(super) fn fill_tests(
         let agent = agent_name::of_tab(&model.snapshot, tab);
         let shape = body_view(&Inputs {
             model: models.0.get(&body.pr),
+            functions: functions.0.get(&body.pr),
             agent: &agent,
             read_only: read_only_reason(&tabs, &model, &body.pr),
             can_edit: ready.view.worktree.is_some(),
@@ -345,6 +404,7 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
             engine,
             off,
             starting,
+            cases,
         } => centered(p, |c| {
             steps_card(
                 c,
@@ -352,6 +412,7 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
                 "Test this change",
                 agent,
                 engine.as_deref(),
+                *cases,
                 [Light::Idle; 3],
                 |row| {
                     if *starting {
@@ -373,23 +434,33 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
             agent,
             step,
             stopping,
+            cases,
         } => centered(p, |c| {
             let lights = if *step == 2 {
                 [Light::Done, Light::Lit, Light::Waiting]
             } else {
                 [Light::Lit, Light::Waiting, Light::Waiting]
             };
-            steps_card(c, fonts, "Generating tests", agent, None, lights, |row| {
-                if *stopping {
-                    row.spawn(disabled_button(fonts, "Stopping…"));
-                } else {
-                    row.spawn((
-                        button(fonts, "Stop", Variant::Secondary),
-                        StopButton(pr.clone()),
-                        observe(on_stop),
-                    ));
-                }
-            });
+            steps_card(
+                c,
+                fonts,
+                "Generating tests",
+                agent,
+                None,
+                *cases,
+                lights,
+                |row| {
+                    if *stopping {
+                        row.spawn(disabled_button(fonts, "Stopping…"));
+                    } else {
+                        row.spawn((
+                            button(fonts, "Stop", Variant::Secondary),
+                            StopButton(pr.clone()),
+                            observe(on_stop),
+                        ));
+                    }
+                },
+            );
         }),
         Shape::Failed { message, actions } => centered(p, |c| {
             outcome_card(
@@ -435,7 +506,7 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
                 },
             );
         }),
-        Shape::Auto { sub, agent } => auto(p, fonts, pr, *sub, agent.as_deref()),
+        Shape::Auto { sub, bar } => auto(p, fonts, pr, *sub, bar.as_deref()),
     }
 }
 
@@ -540,12 +611,14 @@ fn outcome_card(
 
 /// The card of the empty and generating states: a title, the three steps and `footer` (the
 /// buttons) in a row at the bottom.
+#[allow(clippy::too_many_arguments)]
 fn steps_card(
     p: &mut Spawner,
     fonts: &UiFonts,
     title: &str,
     agent: &str,
     engine: Option<&str>,
+    cases: CasesCopy,
     lights: [Light; 3],
     footer: impl FnOnce(&mut Spawner),
 ) {
@@ -558,8 +631,8 @@ fn steps_card(
     let steps = [
         ("Check the environment".to_string(), found),
         (
-            format!("{agent} writes the recipe"),
-            "How to set up and run the tests. It only reads the code.".into(),
+            format!("{agent} writes the recipe and the cases"),
+            copy_line(cases),
         ),
         (
             "You approve the setup".to_string(),
@@ -570,7 +643,7 @@ fn steps_card(
         c.spawn(text(fonts, title, Type::HEADING.size(18.0)));
         c.spawn(wrapped_text(
             fonts,
-            "Run the repository's tests in isolation. Nothing has run yet for this pull request.",
+            "Run the repository's tests in isolation, and try each changed function with values you choose. Nothing has run yet for this pull request.",
             Type::MUTED,
         ));
         for (i, (head, line)) in steps.into_iter().enumerate() {
@@ -627,8 +700,10 @@ fn step_dot(p: &mut Spawner, fonts: &UiFonts, n: u8, light: Light) {
     .with_child(text(fonts, label, Type::STRONG.size(12.0).ink(ink)));
 }
 
-fn auto(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, sub: SubTab, agent: Option<&str>) {
+fn auto(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, sub: SubTab, bar: Option<&str>) {
     p.spawn(Node {
+        justify_content: JustifyContent::SpaceBetween,
+        align_items: AlignItems::Center,
         padding: UiRect::new(px(25), px(25), px(14), px(0)),
         ..default()
     })
@@ -648,28 +723,52 @@ fn auto(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, sub: SubTab, agent: Option
                 ));
             }
         });
+        if let Some(bar) = bar {
+            row.spawn(text(fonts, bar.to_string(), Type::MUTED));
+        }
     });
     if sub == SubTab::Functions {
-        let agent = agent.unwrap_or_default();
-        return centered(p, |c| {
-            c.spawn(Node {
-                max_width: px(460),
+        p.spawn((
+            Node {
+                flex_grow: 1.0,
+                min_height: px(0),
+                column_gap: px(16),
+                padding: UiRect::new(px(25), px(12), px(25), px(14)),
                 ..default()
-            })
-            .with_child((
-                text(
-                    fonts,
-                    format!(
-                        "Run Function tests comes next: each changed function, run alone with cases {agent} writes and values you choose."
-                    ),
-                    Type::MUTED,
-                ),
-                TextLayout::new(
-                    bevy::text::Justify::Center,
-                    bevy::text::LineBreak::WordOrCharacter,
-                ),
+            },
+            FunctionsBody(pr.clone()),
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Node {
+                    width: px(280),
+                    flex_shrink: 0.0,
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                functions::list::FunctionsList(pr.clone()),
+            ));
+            row.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    flex_basis: px(0),
+                    min_width: px(0),
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                functions::cases::FunctionsCases(pr.clone()),
+            ));
+            row.spawn((
+                Node {
+                    width: px(340),
+                    flex_shrink: 0.0,
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                },
+                functions::FunctionsResult(pr.clone()),
             ));
         });
+        return;
     }
     p.spawn((
         Node {
@@ -790,11 +889,11 @@ mod tests {
         testing::settle(&mut app);
         for needle in [
             "Test this change",
-            "Run the repository's tests in isolation. Nothing has run yet for this pull request.",
+            "Run the repository's tests in isolation, and try each changed function with values you choose. Nothing has run yet for this pull request.",
             "Check the environment",
             "Finds a container engine and what is already built for this repository.",
-            "Claude Code writes the recipe",
-            "How to set up and run the tests. It only reads the code.",
+            "Claude Code writes the recipe and the cases",
+            "How to set up and run the tests, and cases for the changed functions. It only reads the code.",
             "You approve the setup",
             "You see every command before it runs. Tests run with no network.",
             "Generate tests",
@@ -1051,10 +1150,8 @@ mod tests {
         let functions = testing::find::<SubTabButton>(&mut app, |b| b.sub == SubTab::Functions);
         testing::activate(&mut app, functions);
         testing::settle(&mut app);
-        assert!(testing::shows(
-            &mut app,
-            "Run Function tests comes next: each changed function, run alone with cases Claude Code writes and values you choose."
-        ));
+        assert!(!testing::shows(&mut app, "comes next"));
+        assert_eq!(testing::count::<functions::FunctionsBody>(&mut app), 1);
         assert_eq!(testing::count::<TopRegion>(&mut app), 0);
         assert_eq!(testing::count::<SubTabButton>(&mut app), 2, "the tabs stay");
         let auto = testing::find::<SubTabButton>(&mut app, |b| b.sub == SubTab::Auto);
@@ -1062,6 +1159,40 @@ mod tests {
         testing::settle(&mut app);
         assert_eq!(testing::count::<TopRegion>(&mut app), 1);
         assert_eq!(model(&app, &pr).sub, SubTab::Auto);
+    }
+
+    #[test]
+    fn the_functions_sub_tab_draws_three_regions_and_no_placeholder() {
+        let (mut app, pr) = tests_app();
+        let view = fixture::demo_functions(NOW, fixture::DemoFunctions::Mockup);
+        testing::open_functions(&mut app, &pr, view);
+        assert_eq!(testing::count::<functions::FunctionsBody>(&mut app), 1);
+        for n in [
+            testing::count::<functions::list::FunctionsList>(&mut app),
+            testing::count::<functions::cases::FunctionsCases>(&mut app),
+            testing::count::<functions::FunctionsResult>(&mut app),
+        ] {
+            assert_eq!(n, 1);
+        }
+        assert!(!testing::shows(&mut app, "comes next"));
+    }
+
+    #[test]
+    fn the_bar_names_the_engine_and_whether_the_setup_is_done() {
+        let (mut app, pr) = tests_app();
+        let mut tests = testing::tests_view(&app, &pr, TestsPhase::Ready);
+        tests.env = Some(testing::tests_env(true));
+        tests.plan = Some(testing::tests_plan(Vec::new(), true));
+        testing::open_tests(&mut app, &pr, tests.clone());
+        testing::open_functions(
+            &mut app,
+            &pr,
+            fixture::demo_functions(NOW, fixture::DemoFunctions::Mockup),
+        );
+        assert!(testing::shows(&mut app, "Docker · Colima · ready"));
+        tests.plan = Some(testing::tests_plan(Vec::new(), false));
+        testing::open_tests(&mut app, &pr, tests);
+        assert!(testing::shows(&mut app, "Docker · Colima · set up first"));
     }
 
     #[test]
@@ -1126,6 +1257,7 @@ mod tests {
                 agent: "Claude Code",
                 read_only,
                 can_edit: false,
+                functions: None,
             }
         }
         assert_eq!(body_view(&inputs(None, None)), Shape::Loading);
@@ -1136,7 +1268,77 @@ mod tests {
                 engine: None,
                 off: Some("Not connected to clusiad — not sent"),
                 starting: false,
+                cases: CasesCopy(None),
             }
         );
+    }
+
+    #[test]
+    fn step_two_counts_the_functions_with_a_language_pack() {
+        for (n, line) in [
+            (
+                None,
+                "How to set up and run the tests, and cases for the changed functions. It only reads the code.",
+            ),
+            (
+                Some(0),
+                "How to set up and run the tests, and cases for the changed functions. It only reads the code.",
+            ),
+            (
+                Some(1),
+                "How to set up and run the tests, and cases for the changed function. It only reads the code.",
+            ),
+            (
+                Some(5),
+                "How to set up and run the tests, and cases for the 5 changed functions. It only reads the code.",
+            ),
+        ] {
+            assert_eq!(copy_line(CasesCopy(n)), line);
+        }
+    }
+
+    #[test]
+    fn the_count_ignores_functions_without_a_pack_and_a_view_still_reading() {
+        let mut view =
+            crate::fixture::demo_functions(testing::NOW, crate::fixture::DemoFunctions::Mockup);
+        assert_eq!(
+            cases_copy(Some(&view)),
+            CasesCopy(Some(4)),
+            "the Swift file has no function"
+        );
+        view.functions[3].lang = None;
+        assert_eq!(
+            cases_copy(Some(&view)),
+            CasesCopy(Some(3)),
+            "one has no pack"
+        );
+        view.reading = true;
+        assert_eq!(cases_copy(Some(&view)), CasesCopy(None));
+        assert_eq!(cases_copy(None), CasesCopy(None));
+    }
+
+    #[test]
+    fn files_no_pack_reads_are_not_counted_as_functions() {
+        let mut view =
+            crate::fixture::demo_functions(testing::NOW, crate::fixture::DemoFunctions::Mockup);
+        view.functions.clear();
+        view.unsupported = vec!["README.md".into(), "Cargo.lock".into()];
+        assert_eq!(cases_copy(Some(&view)), CasesCopy(Some(0)));
+    }
+
+    #[test]
+    fn the_generating_card_names_the_cases_too() {
+        let (mut app, pr) = tests_app();
+        open(
+            &mut app,
+            &pr,
+            TestsPhase::Generating {
+                activity: Some(ACTIVITY_WRITING.into()),
+            },
+        );
+        assert!(testing::shows(
+            &mut app,
+            "Claude Code writes the recipe and the cases"
+        ));
     }
 }

@@ -766,6 +766,7 @@ pub(crate) fn shell_views_changed(
     stories: Res<crate::screens::review::story::model::Stories>,
     calls: Res<crate::screens::review::calls::Calls>,
     tests: Res<crate::screens::review::tests_tab::TestsModels>,
+    functions: Res<crate::screens::review::tests_tab::functions::FunctionsModels>,
     spawned: Query<(), Or<(Added<ShellTop>, Added<RightPanel>, Added<StatusBar>)>>,
 ) -> bool {
     tabs.is_changed()
@@ -780,6 +781,7 @@ pub(crate) fn shell_views_changed(
         || stories.is_changed()
         || calls.is_changed()
         || tests.is_changed()
+        || functions.is_changed()
         || !spawned.is_empty()
 }
 
@@ -793,6 +795,7 @@ fn rebuild_top(
     revalidations: Res<Revalidations>,
     diagrams: Res<crate::screens::review::diagrams::Diagrams>,
     tests: Res<crate::screens::review::tests_tab::TestsModels>,
+    functions: Res<crate::screens::review::tests_tab::functions::FunctionsModels>,
     mut tops: Query<(Entity, &mut ShellTop)>,
 ) {
     for (entity, mut top) in &mut tops {
@@ -808,6 +811,7 @@ fn rebuild_top(
         crate::screens::review::tests_tab::badge_tests(
             &mut sections,
             crate::screens::review::tests_tab::of_head(tests.0.get(&top.pr), head),
+            crate::screens::review::tests_tab::functions::of_head(functions.0.get(&top.pr), head),
         );
         let tab = &tabs.0[&top.pr];
         let reanchor = tab.ui.reanchor.as_ref().and_then(|id| {

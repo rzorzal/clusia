@@ -2,7 +2,12 @@
 //! their storage. A review does one thing at a time (generate, set up, list or run), and at most
 //! `tests.parallel_runs` setups, lists and runs go at once across all reviews.
 
+mod case_run;
+pub(crate) mod case_turn;
+pub(super) mod cases;
 mod env;
+#[cfg(test)]
+mod functions_lab;
 #[cfg(test)]
 mod lab;
 pub(crate) mod recipe_file;
@@ -11,11 +16,12 @@ mod work;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
+use clusia_core::functions::FunctionsActivity;
 use clusia_core::tests::{Approve, TestEngineInfo, TestScope, TestsPhase, TestsView};
 use clusia_protocol::{ErrorCode, Event, Outcome, ProtocolError, Reply, topics};
 use clusia_testrun::exec::StopFlag;
@@ -25,6 +31,10 @@ use tokio::sync::{Notify, watch};
 use crate::reviews;
 use crate::state::Shared;
 use crate::turns::{Stop, Why};
+
+pub(crate) use case_run::run_cases;
+pub(crate) use case_turn::write_cases;
+pub(crate) use cases::{driver, functions, remove_case, reset_case, save_case};
 
 /// How long `stop_all` waits for the activity of a review to end; a container's stop may take
 /// two `docker kill`s and the client's grace between them.
@@ -47,6 +57,8 @@ pub(super) enum Doing {
     Prepare,
     List,
     Run,
+    Cases,
+    RunCases,
 }
 
 impl Doing {
@@ -56,7 +68,14 @@ impl Doing {
             Doing::Prepare => "setting up",
             Doing::List => "listing the tests",
             Doing::Run => "running the tests",
+            Doing::Cases => "writing cases",
+            Doing::RunCases => "running cases",
         }
+    }
+
+    /// Whether the activity is about the function cases, which leave the tests' phase alone.
+    pub(super) fn is_functions(self) -> bool {
+        matches!(self, Doing::Cases | Doing::RunCases)
     }
 }
 
@@ -72,6 +91,8 @@ pub(super) struct Activity {
     /// The container of the command that runs now, or the compose project coming up, which
     /// the sweep must leave alone.
     pub container: Option<String>,
+    /// What a functions activity is doing, for the functions view.
+    pub functions: Option<FunctionsActivity>,
 }
 
 impl Activity {
@@ -100,6 +121,13 @@ pub(super) struct Entry {
     pub shipped: Option<Option<String>>,
     /// What docker said about the recipe's image and services; dropped whenever it may change.
     pub facts: Option<env::Cached>,
+    /// Why the last case turn failed, until the next functions activity begins.
+    pub cases_failed: Option<String>,
+    /// A task waits for the call index to tell the functions view.
+    pub functions_waiting: bool,
+    /// Waits for the call index that ended with it still not ready, since it was last ready or
+    /// a client last asked.
+    pub functions_rounds: u32,
 }
 
 /// The tests of every review.
@@ -115,6 +143,8 @@ pub(crate) struct Bench {
     next: AtomicU32,
     /// The mount checks of this session, by (image tag, worktree).
     mounts: Mutex<HashMap<(String, PathBuf), Result<(), String>>>,
+    /// How long one wait for the call index lasts, in milliseconds.
+    index_wait_ms: AtomicU64,
 }
 
 impl Default for Bench {
@@ -127,6 +157,9 @@ impl Default for Bench {
             closing: AtomicBool::new(false),
             next: AtomicU32::new(1),
             mounts: Mutex::new(HashMap::new()),
+            index_wait_ms: AtomicU64::new(
+                u64::try_from(cases::INDEX_WAIT.as_millis()).unwrap_or(u64::MAX),
+            ),
         }
     }
 }
@@ -135,6 +168,16 @@ impl Bench {
     pub(super) fn with<R>(&self, pr: &PrRef, change: impl FnOnce(&mut Entry) -> R) -> R {
         let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
         change(table.entry(pr.clone()).or_default())
+    }
+
+    pub(super) fn index_wait(&self) -> Duration {
+        Duration::from_millis(self.index_wait_ms.load(Ordering::SeqCst))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_index_wait(&self, wait: Duration) {
+        let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+        self.index_wait_ms.store(ms, Ordering::SeqCst);
     }
 
     pub(super) fn seq(&self) -> u32 {
@@ -272,7 +315,12 @@ pub(super) fn begin(
         }
         let id = u64::from(shared.tests.seq());
         let (stop, turn) = (StopFlag::new(), Stop::new());
-        entry.failed = None;
+        // A functions activity leaves the tests' own failure for the tests' view to show.
+        if doing.is_functions() {
+            entry.cases_failed = None;
+        } else {
+            entry.failed = None;
+        }
         entry.activity = Some(Activity {
             id,
             doing,
@@ -280,6 +328,7 @@ pub(super) fn begin(
             stop: stop.clone(),
             turn: turn.clone(),
             container: None,
+            functions: None,
         });
         Ok(Started {
             id,
@@ -394,15 +443,15 @@ pub(crate) async fn generate(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
     let guard = Ending::new(shared, pr, started.id, started.live);
     // The `Generating` view goes out before the `Ack`, so a client always sees it begin.
     tell(shared, pr).await;
+    cases::tell_functions(shared, pr).await;
     let id = started.id;
     let job = work::generate(shared.clone(), pr.clone(), review, id, started.turn.clone());
-    tokio::spawn(work::drive(
-        shared.clone(),
-        pr.clone(),
-        id,
-        guard.hand_off(),
-        job,
-    ));
+    let live = guard.hand_off();
+    let (shared, pr) = (shared.clone(), pr.clone());
+    tokio::spawn(async move {
+        work::drive(shared.clone(), pr.clone(), id, live, job).await;
+        cases::tell_functions(&shared, &pr).await;
+    });
     Outcome::Ok(Reply::Ack)
 }
 

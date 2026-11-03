@@ -550,6 +550,38 @@ pub fn open_tests(app: &mut App, pr: &PrRef, view: clusia_core::tests::TestsView
     settle(app);
 }
 
+/// Opens the Tests tab of `pr` ready on its Functions sub-tab and tells `view` as its changed
+/// functions, then settles.
+pub fn open_functions(app: &mut App, pr: &PrRef, view: clusia_core::functions::FunctionsView) {
+    use crate::screens::review::tests_tab::{SubTab, TestsModels};
+    let mut tests = tests_view(app, pr, clusia_core::tests::TestsPhase::Ready);
+    // The machine a test already told stays.
+    tests.env = app
+        .world()
+        .resource::<TestsModels>()
+        .0
+        .get(pr)
+        .and_then(|m| m.view.as_ref())
+        .and_then(|v| v.env.clone());
+    tests.plan = Some(tests_plan(Vec::new(), true));
+    tests.recipe = Some(tests_recipe());
+    open_tests(app, pr, tests);
+    app.world_mut()
+        .resource_mut::<TestsModels>()
+        .0
+        .entry(pr.clone())
+        .or_default()
+        .sub = SubTab::Functions;
+    tell(
+        app,
+        Tell::Functions(crate::bridge::FunctionsTell::Loaded {
+            pr: pr.clone(),
+            view: Box::new(view),
+        }),
+    );
+    settle(app);
+}
+
 /// The demo app with the demo review open and ready (`fixture::demo_review` without its
 /// What's new rows, so no modal opens), and no recorded asks.
 pub fn demo_review_app() -> App {
@@ -611,8 +643,15 @@ pub fn open_ready(app: &mut App, news: bool) -> PrRef {
 /// and every other `Text` as it is.
 pub fn shown_text(app: &mut App) -> Vec<String> {
     let mut out = Vec::new();
-    let mut texts = app.world_mut().query::<&Text>();
-    out.extend(texts.iter(app.world()).map(|t| t.0.clone()));
+    let mut texts = app.world_mut().query::<(Entity, &Text)>();
+    for (entity, text) in texts.iter(app.world()) {
+        // A text with runs reads as one: its own text, then each run's.
+        let mut whole = text.0.clone();
+        for span in app.world().get::<Children>(entity).into_iter().flatten() {
+            whole.push_str(app.world().get::<TextSpan>(*span).map_or("", |s| &s.0));
+        }
+        out.push(whole);
+    }
     let mut rows = app.world_mut().query::<(&Node, &Children)>();
     for (node, children) in rows.iter(app.world()) {
         if node.flex_wrap != FlexWrap::Wrap {
@@ -796,6 +835,7 @@ pub fn tests_recipe() -> clusia_core::tests::RecipeSummary {
         list: Some("cargo test -- --list".into()),
         results: ResultsFormat::Libtest,
         env: Default::default(),
+        functions: Default::default(),
         services: Vec::new(),
         problems: Vec::new(),
     }
@@ -1314,5 +1354,54 @@ pub fn left_press(app: &mut App) {
         state: ButtonState::Pressed,
         window: Entity::PLACEHOLDER,
     });
+    app.update();
+}
+
+/// Esc goes down and comes up, as the window sends it, and the frames that settle.
+pub fn press_escape(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Escape);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset_all();
+    settle(app);
+}
+
+/// A click on the dimmed layer of the functions' driver dialog, and the frames that settle.
+pub fn click_backdrop(app: &mut App) {
+    use crate::review_state::Modal;
+    use crate::screens::review::shell::ModalFor;
+    let root = find::<ModalFor>(app, |m| m.modal == Modal::DriverCode);
+    click(app, root);
+    settle(app);
+}
+
+/// Gives the diff of `pr` a patch for `file` in which `line` of the new side can carry a
+/// comment, replacing the file's own patch.
+pub fn allow_comments_on(app: &mut App, pr: &PrRef, file: &str, line: u32) {
+    let patch = format!("@@ -{line},1 +{line},1 @@\n-old\n+new\n");
+    let mut tabs = app.world_mut().resource_mut::<ReviewTabs>();
+    let ready = tabs
+        .0
+        .get_mut(pr)
+        .and_then(|t| t.ready_mut())
+        .expect("a ready review");
+    ready.view.diff.retain(|f| f.path != file);
+    ready.view.diff.push(clusia_core::FileDiff {
+        path: file.into(),
+        previous_path: None,
+        status: "modified".into(),
+        additions: 1,
+        deletions: 1,
+        patch: Some(patch),
+    });
+    app.update();
+}
+
+/// The daemon is gone: the window is read-only.
+pub fn go_offline(app: &mut App) {
+    app.world_mut().resource_mut::<Model>().connection = bridge::Connection::Lost("gone".into());
     app.update();
 }

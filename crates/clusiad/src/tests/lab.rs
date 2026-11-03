@@ -24,25 +24,25 @@ use crate::options::DaemonOptions;
 
 const COLIMA_CONTEXT: &str = r#"[{"Name":"colima","Metadata":{},"Endpoints":{"docker":{"Host":"unix:///Users/octo/.colima/default/docker.sock","SkipTLSVerify":false}}}]"#;
 
-fn pr(n: u64) -> PrRef {
+pub(super) fn pr(n: u64) -> PrRef {
     format!("acme/widgets#{n}").parse().unwrap()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Machine {
+pub(super) enum Machine {
     Colima { running: bool },
     NoEngine,
 }
 
-struct Lab {
-    home: tempfile::TempDir,
-    fake: tempfile::TempDir,
-    exec: Arc<FakeExec>,
-    shared: Arc<Shared>,
-    events: broadcast::Receiver<(String, Event)>,
+pub(super) struct Lab {
+    pub(super) home: tempfile::TempDir,
+    pub(super) fake: tempfile::TempDir,
+    pub(super) exec: Arc<FakeExec>,
+    pub(super) shared: Arc<Shared>,
+    pub(super) events: broadcast::Receiver<(String, Event)>,
 }
 
-fn recipe() -> serde_json::Value {
+pub(super) fn recipe() -> serde_json::Value {
     json!({
         "runner": "auto",
         "image": { "base": "rust:1.86" },
@@ -57,12 +57,12 @@ fn recipe() -> serde_json::Value {
     })
 }
 
-fn no_setup(mut recipe: serde_json::Value) -> serde_json::Value {
+pub(super) fn no_setup(mut recipe: serde_json::Value) -> serde_json::Value {
     recipe["setup"] = json!([]);
     recipe
 }
 
-fn answer(recipe: serde_json::Value) -> Turn {
+pub(super) fn answer(recipe: serde_json::Value) -> Turn {
     Turn::answer_blocks("Here is the recipe.", &[recipe_block(recipe)])
 }
 
@@ -141,7 +141,7 @@ fn machine_rules(exec: &FakeExec, machine: Machine, home: &Path) {
 /// Saved reviews of acme/widgets `reviews`, each with a worktree, a fake `claude` playing
 /// `turns`, and a machine whose programs answer as `machine` says. `script` adds rules before
 /// the lab's own, so they win; it gets the paths, whose worktrees exist by then.
-fn lab(
+pub(super) fn lab(
     machine: Machine,
     turns: Vec<Turn>,
     reviews: &[u64],
@@ -181,7 +181,7 @@ fn lab(
 }
 
 /// The canonical worktree of `pr(n)`, as the daemon's git calls name it after `-C`.
-fn wt(paths: &Paths, n: u64) -> String {
+pub(super) fn wt(paths: &Paths, n: u64) -> String {
     std::fs::canonicalize(paths.worktree_for(&pr(n)))
         .unwrap()
         .display()
@@ -189,7 +189,7 @@ fn wt(paths: &Paths, n: u64) -> String {
 }
 
 /// `prepare` with the recipe hash of the plan the reviewer sees now.
-async fn approve(lab: &Lab, n: u64, approve: Approve) -> Outcome {
+pub(super) async fn approve(lab: &Lab, n: u64, approve: Approve) -> Outcome {
     let seen = env::view(&lab.shared, &pr(n))
         .await
         .plan
@@ -199,20 +199,20 @@ async fn approve(lab: &Lab, n: u64, approve: Approve) -> Outcome {
 }
 
 impl Lab {
-    fn worktree(&self, n: u64) -> PathBuf {
+    pub(super) fn worktree(&self, n: u64) -> PathBuf {
         std::fs::canonicalize(self.shared.paths.worktree_for(&pr(n))).unwrap()
     }
 
-    fn recipe_file(&self, n: u64) -> PathBuf {
+    pub(super) fn recipe_file(&self, n: u64) -> PathBuf {
         self.worktree(n).join(".clusia/recipe.toml")
     }
 
     /// Every call the fake machine got, as `<program> <args…>`.
-    fn ran(&self) -> Vec<String> {
+    pub(super) fn ran(&self) -> Vec<String> {
         self.exec.calls().iter().map(line_of).collect()
     }
 
-    fn calls_with(&self, args: &[&str]) -> Vec<CommandSpec> {
+    pub(super) fn calls_with(&self, args: &[&str]) -> Vec<CommandSpec> {
         self.exec
             .calls()
             .into_iter()
@@ -222,7 +222,7 @@ impl Lab {
             .collect()
     }
 
-    fn drain(&mut self) -> Vec<Event> {
+    pub(super) fn drain(&mut self) -> Vec<Event> {
         let mut seen = Vec::new();
         while let Ok((_, event)) = self.events.try_recv() {
             seen.push(event);
@@ -231,23 +231,23 @@ impl Lab {
     }
 }
 
-fn args_of(call: &CommandSpec) -> Vec<String> {
+pub(super) fn args_of(call: &CommandSpec) -> Vec<String> {
     call.args
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
 }
 
-fn line_of(call: &CommandSpec) -> String {
+pub(super) fn line_of(call: &CommandSpec) -> String {
     format!("{} {}", call.program.display(), args_of(call).join(" "))
 }
 
-fn value_after(args: &[String], flag: &str) -> String {
+pub(super) fn value_after(args: &[String], flag: &str) -> String {
     let at = args.iter().position(|a| a == flag).expect(flag);
     args[at + 1].clone()
 }
 
-fn refused(out: Outcome) -> String {
+pub(super) fn refused(out: Outcome) -> String {
     match out {
         Outcome::Err(e) => {
             assert_eq!(e.code, ErrorCode::InvalidState, "{}", e.message);
@@ -257,11 +257,16 @@ fn refused(out: Outcome) -> String {
     }
 }
 
-fn idle(shared: &Shared, n: u64) -> bool {
+pub(super) fn idle(shared: &Shared, n: u64) -> bool {
     shared.tests.with(&pr(n), |entry| entry.activity.is_none())
 }
 
-async fn until(lab: &Lab, n: u64, what: &str, done: impl Fn(&TestsView) -> bool) -> TestsView {
+pub(super) async fn until(
+    lab: &Lab,
+    n: u64,
+    what: &str,
+    done: impl Fn(&TestsView) -> bool,
+) -> TestsView {
     let give_up = Instant::now() + clusia_core::testkit::HANG_BOUND;
     loop {
         let view = env::view(&lab.shared, &pr(n)).await;
@@ -273,11 +278,11 @@ async fn until(lab: &Lab, n: u64, what: &str, done: impl Fn(&TestsView) -> bool)
     }
 }
 
-async fn settled(lab: &Lab, n: u64) -> TestsView {
+pub(super) async fn settled(lab: &Lab, n: u64) -> TestsView {
     until(lab, n, "the activity ends", |_| idle(&lab.shared, n)).await
 }
 
-async fn generated(lab: &Lab, n: u64) -> TestsView {
+pub(super) async fn generated(lab: &Lab, n: u64) -> TestsView {
     assert!(matches!(
         generate(&lab.shared, &pr(n)).await,
         Outcome::Ok(Reply::Ack)
@@ -285,7 +290,7 @@ async fn generated(lab: &Lab, n: u64) -> TestsView {
     settled(lab, n).await
 }
 
-async fn ready(lab: &Lab, n: u64) -> TestsView {
+pub(super) async fn ready(lab: &Lab, n: u64) -> TestsView {
     let view = generated(lab, n).await;
     assert_eq!(view.phase, TestsPhase::NeedsSetup, "{view:#?}");
     assert!(matches!(
@@ -297,14 +302,14 @@ async fn ready(lab: &Lab, n: u64) -> TestsView {
     view
 }
 
-async fn started(lab: &Lab, n: u64, scope: TestScope) -> String {
+pub(super) async fn started(lab: &Lab, n: u64, scope: TestScope) -> String {
     match run(&lab.shared, &pr(n), scope).await {
         Outcome::Ok(Reply::TestRunStarted { run }) => run,
         other => panic!("{other:?}"),
     }
 }
 
-async fn finished(lab: &Lab, n: u64, id: &str) -> TestRun {
+pub(super) async fn finished(lab: &Lab, n: u64, id: &str) -> TestRun {
     let view = until(lab, n, "the run is stored", |v| {
         idle(&lab.shared, n) && v.runs.first().is_some_and(|r| r.id == id)
     })
@@ -313,7 +318,7 @@ async fn finished(lab: &Lab, n: u64, id: &str) -> TestRun {
 }
 
 /// The recipe's image already exists on the machine.
-fn built(exec: &FakeExec) {
+pub(super) fn built(exec: &FakeExec) {
     exec.on("docker", &["image", "inspect"], FakeReply::ok("sha256:1\n"));
 }
 
@@ -398,7 +403,7 @@ async fn nothing_runs_before_approval_not_even_list() {
 }
 
 /// `ready` for a review already generated.
-async fn ready_after(lab: &Lab, n: u64) {
+pub(super) async fn ready_after(lab: &Lab, n: u64) {
     assert!(matches!(
         approve(lab, n, Approve::All).await,
         Outcome::Ok(Reply::Ack)
@@ -833,6 +838,7 @@ async fn the_sweep_removes_orphan_containers() {
             stop: StopFlag::new(),
             turn: Stop::new(),
             container: Some("clusia-run-acme-widgets-1a2b3c-7-1".into()),
+            functions: None,
         });
     });
     // A record with no review is old enough to go.

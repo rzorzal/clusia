@@ -494,6 +494,7 @@ mod tests {
 
     fn recipe(image: ImageSource, setup: Vec<SetupStep>) -> Recipe {
         Recipe {
+            functions: None,
             runner: RunnerChoice::Auto,
             image: Some(image),
             setup,

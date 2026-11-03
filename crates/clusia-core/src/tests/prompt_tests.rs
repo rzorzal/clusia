@@ -42,6 +42,7 @@ fn ctx(runner: RunnerKind) -> RecipePromptContext {
         env: env(runner),
         current: None,
         cases: false,
+        functions: Vec::new(),
     }
 }
 

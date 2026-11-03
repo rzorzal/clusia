@@ -12,6 +12,11 @@ use clusia_core::diagram::{
     Group, GroupKind, History, LineStyle, Message, Node, PlanEntry, Row, RowKey, Shape,
     VersionPhase,
 };
+use clusia_core::functions::{
+    CaseOrigin, CaseRef, CaseResult, CaseScope, CaseStatus, CaseView, DriverCode, Expect,
+    FunctionChange, FunctionLang, FunctionView, FunctionsActivity, FunctionsView, Param, ParamKind,
+    StateCheck, Support, function_hash, function_slug, view_hash,
+};
 use clusia_core::hunks::HunkRef;
 use clusia_core::keywords::{
     AddedLines, Axis, Family, Hit, KEYWORDS_KEY, KEYWORDS_TITLE, KeywordMap, KeywordPlacement,
@@ -746,6 +751,7 @@ fn demo_tests_recipe(by_hand: bool, services: &[&str]) -> RecipeSummary {
             ("API_KEY".to_string(), "fake_k3y_9a1".to_string()),
         ]
         .into(),
+        functions: BTreeMap::new(),
         services: services.iter().map(|s| s.to_string()).collect(),
         problems: Vec::new(),
     }
@@ -907,7 +913,7 @@ fn demo_setup_steps(state: StepState, approved: bool) -> Vec<PlanStep> {
 pub fn demo_tests(now: i64, state: DemoTests) -> TestsView {
     let mut view = TestsView::new(HEAD_SHA);
     match state {
-        DemoTests::Empty => {}
+        DemoTests::Empty => view.env = Some(demo_tests_env(now)),
         DemoTests::Generating => {
             view.phase = TestsPhase::Generating {
                 activity: Some(ACTIVITY_WRITING.into()),
@@ -1014,6 +1020,394 @@ pub fn demo_live_tail() -> String {
     (9..=12)
         .map(|i| format!("test store::cases::case_{i:02} ... ok\n"))
         .collect()
+}
+
+/// The states of the Run Function tests sub-tab the scenes need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemoFunctions {
+    /// The mockup's data: `TokenStore::refresh` with a failed case.
+    Mockup,
+    /// A run of every case, six of fourteen done.
+    Running,
+    /// `Config::token_path` has cases written for another signature.
+    Stale,
+    /// The mockup's data, for the scene that opens the driver.
+    Driver,
+}
+
+fn demo_param(name: &str, label: &str, kind: ParamKind) -> Param {
+    Param {
+        name: name.into(),
+        label: label.into(),
+        kind,
+    }
+}
+
+/// One case of a demo function. The case's hash and its result's are `<slug>:<id>`, and a
+/// result belongs to the view's head, so a result is current.
+fn demo_case(
+    slug: &str,
+    id: &str,
+    name: &str,
+    values: &[(&str, &str)],
+    expect: Expect,
+    result: Option<(CaseStatus, u64)>,
+    now: i64,
+) -> CaseView {
+    let hash = format!("{slug}:{id}");
+    let result = result.map(|(status, took_ms)| CaseResult {
+        case: id.into(),
+        head: HEAD_SHA.into(),
+        hash: hash.clone(),
+        status,
+        returned: Some(expect.returned.clone().unwrap_or_else(|| "Ok(())".into())),
+        returned_expected: expect.returned.clone(),
+        error: None,
+        state: expect
+            .state
+            .iter()
+            .map(|(name, value)| StateCheck {
+                name: name.clone(),
+                got: Some(value.clone()),
+                expected: Some(value.clone()),
+            })
+            .collect(),
+        output: String::new(),
+        took_ms,
+        runner: RunnerKind::Container,
+        exit_code: Some(if status == CaseStatus::Passed { 0 } else { 1 }),
+        message: None,
+        at: now,
+    });
+    CaseView {
+        id: id.into(),
+        name: name.into(),
+        origin: CaseOrigin::Agent,
+        edited: false,
+        values: values
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        expect,
+        hash,
+        result,
+    }
+}
+
+/// What a case expects: the text it returns and the state it leaves.
+fn demo_expect(returned: &str, state: &[(&str, &str)]) -> Expect {
+    Expect {
+        returned: Some(returned.into()),
+        state: state
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    }
+}
+
+struct DemoFunctionSpec<'a> {
+    file: &'a str,
+    qualified: &'a str,
+    change: FunctionChange,
+    start_line: u32,
+    diff_lines: Option<(u32, u32)>,
+    signature: &'a str,
+    state_label: Option<&'a str>,
+    params: Vec<Param>,
+}
+
+/// A demo function with its cases; the hash is set by `demo_finish`.
+fn demo_fn_view(spec: DemoFunctionSpec, cases: impl FnOnce(&str) -> Vec<CaseView>) -> FunctionView {
+    let slug = function_slug(spec.file, spec.qualified);
+    let name = spec
+        .qualified
+        .rsplit("::")
+        .next()
+        .unwrap_or(spec.qualified)
+        .to_string();
+    let cases = cases(&slug);
+    FunctionView {
+        driver: Some(format!(".clusia/functions/{slug}/driver.rs")),
+        slug,
+        qualified: spec.qualified.into(),
+        name,
+        file: spec.file.into(),
+        lang: Some(FunctionLang::Rust),
+        change: spec.change,
+        signature: spec.signature.into(),
+        start_line: spec.start_line,
+        diff_lines: spec.diff_lines,
+        params: spec.params,
+        state_label: spec.state_label.map(Into::into),
+        support: Support::Ready,
+        cases,
+        hash: String::new(),
+    }
+}
+
+/// Recomputes every hash of a view after its state changed.
+fn demo_finish(mut view: FunctionsView) -> FunctionsView {
+    for f in &mut view.functions {
+        let cases: Vec<(String, String)> = f
+            .cases
+            .iter()
+            .map(|c| (c.id.clone(), c.hash.clone()))
+            .collect();
+        f.hash = function_hash(&f.slug, &f.signature, &f.params, &f.support, &cases);
+    }
+    view.hash = view_hash(&view.functions);
+    view
+}
+
+/// What the daemon would answer `GetFunctions` with for the demo review in `state`; `now` is the
+/// clock the results' times are counted from.
+pub fn demo_functions(now: i64, state: DemoFunctions) -> FunctionsView {
+    use CaseStatus::Passed;
+    let refresh = demo_fn_view(
+        DemoFunctionSpec {
+            file: "store/refresh.rs",
+            qualified: "TokenStore::refresh",
+            change: FunctionChange::Changed,
+            start_line: 40,
+            diff_lines: Some((44, 52)),
+            signature: "pub async fn refresh(&self, now: Instant) -> Result<Token, RefreshError>",
+            state_label: Some("Store"),
+            params: vec![
+                demo_param("stored_token", "stored token", ParamKind::Text),
+                demo_param("now", "now", ParamKind::Text),
+                demo_param("endpoint_status", "endpoint status", ParamKind::Int),
+                demo_param("endpoint_latency", "endpoint latency", ParamKind::Text),
+                demo_param("endpoint_body", "endpoint body", ParamKind::Json),
+            ],
+        },
+        |slug| {
+            let case = |id, name, values: &[(&str, &str)], expect, took| {
+                demo_case(slug, id, name, values, expect, Some((Passed, took)), now)
+            };
+            let mut a1 = case(
+                "a1",
+                "Endpoint fails, old token kept",
+                &[
+                    ("stored_token", "\"old\", expires +10 s"),
+                    ("now", "+15 s"),
+                    ("endpoint_status", "500"),
+                    ("endpoint_latency", "200 ms"),
+                    ("endpoint_body", r#"{"error": "server_error"}"#),
+                ],
+                demo_expect("Err(RefreshError::Http(500))", &[("token", "\"old\"")]),
+                210,
+            );
+            // The mockup shows the reviewer's change to this agent case, and its Reset.
+            a1.edited = true;
+            if let Some(r) = a1.result.as_mut() {
+                r.status = CaseStatus::Failed;
+                r.state = vec![StateCheck {
+                    name: "token".into(),
+                    got: Some("\"\"".into()),
+                    expected: Some("\"old\"".into()),
+                }];
+                r.output = "WARN refresh failed: 500\nstore cleared before retry".into();
+            }
+            vec![
+                a1,
+                case(
+                    "a2",
+                    "Valid token, no exchange",
+                    &[
+                        ("stored_token", "\"fresh\", expires +50 s"),
+                        ("now", "+15 s"),
+                        ("endpoint_status", "200"),
+                        ("endpoint_latency", "20 ms"),
+                        ("endpoint_body", r#"{"token": "new"}"#),
+                    ],
+                    demo_expect("Ok(Token(\"fresh\"))", &[("token", "\"fresh\"")]),
+                    10,
+                ),
+                case(
+                    "a3",
+                    "Expired token, one exchange",
+                    &[
+                        ("stored_token", "\"stale\", expires -5 s"),
+                        ("now", "+15 s"),
+                        ("endpoint_status", "200"),
+                        ("endpoint_latency", "120 ms"),
+                        ("endpoint_body", r#"{"token": "new"}"#),
+                    ],
+                    demo_expect("Ok(Token(\"new\"))", &[("token", "\"new\"")]),
+                    320,
+                ),
+                case(
+                    "a4",
+                    "Two callers at once share one exchange",
+                    &[
+                        ("stored_token", "\"stale\", expires -5 s"),
+                        ("now", "+15 s"),
+                        ("endpoint_status", "200"),
+                        ("endpoint_latency", "900 ms"),
+                        ("endpoint_body", r#"{"token": "new"}"#),
+                    ],
+                    demo_expect("Ok(Token(\"new\"))", &[("exchanges", "1")]),
+                    1840,
+                ),
+            ]
+        },
+    );
+    let not_run = |slug: &str, names: &[&str], values: &[(&str, &str)]| -> Vec<CaseView> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                demo_case(
+                    slug,
+                    &format!("a{}", i + 1),
+                    name,
+                    values,
+                    Expect::default(),
+                    None,
+                    now,
+                )
+            })
+            .collect()
+    };
+    let exchange = demo_fn_view(
+        DemoFunctionSpec {
+            file: "store/refresh.rs",
+            qualified: "TokenStore::exchange",
+            change: FunctionChange::New,
+            start_line: 88,
+            diff_lines: Some((88, 112)),
+            signature: "async fn exchange(&self, refresh_token: &str) -> Result<Token, RefreshError>",
+            state_label: Some("Store"),
+            params: vec![
+                demo_param("refresh_token", "refresh token", ParamKind::Text),
+                demo_param("endpoint_status", "endpoint status", ParamKind::Int),
+            ],
+        },
+        |slug| {
+            not_run(
+                slug,
+                &["Accepted token", "Rejected token", "Endpoint unreachable"],
+                &[("refresh_token", "\"r-1\""), ("endpoint_status", "200")],
+            )
+        },
+    );
+    let backoff = demo_fn_view(
+        DemoFunctionSpec {
+            file: "http/retry.rs",
+            qualified: "backoff_delay",
+            change: FunctionChange::Signature,
+            start_line: 12,
+            diff_lines: Some((12, 20)),
+            signature: "pub fn backoff_delay(attempt: u32, base_ms: u64) -> Duration",
+            state_label: None,
+            params: vec![
+                demo_param("attempt", "attempt", ParamKind::Int),
+                demo_param("base_ms", "base ms", ParamKind::Int),
+            ],
+        },
+        |slug| {
+            let rows: [(&str, &str, u64); 5] = [
+                ("First attempt", "0", 3),
+                ("Second attempt", "1", 4),
+                ("Doubles each time", "2", 2),
+                ("Capped at the maximum", "10", 5),
+                ("Very large attempt", "64", 6),
+            ];
+            rows.iter()
+                .enumerate()
+                .map(|(i, (name, attempt, took))| {
+                    demo_case(
+                        slug,
+                        &format!("a{}", i + 1),
+                        name,
+                        &[("attempt", attempt), ("base_ms", "100")],
+                        Expect::default(),
+                        Some((Passed, *took)),
+                        now,
+                    )
+                })
+                .collect()
+        },
+    );
+    let token_path = demo_fn_view(
+        DemoFunctionSpec {
+            file: "config.rs",
+            qualified: "Config::token_path",
+            change: FunctionChange::Changed,
+            start_line: 30,
+            diff_lines: Some((31, 36)),
+            signature: "pub fn token_path(&self) -> PathBuf",
+            state_label: None,
+            params: vec![demo_param("home", "home folder", ParamKind::Text)],
+        },
+        |slug| {
+            not_run(
+                slug,
+                &["Home folder is set", "Home folder is empty"],
+                &[("home", "/home/mona")],
+            )
+        },
+    );
+    let mut view = FunctionsView::new(HEAD_SHA);
+    view.functions = vec![refresh, exchange, backoff, token_path];
+    view.unsupported = vec!["ui/badge.swift".into()];
+    match state {
+        DemoFunctions::Mockup | DemoFunctions::Driver => {}
+        DemoFunctions::Running => {
+            let current = CaseRef {
+                function: view.functions[1].slug.clone(),
+                case: "a1".into(),
+            };
+            view.activity = Some(FunctionsActivity::Running {
+                run: "run-demo".into(),
+                scope: CaseScope::All,
+                total: 14,
+                done: 6,
+                current: Some(current),
+            });
+        }
+        DemoFunctions::Stale => {
+            view.functions[3].support = Support::Stale {
+                reason: "The signature changed since these cases were written".into(),
+            };
+        }
+    }
+    demo_finish(view)
+}
+
+/// The driver the demo shows for `TokenStore::refresh`.
+pub fn demo_driver() -> DriverCode {
+    let slug = function_slug("store/refresh.rs", "TokenStore::refresh");
+    DriverCode {
+        path: format!(".clusia/functions/{slug}/driver.rs"),
+        function: slug,
+        hash: "9f2c4e6a8b0d1f3a5c7e9b1d3f5a7c9e0b2d4f6a8c0e1b3d5f7a9c1e3b5d7f90".into(),
+        text: r#"use rzorzal_auth::store::TokenStore;
+use std::time::{Duration, Instant};
+
+fn arg(name: &str) -> String {
+    std::env::var(format!("CLUSIA_ARG_{}", name.to_uppercase())).unwrap_or_default()
+}
+
+fn line(text: &str) {
+    println!("{} {}", std::env::var("CLUSIA_MARK").unwrap_or_default(), text);
+}
+
+#[test]
+fn clusia_case() {
+    let store = TokenStore::with_token(&arg("stored_token"));
+    let status: u16 = arg("endpoint_status").parse().unwrap_or(200);
+    store.serve_endpoint(status, &arg("endpoint_body"));
+    let started = Instant::now();
+    let outcome = futures::executor::block_on(store.refresh(Instant::now() + Duration::from_secs(15)));
+    line(&format!("returned {outcome:?}"));
+    line(&format!("state token {:?}", store.token()));
+    line(&format!("took {}", started.elapsed().as_millis()));
+    line("done");
+}
+"#
+        .into(),
+    }
 }
 
 /// A good harness test: Claude Code answered in 1.8 s.
@@ -3573,6 +3967,142 @@ pub fn demo_function_code(function: &str) -> DiagramCode {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_functions_mockup_is_the_mockups_data() {
+        let view = demo_functions(1_790_000_000, DemoFunctions::Mockup);
+        let names: Vec<&str> = view
+            .functions
+            .iter()
+            .map(|f| f.qualified.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "TokenStore::refresh",
+                "TokenStore::exchange",
+                "backoff_delay",
+                "Config::token_path"
+            ]
+        );
+        assert_eq!(view.unsupported, ["ui/badge.swift"]);
+        let counts: Vec<usize> = view.functions.iter().map(|f| f.cases.len()).collect();
+        assert_eq!(counts, [4, 3, 5, 2]);
+        let refresh = &view.functions[0];
+        assert_eq!(
+            refresh.signature,
+            "pub async fn refresh(&self, now: Instant) -> Result<Token, RefreshError>"
+        );
+        assert_eq!(refresh.state_label.as_deref(), Some("Store"));
+        assert_eq!(
+            refresh
+                .params
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "stored_token",
+                "now",
+                "endpoint_status",
+                "endpoint_latency",
+                "endpoint_body"
+            ]
+        );
+        let a1 = &refresh.cases[0];
+        assert_eq!(a1.name, "Endpoint fails, old token kept");
+        assert_eq!(a1.values["endpoint_status"], "500");
+        assert_eq!(a1.values["endpoint_body"], r#"{"error": "server_error"}"#);
+        let r = a1.result.as_ref().unwrap();
+        assert_eq!(
+            (r.status, r.took_ms),
+            (clusia_core::functions::CaseStatus::Failed, 210)
+        );
+        assert_eq!(r.returned.as_deref(), Some("Err(RefreshError::Http(500))"));
+        assert_eq!(
+            (
+                r.state[0].name.as_str(),
+                r.state[0].got.as_deref(),
+                r.state[0].expected.as_deref()
+            ),
+            ("token", Some("\"\""), Some("\"old\""))
+        );
+        assert_eq!(
+            r.output,
+            "WARN refresh failed: 500\nstore cleared before retry"
+        );
+        let times: Vec<u64> = refresh.cases[1..]
+            .iter()
+            .map(|c| c.result.as_ref().unwrap().took_ms)
+            .collect();
+        assert_eq!(times, [10, 320, 1840]);
+        assert!(view.functions[1].cases.iter().all(|c| c.result.is_none()));
+        assert!(view.functions[2].cases.iter().all(|c| {
+            c.result
+                .as_ref()
+                .is_some_and(|r| r.status == clusia_core::functions::CaseStatus::Passed)
+        }));
+        assert!(
+            view.functions
+                .iter()
+                .all(|f| f.support == clusia_core::functions::Support::Ready)
+        );
+        assert!(
+            view.functions
+                .iter()
+                .all(|f| clusia_core::functions::valid_slug(&f.slug))
+        );
+        assert!(
+            view.activity.is_none()
+                && !view.reading
+                && view.note.is_none()
+                && view.failed.is_none()
+        );
+        // Every result is current: the case's hash and the view's head.
+        for f in &view.functions {
+            for c in &f.cases {
+                if let Some(r) = &c.result {
+                    assert_eq!(
+                        (r.hash.as_str(), r.head.as_str()),
+                        (c.hash.as_str(), view.head.as_str())
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            view.hash,
+            clusia_core::functions::view_hash(&view.functions)
+        );
+    }
+
+    #[test]
+    fn the_other_functions_states_differ_where_the_scenes_need_them() {
+        let running = demo_functions(1_790_000_000, DemoFunctions::Running);
+        assert!(matches!(
+            running.activity,
+            Some(clusia_core::functions::FunctionsActivity::Running { total: 14, .. })
+        ));
+        let stale = demo_functions(1_790_000_000, DemoFunctions::Stale);
+        assert!(matches!(
+            stale.functions[3].support,
+            clusia_core::functions::Support::Stale { .. }
+        ));
+        assert_eq!(stale.functions[3].qualified, "Config::token_path");
+        let driver = demo_functions(1_790_000_000, DemoFunctions::Driver);
+        assert!(
+            driver.functions[0]
+                .driver
+                .as_deref()
+                .is_some_and(|p| p.starts_with(".clusia/functions/"))
+        );
+        let code = demo_driver();
+        assert_eq!(code.function, driver.functions[0].slug);
+        assert_eq!(
+            Some(code.path.as_str()),
+            driver.functions[0].driver.as_deref()
+        );
+        assert!(code.text.contains("fn clusia_case()"));
+        assert!(code.text.len() <= clusia_core::functions::DRIVER_MAX_BYTES);
+    }
     use super::*;
     use crate::testing::NOW;
     use clusia_core::checks::anchor_in_diff;

@@ -9,6 +9,7 @@ pub mod diagram;
 pub mod diffmap;
 pub mod draft;
 pub mod editor;
+pub mod functions;
 pub mod hidden;
 pub mod hunks;
 pub mod keywords;

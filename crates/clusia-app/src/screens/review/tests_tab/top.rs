@@ -389,13 +389,18 @@ fn run_card(i: &Inputs, state: &TabState) -> RunCard {
             let view = i.view;
             let near = view.near.len();
             let sending = pending == Some(TestsAskKind::Run);
-            let off = i.read_only.is_some() || sending;
+            let running_cases = i.model.functions_busy;
+            let off = i.read_only.is_some() || sending || running_cases;
             let near_reason = match view.listed {
                 None => Some("List the tests first to find the ones near this change"),
                 Some(_) if near == 0 => Some("No tests near this change were found"),
                 Some(_) => None,
             };
-            let mut notes: Vec<String> = i.read_only.map(str::to_string).into_iter().collect();
+            let mut notes: Vec<String> = running_cases
+                .then(|| "Function cases are running".to_string())
+                .into_iter()
+                .collect();
+            notes.extend(i.read_only.map(str::to_string));
             notes.extend(near_reason.map(str::to_string));
             RunCard::Ready {
                 near: match near {
