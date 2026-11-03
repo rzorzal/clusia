@@ -14,10 +14,11 @@ Same regions, order, copy, states, pills, the green selected row and the orange 
 
 - The Swift file's row reads `badge.swift` over `ui/badge.swift · not supported yet`; the mockup names a function (`render_badge`). Clúsia does not read Swift functions, so the row is the file.
 - The signature wraps onto a second line (`RefreshError>`); the mockup's fits on one. The bundled font is wider than the mockup's system font, and the signature is shown in full rather than cut.
-- The fields (a pair wraps its field under its label, and a row wraps its second pair, when the column is narrower than they are): two label-and-field pairs per row and a `json` value on its own row, as the mockup. The mockup's *stored token* field wraps `"old", expires +10 s` inside the field; the app keeps it on one line and clips it (`+10`), because a field never grows its row.
-- The Output of the failed case shows the mockup's two lines; a real `cargo test` prints more (compiler lines), which the Output box scrolls.
+- The fields (a pair wraps its field under its label, and a row wraps its second pair, when the column is narrower than they are): two label-and-field pairs per row and a `json` value on its own row, as the mockup. The mockup's *stored token* field wraps `"old", expires +10 s` inside the field; the app keeps it on one line and shows its start (`"old", expires +10`), because a field never grows its row. Ruled: a single-line field shows its start.
+- The field labels are 112 px wide, not 120: at 1280 px the cases column holds two label-and-field pairs on a row only with the narrower label, and the bundled font is wider than the mockup's.
+- The Output of the failed case shows the mockup's two lines; a real `cargo test` prints more (compiler lines), and then the whole Result card scrolls, not the Output block alone.
 - The Returned and state blocks take their fills from the theme's `OrangeSoft`/`Chrome` tokens, not the mockup's hex values (in dark the failed block is a stronger orange).
-- **Show driver code** and **Comment on the function** are ghost buttons, not underlined links, and **Ask Claude Code for more cases** is one too. The `+` of **+ Add a case** is an ASCII plus.
+- Ruled differences: **Show driver code**, **Comment on the function** and **Ask Claude Code for more cases** are ghost buttons where the mockup has underlined links, and the glyph of **+ Add a case** is an ASCII `+` where the mockup has a full-width `＋`.
 - The mockup shows "Claude Code · session active · Draft saved · 4 items" in the footer; the app's footer is the shared review footer ("Claude Code · ready · Draft saved · 3 items · 3 waiting for your OK"). It is the same on every review screen.
 - The header shows the pull request's branch, change counts and checks (the shared review header); the mockup abbreviates it. The Tests tab carries a badge (`1`, the failed case count) that the mockup lacks.
 - The sub-tab bar's chips and the **Docker · Colima · ready** text sit slightly lower than the mockup because of the header's second row.
@@ -27,8 +28,7 @@ Same regions, order, copy, states, pills, the green selected row and the orange 
 ![light](assets/sp4-m1c-tests-empty-light.png)
 ![dark](assets/sp4-m1c-tests-empty-dark.png)
 
-- Step 1 reads "Finds a container engine and what is already built for this repository." The mockup says "Finds Docker (here: Colima, running) …": the empty scene's engine probe has not answered when the card draws, so it names no engine.
-- Step 2 reads "cases for the 4 changed functions"; the mockup says 5. The functions view is not loaded in this scene, so the count is the Tests view's own, and it leaves the unsupported Swift file out.
+- Steps 1 and 2 read as the mockup: "Finds Docker (here: Colima, running) …" and "cases for the 5 changed functions" (the number over the Functions view's list, the Swift file included).
 - **Generate tests** is a smaller button than the mockup's.
 
 ## tests-functions-running (no mockup)
@@ -41,7 +41,7 @@ The Mockup's data with a run at 6 of 14 and `TokenStore::exchange` current: `run
 
 ![light](assets/sp4-m1c-tests-functions-stale-light.png)
 
-`Config::token_path` is selected: the signature, the note "The signature changed since these cases were written" and **Write new cases**, no cases and no **Run this case**. The list's `Run all cases · 12` leaves this function's cases out. The Result column still says "Run this case to see what it returns." though no case can run here; it only fills the column.
+`Config::token_path` is selected: the signature, the note "The signature changed since these cases were written" and **Write new cases**, no cases and no **Run this case**. The list's `Run all cases · 12` leaves this function's cases out. The Result column says "No case of this function can run until its cases match it." in place of the run hint.
 
 ## tests-functions-driver (no mockup)
 

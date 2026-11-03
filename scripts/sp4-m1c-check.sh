@@ -196,7 +196,7 @@ ask "Every step you approved shows as done, and nothing you did not approve ran"
 say "${STEPS[3]}"
 echo "  Click the Run Function tests sub-tab."
 clusia tests "$PR" --functions
-check "the daemon lists the changed functions" view_has '"functions":\['
+check "the daemon lists the changed functions" view_has '"functions":\[{'
 ask "The window lists the same functions, and no case has a result yet"
 if ! has_supported; then
   echo "No changed function of this pull request is in a language Clúsia runs; skipping the case steps."
@@ -256,8 +256,8 @@ if [ "$SKIP_CASES" = 0 ]; then
   go_on "run clusia tests $PR --run-cases (every case of the pull request, in the container or sandbox you approved)"
   clusia tests "$PR" --run-cases
   code=$?
-  echo "  clusia exited $code (0 when every case passed, 1 when any failed or erred)."
-  ask "That exit code matches the window (0 all passed, 1 any failed or erred)"
+  echo "  clusia exited $code (0 every case passed, 1 any failed or erred, 124 timed out, 130 stopped)."
+  ask "That exit code matches the window (0 passed, 1 failed or erred, 124 timed out, 130 stopped)"
   check "the daemon holds results" view_has '"status":"'
 fi
 ask "The cases listed above are the ones the window shows"
