@@ -1635,7 +1635,7 @@ mod tests {
                 "Check the environment",
                 "Claude Code writes the recipe and the cases",
                 "Finds Docker (here: Colima, running) and what is already built for this repository.",
-                "How to set up and run the tests, and cases for the 5 changed functions. It only reads the code.",
+                "How to set up and run the tests, and cases for the 4 changed functions. It only reads the code.",
                 "You approve the setup",
                 "Generate tests",
                 "Uses one Claude Code turn on your account",

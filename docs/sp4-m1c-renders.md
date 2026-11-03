@@ -28,7 +28,8 @@ Same regions, order, copy, states, pills, the green selected row and the orange 
 ![light](assets/sp4-m1c-tests-empty-light.png)
 ![dark](assets/sp4-m1c-tests-empty-dark.png)
 
-- Steps 1 and 2 read as the mockup: "Finds Docker (here: Colima, running) …" and "cases for the 5 changed functions" (the number over the Functions view's list, the Swift file included).
+- Step 1 reads as the mockup: "Finds Docker (here: Colima, running) …".
+- Step 2 says "cases for the 4 changed functions"; the mockup says 5. Ruled: the mockup counts a Swift file Clúsia does not read, and the count is of the functions with a language pack, the ones Generate tests writes cases for.
 - **Generate tests** is a smaller button than the mockup's.
 
 ## tests-functions-running (no mockup)

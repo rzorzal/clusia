@@ -65,19 +65,22 @@ pub(super) enum Shape {
     },
 }
 
-/// How many changed functions step 2 names: the number over the functions list (the changed
-/// functions and the files with none Clúsia can read) in a loaded view; `None` when none is
-/// known.
+/// How many changed functions the cases of step 2 are for: the ones with a language pack in a
+/// loaded view; `None` when none is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CasesCopy(pub Option<usize>);
 
-/// The number of changed functions, from the loaded view. A view still being read has no
-/// functions yet, so it counts none.
+/// The number of functions the Generate click writes cases for, from the loaded view. Files no
+/// pack reads are not functions. A view still being read has no functions yet, so it counts
+/// none.
 pub(super) fn cases_copy(view: Option<&FunctionsView>) -> CasesCopy {
-    CasesCopy(
-        view.filter(|v| !v.reading)
-            .map(|v| (v.functions.len() + v.unsupported.len()).min(FUNCTIONS_MAX)),
-    )
+    CasesCopy(view.filter(|v| !v.reading).map(|v| {
+        v.functions
+            .iter()
+            .filter(|f| f.lang.is_some())
+            .count()
+            .min(FUNCTIONS_MAX)
+    }))
 }
 
 /// The line under step 2's title.
@@ -1295,19 +1298,32 @@ mod tests {
     }
 
     #[test]
-    fn the_count_is_the_one_over_the_function_list_and_a_view_still_reading_has_none() {
+    fn the_count_ignores_functions_without_a_pack_and_a_view_still_reading() {
         let mut view =
             crate::fixture::demo_functions(testing::NOW, crate::fixture::DemoFunctions::Mockup);
         assert_eq!(
             cases_copy(Some(&view)),
-            CasesCopy(Some(5)),
-            "four functions and the Swift file, as the list's heading counts them"
+            CasesCopy(Some(4)),
+            "the Swift file has no function"
         );
-        view.unsupported.clear();
-        assert_eq!(cases_copy(Some(&view)), CasesCopy(Some(4)));
+        view.functions[3].lang = None;
+        assert_eq!(
+            cases_copy(Some(&view)),
+            CasesCopy(Some(3)),
+            "one has no pack"
+        );
         view.reading = true;
         assert_eq!(cases_copy(Some(&view)), CasesCopy(None));
         assert_eq!(cases_copy(None), CasesCopy(None));
+    }
+
+    #[test]
+    fn files_no_pack_reads_are_not_counted_as_functions() {
+        let mut view =
+            crate::fixture::demo_functions(testing::NOW, crate::fixture::DemoFunctions::Mockup);
+        view.functions.clear();
+        view.unsupported = vec!["README.md".into(), "Cargo.lock".into()];
+        assert_eq!(cases_copy(Some(&view)), CasesCopy(Some(0)));
     }
 
     #[test]
