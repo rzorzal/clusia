@@ -18,7 +18,6 @@ use clusia_testrun::functions::{
     read_report, remove_driver,
 };
 use clusia_testrun::log::Tail;
-use clusia_testrun::names::sha256_hex;
 
 use super::work::{self, RunJob};
 use super::{Doing, cases, env};
@@ -166,9 +165,9 @@ pub(crate) async fn run_cases(
     if let Err(out) = cases::check_seen(&read.view, pr, &scope, &seen) {
         return out;
     }
-    let Some(worktree) = read.worktree.clone() else {
+    if read.worktree.is_none() {
         return reviews::invalid_state(cases::OPEN_FIRST);
-    };
+    }
     let mut chosen = Vec::new();
     for (at, f) in read.view.functions.iter().enumerate() {
         let wanted = match &scope {
@@ -204,10 +203,9 @@ pub(crate) async fn run_cases(
         let Some(lang) = f.lang else {
             return reviews::invalid_state(CASES_CHANGED);
         };
-        let stored_hash = item.stored.as_ref().and_then(|s| s.driver_hash.as_deref());
-        let driver = match cases::read_driver(&worktree, &f.slug, lang) {
-            Ok(Some(text)) if Some(sha256_hex(text.as_bytes()).as_str()) == stored_hash => text,
-            _ => return reviews::invalid_state(CASES_CHANGED),
+        // Read with the view: a missing or changed driver made the function not Ready.
+        let Some(driver) = item.driver.clone() else {
+            return reviews::invalid_state(CASES_CHANGED);
         };
         // The command is the one the approved recipe holds, never the file read again.
         let template = usable

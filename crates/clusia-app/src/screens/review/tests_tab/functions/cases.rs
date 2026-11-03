@@ -317,9 +317,10 @@ pub(super) fn cases_view(
                 None,
             )
         }
+        // Cases with no driver beside them can be written again, with one.
         Support::Unsupported { reason } => Body::Note(
             format!("Clúsia can't run this function yet: {}", printable(reason)),
-            None,
+            (f.driver.is_none() && !f.cases.is_empty()).then(|| ask("Write new cases".to_string())),
         ),
     };
     view
@@ -1558,6 +1559,37 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn cases_with_no_driver_offer_new_cases_and_other_unsupported_ones_do_not() {
+        let mut view = mockup();
+        view.functions[0].support = Support::Unsupported {
+            reason: "Claude Code wrote no driver for this function".into(),
+        };
+        view.functions[0].driver = None;
+        let (mut app, pr) = app_on_first(view);
+        assert!(testing::shows(
+            &mut app,
+            "Clúsia can't run this function yet: Claude Code wrote no driver for this function"
+        ));
+        assert_eq!(testing::count::<RunThisCase>(&mut app), 0);
+        let write = testing::find::<FreshCases>(&mut app, |f| f.pr == pr);
+        testing::activate(&mut app, write);
+        assert!(matches!(
+            testing::recorded(&mut app).as_slice(),
+            [Ask::WriteCases {
+                ask: CasesAsk::Fresh,
+                ..
+            }]
+        ));
+
+        let mut view = mockup();
+        view.functions[0].support = Support::Unsupported {
+            reason: "No Cargo package holds this file".into(),
+        };
+        let (mut app, _pr) = app_on_first(view);
+        assert_eq!(testing::count::<FreshCases>(&mut app), 0);
     }
 
     #[test]

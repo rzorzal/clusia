@@ -924,6 +924,8 @@ impl FunctionBlock {
         }
         if let Some(driver) = &raw.driver {
             driver_problems(driver, &mut problems);
+        } else if !raw.cases.is_empty() && raw.unsupported.is_none() {
+            problems.push("cases need a driver to run them".into());
         }
         if raw.cases.len() > CASES_MAX {
             problems.push(format!(
@@ -1194,6 +1196,7 @@ mod tests {
         let no_expect = json!({
             "function": "f", "file": "a.py",
             "params": [{"name": "n", "label": "n", "kind": "int"}],
+            "driver": "print(1)\n",
             "cases": [{"name": "one", "values": {"n": "1"}}]
         });
         assert_eq!(
@@ -1210,6 +1213,22 @@ mod tests {
         let mut kind = block();
         kind["params"][0]["kind"] = json!("date");
         assert_eq!(problems(kind).len(), 1);
+    }
+
+    #[test]
+    fn cases_without_a_driver_are_refused() {
+        let mut driverless = block();
+        driverless.as_object_mut().unwrap().remove("driver");
+        assert_eq!(
+            problems(driverless.clone()),
+            vec!["cases need a driver to run them"]
+        );
+        driverless["unsupported"] = json!("Not public: a driver can't call it");
+        assert!(FunctionBlock::from_json(&driverless).is_ok());
+        let mut empty = block();
+        empty.as_object_mut().unwrap().remove("driver");
+        empty["cases"] = json!([]);
+        assert!(FunctionBlock::from_json(&empty).is_ok());
     }
 
     #[test]

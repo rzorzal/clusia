@@ -1627,3 +1627,119 @@ async fn a_placed_entry_that_is_not_a_driver_path_is_dropped() {
     );
     assert_eq!(std::fs::read_to_string(&kept).unwrap(), "fn main() {}\n");
 }
+
+/// The recipe turn's answer with the cases of both listed functions.
+fn both_answer() -> Turn {
+    Turn::answer_blocks(
+        "Here is the recipe and the cases.",
+        &[
+            recipe_block(functions_recipe()),
+            function_block(refresh_block(two_cases())),
+            function_block(json!({
+                "function": "backoff_delay",
+                "file": "src/retry.rs",
+                "params": [{"name": "attempt", "label": "attempt", "kind": "int"}],
+                "driver": DRIVER,
+                "cases": [{"name": "First try", "values": {"attempt": "1"},
+                           "expect": {"returned": "100"}}]
+            })),
+        ],
+    )
+}
+
+fn refresh_file(lab: &Lab, name: &str) -> std::path::PathBuf {
+    lab.worktree(7)
+        .join(".clusia/functions")
+        .join(refresh())
+        .join(name)
+}
+
+#[tokio::test]
+async fn a_missing_driver_is_not_runnable_and_all_runs_the_other_functions() {
+    let mut lab = local_ready(vec![both_answer()], driver_output()).await;
+    std::fs::remove_file(refresh_file(&lab, "driver.rs")).unwrap();
+    let agent = crate::sessions::name_for(&lab.shared, &pr(7)).await;
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    let f = of(&view, &refresh());
+    assert_eq!(
+        f.support,
+        Support::Unsupported {
+            reason: format!("{agent} wrote no driver for this function")
+        }
+    );
+    assert_eq!(f.driver, None, "no path to a driver that is not there");
+    assert_eq!(of(&view, &backoff()).support, Support::Ready);
+    let one = CaseScope::Function {
+        function: refresh(),
+    };
+    assert_eq!(
+        refused(run_cases(&lab.shared, &pr(7), one.clone(), seen_for(&view, &one)).await),
+        format!("{agent} wrote no driver for this function")
+    );
+    lab.drain();
+    let run = start(&lab, CaseScope::All).await;
+    let done = results(&mut lab, &run).await;
+    assert_eq!(
+        done.iter().map(|r| r.case.as_str()).collect::<Vec<_>>(),
+        ["a1"]
+    );
+    assert_eq!(case_calls(&lab).len(), 1, "only backoff_delay's case ran");
+    let after = cases::view(&lab.shared, &pr(7)).await;
+    assert!(of(&after, &backoff()).cases[0].result.is_some());
+    assert!(
+        of(&after, &refresh())
+            .cases
+            .iter()
+            .all(|c| c.result.is_none())
+    );
+}
+
+#[tokio::test]
+async fn cases_stored_without_a_driver_hash_are_not_runnable() {
+    let lab = local_ready(vec![generate_answer()], driver_output()).await;
+    let file = refresh_file(&lab, "function.json");
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    stored["driver_hash"] = serde_json::Value::Null;
+    std::fs::write(&file, stored.to_string()).unwrap();
+    let agent = crate::sessions::name_for(&lab.shared, &pr(7)).await;
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    assert_eq!(
+        of(&view, &refresh()).support,
+        Support::Unsupported {
+            reason: format!("{agent} wrote no driver for this function")
+        }
+    );
+    assert_eq!(
+        refused(run_cases(&lab.shared, &pr(7), CaseScope::All, view.hash.clone()).await),
+        clusia_core::functions::NO_CASES,
+        "no Ready function is left"
+    );
+}
+
+#[tokio::test]
+async fn an_edited_driver_makes_the_cases_stale() {
+    let lab = local_ready(vec![generate_answer()], driver_output()).await;
+    std::fs::write(
+        refresh_file(&lab, "driver.rs"),
+        "#[test]\nfn clusia_case() { panic!() }\n",
+    )
+    .unwrap();
+    let view = cases::view(&lab.shared, &pr(7)).await;
+    let f = of(&view, &refresh());
+    assert_eq!(
+        f.support,
+        Support::Stale {
+            reason: "The driver changed since these cases were written".into()
+        }
+    );
+    assert!(f.driver.is_some(), "the changed driver can still be read");
+    let one = CaseScope::Function {
+        function: refresh(),
+    };
+    assert_eq!(
+        refused(run_cases(&lab.shared, &pr(7), one.clone(), seen_for(&view, &one)).await),
+        "The driver changed since these cases were written"
+    );
+    assert!(case_calls(&lab).is_empty());
+}

@@ -173,6 +173,35 @@ pub(super) struct Facts<'a> {
     pub cases: usize,
     pub lang: Option<FunctionLang>,
     pub command: Option<&'a str>,
+    /// The stored driver against the hash its cases were written with.
+    pub driver: DriverFile,
+    /// The agent's name, for the reason a driver is missing.
+    pub agent: &'a str,
+}
+
+/// The driver on disk, held against the stored `driver_hash`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DriverFile {
+    /// Its bytes hash to `driver_hash`; the text is what a run uses.
+    Same(String),
+    /// No file, or no hash to hold it against.
+    Missing,
+    /// A file whose bytes differ, or that cannot be read as the driver.
+    Changed,
+}
+
+impl DriverFile {
+    /// Reads the driver of `stored` once, never following a link.
+    pub(super) fn of(worktree: &Path, slug: &str, stored: &StoredFunction) -> Self {
+        let Some(hash) = stored.driver_hash.as_deref() else {
+            return DriverFile::Missing;
+        };
+        match read_driver(worktree, slug, stored.lang) {
+            Ok(Some(text)) if sha256_hex(text.as_bytes()) == hash => DriverFile::Same(text),
+            Ok(Some(_)) | Err(_) => DriverFile::Changed,
+            Ok(None) => DriverFile::Missing,
+        }
+    }
 }
 
 /// The first reason that applies, in a fixed order.
@@ -204,6 +233,22 @@ pub(super) fn support_of(facts: &Facts<'_>) -> Support {
         return Support::Stale {
             reason: "The signature changed since these cases were written".into(),
         };
+    }
+    // Cases with no driver to run them, or with one that is not what they were written for.
+    if facts.stored.is_some() && facts.cases > 0 {
+        match facts.driver {
+            DriverFile::Same(_) => {}
+            DriverFile::Missing => {
+                return Support::Unsupported {
+                    reason: format!("{} wrote no driver for this function", facts.agent),
+                };
+            }
+            DriverFile::Changed => {
+                return Support::Stale {
+                    reason: "The driver changed since these cases were written".into(),
+                };
+            }
+        }
     }
     if facts.stored.is_none() || facts.cases == 0 {
         return Support::NoCases;
@@ -780,6 +825,9 @@ pub(super) struct Item {
     pub problem: Option<String>,
     /// The recipe's command for its language.
     pub command: Option<String>,
+    /// The driver's text, read once with the view, when it is the one its cases were written
+    /// for.
+    pub driver: Option<String>,
     /// For a Rust function, the folder and name of the Cargo package that holds its file, or
     /// why none does.
     pub package: Option<Result<(String, String), String>>,
@@ -908,6 +956,7 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
         RecipeState::Valid { recipe, .. } => recipe.functions,
         _ => None,
     };
+    let agent = sessions::name_for(shared, pr).await;
     let mut items = Vec::new();
     for l in &listed {
         let f = l.function;
@@ -926,6 +975,9 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
         let cases = effective(stored.function.as_ref(), &stored.edits);
         let package = (lang == Some(FunctionLang::Rust))
             .then(|| clusia_testrun::functions::package_for(&ctx.worktree, &f.path));
+        let driver_file = stored.function.as_ref().map_or(DriverFile::Missing, |s| {
+            DriverFile::of(&ctx.worktree, &l.slug, s)
+        });
         let support = support_of(&Facts {
             stored: stored.function.as_ref(),
             folder_refused: stored.refused,
@@ -935,6 +987,8 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
             cases: cases.len(),
             lang,
             command: command.as_deref(),
+            driver: driver_file.clone(),
+            agent: &agent,
         });
         let driver_hash = stored.function.as_ref().and_then(|s| s.driver_hash.clone());
         let results = record.case_results.get(&l.slug);
@@ -966,10 +1020,11 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
             .map(|c| (c.id.clone(), c.hash.clone()))
             .collect();
         let hash = function_hash(&l.slug, &signature, &params, &support, &hashes);
+        // A missing driver has no path to show.
         let driver = stored
             .function
             .as_ref()
-            .filter(|s| s.driver_hash.is_some())
+            .filter(|_| driver_file != DriverFile::Missing)
             .map(|s| driver_path(&l.slug, s.lang));
         view.functions.push(FunctionView {
             slug: l.slug.clone(),
@@ -1005,6 +1060,10 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
             refused: stored.refused,
             problem: stored.problem,
             command,
+            driver: match driver_file {
+                DriverFile::Same(text) => Some(text),
+                _ => None,
+            },
             package,
         });
     }
@@ -1653,6 +1712,8 @@ mod tests {
                 cases,
                 lang: Some(FunctionLang::Rust),
                 command,
+                driver: DriverFile::Same(String::new()),
+                agent: "Claude Code",
             })
         };
         let mut marked = base.clone();
@@ -1727,10 +1788,74 @@ mod tests {
                 cases: 0,
                 lang: Some(FunctionLang::Rust),
                 command: Some(command),
+                driver: DriverFile::Missing,
+                agent: "Claude Code",
             }),
             Support::Unsupported {
                 reason: "cannot open functions: Permission denied".into()
             }
+        );
+    }
+
+    #[test]
+    fn cases_need_the_driver_they_were_written_for() {
+        let base = stored();
+        let sig = base.signature.clone();
+        let facts = |cases: usize, driver: DriverFile| {
+            support_of(&Facts {
+                stored: Some(&base),
+                folder_refused: false,
+                folder_problem: None,
+                no_package: false,
+                signature: &sig,
+                cases,
+                lang: Some(FunctionLang::Rust),
+                command: Some("cargo test"),
+                driver,
+                agent: "Claude Code",
+            })
+        };
+        assert_eq!(
+            facts(2, DriverFile::Missing),
+            Support::Unsupported {
+                reason: "Claude Code wrote no driver for this function".into()
+            }
+        );
+        assert_eq!(
+            facts(2, DriverFile::Changed),
+            Support::Stale {
+                reason: "The driver changed since these cases were written".into()
+            }
+        );
+        assert_eq!(facts(0, DriverFile::Missing), Support::NoCases);
+        assert_eq!(facts(2, DriverFile::Same("x".into())), Support::Ready);
+    }
+
+    #[test]
+    fn the_driver_file_is_held_against_the_stored_hash() {
+        let wt = tempfile::tempdir().unwrap();
+        let text = "#[test]\nfn clusia_case() {}\n";
+        let mut function = stored();
+        function.driver_hash = Some(sha256_hex(text.as_bytes()));
+        assert_eq!(
+            DriverFile::of(wt.path(), &slug(), &function),
+            DriverFile::Missing
+        );
+        save_function(wt.path(), &slug(), &function, Some(text)).unwrap();
+        assert_eq!(
+            DriverFile::of(wt.path(), &slug(), &function),
+            DriverFile::Same(text.into())
+        );
+        std::fs::write(folder_of(&wt).join("driver.rs"), "fn other() {}\n").unwrap();
+        assert_eq!(
+            DriverFile::of(wt.path(), &slug(), &function),
+            DriverFile::Changed
+        );
+        function.driver_hash = None;
+        assert_eq!(
+            DriverFile::of(wt.path(), &slug(), &function),
+            DriverFile::Missing,
+            "no hash to hold the file against"
         );
     }
 
