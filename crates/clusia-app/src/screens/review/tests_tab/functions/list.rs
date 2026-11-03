@@ -339,7 +339,8 @@ fn draw_row(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, row: &RowView) {
     } else {
         (
             Type {
-                weight: if row.selected { 600 } else { 400 },
+                // At this size JetBrains Mono's 600 is hard to tell from its 400.
+                weight: if row.selected { 700 } else { 400 },
                 ..Type::MONO.ink(Swatch::Fg)
             },
             Type::META,
@@ -535,6 +536,20 @@ mod tests {
         ] {
             assert!(testing::shows(&mut app, line), "missing {line:?}");
         }
+    }
+
+    #[test]
+    fn the_selected_name_is_bold_and_the_others_are_regular() {
+        let (mut app, _pr) = app_with(mockup());
+        let mut q = app.world_mut().query::<(&Text, &TextFont)>();
+        let mut weight = |name: &str| {
+            q.iter(app.world())
+                .find(|(t, _)| t.0 == name)
+                .map(|(_, f)| f.weight.0)
+                .expect(name)
+        };
+        assert_eq!(weight("TokenStore::refresh"), 700);
+        assert_eq!(weight("TokenStore::exchange"), 400);
     }
 
     #[test]

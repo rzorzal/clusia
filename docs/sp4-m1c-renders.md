@@ -22,6 +22,7 @@ Same regions, order, copy, states, pills, the green selected row and the orange 
 - The mockup shows "Claude Code · session active · Draft saved · 4 items" in the footer; the app's footer is the shared review footer ("Claude Code · ready · Draft saved · 3 items · 3 waiting for your OK"). It is the same on every review screen.
 - The header shows the pull request's branch, change counts and checks (the shared review header); the mockup abbreviates it. The Tests tab carries a badge (`1`, the failed case count) that the mockup lacks.
 - The sub-tab bar's chips and the **Docker · Colima · ready** text sit slightly lower than the mockup because of the header's second row.
+- The selected function's name and the signature up to the name are JetBrains Mono at weight 700 (the bundled font's weight axis applies; 600 was hard to tell from 400 at 13 px). In light they still read lighter than the mockup's system mono bold, because the bundled font renders thinner dark-on-light.
 
 ## tests-empty (`Tests-empty.png`, `Dark-Tests-empty.png`)
 
