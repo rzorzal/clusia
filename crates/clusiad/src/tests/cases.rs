@@ -36,6 +36,10 @@ pub(super) const OPEN_FIRST: &str = "Open the review to see its changed function
 pub(super) const FOLDER_REFUSED: &str = "Clúsia's folder for this function is not a plain folder";
 /// How long a request waits for the call index of the head.
 pub(super) const INDEX_WAIT: Duration = Duration::from_secs(15);
+/// Waits for an index that stays in Building before the view stops waiting and says so; a
+/// client asking again starts them over.
+const WAIT_ROUNDS: u32 = 4;
+pub(super) const STILL_READING: &str = "The changed functions are still being read";
 /// The longest signature shown or written into a prompt.
 const SIGNATURE_MAX: usize = 300;
 /// The largest `function.json` or `edits.json` read.
@@ -864,10 +868,14 @@ fn wait_then_tell(shared: &Arc<Shared>, pr: &PrRef, head: String) {
     }
     let (shared, pr) = (shared.clone(), pr.clone());
     tokio::spawn(async move {
-        calls::wait_ready(&shared, &pr, &head, INDEX_WAIT).await;
-        shared
-            .tests
-            .with(&pr, |entry| entry.functions_waiting = false);
+        let wait = shared.tests.index_wait();
+        let ready = calls::wait_ready(&shared, &pr, &head, wait).await.is_some();
+        shared.tests.with(&pr, |entry| {
+            entry.functions_waiting = false;
+            if !ready {
+                entry.functions_rounds += 1;
+            }
+        });
         tell_functions(&shared, &pr).await;
     });
 }
@@ -938,12 +946,20 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
                 }
                 _ => {
                     view.reading = true;
-                    wait_then_tell(shared, pr, head);
+                    // Every wait ends in a told view, so an index stuck in Building would
+                    // otherwise wake the window for as long as it stays there.
+                    let rounds = shared.tests.with(pr, |entry| entry.functions_rounds);
+                    if rounds >= WAIT_ROUNDS {
+                        view.note = Some(STILL_READING.into());
+                    } else {
+                        wait_then_tell(shared, pr, head);
+                    }
                     return Read::empty(view);
                 }
             }
         }
     };
+    shared.tests.with(pr, |entry| entry.functions_rounds = 0);
     let (listed, more) = listed(&built);
     if more > 0 {
         view.note = Some(format!("{more} more changed functions are not listed"));
@@ -1275,6 +1291,7 @@ fn write_failed(message: String) -> Outcome {
 
 /// `GetFunctions`.
 pub(crate) async fn functions(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
+    shared.tests.with(pr, |entry| entry.functions_rounds = 0);
     Outcome::Ok(Reply::ChangedFunctions(Box::new(view(shared, pr).await)))
 }
 

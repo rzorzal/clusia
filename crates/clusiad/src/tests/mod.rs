@@ -16,7 +16,7 @@ mod work;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -125,6 +125,9 @@ pub(super) struct Entry {
     pub cases_failed: Option<String>,
     /// A task waits for the call index to tell the functions view.
     pub functions_waiting: bool,
+    /// Waits for the call index that ended with it still not ready, since it was last ready or
+    /// a client last asked.
+    pub functions_rounds: u32,
 }
 
 /// The tests of every review.
@@ -140,6 +143,8 @@ pub(crate) struct Bench {
     next: AtomicU32,
     /// The mount checks of this session, by (image tag, worktree).
     mounts: Mutex<HashMap<(String, PathBuf), Result<(), String>>>,
+    /// How long one wait for the call index lasts, in milliseconds.
+    index_wait_ms: AtomicU64,
 }
 
 impl Default for Bench {
@@ -152,6 +157,9 @@ impl Default for Bench {
             closing: AtomicBool::new(false),
             next: AtomicU32::new(1),
             mounts: Mutex::new(HashMap::new()),
+            index_wait_ms: AtomicU64::new(
+                u64::try_from(cases::INDEX_WAIT.as_millis()).unwrap_or(u64::MAX),
+            ),
         }
     }
 }
@@ -160,6 +168,16 @@ impl Bench {
     pub(super) fn with<R>(&self, pr: &PrRef, change: impl FnOnce(&mut Entry) -> R) -> R {
         let mut table = self.table.lock().unwrap_or_else(|p| p.into_inner());
         change(table.entry(pr.clone()).or_default())
+    }
+
+    pub(super) fn index_wait(&self) -> Duration {
+        Duration::from_millis(self.index_wait_ms.load(Ordering::SeqCst))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_index_wait(&self, wait: Duration) {
+        let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+        self.index_wait_ms.store(ms, Ordering::SeqCst);
     }
 
     pub(super) fn seq(&self) -> u32 {

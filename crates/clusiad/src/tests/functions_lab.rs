@@ -1788,3 +1788,33 @@ async fn a_driver_file_the_pull_request_ships_is_never_removed() {
     results(&mut lab, &again).await;
     assert!(tracked.exists(), "a later run does not remove it either");
 }
+
+#[tokio::test]
+async fn an_index_that_stays_building_stops_rearming_and_says_so() {
+    let mut lab = lab(Machine::NoEngine, Vec::new(), &[7], |_, _| {});
+    let head = crate::reviews::load_stored(&lab.shared, &pr(7))
+        .unwrap()
+        .unwrap()
+        .head_sha;
+    crate::calls::tests::pin_building(&lab.shared, &pr(7), &head);
+    lab.shared
+        .tests
+        .set_index_wait(std::time::Duration::from_millis(40));
+    let first = cases::view(&lab.shared, &pr(7)).await;
+    assert!(first.reading && first.note.is_none());
+    let stalled = told(&mut lab, "the still-reading note", |v| v.note.is_some()).await;
+    assert!(stalled.reading);
+    assert_eq!(stalled.note.as_deref(), Some(cases::STILL_READING));
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let later = lab
+        .drain()
+        .into_iter()
+        .filter(|e| matches!(e, Event::FunctionsChanged { .. }))
+        .count();
+    assert_eq!(later, 0, "no wait is armed again");
+
+    // Asking again starts a fresh set of rounds.
+    let asked = view_of(cases::functions(&lab.shared, &pr(7)).await);
+    assert!(asked.reading && asked.note.is_none());
+    told(&mut lab, "the note again", |v| v.note.is_some()).await;
+}

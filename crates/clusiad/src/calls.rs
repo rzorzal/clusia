@@ -1931,6 +1931,18 @@ pub fn untouched_helper() -> u32 {
     }
 
     /// Puts `built` in memory as the index of its commit for `pr`.
+    /// Holds the index of `commit` in Building, with no build behind it.
+    pub(crate) fn pin_building(shared: &Shared, pr: &PrRef, commit: &str) {
+        shared.indexes.table().building.insert(
+            pr.clone(),
+            Building {
+                id: u64::MAX,
+                commit: commit.to_string(),
+                abort: None,
+            },
+        );
+    }
+
     pub(crate) fn install(shared: &Shared, pr: &PrRef, built: Arc<Built>) {
         shared.indexes.insert(pr, built);
     }
