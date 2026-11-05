@@ -84,6 +84,8 @@ pub const INPUT_LABEL_MAX: usize = 40;
 pub const SCENARIO_ROUNDS_MIN: u32 = 1;
 pub const SCENARIO_TIMEOUT_MIN: u32 = 5;
 pub const BENCH_SECS_MIN: u32 = 1;
+/// The longest file path a benchmark block may name, in characters.
+pub const BENCH_FILE_MAX: usize = 300;
 /// The largest `scenario.toml`, in bytes.
 pub const SCENARIO_FILE_MAX_BYTES: usize = 16_384;
 /// The largest `edits.json`, in bytes.
@@ -1384,14 +1386,15 @@ pub fn metric_value_text(m: Metric, v: u64) -> String {
         Metric::Duration => format!("{} s", one_decimal(v, 1000)),
         Metric::P50 | Metric::P95 => match v {
             0..1_000 => format!("{v} ns"),
-            1_000..1_000_000 => format!("{} µs", one_decimal(v, 1_000)),
-            1_000_000..1_000_000_000 => format!("{} ms", one_decimal(v, 1_000_000)),
+            // A unit ends where its one-decimal rounding would reach the next unit's 1000.
+            1_000..999_950 => format!("{} µs", one_decimal(v, 1_000)),
+            999_950..999_950_000 => format!("{} ms", one_decimal(v, 1_000_000)),
             _ => {
                 let hundredths = (u128::from(v) + 5_000_000) / 10_000_000;
                 format!("{}.{:02} s", hundredths / 100, hundredths % 100)
             }
         },
-        Metric::CallsPerSec if v < 100_000 => format!("{} calls/s", one_decimal(v, 1000)),
+        Metric::CallsPerSec if v < 99_950 => format!("{} calls/s", one_decimal(v, 1000)),
         Metric::CallsPerSec => format!("{} calls/s", v.saturating_add(500) / 1000),
         Metric::PeakMemory => format!("{} MB", one_decimal(v, 1024)),
         Metric::AvgCpu => format!("{}%", v.saturating_add(5) / 10),
@@ -1438,6 +1441,8 @@ fn short_form(view: &ComparisonView) -> Option<String> {
         view.rows
             .iter()
             .filter(|r| metrics.contains(&r.metric))
+            // Reversed so the first row wins a tie: `max_by_key` keeps the last maximum.
+            .rev()
             .max_by_key(|r| r.delta.percent.map_or(0, i64::abs))
     };
     match &view.verdict {
@@ -1791,7 +1796,7 @@ impl BenchBlock {
         if !one_line(&raw.function, 1, 300) {
             bad.push("function must be between 1 and 300 characters on one line".to_string());
         }
-        if raw.file.is_empty() || !plain_relative(&raw.file, 300) {
+        if raw.file.is_empty() || !plain_relative(&raw.file, BENCH_FILE_MAX) {
             bad.push("file must be a plain relative path".into());
         }
         for param in params {
@@ -3315,6 +3320,10 @@ mod tests {
             (Metric::P95, 2_500_000_000, "2.50 s"),
             (Metric::CallsPerSec, 250_000_000, "250000 calls/s"),
             (Metric::CallsPerSec, 55_500, "55.5 calls/s"),
+            (Metric::P95, 999_950, "1.0 ms"),
+            (Metric::P95, 999_949, "999.9 µs"),
+            (Metric::P95, 999_950_000, "1.00 s"),
+            (Metric::CallsPerSec, 99_950, "100 calls/s"),
             (Metric::PeakMemory, 51_200, "50.0 MB"),
             (Metric::PeakMemory, 100, "0.1 MB"),
             (Metric::PeakMemory, 200, "0.2 MB"),
@@ -3519,6 +3528,22 @@ mod tests {
         assert_eq!(
             scenario_status(&view, false),
             "memory +37% · worse than main"
+        );
+        view.comparison = Some(comparison(
+            pass,
+            pass,
+            Verdict::Worse {
+                metrics: vec![Metric::Duration, Metric::PeakMemory],
+            },
+            vec![
+                row(Metric::Duration, DeltaLabel::Worse, 12),
+                row(Metric::PeakMemory, DeltaLabel::Worse, 12),
+            ],
+            Some(true),
+        ));
+        assert_eq!(
+            scenario_status(&view, false),
+            "duration +12% · worse than main"
         );
         view.comparison = Some(comparison(
             pass,
