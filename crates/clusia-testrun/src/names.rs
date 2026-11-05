@@ -53,6 +53,12 @@ pub fn cache_volume(slug: &str, eco: Ecosystem) -> String {
     format!("clusia-cache-{slug}-{}", crate::eco::name(eco))
 }
 
+/// Main's cache volume. Main's caches are per review and never the pull request's, so neither
+/// side warms the other.
+pub fn main_cache_volume(slug: &str, number: u64, eco: Ecosystem) -> String {
+    format!("clusia-main-{slug}-{number}-{}", crate::eco::name(eco))
+}
+
 pub fn compose_project(slug: &str, number: u64) -> String {
     format!("clusia-{slug}-{number}")
 }

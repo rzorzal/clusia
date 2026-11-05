@@ -1,6 +1,7 @@
 //! Everything that decides or spawns for a pull request's test runs. It never talks to the
 //! daemon's socket and starts programs only through [`exec::Exec`].
 
+pub mod bench;
 pub mod cleanup;
 pub mod compose;
 pub mod container;
@@ -17,7 +18,9 @@ pub mod near;
 pub mod plan;
 pub mod recipe;
 pub mod results;
+pub mod sample;
 pub mod sandbox;
 pub mod scan;
+pub mod scenario;
 #[cfg(any(test, feature = "test-kit"))]
 pub mod testkit;

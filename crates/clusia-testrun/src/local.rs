@@ -19,6 +19,21 @@ pub async fn run_local(
     exec.stream(cmd, limit, stop, chunk).await
 }
 
+/// `run_local`, also handing `started` the process group's id right after the start.
+pub async fn run_local_group(
+    exec: &dyn Exec,
+    cmd: &CommandSpec,
+    limit: Duration,
+    stop: &StopFlag,
+    chunk: &mut (dyn FnMut(Stream, &[u8]) + Send),
+    started: &mut (dyn FnMut(u32) + Send),
+) -> io::Result<Ended> {
+    if stop.fired() {
+        return Ok(Ended::Stopped);
+    }
+    exec.stream_group(cmd, limit, stop, chunk, started).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -102,5 +117,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ended, Ended::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn run_local_group_reports_the_group_and_a_stop_first_runs_nothing() {
+        let fake = FakeExec::new();
+        fake.on(
+            "sandbox-exec",
+            &["-f"],
+            FakeReply::chunks(vec![(Stream::Out, "ok\n".into())], 0),
+        );
+        fake.group(4242, vec![None]);
+        let stop = StopFlag::new();
+        let mut groups = Vec::new();
+        let mut chunk = |_: Stream, _: &[u8]| {};
+        let ended = run_local_group(
+            &fake,
+            &spec(),
+            Duration::from_secs(5),
+            &stop,
+            &mut chunk,
+            &mut |g| groups.push(g),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (ended, groups.clone()),
+            (Ended::Exited(Some(0)), vec![4242])
+        );
+        let stopped = StopFlag::new();
+        stopped.fire();
+        let ended = run_local_group(
+            &fake,
+            &spec(),
+            Duration::from_secs(5),
+            &stopped,
+            &mut chunk,
+            &mut |g| groups.push(g),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ended, Ended::Stopped);
+        assert_eq!((groups.len(), fake.calls().len()), (1, 1));
     }
 }

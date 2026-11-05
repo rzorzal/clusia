@@ -8,10 +8,12 @@ use clusia_core::tests::Ecosystem;
 
 use crate::eco::{eco_env, name};
 use crate::exec::CommandSpec;
-use crate::names::{Labels, cache_volume};
+use crate::names::{Labels, cache_volume, main_cache_volume};
 
 pub const WORK_DIR: &str = "/work";
 pub const CACHE_DIR: &str = "/cache";
+/// Where a scenario's run folder is mounted, read-only.
+pub const SCENARIO_DIR: &str = "/clusia-scenario";
 pub const PIDS_LIMIT: &str = "4096";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,8 @@ pub enum ContainerNet {
 pub struct RunMounts {
     pub worktree: PathBuf,
     pub git_common: PathBuf,
+    /// The scenario run folder, mounted read-only at `SCENARIO_DIR`.
+    pub scenario: Option<PathBuf>,
     /// `(volume, container path)`.
     pub caches: Vec<(String, String)>,
 }
@@ -93,6 +97,12 @@ pub fn run_args(job: &ContainerJob, mounts: &RunMounts) -> Vec<String> {
     .into_iter()
     .chain(
         mounts
+            .scenario
+            .iter()
+            .map(|folder| format!("{}:{SCENARIO_DIR}:ro", folder.display())),
+    )
+    .chain(
+        mounts
             .caches
             .iter()
             .map(|(name, path)| format!("{name}:{path}")),
@@ -123,6 +133,7 @@ pub fn kill_args(name: &str) -> Vec<String> {
 pub fn mount_problem(mounts: &RunMounts) -> Option<String> {
     [&mounts.worktree, &mounts.git_common]
         .into_iter()
+        .chain(mounts.scenario.as_ref())
         .find_map(|path| match path.to_str() {
             None => Some(format!(
                 "Clúsia can't mount {} into a container: the path is not UTF-8.",
@@ -153,6 +164,18 @@ pub fn cache_mounts(slug: &str, ecos: &[Ecosystem]) -> Vec<(String, String)> {
         .map(|&eco| {
             (
                 cache_volume(slug, eco),
+                format!("{CACHE_DIR}/{}", name(eco)),
+            )
+        })
+        .collect()
+}
+
+/// Main's cache mounts: the same paths as the pull request's, over volumes of main's own.
+pub fn main_cache_mounts(slug: &str, number: u64, ecos: &[Ecosystem]) -> Vec<(String, String)> {
+    ecos.iter()
+        .map(|&eco| {
+            (
+                main_cache_volume(slug, number, eco),
                 format!("{CACHE_DIR}/{}", name(eco)),
             )
         })
@@ -192,6 +215,7 @@ mod tests {
         RunMounts {
             worktree: "/d/worktrees/acme~widgets~7".into(),
             git_common: "/d/repos/acme~widgets/.git".into(),
+            scenario: None,
             caches: vec![(
                 "clusia-cache-acme-widgets-abc123-cargo".into(),
                 "/cache/cargo".into(),
@@ -392,5 +416,85 @@ mod tests {
         );
         assert!(cmd.clear_env);
         assert_eq!(cmd.env, docker.env);
+    }
+
+    #[test]
+    fn a_scenario_folder_is_mounted_read_only() {
+        let with = RunMounts {
+            scenario: Some("/d/tests/runs/acme~widgets~7/1762300000-4-0".into()),
+            ..mounts()
+        };
+        let args = run_args(&job(), &with);
+        let volumes: Vec<&String> = args
+            .windows(2)
+            .filter(|w| w[0] == "-v")
+            .map(|w| &w[1])
+            .collect();
+        assert_eq!(
+            volumes,
+            [
+                "/d/worktrees/acme~widgets~7:/work",
+                "/d/worktrees/acme~widgets~7/.clusia:/work/.clusia:ro",
+                "/d/worktrees/acme~widgets~7/.git:/work/.git:ro",
+                "/d/repos/acme~widgets/.git:/d/repos/acme~widgets/.git:ro",
+                "/d/tests/runs/acme~widgets~7/1762300000-4-0:/clusia-scenario:ro",
+                "clusia-cache-acme-widgets-abc123-cargo:/cache/cargo",
+            ]
+        );
+        assert_eq!(SCENARIO_DIR, "/clusia-scenario");
+        let bad = RunMounts {
+            scenario: Some("/d/runs/a:b".into()),
+            ..mounts()
+        };
+        assert_eq!(
+            mount_problem(&bad).as_deref(),
+            Some("Clúsia can't mount /d/runs/a:b into a container: the path holds a ':' or ','.")
+        );
+    }
+
+    #[test]
+    fn main_names_never_share_the_pr_caches() {
+        use crate::names::{cache_volume, main_cache_volume};
+        let slug = "acme-widgets-d782c8";
+        assert_eq!(
+            main_cache_volume(slug, 7, Ecosystem::Cargo),
+            "clusia-main-acme-widgets-d782c8-7-cargo"
+        );
+        for eco in [
+            Ecosystem::Cargo,
+            Ecosystem::Node,
+            Ecosystem::Python,
+            Ecosystem::Go,
+            Ecosystem::Jvm,
+            Ecosystem::Ruby,
+        ] {
+            let main = main_cache_volume(slug, 7, eco);
+            assert_ne!(main, cache_volume(slug, eco));
+            assert_ne!(
+                main,
+                main_cache_volume(slug, 8, eco),
+                "each review has its own"
+            );
+            assert!(!main.starts_with("clusia-cache-"));
+        }
+        assert_eq!(
+            main_cache_mounts(slug, 7, &[Ecosystem::Cargo, Ecosystem::Node]),
+            [
+                (
+                    "clusia-main-acme-widgets-d782c8-7-cargo".to_string(),
+                    "/cache/cargo".to_string()
+                ),
+                (
+                    "clusia-main-acme-widgets-d782c8-7-node".to_string(),
+                    "/cache/node".to_string()
+                ),
+            ]
+        );
+        let pr = cache_mounts(slug, &[Ecosystem::Cargo]);
+        assert!(
+            main_cache_mounts(slug, 7, &[Ecosystem::Cargo])
+                .iter()
+                .all(|m| !pr.contains(m))
+        );
     }
 }

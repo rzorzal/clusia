@@ -24,6 +24,7 @@ const CARGO_MAX: u64 = 64 * 1024;
 /// The longest package name taken from a `Cargo.toml`.
 const NAME_MAX: usize = 64;
 const TARGET_PREFIX: &str = "clusia_driver_";
+const BENCH_PREFIX: &str = "clusia_bench_";
 const TESTS: &str = "tests";
 
 pub fn function_command(
@@ -137,9 +138,10 @@ pub fn driver_target(slug: &str) -> String {
 }
 
 fn valid_target(target: &str) -> bool {
-    target.strip_prefix(TARGET_PREFIX).is_some_and(|hex| {
-        hex.len() == 10 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    })
+    [TARGET_PREFIX, BENCH_PREFIX]
+        .iter()
+        .filter_map(|prefix| target.strip_prefix(prefix))
+        .any(|hex| hex.len() == 10 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// Writes `text` as `<package_dir>/tests/<target>.rs` and answers that path, relative to the
@@ -215,7 +217,8 @@ pub fn place_driver(
 }
 
 /// Removes a file `place_driver` placed, through freshly opened folders that are never links.
-/// Only a path of the form `[<dir>/]tests/clusia_driver_<10 hex>.rs` is accepted; a file
+/// Only a path of the form `[<dir>/]tests/clusia_driver_<10 hex>.rs` or
+/// `[<dir>/]tests/clusia_bench_<10 hex>.rs` is accepted; a file
 /// already gone is not an error.
 pub fn remove_driver(worktree: &Path, placed: &str) -> io::Result<()> {
     let invalid = || {
@@ -948,5 +951,34 @@ mod tests {
             ]
             .map(|(k, v)| (k.to_string(), v.to_string()))
         );
+    }
+
+    #[test]
+    fn bench_files_are_placed_and_removed_like_drivers() {
+        let dir = tempfile::tempdir().unwrap();
+        let slug = clusia_core::functions::function_slug("src/store.rs", "TokenStore::refresh");
+        let target = crate::bench::bench_target(&slug);
+        let placed = place_driver(
+            dir.path(),
+            "",
+            &target,
+            b"#[test]\nfn clusia_case() {}\n",
+            false,
+        )
+        .unwrap();
+        assert_eq!(placed, format!("tests/{target}.rs"));
+        assert_eq!(
+            fs::read_to_string(dir.path().join(&placed)).unwrap(),
+            "#[test]\nfn clusia_case() {}\n"
+        );
+        remove_driver(dir.path(), &placed).unwrap();
+        assert!(!dir.path().join(&placed).exists());
+        assert_eq!(
+            remove_driver(dir.path(), "tests/clusia_benchmark.rs")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(place_driver(dir.path(), "", "clusia_bench_xyz", b"x", false).is_err());
     }
 }

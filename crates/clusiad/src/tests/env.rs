@@ -741,6 +741,7 @@ pub(super) fn roots(shared: &Shared, ctx: &Ctx) -> io::Result<SandboxRoots> {
         data_root: shared.paths.root().to_path_buf(),
         home: ctx.host.home.clone(),
         clone_env: sandbox::clone_env_files(&ctx.clone),
+        read_only: Vec::new(),
     })
 }
 

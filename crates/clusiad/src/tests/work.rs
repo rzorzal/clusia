@@ -602,6 +602,7 @@ async fn mount(shared: &Shared, pr: &PrRef, id: u64, ctx: &Ctx, env: &EnvState, 
             let mounts = RunMounts {
                 worktree: ctx.worktree.clone(),
                 git_common: ctx.git_common.clone(),
+                scenario: None,
                 caches: Vec::new(),
             };
             let name = names::run_name(&ctx.slug, pr.number, shared.tests.seq());
@@ -960,6 +961,7 @@ fn mounts(ctx: &Ctx, env: &EnvState) -> RunMounts {
     RunMounts {
         worktree: ctx.worktree.clone(),
         git_common: ctx.git_common.clone(),
+        scenario: None,
         caches: docker::cache_mounts(&ctx.slug, &env.signals.ecosystems),
     }
 }
