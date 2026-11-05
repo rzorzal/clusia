@@ -8,7 +8,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::Path;
 
 use clusia_core::cockpit::{
@@ -158,18 +158,34 @@ pub fn write_run_folder(dir: &Path, files: &[(String, Vec<u8>)]) -> io::Result<(
 }
 
 fn write_files(dir: &Path, files: &[(String, Vec<u8>)]) -> io::Result<()> {
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    // Every step goes through this handle, so a path swapped for a link after the open cannot
+    // redirect a file or the final mode change.
+    let handle: File = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(dir)?;
+    handle.set_permissions(fs::Permissions::from_mode(0o700))?;
     for (name, bytes) in files {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(dir.join(name))?;
+        let name = CString::new(name.as_bytes()).map_err(|_| invalid("a file name holds a NUL"))?;
+        // SAFETY: `handle` is an open folder and `name` a NUL-terminated name; `O_EXCL` and
+        // `O_NOFOLLOW` make `openat` create a new file and never follow a link.
+        let fd = unsafe {
+            libc::openat(
+                handle.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::c_uint::from(0o600_u16),
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a descriptor `openat` just returned and nothing else owns it.
+        let mut file = unsafe { File::from_raw_fd(fd) };
         file.write_all(bytes)?;
         file.set_permissions(fs::Permissions::from_mode(0o444))?;
     }
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o555))
+    handle.set_permissions(fs::Permissions::from_mode(0o555))
 }
 
 /// Removes a run folder `write_run_folder` made. A missing folder is fine; a link or a file is

@@ -43,13 +43,15 @@ pub fn parse_sample_line(line: &str) -> Option<(Option<u64>, Option<u64>, Option
     if fields.next().is_some() {
         return None;
     }
-    let number = |text: &str| {
-        text.bytes()
-            .all(|b| b.is_ascii_digit())
-            .then(|| text.parse().ok())
-            .flatten()
-    };
-    Some((number(a), number(b), number(c)))
+    Some((digits_number(a), digits_number(b), digits_number(c)))
+}
+
+/// `text` as a number only when it is all ASCII digits, so a sign such as `+5` is refused.
+pub(crate) fn digits_number(text: &str) -> Option<u64> {
+    text.bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| text.parse().ok())
+        .flatten()
 }
 
 /// Turns cumulative CPU readings into thousandths of a core over the time between them.

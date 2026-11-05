@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use clusia_core::cockpit::{BENCH_CALLS_MAX, ErrorLine, Metric};
 
 use crate::functions::{case_env, driver_target};
+use crate::sample::digits_number;
 use crate::scenario::{add_error, marked};
 
 /// What a round with no `bench` line says; the exit code follows in parentheses.
@@ -69,7 +70,7 @@ pub fn read_bench_line(mark: &str, line: &str, at_ms: u64, report: &mut BenchRep
     } else if rest == "done" {
         report.done = true;
     } else if let Some(numbers) = rest.strip_prefix("bench ") {
-        let parsed: Option<Vec<u64>> = numbers.split(' ').map(|n| n.parse().ok()).collect();
+        let parsed: Option<Vec<u64>> = numbers.split(' ').map(digits_number).collect();
         if let Some([calls, total_ns, p50_ns, p95_ns, max_ns]) = parsed.as_deref() {
             report.bench = Some(BenchLine {
                 calls: *calls,
@@ -155,6 +156,7 @@ mod tests {
         read(format!("{MARK} bench 1 2 3 4 5 6"), 6401);
         read(format!("{MARK} bench a b c d e"), 6402);
         read(format!("{MARK} bench 1 2 3 4 -5"), 6403);
+        read(format!("{MARK} bench 1 2 3 4 +5"), 6403);
         read("ffffffffffffffff bench 9 9 9 9 9".to_string(), 6404);
         read(format!("{MARK} error slow call"), 6500);
         read(format!("{MARK} error slow call"), 6600);

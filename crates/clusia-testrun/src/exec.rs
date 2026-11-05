@@ -362,8 +362,9 @@ impl Exec for SystemExec {
     }
 }
 
-/// libc points to the `mach2` crate for these, which the workspace does not take.
+/// The Mach timebase `(numer, denom)` that turns CPU ticks into nanoseconds, read once.
 #[cfg(target_os = "macos")]
+// libc points to the `mach2` crate for these, which the workspace does not take.
 #[allow(deprecated)]
 fn timebase() -> (u32, u32) {
     static TIMEBASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();

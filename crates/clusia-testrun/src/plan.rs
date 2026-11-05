@@ -1090,6 +1090,7 @@ mod tests {
             "the tests step approves the function commands too"
         );
     }
+
     fn main_recipe() -> Recipe {
         let mut recipe = recipe();
         recipe.services = None;
