@@ -243,7 +243,10 @@ fn kind_of(origin: TurnOrigin) -> Option<CheckKind> {
         | TurnOrigin::Diagrams
         | TurnOrigin::Story
         | TurnOrigin::Recipe
-        | TurnOrigin::Cases => None,
+        | TurnOrigin::Cases
+        | TurnOrigin::Scenarios
+        | TurnOrigin::Bench
+        | TurnOrigin::Copilot => None,
         TurnOrigin::Security => Some(CheckKind::Security),
         TurnOrigin::Audit => Some(CheckKind::Audit),
     }
@@ -495,6 +498,9 @@ mod tests {
     fn a_story_request_is_no_check() {
         assert_eq!(kind_of(TurnOrigin::Story), None);
         assert_eq!(kind_of(TurnOrigin::Cases), None);
+        assert_eq!(kind_of(TurnOrigin::Scenarios), None);
+        assert_eq!(kind_of(TurnOrigin::Bench), None);
+        assert_eq!(kind_of(TurnOrigin::Copilot), None);
     }
 
     fn finding(

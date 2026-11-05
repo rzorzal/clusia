@@ -4,6 +4,7 @@
 
 mod agent;
 mod check_blocks;
+mod cockpit_blocks;
 pub mod codex;
 mod codex_command;
 mod command;
@@ -20,6 +21,10 @@ pub mod testkit;
 
 pub use agent::{Agent, version_at_least};
 pub use check_blocks::extract_check_blocks;
+pub use cockpit_blocks::{
+    BENCH_BLOCKS_MAX, BENCH_INFO, CockpitBlocks, SCENARIO_BLOCKS_MAX, SCENARIO_INFO,
+    SUGGESTION_INFO, extract_cockpit_blocks,
+};
 pub use codex_command::{CodexServerSpec, codex_server_command};
 pub use command::{BridgeSpec, ClaudeCode, ROLE_PROMPT, SessionArg, TurnSpec};
 pub use diagram_blocks::{

@@ -2,6 +2,10 @@
 
 use clusia_calls::{CallGraph, StaticStep};
 pub use clusia_core::OpenTarget;
+use clusia_core::cockpit::{
+    BenchAsk, BenchInput, CockpitScope, CockpitView, CopilotAsk, ItemRef, RoundResult, RunSide,
+    Sample, ScenarioAsk, ScenarioInput, ScenarioScript,
+};
 use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::functions::{
     CaseInput, CaseResult, CaseScope, CasesAsk, DriverCode, FunctionsView,
@@ -32,8 +36,9 @@ pub mod topics {
     pub const TRAY: &str = "tray";
     /// The review agent's chat: every `Agent*` event and `SessionState`.
     pub const AGENT: &str = "agent";
-    /// The test setup, the test runs and the function cases: every `Test*`, `FunctionsChanged`
-    /// and `CaseDone` event.
+    /// The test setup, the test runs, the function cases and the QA cockpit: every `Test*`,
+    /// `FunctionsChanged`, `CaseDone`, `CockpitChanged`, `CockpitSamples` and `CockpitRound`
+    /// event.
     pub const TESTS: &str = "tests";
 }
 
@@ -393,6 +398,86 @@ pub enum Command {
         pr: PrRef,
         function: String,
     },
+    /// The QA cockpit of a pull request (`Reply::Cockpit`).
+    GetCockpit {
+        pr: PrRef,
+    },
+    /// Saves the reviewer's overlay of one scenario (`Reply::Cockpit`).
+    SaveScenario {
+        pr: PrRef,
+        scenario: String,
+        input: ScenarioInput,
+    },
+    /// Drops the reviewer's edits of one scenario (`Reply::Cockpit`).
+    ResetScenario {
+        pr: PrRef,
+        scenario: String,
+    },
+    /// Removes one scenario, its approval and its results (`Reply::Cockpit`).
+    RemoveScenario {
+        pr: PrRef,
+        scenario: String,
+    },
+    /// Approves the command and script of one scenario. `hash` is the approval hash the reviewer
+    /// read; another one is refused (`Reply::Cockpit`).
+    ApproveScenario {
+        pr: PrRef,
+        scenario: String,
+        hash: String,
+    },
+    /// The script files and the approval hash of one scenario (`Reply::ScenarioScript`).
+    GetScenarioScript {
+        pr: PrRef,
+        scenario: String,
+    },
+    /// Asks the agent for scenarios, in the background (`Reply::Ack`).
+    WriteScenarios {
+        pr: PrRef,
+        ask: ScenarioAsk,
+    },
+    /// Saves the reviewer's overlay of one benchmark (`Reply::Cockpit`).
+    SaveBench {
+        pr: PrRef,
+        function: String,
+        input: BenchInput,
+    },
+    /// Drops the reviewer's edits of one benchmark (`Reply::Cockpit`).
+    ResetBench {
+        pr: PrRef,
+        function: String,
+    },
+    /// Asks the agent for the benchmark of one function, in the background (`Reply::Ack`).
+    WriteBench {
+        pr: PrRef,
+        function: String,
+        ask: BenchAsk,
+    },
+    /// Creates main's worktree at the pull request's base (`Reply::Ack`).
+    OpenMain {
+        pr: PrRef,
+    },
+    /// Approves main's setup plan and runs it. `main_hash` is the hash of the plan the reviewer
+    /// saw (`Reply::Ack`).
+    PrepareMain {
+        pr: PrRef,
+        main_hash: String,
+        approve: Approve,
+    },
+    /// Runs scenarios or one item, on the pull request alone or against main
+    /// (`Reply::CockpitStarted`). `seen` is `CockpitView.hash` for `Scenarios`, or the item's
+    /// `hash`; another one is refused.
+    RunCockpit {
+        pr: PrRef,
+        scope: CockpitScope,
+        on_main: bool,
+        seen: String,
+    },
+    /// Asks the QA copilot, in the background (`Reply::Ack`).
+    AskCopilot {
+        pr: PrRef,
+        item: Option<ItemRef>,
+        ask: CopilotAsk,
+    },
     /// The comments hidden in this pull request (`Reply::HiddenComments`).
     GetHiddenComments {
         pr: PrRef,
@@ -681,6 +766,16 @@ pub enum Reply {
     /// A case run was accepted and has this id; its events follow on topic `tests`.
     CasesStarted {
         run: String,
+    },
+    /// What `GetCockpit` and every cockpit write know.
+    Cockpit(Box<CockpitView>),
+    /// The script files of one scenario and the hash an approval must name.
+    ScenarioScript(Box<ScenarioScript>),
+    /// A cockpit run was accepted and has this id; its events follow on topic `tests`.
+    /// `skipped` names the scenarios that were not run: not approved, or not runnable.
+    CockpitStarted {
+        run: String,
+        skipped: Vec<String>,
     },
     Driver(Box<DriverCode>),
     /// What `GetCalls` knows: the graph (none while the index is not ready), the state of the
@@ -1094,6 +1189,26 @@ pub enum Event {
         function: String,
         result: Box<CaseResult>,
     },
+    /// The cockpit's scenarios, benchmarks, main, activity or copilot changed (topic `tests`).
+    CockpitChanged {
+        pr: PrRef,
+        view: Box<CockpitView>,
+    },
+    /// New samples of a measured round, a few at a time (topic `tests`).
+    CockpitSamples {
+        pr: PrRef,
+        run: String,
+        item: ItemRef,
+        side: RunSide,
+        round: u32,
+        points: Vec<Sample>,
+    },
+    /// One measured round ended (topic `tests`).
+    CockpitRound {
+        pr: PrRef,
+        run: String,
+        result: Box<RoundResult>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1491,7 +1606,8 @@ pub struct PermissionRequest {
 }
 
 /// Who runs a turn of the agent: the review chat, one of the two checks, the revalidation, the
-/// drawing of diagrams, the writing of the Story, or the recipe or the cases of the tests.
+/// drawing of diagrams, the writing of the Story, the recipe or the cases of the tests, or the
+/// scenarios, the benchmark or the QA copilot of the cockpit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOrigin {
@@ -1504,6 +1620,9 @@ pub enum TurnOrigin {
     Story,
     Recipe,
     Cases,
+    Scenarios,
+    Bench,
+    Copilot,
 }
 
 impl TurnOrigin {
@@ -4849,6 +4968,278 @@ mod tests {
     fn a_cases_turn_is_not_a_chat_turn() {
         assert_eq!(wire(&TurnOrigin::Cases), r#""cases""#);
         assert!(!TurnOrigin::Cases.is_chat());
+    }
+
+    #[test]
+    fn cockpit_commands_wire_format() {
+        use clusia_core::cockpit::*;
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        let item = ItemRef {
+            kind: ItemKind::Scenario,
+            id: "two-requests-refresh-at-once".into(),
+        };
+        assert_eq!(
+            request(Command::GetCockpit { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"get_cockpit":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::RunCockpit {
+                pr: acme(),
+                scope: CockpitScope::Item { item: item.clone() },
+                on_main: true,
+                seen: "abc".into(),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"run_cockpit":{"pr":"acme/widgets#7","scope":{"item":{"item":{"kind":"scenario","id":"two-requests-refresh-at-once"}}},"on_main":true,"seen":"abc"}}}"#
+        );
+        assert_eq!(
+            request(Command::RunCockpit {
+                pr: acme(),
+                scope: CockpitScope::Scenarios,
+                on_main: false,
+                seen: "abc".into(),
+            }),
+            r#"{"type":"request","id":5,"cmd":{"run_cockpit":{"pr":"acme/widgets#7","scope":"scenarios","on_main":false,"seen":"abc"}}}"#
+        );
+        assert_eq!(
+            request(Command::WriteScenarios {
+                pr: acme(),
+                ask: ScenarioAsk::Describe {
+                    text: "Token endpoint is down".into()
+                },
+            }),
+            r#"{"type":"request","id":5,"cmd":{"write_scenarios":{"pr":"acme/widgets#7","ask":{"describe":{"text":"Token endpoint is down"}}}}}"#
+        );
+        assert_eq!(
+            request(Command::WriteScenarios {
+                pr: acme(),
+                ask: ScenarioAsk::Fresh
+            }),
+            r#"{"type":"request","id":5,"cmd":{"write_scenarios":{"pr":"acme/widgets#7","ask":"fresh"}}}"#
+        );
+        assert_eq!(
+            request(Command::WriteScenarios {
+                pr: acme(),
+                ask: ScenarioAsk::Values {
+                    scenario: "refresh".into()
+                },
+            }),
+            r#"{"type":"request","id":5,"cmd":{"write_scenarios":{"pr":"acme/widgets#7","ask":{"values":{"scenario":"refresh"}}}}}"#
+        );
+        assert_eq!(
+            request(Command::AskCopilot {
+                pr: acme(),
+                item: None,
+                ask: CopilotAsk::Next
+            }),
+            r#"{"type":"request","id":5,"cmd":{"ask_copilot":{"pr":"acme/widgets#7","item":null,"ask":"next"}}}"#
+        );
+        assert_eq!(
+            request(Command::AskCopilot {
+                pr: acme(),
+                item: Some(item.clone()),
+                ask: CopilotAsk::Free {
+                    text: "Why?".into()
+                },
+            }),
+            r#"{"type":"request","id":5,"cmd":{"ask_copilot":{"pr":"acme/widgets#7","item":{"kind":"scenario","id":"two-requests-refresh-at-once"},"ask":{"free":{"text":"Why?"}}}}}"#
+        );
+        assert_eq!(
+            request(Command::PrepareMain {
+                pr: acme(),
+                main_hash: "abc".into(),
+                approve: Approve::All,
+            }),
+            r#"{"type":"request","id":5,"cmd":{"prepare_main":{"pr":"acme/widgets#7","main_hash":"abc","approve":"all"}}}"#
+        );
+        assert_eq!(
+            request(Command::OpenMain { pr: acme() }),
+            r#"{"type":"request","id":5,"cmd":{"open_main":{"pr":"acme/widgets#7"}}}"#
+        );
+        assert_eq!(
+            request(Command::ApproveScenario {
+                pr: acme(),
+                scenario: "refresh".into(),
+                hash: "h".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"approve_scenario":{"pr":"acme/widgets#7","scenario":"refresh","hash":"h"}}}"#
+        );
+        assert_eq!(
+            request(Command::GetScenarioScript {
+                pr: acme(),
+                scenario: "refresh".into()
+            }),
+            r#"{"type":"request","id":5,"cmd":{"get_scenario_script":{"pr":"acme/widgets#7","scenario":"refresh"}}}"#
+        );
+        assert_eq!(
+            request(Command::WriteBench {
+                pr: acme(),
+                function: "f-0123456789".into(),
+                ask: BenchAsk::Values
+            }),
+            r#"{"type":"request","id":5,"cmd":{"write_bench":{"pr":"acme/widgets#7","function":"f-0123456789","ask":"values"}}}"#
+        );
+        for cmd in [
+            Command::SaveScenario {
+                pr: acme(),
+                scenario: "refresh".into(),
+                input: ScenarioInput {
+                    values: [("callers".to_string(), "3".to_string())].into(),
+                    files: Default::default(),
+                    run: None,
+                    rounds: Some(5),
+                    timeout_secs: None,
+                },
+            },
+            Command::ResetScenario {
+                pr: acme(),
+                scenario: "refresh".into(),
+            },
+            Command::RemoveScenario {
+                pr: acme(),
+                scenario: "refresh".into(),
+            },
+            Command::SaveBench {
+                pr: acme(),
+                function: "f-0123456789".into(),
+                input: BenchInput {
+                    values: Default::default(),
+                    warmup: Some(10),
+                    secs: None,
+                    rounds: None,
+                },
+            },
+            Command::ResetBench {
+                pr: acme(),
+                function: "f-0123456789".into(),
+            },
+        ] {
+            round_trip(cmd);
+        }
+    }
+
+    #[test]
+    fn cockpit_replies_and_events_wire_format() {
+        use clusia_core::cockpit::*;
+        let reply = |reply| {
+            wire(&ServerMessage::Response {
+                id: 5,
+                result: Outcome::Ok(reply),
+            })
+        };
+        let view = CockpitView::new("abc");
+        assert_eq!(
+            reply(Reply::Cockpit(Box::new(view.clone()))),
+            format!(
+                r#"{{"type":"response","id":5,"result":{{"ok":{{"cockpit":{}}}}}}}"#,
+                wire(&view)
+            )
+        );
+        assert_eq!(
+            reply(Reply::CockpitStarted {
+                run: "cockpit-1-2".into(),
+                skipped: vec!["refresh".into()]
+            }),
+            r#"{"type":"response","id":5,"result":{"ok":{"cockpit_started":{"run":"cockpit-1-2","skipped":["refresh"]}}}}"#
+        );
+        let script = ScenarioScript {
+            scenario: "refresh".into(),
+            files: vec![("run.py".into(), "print(1)\n".into())],
+            approval_hash: "a".into(),
+        };
+        assert_eq!(
+            reply(Reply::ScenarioScript(Box::new(script.clone()))),
+            r#"{"type":"response","id":5,"result":{"ok":{"scenario_script":{"scenario":"refresh","files":[["run.py","print(1)\n"]],"approval_hash":"a"}}}}"#
+        );
+        round_trip(Reply::ScenarioScript(Box::new(script)));
+        let event = |event| {
+            wire(&ServerMessage::Event {
+                topic: topics::TESTS.into(),
+                event,
+            })
+        };
+        assert_eq!(
+            event(Event::CockpitChanged {
+                pr: acme(),
+                view: Box::new(view.clone())
+            }),
+            format!(
+                r#"{{"type":"event","topic":"tests","event":{{"cockpit_changed":{{"pr":"acme/widgets#7","view":{}}}}}}}"#,
+                wire(&view)
+            )
+        );
+        let item = ItemRef {
+            kind: ItemKind::Bench,
+            id: "f-0123456789".into(),
+        };
+        assert_eq!(
+            event(Event::CockpitSamples {
+                pr: acme(),
+                run: "r".into(),
+                item: item.clone(),
+                side: RunSide::Main,
+                round: 2,
+                points: vec![Sample {
+                    t_ms: 250,
+                    rss_kb: Some(51_200),
+                    cpu_milli: None
+                }],
+            }),
+            r#"{"type":"event","topic":"tests","event":{"cockpit_samples":{"pr":"acme/widgets#7","run":"r","item":{"kind":"bench","id":"f-0123456789"},"side":"main","round":2,"points":[{"t_ms":250,"rss_kb":51200,"cpu_milli":null}]}}}"#
+        );
+        let result = RoundResult {
+            item,
+            side: RunSide::Pr,
+            round: 1,
+            sha: "abc".into(),
+            passed: None,
+            end: RoundEnd::Finished,
+            exit_code: Some(0),
+            metrics: [(Metric::P95, 12_500)].into(),
+            outputs: Default::default(),
+            errors: vec![ErrorLine {
+                text: "x".into(),
+                count: 2,
+                first_ms: 10,
+            }],
+            message: None,
+            tail: String::new(),
+            took_ms: 6_000,
+            at: 9,
+        };
+        assert_eq!(
+            event(Event::CockpitRound {
+                pr: acme(),
+                run: "r".into(),
+                result: Box::new(result.clone())
+            }),
+            format!(
+                r#"{{"type":"event","topic":"tests","event":{{"cockpit_round":{{"pr":"acme/widgets#7","run":"r","result":{}}}}}}}"#,
+                wire(&result)
+            )
+        );
+        assert!(wire(&result).contains(r#""metrics":{"p95":12500}"#));
+        round_trip(Event::CockpitRound {
+            pr: acme(),
+            run: "r".into(),
+            result: Box::new(result),
+        });
+        round_trip(Event::CockpitChanged {
+            pr: acme(),
+            view: Box::new(view),
+        });
+    }
+
+    #[test]
+    fn the_cockpit_turns_are_not_chat_turns() {
+        for (origin, wire_name) in [
+            (TurnOrigin::Scenarios, r#""scenarios""#),
+            (TurnOrigin::Bench, r#""bench""#),
+            (TurnOrigin::Copilot, r#""copilot""#),
+        ] {
+            assert_eq!(wire(&origin), wire_name);
+            assert!(!origin.is_chat());
+            round_trip(origin);
+        }
     }
 
     #[test]

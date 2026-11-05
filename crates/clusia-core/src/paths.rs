@@ -153,6 +153,36 @@ impl Paths {
         self.tests_dir().join("tmp").join(short)
     }
 
+    /// The read-only folders the scenario runs of `pr` run from, one per item run.
+    pub fn test_runs_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.tests_dir().join("runs").join(pr.file_key())
+    }
+
+    /// The worktree at the pull request's base. The leading dot keeps it out of the sweep of
+    /// review worktrees and out of the count of the repository's worktrees.
+    pub fn main_worktree_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.worktrees_dir().join(".main").join(pr.file_key())
+    }
+
+    /// `test_tmp_for` with an `m` appended: main's temp folder.
+    pub fn test_main_tmp_for(&self, pr: &crate::PrRef) -> PathBuf {
+        let mut name = self
+            .test_tmp_for(pr)
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push("m");
+        self.tests_dir().join("tmp").join(name)
+    }
+
+    /// Main's package caches, apart from the review's own.
+    pub fn test_main_cache_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.tests_dir()
+            .join("cache")
+            .join("main")
+            .join(pr.file_key())
+    }
+
     /// The package caches that the runs of one repository share.
     pub fn test_cache_for(&self, owner: &str, repo: &str) -> PathBuf {
         self.tests_dir()
@@ -266,6 +296,52 @@ impl Paths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_has_its_own_worktree_temp_and_cache_and_the_runs_have_a_folder() {
+        let paths = Paths::new("/data");
+        let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
+        let key = pr.file_key();
+        assert_eq!(
+            paths.test_runs_for(&pr),
+            PathBuf::from(format!("/data/tests/runs/{key}"))
+        );
+        assert_eq!(
+            paths.main_worktree_for(&pr),
+            PathBuf::from(format!("/data/worktrees/.main/{key}"))
+        );
+        assert_eq!(
+            paths.test_main_cache_for(&pr),
+            PathBuf::from(format!("/data/tests/cache/main/{key}"))
+        );
+        let tmp = paths.test_tmp_for(&pr);
+        let main_tmp = paths.test_main_tmp_for(&pr);
+        assert_eq!(main_tmp.parent(), tmp.parent());
+        assert_eq!(
+            main_tmp.file_name().unwrap().to_string_lossy(),
+            format!("{}m", tmp.file_name().unwrap().to_string_lossy())
+        );
+        assert_eq!(main_tmp.file_name().unwrap().len(), 13, "12 hex and the m");
+        assert_ne!(main_tmp, tmp);
+        assert_ne!(paths.main_worktree_for(&pr), paths.worktree_for(&pr));
+        assert!(
+            !paths
+                .main_worktree_for(&pr)
+                .starts_with(paths.worktrees_dir().join(&key)),
+            "main's worktree is not under the review's own folder"
+        );
+        assert_eq!(
+            paths
+                .main_worktree_for(&pr)
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            ".main",
+            "the leading dot keeps it out of the worktree sweep"
+        );
+        assert!(paths.test_runs_for(&pr).starts_with(paths.tests_dir()));
+    }
 
     #[test]
     fn app_lock_lives_in_the_root() {
