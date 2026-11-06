@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::exec::{BoxFut, CommandSpec, Ended, Exec, Output, StopFlag, Stream};
+use crate::exec::{BoxFut, CommandSpec, Ended, Exec, GroupUsage, Output, StopFlag, Stream};
 
 #[derive(Debug, Clone)]
 enum Reply {
@@ -95,6 +95,10 @@ struct State {
     rules: Vec<Rule>,
     executable: BTreeSet<PathBuf>,
     calls: Vec<CommandSpec>,
+    group: Option<u32>,
+    usages: Vec<Option<GroupUsage>>,
+    group_reads: usize,
+    matched_reads: usize,
 }
 
 #[derive(Default)]
@@ -133,6 +137,22 @@ impl FakeExec {
     pub fn executable_at(&self, path: impl AsRef<Path>) -> &Self {
         self.lock().executable.insert(path.as_ref().to_path_buf());
         self
+    }
+
+    /// Makes every later `stream_group` report `pid` as its group, and answers `group_usage(pid)`
+    /// with `usages` in turn, repeating the last one.
+    pub fn group(&self, pid: u32, usages: Vec<Option<GroupUsage>>) -> &Self {
+        let mut state = self.lock();
+        state.group = Some(pid);
+        state.usages = usages;
+        state.matched_reads = 0;
+        drop(state);
+        self
+    }
+
+    /// How many times `group_usage` was asked.
+    pub fn group_calls(&self) -> usize {
+        self.lock().group_reads
     }
 
     pub fn calls(&self) -> Vec<CommandSpec> {
@@ -313,6 +333,35 @@ impl Exec for FakeExec {
             }
             Ok(Ended::Exited(Some(code)))
         })
+    }
+
+    fn stream_group<'a>(
+        &'a self,
+        cmd: &'a CommandSpec,
+        limit: Duration,
+        stop: &'a StopFlag,
+        chunk: &'a mut (dyn FnMut(Stream, &[u8]) + Send),
+        started: &'a mut (dyn FnMut(u32) + Send),
+    ) -> BoxFut<'a, io::Result<Ended>> {
+        Box::pin(async move {
+            let group = self.lock().group;
+            if let Some(pid) = group {
+                started(pid);
+            }
+            self.stream(cmd, limit, stop, chunk).await
+        })
+    }
+
+    fn group_usage(&self, group: u32) -> Option<GroupUsage> {
+        let mut state = self.lock();
+        state.group_reads += 1;
+        if state.group != Some(group) {
+            return None;
+        }
+        let read = state.matched_reads;
+        state.matched_reads += 1;
+        let last = state.usages.len().checked_sub(1)?;
+        state.usages[read.min(last)].clone()
     }
 }
 
@@ -557,5 +606,49 @@ mod tests {
         fake.executable_at("/opt/homebrew/bin/docker");
         assert!(fake.executable(Path::new("/opt/homebrew/bin/docker")));
         assert!(!fake.executable(Path::new("/usr/local/bin/docker")));
+    }
+
+    #[tokio::test]
+    async fn a_fake_group_reports_its_pid_and_scripted_usages() {
+        use crate::exec::{GroupUsage, ProcUsage};
+        let one = GroupUsage {
+            procs: vec![ProcUsage {
+                pid: 77,
+                rss_bytes: 4096,
+                cpu_ns: 10,
+            }],
+        };
+        let fake = FakeExec::new();
+        fake.on("sandbox-exec", &[], FakeReply::ok("done\n"));
+        let cmd = CommandSpec::new("/usr/bin/sandbox-exec").args(["-f", "p.sb"]);
+        let stop = StopFlag::new();
+        let mut pids = Vec::new();
+        fake.stream_group(
+            &cmd,
+            Duration::from_secs(1),
+            &stop,
+            &mut |_, _: &[u8]| {},
+            &mut |pid| pids.push(pid),
+        )
+        .await
+        .unwrap();
+        assert!(pids.is_empty(), "no group was scripted");
+        fake.group(77, vec![Some(one.clone()), None]);
+        let ended = fake
+            .stream_group(
+                &cmd,
+                Duration::from_secs(1),
+                &stop,
+                &mut |_, _: &[u8]| {},
+                &mut |pid| pids.push(pid),
+            )
+            .await
+            .unwrap();
+        assert_eq!((ended, pids), (Ended::Exited(Some(0)), vec![77]));
+        assert_eq!(fake.group_usage(77), Some(one));
+        assert_eq!(fake.group_usage(77), None);
+        assert_eq!(fake.group_usage(77), None, "the last one repeats");
+        assert_eq!(fake.group_usage(78), None);
+        assert_eq!(fake.group_calls(), 4);
     }
 }

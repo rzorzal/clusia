@@ -515,6 +515,7 @@ mod tests {
         let mounts = RunMounts {
             worktree: top.join("wt"),
             git_common: top.join("git"),
+            scenario: None,
             caches: vec![(
                 "clusia-cache-acme-widgets-abc123-cargo".into(),
                 "/cache/cargo".into(),

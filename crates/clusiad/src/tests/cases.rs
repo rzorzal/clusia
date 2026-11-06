@@ -303,7 +303,7 @@ fn refusal(name: &str, error: &io::Error) -> Refusal {
 }
 
 /// The worktree itself, as a folder.
-fn open_root(worktree: &Path) -> Result<OwnedFd, Refusal> {
+pub(super) fn open_root(worktree: &Path) -> Result<OwnedFd, Refusal> {
     let path = c_string(worktree.as_os_str().as_bytes())
         .map_err(|e| Refusal::Io(format!("cannot open the worktree: {e}")))?;
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
@@ -319,7 +319,7 @@ fn open_dir_at(dir: &OwnedFd, name: &CString) -> io::Result<OwnedFd> {
 }
 
 /// The folder `name` in `dir`; `None` when it is missing and `create` is false.
-fn sub_dir(dir: &OwnedFd, name: &str, create: bool) -> Result<Option<OwnedFd>, Refusal> {
+pub(super) fn sub_dir(dir: &OwnedFd, name: &str, create: bool) -> Result<Option<OwnedFd>, Refusal> {
     let c_name = c_string(name.as_bytes()).map_err(|e| refusal(name, &e))?;
     match open_dir_at(dir, &c_name) {
         Ok(fd) => return Ok(Some(fd)),
@@ -341,7 +341,11 @@ fn sub_dir(dir: &OwnedFd, name: &str, create: bool) -> Result<Option<OwnedFd>, R
 }
 
 /// The bytes of the regular file `name` in `dir`, up to `cap`; `None` when it is missing.
-fn read_capped(dir: &OwnedFd, name: &str, cap: usize) -> Result<Option<Vec<u8>>, Refusal> {
+pub(super) fn read_capped(
+    dir: &OwnedFd,
+    name: &str,
+    cap: usize,
+) -> Result<Option<Vec<u8>>, Refusal> {
     let c_name = c_string(name.as_bytes()).map_err(|e| refusal(name, &e))?;
     let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: `dir` is an open descriptor and `c_name` a valid C string that `openat` only reads.
@@ -370,7 +374,7 @@ fn read_capped(dir: &OwnedFd, name: &str, cap: usize) -> Result<Option<Vec<u8>>,
 
 /// Writes `bytes` as `name` in `dir`, whole or not at all: a new temporary file no other writer
 /// shares, then `renameat` over the name, which replaces a link there without writing through it.
-fn write_whole(dir: &OwnedFd, name: &str, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn write_whole(dir: &OwnedFd, name: &str, bytes: &[u8]) -> io::Result<()> {
     let temp = format!(
         ".{name}.{}-{}.tmp",
         std::process::id(),
@@ -410,7 +414,7 @@ fn write_whole(dir: &OwnedFd, name: &str, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Removes the file `name` from `dir`; a missing one is fine.
-fn remove_at(dir: &OwnedFd, name: &str) -> io::Result<()> {
+pub(super) fn remove_at(dir: &OwnedFd, name: &str) -> io::Result<()> {
     let c_name = c_string(name.as_bytes())?;
     // SAFETY: `dir` is an open descriptor and `c_name` a valid C string that `unlinkat` only reads.
     if unsafe { libc::unlinkat(dir.as_raw_fd(), c_name.as_ptr(), 0) } == 0 {
@@ -434,15 +438,79 @@ pub(super) fn folder(
     if !valid_slug(slug) {
         return Err(Refusal::Io("invalid function id".into()));
     }
-    let root = open_root(worktree)?;
-    let mut dir = root;
-    for name in FUNCTIONS_DIR.split('/').chain([slug]) {
+    let parts: Vec<&str> = FUNCTIONS_DIR.split('/').chain([slug]).collect();
+    dir_at(worktree, &parts, create)
+}
+
+/// The folder at `parts` below the worktree, each opened without following a link and made
+/// when `create`; `None` when one is missing and not made.
+pub(super) fn dir_at(
+    worktree: &Path,
+    parts: &[&str],
+    create: bool,
+) -> Result<Option<OwnedFd>, Refusal> {
+    let mut dir = open_root(worktree)?;
+    for name in parts {
         match sub_dir(&dir, name, create)? {
             Some(next) => dir = next,
             None => return Ok(None),
         }
     }
     Ok(Some(dir))
+}
+
+/// The names in `dir`, sorted, without `.` and `..`; a name that is not UTF-8 is skipped.
+pub(super) fn list_names(dir: &OwnedFd) -> io::Result<Vec<String>> {
+    // SAFETY: `dup` gives a new descriptor, which `fdopendir` takes over on success.
+    let fd = unsafe { libc::dup(dir.as_raw_fd()) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a descriptor of a folder that nothing else owns.
+    let handle = unsafe { libc::fdopendir(fd) };
+    if handle.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so `fd` is still ours to close.
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+    // SAFETY: `handle` is an open directory stream; `dup` shares the offset with `dir`.
+    unsafe { libc::rewinddir(handle) };
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `handle` is an open directory stream.
+        let entry = unsafe { libc::readdir(handle) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` of an entry `readdir` returned is a NUL-terminated string.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        if let Ok(text) = std::str::from_utf8(name) {
+            names.push(text.to_string());
+        }
+    }
+    // SAFETY: `handle` is open and closed once; this also closes the duplicated descriptor.
+    unsafe { libc::closedir(handle) };
+    names.sort();
+    Ok(names)
+}
+
+/// Removes the empty folder `name` of `parent`; a missing one is fine.
+pub(super) fn remove_dir_at(parent: &OwnedFd, name: &str) -> io::Result<()> {
+    let c_name = c_string(name.as_bytes())?;
+    // SAFETY: `parent` is an open descriptor and `c_name` a valid C string.
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), c_name.as_ptr(), libc::AT_REMOVEDIR) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 /// What is stored for one function.
@@ -531,7 +599,7 @@ pub(super) fn load_stored(worktree: &Path, slug: &str) -> Stored {
     }
 }
 
-fn refusal_text(refusal: Refusal) -> String {
+pub(super) fn refusal_text(refusal: Refusal) -> String {
     match refusal {
         Refusal::NotPlain => FOLDER_REFUSED.to_string(),
         Refusal::Io(message) => message,

@@ -20,6 +20,7 @@ use crate::cases_cmd::{
     read_functions, run_cases,
 };
 use crate::check::line_of;
+use crate::cockpit_cmd::{self, CockpitWanted};
 use crate::review::parse_pr;
 use crate::run::{CliError, Output, connect, unexpected};
 
@@ -39,6 +40,7 @@ pub(crate) struct Wanted {
     pub run: Option<TestScope>,
     pub functions: bool,
     pub run_cases: Option<CasesWanted>,
+    pub cockpit: Option<CockpitWanted>,
 }
 
 /// What `--run-cases` was narrowed to: a function by id or exact name, and one of its cases.
@@ -395,14 +397,9 @@ async fn generate(
 
 /// Asks at the terminal; anything but a yes, and the end of input, is a no. A line that comes
 /// sooner than `QUIET_AFTER_PROMPT` after the question was typed before it, and is not an answer.
-async fn approved_at_terminal(plan: &SetupPlan) -> Result<bool, CliError> {
-    let steps = plan
-        .steps
-        .iter()
-        .filter(|s| !matches!(s.state, StepState::Done | StepState::Skipped { .. }))
-        .count();
+pub(crate) async fn confirm(question: &str) -> Result<bool, CliError> {
     loop {
-        eprint!("Approve all {steps} steps and the test commands? [y/N] ");
+        eprint!("{question}");
         let asked = Instant::now();
         let (read, line) = tokio::task::spawn_blocking(|| {
             let mut line = String::new();
@@ -421,6 +418,18 @@ async fn approved_at_terminal(plan: &SetupPlan) -> Result<bool, CliError> {
         }
         return Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"));
     }
+}
+
+async fn approved_at_terminal(plan: &SetupPlan) -> Result<bool, CliError> {
+    let steps = plan
+        .steps
+        .iter()
+        .filter(|s| !matches!(s.state, StepState::Done | StepState::Skipped { .. }))
+        .count();
+    confirm(&format!(
+        "Approve all {steps} steps and the test commands? [y/N] "
+    ))
+    .await
 }
 
 /// A step as the setup tells it: by the title the plan gave it, else by its id.
@@ -727,7 +736,8 @@ pub(crate) async fn tests(
         || wanted.list
         || wanted.run.is_some()
         || wanted.functions
-        || wanted.run_cases.is_some();
+        || wanted.run_cases.is_some()
+        || wanted.cockpit.is_some();
     if acts {
         // The requests read the review's worktree, which opening prepares.
         let topics = vec![topics::TESTS.into()];
@@ -823,13 +833,23 @@ pub(crate) async fn tests(
         );
         cases_code = Some(code);
     }
+    let mut cockpit_failed = None;
+    if let Some(cockpit) = &wanted.cockpit {
+        let done = cockpit_cmd::run(&mut client, &pr, cockpit, json, &mut stop).await?;
+        human.extend(done.human);
+        object.extend(done.json);
+        cockpit_failed = done.failed;
+    }
     object.insert("view".into(), json!(view));
     let output = Output {
         human: human.join("\n"),
         json: serde_json::Value::Object(object),
     };
     let cases_failed = cases_code.filter(|c| *c != 0);
-    if ended.as_ref().is_none_or(|_| code == 0) && cases_failed.is_none() {
+    if ended.as_ref().is_none_or(|_| code == 0)
+        && cases_failed.is_none()
+        && cockpit_failed.is_none()
+    {
         return Ok(output);
     }
     if json {
@@ -847,6 +867,9 @@ pub(crate) async fn tests(
             code,
             message: message.into(),
         });
+    }
+    if let Some((code, message)) = cockpit_failed {
+        return Err(CliError::Exit { code, message });
     }
     let message = match ended.as_ref().map(|run| &run.outcome) {
         Some(RunOutcome::Failed) => format!("tests failed (exit code {code})"),

@@ -22,6 +22,8 @@ pub struct SandboxRoots {
     pub data_root: PathBuf,
     pub home: PathBuf,
     pub clone_env: Vec<PathBuf>,
+    /// Folders a run may read and never write: a scenario's run folder.
+    pub read_only: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +178,11 @@ pub fn resolve_roots(roots: SandboxRoots) -> io::Result<SandboxRoots> {
             .iter()
             .filter_map(|p| std::fs::canonicalize(p).ok())
             .collect(),
+        read_only: roots
+            .read_only
+            .iter()
+            .map(|p| real(p))
+            .collect::<io::Result<_>>()?,
     })
 }
 
@@ -199,14 +206,26 @@ pub fn profile(roots: &SandboxRoots, mode: NetMode) -> String {
     ));
     out.push_str("(deny file-read*\n");
     out.push_str(&close(rule("subpath", &roots.data_root)));
-    // Metadata of the folders above the worktree, so `pwd -P`, `realpath` and git's discovery
-    // can walk up through the denied data root.
+    // Metadata of the folders above the worktree and the read-only roots, so `pwd -P`,
+    // `realpath` and git's discovery can walk up through the denied data root.
     out.push_str("(allow file-read-metadata\n");
-    let above = [
+    let mut above = vec![
         roots.data_root.clone(),
         roots.data_root.join("worktrees"),
         roots.data_root.join("tests"),
+        roots.data_root.join("worktrees").join(".main"),
+        roots.data_root.join("tests").join("runs"),
     ];
+    for root in std::iter::once(&roots.worktree).chain(&roots.read_only) {
+        for folder in root.ancestors().skip(1) {
+            if folder == roots.data_root || !folder.starts_with(&roots.data_root) {
+                break;
+            }
+            if !above.iter().any(|a| a == folder) {
+                above.push(folder.to_path_buf());
+            }
+        }
+    }
     out.push_str(&close(above.iter().map(|p| rule("literal", p)).collect()));
     out.push_str("(allow file-read*\n");
     let readable = [
@@ -214,10 +233,10 @@ pub fn profile(roots: &SandboxRoots, mode: NetMode) -> String {
         &roots.git_common,
         &roots.review_tmp,
         &roots.repo_cache,
-    ];
-    out.push_str(&close(
-        readable.iter().map(|p| rule("subpath", p)).collect(),
-    ));
+    ]
+    .into_iter()
+    .chain(&roots.read_only);
+    out.push_str(&close(readable.map(|p| rule("subpath", p)).collect()));
     let mut denied = String::new();
     for entry in DENY_HOME {
         let folder = !DENY_FILES.contains(&entry);
@@ -465,6 +484,7 @@ mod tests {
             data_root: "/d".into(),
             home: "/h".into(),
             clone_env: vec!["/c/widgets/.env".into()],
+            read_only: vec![],
         }
     }
 
@@ -514,7 +534,9 @@ mod tests {
 (allow file-read-metadata
   (literal "/d")
   (literal "/d/worktrees")
-  (literal "/d/tests"))
+  (literal "/d/tests")
+  (literal "/d/worktrees/.main")
+  (literal "/d/tests/runs"))
 (allow file-read*
   (subpath "/d/worktrees/acme~widgets~7")
   (subpath "/c/widgets/.git")
@@ -655,6 +677,7 @@ mod tests {
             data_root: top.join("data"),
             home: top.join("home"),
             clone_env: vec![top.join("clone/.env"), top.join("clone/.env.gone")],
+            read_only: vec![],
         })
         .unwrap();
         let real = |p: &str| top.join(p).canonicalize().unwrap();
@@ -682,6 +705,7 @@ mod tests {
             data_root: top.clone(),
             home: top.join("home"),
             clone_env: vec![],
+            read_only: vec![],
         };
         let err = resolve_roots(base.clone()).unwrap_err();
         assert!(err.to_string().contains("nowhere"), "{err}");
@@ -751,6 +775,7 @@ mod tests {
             data_root: top.join("data"),
             home: top.join("home"),
             clone_env: vec![],
+            read_only: vec![],
         })
         .unwrap();
         assert!(writable_by_sandbox(
@@ -947,5 +972,64 @@ mod tests {
             HEALTH_TIMEOUT,
             "the paused clock: no real wait"
         );
+    }
+
+    #[test]
+    fn read_only_roots_are_readable_and_never_writable() {
+        let run = PathBuf::from("/d/tests/runs/acme~widgets~7/1762300000-4-0");
+        let roots = SandboxRoots {
+            worktree: "/d/worktrees/.main/acme~widgets~7".into(),
+            read_only: vec![run.clone()],
+            ..roots()
+        };
+        let text = profile(&roots, NetMode::Offline);
+        assert!(text.contains(
+            "(allow file-read-metadata\n  (literal \"/d\")\n  (literal \"/d/worktrees\")\n  \
+             (literal \"/d/tests\")\n  (literal \"/d/worktrees/.main\")\n  (literal \"/d/tests/runs\")\n  \
+             (literal \"/d/tests/runs/acme~widgets~7\"))\n"
+        ), "{text}");
+        assert!(
+            text.contains(
+                "  (subpath \"/d/tests/cache/acme~widgets\")\n  \
+             (subpath \"/d/tests/runs/acme~widgets~7/1762300000-4-0\"))\n"
+            ),
+            "{text}"
+        );
+        let writes =
+            &text[text.find("(allow file-write*").unwrap()..text.find("(deny file-read*").unwrap()];
+        assert!(writes.contains("(subpath \"/d/worktrees/.main/acme~widgets~7\")"));
+        assert!(!writes.contains("/d/tests/runs"), "{writes}");
+        assert!(!writable_by_sandbox(&roots, &run.join("run.py")));
+
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().to_path_buf();
+        for d in [
+            "data/worktrees/w",
+            "data/tests/runs/k/r1-0",
+            "clone/.git",
+            "home",
+        ] {
+            std::fs::create_dir_all(top.join(d)).unwrap();
+        }
+        let resolved = resolve_roots(SandboxRoots {
+            worktree: top.join("data/worktrees/w"),
+            git_common: top.join("clone/.git"),
+            review_tmp: top.join("data/tests/tmp/abc"),
+            repo_cache: top.join("data/tests/cache/acme~widgets"),
+            data_root: top.join("data"),
+            home: top.join("home"),
+            clone_env: vec![],
+            read_only: vec![top.join("data/tests/runs/k/r1-0")],
+        })
+        .unwrap();
+        assert_eq!(
+            resolved.read_only,
+            [top.join("data/tests/runs/k/r1-0").canonicalize().unwrap()]
+        );
+        let missing = SandboxRoots {
+            read_only: vec![top.join("gone")],
+            ..resolved
+        };
+        assert!(resolve_roots(missing).is_err());
     }
 }

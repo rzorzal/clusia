@@ -221,6 +221,21 @@ pub fn function_block(json: serde_json::Value) -> String {
     format!("```clusia-function\n{json}\n```")
 }
 
+/// A fenced `clusia-scenario` block holding `json`.
+pub fn scenario_block(json: serde_json::Value) -> String {
+    format!("```clusia-scenario\n{json}\n```")
+}
+
+/// A fenced `clusia-bench` block holding `json`.
+pub fn bench_block(json: serde_json::Value) -> String {
+    format!("```clusia-bench\n{json}\n```")
+}
+
+/// A fenced `clusia-suggestion` block holding `json`.
+pub fn suggestion_block(json: serde_json::Value) -> String {
+    format!("```clusia-suggestion\n{json}\n```")
+}
+
 /// The turns the fake plays, one per call.
 #[derive(Debug, Clone)]
 pub struct Script {

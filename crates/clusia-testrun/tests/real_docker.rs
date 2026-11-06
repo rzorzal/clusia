@@ -150,6 +150,7 @@ async fn a_real_engine_builds_runs_stops_and_cleans_up() {
     let mounts = RunMounts {
         worktree: worktree.clone(),
         git_common: git.clone(),
+        scenario: None,
         caches: vec![(
             names::cache_volume(&slug, Ecosystem::Cargo),
             "/cache/cargo".into(),

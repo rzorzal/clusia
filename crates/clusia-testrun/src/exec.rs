@@ -126,6 +126,20 @@ impl StopFlag {
     }
 }
 
+/// The memory and CPU time of one process.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcUsage {
+    pub pid: u32,
+    pub rss_bytes: u64,
+    pub cpu_ns: u64,
+}
+
+/// The processes of one process group at one moment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupUsage {
+    pub procs: Vec<ProcUsage>,
+}
+
 pub trait Exec: Send + Sync {
     /// Whether `path` is a file a program can be started from.
     fn executable(&self, path: &Path) -> bool;
@@ -146,6 +160,26 @@ pub trait Exec: Send + Sync {
         stop: &'a StopFlag,
         chunk: &'a mut (dyn FnMut(Stream, &[u8]) + Send),
     ) -> BoxFut<'a, io::Result<Ended>>;
+
+    /// `stream`, also handing `started` the pid of the program right after it starts. The pid
+    /// is its process group's id. The default never calls `started`.
+    fn stream_group<'a>(
+        &'a self,
+        cmd: &'a CommandSpec,
+        limit: Duration,
+        stop: &'a StopFlag,
+        chunk: &'a mut (dyn FnMut(Stream, &[u8]) + Send),
+        started: &'a mut (dyn FnMut(u32) + Send),
+    ) -> BoxFut<'a, io::Result<Ended>> {
+        let _ = started;
+        self.stream(cmd, limit, stop, chunk)
+    }
+
+    /// The memory and CPU time of every process in `group`, or `None` when it can't be read.
+    fn group_usage(&self, group: u32) -> Option<GroupUsage> {
+        let _ = group;
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -181,6 +215,7 @@ async fn drive(
     limit: Duration,
     stop: Option<&StopFlag>,
     chunk: &mut (dyn FnMut(Stream, &[u8]) + Send),
+    started: Option<&mut (dyn FnMut(u32) + Send)>,
 ) -> io::Result<Ended> {
     let mut command = Command::new(&cmd.program);
     command.args(&cmd.args);
@@ -206,6 +241,9 @@ async fn drive(
         io::Error::new(e.kind(), text)
     })?;
     let pid = child.id();
+    if let (Some(started), Some(pid)) = (started, pid) {
+        started(pid);
+    }
     let (mut out, mut err) = (
         child.stdout.take().expect("stdout is piped"),
         child.stderr.take().expect("stderr is piped"),
@@ -285,7 +323,7 @@ impl Exec for SystemExec {
                 Stream::Out => keep(&mut stdout, bytes),
                 Stream::Err => keep(&mut stderr, bytes),
             };
-            let ended = drive(cmd, limit, None, &mut chunk).await?;
+            let ended = drive(cmd, limit, None, &mut chunk, None).await?;
             Ok(Output {
                 code: match ended {
                     Ended::Exited(code) => code,
@@ -305,8 +343,84 @@ impl Exec for SystemExec {
         stop: &'a StopFlag,
         chunk: &'a mut (dyn FnMut(Stream, &[u8]) + Send),
     ) -> BoxFut<'a, io::Result<Ended>> {
-        Box::pin(drive(cmd, limit, Some(stop), chunk))
+        Box::pin(drive(cmd, limit, Some(stop), chunk, None))
     }
+
+    fn stream_group<'a>(
+        &'a self,
+        cmd: &'a CommandSpec,
+        limit: Duration,
+        stop: &'a StopFlag,
+        chunk: &'a mut (dyn FnMut(Stream, &[u8]) + Send),
+        started: &'a mut (dyn FnMut(u32) + Send),
+    ) -> BoxFut<'a, io::Result<Ended>> {
+        Box::pin(drive(cmd, limit, Some(stop), chunk, Some(started)))
+    }
+
+    fn group_usage(&self, group: u32) -> Option<GroupUsage> {
+        read_group(group)
+    }
+}
+
+/// The Mach timebase `(numer, denom)` that turns CPU ticks into nanoseconds, read once.
+#[cfg(target_os = "macos")]
+// libc points to the `mach2` crate for these, which the workspace does not take.
+#[allow(deprecated)]
+fn timebase() -> (u32, u32) {
+    static TIMEBASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    *TIMEBASE.get_or_init(|| {
+        let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+        // SAFETY: the call only writes the two fields of `info`.
+        let status = unsafe { libc::mach_timebase_info(&mut info) };
+        if status == 0 && info.denom != 0 {
+            (info.numer, info.denom)
+        } else {
+            (1, 1)
+        }
+    })
+}
+
+/// The processes of `group` through libproc: resident memory and user plus system CPU time.
+#[cfg(target_os = "macos")]
+fn read_group(group: u32) -> Option<GroupUsage> {
+    const PIDS_MAX: usize = 1024;
+    let group = libc::pid_t::try_from(group).ok().filter(|g| *g > 0)?;
+    let mut pids: Vec<libc::pid_t> = vec![0; PIDS_MAX];
+    let bytes = libc::c_int::try_from(PIDS_MAX * std::mem::size_of::<libc::pid_t>()).ok()?;
+    // SAFETY: `pids` holds `bytes` bytes and the call writes at most that many.
+    let n = unsafe { libc::proc_listpgrppids(group, pids.as_mut_ptr().cast(), bytes) };
+    let n = usize::try_from(n).ok().filter(|n| *n > 0)?.min(PIDS_MAX);
+    let (numer, denom) = timebase();
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_taskinfo>()).ok()?;
+    let mut procs = Vec::new();
+    for &pid in &pids[..n] {
+        let Ok(id) = u32::try_from(pid) else { continue };
+        if id == 0 {
+            continue;
+        }
+        // SAFETY: an all-zero `proc_taskinfo` is a valid value of a plain C struct.
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is `size` bytes long and the call writes at most that many.
+        let got = unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size)
+        };
+        if got != size {
+            continue;
+        }
+        let ticks = u128::from(info.pti_total_user) + u128::from(info.pti_total_system);
+        let cpu_ns = ticks * u128::from(numer) / u128::from(denom);
+        procs.push(ProcUsage {
+            pid: id,
+            rss_bytes: info.pti_resident_size,
+            cpu_ns: u64::try_from(cpu_ns).unwrap_or(u64::MAX),
+        });
+    }
+    (!procs.is_empty()).then_some(GroupUsage { procs })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_group(_group: u32) -> Option<GroupUsage> {
+    None
 }
 
 #[cfg(test)]
@@ -620,5 +734,57 @@ mod tests {
         );
         assert_eq!(cmd.cwd, Some(PathBuf::from("/tmp/wt")));
         assert!(cmd.clear_env);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sampling_a_sleep_reads_its_group() {
+        let stop = StopFlag::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut started = move |pid: u32| {
+            let _ = tx.send(pid);
+        };
+        let mut chunk = |_: Stream, _: &[u8]| {};
+        let cmd = CommandSpec::new("/bin/sleep").arg("5");
+        let run = SystemExec.stream_group(
+            &cmd,
+            Duration::from_secs(20),
+            &stop,
+            &mut chunk,
+            &mut started,
+        );
+        let read = async {
+            let pid = loop {
+                if let Ok(pid) = rx.try_recv() {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let usage = SystemExec.group_usage(pid);
+            stop.fire();
+            (pid, usage)
+        };
+        let (ended, (pid, usage)) = tokio::join!(run, read);
+        assert_eq!(ended.unwrap(), Ended::Stopped);
+        let usage = usage.expect("the group of a running sleep");
+        let leader = usage
+            .procs
+            .iter()
+            .find(|p| p.pid == pid)
+            .expect("the leader is listed");
+        assert!(leader.rss_bytes > 0, "{leader:?}");
+        assert_eq!(
+            SystemExec.group_usage(pid),
+            None,
+            "an ended group reads as nothing"
+        );
+        assert_eq!(SystemExec.group_usage(0), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn group_usage_is_not_read_off_macos() {
+        assert_eq!(SystemExec.group_usage(std::process::id()), None);
     }
 }

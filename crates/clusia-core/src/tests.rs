@@ -442,6 +442,21 @@ pub struct TestsRecord {
     /// Drivers placed in the worktree and not yet removed, relative to it.
     #[serde(default)]
     pub placed: Vec<String>,
+    /// Rust bench files Clúsia placed in main's worktree, relative to it, removed after each run.
+    #[serde(default)]
+    pub main_placed: Vec<String>,
+    /// The approved `approval_hash` of each scenario, by slug.
+    #[serde(default)]
+    pub scenario_approvals: BTreeMap<String, String>,
+    /// Main's worktree record.
+    #[serde(default)]
+    pub main: Option<crate::cockpit::MainRecord>,
+    /// The newest results of each item, by `ItemRef::key`.
+    #[serde(default)]
+    pub cockpit_results: BTreeMap<String, crate::cockpit::ItemResults>,
+    /// The QA copilot's conversation, the last `COPILOT_KEPT` messages.
+    #[serde(default)]
+    pub copilot: Vec<crate::cockpit::CopilotMessage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -918,6 +933,7 @@ mod wire_and_limits {
                 BTreeMap::new(),
             )]),
             placed: vec!["store/tests/clusia_driver_f3910adf0e.rs".into()],
+            ..Default::default()
         };
         let back: TestsRecord = serde_json::from_str(&json(&record)).unwrap();
         assert_eq!(back, record);
@@ -1078,5 +1094,48 @@ mod wire_and_limits {
             ],
             ["engine", "image", "services", "stack", "tests"]
         );
+    }
+
+    #[test]
+    fn an_old_record_reads_without_the_cockpit_fields() {
+        let old = r#"{"env":null,"written_hash":null,"generated_inputs":null,"proposal":null,"approval":null,"agent_near":[],"listing":null,"runs":[],"stack":null,"generated_at":null}"#;
+        let record: TestsRecord = serde_json::from_str(old).unwrap();
+        assert!(record.scenario_approvals.is_empty());
+        assert!(record.main.is_none());
+        assert!(record.cockpit_results.is_empty());
+        assert!(record.copilot.is_empty());
+        assert!(record.main_placed.is_empty());
+        assert_eq!(record, TestsRecord::default());
+    }
+
+    #[test]
+    fn the_cockpit_fields_round_trip() {
+        use crate::cockpit::*;
+        let mut record = TestsRecord::default();
+        record
+            .scenario_approvals
+            .insert("refresh".into(), "abc".into());
+        record.main = Some(MainRecord {
+            base: "b0".into(),
+            created_at: 1,
+            runner: RunnerKind::Container,
+            inputs_hash: "i".into(),
+            approval: None,
+            built: false,
+        });
+        record
+            .cockpit_results
+            .insert("scenario:refresh".into(), ItemResults::default());
+        record.copilot.push(CopilotMessage {
+            id: 1,
+            at: 2,
+            from: CopilotFrom::Reviewer,
+            item: None,
+            text: "Explain this comparison".into(),
+            suggestions: Vec::new(),
+        });
+        let back: TestsRecord =
+            serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+        assert_eq!(back, record);
     }
 }

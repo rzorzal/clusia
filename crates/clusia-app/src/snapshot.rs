@@ -182,7 +182,10 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         | Event::TestResult { .. }
         | Event::TestRunDone { .. }
         | Event::FunctionsChanged { .. }
-        | Event::CaseDone { .. } => {}
+        | Event::CaseDone { .. }
+        | Event::CockpitChanged { .. }
+        | Event::CockpitSamples { .. }
+        | Event::CockpitRound { .. } => {}
     }
     (r, None)
 }

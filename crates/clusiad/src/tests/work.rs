@@ -5,10 +5,11 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::future::Future;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use clusia_core::cockpit::{RunSide, Sample};
 use clusia_core::tests::{
     Approval, Approve, EnvState, Listing, MESSAGE_MAX, PlanStep, RECIPE_CHANGED, RECIPE_FILE,
     RESULTS_MAX, RecipePromptContext, RecipeProposal, ResultsFormat, RunOutcome, RunnerKind,
@@ -25,6 +26,7 @@ use clusia_testrun::log::{CappedLog, Tail};
 use clusia_testrun::names::{self, LabelKind};
 use clusia_testrun::recipe::{Recipe, commands_for, recipe_hash};
 use clusia_testrun::results::{ResultParser, parse_list, parser_for};
+use clusia_testrun::sample::{PointGate, Probe, sample};
 use clusia_testrun::sandbox::{self, NetMode};
 use clusia_testrun::{compose, engine, local};
 
@@ -540,6 +542,8 @@ pub(super) async fn prepare(
             recipe: &recipe,
             hash: &hash,
             stop: &stop,
+            main: false,
+            image_tag: None,
         };
         match run_step(&walk, &step).await {
             StepEnd::Done => {
@@ -586,7 +590,14 @@ fn failed(shared: &Shared, pr: &PrRef, step: &str, message: String, tail: Option
 }
 
 /// The mount check of `tag` for this worktree, kept for the daemon's session.
-async fn mount(shared: &Shared, pr: &PrRef, id: u64, ctx: &Ctx, env: &EnvState, tag: &str) {
+pub(super) async fn mount(
+    shared: &Shared,
+    pr: &PrRef,
+    id: u64,
+    ctx: &Ctx,
+    env: &EnvState,
+    tag: &str,
+) {
     super::set_phase(
         shared,
         pr,
@@ -602,6 +613,7 @@ async fn mount(shared: &Shared, pr: &PrRef, id: u64, ctx: &Ctx, env: &EnvState, 
             let mounts = RunMounts {
                 worktree: ctx.worktree.clone(),
                 git_common: ctx.git_common.clone(),
+                scenario: None,
                 caches: Vec::new(),
             };
             let name = names::run_name(&ctx.slug, pr.number, shared.tests.seq());
@@ -627,18 +639,24 @@ async fn mount(shared: &Shared, pr: &PrRef, id: u64, ctx: &Ctx, env: &EnvState, 
 }
 
 /// What every step of one walk reads.
-struct Walk<'a> {
-    shared: &'a Arc<Shared>,
-    pr: &'a PrRef,
-    id: u64,
-    ctx: &'a Ctx,
-    env: &'a EnvState,
-    recipe: &'a Recipe,
-    hash: &'a str,
-    stop: &'a StopFlag,
+pub(super) struct Walk<'a> {
+    pub shared: &'a Arc<Shared>,
+    pub pr: &'a PrRef,
+    pub id: u64,
+    pub ctx: &'a Ctx,
+    pub env: &'a EnvState,
+    pub recipe: &'a Recipe,
+    pub hash: &'a str,
+    pub stop: &'a StopFlag,
+    /// The walk is over main's worktree: its output goes to `main:<step>` and its caches and
+    /// roots are main's own.
+    pub main: bool,
+    /// The image a container step runs in, when it is not the one `ctx`'s worktree plans (main
+    /// runs in the pull request's image).
+    pub image_tag: Option<&'a str>,
 }
 
-enum StepEnd {
+pub(super) enum StepEnd {
     Done,
     /// Why, and the output's tail.
     Failed(String, String),
@@ -680,11 +698,16 @@ fn image_of(walk: &Walk<'_>) -> Result<ImagePlan, String> {
     )
 }
 
-async fn run_step(walk: &Walk<'_>, step: &PlanStep) -> StepEnd {
+pub(super) async fn run_step(walk: &Walk<'_>, step: &PlanStep) -> StepEnd {
     let shared = walk.shared;
     let exec = shared.test_exec.as_ref();
     let limit = Duration::from_secs(u64::from(shared.config.read().await.tests.run_timeout_secs));
-    let mut sink = Sink::new(shared, walk.pr, To::Step(step.id.clone()), None, None);
+    let sink_id = if walk.main {
+        format!("main:{}", step.id)
+    } else {
+        step.id.clone()
+    };
+    let mut sink = Sink::new(shared, walk.pr, To::Step(sink_id), None, None);
     let id = step.id.as_str();
     if id == STEP_ENGINE {
         return engine_step(walk, &mut sink).await;
@@ -892,13 +915,16 @@ async fn work_step(
             return Err(io::Error::other("no container engine found"));
         };
         let docker = env::docker_for(engine, &ctx.host);
-        let image = image_of(walk).map_err(io::Error::other)?;
-        let marker = clusia_testrun::plan::work_marker(setup, Some(&image.tag), &env.inputs_hash);
+        let tag = match walk.image_tag {
+            Some(tag) => tag.to_string(),
+            None => image_of(walk).map_err(io::Error::other)?.tag,
+        };
+        let marker = clusia_testrun::plan::work_marker(setup, Some(&tag), &env.inputs_hash);
         let config = shared.config.read().await.tests.clone();
         let name = names::run_name(&ctx.slug, walk.pr.number, shared.tests.seq());
         let job = ContainerJob {
             name: name.clone(),
-            image: image.tag.clone(),
+            image: tag,
             command: setup.run.clone(),
             env: docker::job_env(&env.signals.ecosystems, &walk.recipe.tests.env),
             net: if setup.network {
@@ -915,7 +941,11 @@ async fn work_step(
             exec,
             &docker,
             &job,
-            &mounts(ctx, env),
+            &if walk.main {
+                super::main_tree::mounts_for_main(ctx, env)
+            } else {
+                mounts(ctx, env)
+            },
             Marker {
                 worktree: &ctx.worktree,
                 step: &step.id,
@@ -934,8 +964,12 @@ async fn work_step(
     } else {
         NetMode::Offline
     };
-    let roots = env::roots(shared, ctx)?;
-    let profile = env::profile_file(shared, ctx, mode)?;
+    let roots = if walk.main {
+        env::roots_for_main(shared, ctx, None)?
+    } else {
+        env::roots(shared, ctx)?
+    };
+    let profile = env::profile_file_for(shared, ctx, &roots, mode, walk.main)?;
     let cmd = sandbox::local_command(
         &shared.sandbox_exec_program,
         &profile,
@@ -960,6 +994,7 @@ fn mounts(ctx: &Ctx, env: &EnvState) -> RunMounts {
     RunMounts {
         worktree: ctx.worktree.clone(),
         git_common: ctx.git_common.clone(),
+        scenario: None,
         caches: docker::cache_mounts(&ctx.slug, &env.signals.ecosystems),
     }
 }
@@ -1076,6 +1111,10 @@ pub(super) struct RunJob {
     /// The recipe's image, for the container runner.
     pub image: Option<String>,
     pub network: ContainerNet,
+    /// The scenario run folder, read-only for the run.
+    pub scenario: Option<PathBuf>,
+    /// Which worktree the job runs in.
+    pub side: RunSide,
 }
 
 /// What a run or a list needs: everything `usable` checks, a plan that is ready, and an engine
@@ -1117,6 +1156,8 @@ pub(super) fn job_of(
         env: usable.env,
         recipe: usable.recipe,
         network,
+        scenario: None,
+        side: RunSide::Pr,
     }
 }
 
@@ -1310,6 +1351,93 @@ fn totals_of(results: &[TestCaseResult]) -> Totals {
     totals
 }
 
+/// The container, its job and its mounts for one command of `job`: the side's worktree and
+/// caches, the scenario folder read-only when there is one, and `extra_env` after the recipe's
+/// own environment.
+async fn container_parts(
+    shared: &Shared,
+    pr: &PrRef,
+    job: &RunJob,
+    command: &str,
+    extra_env: &[(String, String)],
+) -> io::Result<(Docker, ContainerJob, RunMounts)> {
+    let (ctx, env) = (&job.ctx, &job.env);
+    let (Some(engine), Some(image)) = (&env.engine, &job.image) else {
+        return Err(io::Error::other("no container engine or image"));
+    };
+    let docker = env::docker_for(engine, &ctx.host);
+    let config = shared.config.read().await.tests.clone();
+    let name = names::run_name(&ctx.slug, pr.number, shared.tests.seq());
+    let container_job = ContainerJob {
+        name,
+        image: image.clone(),
+        command: command.to_string(),
+        env: docker::job_env(&env.signals.ecosystems, &job.recipe.tests.env)
+            .into_iter()
+            .chain(extra_env.iter().cloned())
+            .collect(),
+        net: job.network.clone(),
+        cpus: Some(config.cpus_for(cores())),
+        memory_mb: Some(config.memory_mb),
+        labels: ctx.labels(LabelKind::Run),
+    };
+    let mut mounts = match job.side {
+        RunSide::Pr => mounts(ctx, env),
+        RunSide::Main => super::main_tree::mounts_for_main(ctx, env),
+    };
+    mounts.scenario = job.scenario.clone();
+    Ok((docker, container_job, mounts))
+}
+
+/// Which sandbox profile file a local command writes and runs with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProfileOf {
+    /// The review's offline profile, which runs, lists and cases share.
+    Run,
+    /// The cockpit's profile of the job's side.
+    Cockpit,
+}
+
+/// The local sandbox command for one command of `job`: the side's roots, with the scenario
+/// folder read-only when there is one, and `extra_env` after the recipe's own environment.
+fn local_parts(
+    shared: &Shared,
+    pr: &PrRef,
+    job: &RunJob,
+    command: &str,
+    extra_env: &[(String, String)],
+    profile_of: ProfileOf,
+) -> io::Result<CommandSpec> {
+    let (ctx, env) = (&job.ctx, &job.env);
+    let folder = job.scenario.as_deref();
+    let roots = match job.side {
+        RunSide::Pr => env::roots_for_run(shared, ctx, folder)?,
+        RunSide::Main => env::roots_for_main(shared, ctx, folder)?,
+    };
+    let profile = match profile_of {
+        ProfileOf::Run => env::profile_file(shared, ctx, NetMode::Offline)?,
+        ProfileOf::Cockpit => env::cockpit_profile(shared, pr, job.side, &roots)?,
+    };
+    let mut vars = sandbox::base_env(
+        &roots,
+        &env::local_path(shared),
+        &env.signals.ecosystems,
+        &job.recipe.tests.env,
+    );
+    vars.extend(
+        extra_env
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
+    );
+    Ok(sandbox::local_command(
+        &shared.sandbox_exec_program,
+        &profile,
+        command,
+        vars,
+        &ctx.worktree,
+    ))
+}
+
 /// One command of a run, a list or a case, in a container of the recipe's image or in the
 /// local sandbox with no network. `extra_env` comes after the recipe's own environment: as
 /// `-e` arguments in a container, as entries of the cleared environment locally.
@@ -1326,62 +1454,113 @@ pub(super) async fn run_command(
     extra_env: &[(String, String)],
 ) -> io::Result<Ended> {
     let exec = shared.test_exec.as_ref();
-    let (ctx, env) = (&job.ctx, &job.env);
-    if env.runner == RunnerKind::Container {
-        let (Some(engine), Some(image)) = (&env.engine, &job.image) else {
-            return Err(io::Error::other("no container engine or image"));
-        };
-        let docker = env::docker_for(engine, &ctx.host);
-        let config = shared.config.read().await.tests.clone();
-        let name = names::run_name(&ctx.slug, pr.number, shared.tests.seq());
-        let container_job = ContainerJob {
-            name: name.clone(),
-            image: image.clone(),
-            command: command.to_string(),
-            env: docker::job_env(&env.signals.ecosystems, &job.recipe.tests.env)
-                .into_iter()
-                .chain(extra_env.iter().cloned())
-                .collect(),
-            net: job.network.clone(),
-            cpus: Some(config.cpus_for(cores())),
-            memory_mb: Some(config.memory_mb),
-            labels: ctx.labels(LabelKind::Run),
-        };
-        super::set_container(shared, pr, act, Some(name));
-        let ended = container::run_container(
-            exec,
-            &docker,
-            &container_job,
-            &mounts(ctx, env),
-            limit,
-            stop,
-            chunk,
-        )
-        .await;
+    if job.env.runner == RunnerKind::Container {
+        let (docker, container_job, mounts) =
+            container_parts(shared, pr, job, command, extra_env).await?;
+        super::set_container(shared, pr, act, Some(container_job.name.clone()));
+        let ended =
+            container::run_container(exec, &docker, &container_job, &mounts, limit, stop, chunk)
+                .await;
         super::set_container(shared, pr, act, None);
         return ended;
     }
-    let roots = env::roots(shared, ctx)?;
-    let profile = env::profile_file(shared, ctx, NetMode::Offline)?;
-    let mut vars = sandbox::base_env(
-        &roots,
-        &env::local_path(shared),
-        &env.signals.ecosystems,
-        &job.recipe.tests.env,
-    );
-    vars.extend(
-        extra_env
-            .iter()
-            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
-    );
-    let cmd = sandbox::local_command(
-        &shared.sandbox_exec_program,
-        &profile,
-        command,
-        vars,
-        &ctx.worktree,
-    );
+    let cmd = local_parts(shared, pr, job, command, extra_env, ProfileOf::Run)?;
     local::run_local(exec, &cmd, limit, stop, chunk).await
+}
+
+/// How a measured command ended, how long it took and every point its sampler read.
+pub(super) struct Measured {
+    pub ended: Ended,
+    pub took_ms: u64,
+    pub points: Vec<Sample>,
+}
+
+/// One command of a cockpit round, with one sampler beside it that ends with it.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_measured(
+    shared: &Shared,
+    pr: &PrRef,
+    act: u64,
+    job: &RunJob,
+    command: &str,
+    limit: Duration,
+    stop: &StopFlag,
+    chunk: &mut (dyn FnMut(Stream, &[u8]) + Send),
+    extra_env: &[(String, String)],
+    push: &mut (dyn FnMut(Sample) + Send),
+) -> io::Result<Measured> {
+    let exec = shared.test_exec.as_ref();
+    let began = Instant::now();
+    let sampler_stop = StopFlag::new();
+    let mut points = Vec::new();
+    let mut gate = PointGate::new(limit);
+    let mut keep = |point: Sample| {
+        if !gate.admit(point.t_ms) {
+            return;
+        }
+        points.push(point.clone());
+        push(point);
+    };
+    let ended = if job.env.runner == RunnerKind::Container {
+        let (docker, container_job, mounts) =
+            container_parts(shared, pr, job, command, extra_env).await?;
+        let probe = Probe::Container {
+            docker: docker.clone(),
+            name: container_job.name.clone(),
+        };
+        super::set_container(shared, pr, act, Some(container_job.name.clone()));
+        let run = async {
+            let ended = container::run_container(
+                exec,
+                &docker,
+                &container_job,
+                &mounts,
+                limit,
+                stop,
+                chunk,
+            )
+            .await;
+            sampler_stop.fire();
+            ended
+        };
+        let (ended, ()) = tokio::join!(run, sample(exec, probe, &sampler_stop, &mut keep));
+        super::set_container(shared, pr, act, None);
+        ended
+    } else {
+        let cmd = local_parts(shared, pr, job, command, extra_env, ProfileOf::Cockpit)?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let mut started = |group: u32| {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(group);
+            }
+        };
+        let run = async {
+            let ended = local::run_local_group(exec, &cmd, limit, stop, chunk, &mut started).await;
+            sampler_stop.fire();
+            ended
+        };
+        let sampler = async {
+            tokio::select! {
+                biased;
+                _ = sampler_stop.notified() => {}
+                group = rx => {
+                    if let Ok(group) = group {
+                        sample(exec, Probe::Local { group }, &sampler_stop, &mut keep).await;
+                    }
+                }
+            }
+        };
+        let (ended, ()) = tokio::join!(run, sampler);
+        ended
+    }?;
+    let took_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+    drop(keep);
+    Ok(Measured {
+        ended,
+        took_ms,
+        points,
+    })
 }
 
 /// The list command, with a place, answered as the tests it found.

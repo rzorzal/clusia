@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use clusia_core::cockpit::SERVICES_ON_MAIN;
 use clusia_core::tests::{
     Approval, Engine, EngineKind, EnvState, PlanCommand, PlanStep, RunnerChoice, RunnerKind,
     STEP_ENGINE, STEP_IMAGE, STEP_SERVICES, STEP_STACK, STEP_TESTS, SetupPlan, StepPlace,
@@ -15,6 +16,9 @@ use crate::recipe::{ImageSource, Recipe, SetupStep, StepInto};
 /// The block of a container plan whose recipe has no `[image]`.
 pub const NO_IMAGE: &str =
     "This recipe names no image. Add an [image] section, or set runner to local.";
+
+/// The block of main's plan while the pull request side has no image yet.
+pub const SET_UP_PR_FIRST: &str = "Set up this pull request's tests first";
 
 const NO_ENGINE: &str = "No container engine found. Install one, or set tests.runner to local.";
 const START_ENGINE: &str = "Start your container engine.";
@@ -126,35 +130,7 @@ pub fn setup_plan(
         step.state = done_if(facts.services_ready);
         steps.push(step);
     }
-    for (i, setup) in recipe.setup.iter().enumerate() {
-        match (setup.into, container) {
-            (StepInto::Image, true) => {}
-            (StepInto::Image, false) => {
-                let mut step = plan_step(
-                    &format!("image:{i}"),
-                    &setup.name,
-                    &setup.run,
-                    StepPlace::LocalSandbox,
-                    setup.network,
-                );
-                step.state = StepState::Skipped {
-                    why: "container only".into(),
-                };
-                steps.push(step);
-            }
-            (StepInto::Work, _) => {
-                let id = format!("work:{i}");
-                let place = if container {
-                    StepPlace::Container
-                } else {
-                    StepPlace::LocalSandbox
-                };
-                let mut step = plan_step(&id, &setup.name, &setup.run, place, setup.network);
-                step.state = done_if(facts.markers.get(&id).copied().unwrap_or(false));
-                steps.push(step);
-            }
-        }
-    }
+    steps.extend(setup_steps(recipe, container, facts));
     if let (Some(compose), Some(services)) = (compose, &recipe.services) {
         let command = format!(
             "{} {}",
@@ -192,6 +168,104 @@ pub fn setup_plan(
     }
 }
 
+/// The recipe's `setup` steps that run in the work folder or, locally, anywhere: in a container
+/// only `into = "work"` steps, and locally the image steps are skipped.
+fn setup_steps(recipe: &Recipe, container: bool, facts: &Facts) -> Vec<PlanStep> {
+    let mut steps = Vec::new();
+    for (i, setup) in recipe.setup.iter().enumerate() {
+        match (setup.into, container) {
+            (StepInto::Image, true) => {}
+            (StepInto::Image, false) => {
+                let mut step = plan_step(
+                    &format!("image:{i}"),
+                    &setup.name,
+                    &setup.run,
+                    StepPlace::LocalSandbox,
+                    setup.network,
+                );
+                step.state = StepState::Skipped {
+                    why: "container only".into(),
+                };
+                steps.push(step);
+            }
+            (StepInto::Work, _) => {
+                let id = format!("work:{i}");
+                let place = if container {
+                    StepPlace::Container
+                } else {
+                    StepPlace::LocalSandbox
+                };
+                let mut step = plan_step(&id, &setup.name, &setup.run, place, setup.network);
+                step.state = done_if(facts.markers.get(&id).copied().unwrap_or(false));
+                steps.push(step);
+            }
+        }
+    }
+    steps
+}
+
+/// The plan of main's worktree: only the setup steps that run in the work folder and the
+/// function commands. Main runs in the pull request's image, so it never builds one, starts an
+/// engine or brings up services, and it waits for the pull request side to be set up first.
+pub fn main_plan(
+    recipe: &Recipe,
+    main_hash: &str,
+    env: &EnvState,
+    facts: &Facts,
+    approval: Option<&Approval>,
+) -> SetupPlan {
+    let container = env.runner == RunnerKind::Container;
+    if let Some(problem) = &facts.clusia_problem {
+        return SetupPlan {
+            recipe_hash: main_hash.to_string(),
+            steps: Vec::new(),
+            commands: Vec::new(),
+            commands_approved: false,
+            ready: false,
+            blocked: Some(problem.clone()),
+        };
+    }
+    let mut steps = setup_steps(recipe, container, facts);
+    for step in &mut steps {
+        step.approved = matches!(step.state, StepState::Skipped { .. })
+            || approved(approval, main_hash, &step.id);
+    }
+    let commands_approved = approved(approval, main_hash, STEP_TESTS);
+    let blocked = main_blocked(recipe, env, facts, container);
+    let steps_done = steps
+        .iter()
+        .all(|s| matches!(s.state, StepState::Done | StepState::Skipped { .. }));
+    SetupPlan {
+        recipe_hash: main_hash.to_string(),
+        commands: function_commands(recipe),
+        commands_approved,
+        ready: blocked.is_none() && steps_done && commands_approved,
+        blocked,
+        steps,
+    }
+}
+
+fn main_blocked(recipe: &Recipe, env: &EnvState, facts: &Facts, container: bool) -> Option<String> {
+    let message = if recipe.services.is_some() {
+        SERVICES_ON_MAIN
+    } else if container {
+        if env.engine.is_none() {
+            NO_ENGINE
+        } else if !facts.engine_running {
+            START_ENGINE
+        } else if recipe.image.is_none() || !facts.image_present {
+            SET_UP_PR_FIRST
+        } else {
+            return None;
+        }
+    } else if !env.sandbox_ok {
+        NO_SANDBOX
+    } else {
+        return None;
+    };
+    Some(message.to_string())
+}
+
 fn blocked(recipe: &Recipe, env: &EnvState, facts: &Facts, container: bool) -> Option<String> {
     if let Some(problem) = &facts.compose_problem {
         return Some(problem.clone());
@@ -225,10 +299,17 @@ fn commands(recipe: &Recipe) -> Vec<PlanCommand> {
             out.push(command(key, text));
         }
     }
-    for (lang, text) in recipe.functions.iter().flat_map(|s| s.entries()) {
-        out.push(command(&format!("functions.{}", lang.key()), text));
-    }
+    out.extend(function_commands(recipe));
     out
+}
+
+fn function_commands(recipe: &Recipe) -> Vec<PlanCommand> {
+    recipe
+        .functions
+        .iter()
+        .flat_map(|s| s.entries())
+        .map(|(lang, text)| command(&format!("functions.{}", lang.key()), text))
+        .collect()
 }
 
 fn command(key: &str, command: &str) -> PlanCommand {
@@ -1008,5 +1089,158 @@ mod tests {
             approved.commands_approved,
             "the tests step approves the function commands too"
         );
+    }
+
+    fn main_recipe() -> Recipe {
+        let mut recipe = recipe();
+        recipe.services = None;
+        recipe.functions = Some(crate::recipe::FunctionsSpec {
+            rust: Some("cargo test -p {package} --test {driver}".into()),
+            ..Default::default()
+        });
+        recipe
+    }
+
+    const MAIN_HASH: &str = "0f0f";
+
+    fn main_approval(steps: &[&str]) -> Approval {
+        Approval {
+            recipe_hash: MAIN_HASH.into(),
+            steps: steps.iter().map(|s| s.to_string()).collect(),
+            at: 0,
+        }
+    }
+
+    #[test]
+    fn main_plan_has_only_work_steps_and_function_commands() {
+        let container = env(RunnerKind::Container, Some(colima()));
+        let plan = main_plan(
+            &main_recipe(),
+            MAIN_HASH,
+            &container,
+            &running_with_image(),
+            None,
+        );
+        assert_eq!(plan.recipe_hash, MAIN_HASH);
+        assert_eq!(
+            plan.steps,
+            [step(
+                "work:1",
+                "Fetch dependencies",
+                "cargo fetch",
+                StepPlace::Container,
+                true
+            )]
+        );
+        assert_eq!(
+            plan.commands
+                .iter()
+                .map(|c| c.key.as_str())
+                .collect::<Vec<_>>(),
+            ["functions.rust"]
+        );
+        assert_eq!(
+            (plan.blocked.as_deref(), plan.ready, plan.commands_approved),
+            (None, false, false)
+        );
+
+        let pr_approval = approval(&EVERYTHING);
+        let marked = Facts {
+            markers: BTreeMap::from([("work:1".to_string(), true)]),
+            ..running_with_image()
+        };
+        let not_main = main_plan(
+            &main_recipe(),
+            MAIN_HASH,
+            &container,
+            &marked,
+            Some(&pr_approval),
+        );
+        assert!(
+            !not_main.ready && !not_main.commands_approved,
+            "the PR's approval is not main's"
+        );
+        let ready = main_plan(
+            &main_recipe(),
+            MAIN_HASH,
+            &container,
+            &marked,
+            Some(&main_approval(&["work:1", "tests"])),
+        );
+        assert!(ready.ready && ready.steps[0].approved && ready.steps[0].state == StepState::Done);
+
+        let local = main_plan(
+            &main_recipe(),
+            MAIN_HASH,
+            &env(RunnerKind::Local, None),
+            &Facts::default(),
+            None,
+        );
+        assert_eq!(
+            local
+                .steps
+                .iter()
+                .map(|s| (s.id.as_str(), s.place))
+                .collect::<Vec<_>>(),
+            [
+                ("image:0", StepPlace::LocalSandbox),
+                ("work:1", StepPlace::LocalSandbox)
+            ]
+        );
+        assert!(matches!(local.steps[0].state, StepState::Skipped { .. }));
+    }
+
+    fn running_with_image() -> Facts {
+        Facts {
+            image_present: true,
+            ..running()
+        }
+    }
+
+    #[test]
+    fn main_plan_blocks_until_the_pr_side_is_set_up() {
+        let container = env(RunnerKind::Container, Some(colima()));
+        let no_image = main_plan(&main_recipe(), MAIN_HASH, &container, &running(), None);
+        assert_eq!(no_image.blocked.as_deref(), Some(SET_UP_PR_FIRST));
+        assert_eq!(SET_UP_PR_FIRST, "Set up this pull request's tests first");
+        let services = main_plan(
+            &recipe(),
+            MAIN_HASH,
+            &container,
+            &running_with_image(),
+            None,
+        );
+        assert_eq!(
+            services.blocked.as_deref(),
+            Some(clusia_core::cockpit::SERVICES_ON_MAIN)
+        );
+        let no_engine = main_plan(
+            &main_recipe(),
+            MAIN_HASH,
+            &env(RunnerKind::Container, None),
+            &running(),
+            None,
+        );
+        assert_eq!(no_engine.blocked.as_deref(), Some(NO_ENGINE));
+        let shipped = Facts {
+            clusia_problem: Some("main ships its own .clusia folder".into()),
+            ..running_with_image()
+        };
+        let plan = main_plan(&main_recipe(), MAIN_HASH, &container, &shipped, None);
+        assert_eq!(
+            plan.blocked.as_deref(),
+            Some("main ships its own .clusia folder")
+        );
+        assert!(plan.steps.is_empty() && plan.commands.is_empty() && !plan.ready);
+        let mut no_sandbox = env(RunnerKind::Local, None);
+        no_sandbox.sandbox_ok = false;
+        let plan = main_plan(
+            &main_recipe(),
+            MAIN_HASH,
+            &no_sandbox,
+            &Facts::default(),
+            None,
+        );
+        assert_eq!(plan.blocked.as_deref(), Some(NO_SANDBOX));
     }
 }

@@ -2,16 +2,27 @@
 //! their storage. A review does one thing at a time (generate, set up, list or run), and at most
 //! `tests.parallel_runs` setups, lists and runs go at once across all reviews.
 
+mod bench;
 mod case_run;
 pub(crate) mod case_turn;
 pub(super) mod cases;
+#[cfg(test)]
+mod cockpit_lab;
+mod cockpit_turn;
+mod compare;
+#[cfg(test)]
+mod compare_lab;
 mod env;
 #[cfg(test)]
 mod functions_lab;
 #[cfg(test)]
 mod lab;
+#[cfg(test)]
+mod main_lab;
+mod main_tree;
 pub(crate) mod recipe_file;
 pub(crate) mod recipe_turn;
+mod scenarios;
 mod work;
 
 use std::collections::{BTreeMap, HashMap};
@@ -21,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
+use clusia_core::cockpit::CockpitActivity;
 use clusia_core::functions::FunctionsActivity;
 use clusia_core::tests::{Approve, TestEngineInfo, TestScope, TestsPhase, TestsView};
 use clusia_protocol::{ErrorCode, Event, Outcome, ProtocolError, Reply, topics};
@@ -32,9 +44,16 @@ use crate::reviews;
 use crate::state::Shared;
 use crate::turns::{Stop, Why};
 
+pub(crate) use bench::{reset_bench, save_bench};
 pub(crate) use case_run::run_cases;
 pub(crate) use case_turn::write_cases;
 pub(crate) use cases::{driver, functions, remove_case, reset_case, save_case};
+pub(crate) use cockpit_turn::{ask_copilot, write_bench, write_scenarios};
+pub(crate) use compare::run_cockpit;
+pub(crate) use main_tree::{open_main, prepare_main, remove_main, sweep_main};
+pub(crate) use scenarios::{
+    approve_scenario, cockpit, remove_scenario, reset_scenario, save_scenario, scenario_script,
+};
 
 /// How long `stop_all` waits for the activity of a review to end; a container's stop may take
 /// two `docker kill`s and the client's grace between them.
@@ -59,6 +78,10 @@ pub(super) enum Doing {
     Run,
     Cases,
     RunCases,
+    Scenarios,
+    Bench,
+    Main,
+    Cockpit,
 }
 
 impl Doing {
@@ -70,12 +93,24 @@ impl Doing {
             Doing::Run => "running the tests",
             Doing::Cases => "writing cases",
             Doing::RunCases => "running cases",
+            Doing::Scenarios => "writing scenarios",
+            Doing::Bench => "writing a benchmark",
+            Doing::Main => "preparing main",
+            Doing::Cockpit => "running the QA cockpit",
         }
     }
 
     /// Whether the activity is about the function cases, which leave the tests' phase alone.
     pub(super) fn is_functions(self) -> bool {
         matches!(self, Doing::Cases | Doing::RunCases)
+    }
+
+    /// Whether the activity is about the QA cockpit, which leaves the tests' phase alone too.
+    pub(super) fn is_cockpit(self) -> bool {
+        matches!(
+            self,
+            Doing::Scenarios | Doing::Bench | Doing::Main | Doing::Cockpit
+        )
     }
 }
 
@@ -93,6 +128,8 @@ pub(super) struct Activity {
     pub container: Option<String>,
     /// What a functions activity is doing, for the functions view.
     pub functions: Option<FunctionsActivity>,
+    /// What a cockpit activity is doing, for the cockpit view.
+    pub cockpit: Option<CockpitActivity>,
 }
 
 impl Activity {
@@ -128,6 +165,18 @@ pub(super) struct Entry {
     /// Waits for the call index that ended with it still not ready, since it was last ready or
     /// a client last asked.
     pub functions_rounds: u32,
+    /// Why the last scenario or benchmark turn failed, until the next one begins.
+    pub cockpit_failed: Option<String>,
+    /// The copilot turn that answers now; it does not hold the review's slot.
+    pub copilot: Option<Arc<Stop>>,
+    /// Why the last copilot turn failed, until the next ask.
+    pub copilot_failed: Option<String>,
+    /// Main's worktree is being made or moved.
+    pub main_opening: bool,
+    /// Why opening or preparing main failed, until the next such activity begins.
+    pub main_failed: Option<String>,
+    /// Why each of main's setup steps failed in the last walk, by step id.
+    pub main_step_failures: BTreeMap<String, String>,
 }
 
 /// The tests of every review.
@@ -318,6 +367,11 @@ pub(super) fn begin(
         // A functions activity leaves the tests' own failure for the tests' view to show.
         if doing.is_functions() {
             entry.cases_failed = None;
+        } else if doing == Doing::Main {
+            entry.main_failed = None;
+            entry.main_step_failures.clear();
+        } else if doing.is_cockpit() {
+            entry.cockpit_failed = None;
         } else {
             entry.failed = None;
         }
@@ -329,6 +383,7 @@ pub(super) fn begin(
             turn: turn.clone(),
             container: None,
             functions: None,
+            cockpit: None,
         });
         Ok(Started {
             id,
@@ -529,6 +584,9 @@ pub(crate) fn stop(shared: &Shared, pr: &PrRef) -> Outcome {
         if let Some(activity) = &entry.activity {
             activity.fire(Why::User);
         }
+        if let Some(copilot) = &entry.copilot {
+            copilot.fire(Why::User);
+        }
     });
     Outcome::Ok(Reply::Ack)
 }
@@ -675,8 +733,10 @@ pub(crate) async fn disk(shared: &Shared) -> Outcome {
         found
     };
     let caches = folders(shared.paths.tests_dir().join("cache"));
+    // Main's worktrees sit one level down, in a folder of their own.
     let worktree_dirs: Vec<PathBuf> = folders(shared.paths.worktrees_dir())
         .into_iter()
+        .chain(folders(shared.paths.worktrees_dir().join(".main")))
         .flat_map(|worktree| [worktree.join("node_modules"), worktree.join(".venv")])
         .filter(|path| is_dir(path))
         .collect();
@@ -792,6 +852,9 @@ pub(crate) async fn stop_all(shared: &Shared, pr: &PrRef, why: Why) {
         if let Some(activity) = &entry.activity {
             activity.fire(why);
         }
+        if let Some(copilot) = &entry.copilot {
+            copilot.fire(why);
+        }
     });
     let give_up = Instant::now() + STOP_WAIT;
     while !shared.tests.with(pr, |entry| entry.activity.is_none()) && Instant::now() < give_up {
@@ -818,6 +881,9 @@ pub(crate) fn forget(shared: &Shared, pr: &PrRef) {
     if let Some(activity) = removed.as_ref().and_then(|entry| entry.activity.as_ref()) {
         activity.fire(Why::Ended);
     }
+    if let Some(copilot) = removed.as_ref().and_then(|entry| entry.copilot.as_ref()) {
+        copilot.fire(Why::Ended);
+    }
     let record = clusia_store::load_tests(&shared.paths, pr).unwrap_or_default();
     if let Err(e) = clusia_store::delete_tests(&shared.paths, pr) {
         tracing::warn!(error = %e, pr = %pr, "cannot delete the test record");
@@ -830,6 +896,7 @@ pub(crate) fn forget(shared: &Shared, pr: &PrRef) {
             .unwrap_or_else(|p| p.into_inner());
         mounts.retain(|(_, w), _| *w != worktree);
     }
+    remove_runs(&shared.paths.test_runs_for(pr));
     if let Some(project) = record.stack {
         env::take_down_later(shared, project);
     }
@@ -870,6 +937,22 @@ pub(crate) async fn after_checkout_removed(shared: &Shared, pr: &PrRef) {
     remove_cache(shared, &pr.owner, &pr.repo);
 }
 
+/// Removes the scenario run folders under `dir`, then `dir` itself.
+fn remove_runs(dir: &Path) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if let Err(e) = clusia_testrun::scenario::remove_run_folder(&path) {
+            tracing::warn!(error = %e, folder = %path.display(), "cannot remove a scenario run folder");
+        }
+    }
+    match std::fs::remove_dir(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            tracing::warn!(error = %e, folder = %dir.display(), "cannot remove the scenario run folders");
+        }
+        _ => {}
+    }
+}
+
 /// The pull requests with a stored test record, and the record's file.
 fn recorded(shared: &Shared) -> Vec<(PrRef, PathBuf)> {
     std::fs::read_dir(shared.paths.tests_dir())
@@ -905,6 +988,8 @@ pub(crate) async fn sweep(shared: &Shared, cutoff: i64) {
             tracing::warn!(error = %e, pr = %pr, "cannot delete the test record");
         }
     }
+    sweep_runs(shared);
+    sweep_main(shared).await;
     if let Some(docker) = env::docker_now(shared).await
         && let Err(e) = clusia_testrun::cleanup::remove_orphans(
             shared.test_exec.as_ref(),
@@ -918,14 +1003,35 @@ pub(crate) async fn sweep(shared: &Shared, cutoff: i64) {
     }
 }
 
+/// Removes the scenario run folders of every review whose test record is gone.
+fn sweep_runs(shared: &Shared) {
+    let runs = shared.paths.tests_dir().join("runs");
+    for entry in std::fs::read_dir(&runs).into_iter().flatten().flatten() {
+        let key = entry.file_name().to_string_lossy().into_owned();
+        if !shared
+            .paths
+            .tests_dir()
+            .join(format!("{key}.json"))
+            .exists()
+        {
+            remove_runs(&entry.path());
+        }
+    }
+}
+
 /// The daemon is stopping: no new activity, every running one stopped, then every stored
 /// compose stack taken down.
 pub(crate) async fn shutdown(shared: &Shared) {
     shared.tests.closing.store(true, Ordering::SeqCst);
     {
         let table = shared.tests.table.lock().unwrap_or_else(|p| p.into_inner());
-        for activity in table.values().filter_map(|entry| entry.activity.as_ref()) {
-            activity.fire(Why::Shutdown);
+        for entry in table.values() {
+            if let Some(activity) = &entry.activity {
+                activity.fire(Why::Shutdown);
+            }
+            if let Some(copilot) = &entry.copilot {
+                copilot.fire(Why::Shutdown);
+            }
         }
     }
     let mut live = shared.tests.live.subscribe();

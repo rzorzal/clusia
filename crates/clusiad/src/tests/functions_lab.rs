@@ -19,9 +19,9 @@ use serde_json::json;
 use super::lab::{Lab, Machine, built, generated, lab, no_setup, pr, recipe, refused, settled, wt};
 use super::*;
 
-const REFRESH_SIG: &str = "pub fn refresh(&self, now: u64) -> Result<u32, String> {";
-const DRIVER: &str = "#[test]\nfn clusia_case() {}\n";
-const RUST_COMMAND: &str =
+pub(super) const REFRESH_SIG: &str = "pub fn refresh(&self, now: u64) -> Result<u32, String> {";
+pub(super) const DRIVER: &str = "#[test]\nfn clusia_case() {}\n";
+pub(super) const RUST_COMMAND: &str =
     "cargo test --offline -p {package} --test {driver} -- --exact clusia_case --nocapture";
 
 fn function(path: &str, qualified: &str, start: u32, end: u32) -> Function {
@@ -53,7 +53,7 @@ fn hunk(path: &str, start: u32, len: u32) -> FileHunks {
 
 /// The index of review `n` at `head`: `TokenStore::refresh` changed with `refresh_sig`,
 /// `backoff_delay` new, a test function, a test file, a removed function and a Swift file.
-fn index(lab: &Lab, n: u64, head: &str, refresh_sig: &str) {
+pub(super) fn index(lab: &Lab, n: u64, head: &str, refresh_sig: &str) {
     let built = crate::calls::tests::built_of(
         head,
         &[
@@ -93,7 +93,7 @@ fn index(lab: &Lab, n: u64, head: &str, refresh_sig: &str) {
     crate::calls::tests::install(&lab.shared, &pr(n), built);
 }
 
-fn refresh() -> String {
+pub(super) fn refresh() -> String {
     function_slug("src/store.rs", "TokenStore::refresh")
 }
 
@@ -101,13 +101,13 @@ fn backoff() -> String {
     function_slug("src/retry.rs", "backoff_delay")
 }
 
-fn functions_recipe() -> serde_json::Value {
+pub(super) fn functions_recipe() -> serde_json::Value {
     let mut recipe = no_setup(recipe());
     recipe["functions"] = json!({ "rust": RUST_COMMAND });
     recipe
 }
 
-fn refresh_block(cases: serde_json::Value) -> serde_json::Value {
+pub(super) fn refresh_block(cases: serde_json::Value) -> serde_json::Value {
     json!({
         "function": "TokenStore::refresh",
         "file": "src/store.rs",
@@ -121,7 +121,7 @@ fn refresh_block(cases: serde_json::Value) -> serde_json::Value {
     })
 }
 
-fn two_cases() -> serde_json::Value {
+pub(super) fn two_cases() -> serde_json::Value {
     json!([
         {"name": "Endpoint fails, old token kept",
          "values": {"stored_token": "old", "endpoint_status": "500"},
@@ -134,7 +134,7 @@ fn two_cases() -> serde_json::Value {
 
 /// The recipe turn's answer: the recipe with its functions command, the cases of
 /// `TokenStore::refresh`, and a block for a function that is not listed.
-fn generate_answer() -> Turn {
+pub(super) fn generate_answer() -> Turn {
     Turn::answer_blocks(
         "Here is the recipe and the cases.",
         &[
@@ -148,7 +148,7 @@ fn generate_answer() -> Turn {
 }
 
 /// A running engine and an image already built: generate and setup need nothing more.
-fn functions_lab(turns: Vec<Turn>) -> Lab {
+pub(super) fn functions_lab(turns: Vec<Turn>) -> Lab {
     let lab = lab(Machine::Colima { running: true }, turns, &[7], |x, _| {
         built(x);
         x.on("docker", &["run"], FakeReply::ok(""));
@@ -178,7 +178,7 @@ fn bad(out: Outcome) -> String {
     }
 }
 
-fn input(id: Option<&str>, name: &str, token: &str, status: &str) -> CaseInput {
+pub(super) fn input(id: Option<&str>, name: &str, token: &str, status: &str) -> CaseInput {
     CaseInput {
         id: id.map(String::from),
         name: name.into(),
@@ -205,7 +205,7 @@ async fn told(lab: &mut Lab, what: &str, done: impl Fn(&FunctionsView) -> bool) 
     }
 }
 
-fn states(lab: &Lab) -> Vec<String> {
+pub(super) fn states(lab: &Lab) -> Vec<String> {
     crate::agent_log::read(&lab.shared.paths.agent_log(&pr(7)))
         .into_iter()
         .filter_map(|entry| match entry {

@@ -265,7 +265,7 @@ pub(crate) async fn run_cases(
 }
 
 /// The placed driver's path, relative to the worktree, as `place_driver` answers it.
-fn placed_path(package_dir: &str, target: &str) -> String {
+pub(super) fn placed_path(package_dir: &str, target: &str) -> String {
     if package_dir.is_empty() {
         format!("tests/{target}.rs")
     } else {
@@ -275,7 +275,7 @@ fn placed_path(package_dir: &str, target: &str) -> String {
 
 /// Removes a placed driver and forgets it, or keeps it in the record for the next run. A path
 /// that is not of the placed form was never placed by Clúsia and is forgotten untouched.
-async fn unplace(shared: &Shared, pr: &PrRef, worktree: &std::path::Path, placed: &str) {
+pub(super) async fn unplace(shared: &Shared, pr: &PrRef, worktree: &std::path::Path, placed: &str) {
     match remove_driver(worktree, placed) {
         Ok(()) => {
             env::update_record(shared, pr, |record| record.placed.retain(|p| p != placed)).await;

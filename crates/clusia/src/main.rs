@@ -3,6 +3,7 @@ mod calls;
 mod cases_cmd;
 mod check;
 mod cli;
+mod cockpit_cmd;
 mod diagrams;
 mod harness;
 mod harness_test;

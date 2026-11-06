@@ -629,7 +629,7 @@ pub fn env_is_forbidden(key: &str) -> bool {
 
 /// A text field: 1..=`max` characters, no NUL or control character besides line breaks and tabs,
 /// and nothing that draws nothing or reorders what is drawn.
-fn check_text(field: &str, text: &str, max: usize) -> Option<String> {
+pub(crate) fn check_text(field: &str, text: &str, max: usize) -> Option<String> {
     let length = text.chars().count();
     if text.trim().is_empty() || length > max {
         return Some(format!("{field} must be between 1 and {max} characters"));
@@ -649,7 +649,7 @@ fn check_text(field: &str, text: &str, max: usize) -> Option<String> {
 /// `None` when every `placeholder` in `text` is a shell word of its own outside quotes, so
 /// substituting a quoted name cannot be unquoted, glued to other text or run by a quote's
 /// expansion.
-fn placeholder_problem(field: &str, text: &str, placeholder: &str) -> Option<String> {
+pub(crate) fn placeholder_problem(field: &str, text: &str, placeholder: &str) -> Option<String> {
     #[derive(Clone, Copy, PartialEq)]
     enum Quote {
         None,

@@ -156,6 +156,7 @@ fn lab() -> Option<Lab> {
         data_root: data,
         home,
         clone_env: sandbox::clone_env_files(&clone),
+        read_only: vec![],
     })
     .unwrap();
     Some(Lab {

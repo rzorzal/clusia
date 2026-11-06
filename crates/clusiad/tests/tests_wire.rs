@@ -45,3 +45,42 @@ async fn the_test_commands_answer_through_the_socket() {
     assert_eq!(info.engine, None, "the test daemon has no docker");
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn the_cockpit_is_served_through_the_wire() {
+    use clusia_core::cockpit::{CopilotAsk, NO_REVIEW};
+
+    let daemon = TestDaemon::start().await;
+    let mut client = daemon.client().await;
+    let pr: PrRef = "acme/widgets#7".parse().unwrap();
+    match client.request(Command::GetCockpit { pr: pr.clone() }).await {
+        Ok(Reply::Cockpit(view)) => assert_eq!(view.note.as_deref(), Some(NO_REVIEW)),
+        other => panic!("not a cockpit view: {other:?}"),
+    }
+    let Err(ClientError::Server(refusal)) =
+        client.request(Command::OpenMain { pr: pr.clone() }).await
+    else {
+        panic!("OpenMain was not refused without a review");
+    };
+    assert!(
+        !refusal.message.contains("not served yet"),
+        "{}",
+        refusal.message
+    );
+    let Err(ClientError::Server(refusal)) = client
+        .request(Command::AskCopilot {
+            pr: pr.clone(),
+            item: None,
+            ask: CopilotAsk::Next,
+        })
+        .await
+    else {
+        panic!("the copilot was not refused without a review");
+    };
+    assert!(
+        !refusal.message.contains("not served yet"),
+        "{}",
+        refusal.message
+    );
+    daemon.stop().await;
+}
