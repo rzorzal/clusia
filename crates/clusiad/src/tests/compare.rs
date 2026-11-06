@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
 use clusia_core::cockpit::{
-    COCKPIT_CHANGED, COMPARE_MAX_SECS, CockpitActivity, CockpitScope, CompareOutcome,
-    CompareRecord, ComparisonView, Freshness, Input, ItemKind, ItemRef, ItemResults, ItemSupport,
-    LOAD_LATER, MAIN_FIRST, Metric, NEW_FUNCTION, NO_SCENARIOS, NOT_APPROVED, RoundEnd,
-    RoundResult, RunSide, SERVICES_ON_MAIN, Sample, Series, SideRecord, SideView, WARMUP_MAX_SECS,
-    approval_hash, comparison_view, freshness, script_sha, side_view, valid_scenario_slug,
+    BENCH_MAX_BYTES, COCKPIT_CHANGED, COMPARE_MAX_SECS, CockpitActivity, CockpitScope,
+    CompareOutcome, CompareRecord, ComparisonView, Freshness, Input, ItemKind, ItemRef,
+    ItemResults, ItemSupport, LOAD_LATER, MAIN_FIRST, Metric, NEW_FUNCTION, NO_SCENARIOS,
+    NOT_APPROVED, RoundEnd, RoundResult, RunSide, SERVICES_ON_MAIN, Sample, Series, SideRecord,
+    SideView, WARMUP_MAX_SECS, approval_hash, comparison_view, freshness, script_sha, side_view,
+    valid_scenario_slug,
 };
 use clusia_core::functions::{FunctionChange, FunctionLang, valid_slug};
 use clusia_core::tests::{
@@ -50,6 +51,7 @@ const REPORT_LINE_MAX: usize = 64 * 1024;
 const OUTPUT_EVERY: Duration = Duration::from_millis(OUTPUT_EVERY_MS);
 /// How long removing a panicked run's container may take.
 const DOCKER_RM_LIMIT: Duration = Duration::from_secs(30);
+const BENCH_CHANGED: &str = "The benchmark changed since this run started";
 const MAIN_NOT_PLAIN: &str =
     "Clúsia won't write the benchmark into main: its folder is not a plain folder";
 
@@ -719,7 +721,11 @@ async fn remove_leftovers(shared: &Shared, pr: &PrRef, sides: &Sides) {
 /// Removes a bench file placed in main's worktree and forgets it, or keeps it in the record for
 /// the next run. With main's worktree gone, or a path not of the placed form, it is forgotten.
 async fn unplace_main(shared: &Shared, pr: &PrRef, worktree: Option<&Path>, placed: &str) {
-    let forget = match worktree.map(|worktree| remove_driver(worktree, placed)) {
+    let removed = worktree.map(|worktree| match copy_parts(placed) {
+        Some((slug, name)) => remove_main_copy(worktree, slug, name),
+        None => remove_driver(worktree, placed),
+    });
+    let forget = match removed {
         None | Some(Ok(())) => true,
         Some(Err(e)) if e.kind() == std::io::ErrorKind::InvalidInput => true,
         Some(Err(e)) => {
@@ -733,6 +739,68 @@ async fn unplace_main(shared: &Shared, pr: &PrRef, worktree: Option<&Path>, plac
         })
         .await;
     }
+}
+
+/// The slug and file name of a non-Rust loop file's copy in main's worktree,
+/// `.clusia/functions/<slug>/bench.<ext>`; `None` for any other path.
+fn copy_parts(placed: &str) -> Option<(&str, &str)> {
+    let (slug, name) = placed.strip_prefix(".clusia/functions/")?.split_once('/')?;
+    let named = FunctionLang::ALL
+        .iter()
+        .any(|lang| name == format!("bench.{}", lang.ext()));
+    (valid_slug(slug) && named).then_some((slug, name))
+}
+
+/// The path of main's copy of `slug`'s loop file, as `main_placed` records it.
+fn copy_path(slug: &str, name: &str) -> String {
+    format!(".clusia/functions/{slug}/{name}")
+}
+
+/// Removes main's copy of `slug`'s loop file without following a link, then the folders above
+/// it that are empty now. A link on the way is refused as not a placed path.
+fn remove_main_copy(worktree: &Path, slug: &str, name: &str) -> std::io::Result<()> {
+    match cases::dir_at(worktree, &[".clusia", "functions", slug], false) {
+        Ok(Some(dir)) => cases::remove_at(&dir, name)?,
+        Ok(None) => {}
+        Err(Refusal::NotPlain) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                MAIN_NOT_PLAIN,
+            ));
+        }
+        Err(Refusal::Io(message)) => return Err(std::io::Error::other(message)),
+    }
+    prune_copy_folders(worktree, slug);
+    Ok(())
+}
+
+/// Removes `.clusia/functions/<slug>`, then `.clusia/functions`, then `.clusia` from main's
+/// worktree, each only while it is empty: the copy's write made them when they were missing.
+fn prune_copy_folders(worktree: &Path, slug: &str) {
+    let levels: [(&[&str], &str); 3] = [
+        (&[".clusia", "functions"], slug),
+        (&[".clusia"], "functions"),
+        (&[], ".clusia"),
+    ];
+    for (parts, name) in levels {
+        let Ok(Some(parent)) = cases::dir_at(worktree, parts, false) else {
+            return;
+        };
+        if cases::remove_dir_at(&parent, name).is_err() {
+            return;
+        }
+    }
+}
+
+/// Adds `path` to `record.main_placed`, or takes it out.
+async fn note_main(shared: &Shared, pr: &PrRef, path: &str, placed: bool) {
+    env::update_record(shared, pr, |record| {
+        record.main_placed.retain(|p| p != path);
+        if placed {
+            record.main_placed.push(path.to_string());
+        }
+    })
+    .await;
 }
 
 /// Removes a scenario's run folder when dropped, however its item ends.
@@ -754,8 +822,8 @@ struct Placed {
     pr_driver: Option<String>,
     /// The Rust loop file in main's worktree, relative to it.
     main_driver: Option<String>,
-    /// Main's copy of a non-Rust loop file: its folder and its name there.
-    main_copy: Option<(OwnedFd, String)>,
+    /// Main's copy of a non-Rust loop file: its folder, the slug and its name there.
+    main_copy: Option<(OwnedFd, String, String)>,
 }
 
 impl Placed {
@@ -772,10 +840,18 @@ impl Placed {
             let main = sides.main.as_ref().map(|(job, _)| job.ctx.worktree.clone());
             unplace_main(shared, pr, main.as_deref(), placed).await;
         }
-        if let Some((dir, name)) = &self.main_copy
-            && let Err(e) = cases::remove_at(dir, name)
-        {
-            tracing::warn!(pr = %pr, error = %e, "cannot remove the benchmark copy from main");
+        if let Some((dir, slug, name)) = &self.main_copy {
+            match cases::remove_at(dir, name) {
+                Ok(()) => {
+                    if let Some((job, _)) = &sides.main {
+                        prune_copy_folders(&job.ctx.worktree, slug);
+                    }
+                    note_main(shared, pr, &copy_path(slug, name), false).await;
+                }
+                Err(e) => {
+                    tracing::warn!(pr = %pr, error = %e, "cannot remove the benchmark copy from main");
+                }
+            }
         }
     }
 }
@@ -795,6 +871,8 @@ async fn place_rust(
 ) -> Result<(String, String), String> {
     let (dir, name) = package;
     let target = bench_target(slug);
+    // Known before anything is placed, so a refused command leaves nothing behind.
+    let command = function_command(template, &target, Some(name))?;
     let path = case_run::placed_path(dir, &target);
     let mut leftover = false;
     env::update_record(shared, pr, |record| {
@@ -809,7 +887,7 @@ async fn place_rust(
     })
     .await;
     match place_driver(worktree, dir, &target, loop_file, leftover) {
-        Ok(at) => Ok((at, function_command(template, &target, Some(name))?)),
+        Ok(at) => Ok((at, command)),
         Err(message) => {
             env::update_record(shared, pr, |record| {
                 let placed = match side {
@@ -901,19 +979,30 @@ async fn prepare(
                 }
                 (FunctionLang::Rust, None) => return Err(NO_PACKAGE_ON_MAIN.to_string()),
                 _ => {
-                    let parts = [".clusia", "functions", slug.as_str()];
-                    let dir = match cases::dir_at(&worktree, &parts, true) {
-                        Ok(Some(dir)) => dir,
-                        Ok(None) => {
-                            return Err(format!("cannot make the folder of {slug} in main"));
-                        }
-                        Err(Refusal::NotPlain) => return Err(MAIN_NOT_PLAIN.to_string()),
-                        Err(Refusal::Io(message)) => return Err(message),
-                    };
+                    let command = function_command(template, &script, None)?;
                     let name = format!("bench.{}", lang.ext());
-                    cases::write_whole(&dir, &name, loop_file).map_err(|e| e.to_string())?;
-                    placed.main_copy = Some((dir, name));
-                    function_command(template, &script, None)?
+                    let path = copy_path(slug, &name);
+                    // Recorded before it exists, so a run that dies after writing it still
+                    // lets the next run remove it.
+                    note_main(shared, pr, &path, true).await;
+                    let parts = [".clusia", "functions", slug.as_str()];
+                    let written = match cases::dir_at(&worktree, &parts, true) {
+                        Ok(Some(dir)) => cases::write_whole(&dir, &name, loop_file)
+                            .map(|()| dir)
+                            .map_err(|e| e.to_string()),
+                        Ok(None) => Err(format!("cannot make the folder of {slug} in main")),
+                        Err(Refusal::NotPlain) => Err(MAIN_NOT_PLAIN.to_string()),
+                        Err(Refusal::Io(message)) => Err(message),
+                    };
+                    match written {
+                        Ok(dir) => placed.main_copy = Some((dir, slug.clone(), name)),
+                        Err(message) => {
+                            prune_copy_folders(&worktree, slug);
+                            note_main(shared, pr, &path, false).await;
+                            return Err(message);
+                        }
+                    }
+                    command
                 }
             };
             Ok((pr_command, Some(main_command)))
@@ -1013,11 +1102,31 @@ async fn failed(
     if main_side.is_some() {
         return;
     }
-    let result = RoundResult {
+    let result = error_round(planned, RunSide::Pr, 1, &pr_side.sha, message);
+    pr_side.rounds.push(result.clone());
+    cx.shared.publish(
+        topics::TESTS,
+        Event::CockpitRound {
+            pr: cx.pr.clone(),
+            run: cx.run_id.to_string(),
+            result: Box::new(result),
+        },
+    );
+}
+
+/// A round that ended before its command ran, with `message` as why.
+fn error_round(
+    planned: &Planned,
+    side: RunSide,
+    round: u32,
+    sha: &str,
+    message: &str,
+) -> RoundResult {
+    RoundResult {
         item: planned.item.clone(),
-        side: RunSide::Pr,
-        round: 1,
-        sha: pr_side.sha.clone(),
+        side,
+        round,
+        sha: sha.to_string(),
         passed: None,
         end: RoundEnd::Error,
         exit_code: None,
@@ -1028,16 +1137,19 @@ async fn failed(
         tail: String::new(),
         took_ms: 0,
         at: now_unix(),
+    }
+}
+
+/// Whether the pull request's own loop file of `slug` still holds the bytes the request checked.
+fn same_loop(worktree: &Path, slug: &str, lang: FunctionLang, checked: &[u8]) -> bool {
+    let Ok(Some(dir)) = cases::folder(worktree, slug, false) else {
+        return false;
     };
-    pr_side.rounds.push(result.clone());
-    cx.shared.publish(
-        topics::TESTS,
-        Event::CockpitRound {
-            pr: cx.pr.clone(),
-            run: cx.run_id.to_string(),
-            result: Box::new(result),
-        },
-    );
+    let name = format!("bench.{}", lang.ext());
+    matches!(
+        cases::read_capped(&dir, &name, BENCH_MAX_BYTES),
+        Ok(Some(bytes)) if script_sha(&bytes) == script_sha(checked)
+    )
 }
 
 /// The rounds of one item, once its files are in place.
@@ -1102,7 +1214,32 @@ impl Rounds<'_> {
                 rounds: shown_rounds(planned, compare),
                 limit,
             };
-            let (result, points) = run_round(cx, planned, job, command, &at, sha).await;
+            // A non-Rust loop runs from the pull request's worktree, which its own runs may
+            // write: each round runs only the bytes the request checked.
+            let changed = match &planned.work {
+                Work::Bench {
+                    slug,
+                    lang,
+                    loop_file,
+                    ..
+                } if side == RunSide::Pr && *lang != FunctionLang::Rust => {
+                    !same_loop(&sides.pr.ctx.worktree, slug, *lang, loop_file)
+                }
+                _ => false,
+            };
+            let Ran {
+                result,
+                points,
+                exited,
+            } = if changed {
+                Ran {
+                    result: error_round(planned, side, round, sha, BENCH_CHANGED),
+                    points: Vec::new(),
+                    exited: false,
+                }
+            } else {
+                run_round(cx, planned, job, command, &at, sha).await
+            };
             let past_budget = result.end == RoundEnd::TimedOut && limit == left;
             let stopped = result.end == RoundEnd::Stopped;
             if round > 0 {
@@ -1124,7 +1261,7 @@ impl Rounds<'_> {
                         record.stopped = true;
                     }
                 }
-                let built = side == RunSide::Main && result.end == RoundEnd::Finished;
+                let built = side == RunSide::Main && exited;
                 let stored = (pr_side.clone(), main_side.as_deref().cloned());
                 let run = cx.run_id.to_string();
                 env::update_record(shared, pr, |record| {
@@ -1163,6 +1300,11 @@ impl Rounds<'_> {
                 );
                 scenarios::tell_cockpit(shared, pr).await;
             }
+            if changed {
+                return CompareOutcome::Failed {
+                    message: BENCH_CHANGED.to_string(),
+                };
+            }
             if stopped {
                 return CompareOutcome::Stopped;
             }
@@ -1172,6 +1314,14 @@ impl Rounds<'_> {
         }
         CompareOutcome::Done
     }
+}
+
+/// What one round gave: its result, every point its sampler read, and whether its command ran
+/// to its end.
+struct Ran {
+    result: RoundResult,
+    points: Vec<Sample>,
+    exited: bool,
 }
 
 /// Where one round stands in its run.
@@ -1205,7 +1355,7 @@ async fn run_round(
     command: &str,
     at: &RoundAt,
     sha: &str,
-) -> (RoundResult, Vec<Sample>) {
+) -> Ran {
     let (shared, pr) = (cx.shared, cx.pr);
     let warmup = at.round == 0;
     set_activity(
@@ -1301,10 +1451,16 @@ async fn run_round(
         Ok(measured) => measured,
         Err(e) => {
             result.message = Some(format!("The run could not start: {e}"));
-            return (result, Vec::new());
+            return Ran {
+                result,
+                points: Vec::new(),
+                exited: false,
+            };
         }
     };
     result.took_ms = measured.took_ms;
+    // Main's command ran to its end, so it built, whatever its result says.
+    let exited = matches!(measured.ended, Ended::Exited(_));
     let code = match measured.ended {
         Ended::Exited(code) => code,
         _ => None,
@@ -1346,7 +1502,11 @@ async fn run_round(
             }
         }
     }
-    (result, measured.points)
+    Ran {
+        result,
+        points: measured.points,
+        exited,
+    }
 }
 
 #[cfg(test)]

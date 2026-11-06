@@ -966,3 +966,142 @@ async fn forget_removes_the_run_folders() {
     forget(&lab.shared, &pr(7));
     assert!(!lab.shared.paths.test_runs_for(&pr(7)).exists());
 }
+
+const PY_FILE: &str = "app/store.py";
+const PY_LOOP: &str = "import os\nprint('loop')\n";
+
+/// Review 7 in the local sandbox, set up with a recipe that runs Python functions, whose one
+/// changed function is `refresh` in `app/store.py`, with a stored benchmark of it as the
+/// benchmark turn leaves it. Answers the benchmark's slug.
+async fn python_bench_lab(pr_side: Vec<FakeReply>) -> (Lab, String) {
+    let mut recipe = no_setup(recipe());
+    recipe["functions"] = json!({ "rust": RUST_COMMAND, "python": "python3 {driver}" });
+    let lab = super::cockpit_lab::cockpit_lab_with(
+        Machine::NoEngine,
+        vec![answer(recipe)],
+        move |x, paths| local_rules(x, paths, pr_side, vec![FakeReply::ok("")]),
+    );
+    ready(&lab, 7).await;
+    let function = clusia_calls::Function {
+        id: clusia_calls::FunctionId(format!("{PY_FILE}#refresh#1")),
+        qualified: "refresh".into(),
+        name: "refresh".into(),
+        path: PY_FILE.into(),
+        start_line: 1,
+        end_line: 3,
+        signature_lines: 1,
+        lang: "python".into(),
+    };
+    let hunk = clusia_core::hunks::FileHunks {
+        old_path: Some(PY_FILE.into()),
+        new_path: Some(PY_FILE.into()),
+        status: clusia_core::hunks::FileStatus::Modified,
+        hunks: vec![clusia_core::hunks::Hunk {
+            old_start: 1,
+            old_len: 3,
+            new_start: 1,
+            new_len: 3,
+        }],
+    };
+    let built = crate::calls::tests::built_of(
+        "h1",
+        &[(
+            function,
+            clusia_calls::ChangeKind::Changed,
+            "def refresh(token):",
+        )],
+        vec![hunk],
+        &[],
+    );
+    crate::calls::tests::install(&lab.shared, &pr(7), built);
+    let slug = function_slug(PY_FILE, "refresh");
+    let dir = lab.worktree(7).join(".clusia/functions").join(&slug);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("bench.py"), PY_LOOP).unwrap();
+    let stored = StoredBench {
+        qualified: "refresh".into(),
+        file: PY_FILE.into(),
+        lang: FunctionLang::Python,
+        signature: super::cases::trim_signature("def refresh(token):", "python"),
+        values: BTreeMap::new(),
+        warmup: 10,
+        secs: 6,
+        rounds: 5,
+        bench_sha: sha256_hex(PY_LOOP.as_bytes()),
+        written_head: "h1".into(),
+        written_at: 1_762_300_000,
+    };
+    fs::write(dir.join("bench.json"), serde_json::to_vec(&stored).unwrap()).unwrap();
+    (lab, slug)
+}
+
+#[tokio::test]
+async fn a_benchmark_changed_on_disk_after_the_request_is_not_run() {
+    let (mut lab, slug) = python_bench_lab(vec![FakeReply::ok("")]).await;
+    lab.shared.config.write().await.tests.parallel_runs = 1;
+    // The only place is taken, so the run waits after the request was checked.
+    let held = place(&lab.shared, &pr(7), 0, &StopFlag::new())
+        .await
+        .expect("a place");
+    let scope = CockpitScope::Item {
+        item: item(ItemKind::Bench, &slug),
+    };
+    let (run, _) = start(&lab, scope, false).await;
+    fs::write(
+        lab.worktree(7)
+            .join(".clusia/functions")
+            .join(&slug)
+            .join("bench.py"),
+        "import os; os.system('curl https://example.invalid')\n",
+    )
+    .unwrap();
+    drop(held);
+    let (done, _) = rounds(&mut lab, &run).await;
+    assert_eq!(done.len(), 1);
+    assert_eq!(
+        (done[0].end, done[0].message.as_deref()),
+        (
+            RoundEnd::Error,
+            Some("The benchmark changed since this run started")
+        )
+    );
+    assert!(measured(&lab).is_empty(), "nothing ran: {:#?}", lab.ran());
+}
+
+#[tokio::test]
+async fn a_leftover_bench_copy_in_main_goes_at_the_next_run() {
+    let (mut lab, _) = compared_lab(vec![passing()], vec![passing()]).await;
+    let slug = function_slug(PY_FILE, "refresh");
+    let main = main_worktree(&lab);
+    let dir = main.join(".clusia/functions").join(&slug);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("bench.py"), PY_LOOP).unwrap();
+    let copy = format!(".clusia/functions/{slug}/bench.py");
+    env::update_record(&lab.shared, &pr(7), |r| r.main_placed.push(copy)).await;
+    let (run, _) = start(&lab, one(SLUG), false).await;
+    rounds(&mut lab, &run).await;
+    assert!(!dir.exists(), "the copy and its folder went");
+    assert!(
+        !main.join(".clusia/functions").exists(),
+        "an emptied folder goes too"
+    );
+    assert!(env::load(&lab.shared, &pr(7)).main_placed.is_empty());
+}
+
+#[tokio::test]
+async fn a_main_bench_round_without_a_result_still_built_main() {
+    let done_only = || FakeReply::marked(vec![(Stream::Out, "@MARK@ done\n".into())], 0);
+    let (mut lab, _) = compared_lab(vec![done_only()], vec![done_only()]).await;
+    let slug = put_bench(&lab);
+    let scope = CockpitScope::Item {
+        item: item(ItemKind::Bench, &slug),
+    };
+    let (run, _) = start(&lab, scope, true).await;
+    let (done, _) = rounds(&mut lab, &run).await;
+    assert!(done.iter().all(|r| r.end == RoundEnd::Error), "{done:#?}");
+    assert!(done.iter().any(|r| r.side == RunSide::Main));
+    assert!(
+        env::load(&lab.shared, &pr(7)).main.unwrap().built,
+        "main's rounds ran and built it"
+    );
+}
