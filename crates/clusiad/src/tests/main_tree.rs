@@ -201,6 +201,12 @@ pub(super) async fn main_state_of(shared: &Shared, pr: &PrRef, snap: &Snapshot) 
         let mount = tag
             .as_deref()
             .and_then(|tag| shared.tests.mount(tag, &ctx.worktree));
+        // The folder may have been moved onto a base that ships a `.clusia/` after the record
+        // was made; its tracked markers must not stand for Clúsia's own.
+        let clusia_problem =
+            scan::clusia_dir_problem(shared.test_exec.as_ref(), &ctx.worktree, Some(&ctx.gitdir))
+                .await
+                .map(|problem| problem.replacen("This pull request", "Main", 1));
         let facts = Facts {
             engine_running: snap
                 .env
@@ -212,7 +218,7 @@ pub(super) async fn main_state_of(shared: &Shared, pr: &PrRef, snap: &Snapshot) 
             mount_ok: mount.as_ref().map(Result::is_ok),
             services_ready: false,
             stack_up: false,
-            clusia_problem: None,
+            clusia_problem,
             compose_problem: None,
         };
         let mut built = main_plan(

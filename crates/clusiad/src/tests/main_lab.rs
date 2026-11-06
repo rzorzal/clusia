@@ -22,7 +22,6 @@ pub(super) struct Shas {
     /// Where the pull request branched from.
     pub merge_base: String,
     /// The pull request's head.
-    #[allow(dead_code)]
     pub head: String,
     /// `main`'s tip, which holds a commit the pull request does not have.
     pub base_tip: String,
@@ -192,6 +191,7 @@ async fn open_main_makes_a_worktree_at_the_merge_base_with_its_own_plan() {
         "not the base's tip"
     );
     assert_eq!(done.main.at.as_deref(), Some(shas.merge_base.as_str()));
+    assert_ne!(done.main.at.as_deref(), Some(shas.head.as_str()));
     assert_eq!(done.base.as_deref(), Some(shas.merge_base.as_str()));
     assert!(done.main.first_build);
     let plan = done.main.plan.expect("a plan");
@@ -290,7 +290,7 @@ async fn main_runs_nothing_before_its_own_approval() {
     assert_eq!(view.main.phase, MainPhase::NeedsSetup);
     let plan = view.main.plan.unwrap();
     assert!(!plan.commands_approved && !plan.ready);
-    // A changed recipe is a new hash: the stored approval no longer covers main.
+    // The approval is stored under main's own hash.
     let record = env::load(&lab.shared, &pr(7)).main.unwrap();
     assert_eq!(record.approval.as_ref().unwrap().recipe_hash, hash);
 }
@@ -669,4 +669,41 @@ async fn preparing_main_tells_each_step_and_nothing_after_it_ends() {
             .iter()
             .all(|e| !matches!(e, Event::CockpitChanged { .. }))
     );
+}
+
+#[tokio::test]
+async fn a_main_tree_moved_onto_a_base_that_ships_clusia_cannot_be_prepared() {
+    let (lab, shas) = pr_ready(vec![main_answer()], |_, _| {}).await;
+    ready_main(&lab, &shas).await;
+    let clone = lab.home.path().join("clone");
+    // The pull request is rebased onto a base that tracks a `.clusia` link.
+    git(&clone, &["checkout", "-q", "-b", "shipped", &shas.base_tip]);
+    std::os::unix::fs::symlink("elsewhere", clone.join(".clusia")).unwrap();
+    git(&clone, &["add", ".clusia"]);
+    git(&clone, &["commit", "-q", "-m", "ships clusia"]);
+    let shipped = git(&clone, &["rev-parse", "HEAD"]);
+    let head = commit(
+        &clone,
+        "src/feature.rs",
+        "pub fn feature() {}\n",
+        "feature again",
+    );
+    git(&clone, &["checkout", "-q", "main"]);
+    let mut review = reviews::load_stored(&lab.shared, &pr(7)).unwrap().unwrap();
+    review.base_sha = shipped;
+    review.head_sha = head.clone();
+    clusia_store::save_review(&lab.shared.paths, &review).unwrap();
+    index(&lab, 7, &head, REFRESH_SIG);
+    let before = docker_runs(&lab);
+    let refusal = main_tree::ensure_main_at_base(&lab.shared, &pr(7))
+        .await
+        .unwrap_err();
+    assert!(refusal.starts_with("Main "), "{refusal}");
+    let view = cockpit_of(cockpit(&lab.shared, &pr(7)).await);
+    assert_ne!(view.main.phase, MainPhase::Ready, "{:#?}", view.main);
+    let plan = view.main.plan.expect("main's plan");
+    assert!(plan.blocked.is_some() && !plan.ready, "{plan:#?}");
+    let hash = plan.recipe_hash;
+    refused(prepare_main(&lab.shared, &pr(7), &hash, Approve::All).await);
+    assert_eq!(docker_runs(&lab), before);
 }
