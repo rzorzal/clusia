@@ -92,6 +92,9 @@ impl CockpitWanted {
         if flags.write && flags.bench.is_none() {
             return Err(usage("--write needs --bench"));
         }
+        if flags.write && flags.copilot.is_some() {
+            return Err(usage("--write needs --bench without --copilot"));
+        }
         if let Some(text) = &flags.describe
             && !describe_ok(text)
         {
@@ -705,6 +708,7 @@ async fn ensure_main(
         view.main.phase,
         MainPhase::Creating | MainPhase::Preparing { .. }
     ) {
+        // The view is read again right after, so what was told meanwhile is not lost.
         stop.ask(
             client,
             Request::OpenMain { pr: pr.clone() },

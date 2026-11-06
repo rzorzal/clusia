@@ -183,7 +183,7 @@ pub enum Command {
         #[arg(long, value_name = "SLUG_OR_NAME", conflicts_with = "scenario")]
         bench: Option<String>,
         /// With --bench: ask the agent to write the benchmark first (one turn of the agent).
-        #[arg(long, requires = "bench")]
+        #[arg(long, requires = "bench", conflicts_with = "copilot")]
         write: bool,
         /// Ask the QA copilot; `explain` explains the item named by --scenario or --bench.
         #[arg(long, value_name = "TEXT")]

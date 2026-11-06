@@ -206,7 +206,21 @@ async fn rounds(lab: &mut Lab, run: &str) -> (Vec<RoundResult>, Vec<(RunSide, u3
                     points,
                     ..
                 } if id == run => samples.push((side, round, points)),
-                Event::CockpitChanged { view, .. } if view.activity.is_none() => ended = true,
+                // The view that ends a run already holds its stored results: the CLI prints
+                // from it without reading again.
+                Event::CockpitChanged { view, .. }
+                    if view.activity.is_none()
+                        && (view
+                            .scenarios
+                            .iter()
+                            .any(|s| s.last.is_some() || s.comparison.is_some())
+                            || view
+                                .benches
+                                .iter()
+                                .any(|b| b.last.is_some() || b.comparison.is_some())) =>
+                {
+                    ended = true;
+                }
                 _ => {}
             }
         }

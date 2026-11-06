@@ -2367,6 +2367,15 @@ fn tests_flags_that_need_another_are_usage_errors() {
         &[
             "tests",
             "acme/widgets#7",
+            "--bench",
+            "x",
+            "--write",
+            "--copilot",
+            "hi",
+        ][..],
+        &[
+            "tests",
+            "acme/widgets#7",
             "--approve-scenario",
             "x",
             "--yes",

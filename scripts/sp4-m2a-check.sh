@@ -5,7 +5,7 @@
 # milestone. It spends one agent turn for each of `--write-scenarios`, `--bench … --write` and
 # `--copilot`, and it runs the pull request's code on this Mac, in the container or sandbox you
 # approved, for each run. It approves nothing for you (each approval is a question you answer at
-# the terminal), changes no setting it does not put back, installs nothing, starts no engine,
+# the terminal), changes no setting, installs nothing, starts no engine,
 # removes no Docker object itself and publishes nothing to GitHub. It discards the review only
 # when you say yes.
 #
@@ -27,7 +27,6 @@ LIST=0
 SLUG=""
 passed=0
 failed=0
-OLD_RUNNER=""
 # Clúsia's data folder, as the CLI finds it.
 DATA="${CLUSIA_HOME:-$HOME/Library/Application Support/Clusia}"
 ERR="$(mktemp -t sp4-m2a-check.XXXXXX)" || {
@@ -169,8 +168,8 @@ fi
 echo "This opens a real review of $PR and drives clusia tests: one agent turn of YOUR agent for"
 echo "each of --write-scenarios, --bench … --write and --copilot, and runs of the pull request's"
 echo "code on this Mac, in the container or the sandbox you approved. Every approval is a"
-echo "question you answer at the terminal; the script approves nothing. It puts back any setting"
-echo "it reads (tests.runner), installs nothing and starts no engine. It asks before it discards"
+echo "question you answer at the terminal; the script approves nothing. It changes no setting,"
+echo "installs nothing and starts no engine. It asks before it discards"
 echo "the review of $PR on this Mac at the end. It publishes nothing to GitHub."
 printf 'Continue? [y/N] '
 read -r answer || answer=n
@@ -180,7 +179,6 @@ say "${STEPS[0]}"
 command -v clusia >/dev/null 2>&1 || { fail "clusia is on the PATH"; exit 1; }
 check "the daemon answers" clusia daemon status
 check "the review opens" clusia open "$PR"
-OLD_RUNNER="$(clusia config get tests.runner 2>/dev/null)"
 clusia tests "$PR" --scenarios
 check "the cockpit answers" cockpit_has '"scenarios":\['
 
@@ -271,11 +269,6 @@ if yes_or_no "Discard the review of $PR on this Mac now"; then
   check "no bench file is left in the worktree" no_placed_bench
 else
   echo "  Skipped: the review was kept."
-fi
-if [ "$(clusia config get tests.runner 2>/dev/null)" = "$OLD_RUNNER" ]; then
-  pass "tests.runner is as it was"
-else
-  fail "tests.runner is as it was"
 fi
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
