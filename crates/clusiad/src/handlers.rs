@@ -296,20 +296,44 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::RunCases { pr, scope, seen } => {
             crate::tests::run_cases(shared, &pr, scope, seen).await
         }
-        Command::GetCockpit { .. }
-        | Command::SaveScenario { .. }
-        | Command::ResetScenario { .. }
-        | Command::RemoveScenario { .. }
-        | Command::ApproveScenario { .. }
-        | Command::GetScenarioScript { .. }
-        | Command::WriteScenarios { .. }
-        | Command::SaveBench { .. }
-        | Command::ResetBench { .. }
-        | Command::WriteBench { .. }
-        | Command::OpenMain { .. }
-        | Command::PrepareMain { .. }
-        | Command::RunCockpit { .. }
-        | Command::AskCopilot { .. } => cockpit_not_ready(),
+        Command::GetCockpit { pr } => crate::tests::cockpit(shared, &pr).await,
+        Command::SaveScenario {
+            pr,
+            scenario,
+            input,
+        } => crate::tests::save_scenario(shared, &pr, &scenario, input).await,
+        Command::ResetScenario { pr, scenario } => {
+            crate::tests::reset_scenario(shared, &pr, &scenario).await
+        }
+        Command::RemoveScenario { pr, scenario } => {
+            crate::tests::remove_scenario(shared, &pr, &scenario).await
+        }
+        Command::ApproveScenario { pr, scenario, hash } => {
+            crate::tests::approve_scenario(shared, &pr, &scenario, &hash).await
+        }
+        Command::GetScenarioScript { pr, scenario } => {
+            crate::tests::scenario_script(shared, &pr, &scenario).await
+        }
+        Command::WriteScenarios { pr, ask } => {
+            crate::tests::write_scenarios(shared, &pr, ask).await
+        }
+        Command::SaveBench {
+            pr,
+            function,
+            input,
+        } => crate::tests::save_bench(shared, &pr, &function, input).await,
+        Command::ResetBench { pr, function } => {
+            crate::tests::reset_bench(shared, &pr, &function).await
+        }
+        Command::WriteBench { pr, function, ask } => {
+            crate::tests::write_bench(shared, &pr, &function, ask).await
+        }
+        Command::AskCopilot { pr, item, ask } => {
+            crate::tests::ask_copilot(shared, &pr, item, ask).await
+        }
+        Command::OpenMain { .. } | Command::PrepareMain { .. } | Command::RunCockpit { .. } => {
+            cockpit_not_ready()
+        }
     }
 }
 

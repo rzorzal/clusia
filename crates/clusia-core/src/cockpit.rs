@@ -4,11 +4,13 @@
 //! these checks are what each writer of a value, a block or a script runs first.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::checks::{DATA_RULE, PromptContext, context_text, one_line as flat};
 use crate::functions::{
     FunctionBrief, FunctionChange, FunctionLang, Param, VALUE_MAX, check_value,
 };
@@ -1900,19 +1902,347 @@ impl Suggestion {
     }
 }
 
-/// The text of a scenario turn's prompt.
-pub fn scenario_prompt(_ctx: &ScenarioPromptContext) -> String {
-    String::new()
+const ENV_TEXT: &str = "Clúsia runs a script with these environment variables: CLUSIA_MARK (a random mark), CLUSIA_ROOT (the repository root), CLUSIA_SCENARIO_DIR (the folder that holds the scripts), and CLUSIA_ARG_<NAME> for each input, where <NAME> is the input's name in capitals. Every value is a string; a duration arrives in milliseconds as a whole number, a boolean as true or false. Values reach the script only through environment variables; never write a value into a script or into `run`.\n";
+
+const SCENARIO_RULES: &str = "How a scenario runs: from the repository root (CLUSIA_ROOT names it), with no network, not even localhost in the local sandbox, and none of the reviewer's secrets. Scripts are never executable: a script is run by an interpreter named in `run`, for example `python3 {script} --callers {callers}`. In `run`, {script} is the first script, {dir} the folder of the scripts and {<input name>} an input; write them as words of their own, outside quotes. A script writes files only under $TMPDIR.\nThe script prints its report to stdout, one line each, every line starting with the value of CLUSIA_MARK and one space: `output <name> <value>` (a result worth comparing, such as a count; name matches a-z, 0-9, `_`, `.` and `-`; no timestamps or random values) and `error <text>` (a failure it caught). The scenario passes when the script exits with 0. Every value is fake data written for the scenario: never copy a secret, a token, a key or a real address from the repository.\n";
+
+const SCENARIO_FORMAT: &str = "Write each scenario as one fenced ```clusia-scenario block holding one JSON object: {\"title\": \"<one line, at most 80 characters>\", \"purpose\": \"<one line, at most 300>\", \"steps\": [\"<what it does, one line each, at most 12>\"], \"inputs\": [{\"name\": \"<a-z, 0-9 and _>\", \"label\": \"<short label>\", \"kind\": \"string\" or \"integer\" or \"boolean\" or \"duration\" or \"one_of\", \"default\": \"<fake value as text>\", \"choices\": [\"<only for one_of>\"]}], \"run\": \"<the command>\", \"scripts\": [{\"name\": \"run.py\", \"text\": \"<the whole script>\"}], \"rounds\": <optional, 1 to 10>, \"timeout_secs\": <optional, 5 to 600>}. The first script is {script}. At most 12 inputs and 4 scripts of at most 32 KiB; script names are a-z, 0-9, `_` and `-` with the extension sh, py, mjs, js, ts, rb, json or txt. A duration default looks like `200 ms` or `30 s`.\n";
+
+/// `{calls_max}` is replaced by `BENCH_CALLS_MAX`.
+const BENCH_RULES: &str = "How a benchmark runs: one process per round, from the repository root (CLUSIA_ROOT names it), with no network and none of the reviewer's secrets. The loop file reads CLUSIA_BENCH_WARMUP (calls to run first and drop), CLUSIA_BENCH_SECS (how long to measure) and CLUSIA_BENCH_CALLS_MAX ({calls_max}, the most calls), and CLUSIA_ARG_<NAME> for each parameter, where <NAME> is the parameter's name in capitals; every value is a string. It runs WARMUP calls, prints `start`, then calls the function for SECS seconds or CALLS_MAX calls, whichever comes first, and must time each call. It then prints `bench <calls> <total_ns> <p50_ns> <p95_ns> <max_ns>` with p50 and p95 over the per-call times, and last `done`. Every line of the report starts with the value of CLUSIA_MARK and one space; `error <text>` reports a failure. A Rust bench is an integration test with `#[test] fn clusia_case()`, which the function's command runs with `--exact` and the name clusia_case; the loop file is its own test file, so the name does not clash with the driver's. The loop writes no file and uses no network. Every value is fake data: never copy a secret, a token, a key or a real address from the repository.\n";
+
+const BENCH_FORMAT: &str = "Answer with exactly one fenced ```clusia-bench block holding one JSON object: {\"function\": \"<qualified name exactly as listed>\", \"file\": \"<path exactly as listed>\", \"values\": {\"<param name>\": \"<value as text>\"}, \"warmup\": <optional, 0 to 1000>, \"secs\": <optional, 1 to 30>, \"bench\": \"<the loop file's whole source>\"}. `values` names exactly the function's parameters.\n";
+
+const SUGGESTION_FORMAT: &str = "When you suggest something to try, write each suggestion as one fenced ```clusia-suggestion block holding one JSON object: {\"kind\": \"scenario\" or \"bench\", \"title\": \"<one line, at most 80 characters>\", \"why\": \"<one line, at most 300>\", \"function\": \"<qualified name of a listed function; only for bench>\"}. Write at most 3.\n";
+
+fn input_lines(out: &mut String, inputs: &[Input]) {
+    for input in inputs {
+        let kind = match input.kind {
+            InputKind::String => "string",
+            InputKind::Integer => "integer",
+            InputKind::Boolean => "boolean",
+            InputKind::Duration => "duration",
+            InputKind::OneOf => "one_of",
+        };
+        let _ = writeln!(
+            out,
+            "    {} ({kind}): {}, default {}",
+            flat(&input.name),
+            flat(&input.label),
+            flat(&input.default)
+        );
+    }
+}
+
+fn brief_lines(out: &mut String, functions: &[FunctionBrief]) {
+    if functions.is_empty() {
+        return;
+    }
+    out.push_str("Changed functions (data):\n");
+    for brief in functions {
+        let _ = writeln!(out, "- {}", crate::functions::brief_line(brief));
+    }
+}
+
+/// The text of a scenario turn's prompt. Everything the pull request wrote goes through `flat`
+/// or is indented as data, so none of it can start a section.
+pub fn scenario_prompt(ctx: &ScenarioPromptContext) -> String {
+    let mut out = match &ctx.ask {
+        ScenarioAsk::Fresh => format!(
+            "Write end-to-end scenarios for this pull request: at most {SCENARIOS_FIRST} scenarios that exercise what the change does, each with fake default values for its inputs and the script that runs it. Do not run anything yourself; read the code and answer.\n"
+        ),
+        ScenarioAsk::More => {
+            "Write more scenarios unlike the ones listed below. Do not run anything yourself.\n"
+                .to_string()
+        }
+        ScenarioAsk::Values { scenario } => format!(
+            "Write new fake default values for the scenario {}: give the same inputs with new defaults, in one block. Do not run anything yourself.\n",
+            flat(scenario)
+        ),
+        ScenarioAsk::Describe { text } => format!(
+            "Write one scenario for this idea (data): {}\nDo not run anything yourself.\n",
+            flat(text)
+        ),
+    };
+    out.push_str(DATA_RULE);
+    out.push('\n');
+    out.push_str(&context_text(&PromptContext {
+        pr_title: ctx.pr_title.clone(),
+        files: ctx.files.clone(),
+        forked: ctx.forked,
+    }));
+    let runner = match ctx.runner {
+        RunnerKind::Container => "a container",
+        RunnerKind::Local => "the local sandbox",
+    };
+    let _ = writeln!(out, "Scenarios run in {runner}, with no network.");
+    if let Some(all) = &ctx.tests_all {
+        let _ = writeln!(out, "The repository's test command (data): {}", flat(all));
+    }
+    brief_lines(&mut out, &ctx.functions);
+    if !ctx.existing.is_empty() {
+        out.push_str("Scenarios that exist (data):\n");
+        for (slug, title) in &ctx.existing {
+            let _ = writeln!(out, "    {} {}", flat(slug), flat(title));
+        }
+    }
+    if matches!(ctx.ask, ScenarioAsk::Values { .. }) {
+        out.push_str("Its inputs (data):\n");
+        input_lines(&mut out, &ctx.inputs);
+    }
+    out.push_str(ENV_TEXT);
+    out.push_str(SCENARIO_RULES);
+    out.push_str(SCENARIO_FORMAT);
+    out
 }
 
 /// The text of a benchmark turn's prompt.
-pub fn bench_prompt(_ctx: &BenchPromptContext) -> String {
-    String::new()
+pub fn bench_prompt(ctx: &BenchPromptContext) -> String {
+    let mut out = match ctx.ask {
+        BenchAsk::Fresh => "Write a benchmark for one changed function of this pull request: one loop file that calls the function many times with fake values, and the values it sets. Do not run anything yourself; read the code and answer.\n",
+        BenchAsk::Values => "Write new fake values for the benchmark of one changed function of this pull request: every parameter, with new values, in one block. Do not run anything yourself.\n",
+    }
+    .to_string();
+    out.push_str(DATA_RULE);
+    out.push('\n');
+    out.push_str(&context_text(&PromptContext {
+        pr_title: ctx.pr_title.clone(),
+        files: vec![ctx.function.file.clone()],
+        forked: ctx.forked,
+    }));
+    let _ = writeln!(
+        out,
+        "Function (data): {}",
+        crate::functions::brief_line(&ctx.function)
+    );
+    if !ctx.params.is_empty() {
+        out.push_str("Parameters (data):\n");
+        for param in &ctx.params {
+            let _ = writeln!(
+                out,
+                "    {} ({}): {}",
+                flat(&param.name),
+                crate::functions::kind_name(param.kind),
+                flat(&param.label)
+            );
+        }
+    }
+    if !ctx.values.is_empty() {
+        out.push_str("Current values (data):\n");
+        for (name, value) in &ctx.values {
+            let _ = writeln!(out, "    {} = {}", flat(name), flat(value));
+        }
+    }
+    if let Some(driver) = &ctx.driver {
+        out.push_str("Current driver (data):\n");
+        for text in driver.lines() {
+            let _ = writeln!(out, "    {text}");
+        }
+    }
+    if let Some(command) = &ctx.command {
+        let _ = writeln!(out, "Command that runs the benchmark: {}", flat(command));
+    }
+    out.push_str(&BENCH_RULES.replace("{calls_max}", &BENCH_CALLS_MAX.to_string()));
+    out.push_str(BENCH_FORMAT);
+    out
 }
 
+/// How many of the last copilot messages the prompt repeats.
+const HISTORY_SHOWN: usize = 6;
+
 /// The text of a copilot turn's prompt.
-pub fn copilot_prompt(_ctx: &CopilotPromptContext) -> String {
-    String::new()
+pub fn copilot_prompt(ctx: &CopilotPromptContext) -> String {
+    let mut out = match &ctx.ask {
+        CopilotAsk::Explain => "Explain this comparison in plain words: what got better or worse, and what in the numbers, the errors and the memory and CPU series says why.\n".to_string(),
+        CopilotAsk::Next => "Suggest what to try next: scenarios or benchmarks that would tell the reviewer more.\n".to_string(),
+        CopilotAsk::Free { text } => format!("Answer the reviewer's question (data): {}\n", flat(text)),
+    };
+    out.push_str(DATA_RULE);
+    out.push('\n');
+    out.push_str(&context_text(&PromptContext {
+        pr_title: ctx.pr_title.clone(),
+        files: Vec::new(),
+        forked: ctx.forked,
+    }));
+    if let Some(item) = &ctx.item {
+        out.push_str("The item (data):\n");
+        out.push_str(item);
+        if !item.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    brief_lines(&mut out, &ctx.functions);
+    if !ctx.others.is_empty() {
+        out.push_str("Other items (data):\n");
+        for title in &ctx.others {
+            let _ = writeln!(out, "    {}", flat(title));
+        }
+    }
+    if !ctx.history.is_empty() {
+        out.push_str("The conversation so far (data):\n");
+        let skip = ctx.history.len().saturating_sub(HISTORY_SHOWN);
+        for message in &ctx.history[skip..] {
+            let who = match message.from {
+                CopilotFrom::Reviewer => "reviewer",
+                CopilotFrom::Agent => "you",
+            };
+            let _ = writeln!(out, "    {who}: {}", flat(&message.text));
+        }
+    }
+    out.push_str("Answer in plain text: no links, no markdown, no HTML. Be short and concrete.\n");
+    out.push_str(SUGGESTION_FORMAT);
+    out
+}
+
+fn data_line(out: &mut String, text: &str) {
+    let _ = writeln!(out, "    {}", flat(text));
+}
+
+/// A series as start, peak and end memory and the mean CPU; `None` when nothing was measured.
+fn series_text(series: &Series) -> Option<String> {
+    let memory: Vec<u64> = series.points.iter().filter_map(|p| p.rss_kb).collect();
+    let cpu: Vec<u64> = series
+        .points
+        .iter()
+        .filter_map(|p| p.cpu_milli.map(u64::from))
+        .collect();
+    let mut parts = Vec::new();
+    if let (Some(first), Some(max), Some(last)) =
+        (memory.first(), memory.iter().max(), memory.last())
+    {
+        let mb = |kb| metric_value_text(Metric::PeakMemory, kb);
+        parts.push(format!(
+            "memory start {}, peak {}, end {}",
+            mb(*first),
+            mb(*max),
+            mb(*last)
+        ));
+    }
+    if !cpu.is_empty() {
+        let mean = cpu.iter().sum::<u64>() / cpu.len() as u64;
+        parts.push(format!(
+            "CPU average {}",
+            metric_value_text(Metric::AvgCpu, mean)
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// One side's pass count, outputs, first errors and series. `other_errors` are the other side's,
+/// for the "on main" tail of this PR's error lines.
+fn side_lines(
+    out: &mut String,
+    side: RunSide,
+    view: &SideView,
+    other_errors: Option<&[ErrorLine]>,
+) {
+    let (name, prefix) = match side {
+        RunSide::Pr => ("this PR", ""),
+        RunSide::Main => ("main", "main "),
+    };
+    if let Some(pass) = &view.pass {
+        data_line(
+            out,
+            &format!("{name}: {} of {} rounds passed", pass.passed, pass.rounds),
+        );
+    }
+    for (key, value) in &view.outputs {
+        data_line(out, &format!("{prefix}output {key} = {value}"));
+    }
+    for error in view.errors.iter().take(5) {
+        let mut text = error_text(error, side);
+        if let Some(other) = other_errors {
+            let n = other
+                .iter()
+                .find(|e| e.text == error.text)
+                .map_or(0, |e| e.count);
+            text.push_str(&format!(" · {n} on main"));
+        }
+        data_line(out, &text);
+    }
+    if let Some(text) = series_text(&view.series) {
+        data_line(out, &format!("{name} {text}"));
+    }
+}
+
+fn stat_text(metric: Metric, stat: Option<&SideStat>) -> String {
+    match stat {
+        Some(s) => format!(
+            "{} (spread {}, n {})",
+            metric_value_text(metric, s.median),
+            metric_value_text(metric, s.spread),
+            s.n
+        ),
+        None => "not measured".to_string(),
+    }
+}
+
+/// The comparison, or the last single run when there is none.
+fn results_lines(out: &mut String, comparison: Option<&ComparisonView>, last: Option<&SideView>) {
+    if let Some(c) = comparison {
+        data_line(out, &c.line);
+        for row in &c.rows {
+            data_line(
+                out,
+                &format!(
+                    "{}: main {}, this PR {}, {}",
+                    row.metric.label(),
+                    stat_text(row.metric, row.main.as_ref()),
+                    stat_text(row.metric, row.pr.as_ref()),
+                    delta_text(&row.delta, row.main.as_ref())
+                ),
+            );
+        }
+        if c.exercises == Some(false) {
+            data_line(
+                out,
+                "Doesn't exercise the change: same result and outputs on main.",
+            );
+        }
+        side_lines(out, RunSide::Pr, &c.pr, Some(&c.main.errors));
+        side_lines(out, RunSide::Main, &c.main, None);
+    } else if let Some(side) = last {
+        side_lines(out, RunSide::Pr, side, None);
+    }
+}
+
+/// A scenario as data lines for the copilot: the item, its comparison table and verdict, the
+/// pass counts, outputs, first errors and the series summary.
+pub fn scenario_item_text(view: &ScenarioView) -> String {
+    let mut out = String::new();
+    data_line(&mut out, &view.title);
+    data_line(&mut out, &view.purpose);
+    for (i, step) in view.steps.iter().enumerate() {
+        data_line(&mut out, &format!("{}. {step}", i + 1));
+    }
+    if let Some(command) = &view.command {
+        data_line(&mut out, &format!("command: {command}"));
+    }
+    for input in &view.inputs {
+        data_line(&mut out, &format!("{} = {}", input.input.name, input.value));
+    }
+    data_line(&mut out, &view.status);
+    results_lines(&mut out, view.comparison.as_ref(), view.last.as_ref());
+    out
+}
+
+/// A benchmark as data lines for the copilot, as `scenario_item_text` does for a scenario.
+pub fn bench_item_text(view: &BenchView) -> String {
+    let mut out = String::new();
+    data_line(&mut out, &view.qualified);
+    data_line(
+        &mut out,
+        &format!(
+            "{} warm-up calls, {} s, {} rounds",
+            view.warmup, view.secs, view.rounds
+        ),
+    );
+    for (name, value) in &view.values {
+        data_line(&mut out, &format!("{name} = {value}"));
+    }
+    data_line(&mut out, &view.status);
+    results_lines(&mut out, view.comparison.as_ref(), view.last.as_ref());
+    out
 }
 
 #[cfg(test)]
@@ -3659,3 +3989,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod prompt_tests;

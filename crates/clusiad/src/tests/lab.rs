@@ -839,6 +839,7 @@ async fn the_sweep_removes_orphan_containers() {
             turn: Stop::new(),
             container: Some("clusia-run-acme-widgets-1a2b3c-7-1".into()),
             functions: None,
+            cockpit: None,
         });
     });
     // A record with no review is old enough to go.

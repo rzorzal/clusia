@@ -2,9 +2,14 @@
 //! their storage. A review does one thing at a time (generate, set up, list or run), and at most
 //! `tests.parallel_runs` setups, lists and runs go at once across all reviews.
 
+mod bench;
 mod case_run;
 pub(crate) mod case_turn;
 pub(super) mod cases;
+#[cfg(test)]
+mod cockpit_lab;
+mod cockpit_turn;
+mod compare;
 mod env;
 #[cfg(test)]
 mod functions_lab;
@@ -12,6 +17,7 @@ mod functions_lab;
 mod lab;
 pub(crate) mod recipe_file;
 pub(crate) mod recipe_turn;
+mod scenarios;
 mod work;
 
 use std::collections::{BTreeMap, HashMap};
@@ -21,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
+use clusia_core::cockpit::CockpitActivity;
 use clusia_core::functions::FunctionsActivity;
 use clusia_core::tests::{Approve, TestEngineInfo, TestScope, TestsPhase, TestsView};
 use clusia_protocol::{ErrorCode, Event, Outcome, ProtocolError, Reply, topics};
@@ -32,9 +39,14 @@ use crate::reviews;
 use crate::state::Shared;
 use crate::turns::{Stop, Why};
 
+pub(crate) use bench::{reset_bench, save_bench};
 pub(crate) use case_run::run_cases;
 pub(crate) use case_turn::write_cases;
 pub(crate) use cases::{driver, functions, remove_case, reset_case, save_case};
+pub(crate) use cockpit_turn::{ask_copilot, write_bench, write_scenarios};
+pub(crate) use scenarios::{
+    approve_scenario, cockpit, remove_scenario, reset_scenario, save_scenario, scenario_script,
+};
 
 /// How long `stop_all` waits for the activity of a review to end; a container's stop may take
 /// two `docker kill`s and the client's grace between them.
@@ -59,6 +71,8 @@ pub(super) enum Doing {
     Run,
     Cases,
     RunCases,
+    Scenarios,
+    Bench,
 }
 
 impl Doing {
@@ -70,12 +84,19 @@ impl Doing {
             Doing::Run => "running the tests",
             Doing::Cases => "writing cases",
             Doing::RunCases => "running cases",
+            Doing::Scenarios => "writing scenarios",
+            Doing::Bench => "writing a benchmark",
         }
     }
 
     /// Whether the activity is about the function cases, which leave the tests' phase alone.
     pub(super) fn is_functions(self) -> bool {
         matches!(self, Doing::Cases | Doing::RunCases)
+    }
+
+    /// Whether the activity is about the QA cockpit, which leaves the tests' phase alone too.
+    pub(super) fn is_cockpit(self) -> bool {
+        matches!(self, Doing::Scenarios | Doing::Bench)
     }
 }
 
@@ -93,6 +114,8 @@ pub(super) struct Activity {
     pub container: Option<String>,
     /// What a functions activity is doing, for the functions view.
     pub functions: Option<FunctionsActivity>,
+    /// What a cockpit activity is doing, for the cockpit view.
+    pub cockpit: Option<CockpitActivity>,
 }
 
 impl Activity {
@@ -128,6 +151,12 @@ pub(super) struct Entry {
     /// Waits for the call index that ended with it still not ready, since it was last ready or
     /// a client last asked.
     pub functions_rounds: u32,
+    /// Why the last scenario or benchmark turn failed, until the next one begins.
+    pub cockpit_failed: Option<String>,
+    /// The copilot turn that answers now; it does not hold the review's slot.
+    pub copilot: Option<Arc<Stop>>,
+    /// Why the last copilot turn failed, until the next ask.
+    pub copilot_failed: Option<String>,
 }
 
 /// The tests of every review.
@@ -318,6 +347,8 @@ pub(super) fn begin(
         // A functions activity leaves the tests' own failure for the tests' view to show.
         if doing.is_functions() {
             entry.cases_failed = None;
+        } else if doing.is_cockpit() {
+            entry.cockpit_failed = None;
         } else {
             entry.failed = None;
         }
@@ -329,6 +360,7 @@ pub(super) fn begin(
             turn: turn.clone(),
             container: None,
             functions: None,
+            cockpit: None,
         });
         Ok(Started {
             id,
@@ -528,6 +560,9 @@ pub(crate) fn stop(shared: &Shared, pr: &PrRef) -> Outcome {
     shared.tests.with(pr, |entry| {
         if let Some(activity) = &entry.activity {
             activity.fire(Why::User);
+        }
+        if let Some(copilot) = &entry.copilot {
+            copilot.fire(Why::User);
         }
     });
     Outcome::Ok(Reply::Ack)
@@ -792,6 +827,9 @@ pub(crate) async fn stop_all(shared: &Shared, pr: &PrRef, why: Why) {
         if let Some(activity) = &entry.activity {
             activity.fire(why);
         }
+        if let Some(copilot) = &entry.copilot {
+            copilot.fire(why);
+        }
     });
     let give_up = Instant::now() + STOP_WAIT;
     while !shared.tests.with(pr, |entry| entry.activity.is_none()) && Instant::now() < give_up {
@@ -817,6 +855,9 @@ pub(crate) fn forget(shared: &Shared, pr: &PrRef) {
         .remove(pr);
     if let Some(activity) = removed.as_ref().and_then(|entry| entry.activity.as_ref()) {
         activity.fire(Why::Ended);
+    }
+    if let Some(copilot) = removed.as_ref().and_then(|entry| entry.copilot.as_ref()) {
+        copilot.fire(Why::Ended);
     }
     let record = clusia_store::load_tests(&shared.paths, pr).unwrap_or_default();
     if let Err(e) = clusia_store::delete_tests(&shared.paths, pr) {
@@ -924,8 +965,13 @@ pub(crate) async fn shutdown(shared: &Shared) {
     shared.tests.closing.store(true, Ordering::SeqCst);
     {
         let table = shared.tests.table.lock().unwrap_or_else(|p| p.into_inner());
-        for activity in table.values().filter_map(|entry| entry.activity.as_ref()) {
-            activity.fire(Why::Shutdown);
+        for entry in table.values() {
+            if let Some(activity) = &entry.activity {
+                activity.fire(Why::Shutdown);
+            }
+            if let Some(copilot) = &entry.copilot {
+                copilot.fire(Why::Shutdown);
+            }
         }
     }
     let mut live = shared.tests.live.subscribe();

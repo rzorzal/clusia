@@ -468,7 +468,7 @@ pub(crate) fn brief_line(brief: &FunctionBrief) -> String {
     )
 }
 
-fn kind_name(kind: ParamKind) -> &'static str {
+pub(crate) fn kind_name(kind: ParamKind) -> &'static str {
     match kind {
         ParamKind::Text => "text",
         ParamKind::Int => "int",

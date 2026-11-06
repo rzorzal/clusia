@@ -48,72 +48,13 @@ async fn the_test_commands_answer_through_the_socket() {
 
 #[tokio::test]
 async fn cockpit_commands_are_refused_until_served() {
-    use clusia_core::cockpit::{
-        BenchAsk, BenchInput, CockpitScope, CopilotAsk, ItemKind, ItemRef, ScenarioAsk,
-        ScenarioInput,
-    };
+    use clusia_core::cockpit::CockpitScope;
     use clusia_core::tests::Approve;
 
     let daemon = TestDaemon::start().await;
     let mut client = daemon.client().await;
     let pr: PrRef = "acme/widgets#7".parse().unwrap();
-    let item = ItemRef {
-        kind: ItemKind::Scenario,
-        id: "refresh".into(),
-    };
     let commands = vec![
-        Command::GetCockpit { pr: pr.clone() },
-        Command::SaveScenario {
-            pr: pr.clone(),
-            scenario: "refresh".into(),
-            input: ScenarioInput {
-                values: Default::default(),
-                files: Default::default(),
-                run: None,
-                rounds: None,
-                timeout_secs: None,
-            },
-        },
-        Command::ResetScenario {
-            pr: pr.clone(),
-            scenario: "refresh".into(),
-        },
-        Command::RemoveScenario {
-            pr: pr.clone(),
-            scenario: "refresh".into(),
-        },
-        Command::ApproveScenario {
-            pr: pr.clone(),
-            scenario: "refresh".into(),
-            hash: "h".into(),
-        },
-        Command::GetScenarioScript {
-            pr: pr.clone(),
-            scenario: "refresh".into(),
-        },
-        Command::WriteScenarios {
-            pr: pr.clone(),
-            ask: ScenarioAsk::Fresh,
-        },
-        Command::SaveBench {
-            pr: pr.clone(),
-            function: "f-0123456789".into(),
-            input: BenchInput {
-                values: Default::default(),
-                warmup: None,
-                secs: None,
-                rounds: None,
-            },
-        },
-        Command::ResetBench {
-            pr: pr.clone(),
-            function: "f-0123456789".into(),
-        },
-        Command::WriteBench {
-            pr: pr.clone(),
-            function: "f-0123456789".into(),
-            ask: BenchAsk::Fresh,
-        },
         Command::OpenMain { pr: pr.clone() },
         Command::PrepareMain {
             pr: pr.clone(),
@@ -126,13 +67,8 @@ async fn cockpit_commands_are_refused_until_served() {
             on_main: false,
             seen: "h".into(),
         },
-        Command::AskCopilot {
-            pr: pr.clone(),
-            item: Some(item),
-            ask: CopilotAsk::Next,
-        },
     ];
-    assert_eq!(commands.len(), 14, "every new command is covered");
+    assert_eq!(commands.len(), 3, "every command not served yet is covered");
     for command in commands {
         let name = format!("{command:?}");
         let Err(ClientError::Server(refusal)) = client.request(command).await else {
@@ -144,5 +80,34 @@ async fn cockpit_commands_are_refused_until_served() {
             "{name}"
         );
     }
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn the_cockpit_is_served_through_the_wire() {
+    use clusia_core::cockpit::{CopilotAsk, NO_REVIEW};
+
+    let daemon = TestDaemon::start().await;
+    let mut client = daemon.client().await;
+    let pr: PrRef = "acme/widgets#7".parse().unwrap();
+    match client.request(Command::GetCockpit { pr: pr.clone() }).await {
+        Ok(Reply::Cockpit(view)) => assert_eq!(view.note.as_deref(), Some(NO_REVIEW)),
+        other => panic!("not a cockpit view: {other:?}"),
+    }
+    let Err(ClientError::Server(refusal)) = client
+        .request(Command::AskCopilot {
+            pr: pr.clone(),
+            item: None,
+            ask: CopilotAsk::Next,
+        })
+        .await
+    else {
+        panic!("the copilot was not refused without a review");
+    };
+    assert!(
+        !refusal.message.contains("not served yet"),
+        "{}",
+        refusal.message
+    );
     daemon.stop().await;
 }
