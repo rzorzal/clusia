@@ -144,7 +144,7 @@ fn support_of(
     stored: Option<&StoredBench>,
     loop_file: Option<&[u8]>,
 ) -> ItemSupport {
-    if refused || item.refused {
+    if refused {
         return ItemSupport::Unsupported {
             reason: BENCH_FOLDER_REFUSED.into(),
         };
@@ -192,7 +192,8 @@ fn support_of(
     ItemSupport::Ready
 }
 
-/// The benchmark of one listed function, when it has one.
+/// The benchmark of one listed function, when it has one. A function whose folder is refused
+/// lists no benchmark.
 pub(super) fn read_one(
     worktree: &Path,
     item: &cases::Item,

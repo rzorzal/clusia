@@ -862,9 +862,15 @@ pub fn describe_ok(text: &str) -> bool {
     one_line(text, 1, 600)
 }
 
+/// The scenario folder's overlay file, which no script may take the name of.
+pub const SCRIPT_EDITS_FILE: &str = "edits.json";
+
 /// A script's file name: a stem of 1 to 31 of `[a-z0-9_-]` that starts with a letter or digit,
-/// and one of the extensions an interpreter reads.
+/// and one of the extensions an interpreter reads, except the overlay file's name.
 pub fn valid_script_name(name: &str) -> bool {
+    if name == SCRIPT_EDITS_FILE {
+        return false;
+    }
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
     };
@@ -1669,7 +1675,9 @@ impl ScenarioBlock {
         }
         let mut names = BTreeSet::new();
         for (i, script) in raw.scripts.iter().enumerate() {
-            if !valid_script_name(&script.name) {
+            if script.name == SCRIPT_EDITS_FILE {
+                bad.push(format!("The script name {SCRIPT_EDITS_FILE} is reserved"));
+            } else if !valid_script_name(&script.name) {
                 bad.push(format!(
                     "scripts[{i}].name \"{}\" is not a valid script name",
                     printable(&script.name)
@@ -2036,7 +2044,7 @@ pub fn bench_prompt(ctx: &BenchPromptContext) -> String {
     if let Some(driver) = &ctx.driver {
         out.push_str("Current driver (data):\n");
         for text in driver.lines() {
-            let _ = writeln!(out, "    {text}");
+            let _ = writeln!(out, "    {}", printable(text));
         }
     }
     if let Some(command) = &ctx.command {
@@ -2430,6 +2438,7 @@ mod tests {
             "a/b.py",
             "run.py ",
             "-a.py",
+            "edits.json",
             &format!("{}.py", "a".repeat(32)),
         ] {
             assert!(!valid_script_name(bad), "{bad:?}");
@@ -2635,6 +2644,12 @@ mod tests {
                 "inputs[2].name \"Bad\" must start with a lowercase letter and hold only a-z, 0-9 and _ (at most 32)",
                 "inputs[4].name \"callers\" is used twice",
             ]
+        );
+        let mut reserved = block();
+        reserved["scripts"] = json!([{"name": "edits.json", "text": "{}"}]);
+        assert_eq!(
+            one(reserved),
+            vec!["The script name edits.json is reserved"]
         );
         let mut choices = block();
         choices["inputs"] = json!([

@@ -273,7 +273,7 @@ impl Read {
     }
 }
 
-/// The not-created main the view shows until main's own worktree is served.
+/// Main as the view shows it when it has no worktree.
 pub(super) fn main_stub() -> MainView {
     MainView {
         phase: MainPhase::NotCreated,

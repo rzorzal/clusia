@@ -688,12 +688,23 @@ pub(crate) async fn ask_copilot(
             })
             .await;
         }
-        shared.tests.with(&pr, |entry| {
-            entry.copilot = None;
-            entry.copilot_failed = outcome.err();
+        // A stop, a forget or a newer turn has already replaced this turn's slot: the new state
+        // stays as it is and nothing is told about a review that may be gone.
+        let current = shared.tests.with(&pr, |entry| {
+            let current = entry
+                .copilot
+                .as_ref()
+                .is_some_and(|c| Arc::ptr_eq(c, &stop));
+            if current {
+                entry.copilot = None;
+                entry.copilot_failed = outcome.err();
+            }
+            current
         });
         drop(live);
-        tell_cockpit(&shared, &pr).await;
+        if current {
+            tell_cockpit(&shared, &pr).await;
+        }
     });
     Outcome::Ok(Reply::Ack)
 }

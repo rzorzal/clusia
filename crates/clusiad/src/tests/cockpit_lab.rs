@@ -1268,3 +1268,22 @@ async fn nothing_in_the_cockpit_runs_a_program_that_is_not_the_agent() {
             .is_file()
     );
 }
+
+#[tokio::test]
+async fn a_script_named_like_the_overlay_file_is_not_valid_and_writes_nothing() {
+    let mut block = scenario_json("Overlay clash");
+    block["scripts"] = json!([{"name": "edits.json", "text": "{}\n"}]);
+    let mut lab = cockpit_lab(vec![Turn::answer_blocks("One.", &[scenario_block(block)])]);
+    write_scenarios(&lab.shared, &pr(7), ScenarioAsk::Fresh).await;
+    let done = told_cockpit(&mut lab, "failed", |v| {
+        v.activity.is_none() && v.failed.is_some()
+    })
+    .await;
+    assert!(done.scenarios.is_empty());
+    assert!(
+        done.failed
+            .unwrap()
+            .contains("The script name edits.json is reserved")
+    );
+    assert!(!lab.worktree(7).join(".clusia/e2e/overlay-clash").exists());
+}
