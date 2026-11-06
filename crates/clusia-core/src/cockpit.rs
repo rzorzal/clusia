@@ -366,10 +366,15 @@ pub struct SideRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompareOutcome {
+    /// Rounds are still being added; a record left so by a daemon that stopped reads as
+    /// `Stopped`.
+    Running,
     Done,
     Stopped,
     TimedOut,
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +454,8 @@ pub enum Verdict {
     NoDifference,
     NotEnoughRounds,
     Stopped,
+    /// The comparison is still under way.
+    Running,
     PassDiffers {
         pr: bool,
         main: bool,
@@ -1235,15 +1242,17 @@ pub fn exercises(pr: &SideRecord, main: &SideRecord) -> Option<bool> {
     Some(!seen.all(|x| x == first))
 }
 
-/// The first case that matches decides: a stop, a result that differs, too few rounds, mixed
+/// The first case that matches decides: a stop or a run still under way, a result that differs, too few rounds, mixed
 /// numbers, worse, better, no difference. Metrics are listed in `Metric::ALL` order.
 pub fn verdict(
     rows: &[MetricRow],
     outcome: &CompareOutcome,
     pass: Option<(bool, bool)>,
 ) -> Verdict {
-    if *outcome == CompareOutcome::Stopped {
-        return Verdict::Stopped;
+    match outcome {
+        CompareOutcome::Stopped => return Verdict::Stopped,
+        CompareOutcome::Running => return Verdict::Running,
+        _ => {}
     }
     if let Some((pr, main)) = pass
         && pr != main
@@ -1355,6 +1364,7 @@ pub fn verdict_line(v: &Verdict) -> String {
         Verdict::NoDifference => "No clear difference from main".into(),
         Verdict::NotEnoughRounds => "No verdict: each side needs 3 finished rounds".into(),
         Verdict::Stopped => "Stopped: no verdict".into(),
+        Verdict::Running => "Running: no verdict yet".into(),
         Verdict::PassDiffers { pr: false, .. } => "Passes on main, fails on this PR".into(),
         Verdict::PassDiffers { pr: true, .. } => "Fails on main, passes on this PR".into(),
     }
@@ -1472,7 +1482,7 @@ fn short_form(view: &ComparisonView) -> Option<String> {
                 None => "no clear difference".into(),
             })
         }
-        Verdict::NotEnoughRounds | Verdict::PassDiffers { .. } => None,
+        Verdict::NotEnoughRounds | Verdict::Running | Verdict::PassDiffers { .. } => None,
     }
 }
 
@@ -3278,6 +3288,28 @@ mod tests {
                 metrics: vec![Metric::Duration]
             },
             "a timed-out run keeps what finished"
+        );
+    }
+
+    #[test]
+    fn a_comparison_still_running_gives_no_verdict() {
+        let record = compare(
+            side_of(RunSide::Pr, Metric::Duration, &[130, 131, 129]),
+            side_of(RunSide::Main, Metric::Duration, &[100, 101, 99]),
+            CompareOutcome::Running,
+        );
+        let view = comparison_view(
+            &record,
+            &[Metric::Duration],
+            (Freshness::Current, Freshness::Current),
+            true,
+        );
+        assert_eq!(view.verdict, Verdict::Running);
+        assert_eq!(view.line, "Running: no verdict yet");
+        assert_eq!(view.outcome, CompareOutcome::Running);
+        assert_eq!(
+            serde_json::to_string(&CompareOutcome::Running).unwrap(),
+            "\"running\""
         );
     }
 

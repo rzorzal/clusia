@@ -502,10 +502,15 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
         return read;
     }
     let now_runner = runner.unwrap_or(RunnerKind::Container);
+    let live = match &read.view.activity {
+        Some(CockpitActivity::Running { run, .. }) => Some(run.clone()),
+        _ => None,
+    };
     let now = Now {
         head: &head,
         base: base.as_deref(),
         runner: now_runner,
+        live: live.as_deref(),
     };
     let running: Vec<ItemRef> = match &read.view.activity {
         Some(CockpitActivity::Running { item, .. }) => vec![item.clone()],

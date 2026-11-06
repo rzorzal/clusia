@@ -70,6 +70,8 @@ pub(super) struct Now<'a> {
     pub head: &'a str,
     pub base: Option<&'a str>,
     pub runner: RunnerKind,
+    /// The cockpit run going on now, if any.
+    pub live: Option<&'a str>,
 }
 
 /// The last single run and the last comparison of `item`, shown as `metrics` say.
@@ -89,6 +91,14 @@ pub(super) fn shown(
         .map(|side| side_view(side, fresh(side)));
     let comparison = results.compare.as_ref().map(|c: &CompareRecord| {
         let sides: (Freshness, Freshness) = (fresh(&c.pr), fresh(&c.main));
+        if c.outcome == CompareOutcome::Running && now.live != Some(c.run.as_str()) {
+            // Its run is gone (the daemon stopped mid-comparison): the end never came.
+            let cut = CompareRecord {
+                outcome: CompareOutcome::Stopped,
+                ..c.clone()
+            };
+            return comparison_view(&cut, metrics, sides, scenario);
+        }
         comparison_view(c, metrics, sides, scenario)
     });
     (last, comparison)
@@ -1281,7 +1291,8 @@ impl Rounds<'_> {
                                 run,
                                 pr: pr_record,
                                 main,
-                                outcome: CompareOutcome::Done,
+                                // The end of the item sets the real outcome.
+                                outcome: CompareOutcome::Running,
                                 at: now_unix(),
                             });
                         }

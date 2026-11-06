@@ -23,7 +23,10 @@ use clusia_testrun::names::sha256_hex;
 use clusia_testrun::testkit::{FakeExec, FakeReply};
 use serde_json::json;
 
-use super::cockpit_lab::{approve_scenario_of, put_scenario, ready_lab_with, scenario_view};
+use super::cockpit_lab::{
+    approve_scenario_of, put_scenario, put_scenario_with, ready_lab_with, scenario_view,
+    stored_scenario,
+};
 use super::functions_lab::{REFRESH_SIG, RUST_COMMAND};
 use super::lab::{
     Lab, Machine, answer, args_of, generated, idle, no_setup, pr, ready, ready_after, recipe,
@@ -1176,4 +1179,63 @@ async fn a_flood_of_sample_lines_keeps_the_points_bounded() {
         measured.points.len()
     );
     assert_eq!(pushed, measured.points.len(), "a dropped point is not sent");
+}
+
+#[tokio::test]
+async fn a_comparison_under_way_shows_no_verdict() {
+    let pr_side = vec![
+        passing(),
+        passing(),
+        passing(),
+        passing(),
+        FakeReply::hang(),
+    ];
+    let (mut lab, _) = compared_lab(pr_side, vec![passing()]).await;
+    let mut stored = stored_scenario(SLUG, RUN, &[("run.py", SCRIPT)]);
+    stored.rounds = 5;
+    put_scenario_with(&lab, &stored, SLUG, &[("run.py", SCRIPT)]);
+    approve_scenario_of(&lab, SLUG).await;
+    let (run, _) = start(&lab, one(SLUG), true).await;
+    // A warm-up on each side, three rounds a side, then this PR's fourth round hangs.
+    started_runs(&lab, 9).await;
+    let record = env::load(&lab.shared, &pr(7));
+    let compare = record.cockpit_results[&item(ItemKind::Scenario, SLUG).key()]
+        .compare
+        .clone()
+        .unwrap();
+    assert_eq!((compare.pr.rounds.len(), compare.main.rounds.len()), (3, 3));
+    assert_eq!(compare.outcome, CompareOutcome::Running);
+    let shown = scenario_view(&lab, SLUG).await.comparison.unwrap();
+    assert_eq!(shown.verdict, Verdict::Running, "{}", shown.line);
+    assert_eq!(shown.line, "Running: no verdict yet");
+    assert!(matches!(stop(&lab.shared, &pr(7)), Outcome::Ok(Reply::Ack)));
+    rounds(&mut lab, &run).await;
+    let shown = scenario_view(&lab, SLUG).await.comparison.unwrap();
+    assert_eq!(
+        shown.verdict,
+        Verdict::Stopped,
+        "the end sets the real outcome"
+    );
+}
+
+#[tokio::test]
+async fn a_comparison_left_running_by_a_restart_reads_as_stopped() {
+    let (mut lab, _) = compared_lab(vec![passing()], vec![passing()]).await;
+    let (run, _) = start(&lab, one(SLUG), true).await;
+    rounds(&mut lab, &run).await;
+    let shown = scenario_view(&lab, SLUG).await.comparison.unwrap();
+    assert_ne!(shown.verdict, Verdict::Stopped);
+    // What a daemon killed between two rounds leaves on disk.
+    env::update_record(&lab.shared, &pr(7), |r| {
+        let results = r
+            .cockpit_results
+            .get_mut(&item(ItemKind::Scenario, SLUG).key())
+            .unwrap();
+        results.compare.as_mut().unwrap().outcome = CompareOutcome::Running;
+    })
+    .await;
+    let shown = scenario_view(&lab, SLUG).await.comparison.unwrap();
+    assert_eq!(shown.verdict, Verdict::Stopped);
+    assert_eq!(shown.line, "Stopped: no verdict");
+    assert_eq!(shown.outcome, CompareOutcome::Stopped);
 }
