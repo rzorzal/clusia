@@ -26,7 +26,7 @@ use clusia_testrun::log::{CappedLog, Tail};
 use clusia_testrun::names::{self, LabelKind};
 use clusia_testrun::recipe::{Recipe, commands_for, recipe_hash};
 use clusia_testrun::results::{ResultParser, parse_list, parser_for};
-use clusia_testrun::sample::{Probe, sample};
+use clusia_testrun::sample::{PointGate, Probe, sample};
 use clusia_testrun::sandbox::{self, NetMode};
 use clusia_testrun::{compose, engine, local};
 
@@ -1493,7 +1493,11 @@ pub(super) async fn run_measured(
     let began = Instant::now();
     let sampler_stop = StopFlag::new();
     let mut points = Vec::new();
+    let mut gate = PointGate::new(limit);
     let mut keep = |point: Sample| {
+        if !gate.admit(point.t_ms) {
+            return;
+        }
         points.push(point.clone());
         push(point);
     };

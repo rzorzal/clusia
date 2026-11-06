@@ -1119,3 +1119,61 @@ async fn a_main_bench_round_without_a_result_still_built_main() {
         "main's rounds ran and built it"
     );
 }
+
+#[tokio::test]
+async fn a_flood_of_sample_lines_keeps_the_points_bounded() {
+    let flood = "clusia-sample 10485760 2097152 1000000\n".repeat(1_000_000);
+    let lab = ready_lab_with(Machine::Colima { running: true }, vec![], move |x, _| {
+        x.on(
+            "docker",
+            &["run"],
+            FakeReply::after(Duration::from_millis(700), passing()),
+        );
+        x.on(
+            "docker",
+            &["exec"],
+            FakeReply::chunks(vec![(Stream::Out, flood)], 0),
+        );
+    })
+    .await;
+    let usable = match work::ready_to_run(&lab.shared, &pr(7)).await {
+        Ok(usable) => usable,
+        Err(out) => panic!("not usable: {out:?}"),
+    };
+    let job = work::job_of(
+        usable,
+        "flood".into(),
+        clusia_core::tests::TestScope::All,
+        Vec::new(),
+    );
+    assert_eq!(job.env.runner, RunnerKind::Container);
+    let limit = Duration::from_secs(2);
+    let mut pushed = 0usize;
+    let mut chunk = |_: Stream, _: &[u8]| {};
+    let mut push = |_: Sample| pushed += 1;
+    let measured = work::run_measured(
+        &lab.shared,
+        &pr(7),
+        0,
+        &job,
+        "true",
+        limit,
+        &StopFlag::new(),
+        &mut chunk,
+        &[],
+        &mut push,
+    )
+    .await
+    .expect("the round ran");
+    let bound = 2000 / 250 + 16;
+    assert!(
+        matches!(measured.ended, clusia_testrun::exec::Ended::Exited(Some(0))),
+        "the round ended normally"
+    );
+    assert!(
+        !measured.points.is_empty() && measured.points.len() <= bound,
+        "{} points",
+        measured.points.len()
+    );
+    assert_eq!(pushed, measured.points.len(), "a dropped point is not sent");
+}

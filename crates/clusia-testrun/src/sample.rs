@@ -31,6 +31,43 @@ const LINE_MAX: usize = 200;
 /// Only shell builtins and `sleep`, whose failure ends the loop.
 pub const SAMPLER_SCRIPT: &str = r#"while :; do m=-; i=-; u=-; { read -r m < /sys/fs/cgroup/memory.current; } 2>/dev/null; while read -r k v; do [ "$k" = inactive_file ] && i=$v; done 2>/dev/null < /sys/fs/cgroup/memory.stat; while read -r k v; do [ "$k" = usage_usec ] && u=$v; done 2>/dev/null < /sys/fs/cgroup/cpu.stat; echo "clusia-sample ${m:--} ${i:--} ${u:--}"; sleep 0.25 || exit 0; done"#;
 
+/// Keeps a run's points to the sampler's own rate, so a flood of well-formed lines from the
+/// run's own code cannot grow memory: a point less than half a tick after the last kept one is
+/// dropped, and no more than the round's ticks (plus some slack) are kept.
+#[derive(Debug, Clone)]
+pub struct PointGate {
+    last: Option<u32>,
+    kept: u64,
+    cap: u64,
+}
+
+impl PointGate {
+    /// The gate of a round that may last `limit`.
+    pub fn new(limit: Duration) -> Self {
+        let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
+        Self {
+            last: None,
+            kept: 0,
+            cap: (limit_ms / SAMPLE_EVERY_MS).saturating_add(16),
+        }
+    }
+
+    /// Whether the point at `t_ms` is kept; a kept point counts against the cap.
+    pub fn admit(&mut self, t_ms: u32) -> bool {
+        if self.kept >= self.cap {
+            return false;
+        }
+        if let Some(last) = self.last
+            && u64::from(t_ms) < u64::from(last) + SAMPLE_EVERY_MS / 2
+        {
+            return false;
+        }
+        self.last = Some(t_ms);
+        self.kept += 1;
+        true
+    }
+}
+
 /// `(memory.current, inactive_file, usage_usec)` of one sampler line, each `None` when it is not
 /// a number. A line that is too long, untagged or without exactly three fields is `None`.
 pub fn parse_sample_line(line: &str) -> Option<(Option<u64>, Option<u64>, Option<u64>)> {
@@ -192,39 +229,47 @@ pub async fn sample(
                 });
             }
         }
-        Probe::Container { docker, name } => loop {
-            if stop.fired() {
-                return;
-            }
-            let cmd = docker.command(["exec", name.as_str(), "/bin/sh", "-c", SAMPLER_SCRIPT]);
-            let mut lines = Lines::default();
-            let mut chunk = |stream: Stream, bytes: &[u8]| {
-                if stream != Stream::Out {
+        Probe::Container { docker, name } => {
+            let mut gate = PointGate::new(Duration::from_secs(COMPARE_MAX_SECS));
+            loop {
+                if stop.fired() {
                     return;
                 }
-                for line in lines.feed(bytes) {
-                    let Some(parsed) = parse_sample_line(&line) else {
-                        continue;
-                    };
-                    let now = Instant::now();
-                    let (rss_kb, cpu_milli) = meter.cgroup(parsed, ns_since(began, now));
-                    push(Sample {
-                        t_ms: ms_since(began, now),
-                        rss_kb,
-                        cpu_milli,
-                    });
+                let cmd = docker.command(["exec", name.as_str(), "/bin/sh", "-c", SAMPLER_SCRIPT]);
+                let mut lines = Lines::default();
+                let mut chunk = |stream: Stream, bytes: &[u8]| {
+                    if stream != Stream::Out {
+                        return;
+                    }
+                    for line in lines.feed(bytes) {
+                        let Some(parsed) = parse_sample_line(&line) else {
+                            continue;
+                        };
+                        let now = Instant::now();
+                        let t_ms = ms_since(began, now);
+                        // Lines come from inside the container, which the run's own code controls.
+                        if !gate.admit(t_ms) {
+                            continue;
+                        }
+                        let (rss_kb, cpu_milli) = meter.cgroup(parsed, ns_since(began, now));
+                        push(Sample {
+                            t_ms,
+                            rss_kb,
+                            cpu_milli,
+                        });
+                    }
+                };
+                let limit = Duration::from_secs(COMPARE_MAX_SECS);
+                // An exec that fails (the container is not there yet, or already gone) or ends is
+                // tried again a tick later, until the run ends.
+                let _ = exec.stream(&cmd, limit, stop, &mut chunk).await;
+                tokio::select! {
+                    biased;
+                    _ = stop.notified() => return,
+                    _ = tokio::time::sleep(every) => {}
                 }
-            };
-            let limit = Duration::from_secs(COMPARE_MAX_SECS);
-            // An exec that fails (the container is not there yet, or already gone) or ends is
-            // tried again a tick later, until the run ends.
-            let _ = exec.stream(&cmd, limit, stop, &mut chunk).await;
-            tokio::select! {
-                biased;
-                _ = stop.notified() => return,
-                _ = tokio::time::sleep(every) => {}
             }
-        },
+        }
     }
 }
 
@@ -501,6 +546,55 @@ mod tests {
             [point(500, Some(8192), None)],
             "stdout's one valid line only"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flood_of_sample_lines_keeps_the_sampler_rate() {
+        let fake = FakeExec::new();
+        let flood = "clusia-sample 10485760 2097152 1000000\n".repeat(1_000_000);
+        fake.on(
+            "docker",
+            &["exec"],
+            FakeReply::chunks(vec![(Stream::Out, flood)], 0),
+        );
+        let stop = StopFlag::new();
+        let mut points = Vec::new();
+        {
+            let mut push = |p: Sample| points.push(p);
+            let probe = Probe::Container {
+                docker: docker(),
+                name: "clusia-run-acme-widgets-d782c8-7-3".into(),
+            };
+            let run = async {
+                tokio::time::sleep(Duration::from_millis(1100)).await;
+                stop.fire();
+            };
+            tokio::join!(sample(&fake, probe, &stop, &mut push), run);
+        }
+        assert_eq!(
+            points.iter().map(|p| p.t_ms).collect::<Vec<_>>(),
+            [0, 250, 500, 750, 1000],
+            "one point per tick, however many lines a tick prints"
+        );
+    }
+
+    #[test]
+    fn a_point_gate_keeps_half_a_tick_apart_and_a_round_of_ticks() {
+        let mut gate = PointGate::new(Duration::from_secs(1));
+        let kept: Vec<u32> = (0..1_000_000u32).filter(|&t| gate.admit(t)).collect();
+        assert_eq!(
+            kept.len(),
+            1000 / 250 + 16,
+            "capped at the round's ticks plus slack"
+        );
+        assert!(kept.windows(2).all(|w| w[1] - w[0] >= 125), "{kept:?}");
+        assert_eq!(&kept[..3], [0, 125, 250]);
+
+        let mut gate = PointGate::new(Duration::from_secs(600));
+        assert!(gate.admit(500));
+        assert!(!gate.admit(500));
+        assert!(!gate.admit(624));
+        assert!(gate.admit(625));
     }
 
     #[test]
