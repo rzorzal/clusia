@@ -53,7 +53,6 @@ pub(super) fn cockpit_lab(turns: Vec<Turn>) -> Lab {
 
 /// `cockpit_lab_with`, whose agent first answers the recipe turn (`generate_answer`) and whose
 /// review 7 is then generated and set up: the plan is ready and the tests commands approved.
-#[allow(dead_code)]
 pub(super) async fn ready_lab_with(
     machine: Machine,
     turns: Vec<Turn>,
@@ -99,7 +98,6 @@ pub(super) async fn write_by_turn(lab: &mut Lab, title: &str) -> String {
 
 /// The scenario `put_scenario` writes: a string input `text` (default "hello") and an integer
 /// input `callers` (default "2"), 3 rounds, 120 s.
-#[allow(dead_code)]
 pub(super) fn stored_scenario(slug: &str, run: &str, files: &[(&str, &str)]) -> StoredScenario {
     StoredScenario {
         title: slug.to_string(),
@@ -131,7 +129,6 @@ pub(super) fn stored_scenario(slug: &str, run: &str, files: &[(&str, &str)]) -> 
 }
 
 /// Writes `.clusia/e2e/<slug>/` straight to disk, as a turn would leave it: no agent runs.
-#[allow(dead_code)]
 pub(super) fn put_scenario_with(
     lab: &Lab,
     stored: &StoredScenario,
@@ -147,7 +144,6 @@ pub(super) fn put_scenario_with(
     std::fs::write(dir.join("scenario.toml"), toml).unwrap();
 }
 
-#[allow(dead_code)]
 pub(super) fn put_scenario(lab: &Lab, slug: &str, run: &str, files: &[(&str, &str)]) {
     put_scenario_with(lab, &stored_scenario(slug, run, files), slug, files);
 }
