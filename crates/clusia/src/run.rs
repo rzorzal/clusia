@@ -14,6 +14,7 @@ use crate::cli::{
     AgentCommand, AuthCommand, Command, ConfigCommand, DaemonCommand, HarnessCommand, InstallArgs,
     UninstallArgs,
 };
+use crate::cockpit_cmd::{CockpitFlags, CockpitWanted};
 use crate::{
     agent, calls, check, diagrams, harness_test, install, revalidate, review, spawn, story,
     tests_cmd,
@@ -132,7 +133,34 @@ pub async fn run(
             run_cases,
             function,
             case,
+            scenarios,
+            write_scenarios,
+            describe,
+            approve_scenario,
+            run_scenarios,
+            scenario,
+            on_main,
+            bench,
+            write,
+            copilot,
+            as_comment,
         } => {
+            // Checked before any connection, so a usage error never starts the daemon.
+            let cockpit = CockpitWanted::from_flags(CockpitFlags {
+                scenarios,
+                write_scenarios,
+                describe,
+                approve_scenario,
+                run_scenarios,
+                scenario,
+                on_main,
+                bench,
+                write,
+                copilot,
+                as_comment,
+                yes,
+                setup,
+            })?;
             let scope = run.then_some(match one {
                 Some(name) => TestScope::One { name },
                 None if near => TestScope::NearChange,
@@ -146,6 +174,7 @@ pub async fn run(
                 run: scope,
                 functions,
                 run_cases: run_cases.then_some(tests_cmd::CasesWanted { function, case }),
+                cockpit,
             };
             tests_cmd::tests(paths, home, &pr, wanted, json).await
         }

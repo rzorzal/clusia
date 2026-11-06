@@ -124,8 +124,9 @@ pub enum Command {
         /// Show the setup plan and ask before it runs.
         #[arg(long)]
         setup: bool,
-        /// Approve every step of the setup plan without asking.
-        #[arg(long, requires = "setup")]
+        /// Approve without asking: every step of the setup plan, a scenario with
+        /// --approve-scenario, or main's plan with --on-main.
+        #[arg(long)]
         yes: bool,
         /// Run the tests and stream the results; the exit code is the run's.
         #[arg(long)]
@@ -155,6 +156,41 @@ pub enum Command {
         /// With --function: only this case.
         #[arg(long, requires = "function", value_name = "ID")]
         case: Option<String>,
+        /// List the scenarios and benchmarks with their status, the last comparison and the
+        /// verdict.
+        #[arg(long)]
+        scenarios: bool,
+        /// Ask the agent to write scenarios from the diff (one turn of the agent).
+        #[arg(long)]
+        write_scenarios: bool,
+        /// With --write-scenarios: one scenario from this text.
+        #[arg(long, requires = "write_scenarios", value_name = "TEXT")]
+        describe: Option<String>,
+        /// Print a scenario's command and scripts and ask before approving them.
+        #[arg(long, value_name = "SLUG")]
+        approve_scenario: Option<String>,
+        /// Run the approved scenarios and stream the rounds.
+        #[arg(long)]
+        run_scenarios: bool,
+        /// With --run-scenarios or --copilot: this scenario only.
+        #[arg(long, value_name = "SLUG", conflicts_with = "bench")]
+        scenario: Option<String>,
+        /// With --run-scenarios or --bench: compare with main, which is prepared first when
+        /// needed.
+        #[arg(long)]
+        on_main: bool,
+        /// Run the benchmark of a function, by id or exact name.
+        #[arg(long, value_name = "SLUG_OR_NAME", conflicts_with = "scenario")]
+        bench: Option<String>,
+        /// With --bench: ask the agent to write the benchmark first (one turn of the agent).
+        #[arg(long, requires = "bench")]
+        write: bool,
+        /// Ask the QA copilot; `explain` explains the item named by --scenario or --bench.
+        #[arg(long, value_name = "TEXT")]
+        copilot: Option<String>,
+        /// Print the suggested comment of a scenario.
+        #[arg(long, value_name = "SLUG")]
+        as_comment: Option<String>,
     },
     /// Check a custom command against Clúsia's JSON-lines protocol.
     #[command(subcommand)]

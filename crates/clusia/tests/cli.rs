@@ -2358,6 +2358,20 @@ fn tests_flags_that_need_another_are_usage_errors() {
         &["tests", "acme/widgets#7", "--function", "x"][..],
         &["tests", "acme/widgets#7", "--run-cases", "--case", "a1"][..],
         &["tests", "acme/widgets#7", "--case", "a1", "--function", "x"][..],
+        &["tests", "acme/widgets#7", "--on-main"][..],
+        &["tests", "acme/widgets#7", "--scenario", "x"][..],
+        &["tests", "acme/widgets#7", "--write"][..],
+        &["tests", "acme/widgets#7", "--describe", "x"][..],
+        &["tests", "acme/widgets#7", "--bench", "x", "--scenario", "y"][..],
+        &["tests", "acme/widgets#7", "--copilot", "explain"][..],
+        &[
+            "tests",
+            "acme/widgets#7",
+            "--approve-scenario",
+            "x",
+            "--yes",
+            "--on-main",
+        ][..],
     ] {
         let out = home.clusia(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
@@ -3881,5 +3895,894 @@ mod tests_against_a_scripted_daemon {
         let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
         assert_eq!(code, Some(0), "{out}\n{err}");
         assert!(out.contains("1 passed, 0 failed"), "{out}");
+    }
+
+    use clusia_core::cockpit::*;
+    use clusia_core::tests::{Approve, STEP_TESTS};
+
+    const SLUG: &str = "two-requests-refresh-at-once";
+
+    fn cscenario(approval: ScenarioApproval) -> ScenarioView {
+        ScenarioView {
+            slug: SLUG.into(),
+            title: "Two requests refresh at once".into(),
+            purpose: "Only one exchange may happen.".into(),
+            steps: vec!["Store an expired token".into()],
+            inputs: vec![InputView {
+                input: Input {
+                    name: "callers".into(),
+                    label: "Callers".into(),
+                    kind: InputKind::Integer,
+                    choices: Vec::new(),
+                    default: "2".into(),
+                },
+                value: "2".into(),
+                edited: false,
+            }],
+            run: "python3 {script}".into(),
+            command: Some("python3 \"$CLUSIA_SCENARIO_DIR/run.py\"".into()),
+            scripts: vec![ScriptMeta {
+                name: "run.py".into(),
+                bytes: 12,
+                sha: "s".into(),
+                edited: false,
+            }],
+            rounds: 3,
+            timeout_secs: 120,
+            edited: false,
+            approval,
+            approval_hash: "approval-1".into(),
+            input_hash: "i".into(),
+            support: ItemSupport::Ready,
+            last: None,
+            comparison: None,
+            status: String::new(),
+            hash: "scenario-hash".into(),
+        }
+    }
+
+    fn cview(
+        scenario: ScenarioView,
+        phase: MainPhase,
+        activity: Option<CockpitActivity>,
+    ) -> CockpitView {
+        let mut view = CockpitView::new("9be1d07");
+        view.runner = Some(RunnerKind::Container);
+        view.scenarios = vec![scenario];
+        view.main.phase = phase;
+        view.activity = activity;
+        view.hash = scenarios_hash(&view.scenarios);
+        view
+    }
+
+    fn crunning(round: u32) -> CockpitActivity {
+        CockpitActivity::Running {
+            run: "run-1".into(),
+            item: ItemRef {
+                kind: ItemKind::Scenario,
+                id: SLUG.into(),
+            },
+            side: RunSide::Pr,
+            round,
+            rounds: 3,
+            done_items: 0,
+            total_items: 1,
+        }
+    }
+
+    fn cround(
+        side: RunSide,
+        k: u32,
+        end: RoundEnd,
+        passed: Option<bool>,
+        ms: u64,
+    ) -> ServerMessage {
+        event(Event::CockpitRound {
+            pr: pr(),
+            run: "run-1".into(),
+            result: Box::new(RoundResult {
+                item: ItemRef {
+                    kind: ItemKind::Scenario,
+                    id: SLUG.into(),
+                },
+                side,
+                round: k,
+                sha: "9be1d07".into(),
+                passed,
+                end,
+                exit_code: Some(0),
+                metrics: Default::default(),
+                outputs: Default::default(),
+                errors: Vec::new(),
+                message: None,
+                tail: String::new(),
+                took_ms: ms,
+                at: 1,
+            }),
+        })
+    }
+
+    fn cchanged(view: CockpitView) -> ServerMessage {
+        event(Event::CockpitChanged {
+            pr: pr(),
+            view: Box::new(view),
+        })
+    }
+
+    #[test]
+    fn scenarios_are_listed_with_their_status_and_filtered_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut hostile = cscenario(ScenarioApproval::NotApproved);
+        hostile.title = "Two\u{202e} requests".into();
+        let shown = cview(hostile, MainPhase::NotCreated, None);
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, _| match cmd {
+                Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(shown.clone()))),
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--scenarios"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert!(out.contains("SCENARIOS · 1"), "{out}");
+        assert!(
+            out.contains(&format!("{SLUG}  Two\\u{{202e}} requests  · not approved")),
+            "{out}"
+        );
+        assert!(!out.contains('\u{202e}'), "{out}");
+        let asked = asked.lock().unwrap();
+        assert!(
+            asked
+                .iter()
+                .all(|c| !c.contains("RunCockpit") && !c.contains("WriteScenarios")),
+            "{asked:?}"
+        );
+    }
+
+    #[test]
+    fn run_scenarios_streams_the_rounds_and_ends_with_the_table_and_the_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let before = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::NotCreated,
+            None,
+        );
+        let hash = before.hash.clone();
+        let mut after = before.clone();
+        after.scenarios[0].last = Some(SideView {
+            freshness: Freshness::Current,
+            sha: "9be1d07".into(),
+            rounds: 1,
+            pass: Some(PassCount {
+                passed: 1,
+                rounds: 1,
+            }),
+            series: Series::default(),
+            errors: Vec::new(),
+            outputs: [("exchanges".to_string(), "1".to_string())].into(),
+            stopped: false,
+        });
+        let (first, then) = (before.clone(), after.clone());
+        let reads = Arc::new(Mutex::new(0));
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, say| match cmd {
+                Request::GetCockpit { .. } => {
+                    let mut n = reads.lock().unwrap();
+                    *n += 1;
+                    Some(Reply::Cockpit(Box::new(if *n == 1 {
+                        first.clone()
+                    } else {
+                        then.clone()
+                    })))
+                }
+                Request::RunCockpit {
+                    scope,
+                    on_main,
+                    seen,
+                    ..
+                } => {
+                    assert_eq!(*scope, CockpitScope::Scenarios);
+                    assert!(!*on_main);
+                    assert_eq!(*seen, hash, "the hash it read");
+                    let say = say.clone();
+                    let done = then.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let _ = say.send(cchanged(cview(
+                            cscenario(ScenarioApproval::Approved),
+                            MainPhase::NotCreated,
+                            Some(crunning(1)),
+                        )));
+                        let _ =
+                            say.send(cround(RunSide::Pr, 1, RoundEnd::Finished, Some(true), 210));
+                        let _ = say.send(cchanged(done));
+                    });
+                    Some(Reply::CockpitStarted {
+                        run: "run-1".into(),
+                        skipped: vec!["bad\u{1b}[2Jone".into()],
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-scenarios"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert!(out.contains("  this PR round 1  passed  210 ms"), "{out}");
+        assert!(
+            out.contains(&format!("{SLUG}  Two requests refresh at once  · passed")),
+            "{out}"
+        );
+        assert!(err.contains("Skipped: bad\\u{1b}[2Jone"), "{err}");
+        assert!(!err.contains('\u{1b}'), "{err}");
+        let asked = asked.lock().unwrap();
+        assert!(
+            !asked
+                .iter()
+                .any(|c| c.contains("OpenMain") || c.contains("PrepareMain")),
+            "{asked:?}"
+        );
+    }
+
+    #[test]
+    fn run_scenarios_refuses_a_scenario_that_is_not_approved_before_sending_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let shown = cview(
+            cscenario(ScenarioApproval::Changed),
+            MainPhase::NotCreated,
+            None,
+        );
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, _| match cmd {
+                Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(shown.clone()))),
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-scenarios", "--scenario", SLUG]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains(&format!(
+                "{NOT_APPROVED}; run with --approve-scenario {SLUG}"
+            )),
+            "{err}"
+        );
+        assert!(
+            !asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("RunCockpit"))
+        );
+    }
+
+    #[test]
+    fn run_scenarios_exits_130_when_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let before = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::NotCreated,
+            None,
+        );
+        let mut stopped = before.clone();
+        stopped.scenarios[0].comparison = None;
+        let (first, last) = (before.clone(), stopped);
+        recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, say| match cmd {
+                Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(first.clone()))),
+                Request::RunCockpit { .. } => {
+                    let say = say.clone();
+                    let last = last.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let _ = say.send(cchanged(cview(
+                            cscenario(ScenarioApproval::Approved),
+                            MainPhase::NotCreated,
+                            Some(crunning(1)),
+                        )));
+                        let _ = say.send(cround(RunSide::Pr, 1, RoundEnd::Stopped, None, 40));
+                        let _ = say.send(cchanged(last));
+                    });
+                    Some(Reply::CockpitStarted {
+                        run: "run-1".into(),
+                        skipped: Vec::new(),
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-scenarios"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(130), "{out}\n{err}");
+        assert!(out.contains("  this PR round 1  stopped  40 ms"), "{out}");
+        assert!(err.contains("the run was stopped"), "{err}");
+    }
+
+    #[test]
+    fn a_failing_scenario_exits_1_and_a_timeout_124_whatever_main_says() {
+        for (end, passed, expected) in [
+            (RoundEnd::Finished, Some(false), 1),
+            (RoundEnd::TimedOut, None, 124),
+            (RoundEnd::Finished, Some(true), 0),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let shown = cview(
+                cscenario(ScenarioApproval::Approved),
+                MainPhase::NotCreated,
+                None,
+            );
+            recording_daemon(
+                dir.path(),
+                &rt,
+                view(TestsPhase::Ready, None),
+                move |cmd, say| match cmd {
+                    Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(shown.clone()))),
+                    Request::RunCockpit { .. } => {
+                        let (say, shown) = (say.clone(), shown.clone());
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            let _ = say.send(cchanged(cview(
+                                cscenario(ScenarioApproval::Approved),
+                                MainPhase::NotCreated,
+                                Some(crunning(1)),
+                            )));
+                            let _ =
+                                say.send(cround(RunSide::Main, 1, RoundEnd::Error, Some(false), 5));
+                            let _ = say.send(cround(RunSide::Pr, 1, end, passed, 50));
+                            let _ = say.send(cchanged(shown));
+                        });
+                        Some(Reply::CockpitStarted {
+                            run: "run-1".into(),
+                            skipped: Vec::new(),
+                        })
+                    }
+                    _ => Some(Reply::Ack),
+                },
+            );
+            let mut child = tests_cmd(dir.path(), &["--run-scenarios"]);
+            let code = ended_within(&mut child, Duration::from_secs(20));
+            let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+            assert_eq!(code, Some(expected), "{end:?}: {out}\n{err}");
+        }
+    }
+
+    #[test]
+    fn a_changed_scenario_is_read_again_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let old = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::NotCreated,
+            None,
+        );
+        let mut newer = old.clone();
+        newer.scenarios[0].hash = "scenario-hash-2".into();
+        newer.hash = scenarios_hash(&newer.scenarios);
+        let seen_hashes: Arc<Mutex<Vec<String>>> = Arc::default();
+        let read_count = Arc::new(Mutex::new(0));
+        let (seen, reads) = (seen_hashes.clone(), read_count.clone());
+        let (old_hash, new_hash) = (old.hash.clone(), newer.hash.clone());
+        let (first_hash, second_hash) = (old.hash.clone(), newer.hash.clone());
+        super::check_against_a_scripted_daemon::daemon_result(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, say| match cmd {
+                Request::GetTests { .. } => {
+                    Some(Ok(Reply::Tests(Box::new(view(TestsPhase::Ready, None)))))
+                }
+                Request::GetCockpit { .. } => {
+                    let mut n = reads.lock().unwrap();
+                    *n += 1;
+                    Some(Ok(Reply::Cockpit(Box::new(if *n == 1 {
+                        old.clone()
+                    } else {
+                        newer.clone()
+                    }))))
+                }
+                Request::RunCockpit { seen: s, .. } => {
+                    seen.lock().unwrap().push(s.clone());
+                    if s == &old_hash {
+                        return Some(Err(clusia_protocol::ProtocolError::new(
+                            clusia_protocol::ErrorCode::InvalidState,
+                            COCKPIT_CHANGED,
+                        )));
+                    }
+                    assert_eq!(s, &new_hash);
+                    let (say, newer) = (say.clone(), newer.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(cchanged(cview(
+                            cscenario(ScenarioApproval::Approved),
+                            MainPhase::NotCreated,
+                            Some(crunning(1)),
+                        )));
+                        let _ =
+                            say.send(cround(RunSide::Pr, 1, RoundEnd::Finished, Some(true), 10));
+                        let _ = say.send(cchanged(newer));
+                    });
+                    Some(Ok(Reply::CockpitStarted {
+                        run: "run-1".into(),
+                        skipped: Vec::new(),
+                    }))
+                }
+                _ => Some(Ok(Reply::Ack)),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-scenarios"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert_eq!(
+            *seen_hashes.lock().unwrap(),
+            [first_hash, second_hash],
+            "the stale hash, then the one read again"
+        );
+        assert_eq!(*read_count.lock().unwrap(), 2, "one re-read, no more");
+    }
+
+    #[test]
+    fn a_second_cockpit_refusal_ends_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let shown = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::NotCreated,
+            None,
+        );
+        let sent = Arc::new(Mutex::new(0));
+        let count = sent.clone();
+        super::check_against_a_scripted_daemon::daemon_result(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, _| match cmd {
+                Request::GetTests { .. } => {
+                    Some(Ok(Reply::Tests(Box::new(view(TestsPhase::Ready, None)))))
+                }
+                Request::GetCockpit { .. } => Some(Ok(Reply::Cockpit(Box::new(shown.clone())))),
+                Request::RunCockpit { .. } => {
+                    *count.lock().unwrap() += 1;
+                    Some(Err(clusia_protocol::ProtocolError::new(
+                        clusia_protocol::ErrorCode::InvalidState,
+                        COCKPIT_CHANGED,
+                    )))
+                }
+                _ => Some(Ok(Reply::Ack)),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-scenarios"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(err.contains(COCKPIT_CHANGED), "{err}");
+        assert_eq!(*sent.lock().unwrap(), 2, "asked twice, never a third time");
+    }
+
+    #[test]
+    fn on_main_prepares_main_with_its_own_approval_before_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut plan = one_step_plan("Fetch dependencies on main", None, StepState::Missing);
+        plan.recipe_hash = "main-hash".into();
+        let mut needs = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::NeedsSetup,
+            None,
+        );
+        needs.main.plan = Some(plan);
+        needs.main.base = Some("b0b0b0b0b0b0".into());
+        needs.main.image = Some("clusia/blog:abc".into());
+        let ready = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::Ready,
+            None,
+        );
+        let phase = Arc::new(Mutex::new(0u8));
+        let (n, r) = (needs.clone(), ready.clone());
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, say| match cmd {
+                Request::GetCockpit { .. } => {
+                    let p = *phase.lock().unwrap();
+                    Some(Reply::Cockpit(Box::new(if p == 0 {
+                        n.clone()
+                    } else {
+                        r.clone()
+                    })))
+                }
+                Request::PrepareMain {
+                    main_hash, approve, ..
+                } => {
+                    assert_eq!(main_hash, "main-hash", "main's own hash, not the PR's");
+                    assert_eq!(
+                        *approve,
+                        Approve::Steps(vec!["work:0".into(), STEP_TESTS.into()])
+                    );
+                    *phase.lock().unwrap() = 1;
+                    Some(Reply::Ack)
+                }
+                Request::RunCockpit { on_main, .. } => {
+                    assert!(*on_main);
+                    assert_eq!(*phase.lock().unwrap(), 1, "main is ready before the run");
+                    let (say, r) = (say.clone(), r.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(cchanged(cview(
+                            cscenario(ScenarioApproval::Approved),
+                            MainPhase::Ready,
+                            Some(crunning(0)),
+                        )));
+                        let _ =
+                            say.send(cround(RunSide::Pr, 1, RoundEnd::Finished, Some(true), 10));
+                        let _ =
+                            say.send(cround(RunSide::Main, 1, RoundEnd::Finished, Some(true), 12));
+                        let _ = say.send(cchanged(r));
+                    });
+                    Some(Reply::CockpitStarted {
+                        run: "run-1".into(),
+                        skipped: Vec::new(),
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-scenarios", "--on-main", "--yes"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert!(
+            err.contains("Prepare main") && err.contains("Fetch dependencies on main"),
+            "{err}"
+        );
+        assert!(out.contains("  main round 1  passed  12 ms"), "{out}");
+        let asked = asked.lock().unwrap().clone();
+        let at = |needle: &str| {
+            asked
+                .iter()
+                .position(|c| c.contains(needle))
+                .unwrap_or(usize::MAX)
+        };
+        assert!(at("PrepareMain") < at("RunCockpit"), "{asked:?}");
+    }
+
+    #[test]
+    fn main_that_is_not_approved_in_the_terminal_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut needs = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::NeedsSetup,
+            None,
+        );
+        needs.main.plan = Some(one_step_plan(
+            "Fetch dependencies on main",
+            None,
+            StepState::Missing,
+        ));
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, _| match cmd {
+                Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(needs.clone()))),
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-scenarios", "--on-main"]);
+        drop(child.stdin.take());
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains("Approve every step and the commands on main? [y/N]"),
+            "{err}"
+        );
+        let asked = asked.lock().unwrap();
+        assert!(
+            !asked
+                .iter()
+                .any(|c| c.contains("PrepareMain") || c.contains("RunCockpit")),
+            "{asked:?}"
+        );
+    }
+
+    #[test]
+    fn approving_a_scenario_prints_the_text_and_sends_the_hash_it_showed() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let shown = cview(
+            cscenario(ScenarioApproval::NotApproved),
+            MainPhase::NotCreated,
+            None,
+        );
+        let approved = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::NotCreated,
+            None,
+        );
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = sent.clone();
+        recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, _| match cmd {
+                Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(shown.clone()))),
+                Request::GetScenarioScript { .. } => {
+                    Some(Reply::ScenarioScript(Box::new(ScenarioScript {
+                        scenario: SLUG.into(),
+                        files: vec![("run.py".into(), "print('ok')\n".into())],
+                        approval_hash: "approval-1".into(),
+                    })))
+                }
+                Request::ApproveScenario { hash, .. } => {
+                    log.lock().unwrap().push(hash.clone());
+                    Some(Reply::Cockpit(Box::new(approved.clone())))
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--approve-scenario", SLUG, "--yes"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        for line in [
+            "Run this scenario?",
+            "Script · run.py",
+            "  print('ok')",
+            "Main runs the same files from a read-only copy.",
+        ] {
+            assert!(err.contains(line), "{line}: {err}");
+        }
+        assert_eq!(
+            *sent.lock().unwrap(),
+            ["approval-1"],
+            "the hash the text was made from"
+        );
+    }
+
+    #[test]
+    fn a_scenario_that_is_not_approved_at_the_terminal_sends_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let shown = cview(
+            cscenario(ScenarioApproval::NotApproved),
+            MainPhase::NotCreated,
+            None,
+        );
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, _| match cmd {
+                Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(shown.clone()))),
+                Request::GetScenarioScript { .. } => {
+                    Some(Reply::ScenarioScript(Box::new(ScenarioScript {
+                        scenario: SLUG.into(),
+                        files: vec![("run.py".into(), "print('ok')\n".into())],
+                        approval_hash: "approval-1".into(),
+                    })))
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--approve-scenario", SLUG]);
+        drop(child.stdin.take());
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(err.contains("Not approved; nothing ran."), "{err}");
+        assert!(
+            !asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("ApproveScenario"))
+        );
+    }
+
+    #[test]
+    fn write_scenarios_waits_for_the_turn_and_prints_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let writing = cview(
+            cscenario(ScenarioApproval::NotApproved),
+            MainPhase::NotCreated,
+            Some(CockpitActivity::Writing {
+                what: "scenarios".into(),
+            }),
+        );
+        let mut failed = cview(
+            cscenario(ScenarioApproval::NotApproved),
+            MainPhase::NotCreated,
+            None,
+        );
+        failed.failed = Some("Claude Code's scenario is not valid: title must be between 1 and 80 characters on one line".into());
+        let (w, f) = (writing.clone(), failed.clone());
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, say| match cmd {
+                Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(f.clone()))),
+                Request::WriteScenarios { ask, .. } => {
+                    assert_eq!(
+                        *ask,
+                        ScenarioAsk::Describe {
+                            text: "Token endpoint is down".into()
+                        }
+                    );
+                    let (say, w, f) = (say.clone(), w.clone(), f.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(cchanged(w));
+                        let _ = say.send(cchanged(f));
+                    });
+                    Some(Reply::Ack)
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(
+            dir.path(),
+            &["--write-scenarios", "--describe", "Token endpoint is down"],
+        );
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(
+            err.contains("Writing the scenarios failed: Claude Code's scenario is not valid"),
+            "{err}"
+        );
+        assert!(
+            asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("WriteScenarios"))
+        );
+    }
+
+    #[test]
+    fn the_copilot_answer_is_printed_as_plain_text_with_its_suggestions() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let idle = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::NotCreated,
+            None,
+        );
+        let mut busy = idle.clone();
+        busy.copilot.busy = true;
+        let mut answered = idle.clone();
+        answered.copilot.messages = vec![
+            CopilotMessage {
+                id: 1,
+                at: 1,
+                from: CopilotFrom::Reviewer,
+                item: None,
+                text: "Why is p95 worse?".into(),
+                suggestions: Vec::new(),
+            },
+            CopilotMessage {
+                id: 2,
+                at: 2,
+                from: CopilotFrom::Agent,
+                item: None,
+                text: "Main reuses the token\u{202e}.\n[click](https://example.com)".into(),
+                suggestions: vec![Suggestion {
+                    kind: ItemKind::Bench,
+                    title: "p95 of refresh".into(),
+                    why: "It is the hot path\u{1b}[31m".into(),
+                    function: Some("TokenStore::refresh".into()),
+                }],
+            },
+        ];
+        let (i, b, a) = (idle.clone(), busy.clone(), answered.clone());
+        recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, say| match cmd {
+                Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(i.clone()))),
+                Request::AskCopilot { item, ask, .. } => {
+                    assert_eq!(
+                        *ask,
+                        CopilotAsk::Free {
+                            text: "Why is p95 worse?".into()
+                        }
+                    );
+                    assert_eq!(item.as_ref().map(|i| i.id.as_str()), Some(SLUG));
+                    let (say, b, a) = (say.clone(), b.clone(), a.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(cchanged(b));
+                        let _ = say.send(cchanged(a));
+                    });
+                    Some(Reply::Ack)
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(
+            dir.path(),
+            &["--copilot", "Why is p95 worse?", "--scenario", SLUG],
+        );
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert!(out.contains("Main reuses the token\\u{202e}."), "{out}");
+        assert!(
+            out.contains("[click](https://example.com)"),
+            "plain text: {out}"
+        );
+        assert!(
+            out.contains("Suggestion · bench: p95 of refresh — It is the hot path\\u{1b}[31m"),
+            "{out}"
+        );
+        assert!(
+            !out.contains('\u{202e}') && !out.contains('\u{1b}'),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn as_comment_prints_the_suggested_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let shown = cview(
+            cscenario(ScenarioApproval::Approved),
+            MainPhase::NotCreated,
+            None,
+        );
+        recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, _| match cmd {
+                Request::GetCockpit { .. } => Some(Reply::Cockpit(Box::new(shown.clone()))),
+                Request::GetScenarioScript { .. } => {
+                    Some(Reply::ScenarioScript(Box::new(ScenarioScript {
+                        scenario: SLUG.into(),
+                        files: vec![("run.py".into(), "print('ok')\n".into())],
+                        approval_hash: "approval-1".into(),
+                    })))
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--as-comment", SLUG]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        assert!(
+            out.starts_with(
+                "Suggested test: Two requests refresh at once\n\nOnly one exchange may happen."
+            ),
+            "{out}"
+        );
+        assert!(out.contains("run.py:\n```\nprint('ok')\n```"), "{out}");
     }
 }
