@@ -442,6 +442,9 @@ pub struct TestsRecord {
     /// Drivers placed in the worktree and not yet removed, relative to it.
     #[serde(default)]
     pub placed: Vec<String>,
+    /// Rust bench files Clúsia placed in main's worktree, relative to it, removed after each run.
+    #[serde(default)]
+    pub main_placed: Vec<String>,
     /// The approved `approval_hash` of each scenario, by slug.
     #[serde(default)]
     pub scenario_approvals: BTreeMap<String, String>,
@@ -1101,6 +1104,7 @@ mod wire_and_limits {
         assert!(record.main.is_none());
         assert!(record.cockpit_results.is_empty());
         assert!(record.copilot.is_empty());
+        assert!(record.main_placed.is_empty());
         assert_eq!(record, TestsRecord::default());
     }
 

@@ -10,6 +10,8 @@ pub(super) mod cases;
 mod cockpit_lab;
 mod cockpit_turn;
 mod compare;
+#[cfg(test)]
+mod compare_lab;
 mod env;
 #[cfg(test)]
 mod functions_lab;
@@ -47,6 +49,7 @@ pub(crate) use case_run::run_cases;
 pub(crate) use case_turn::write_cases;
 pub(crate) use cases::{driver, functions, remove_case, reset_case, save_case};
 pub(crate) use cockpit_turn::{ask_copilot, write_bench, write_scenarios};
+pub(crate) use compare::run_cockpit;
 pub(crate) use main_tree::{open_main, prepare_main, remove_main, sweep_main};
 pub(crate) use scenarios::{
     approve_scenario, cockpit, remove_scenario, reset_scenario, save_scenario, scenario_script,
@@ -78,6 +81,7 @@ pub(super) enum Doing {
     Scenarios,
     Bench,
     Main,
+    Cockpit,
 }
 
 impl Doing {
@@ -92,6 +96,7 @@ impl Doing {
             Doing::Scenarios => "writing scenarios",
             Doing::Bench => "writing a benchmark",
             Doing::Main => "preparing main",
+            Doing::Cockpit => "running the QA cockpit",
         }
     }
 
@@ -102,7 +107,10 @@ impl Doing {
 
     /// Whether the activity is about the QA cockpit, which leaves the tests' phase alone too.
     pub(super) fn is_cockpit(self) -> bool {
-        matches!(self, Doing::Scenarios | Doing::Bench | Doing::Main)
+        matches!(
+            self,
+            Doing::Scenarios | Doing::Bench | Doing::Main | Doing::Cockpit
+        )
     }
 }
 
@@ -888,6 +896,7 @@ pub(crate) fn forget(shared: &Shared, pr: &PrRef) {
             .unwrap_or_else(|p| p.into_inner());
         mounts.retain(|(_, w), _| *w != worktree);
     }
+    remove_runs(&shared.paths.test_runs_for(pr));
     if let Some(project) = record.stack {
         env::take_down_later(shared, project);
     }
@@ -928,6 +937,22 @@ pub(crate) async fn after_checkout_removed(shared: &Shared, pr: &PrRef) {
     remove_cache(shared, &pr.owner, &pr.repo);
 }
 
+/// Removes the scenario run folders under `dir`, then `dir` itself.
+fn remove_runs(dir: &Path) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if let Err(e) = clusia_testrun::scenario::remove_run_folder(&path) {
+            tracing::warn!(error = %e, folder = %path.display(), "cannot remove a scenario run folder");
+        }
+    }
+    match std::fs::remove_dir(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            tracing::warn!(error = %e, folder = %dir.display(), "cannot remove the scenario run folders");
+        }
+        _ => {}
+    }
+}
+
 /// The pull requests with a stored test record, and the record's file.
 fn recorded(shared: &Shared) -> Vec<(PrRef, PathBuf)> {
     std::fs::read_dir(shared.paths.tests_dir())
@@ -963,6 +988,7 @@ pub(crate) async fn sweep(shared: &Shared, cutoff: i64) {
             tracing::warn!(error = %e, pr = %pr, "cannot delete the test record");
         }
     }
+    sweep_runs(shared);
     sweep_main(shared).await;
     if let Some(docker) = env::docker_now(shared).await
         && let Err(e) = clusia_testrun::cleanup::remove_orphans(
@@ -974,6 +1000,22 @@ pub(crate) async fn sweep(shared: &Shared, cutoff: i64) {
         .await
     {
         tracing::warn!(error = %e, "cannot remove the orphan test containers");
+    }
+}
+
+/// Removes the scenario run folders of every review whose test record is gone.
+fn sweep_runs(shared: &Shared) {
+    let runs = shared.paths.tests_dir().join("runs");
+    for entry in std::fs::read_dir(&runs).into_iter().flatten().flatten() {
+        let key = entry.file_name().to_string_lossy().into_owned();
+        if !shared
+            .paths
+            .tests_dir()
+            .join(format!("{key}.json"))
+            .exists()
+        {
+            remove_runs(&entry.path());
+        }
     }
 }
 

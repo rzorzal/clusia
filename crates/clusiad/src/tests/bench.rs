@@ -31,10 +31,8 @@ const BENCH_JSON: &str = "bench.json";
 const BENCH_EDITS: &str = "bench_edits.json";
 
 /// A listed benchmark with what a run needs of it.
-#[allow(dead_code)]
 pub(super) struct BenchItem {
     pub slug: String,
-    pub qualified: String,
     pub file: String,
     pub lang: FunctionLang,
     pub change: FunctionChange,
@@ -48,7 +46,6 @@ pub(super) struct BenchItem {
     /// The loop file as it is on disk now.
     pub loop_file: Option<Vec<u8>>,
     pub package: Option<Result<(String, String), String>>,
-    pub params: Vec<Param>,
     pub input_hash: String,
 }
 
@@ -63,7 +60,7 @@ struct Loaded {
 }
 
 /// The path of the loop file, relative to the worktree.
-fn loop_path(slug: &str, lang: FunctionLang) -> String {
+pub(super) fn loop_path(slug: &str, lang: FunctionLang) -> String {
     format!("{FUNCTIONS_DIR}/{slug}/bench.{}", lang.ext())
 }
 
@@ -291,7 +288,6 @@ pub(super) fn read_one(
     view.status = bench_status(&view, running);
     let bench = BenchItem {
         slug: function.slug.clone(),
-        qualified: item.brief.qualified.clone(),
         file: item.brief.file.clone(),
         lang,
         change: item.brief.change,
@@ -303,7 +299,6 @@ pub(super) fn read_one(
         template: item.command.clone(),
         loop_file: loaded.loop_file,
         package: item.package.clone(),
-        params,
         input_hash,
     };
     Some((view, bench))

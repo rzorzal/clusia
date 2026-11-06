@@ -47,33 +47,6 @@ async fn the_test_commands_answer_through_the_socket() {
 }
 
 #[tokio::test]
-async fn cockpit_commands_are_refused_until_served() {
-    use clusia_core::cockpit::CockpitScope;
-    let daemon = TestDaemon::start().await;
-    let mut client = daemon.client().await;
-    let pr: PrRef = "acme/widgets#7".parse().unwrap();
-    let commands = vec![Command::RunCockpit {
-        pr: pr.clone(),
-        scope: CockpitScope::Scenarios,
-        on_main: false,
-        seen: "h".into(),
-    }];
-    assert_eq!(commands.len(), 1, "every command not served yet is covered");
-    for command in commands {
-        let name = format!("{command:?}");
-        let Err(ClientError::Server(refusal)) = client.request(command).await else {
-            panic!("{name} was not refused");
-        };
-        assert_eq!(refusal.code, ErrorCode::InvalidState, "{name}");
-        assert_eq!(
-            refusal.message, "The QA cockpit is not served yet",
-            "{name}"
-        );
-    }
-    daemon.stop().await;
-}
-
-#[tokio::test]
 async fn the_cockpit_is_served_through_the_wire() {
     use clusia_core::cockpit::{CopilotAsk, NO_REVIEW};
 

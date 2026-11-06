@@ -337,7 +337,12 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
             main_hash,
             approve,
         } => crate::tests::prepare_main(shared, &pr, &main_hash, approve).await,
-        Command::RunCockpit { .. } => cockpit_not_ready(),
+        Command::RunCockpit {
+            pr,
+            scope,
+            on_main,
+            seen,
+        } => crate::tests::run_cockpit(shared, &pr, scope, on_main, seen).await,
     }
 }
 
@@ -513,11 +518,4 @@ async fn clear_token(shared: &Shared) -> Outcome {
             format!("could not remove the token: {e}"),
         )),
     }
-}
-
-/// What every QA cockpit command answers until the daemon serves it.
-const COCKPIT_NOT_READY: &str = "The QA cockpit is not served yet";
-
-fn cockpit_not_ready() -> Outcome {
-    crate::reviews::invalid_state(COCKPIT_NOT_READY)
 }

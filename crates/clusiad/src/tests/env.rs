@@ -5,11 +5,12 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use clusia_core::PrRef;
+use clusia_core::cockpit::RunSide;
 use clusia_core::tests::{
     Engine, EnvState, NearTest, RECIPE_FILE, RunnerChoice, RunnerKind, SetupPlan, StepState,
     TestsPhase, TestsRecord, TestsView,
 };
+use clusia_core::{Paths, PrRef};
 use clusia_testrun::container;
 use clusia_testrun::docker::Docker;
 use clusia_testrun::engine::{self, HostEnv};
@@ -687,19 +688,22 @@ pub(super) fn save(shared: &Shared, pr: &PrRef, record: &TestsRecord) {
 }
 
 /// The name of the review's temp folder, which also names its files in `tests/`.
-fn tmp_name(shared: &Shared, pr: &PrRef) -> OsString {
-    shared
-        .paths
+fn tmp_name(paths: &Paths, pr: &PrRef) -> OsString {
+    paths
         .test_tmp_for(pr)
         .file_name()
         .map(OsString::from)
         .unwrap_or_else(|| pr.file_key().into())
 }
 
-fn named(shared: &Shared, pr: &PrRef, suffix: &str) -> PathBuf {
-    let mut name = tmp_name(shared, pr);
+fn named_in(paths: &Paths, pr: &PrRef, suffix: &str) -> PathBuf {
+    let mut name = tmp_name(paths, pr);
     name.push(suffix);
-    shared.paths.tests_dir().join("profiles").join(name)
+    paths.tests_dir().join("profiles").join(name)
+}
+
+fn named(shared: &Shared, pr: &PrRef, suffix: &str) -> PathBuf {
+    named_in(&shared.paths, pr, suffix)
 }
 
 /// The compose override of `pr`, outside every folder a run may write.
@@ -713,7 +717,7 @@ pub(super) fn build_dir(shared: &Shared, pr: &PrRef) -> PathBuf {
         .paths
         .tests_dir()
         .join("build")
-        .join(tmp_name(shared, pr))
+        .join(tmp_name(&shared.paths, pr))
 }
 
 /// Writes the sandbox profile of `mode` for `ctx` atomically, right before its use, and answers
@@ -741,6 +745,11 @@ pub(super) fn profile_file_for(
             (true, NetMode::Online) => "-main-online.sb",
         },
     );
+    write_profile(file, roots, mode)
+}
+
+/// Writes the profile of `roots` and `mode` to `file` atomically and answers its path.
+fn write_profile(file: PathBuf, roots: &SandboxRoots, mode: NetMode) -> io::Result<PathBuf> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -752,8 +761,45 @@ pub(super) fn profile_file_for(
     Ok(file)
 }
 
+/// The sandbox profile file of a cockpit round on `side`: one per side, apart from the files of
+/// the review's other runs, because main's roots and a scenario's run folder differ.
+pub(super) fn cockpit_profile_path(paths: &Paths, pr: &PrRef, side: RunSide) -> PathBuf {
+    named_in(
+        paths,
+        pr,
+        match side {
+            RunSide::Pr => "-cockpit-pr.sb",
+            RunSide::Main => "-cockpit-main.sb",
+        },
+    )
+}
+
+/// Writes the offline profile of a cockpit round on `side` for `roots`, right before its use,
+/// and answers its path.
+pub(super) fn cockpit_profile(
+    shared: &Shared,
+    pr: &PrRef,
+    side: RunSide,
+    roots: &SandboxRoots,
+) -> io::Result<PathBuf> {
+    write_profile(
+        cockpit_profile_path(&shared.paths, pr, side),
+        roots,
+        NetMode::Offline,
+    )
+}
+
 /// The folders a local run of `ctx` may write and read, at their real paths.
 pub(super) fn roots(shared: &Shared, ctx: &Ctx) -> io::Result<SandboxRoots> {
+    roots_for_run(shared, ctx, None)
+}
+
+/// `roots`, and `run_folder`, read-only, when a scenario runs from one.
+pub(super) fn roots_for_run(
+    shared: &Shared,
+    ctx: &Ctx,
+    run_folder: Option<&Path>,
+) -> io::Result<SandboxRoots> {
     sandbox::resolve_roots(SandboxRoots {
         worktree: ctx.worktree.clone(),
         git_common: ctx.git_common.clone(),
@@ -762,7 +808,7 @@ pub(super) fn roots(shared: &Shared, ctx: &Ctx) -> io::Result<SandboxRoots> {
         data_root: shared.paths.root().to_path_buf(),
         home: ctx.host.home.clone(),
         clone_env: sandbox::clone_env_files(&ctx.clone),
-        read_only: Vec::new(),
+        read_only: run_folder.map(Path::to_path_buf).into_iter().collect(),
     })
 }
 

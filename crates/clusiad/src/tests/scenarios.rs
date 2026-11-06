@@ -9,13 +9,13 @@ use std::sync::atomic::Ordering;
 
 use clusia_core::PrRef;
 use clusia_core::cockpit::{
-    COCKPIT_CHANGED, CockpitActivity, CockpitView, CopilotView, E2E_DIR, EDITS_MAX_BYTES, Input,
-    InputView, ItemKind, ItemRef, ItemSupport, NO_REVIEW, ROUNDS_MAX, SCENARIO_FILE_MAX_BYTES,
-    SCENARIO_METRICS, SCENARIO_ROUNDS_MIN, SCENARIO_TIMEOUT_MAX, SCENARIO_TIMEOUT_MIN,
-    SCENARIOS_MAX, SCRIPT_MAX_BYTES, ScenarioApproval, ScenarioBlock, ScenarioEdits, ScenarioInput,
-    ScenarioScript, ScenarioView, ScriptMeta, StoredScenario, approval_hash, check_input,
-    scenario_hash, scenario_input_hash, scenario_status, scenarios_hash, script_sha,
-    valid_scenario_slug, valid_script_name,
+    COCKPIT_CHANGED, CockpitActivity, CockpitScope, CockpitView, CopilotView, E2E_DIR,
+    EDITS_MAX_BYTES, Input, InputView, ItemKind, ItemRef, ItemSupport, LOAD_LATER, NO_REVIEW,
+    ROUNDS_MAX, SCENARIO_FILE_MAX_BYTES, SCENARIO_METRICS, SCENARIO_ROUNDS_MIN,
+    SCENARIO_TIMEOUT_MAX, SCENARIO_TIMEOUT_MIN, SCENARIOS_MAX, SCRIPT_MAX_BYTES, ScenarioApproval,
+    ScenarioBlock, ScenarioEdits, ScenarioInput, ScenarioScript, ScenarioView, ScriptMeta,
+    StoredScenario, approval_hash, check_input, scenario_hash, scenario_input_hash,
+    scenario_status, scenarios_hash, script_sha, valid_scenario_slug, valid_script_name,
 };
 use clusia_core::functions::{FUNCTIONS_MAX, FunctionBrief};
 use clusia_core::printable::printable;
@@ -223,11 +223,8 @@ pub(super) fn effective(
 }
 
 /// A listed scenario with what a run or an approval needs of it.
-#[allow(dead_code)]
 pub(super) struct ScenarioItem {
     pub slug: String,
-    pub stored: Option<StoredScenario>,
-    pub edits: ScenarioEdits,
     pub inputs: Vec<Input>,
     pub values: BTreeMap<String, String>,
     pub files: Vec<(String, Vec<u8>)>,
@@ -241,13 +238,11 @@ pub(super) struct ScenarioItem {
 
 /// The cockpit view and what it was read from; `scenarios[i]` belongs to `view.scenarios[i]`
 /// and `benches[i]` to `view.benches[i]`.
-#[allow(dead_code)]
 pub(super) struct Read {
     pub view: CockpitView,
     pub worktree: Option<PathBuf>,
     /// The problem of a `.clusia/` the pull request ships.
     pub shipped: Option<String>,
-    pub head: String,
     pub base: Option<String>,
     pub runner: Option<RunnerKind>,
     pub scenarios: Vec<ScenarioItem>,
@@ -257,12 +252,11 @@ pub(super) struct Read {
 }
 
 impl Read {
-    fn empty(view: CockpitView, head: String) -> Self {
+    fn empty(view: CockpitView) -> Self {
         Read {
             view,
             worktree: None,
             shipped: None,
-            head,
             base: None,
             runner: None,
             scenarios: Vec::new(),
@@ -316,8 +310,6 @@ fn unusable_view(unusable: &Unusable<'_>, running: bool) -> (ScenarioView, Scena
     view.status = scenario_status(&view, running);
     let item = ScenarioItem {
         slug: unusable.slug.to_string(),
-        stored: None,
-        edits: ScenarioEdits::default(),
         inputs: Vec::new(),
         values: BTreeMap::new(),
         files: Vec::new(),
@@ -436,8 +428,6 @@ fn read_one(
     view.status = scenario_status(&view, running);
     let item = ScenarioItem {
         slug: slug.to_string(),
-        stored: Some(stored),
-        edits: loaded.edits,
         inputs: eff.inputs,
         values: eff.values,
         files: eff
@@ -467,7 +457,7 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
                 .unwrap_or_default();
             let mut view = CockpitView::new(&head);
             view.note = Some(NO_REVIEW.into());
-            return Read::empty(view, head);
+            return Read::empty(view);
         }
     };
     let head = review.head_sha;
@@ -494,7 +484,7 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
         busy: copilot_busy,
         failed: copilot_failed,
     };
-    let mut read = Read::empty(view, head.clone());
+    let mut read = Read::empty(view);
     read.record = snap.record.clone();
     read.base = base.clone();
     read.runner = runner;
@@ -654,6 +644,46 @@ pub(super) async fn writable(shared: &Arc<Shared>, pr: &PrRef) -> Result<Read, O
         return Err(reviews::invalid_state(E2E_ROOT_REFUSED));
     }
     Ok(read)
+}
+
+/// Whether what the reviewer saw (`seen`: the view's hash for `Scenarios`, else the item's)
+/// is still what would run.
+#[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
+pub(super) fn check_seen(
+    view: &CockpitView,
+    pr: &PrRef,
+    scope: &CockpitScope,
+    seen: &str,
+) -> Result<(), Outcome> {
+    let now = match scope {
+        CockpitScope::Scenarios => &view.hash,
+        CockpitScope::Item { item } => match item.kind {
+            ItemKind::Scenario => match view.scenarios.iter().find(|s| s.slug == item.id) {
+                Some(found) => &found.hash,
+                None => {
+                    return Err(reviews::invalid_state(format!(
+                        "No scenario {} in {pr}",
+                        item.id
+                    )));
+                }
+            },
+            ItemKind::Bench => match view.benches.iter().find(|b| b.slug == item.id) {
+                Some(found) => &found.hash,
+                None => {
+                    return Err(reviews::invalid_state(format!(
+                        "No benchmark {} in {pr}",
+                        item.id
+                    )));
+                }
+            },
+            ItemKind::Load => return Err(reviews::invalid_state(LOAD_LATER)),
+        },
+    };
+    if now == seen {
+        Ok(())
+    } else {
+        Err(reviews::invalid_state(COCKPIT_CHANGED))
+    }
 }
 
 /// The position of scenario `slug` in `read`, refusing an unknown one and a refused folder.

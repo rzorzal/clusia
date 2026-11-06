@@ -116,7 +116,6 @@ pub(super) async fn ensure_main_at_base(
 }
 
 /// Main as the view and a job read it.
-#[allow(dead_code)]
 pub(super) struct MainState {
     pub view: MainView,
     /// The stored record, ignored when main's worktree is gone.
