@@ -692,6 +692,32 @@ fn main_failure(view: &CockpitView) -> String {
     }
 }
 
+/// The first view told for this review whose main is no longer `busy`. What was told while the
+/// last read waited for its answer comes first: main's job can end before that answer is sent,
+/// and its last change is then already buffered. Ctrl-C ends the wait as `what`.
+async fn main_settled(
+    client: &mut Client,
+    pr: &PrRef,
+    stop: &mut Interrupts<'_>,
+    what: &str,
+    busy: impl Fn(&MainPhase) -> bool,
+) -> Result<CockpitView, CliError> {
+    for (_, event) in client.take_events() {
+        if let Event::CockpitChanged { pr: of, view } = event
+            && of == *pr
+            && !busy(&view.main.phase)
+        {
+            return Ok(*view);
+        }
+    }
+    loop {
+        let view = next_view(client, pr, stop, what).await?;
+        if !busy(&view.main.phase) {
+            return Ok(view);
+        }
+    }
+}
+
 /// Makes main ready, with its own approval, and returns the view as it ends. Nothing is sent
 /// when main is ready.
 async fn ensure_main(
@@ -718,10 +744,12 @@ async fn ensure_main(
         .await?;
         client.take_events();
         view = read_cockpit(client, pr, stop).await?;
-        client.take_events();
     }
-    while matches!(view.main.phase, MainPhase::Creating) {
-        view = next_view(client, pr, stop, "opening main").await?;
+    if matches!(view.main.phase, MainPhase::Creating) {
+        view = main_settled(client, pr, stop, "opening main", |p| {
+            matches!(p, MainPhase::Creating)
+        })
+        .await?;
     }
     match &view.main.phase {
         MainPhase::Ready => return Ok(view),
@@ -761,10 +789,12 @@ async fn ensure_main(
         stop.ask(client, request, true, "preparing main").await?;
         client.take_events();
         view = read_cockpit(client, pr, stop).await?;
-        client.take_events();
     }
-    while matches!(view.main.phase, MainPhase::Preparing { .. }) {
-        view = next_view(client, pr, stop, "preparing main").await?;
+    if matches!(view.main.phase, MainPhase::Preparing { .. }) {
+        view = main_settled(client, pr, stop, "preparing main", |p| {
+            matches!(p, MainPhase::Preparing { .. })
+        })
+        .await?;
     }
     if matches!(view.main.phase, MainPhase::Ready) {
         Ok(view)

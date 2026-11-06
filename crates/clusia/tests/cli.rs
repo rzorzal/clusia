@@ -4477,6 +4477,76 @@ mod tests_against_a_scripted_daemon {
     }
 
     #[test]
+    fn a_main_change_told_before_the_read_that_shows_it_busy_is_not_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let shown = |phase| cview(cscenario(ScenarioApproval::Approved), phase, None);
+        let mut needs = shown(MainPhase::NeedsSetup);
+        let mut plan = one_step_plan("Fetch dependencies on main", None, StepState::Missing);
+        plan.recipe_hash = "main-hash".into();
+        needs.main.plan = Some(plan);
+        let ready = shown(MainPhase::Ready);
+        let reads = Arc::new(Mutex::new(0u8));
+        let asked = recording_daemon(
+            dir.path(),
+            &rt,
+            view(TestsPhase::Ready, None),
+            move |cmd, say| match cmd {
+                Request::GetCockpit { .. } => {
+                    let mut n = reads.lock().unwrap();
+                    *n += 1;
+                    // Main's job ends while the read is answered: its change is told first,
+                    // and the read still shows main busy.
+                    let reply = match *n {
+                        1 => shown(MainPhase::NotCreated),
+                        2 => {
+                            let _ = say.send(cchanged(needs.clone()));
+                            shown(MainPhase::Creating)
+                        }
+                        3 => {
+                            let _ = say.send(cchanged(ready.clone()));
+                            shown(MainPhase::Preparing {
+                                step: "work:0".into(),
+                            })
+                        }
+                        _ => ready.clone(),
+                    };
+                    Some(Reply::Cockpit(Box::new(reply)))
+                }
+                Request::RunCockpit { .. } => {
+                    let (say, r) = (say.clone(), ready.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = say.send(cchanged(cview(
+                            cscenario(ScenarioApproval::Approved),
+                            MainPhase::Ready,
+                            Some(crunning(0)),
+                        )));
+                        let _ =
+                            say.send(cround(RunSide::Pr, 1, RoundEnd::Finished, Some(true), 10));
+                        let _ =
+                            say.send(cround(RunSide::Main, 1, RoundEnd::Finished, Some(true), 12));
+                        let _ = say.send(cchanged(r));
+                    });
+                    Some(Reply::CockpitStarted {
+                        run: "run-1".into(),
+                        skipped: Vec::new(),
+                    })
+                }
+                _ => Some(Reply::Ack),
+            },
+        );
+        let mut child = tests_cmd(dir.path(), &["--run-scenarios", "--on-main", "--yes"]);
+        let code = ended_within(&mut child, Duration::from_secs(20));
+        let (out, err) = (stdout_of(&mut child), stderr_of(&mut child));
+        assert_eq!(code, Some(0), "{out}\n{err}");
+        let asked = asked.lock().unwrap().clone();
+        for request in ["OpenMain", "PrepareMain", "RunCockpit"] {
+            assert!(asked.iter().any(|c| c.contains(request)), "{asked:?}");
+        }
+    }
+
+    #[test]
     fn main_that_is_not_approved_in_the_terminal_runs_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
