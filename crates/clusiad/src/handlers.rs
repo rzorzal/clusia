@@ -331,9 +331,13 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
         Command::AskCopilot { pr, item, ask } => {
             crate::tests::ask_copilot(shared, &pr, item, ask).await
         }
-        Command::OpenMain { .. } | Command::PrepareMain { .. } | Command::RunCockpit { .. } => {
-            cockpit_not_ready()
-        }
+        Command::OpenMain { pr } => crate::tests::open_main(shared, &pr).await,
+        Command::PrepareMain {
+            pr,
+            main_hash,
+            approve,
+        } => crate::tests::prepare_main(shared, &pr, &main_hash, approve).await,
+        Command::RunCockpit { .. } => cockpit_not_ready(),
     }
 }
 

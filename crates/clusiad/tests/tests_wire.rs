@@ -49,26 +49,16 @@ async fn the_test_commands_answer_through_the_socket() {
 #[tokio::test]
 async fn cockpit_commands_are_refused_until_served() {
     use clusia_core::cockpit::CockpitScope;
-    use clusia_core::tests::Approve;
-
     let daemon = TestDaemon::start().await;
     let mut client = daemon.client().await;
     let pr: PrRef = "acme/widgets#7".parse().unwrap();
-    let commands = vec![
-        Command::OpenMain { pr: pr.clone() },
-        Command::PrepareMain {
-            pr: pr.clone(),
-            main_hash: "h".into(),
-            approve: Approve::All,
-        },
-        Command::RunCockpit {
-            pr: pr.clone(),
-            scope: CockpitScope::Scenarios,
-            on_main: false,
-            seen: "h".into(),
-        },
-    ];
-    assert_eq!(commands.len(), 3, "every command not served yet is covered");
+    let commands = vec![Command::RunCockpit {
+        pr: pr.clone(),
+        scope: CockpitScope::Scenarios,
+        on_main: false,
+        seen: "h".into(),
+    }];
+    assert_eq!(commands.len(), 1, "every command not served yet is covered");
     for command in commands {
         let name = format!("{command:?}");
         let Err(ClientError::Server(refusal)) = client.request(command).await else {
@@ -94,6 +84,16 @@ async fn the_cockpit_is_served_through_the_wire() {
         Ok(Reply::Cockpit(view)) => assert_eq!(view.note.as_deref(), Some(NO_REVIEW)),
         other => panic!("not a cockpit view: {other:?}"),
     }
+    let Err(ClientError::Server(refusal)) =
+        client.request(Command::OpenMain { pr: pr.clone() }).await
+    else {
+        panic!("OpenMain was not refused without a review");
+    };
+    assert!(
+        !refusal.message.contains("not served yet"),
+        "{}",
+        refusal.message
+    );
     let Err(ClientError::Server(refusal)) = client
         .request(Command::AskCopilot {
             pr: pr.clone(),

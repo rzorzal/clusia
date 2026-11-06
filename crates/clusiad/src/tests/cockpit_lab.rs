@@ -208,7 +208,13 @@ async fn an_empty_cockpit_says_nothing_and_a_closed_review_says_how_to_open_it()
     let lab = cockpit_lab(Vec::new());
     let view = cockpit_of(cockpit(&lab.shared, &pr(7)).await);
     assert!(view.scenarios.is_empty() && view.benches.is_empty());
-    assert_eq!(view.main.phase, MainPhase::NotCreated);
+    assert_eq!(
+        view.main.phase,
+        MainPhase::Unavailable {
+            reason: super::NO_RECIPE.into()
+        },
+        "main needs the pull request's recipe"
+    );
     assert!(view.note.is_none());
     let closed = cockpit_of(cockpit(&lab.shared, &pr(99)).await);
     assert_eq!(

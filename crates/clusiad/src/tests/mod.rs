@@ -15,6 +15,9 @@ mod env;
 mod functions_lab;
 #[cfg(test)]
 mod lab;
+#[cfg(test)]
+mod main_lab;
+mod main_tree;
 pub(crate) mod recipe_file;
 pub(crate) mod recipe_turn;
 mod scenarios;
@@ -44,6 +47,7 @@ pub(crate) use case_run::run_cases;
 pub(crate) use case_turn::write_cases;
 pub(crate) use cases::{driver, functions, remove_case, reset_case, save_case};
 pub(crate) use cockpit_turn::{ask_copilot, write_bench, write_scenarios};
+pub(crate) use main_tree::{open_main, prepare_main, remove_main, sweep_main};
 pub(crate) use scenarios::{
     approve_scenario, cockpit, remove_scenario, reset_scenario, save_scenario, scenario_script,
 };
@@ -73,6 +77,7 @@ pub(super) enum Doing {
     RunCases,
     Scenarios,
     Bench,
+    Main,
 }
 
 impl Doing {
@@ -86,6 +91,7 @@ impl Doing {
             Doing::RunCases => "running cases",
             Doing::Scenarios => "writing scenarios",
             Doing::Bench => "writing a benchmark",
+            Doing::Main => "preparing main",
         }
     }
 
@@ -96,7 +102,7 @@ impl Doing {
 
     /// Whether the activity is about the QA cockpit, which leaves the tests' phase alone too.
     pub(super) fn is_cockpit(self) -> bool {
-        matches!(self, Doing::Scenarios | Doing::Bench)
+        matches!(self, Doing::Scenarios | Doing::Bench | Doing::Main)
     }
 }
 
@@ -157,6 +163,12 @@ pub(super) struct Entry {
     pub copilot: Option<Arc<Stop>>,
     /// Why the last copilot turn failed, until the next ask.
     pub copilot_failed: Option<String>,
+    /// Main's worktree is being made or moved.
+    pub main_opening: bool,
+    /// Why opening or preparing main failed, until the next such activity begins.
+    pub main_failed: Option<String>,
+    /// Why each of main's setup steps failed in the last walk, by step id.
+    pub main_step_failures: BTreeMap<String, String>,
 }
 
 /// The tests of every review.
@@ -347,6 +359,9 @@ pub(super) fn begin(
         // A functions activity leaves the tests' own failure for the tests' view to show.
         if doing.is_functions() {
             entry.cases_failed = None;
+        } else if doing == Doing::Main {
+            entry.main_failed = None;
+            entry.main_step_failures.clear();
         } else if doing.is_cockpit() {
             entry.cockpit_failed = None;
         } else {
@@ -710,8 +725,10 @@ pub(crate) async fn disk(shared: &Shared) -> Outcome {
         found
     };
     let caches = folders(shared.paths.tests_dir().join("cache"));
+    // Main's worktrees sit one level down, in a folder of their own.
     let worktree_dirs: Vec<PathBuf> = folders(shared.paths.worktrees_dir())
         .into_iter()
+        .chain(folders(shared.paths.worktrees_dir().join(".main")))
         .flat_map(|worktree| [worktree.join("node_modules"), worktree.join(".venv")])
         .filter(|path| is_dir(path))
         .collect();
@@ -946,6 +963,7 @@ pub(crate) async fn sweep(shared: &Shared, cutoff: i64) {
             tracing::warn!(error = %e, pr = %pr, "cannot delete the test record");
         }
     }
+    sweep_main(shared).await;
     if let Some(docker) = env::docker_now(shared).await
         && let Err(e) = clusia_testrun::cleanup::remove_orphans(
             shared.test_exec.as_ref(),

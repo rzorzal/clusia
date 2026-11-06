@@ -540,6 +540,8 @@ pub(super) async fn prepare(
             recipe: &recipe,
             hash: &hash,
             stop: &stop,
+            main: false,
+            image_tag: None,
         };
         match run_step(&walk, &step).await {
             StepEnd::Done => {
@@ -586,7 +588,14 @@ fn failed(shared: &Shared, pr: &PrRef, step: &str, message: String, tail: Option
 }
 
 /// The mount check of `tag` for this worktree, kept for the daemon's session.
-async fn mount(shared: &Shared, pr: &PrRef, id: u64, ctx: &Ctx, env: &EnvState, tag: &str) {
+pub(super) async fn mount(
+    shared: &Shared,
+    pr: &PrRef,
+    id: u64,
+    ctx: &Ctx,
+    env: &EnvState,
+    tag: &str,
+) {
     super::set_phase(
         shared,
         pr,
@@ -628,18 +637,24 @@ async fn mount(shared: &Shared, pr: &PrRef, id: u64, ctx: &Ctx, env: &EnvState, 
 }
 
 /// What every step of one walk reads.
-struct Walk<'a> {
-    shared: &'a Arc<Shared>,
-    pr: &'a PrRef,
-    id: u64,
-    ctx: &'a Ctx,
-    env: &'a EnvState,
-    recipe: &'a Recipe,
-    hash: &'a str,
-    stop: &'a StopFlag,
+pub(super) struct Walk<'a> {
+    pub shared: &'a Arc<Shared>,
+    pub pr: &'a PrRef,
+    pub id: u64,
+    pub ctx: &'a Ctx,
+    pub env: &'a EnvState,
+    pub recipe: &'a Recipe,
+    pub hash: &'a str,
+    pub stop: &'a StopFlag,
+    /// The walk is over main's worktree: its output goes to `main:<step>` and its caches and
+    /// roots are main's own.
+    pub main: bool,
+    /// The image a container step runs in, when it is not the one `ctx`'s worktree plans (main
+    /// runs in the pull request's image).
+    pub image_tag: Option<&'a str>,
 }
 
-enum StepEnd {
+pub(super) enum StepEnd {
     Done,
     /// Why, and the output's tail.
     Failed(String, String),
@@ -681,11 +696,16 @@ fn image_of(walk: &Walk<'_>) -> Result<ImagePlan, String> {
     )
 }
 
-async fn run_step(walk: &Walk<'_>, step: &PlanStep) -> StepEnd {
+pub(super) async fn run_step(walk: &Walk<'_>, step: &PlanStep) -> StepEnd {
     let shared = walk.shared;
     let exec = shared.test_exec.as_ref();
     let limit = Duration::from_secs(u64::from(shared.config.read().await.tests.run_timeout_secs));
-    let mut sink = Sink::new(shared, walk.pr, To::Step(step.id.clone()), None, None);
+    let sink_id = if walk.main {
+        format!("main:{}", step.id)
+    } else {
+        step.id.clone()
+    };
+    let mut sink = Sink::new(shared, walk.pr, To::Step(sink_id), None, None);
     let id = step.id.as_str();
     if id == STEP_ENGINE {
         return engine_step(walk, &mut sink).await;
@@ -893,13 +913,16 @@ async fn work_step(
             return Err(io::Error::other("no container engine found"));
         };
         let docker = env::docker_for(engine, &ctx.host);
-        let image = image_of(walk).map_err(io::Error::other)?;
-        let marker = clusia_testrun::plan::work_marker(setup, Some(&image.tag), &env.inputs_hash);
+        let tag = match walk.image_tag {
+            Some(tag) => tag.to_string(),
+            None => image_of(walk).map_err(io::Error::other)?.tag,
+        };
+        let marker = clusia_testrun::plan::work_marker(setup, Some(&tag), &env.inputs_hash);
         let config = shared.config.read().await.tests.clone();
         let name = names::run_name(&ctx.slug, walk.pr.number, shared.tests.seq());
         let job = ContainerJob {
             name: name.clone(),
-            image: image.tag.clone(),
+            image: tag,
             command: setup.run.clone(),
             env: docker::job_env(&env.signals.ecosystems, &walk.recipe.tests.env),
             net: if setup.network {
@@ -916,7 +939,11 @@ async fn work_step(
             exec,
             &docker,
             &job,
-            &mounts(ctx, env),
+            &if walk.main {
+                super::main_tree::mounts_for_main(ctx, env)
+            } else {
+                mounts(ctx, env)
+            },
             Marker {
                 worktree: &ctx.worktree,
                 step: &step.id,
@@ -935,8 +962,12 @@ async fn work_step(
     } else {
         NetMode::Offline
     };
-    let roots = env::roots(shared, ctx)?;
-    let profile = env::profile_file(shared, ctx, mode)?;
+    let roots = if walk.main {
+        env::roots_for_main(shared, ctx, None)?
+    } else {
+        env::roots(shared, ctx)?
+    };
+    let profile = env::profile_file_for(shared, ctx, &roots, mode, walk.main)?;
     let cmd = sandbox::local_command(
         &shared.sandbox_exec_program,
         &profile,

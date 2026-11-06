@@ -10,12 +10,12 @@ use std::sync::atomic::Ordering;
 use clusia_core::PrRef;
 use clusia_core::cockpit::{
     COCKPIT_CHANGED, CockpitActivity, CockpitView, CopilotView, E2E_DIR, EDITS_MAX_BYTES, Input,
-    InputView, ItemKind, ItemRef, ItemSupport, MainPhase, MainView, NO_REVIEW, ROUNDS_MAX,
-    SCENARIO_FILE_MAX_BYTES, SCENARIO_METRICS, SCENARIO_ROUNDS_MIN, SCENARIO_TIMEOUT_MAX,
-    SCENARIO_TIMEOUT_MIN, SCENARIOS_MAX, SCRIPT_MAX_BYTES, ScenarioApproval, ScenarioBlock,
-    ScenarioEdits, ScenarioInput, ScenarioScript, ScenarioView, ScriptMeta, StoredScenario,
-    approval_hash, check_input, scenario_hash, scenario_input_hash, scenario_status,
-    scenarios_hash, script_sha, valid_scenario_slug, valid_script_name,
+    InputView, ItemKind, ItemRef, ItemSupport, NO_REVIEW, ROUNDS_MAX, SCENARIO_FILE_MAX_BYTES,
+    SCENARIO_METRICS, SCENARIO_ROUNDS_MIN, SCENARIO_TIMEOUT_MAX, SCENARIO_TIMEOUT_MIN,
+    SCENARIOS_MAX, SCRIPT_MAX_BYTES, ScenarioApproval, ScenarioBlock, ScenarioEdits, ScenarioInput,
+    ScenarioScript, ScenarioView, ScriptMeta, StoredScenario, approval_hash, check_input,
+    scenario_hash, scenario_input_hash, scenario_status, scenarios_hash, script_sha,
+    valid_scenario_slug, valid_script_name,
 };
 use clusia_core::functions::{FUNCTIONS_MAX, FunctionBrief};
 use clusia_core::printable::printable;
@@ -273,18 +273,6 @@ impl Read {
     }
 }
 
-/// Main as the view shows it when it has no worktree.
-pub(super) fn main_stub() -> MainView {
-    MainView {
-        phase: MainPhase::NotCreated,
-        base: None,
-        at: None,
-        plan: None,
-        image: None,
-        first_build: false,
-    }
-}
-
 /// A reason that cannot be listed in full: printable, cut to `REASON_MAX` characters.
 pub(super) fn reasons_text(reasons: &[String]) -> String {
     printable(&reasons.join("; "))
@@ -487,8 +475,10 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
     let mut view = CockpitView::new(&head);
     let runner = snap.env.as_ref().map(|env| env.runner);
     view.runner = runner;
-    let base = snap.record.main.as_ref().map(|main| main.base.clone());
+    let main = super::main_tree::main_state_of(shared, pr, &snap).await;
+    let base = main.record.as_ref().map(|record| record.base.clone());
     view.base = base.clone();
+    view.main = main.view;
     let (activity, failed, copilot_busy, copilot_failed) = shared.tests.with(pr, |entry| {
         (
             entry.activity.as_ref().and_then(|a| a.cockpit.clone()),
@@ -560,7 +550,6 @@ pub(super) async fn read(shared: &Arc<Shared>, pr: &PrRef) -> Read {
             read.benches.push(bench_item);
         }
     }
-    read.view.main = main_stub();
     read
 }
 

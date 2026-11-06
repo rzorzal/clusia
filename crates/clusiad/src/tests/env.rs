@@ -41,7 +41,15 @@ pub(super) struct Ctx {
 
 impl Ctx {
     pub fn new(shared: &Shared, pr: &PrRef) -> Result<Ctx, String> {
-        let shown = shared.paths.worktree_for(pr);
+        Self::at(shared, pr, shared.paths.worktree_for(pr))
+    }
+
+    /// The context of main's worktree: the same repository, main's own checkout.
+    pub fn for_main(shared: &Shared, pr: &PrRef) -> Result<Ctx, String> {
+        Self::at(shared, pr, shared.paths.main_worktree_for(pr))
+    }
+
+    fn at(shared: &Shared, pr: &PrRef, shown: PathBuf) -> Result<Ctx, String> {
         let unreadable = || format!("Cannot read the git folder of {}", shown.display());
         let worktree = std::fs::canonicalize(&shown).map_err(|_| unreadable())?;
         let writable = [worktree.clone(), shared.paths.tests_dir()];
@@ -711,22 +719,35 @@ pub(super) fn build_dir(shared: &Shared, pr: &PrRef) -> PathBuf {
 /// Writes the sandbox profile of `mode` for `ctx` atomically, right before its use, and answers
 /// its path.
 pub(super) fn profile_file(shared: &Shared, ctx: &Ctx, mode: NetMode) -> io::Result<PathBuf> {
-    let roots = roots(shared, ctx)?;
+    profile_file_for(shared, ctx, &roots(shared, ctx)?, mode, false)
+}
+
+/// `profile_file` for given `roots`; main's profile files carry `-main-` in their names, so
+/// neither side rewrites the other's.
+pub(super) fn profile_file_for(
+    shared: &Shared,
+    ctx: &Ctx,
+    roots: &SandboxRoots,
+    mode: NetMode,
+    main: bool,
+) -> io::Result<PathBuf> {
     let file = named(
         shared,
         &ctx.pr,
-        match mode {
-            NetMode::Offline => "-offline.sb",
-            NetMode::Online => "-online.sb",
+        match (main, mode) {
+            (false, NetMode::Offline) => "-offline.sb",
+            (false, NetMode::Online) => "-online.sb",
+            (true, NetMode::Offline) => "-main-offline.sb",
+            (true, NetMode::Online) => "-main-online.sb",
         },
     );
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    debug_assert!(!sandbox::writable_by_sandbox(&roots, &file));
+    debug_assert!(!sandbox::writable_by_sandbox(roots, &file));
     let mut tmp = file.clone().into_os_string();
     tmp.push(".tmp");
-    std::fs::write(&tmp, sandbox::profile(&roots, mode))?;
+    std::fs::write(&tmp, sandbox::profile(roots, mode))?;
     std::fs::rename(&tmp, &file)?;
     Ok(file)
 }
@@ -742,6 +763,25 @@ pub(super) fn roots(shared: &Shared, ctx: &Ctx) -> io::Result<SandboxRoots> {
         home: ctx.host.home.clone(),
         clone_env: sandbox::clone_env_files(&ctx.clone),
         read_only: Vec::new(),
+    })
+}
+
+/// The folders a local run in main's worktree may write and read, at their real paths: main's
+/// own temp and cache, and `run_folder`, read-only, when a scenario runs from one.
+pub(super) fn roots_for_main(
+    shared: &Shared,
+    ctx: &Ctx,
+    run_folder: Option<&Path>,
+) -> io::Result<SandboxRoots> {
+    sandbox::resolve_roots(SandboxRoots {
+        worktree: ctx.worktree.clone(),
+        git_common: ctx.git_common.clone(),
+        review_tmp: shared.paths.test_main_tmp_for(&ctx.pr),
+        repo_cache: shared.paths.test_main_cache_for(&ctx.pr),
+        data_root: shared.paths.root().to_path_buf(),
+        home: ctx.host.home.clone(),
+        clone_env: sandbox::clone_env_files(&ctx.clone),
+        read_only: run_folder.map(Path::to_path_buf).into_iter().collect(),
     })
 }
 

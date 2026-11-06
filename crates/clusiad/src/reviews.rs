@@ -943,6 +943,8 @@ async fn leave(
 pub(crate) async fn cleanup_checkout(shared: &Shared, pr: &PrRef) {
     let path = shared.paths.worktree_for(pr);
     let _serialized = shared.worktree_lock.lock().await;
+    // Main's worktree is found through the pull request's, which goes next.
+    crate::tests::remove_main(shared, pr).await;
     if let Ok(repo) = repo_of_worktree(&path).await {
         let _ = unpin(&repo, &reviewed_ref(pr.number)).await;
         let _ = unpin(&repo, &base_pin_ref(pr.number)).await;
