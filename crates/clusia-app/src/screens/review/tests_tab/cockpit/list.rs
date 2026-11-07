@@ -23,7 +23,7 @@ use crate::screens::review::tests_tab::approvable_ids;
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Fill, HoverFill, Stroke, Type, Variant, button, checkbox, disabled_button, divider,
-    text, wrapped_text,
+    text, wrapped_text, wrapping_button,
 };
 use crate::ui::spinner::spinner;
 
@@ -206,7 +206,7 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &ListView) {
         })
         .with_children(|slot| {
             slot.spawn((
-                button(
+                wrapping_button(
                     fonts,
                     "+ Ask the copilot for a scenario",
                     Variant::Secondary,

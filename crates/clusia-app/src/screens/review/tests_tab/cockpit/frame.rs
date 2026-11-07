@@ -22,7 +22,9 @@ use crate::screens::review::shell::{CockpitHidden, ShellTop, StatusBar};
 use crate::screens::review::tests_tab::body::cockpit_open;
 use crate::screens::review::tests_tab::{SubTab, TestsModels};
 use crate::theme::Swatch;
-use crate::ui::kit::{Stroke, Type, Variant, button, card, disabled_button, text, wrapped_text};
+use crate::ui::kit::{
+    Stroke, Type, Variant, button, card, disabled_button, text, wrapped_text, wrapping_button,
+};
 use crate::ui::spinner::spinner;
 
 pub const COLUMN_LEFT: f32 = 262.0;
@@ -652,6 +654,7 @@ fn draw_center_frame(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, frame: &Cente
     p.spawn(Node {
         margin: UiRect::vertical(Val::Auto),
         width: percent(100),
+        flex_shrink: 0.0,
         padding: UiRect::all(px(14)),
         flex_direction: FlexDirection::Column,
         align_items: AlignItems::Center,
@@ -670,21 +673,33 @@ fn draw_center_frame(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, frame: &Cente
             writing,
             write_off,
         } => {
+            // A definite width, so the texts measure at the width they wrap to.
             c.spawn(Node {
-                width: px(460),
-                max_width: percent(100),
-                padding: UiRect::all(px(28)),
+                width: percent(100),
+                max_width: px(460),
+                flex_shrink: 0.0,
+                // The extra room under the last line keeps a line that wraps at the largest text
+                // inside the card, whose height is taken before the wrap.
+                padding: UiRect::new(px(0), px(0), px(28), px(44)),
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
+                align_items: AlignItems::Stretch,
                 row_gap: px(12),
                 ..default()
             })
             .with_children(|card| {
-                card.spawn(text(fonts, empty.title.clone(), Type::HEADING.size(18.0)));
+                card.spawn((
+                    text(fonts, empty.title.clone(), Type::HEADING.size(18.0)),
+                    TextLayout {
+                        justify: Justify::Center,
+                        ..default()
+                    },
+                ));
                 card.spawn(wrapped_text(fonts, empty.text.clone(), Type::MUTED))
                     .entry::<TextLayout>()
                     .and_modify(centered);
                 card.spawn(Node {
+                    width: percent(100),
+                    justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
                     column_gap: px(10),
                     flex_wrap: FlexWrap::Wrap,
@@ -695,7 +710,7 @@ fn draw_center_frame(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, frame: &Cente
                         row.spawn(disabled_button(fonts, &empty.button));
                     } else {
                         row.spawn((
-                            button(fonts, &empty.button, Variant::Primary),
+                            wrapping_button(fonts, &empty.button, Variant::Primary),
                             super::list::CockpitWriteScenarios(pr.clone()),
                             observe(super::list::on_write_scenarios),
                         ));

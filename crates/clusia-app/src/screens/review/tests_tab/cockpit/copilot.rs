@@ -1344,13 +1344,13 @@ mod tests {
         assert!(
             texts_under::<CopilotInputRow>(&mut app)
                 .iter()
-                .any(|t| t == "Ask for a scenario, or what to try next…")
+                .any(|t| t == "Ask for a scenario…")
         );
         let (mut app, _pr) = support::app_with(scenario());
         assert!(
             texts_under::<CopilotInputRow>(&mut app)
                 .iter()
-                .any(|t| t == "Ask why, or what to try next…")
+                .any(|t| t == "Ask why, or what to try…")
         );
     }
 

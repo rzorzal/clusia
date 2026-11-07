@@ -642,20 +642,16 @@ fn table_row(p: &mut Spawner, fonts: &UiFonts, row: &TableRow, head: bool) {
             Node {
                 flex_grow: 1.0,
                 min_width: px(0),
-                overflow: Overflow::clip_x(),
                 ..default()
             },
             TableCell,
         ))
-        .with_child((
-            text(
-                fonts,
-                row.label.clone(),
-                Type::BODY
-                    .size(size)
-                    .ink(if row.faint { Swatch::Faint } else { Swatch::Fg }),
-            ),
-            TextLayout::no_wrap(),
+        .with_child(wrapped_text(
+            fonts,
+            row.label.clone(),
+            Type::BODY
+                .size(size)
+                .ink(if row.faint { Swatch::Faint } else { Swatch::Fg }),
         ));
         for (cell, width) in [
             (&row.main, VALUE_W),

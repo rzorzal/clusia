@@ -574,7 +574,7 @@ pub fn copilot_view(model: &CockpitModel, agent: &str, _now: i64) -> CopilotThre
             messages: Vec::new(),
             busy_line: None,
             failed: None,
-            placeholder: "Ask for a scenario, or what to try next…".into(),
+            placeholder: "Ask for a scenario…".into(),
             disabled: false,
             explain: false,
             next: false,
@@ -607,9 +607,9 @@ pub fn copilot_view(model: &CockpitModel, agent: &str, _now: i64) -> CopilotThre
         placeholder: if copilot.busy {
             COPILOT_BUSY.into()
         } else if empty {
-            "Ask for a scenario, or what to try next…".into()
+            "Ask for a scenario…".into()
         } else {
-            "Ask why, or what to try next…".into()
+            "Ask why, or what to try…".into()
         },
         disabled: copilot.busy,
         explain: has_comparison && !about_it,
@@ -1063,7 +1063,7 @@ mod tests {
     fn the_copilot_input_and_its_links() {
         let empty = model_of(demo_cockpit(NOW, DemoCockpit::Empty));
         let t = copilot_view(&empty, AGENT, NOW);
-        assert_eq!(t.placeholder, "Ask for a scenario, or what to try next…");
+        assert_eq!(t.placeholder, "Ask for a scenario…");
         assert!(t.intro.is_some());
         assert!(!t.explain);
 
@@ -1072,7 +1072,7 @@ mod tests {
         let t = copilot_view(&m, AGENT, NOW);
         assert!(!t.explain, "a message is about it");
         assert!(t.next && t.intro.is_none());
-        assert_eq!(t.placeholder, "Ask why, or what to try next…");
+        assert_eq!(t.placeholder, "Ask why, or what to try…");
         assert_eq!(t.messages.len(), 2);
         assert_eq!(t.messages[0].from, CopilotFrom::Reviewer);
         let slug = backoff(&m);

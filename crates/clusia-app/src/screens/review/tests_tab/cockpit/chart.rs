@@ -411,6 +411,7 @@ fn draw_plot(p: &mut Spawner, fonts: &UiFonts, plot: &Plot, metric: Metric) {
         c.spawn((
             Node {
                 width: px(PLOT_W),
+                max_width: percent(100),
                 height: px(PLOT_H),
                 flex_shrink: 0.0,
                 justify_content: JustifyContent::Center,

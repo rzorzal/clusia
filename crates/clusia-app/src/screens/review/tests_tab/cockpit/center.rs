@@ -1387,7 +1387,7 @@ fn draw_bench(
             false,
             |pair| {
                 field(pair, "rounds", &form.rounds.value, NUMBER_WIDTH);
-                pair.spawn(text(
+                pair.spawn(wrapped_text(
                     fonts,
                     form.limit.clone(),
                     Type::META.ink(Swatch::Faint),
