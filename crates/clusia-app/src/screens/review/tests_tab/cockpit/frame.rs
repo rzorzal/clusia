@@ -1098,7 +1098,12 @@ mod tests {
             }),
         );
         testing::settle(&mut app);
-        assert_eq!(testing::recorded(&mut app), []);
+        // Reading the selected scenario's script is no run: it goes out without a click.
+        let sent: Vec<Ask> = testing::recorded(&mut app)
+            .into_iter()
+            .filter(|a| !matches!(a, Ask::GetScenarioScript { .. }))
+            .collect();
+        assert_eq!(sent, []);
     }
 
     #[test]

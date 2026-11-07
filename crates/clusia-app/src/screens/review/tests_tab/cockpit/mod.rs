@@ -3,8 +3,10 @@
 //! now. Everything the daemon sent is text here: nothing in this module draws it, parses it as a
 //! path or opens it.
 
+pub mod center;
 pub mod frame;
 pub mod list;
+pub mod modals;
 pub mod views;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -25,6 +27,7 @@ use crate::bridge::{
     Ask, Asks, CockpitAskKind, CockpitTell, DEMO_NOT_SENT, NOT_SENT, TOAST_SECS, Toast, Toasts,
 };
 use crate::screens::review::ReviewSystems;
+use crate::ui::kit::FieldCommitted;
 
 pub use views::*;
 
@@ -116,6 +119,8 @@ pub struct CockpitModel {
     /// A stop went out and the run has not ended yet.
     pub stopping: bool,
     pub modal: Option<CockpitModal>,
+    /// The scenario **Approve and run** runs once its approval lands.
+    pub run_after_approve: Option<ItemRef>,
     pub copilot_focus: bool,
     /// Bumped when a copilot ask was taken, so its input can clear itself.
     pub copilot_sent: u64,
@@ -598,6 +603,7 @@ impl CockpitModel {
                             self.asked = false;
                         }
                     }
+                    CockpitAskKind::Approve => self.run_after_approve = None,
                     CockpitAskKind::Script => self.script_error = Some(printable(message)),
                     _ => {}
                 }
@@ -627,6 +633,7 @@ impl CockpitModels {
             model.queued_run = None;
             model.live_run = None;
             model.stopping = false;
+            model.run_after_approve = None;
             model.script_asked = None;
             model.touch();
         }
@@ -741,6 +748,25 @@ pub fn register(app: &mut App) {
             )
                 .after(body::fill_tests)
                 .after(ReviewSystems),
+        )
+        .add_systems(
+            Update,
+            (
+                center::fill_center.run_if(frame::regions_changed),
+                center::fill_foot.run_if(frame::regions_changed),
+                center::ask_script_when_needed.run_if(resource_changed::<CockpitModels>),
+                center::commit_scenario_fields.run_if(on_message::<FieldCommitted>),
+                center::commit_bench_fields.run_if(on_message::<FieldCommitted>),
+                modals::run_after_approval.run_if(modals::run_after_due),
+                modals::open_cockpit_modals.run_if(frame::regions_changed),
+                modals::fill_approve.run_if(frame::regions_changed),
+                modals::fill_main.run_if(frame::regions_changed),
+                modals::fill_remove.run_if(frame::regions_changed),
+                modals::cancel_cockpit_modal.run_if(modals::cockpit_modal_up),
+            )
+                .chain()
+                .after(frame::fill_center_frame)
+                .after(list::fill_list),
         );
 }
 

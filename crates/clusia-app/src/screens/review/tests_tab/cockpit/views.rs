@@ -16,6 +16,7 @@ use clusia_core::printable::{printable, printable_lines};
 use clusia_core::tests::RunnerKind;
 
 use super::CockpitModel;
+use super::center::{self, ActionView, BenchForm, ErrorRow, ScenarioForm, ScriptPane};
 use crate::screens::review::tests_tab::runner_label;
 
 /// Titles, `qualified` names and input values: at most this many characters.
@@ -120,6 +121,11 @@ pub struct CenterView {
     pub edited: bool,
     pub support_note: Option<String>,
     pub failed: Option<String>,
+    pub form: Option<ScenarioForm>,
+    pub bench: Option<BenchForm>,
+    pub action: Option<ActionView>,
+    pub errors: Vec<ErrorRow>,
+    pub script: Option<ScriptPane>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,6 +348,11 @@ fn scenario_center(s: &ScenarioView, agent: &str) -> CenterView {
         edited: s.edited,
         support_note: support_note(&s.support),
         failed: None,
+        form: None,
+        bench: None,
+        action: None,
+        errors: Vec::new(),
+        script: None,
     }
 }
 
@@ -368,15 +379,25 @@ fn bench_center(b: &BenchView, agent: &str) -> CenterView {
         edited: b.edited,
         support_note: support_note(&b.support),
         failed: None,
+        form: None,
+        bench: None,
+        action: None,
+        errors: Vec::new(),
+        script: None,
     }
 }
 
 pub fn center_view(model: &CockpitModel, agent: &str, _now: i64) -> CenterView {
     let agent = printable(agent);
     let mut view = if let Some(s) = model.selected_scenario() {
-        scenario_center(s, &agent)
+        let mut view = scenario_center(s, &agent);
+        view.form = Some(center::scenario_form(model, s));
+        view.script = Some(center::script_pane(model, s));
+        view
     } else if let Some(b) = model.selected_bench() {
-        bench_center(b, &agent)
+        let mut view = bench_center(b, &agent);
+        view.bench = Some(center::bench_form(model, b, &agent));
+        view
     } else {
         CenterView {
             loading: false,
@@ -388,10 +409,20 @@ pub fn center_view(model: &CockpitModel, agent: &str, _now: i64) -> CenterView {
             edited: false,
             support_note: None,
             failed: None,
+            form: None,
+            bench: None,
+            action: None,
+            errors: Vec::new(),
+            script: None,
         }
     };
     view.loading = !model.loaded;
     view.failed = failed_text(model);
+    if let Some(item) = &view.item {
+        view.action = Some(center::shown_action(model, item));
+        let (comparison, last) = results_of(model);
+        view.errors = center::errors_view(last, comparison);
+    }
     view
 }
 
