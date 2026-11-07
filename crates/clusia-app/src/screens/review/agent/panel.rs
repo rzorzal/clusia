@@ -30,9 +30,8 @@ use crate::screens::review::ReviewSystems;
 use crate::screens::review::activity::elapsed_label;
 use crate::screens::review::editor::read_only_reason;
 use crate::screens::review::shell::{
-    HarnessButton, OpenSetting, RightPanel, on_harness, on_open_setting,
+    CockpitHidden, HarnessButton, OpenSetting, RightPanel, on_harness, on_open_setting,
 };
-use crate::screens::review::tests_tab::cockpit::frame::CockpitHidden;
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
@@ -393,7 +392,7 @@ pub struct PanelClosing;
 /// The column's visibility and width, and which tab's body is shown. Showing or hiding the
 /// column slides it (its width is set at once, so it is laid out only when it appears and when
 /// it goes); the first frame of a column and Reduce Motion just show or hide it.
-fn layout(
+pub(crate) fn layout(
     mut commands: Commands,
     chats: Res<Chats>,
     motion: Res<Motion>,

@@ -18,7 +18,7 @@ use crate::fonts::UiFonts;
 use crate::review_state::{ReviewSection, ReviewTabs};
 use crate::screens::review::agent::Chats;
 use crate::screens::review::editor::read_only_reason;
-use crate::screens::review::shell::{ShellTop, StatusBar};
+use crate::screens::review::shell::{CockpitHidden, ShellTop, StatusBar};
 use crate::screens::review::tests_tab::body::cockpit_open;
 use crate::screens::review::tests_tab::{SubTab, TestsModels};
 use crate::theme::Swatch;
@@ -62,11 +62,6 @@ pub struct CockpitBack(pub PrRef);
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CockpitDismissFailed(pub PrRef);
-
-/// A part of the review's screen the cockpit covers. The right column's own layout leaves a
-/// column with this alone, so its display is not flipped back while the cockpit is open.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CockpitHidden;
 
 /// The `HeaderView` the header bar was drawn from.
 #[derive(Component)]
@@ -290,31 +285,18 @@ pub fn draw_body(p: &mut Spawner, _fonts: &UiFonts, pr: &PrRef) {
                 center.spawn((region(false), CockpitChart(pr.clone())));
                 center.spawn((region(false), CockpitCenterFoot(pr.clone())));
             });
-            cols.spawn(Node {
-                width: px(COLUMN_RIGHT),
-                flex_shrink: 0.0,
-                min_height: px(0),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(12),
-                ..default()
-            })
+            // One card: the comparison over the copilot, as the mockup draws them.
+            cockpit_card(
+                cols,
+                Node {
+                    width: px(COLUMN_RIGHT),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            )
             .with_children(|right| {
-                cockpit_card(
-                    right,
-                    Node {
-                        flex_shrink: 0.0,
-                        ..default()
-                    },
-                )
-                .with_child((region(false), CockpitCompare(pr.clone())));
-                cockpit_card(
-                    right,
-                    Node {
-                        flex_grow: 1.0,
-                        ..default()
-                    },
-                )
-                .with_child((region(true), CockpitCopilot(pr.clone())));
+                right.spawn((region(false), CockpitCompare(pr.clone())));
+                right.spawn((region(true), CockpitCopilot(pr.clone())));
             });
         });
     });
@@ -452,9 +434,9 @@ pub fn load_cockpit(
 ) {
     let mut wrote = false;
     let models = cockpit.bypass_change_detection();
-    let shown = |pr: &PrRef| tabs.0.get(pr).is_some_and(|t| t.ready().is_some());
-    if models.0.keys().any(|pr| !shown(pr)) {
-        models.0.retain(|pr, _| shown(pr));
+    // A review that is only not ready right now keeps what it asked.
+    if models.0.keys().any(|pr| !tabs.0.contains_key(pr)) {
+        models.0.retain(|pr, _| tabs.0.contains_key(pr));
         wrote = true;
     }
     if model.connection != Connection::Live {
@@ -550,6 +532,9 @@ fn draw_header(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &HeaderDrawn)
     p.spawn(Node {
         align_items: AlignItems::Center,
         column_gap: px(16),
+        min_width: px(0),
+        flex_shrink: 1.0,
+        overflow: Overflow::clip(),
         ..default()
     })
     .with_children(|right| {
@@ -568,6 +553,10 @@ fn draw_header(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &HeaderDrawn)
                         if matches!(view.main, MainStatus::Preparing { .. }) {
                             main.spawn(spinner());
                         }
+                    }
+                    None if matches!(view.main, MainStatus::NotSet) => {
+                        main.spawn(text(fonts, "main", Type::META));
+                        main.spawn(text(fonts, "not set up", Type::META.ink(ink)));
                     }
                     None => {
                         main.spawn(text(fonts, line.clone(), Type::META.ink(ink)));
@@ -630,6 +619,10 @@ pub fn fill_center_frame(
     }
 }
 
+fn centered(mut layout: Mut<TextLayout>) {
+    layout.justify = Justify::Center;
+}
+
 fn draw_center_frame(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, frame: &CenterFrame) {
     if let Some(failed) = &frame.failed {
         failed_line(p, fonts, pr, failed);
@@ -655,17 +648,20 @@ fn draw_center_frame(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, frame: &Cente
             writing,
             write_off,
         } => {
-            c.spawn(card(Node {
+            c.spawn(Node {
                 width: px(460),
                 max_width: percent(100),
                 padding: UiRect::all(px(28)),
                 flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
                 row_gap: px(12),
                 ..default()
-            }))
+            })
             .with_children(|card| {
                 card.spawn(text(fonts, empty.title.clone(), Type::HEADING.size(18.0)));
-                card.spawn(wrapped_text(fonts, empty.text.clone(), Type::MUTED));
+                card.spawn(wrapped_text(fonts, empty.text.clone(), Type::MUTED))
+                    .entry::<TextLayout>()
+                    .and_modify(centered);
                 card.spawn(Node {
                     align_items: AlignItems::Center,
                     column_gap: px(10),
@@ -694,7 +690,9 @@ fn draw_center_frame(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, frame: &Cente
                         row.spawn(text(fonts, line.clone(), Type::MUTED));
                     });
                 }
-                card.spawn(wrapped_text(fonts, empty.foot.clone(), Type::META));
+                card.spawn(wrapped_text(fonts, empty.foot.clone(), Type::META))
+                    .entry::<TextLayout>()
+                    .and_modify(centered);
             });
         }
     });
@@ -1017,7 +1015,7 @@ mod tests {
         let (mut app, pr) = entry_app();
         click_open(&mut app, &pr);
         let with = |text: &str| {
-            let mut v = demo_cockpit(NOW, DemoCockpit::Scenario);
+            let mut v = demo_cockpit(NOW, DemoCockpit::Empty);
             v.failed = Some(text.into());
             v
         };
@@ -1031,7 +1029,7 @@ mod tests {
             );
             testing::settle(app);
         };
-        tell_cockpit(&mut app, &pr, DemoCockpit::Scenario);
+        tell_cockpit(&mut app, &pr, DemoCockpit::Empty);
         tell_changed(&mut app, with("x"));
         assert!(testing::shows(&mut app, "x"));
         let dismiss = testing::find::<CockpitDismissFailed>(&mut app, |d| d.0 == pr);
@@ -1061,12 +1059,7 @@ mod tests {
         let list = testing::find::<CockpitList>(&mut app, |_| true);
         assert_eq!(width_of_parent(&mut app, list), px(COLUMN_LEFT));
         let compare = testing::find::<CockpitCompare>(&mut app, |_| true);
-        let card = app
-            .world()
-            .get::<ChildOf>(compare)
-            .expect("a card")
-            .parent();
-        assert_eq!(width_of_parent(&mut app, card), px(COLUMN_RIGHT));
+        assert_eq!(width_of_parent(&mut app, compare), px(COLUMN_RIGHT));
         for c in [
             testing::count::<CockpitCenter>(&mut app),
             testing::count::<CockpitChart>(&mut app),
@@ -1136,6 +1129,36 @@ mod tests {
         );
         testing::settle(&mut app);
         assert_eq!(children_of::<CockpitList>(&mut app), list);
+    }
+
+    #[test]
+    fn a_hostile_main_reason_is_bounded_in_the_view_and_the_header_text() {
+        let reason = format!("\u{202e}{}", "x".repeat(10_000));
+        let mut view = demo_cockpit(NOW, DemoCockpit::Scenario);
+        view.main.phase = clusia_core::cockpit::MainPhase::Unavailable { reason };
+        let model = model_of(view);
+        let header = header_view(&model, "Claude", NOW);
+        let (line, _) = main_status_text(&header.main);
+        assert!(
+            line.chars().count() <= super::super::PURPOSE_SHOWN + 1,
+            "{}",
+            line.len()
+        );
+        assert!(!line.contains('\u{202e}'));
+        let list = list_view(&model, "Claude", NOW);
+        let note = list.on_main_note.expect("a note");
+        assert!(note.chars().count() <= super::super::PURPOSE_SHOWN + 1);
+        assert!(!note.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn the_right_column_is_one_card() {
+        let (mut app, _pr) = opened(DemoCockpit::Scenario);
+        let compare = testing::find::<CockpitCompare>(&mut app, |_| true);
+        let copilot = testing::find::<CockpitCopilot>(&mut app, |_| true);
+        let parent =
+            |app: &App, e: Entity| app.world().get::<ChildOf>(e).expect("a parent").parent();
+        assert_eq!(parent(&app, compare), parent(&app, copilot));
     }
 
     #[test]

@@ -732,7 +732,9 @@ pub fn register(app: &mut App) {
             Update,
             (
                 frame::load_cockpit.run_if(frame::load_changed),
-                frame::hide_for_cockpit.run_if(frame::screen_changed),
+                frame::hide_for_cockpit
+                    .run_if(frame::screen_changed)
+                    .before(crate::screens::review::agent::panel::layout),
                 frame::fill_header.run_if(frame::regions_changed),
                 frame::fill_center_frame.run_if(frame::regions_changed),
                 list::fill_list.run_if(frame::regions_changed),

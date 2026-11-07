@@ -8,9 +8,9 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button as WidgetButton, ScrollArea, observe};
 use clusia_core::PrRef;
-use clusia_core::cockpit::{CockpitScope, ItemRef, MainPhase, ScenarioAsk};
+use clusia_core::cockpit::{CockpitScope, ItemKind, ItemRef, MainPhase, ScenarioAsk};
 
-use super::frame::{CockpitList, failed_line};
+use super::frame::CockpitList;
 use super::views::{ListView, Row, Tone, list_view};
 use super::{CockpitModal, CockpitModel, CockpitModels};
 use crate::agent_name;
@@ -130,12 +130,22 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &ListView) {
         ScrollPosition::default(),
     ))
     .with_children(|body| {
-        if let Some(failed) = &view.failed {
-            failed_line(body, fonts, pr, failed);
-        }
-        let scenarios: Vec<&Row> = view.rows.iter().filter(|r| !r.mono).collect();
-        let benches: Vec<&Row> = view.rows.iter().filter(|r| r.mono).collect();
-        group_head(body, fonts, &format!("SCENARIOS · {}", scenarios.len()));
+        let scenarios: Vec<&Row> = view
+            .rows
+            .iter()
+            .filter(|r| r.item.kind == ItemKind::Scenario)
+            .collect();
+        let benches: Vec<&Row> = view
+            .rows
+            .iter()
+            .filter(|r| r.item.kind == ItemKind::Bench)
+            .collect();
+        group_head(
+            body,
+            fonts,
+            &format!("SCENARIOS · {}", scenarios.len()),
+            GROUP,
+        );
         if let Some(writing) = &view.scenarios_writing {
             body.spawn(Node {
                 width: percent(100),
@@ -166,6 +176,7 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &ListView) {
             body,
             fonts,
             &format!("BENCHMARKS · ON DEMAND · {}", benches.len()),
+            GROUP,
         );
         if benches.is_empty() {
             empty_line(
@@ -177,21 +188,35 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &ListView) {
         for row in benches {
             draw_row(body, fonts, pr, row);
         }
-        group_head(body, fonts, "LOAD · COMES LATER");
+        group_head(
+            body,
+            fonts,
+            "LOAD · COMES LATER",
+            Type {
+                ink: Swatch::Faint,
+                ..GROUP
+            },
+        );
+        // The group head's own bottom padding is 6 px: 4 more make the 10 px the button sits at.
         body.spawn(Node {
             width: percent(100),
-            padding: UiRect::new(px(14), px(14), px(10), px(12)),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::new(px(14), px(14), px(4), px(12)),
             ..default()
         })
-        .with_child((
-            button(
-                fonts,
-                "+ Ask the copilot for a scenario",
-                Variant::Secondary,
-            ),
-            CockpitAskScenario(pr.clone()),
-            observe(on_ask_scenario),
-        ));
+        .with_children(|slot| {
+            slot.spawn((
+                button(
+                    fonts,
+                    "+ Ask the copilot for a scenario",
+                    Variant::Secondary,
+                ),
+                CockpitAskScenario(pr.clone()),
+                observe(on_ask_scenario),
+            ))
+            .entry::<Node>()
+            .and_modify(wide);
+        });
     });
     p.spawn(divider());
     p.spawn(Node {
@@ -245,14 +270,14 @@ fn wide(mut node: Mut<Node>) {
     node.align_self = AlignSelf::Stretch;
 }
 
-fn group_head(p: &mut Spawner, fonts: &UiFonts, label: &str) {
+fn group_head(p: &mut Spawner, fonts: &UiFonts, label: &str, style: Type) {
     p.spawn(Node {
         width: percent(100),
         flex_shrink: 0.0,
         padding: UiRect::new(px(14), px(14), px(12), px(6)),
         ..default()
     })
-    .with_child(text(fonts, label.to_string(), GROUP));
+    .with_child(text(fonts, label.to_string(), style));
 }
 
 fn empty_line(p: &mut Spawner, fonts: &UiFonts, line: String) {
@@ -774,6 +799,40 @@ mod tests {
                 .iter()
                 .any(|t| t.contains('\u{202e}'))
         );
+    }
+
+    #[test]
+    fn a_failed_turn_has_one_line_at_the_top_of_the_center_only() {
+        let mut view = demo_cockpit(NOW, DemoCockpit::Empty);
+        view.failed = Some("the agent stopped".into());
+        let (mut app, _pr) = app_with(view);
+        assert_eq!(
+            testing::count::<super::super::frame::CockpitDismissFailed>(&mut app),
+            1
+        );
+        let line = testing::find::<super::super::frame::CockpitDismissFailed>(&mut app, |_| true);
+        let mut up = line;
+        let mut in_center = false;
+        while let Some(parent) = app.world().get::<ChildOf>(up).map(|c| c.parent()) {
+            in_center |= app
+                .world()
+                .get::<super::super::frame::CockpitCenter>(parent)
+                .is_some();
+            up = parent;
+        }
+        assert!(in_center, "the line sits in the center");
+    }
+
+    #[test]
+    fn the_ask_button_is_full_width_in_both_states() {
+        for state in [DemoCockpit::Empty, DemoCockpit::Scenario] {
+            let (mut app, pr) = app_with(demo_cockpit(NOW, state));
+            let e = testing::find::<CockpitAskScenario>(&mut app, |b| b.0 == pr);
+            assert_eq!(
+                app.world().get::<Node>(e).expect("a node").align_self,
+                AlignSelf::Stretch
+            );
+        }
     }
 
     #[test]
