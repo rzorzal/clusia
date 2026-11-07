@@ -21,7 +21,7 @@ use clusia_core::cockpit::{
 use clusia_core::functions::check_value;
 use clusia_core::printable::{printable, printable_lines};
 
-use super::frame::{CockpitCenter, CockpitCenterFoot, FrameBuilt, failed_line};
+use super::frame::{CockpitCenter, CockpitCenterFoot, CockpitErrors, FrameBuilt, failed_line};
 use super::views::{CenterView, PURPOSE_SHOWN, TITLE_SHOWN, VALUE_SHOWN, center_view, shown};
 use super::{CockpitModal, CockpitModel, CockpitModels, Field, FieldKey};
 use crate::agent_name;
@@ -737,7 +737,8 @@ pub struct SuggestAsComment {
 #[derive(Component)]
 pub struct CenterBuilt(CenterView);
 
-/// What the foot draws: the errors and the action row.
+/// What the foot draws: the action row. The errors are drawn above it, where the card
+/// scrolls, and the foot holds them only to know which item it draws for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FootView {
     pub item: ItemRef,
@@ -1467,25 +1468,81 @@ fn draw_foot(
     })
     .with_children(|foot| {
         foot.spawn(Node {
-            margin: UiRect::top(px(SECTION_GAP)),
-            ..default()
-        })
-        .with_child(text(fonts, "Errors", Type::STRONG));
-        for row in &view.errors {
-            let ink = match row.tone {
-                ErrorTone::Pr => Swatch::Orange,
-                ErrorTone::Main => Swatch::Muted,
-                ErrorTone::More | ErrorTone::None => Swatch::Faint,
-            };
-            foot.spawn(wrapped_text(fonts, row.text.clone(), Type::BODY.ink(ink)));
-        }
-        foot.spawn(Node {
             margin: UiRect::top(px(10)),
             flex_direction: FlexDirection::Column,
             row_gap: px(4),
             ..default()
         })
         .with_children(|action| draw_action(action, fonts, pr, view, focused, typed));
+    });
+}
+
+/// The errors of the item the center shows, under its chart.
+#[derive(Component)]
+pub struct ErrorsBuilt(Vec<ErrorRow>);
+
+/// Draws the errors of the selected item, in the part of the card that scrolls.
+pub fn fill_errors(
+    mut commands: Commands,
+    tabs: Res<ReviewTabs>,
+    app_model: Res<Model>,
+    clock: Res<Clock>,
+    models: Res<CockpitModels>,
+    fonts: Res<UiFonts>,
+    regions: Query<(Entity, &CockpitErrors, Option<&ErrorsBuilt>)>,
+) {
+    let now = clock.now();
+    for (entity, region, built) in &regions {
+        let pr = &region.0;
+        let Some(tab) = tabs.0.get(pr).filter(|t| t.ready().is_some()) else {
+            continue;
+        };
+        let agent = agent_name::of_tab(&app_model.snapshot, tab);
+        let Some(rows) = models
+            .0
+            .get(pr)
+            .and_then(|m| foot_view(m, &agent, now))
+            .map(|f| f.errors)
+        else {
+            if built.is_some() {
+                commands.entity(entity).despawn_related::<Children>();
+                commands.entity(entity).remove::<ErrorsBuilt>();
+            }
+            continue;
+        };
+        if built.is_some_and(|b| b.0 == rows) {
+            continue;
+        }
+        commands.entity(entity).despawn_related::<Children>();
+        commands
+            .entity(entity)
+            .with_children(|p| draw_errors(p, &fonts, &rows));
+        commands.entity(entity).insert(ErrorsBuilt(rows));
+    }
+}
+
+fn draw_errors(p: &mut Spawner, fonts: &UiFonts, rows: &[ErrorRow]) {
+    p.spawn(Node {
+        width: percent(100),
+        flex_direction: FlexDirection::Column,
+        row_gap: px(6),
+        padding: UiRect::new(px(18), px(18), px(0), px(12)),
+        ..default()
+    })
+    .with_children(|c| {
+        c.spawn(Node {
+            margin: UiRect::top(px(SECTION_GAP)),
+            ..default()
+        })
+        .with_child(text(fonts, "Errors", Type::STRONG));
+        for row in rows {
+            let ink = match row.tone {
+                ErrorTone::Pr => Swatch::Orange,
+                ErrorTone::Main => Swatch::Muted,
+                ErrorTone::More | ErrorTone::None => Swatch::Faint,
+            };
+            c.spawn(wrapped_text(fonts, row.text.clone(), Type::BODY.ink(ink)));
+        }
     });
 }
 

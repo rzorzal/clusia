@@ -127,8 +127,9 @@ pub struct CockpitModel {
     pub copilot_focus: bool,
     /// Bumped when a copilot ask was taken, so its input can clear itself.
     pub copilot_sent: u64,
-    /// **Suggest as a test in a comment** waits for the selected scenario's script.
-    pub suggest_after_script: bool,
+    /// The scenario whose **Suggest as a test in a comment** waits for its script. Selecting
+    /// another item drops it.
+    pub suggest_for: Option<String>,
     /// Why the copilot's input did not send what it holds; cleared by the next send.
     pub copilot_error: Option<String>,
     /// The `failed` text the reviewer dismissed.
@@ -202,6 +203,7 @@ impl CockpitModel {
     pub fn select(&mut self, item: ItemRef) {
         if self.selected.as_ref() != Some(&item) && self.has_item(&item) {
             self.selected = Some(item);
+            self.suggest_for = None;
             self.touch();
         }
     }
@@ -433,6 +435,7 @@ impl CockpitModel {
         if self.selected.as_ref().is_some_and(|i| self.has_item(i)) {
             return;
         }
+        self.suggest_for = None;
         self.selected = self.view.as_ref().and_then(|v| {
             v.scenarios
                 .first()
@@ -641,7 +644,7 @@ impl CockpitModels {
             model.live_run = None;
             model.stopping = false;
             model.run_after_approve = None;
-            model.suggest_after_script = false;
+            model.suggest_for = None;
             model.script_asked = None;
             model.touch();
         }
@@ -762,6 +765,7 @@ pub fn register(app: &mut App) {
             (
                 center::fill_center.run_if(frame::regions_changed),
                 center::fill_foot.run_if(frame::regions_changed),
+                center::fill_errors.run_if(frame::regions_changed),
                 center::ask_script_when_needed.run_if(resource_changed::<CockpitModels>),
                 center::commit_scenario_fields.run_if(on_message::<FieldCommitted>),
                 center::commit_bench_fields.run_if(on_message::<FieldCommitted>),

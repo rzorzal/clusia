@@ -76,6 +76,10 @@ pub struct TryNext(pub PrRef);
 #[derive(Component)]
 pub struct CopilotShell;
 
+/// The region's "QA copilot" line.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct CopilotHeader(pub PrRef);
+
 /// The scrolling thread of the region.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CopilotThread(pub PrRef);
@@ -240,11 +244,14 @@ pub fn shell_copilot(
             .entity(entity)
             .insert(CopilotShell)
             .with_children(|p| {
-                p.spawn(Node {
-                    padding: UiRect::new(px(16), px(16), px(8), px(8)),
-                    flex_shrink: 0.0,
-                    ..default()
-                })
+                p.spawn((
+                    Node {
+                        padding: UiRect::new(px(16), px(16), px(8), px(8)),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    CopilotHeader(pr.clone()),
+                ))
                 .with_child(text(&fonts, "QA copilot", HEADING));
                 p.spawn((
                     Node {
@@ -859,7 +866,7 @@ pub fn on_suggest(
         model.script_asked = None;
         model.script_error = None;
     }
-    model.suggest_after_script = true;
+    model.suggest_for = Some(scenario.clone());
     if let Some(ask) = model.want_script(pr) {
         asks.send(ask);
     }
@@ -876,16 +883,17 @@ pub fn suggest_when_script(
 ) {
     let mut filled = false;
     for (pr, model) in &mut models.bypass_change_detection().0 {
-        if !model.suggest_after_script {
+        let Some(slug) = model.suggest_for.clone() else {
             continue;
-        }
+        };
         if let Some(error) = model.script_error.clone() {
-            model.suggest_after_script = false;
+            model.suggest_for = None;
             not_sent(&mut toasts, &time, &error);
             continue;
         }
-        let Some(s) = model.selected_scenario() else {
-            model.suggest_after_script = false;
+        // Only the scenario that was clicked: another one selected since is not suggested.
+        let Some(s) = model.selected_scenario().filter(|s| s.slug == slug) else {
+            model.suggest_for = None;
             continue;
         };
         let Some(script) = model
@@ -896,7 +904,7 @@ pub fn suggest_when_script(
             continue;
         };
         let text = scenario_comment(s, script);
-        model.suggest_after_script = false;
+        model.suggest_for = None;
         let Some(tab) = tabs.bypass_change_detection().0.get_mut(pr) else {
             continue;
         };
@@ -1396,6 +1404,50 @@ mod tests {
     }
 
     #[test]
+    fn the_thread_scrolls_under_the_header_and_never_over_it() {
+        let mut app = testing::layout_app(fixture::demo(NOW), bevy::math::UVec2::new(1280, 800));
+        let pr = testing::open_ready(&mut app, false);
+        testing::set_section(&mut app, &pr, crate::review_state::ReviewSection::Tests);
+        testing::open_cockpit(&mut app, &pr, scenario());
+        support::select(&mut app, &pr, scenario_item(REFRESH));
+        for _ in 0..3 {
+            testing::settle(&mut app);
+        }
+        let header = testing::find::<CopilotHeader>(&mut app, |_| true);
+        let thread = testing::find::<CopilotThread>(&mut app, |_| true);
+        let row = testing::find::<CopilotInputRow>(&mut app, |_| true);
+        let node = app.world().get::<Node>(thread).expect("a node");
+        assert_eq!(node.overflow.y, bevy::ui::OverflowAxis::Scroll);
+        let (_, ht, _, hh) = testing::frame(&app, header);
+        let (_, tt, _, th) = testing::frame(&app, thread);
+        let (_, rt, _, _) = testing::frame(&app, row);
+        assert!(th > 0.0);
+        assert!(ht + hh <= tt + 0.5, "the thread starts under the header");
+        assert!(tt + th <= rt + 0.5, "and ends over the input");
+        // Its last message sits at the bottom of what shows.
+        let last = *app
+            .world()
+            .get::<Children>(thread)
+            .expect("messages")
+            .last()
+            .expect("a message");
+        let (_, lt, _, lh) = testing::frame(&app, last);
+        assert!(lt + lh <= tt + th + 1.0, "{} > {}", lt + lh, tt + th);
+        // A clipped thread draws nothing over the header: it clips to its own box.
+        let clip = app
+            .world()
+            .get::<bevy::ui::CalculatedClip>(last)
+            .map(|c| c.clip.min.y);
+        if let Some(top) = clip {
+            assert!(
+                top >= ht + hh - 0.5,
+                "clip {top} over the header {}",
+                ht + hh
+            );
+        }
+    }
+
+    #[test]
     fn the_thread_rebuilds_only_when_its_view_changes() {
         let view = demo_cockpit(NOW, DemoCockpit::BenchRunning);
         let item = ItemRef {
@@ -1511,7 +1563,7 @@ mod tests {
         let view = refresh_view(&app, &pr);
         let editor = testing::tab(&app, &pr).ui.editor.expect("an editor");
         assert_eq!(editor.text, scenario_comment(&view, &refresh_script()));
-        assert!(!support::model(&app, &pr).suggest_after_script);
+        assert_eq!(support::model(&app, &pr).suggest_for, None);
     }
 
     #[test]
@@ -1522,6 +1574,34 @@ mod tests {
         assert!(testing::tab(&app, &pr).ui.editor.is_none());
         land_script(&mut app, &pr, refresh_script());
         assert!(testing::tab(&app, &pr).ui.editor.is_some());
+    }
+
+    #[test]
+    fn a_pending_suggest_ends_when_another_scenario_is_selected() {
+        let (mut app, pr) = refresh_app();
+        click_suggest(&mut app, &pr);
+        assert_eq!(
+            support::model(&app, &pr).suggest_for.as_deref(),
+            Some(REFRESH)
+        );
+        support::select(&mut app, &pr, scenario_item("token-endpoint-is-down"));
+        assert_eq!(support::model(&app, &pr).suggest_for, None);
+        land_script(&mut app, &pr, refresh_script());
+        land_script(&mut app, &pr, fixture::demo_scenario_script());
+        let tab = testing::tab(&app, &pr);
+        assert!(tab.ui.editor.is_none(), "{:?}", tab.ui.editor);
+        assert_eq!(tab.ui.section, ReviewSection::Tests);
+    }
+
+    #[test]
+    fn a_suggest_for_another_slug_fills_nothing() {
+        let (mut app, pr) = refresh_app();
+        support::edit_model(&mut app, &pr, |m| {
+            m.suggest_for = Some("token-endpoint-is-down".into());
+        });
+        land_script(&mut app, &pr, refresh_script());
+        assert!(testing::tab(&app, &pr).ui.editor.is_none());
+        assert_eq!(support::model(&app, &pr).suggest_for, None);
     }
 
     #[test]
@@ -1574,7 +1654,7 @@ mod tests {
         assert_eq!(tab.ui.editor.expect("the editor").text, "half a thought");
         assert_eq!(tab.ui.section, ReviewSection::Tests);
         assert_eq!(testing::recorded(&mut app), []);
-        assert!(!support::model(&app, &pr).suggest_after_script);
+        assert_eq!(support::model(&app, &pr).suggest_for, None);
     }
 
     #[test]

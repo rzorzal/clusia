@@ -8,8 +8,8 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, observe};
 use clusia_core::PrRef;
 use clusia_core::cockpit::{
-    ComparisonView, DeltaLabel, Freshness, MAIN_FIRST, MainPhase, MetricRow, PassCount, SideStat,
-    SideView, Verdict, delta_text, metric_value_text,
+    ComparisonView, DeltaLabel, Freshness, MAIN_FIRST, MainPhase, Metric, MetricRow, PassCount,
+    SideStat, SideView, Verdict, delta_text, metric_value_text,
 };
 
 use super::frame::CockpitCompare;
@@ -148,6 +148,90 @@ pub struct CompareDrawn {
 #[derive(Component)]
 pub struct CompareBuilt(CompareDrawn);
 
+/// A cell of the table, for the side that measures it.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableCell;
+
+/// The step a calls/s value is written in: (thousandths per unit shown, decimals, suffix).
+fn calls_tier(milli: u64) -> (f64, usize, &'static str) {
+    let calls = milli as f64 / 1000.0;
+    if (calls * 10.0).round() < 10_000.0 {
+        (1_000.0, 1, "")
+    } else if calls.round() < 10_000.0 {
+        (1_000.0, 0, "")
+    } else if (calls / 1000.0).round() < 1000.0 {
+        (1_000_000.0, 0, " K")
+    } else {
+        (1_000_000_000.0, 1, " M")
+    }
+}
+
+/// `n` with a space between each group of three digits: "1 840".
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A number with `decimals` decimals, a ".0" left out.
+fn decimal(value: f64, decimals: usize) -> String {
+    let text = format!("{value:.decimals$}");
+    match text.strip_suffix(".0") {
+        Some(whole) => whole.to_string(),
+        None => text,
+    }
+}
+
+/// Calls a second, from the thousandths `metric_value_text` takes, short enough for a cell:
+/// "12.5", "1 840", "950 K", "21.9 M". The row's label says the unit.
+pub fn calls_text(milli: u64) -> String {
+    let (per, decimals, suffix) = calls_tier(milli);
+    let value = milli as f64 / per;
+    if decimals == 0 && suffix.is_empty() {
+        return grouped(value.round() as u64);
+    }
+    if suffix.is_empty() {
+        decimal(value, decimals)
+    } else {
+        format!("{value:.decimals$}{suffix}")
+    }
+}
+
+/// A value of `metric` as a cell shows it.
+fn value_text(metric: Metric, value: u64) -> String {
+    match metric {
+        Metric::CallsPerSec => calls_text(value),
+        _ => metric_value_text(metric, value),
+    }
+}
+
+/// The unit a median of `metric` is written in, as (raw units per unit shown, decimals): what
+/// `metric_value_text` (or `calls_text`) picks for that median.
+fn unit_of(metric: Metric, median: u64) -> (f64, usize) {
+    match metric {
+        Metric::Duration if median < 1000 => (1.0, 0),
+        Metric::Duration => (1000.0, 1),
+        Metric::P50 | Metric::P95 => match median {
+            0..1_000 => (1.0, 0),
+            1_000..999_950 => (1e3, 1),
+            999_950..999_950_000 => (1e6, 1),
+            _ => (1e9, 2),
+        },
+        Metric::CallsPerSec => {
+            let (per, decimals, _) = calls_tier(median);
+            (per, decimals)
+        }
+        Metric::PeakMemory => (1024.0, 1),
+        Metric::AvgCpu => (10.0, 0),
+    }
+}
+
 /// The verdict box, for the side that looks at its fill.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerdictBox;
@@ -156,47 +240,18 @@ pub struct VerdictBox;
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct TryMainAgain(pub PrRef);
 
-/// A value's number and its unit: "20.4 s" is ("20.4", "s").
-fn split_unit(value: &str) -> (&str, &str) {
-    let at = value
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(value.len());
-    (&value[..at], value[at..].trim())
-}
-
-/// " ±<n>" in the unit and with the decimals of the median's text, so "20.4 s" reads "±0.2"
-/// and not "±200 ms", and a ".0" left out. When the spread moves the median into another unit, the spread is
-/// written whole, with its own unit.
+/// " ±<n>": the spread rounded on its own in the median's unit and decimals ("20.4 s ±0.2",
+/// "190.0 MB ±6"), a ".0" left out; `None` when it rounds to nothing.
 fn spread_text(row: &MetricRow, stat: &SideStat) -> Option<String> {
-    if stat.spread == 0 {
-        return None;
-    }
-    let value = metric_value_text(row.metric, stat.median);
-    let upper = metric_value_text(row.metric, stat.median.saturating_add(stat.spread));
-    let ((number, unit), (upper_number, upper_unit)) = (split_unit(&value), split_unit(&upper));
-    let parsed = number
-        .parse::<f64>()
-        .ok()
-        .zip(upper_number.parse::<f64>().ok());
-    match parsed {
-        Some((low, high)) if unit == upper_unit => {
-            let decimals = number.split_once('.').map_or(0, |(_, d)| d.len());
-            let spread = format!("{:.*}", decimals, high - low);
-            // "6.0" reads "6": the column is narrow, and the decimal said nothing.
-            let spread = match spread.strip_suffix(".0") {
-                Some(whole) => whole.to_string(),
-                None => spread,
-            };
-            Some(format!(" ±{spread}"))
-        }
-        _ => Some(format!(" ±{}", metric_value_text(row.metric, stat.spread))),
-    }
+    let (per, decimals) = unit_of(row.metric, stat.median);
+    let text = decimal(stat.spread as f64 / per, decimals);
+    (text.chars().any(|c| c.is_ascii_digit() && c != '0')).then(|| format!(" ±{text}"))
 }
 
 fn stat_cell(row: &MetricRow, stat: Option<&SideStat>) -> Cell {
     match stat {
         Some(s) => Cell {
-            value: metric_value_text(row.metric, s.median),
+            value: value_text(row.metric, s.median),
             spread: spread_text(row, s),
             ink: Swatch::Fg,
         },
@@ -286,19 +341,32 @@ fn comparison_table(view: &CompareView, c: &ComparisonView) -> CompareBody {
     }
 }
 
+/// A run on this PR alone: its pass count and the numbers of its last round, in the PR column.
 fn last_table(last: &SideView) -> CompareBody {
-    let row = match &last.pass {
-        Some(pass) => result_row(Some(pass), None),
-        None => TableRow {
-            label: "Rounds".into(),
-            main: Cell::none(),
-            pr: Cell::plain(last.rounds.to_string(), Swatch::Fg),
-            delta: Cell::plain("—".into(), Swatch::Muted),
-            faint: false,
-        },
-    };
+    let mut rows = Vec::new();
+    if let Some(pass) = &last.pass {
+        rows.push(result_row(Some(pass), None));
+    }
+    let points = &last.series.points;
+    let peak = points.iter().filter_map(|p| p.rss_kb).max();
+    let cpu: Vec<u64> = points
+        .iter()
+        .filter_map(|p| p.cpu_milli.map(u64::from))
+        .collect();
+    let mean = (!cpu.is_empty()).then(|| cpu.iter().sum::<u64>() / cpu.len() as u64);
+    for (metric, value) in [(Metric::PeakMemory, peak), (Metric::AvgCpu, mean)] {
+        if let Some(value) = value {
+            rows.push(TableRow {
+                label: metric.label().into(),
+                main: Cell::none(),
+                pr: Cell::plain(value_text(metric, value), Swatch::Fg),
+                delta: Cell::plain("—".into(), Swatch::Muted),
+                faint: false,
+            });
+        }
+    }
     CompareBody::Table {
-        rows: vec![row],
+        rows,
         verdict: None,
         notes: freshness_notes(&[last]),
         anti_goal: false,
@@ -425,7 +493,7 @@ const HEADING: Type = Type {
     ..Type::STRONG
 };
 /// The widths of a value column and of the Δ column.
-const VALUE_W: f32 = 88.0;
+const VALUE_W: f32 = 90.0;
 const DELTA_W: f32 = 46.0;
 const NOTE: Type = Type::META.size(11.5);
 
@@ -434,7 +502,7 @@ fn draw_compare(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, drawn: &CompareDra
         width: percent(100),
         flex_direction: FlexDirection::Column,
         row_gap: px(10),
-        padding: UiRect::new(px(16), px(16), px(16), px(8)),
+        padding: UiRect::new(px(12), px(12), px(16), px(8)),
         ..default()
     })
     .with_children(|c| {
@@ -570,12 +638,15 @@ fn table_row(p: &mut Spawner, fonts: &UiFonts, row: &TableRow, head: bool) {
         Stroke(Swatch::Line),
     ))
     .with_children(|r| {
-        r.spawn(Node {
-            flex_grow: 1.0,
-            min_width: px(0),
-            overflow: Overflow::clip_x(),
-            ..default()
-        })
+        r.spawn((
+            Node {
+                flex_grow: 1.0,
+                min_width: px(0),
+                overflow: Overflow::clip_x(),
+                ..default()
+            },
+            TableCell,
+        ))
         .with_child((
             text(
                 fonts,
@@ -591,13 +662,16 @@ fn table_row(p: &mut Spawner, fonts: &UiFonts, row: &TableRow, head: bool) {
             (&row.pr, VALUE_W),
             (&row.delta, DELTA_W),
         ] {
-            r.spawn(Node {
-                width: px(width),
-                flex_shrink: 0.0,
-                justify_content: JustifyContent::FlexEnd,
-                align_items: AlignItems::Baseline,
-                ..default()
-            })
+            r.spawn((
+                Node {
+                    width: px(width),
+                    flex_shrink: 0.0,
+                    justify_content: JustifyContent::FlexEnd,
+                    align_items: AlignItems::Baseline,
+                    ..default()
+                },
+                TableCell,
+            ))
             .with_children(|c| {
                 c.spawn((
                     text(
@@ -644,7 +718,8 @@ pub fn register(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use clusia_core::cockpit::{CockpitView, ItemKind, ItemRef, Metric};
+    use bevy::math::UVec2;
+    use clusia_core::cockpit::{CockpitView, ItemKind, ItemRef};
 
     use super::super::CockpitModal;
     use super::super::center::support::{self, REFRESH, scenario_item};
@@ -909,7 +984,172 @@ mod tests {
         assert_eq!(rows[0].pr.value, "3 of 3");
         assert_eq!(rows[0].main.value, "—");
         assert_eq!(rows[0].delta.value, "—");
+        // Then the last run's own numbers, PR column only.
+        assert_eq!(rows[1].label, "Peak memory");
+        assert_eq!(rows[1].pr.value, "410.0 MB");
+        assert_eq!(rows[2].label, "CPU (avg)");
+        assert_eq!(rows[2].pr.value, "41%");
+        assert!(
+            rows[1..]
+                .iter()
+                .all(|r| r.main.value == "—" && r.delta.value == "—")
+        );
         assert_eq!(verdict_fill(&mut app), None);
+    }
+
+    fn stat(median: u64, spread: u64) -> SideStat {
+        SideStat {
+            median,
+            spread,
+            n: 3,
+        }
+    }
+
+    fn spread_of(metric: Metric, median: u64, spread: u64) -> Option<String> {
+        let s = stat(median, spread);
+        let row = MetricRow {
+            metric,
+            main: Some(s),
+            pr: Some(s),
+            delta: clusia_core::cockpit::Delta {
+                label: DeltaLabel::Same,
+                percent: Some(0),
+            },
+        };
+        spread_text(&row, &s)
+    }
+
+    #[test]
+    fn a_spread_is_rounded_on_its_own_in_the_medians_unit() {
+        assert_eq!(
+            spread_of(Metric::Duration, 20_400, 200).as_deref(),
+            Some(" ±0.2")
+        );
+        assert_eq!(
+            spread_of(Metric::Duration, 20_400, 40),
+            None,
+            "0.04 s is ±0"
+        );
+        assert_eq!(spread_of(Metric::Duration, 20_440, 20), None);
+        assert_eq!(
+            spread_of(Metric::Duration, 20_440, 60).as_deref(),
+            Some(" ±0.1")
+        );
+        assert_eq!(
+            spread_of(Metric::Duration, 900, 200).as_deref(),
+            Some(" ±200")
+        );
+        assert_eq!(
+            spread_of(Metric::PeakMemory, 194_560, 6_144).as_deref(),
+            Some(" ±6")
+        );
+        assert_eq!(
+            spread_of(Metric::PeakMemory, 419_840, 14_336).as_deref(),
+            Some(" ±14")
+        );
+        assert_eq!(
+            spread_of(Metric::PeakMemory, 3_072, 300).as_deref(),
+            Some(" ±0.3")
+        );
+        assert_eq!(spread_of(Metric::AvgCpu, 380, 30).as_deref(), Some(" ±3"));
+        assert_eq!(spread_of(Metric::AvgCpu, 380, 4), None);
+        assert_eq!(spread_of(Metric::P50, 41, 2).as_deref(), Some(" ±2"));
+        assert_eq!(spread_of(Metric::P50, 2_500, 300).as_deref(), Some(" ±0.3"));
+        assert_eq!(spread_of(Metric::Duration, 20_400, 0), None);
+    }
+
+    #[test]
+    fn calls_per_second_read_short() {
+        assert_eq!(calls_text(21_900_000_000), "21.9 M");
+        assert_eq!(calls_text(21_100_000_000), "21.1 M");
+        assert_eq!(calls_text(1_840_000), "1 840");
+        assert_eq!(calls_text(950_000_000), "950 K");
+        assert_eq!(calls_text(12_500), "12.5");
+        assert_eq!(calls_text(12_000), "12");
+        assert_eq!(calls_text(999_499_999), "999 K");
+        assert_eq!(calls_text(999_500_000), "1.0 M");
+        assert_eq!(calls_text(9_999_000), "9 999");
+        assert_eq!(calls_text(10_000_000), "10 K");
+    }
+
+    #[test]
+    fn no_table_cell_runs_past_its_column() {
+        for state in [DemoCockpit::Scenario, DemoCockpit::BenchRunning] {
+            let mut app = testing::layout_app(crate::fixture::demo(NOW), UVec2::new(1280, 800));
+            let pr = testing::open_ready(&mut app, false);
+            testing::set_section(&mut app, &pr, crate::review_state::ReviewSection::Tests);
+            let view = demo_cockpit(NOW, state);
+            let item = match state {
+                DemoCockpit::BenchRunning => ItemRef {
+                    kind: ItemKind::Bench,
+                    id: view.benches[0].slug.clone(),
+                },
+                _ => scenario_item(REFRESH),
+            };
+            testing::open_cockpit(&mut app, &pr, view);
+            support::select(&mut app, &pr, item);
+            testing::settle(&mut app);
+            if state == DemoCockpit::BenchRunning {
+                assert!(has(&mut app, "21.9 M") && has(&mut app, "21.1 M"));
+            }
+            let region = testing::find::<CockpitCompare>(&mut app, |_| true);
+            let cells = cell_boxes(&app, region);
+            assert!(!cells.is_empty());
+            for (text, (tx, tw), (cx, cw)) in cells {
+                assert!(
+                    tx >= cx - 0.5 && tx + tw <= cx + cw + 0.5,
+                    "{state:?}: {text:?} at {tx}+{tw} in {cx}+{cw}"
+                );
+            }
+        }
+    }
+
+    /// Every text of the table with the box of the cell it sits in, as (left, width).
+    fn cell_boxes(app: &App, region: Entity) -> Vec<(String, (f32, f32), (f32, f32))> {
+        let mut out = Vec::new();
+        for e in support::descendants(app, region) {
+            if app.world().get::<TableCell>(e).is_none() {
+                continue;
+            }
+            let (cx, _, cw, _) = testing::frame(app, e);
+            for t in support::descendants(app, e) {
+                let Some(text) = app.world().get::<Text>(t) else {
+                    continue;
+                };
+                let (tx, _, tw, _) = testing::frame(app, t);
+                out.push((text.0.clone(), (tx, tw), (cx, cw)));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_bench_with_only_a_last_run_shows_its_numbers_in_the_pr_column() {
+        let mut view = demo_cockpit(NOW, DemoCockpit::Scenario);
+        let slug = view.benches[0].slug.clone();
+        view.benches[0].comparison = None;
+        let (mut app, pr) = support::app_with(view);
+        support::select(
+            &mut app,
+            &pr,
+            ItemRef {
+                kind: ItemKind::Bench,
+                id: slug,
+            },
+        );
+        let drawn = compare_drawn_of(&mut app);
+        let CompareBody::Table { rows, verdict, .. } = drawn.body else {
+            panic!("a table: {drawn:?}");
+        };
+        assert_eq!(verdict, None);
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["Peak memory", "CPU (avg)"]);
+        assert!(!labels.contains(&"Rounds"));
+        assert_eq!(rows[0].pr.value, "3.0 MB");
+        assert_eq!(rows[1].pr.value, "99%");
+        for r in &rows {
+            assert_eq!((r.main.value.as_str(), r.delta.value.as_str()), ("—", "—"));
+        }
     }
 
     fn with_main(phase: MainPhase, first_build: bool) -> CockpitView {

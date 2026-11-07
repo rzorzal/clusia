@@ -19,15 +19,23 @@ use crate::theme::Swatch;
 use crate::ui::kit::{Fill, Type, panel, text};
 use crate::ui::spinner::spinner;
 
-/// The plot area of one chart, in pixels.
-pub const PLOT_W: f32 = 220.0;
-pub const PLOT_H: f32 = 56.0;
+/// The plot area of one chart, in pixels: the panel's width inside its padding when the window
+/// is 1280 px wide, as the mockup is.
+pub const PLOT_W: f32 = 270.0;
+pub const PLOT_H: f32 = 88.0;
 
 /// The thickness of this PR's line and of main's.
 const PR_LINE: f32 = 2.0;
 const MAIN_LINE: f32 = 1.6;
 /// Main's dashes: this long, with a gap as long between two.
 const DASH: f32 = 5.0;
+
+/// The node the lines of one chart are drawn in.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlotArea;
+
+/// The padding of a chart's panel.
+const PANEL_PAD: f32 = 10.0;
 
 /// One straight piece of a line: its center, its length and its angle (radians, y up).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -134,11 +142,29 @@ fn dashed_from(seg: &Segment, phase: f32) -> (Vec<Segment>, f32) {
     (out, (phase + seg.len) % period)
 }
 
+/// The points of a line without those in the middle of a straight run, so a straight run is one
+/// segment and its dashes are never cut where two of its steps meet.
+fn corners(px: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let mut out: Vec<(i32, i32)> = Vec::with_capacity(px.len());
+    for &p in px {
+        if let [.., a, b] = out[..] {
+            let (d1, d2) = ((b.0 - a.0, b.1 - a.1), (p.0 - b.0, p.1 - b.1));
+            let cross = i64::from(d1.0) * i64::from(d2.1) - i64::from(d1.1) * i64::from(d2.0);
+            let dot = i64::from(d1.0) * i64::from(d2.0) + i64::from(d1.1) * i64::from(d2.1);
+            if cross == 0 && dot > 0 {
+                out.pop();
+            }
+        }
+        out.push(p);
+    }
+    out
+}
+
 /// The dashes of a whole line of points, its phase carried from one segment to the next.
 pub fn dashed_line(px: &[(i32, i32)]) -> Vec<Segment> {
     let mut phase = 0.0;
     let mut out = Vec::new();
-    for seg in segments(px) {
+    for seg in segments(&corners(px)) {
         let (pieces, next) = dashed_from(&seg, phase);
         out.extend(pieces);
         phase = next;
@@ -358,8 +384,10 @@ fn draw_plot(p: &mut Spawner, fonts: &UiFonts, plot: &Plot, metric: Metric) {
             min_width: px(0),
             flex_direction: FlexDirection::Column,
             row_gap: px(8),
-            padding: UiRect::all(px(10)),
+            padding: UiRect::all(px(PANEL_PAD)),
             border_radius: BorderRadius::all(px(8)),
+            // A narrower window cuts the plot at the panel's edge.
+            overflow: Overflow::clip(),
             ..default()
         },
         Swatch::Chrome,
@@ -380,14 +408,17 @@ fn draw_plot(p: &mut Spawner, fonts: &UiFonts, plot: &Plot, metric: Metric) {
             };
             legend.spawn(text(fonts, plot.legend.clone(), Type::META.ink(ink)));
         });
-        c.spawn(Node {
-            width: px(PLOT_W),
-            height: px(PLOT_H),
-            align_self: AlignSelf::Center,
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
+        c.spawn((
+            Node {
+                width: px(PLOT_W),
+                height: px(PLOT_H),
+                flex_shrink: 0.0,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            PlotArea,
+        ))
         .with_children(|area| {
             if plot.pr.len() < 2 && plot.main.len() < 2 {
                 area.spawn(text(fonts, "not measured", Type::META));
@@ -486,10 +517,13 @@ mod tests {
 
     #[test]
     fn points_scale_to_the_plot_in_whole_pixels() {
+        // 410 / 451 of the height, rounded half up.
+        let y = (410.0 * f64::from(PLOT_H) / 451.0 + 0.5).floor() as i32;
         assert_eq!(
             plot_points(&[(0, 0), (20_000, 410)], 20_000, 451),
-            vec![(0, 0), (220, 51)]
+            vec![(0, 0), (PLOT_W as i32, y)]
         );
+        assert_eq!(y, 80);
     }
 
     #[test]
@@ -674,6 +708,167 @@ mod tests {
         assert_eq!(memory.main.len(), 3, "the live points: {memory:?}");
         assert_eq!(memory.main[0].0, 0);
         assert_eq!(memory.main[2].0, PLOT_W as i32);
+    }
+
+    #[test]
+    fn a_running_pr_round_draws_the_pr_line_from_its_live_points() {
+        let mut view = demo_cockpit(NOW, DemoCockpit::BenchRunning);
+        if let Some(clusia_core::cockpit::CockpitActivity::Running { side, .. }) =
+            view.activity.as_mut()
+        {
+            *side = RunSide::Pr;
+        }
+        let item = ItemRef {
+            kind: ItemKind::Bench,
+            id: view.benches[0].slug.clone(),
+        };
+        let (mut app, pr) = app_with(view);
+        support::select(&mut app, &pr, item.clone());
+        let points = vec![
+            sample(0, 1_000, 990),
+            sample(1_000, 2_000, 990),
+            sample(2_000, 3_000, 990),
+        ];
+        support::tell(
+            &mut app,
+            CockpitTell::Samples {
+                pr: pr.clone(),
+                run: "demo-bench-run".into(),
+                item,
+                side: RunSide::Pr,
+                round: 3,
+                points,
+            },
+        );
+        let drawn = built(&mut app);
+        let memory = &drawn.plots[0];
+        assert_eq!(memory.pr.len(), 3, "{memory:?}");
+        assert_eq!(memory.pr[0].0, 0);
+        assert_eq!(memory.pr[2].0, PLOT_W as i32);
+        assert!(memory.pr[0].1 < memory.pr[1].1 && memory.pr[1].1 < memory.pr[2].1);
+    }
+
+    fn built(app: &mut App) -> ChartDrawn {
+        app.world_mut()
+            .query::<&ChartBuilt>()
+            .iter(app.world())
+            .next()
+            .map(|b| b.0.clone())
+            .expect("drawn")
+    }
+
+    #[test]
+    fn the_demo_pr_memory_climbs_most_of_the_plot() {
+        let (mut app, pr) = app_with(demo_cockpit(NOW, DemoCockpit::Scenario));
+        support::select(&mut app, &pr, scenario_item(REFRESH));
+        let memory = built(&mut app).plots[0].clone();
+        let (first, last) = (memory.pr[0].1, memory.pr[memory.pr.len() - 1].1);
+        assert!(
+            (last - first) as f32 >= 0.4 * PLOT_H,
+            "{first} → {last} of {PLOT_H}"
+        );
+        assert!((first as f32) < 0.45 * PLOT_H && (last as f32) > 0.85 * PLOT_H);
+        assert_eq!(memory.pr[memory.pr.len() - 1].0, PLOT_W as i32);
+    }
+
+    #[test]
+    fn the_plot_fills_its_panel_at_the_mockups_size() {
+        let mut app = testing::layout_app(crate::fixture::demo(NOW), UVec2::new(1280, 800));
+        let pr = testing::open_ready(&mut app, false);
+        testing::set_section(&mut app, &pr, crate::review_state::ReviewSection::Tests);
+        testing::open_cockpit(&mut app, &pr, demo_cockpit(NOW, DemoCockpit::Scenario));
+        support::select(&mut app, &pr, scenario_item(REFRESH));
+        testing::settle(&mut app);
+        let area = testing::find::<PlotArea>(&mut app, |_| true);
+        let panel = app.world().get::<ChildOf>(area).expect("a panel").parent();
+        let (ax, _, aw, ah) = testing::frame(&app, area);
+        let (px_, _, pw, _) = testing::frame(&app, panel);
+        assert!(
+            (aw - PLOT_W).abs() < 1.0 && (ah - PLOT_H).abs() < 1.0,
+            "{aw}×{ah}"
+        );
+        // The plot spans the panel inside its padding.
+        assert!(ax - px_ <= PANEL_PAD + 1.0 && (px_ + pw) - (ax + aw) <= PANEL_PAD + 1.0);
+    }
+
+    #[test]
+    fn a_straight_run_of_points_is_dashed_as_one_line() {
+        // A flat line of 1 px steps: every dash is whole, none cut where two steps meet.
+        let px: Vec<(i32, i32)> = (0..=40).map(|i| (i, 7)).collect();
+        let pieces = dashed_line(&px);
+        assert_eq!(pieces.len(), 4);
+        assert!(
+            pieces.iter().all(|p| (p.len - DASH).abs() < 1e-3),
+            "{pieces:?}"
+        );
+        // Around a corner the dash goes on from where it stopped: on, off, on… along the path.
+        let corner = [(0, 0), (3, 0), (3, 10)];
+        let pieces = dashed_line(&corner);
+        let lens: Vec<f32> = pieces.iter().map(|p| p.len).collect();
+        assert_eq!(
+            lens,
+            [3.0, 2.0, 3.0],
+            "3 + 2 across the corner, then 3 to the end"
+        );
+    }
+
+    /// The center card at the mockup's size: its content scrolls, with nothing over anything.
+    #[test]
+    fn the_center_scrolls_its_content_and_pins_the_action_row() {
+        use super::super::frame::{CockpitCenterFoot, CockpitCenterScroll, CockpitErrors};
+        let mut app = testing::layout_app(crate::fixture::demo(NOW), UVec2::new(1280, 800));
+        let pr = testing::open_ready(&mut app, false);
+        testing::set_section(&mut app, &pr, crate::review_state::ReviewSection::Tests);
+        testing::open_cockpit(&mut app, &pr, demo_cockpit(NOW, DemoCockpit::Scenario));
+        support::select(&mut app, &pr, scenario_item(REFRESH));
+        testing::settle(&mut app);
+        let scroll = testing::find::<CockpitCenterScroll>(&mut app, |_| true);
+        assert_eq!(
+            app.world().get::<Node>(scroll).expect("a node").overflow.y,
+            bevy::ui::OverflowAxis::Scroll
+        );
+        let parent = |app: &App, e: Entity| app.world().get::<ChildOf>(e).map(|c| c.parent());
+        let center = testing::find::<CockpitCenter>(&mut app, |_| true);
+        let chart = testing::find::<CockpitChart>(&mut app, |_| true);
+        let errors = testing::find::<CockpitErrors>(&mut app, |_| true);
+        let foot = testing::find::<CockpitCenterFoot>(&mut app, |_| true);
+        for e in [center, chart, errors] {
+            assert_eq!(parent(&app, e), Some(scroll), "scrolls with the content");
+        }
+        assert_ne!(parent(&app, foot), Some(scroll), "the action row stays put");
+        let (_, ct, _, ch) = testing::frame(&app, center);
+        let (_, tt, _, th) = testing::frame(&app, chart);
+        let (_, et, _, _) = testing::frame(&app, errors);
+        let (_, st, _, sh) = testing::frame(&app, scroll);
+        let (_, ft, _, _) = testing::frame(&app, foot);
+        assert!(th > PLOT_H, "the chart keeps its height: {th}");
+        assert!(
+            ct + ch <= tt + 0.5,
+            "the chart starts under the item: {} > {tt}",
+            ct + ch
+        );
+        assert!(tt + th <= et + 0.5, "the errors start under the chart");
+        assert!(
+            st + sh <= ft + 0.5,
+            "the action row is under the scrolling part"
+        );
+        let card = parent(&app, scroll).expect("the card");
+        let over = overflowing_under(&mut app, card);
+        assert!(over.is_empty(), "{over:?}");
+    }
+
+    /// The lines of `overflowing_text` about the texts under `root`.
+    pub(in super::super) fn overflowing_under(app: &mut App, root: Entity) -> Vec<String> {
+        let mine: Vec<String> = support::descendants(app, root)
+            .into_iter()
+            .filter_map(|e| app.world().get::<Text>(e).map(|t| t.0.clone()))
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("{:?} ", t.chars().take(60).collect::<String>()))
+            .collect();
+        testing::overflowing_text(app)
+            .into_iter()
+            .filter(|l| mine.iter().any(|m| l.starts_with(m)))
+            .collect()
     }
 
     /// The dashes main's memory line is made of, from the plot it drew.

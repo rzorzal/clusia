@@ -40,9 +40,17 @@ pub struct CockpitHeaderBar(pub PrRef);
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CockpitList(pub PrRef);
 
-/// The scrolling top of the center card.
+/// The item at the top of the center card.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CockpitCenter(pub PrRef);
+
+/// The part of the center card that scrolls: the item, its chart and its errors.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct CockpitCenterScroll(pub PrRef);
+
+/// The errors of the selected item, under its chart.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct CockpitErrors(pub PrRef);
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CockpitChart(pub PrRef);
@@ -273,16 +281,30 @@ pub fn draw_body(p: &mut Spawner, _fonts: &UiFonts, pr: &PrRef) {
                 },
             )
             .with_children(|center| {
-                center.spawn((
-                    Node {
-                        overflow: Overflow::scroll_y(),
-                        ..region(true)
-                    },
-                    ScrollArea,
-                    ScrollPosition::default(),
-                    CockpitCenter(pr.clone()),
-                ));
-                center.spawn((region(false), CockpitChart(pr.clone())));
+                // The item, its chart and its errors scroll together; the action row stays.
+                center
+                    .spawn((
+                        Node {
+                            overflow: Overflow::scroll_y(),
+                            ..region(true)
+                        },
+                        ScrollArea,
+                        ScrollPosition::default(),
+                        CockpitCenterScroll(pr.clone()),
+                    ))
+                    .with_children(|scroll| {
+                        // Grows to the card's height so the loading line and the empty card
+                        // can center in it; never shrinks under its content.
+                        scroll.spawn((
+                            Node {
+                                flex_shrink: 0.0,
+                                ..region(true)
+                            },
+                            CockpitCenter(pr.clone()),
+                        ));
+                        scroll.spawn((region(false), CockpitChart(pr.clone())));
+                        scroll.spawn((region(false), CockpitErrors(pr.clone())));
+                    });
                 center.spawn((region(false), CockpitCenterFoot(pr.clone())));
             });
             // One card: the comparison over the copilot, as the mockup draws them.
