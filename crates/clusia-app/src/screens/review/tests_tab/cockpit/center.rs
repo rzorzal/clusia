@@ -1433,7 +1433,7 @@ fn draw_bench(
 }
 
 /// Underlined text in the regular ink that is clicked: a link on a row of actions.
-fn text_link(fonts: &UiFonts, label: &str) -> impl Bundle {
+pub(super) fn text_link(fonts: &UiFonts, label: &str) -> impl Bundle {
     (
         Node {
             flex_shrink: 0.0,

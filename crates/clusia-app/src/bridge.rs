@@ -4096,7 +4096,22 @@ pub(crate) fn pump(
                 }
                 functions.apply(&tell);
             }
-            Tell::Cockpit(tell) => cockpit.apply(&tell),
+            Tell::Cockpit(tell) => {
+                // A question or a write the reviewer clicked was not taken: say why once.
+                if let CockpitTell::Refused {
+                    kind: CockpitAskKind::Copilot | CockpitAskKind::Write,
+                    message,
+                    ..
+                } = &tell
+                {
+                    toasts.0.push(Toast {
+                        text: clusia_core::printable::printable(message),
+                        warning: true,
+                        until: time.elapsed_secs_f64() + TOAST_SECS,
+                    });
+                }
+                cockpit.apply(&tell);
+            }
             Tell::TestDisk(report) => machine.disk_arrived(report),
             Tell::TestEngine(info) => machine.engine_arrived(info),
             Tell::Diagrams(tell) => diagrams.apply(&tell),

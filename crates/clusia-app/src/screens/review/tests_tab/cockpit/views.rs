@@ -155,6 +155,8 @@ pub struct CompareView {
     pub main: MainPhase,
     pub first_build: bool,
     pub runner: Option<RunnerKind>,
+    /// Main's base, or the review's, cut to 7 characters: the commit main would be checked out at.
+    pub base: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +169,8 @@ pub struct CopilotThreadView {
     pub explain: bool,
     pub next: bool,
     pub intro: Option<String>,
+    /// Why the last question was not sent.
+    pub error: Option<String>,
 }
 
 pub fn header_view(model: &CockpitModel, agent: &str, _now: i64) -> HeaderView {
@@ -506,6 +510,12 @@ pub fn compare_view(model: &CockpitModel, _agent: &str, _now: i64) -> CompareVie
         Some(v) => (v.main.phase.clone(), v.main.first_build, v.runner),
         None => (MainPhase::NotCreated, false, None),
     };
+    let base = model
+        .view
+        .as_ref()
+        .and_then(|v| v.main.base.as_deref().or(v.base.as_deref()))
+        .map(|b| printable(&b.chars().take(7).collect::<String>()))
+        .unwrap_or_default();
     let running = running_here.then(|| {
         let of = match model.view.as_ref().and_then(|v| v.activity.as_ref()) {
             Some(CockpitActivity::Running { rounds, .. }) => *rounds,
@@ -530,6 +540,7 @@ pub fn compare_view(model: &CockpitModel, _agent: &str, _now: i64) -> CompareVie
         main,
         first_build,
         runner,
+        base,
     }
 }
 
@@ -548,8 +559,8 @@ fn copilot_message(message: &CopilotMessage) -> CopilotMessage {
             .iter()
             .map(|s| Suggestion {
                 kind: s.kind,
-                title: printable(&s.title),
-                why: printable(&s.why),
+                title: shown(&s.title, TITLE_SHOWN),
+                why: shown(&s.why, PURPOSE_SHOWN),
                 function: s.function.clone(),
             })
             .collect(),
@@ -568,6 +579,7 @@ pub fn copilot_view(model: &CockpitModel, agent: &str, _now: i64) -> CopilotThre
             explain: false,
             next: false,
             intro: Some(INTRO.into()),
+            error: None,
         };
     };
     let copilot = &view.copilot;
@@ -603,6 +615,10 @@ pub fn copilot_view(model: &CockpitModel, agent: &str, _now: i64) -> CopilotThre
         explain: has_comparison && !about_it,
         next: model.loaded && !copilot.busy,
         intro: copilot.messages.is_empty().then(|| INTRO.into()),
+        error: model
+            .copilot_error
+            .as_deref()
+            .map(|e| shown(e, PURPOSE_SHOWN)),
     }
 }
 
@@ -996,6 +1012,51 @@ mod tests {
         let c = compare_view(&m, AGENT, NOW);
         assert!(c.first_build);
         assert_eq!(c.main, MainPhase::NeedsSetup);
+    }
+
+    #[test]
+    fn compare_names_mains_base_in_seven_characters() {
+        let m = scenario_model();
+        let base: String = m
+            .view
+            .as_ref()
+            .and_then(|v| v.main.base.clone())
+            .expect("a base")
+            .chars()
+            .take(7)
+            .collect();
+        assert_eq!(compare_view(&m, AGENT, NOW).base, base);
+        let mut view = demo_cockpit(NOW, DemoCockpit::Empty);
+        view.base = Some("abc\u{202E}defghij".into());
+        let c = compare_view(&model_of(view), AGENT, NOW);
+        assert!(!c.base.contains('\u{202E}'));
+        assert!(c.base.starts_with("abc"));
+        assert_eq!(compare_view(&CockpitModel::default(), AGENT, NOW).base, "");
+    }
+
+    #[test]
+    fn the_copilot_error_is_the_models_printable_and_bounded() {
+        let mut m = scenario_model();
+        assert_eq!(copilot_view(&m, AGENT, NOW).error, None);
+        m.copilot_error = Some("At most 2000 characters on one line".into());
+        assert_eq!(
+            copilot_view(&m, AGENT, NOW).error.as_deref(),
+            Some("At most 2000 characters on one line")
+        );
+        m.copilot_error = Some(format!("\u{202E}{}", "e".repeat(10_000)));
+        let error = copilot_view(&m, AGENT, NOW).error.expect("an error");
+        assert!(!error.contains('\u{202E}') && error.chars().count() <= PURPOSE_SHOWN + 1);
+    }
+
+    #[test]
+    fn suggestion_titles_and_whys_are_cut() {
+        let mut view = demo_cockpit(NOW, DemoCockpit::Scenario);
+        view.copilot.messages[1].suggestions[0].title = "t".repeat(10_000);
+        view.copilot.messages[1].suggestions[0].why = "w".repeat(10_000);
+        let t = copilot_view(&model_of(view), AGENT, NOW);
+        let s = &t.messages[1].suggestions[0];
+        assert!(s.title.chars().count() <= TITLE_SHOWN + 1);
+        assert!(s.why.chars().count() <= PURPOSE_SHOWN + 1);
     }
 
     #[test]

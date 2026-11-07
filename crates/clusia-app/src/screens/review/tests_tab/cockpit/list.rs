@@ -737,7 +737,15 @@ mod tests {
     fn ask_the_copilot_for_a_scenario_sends_nothing_and_asks_for_focus() {
         let (mut app, pr) = app_with(demo_cockpit(NOW, DemoCockpit::Scenario));
         click::<CockpitAskScenario>(&mut app, |b| b.0 == pr);
-        assert!(model(&app, &pr).copilot_focus);
+        // The copilot's input takes the focus and the flag is spent.
+        let input = testing::find::<super::super::copilot::CopilotInput>(&mut app, |i| i.0 == pr);
+        assert_eq!(
+            app.world()
+                .resource::<bevy::input_focus::InputFocus>()
+                .get(),
+            Some(input)
+        );
+        assert!(!model(&app, &pr).copilot_focus);
         assert_eq!(testing::recorded(&mut app), []);
     }
 

@@ -4,6 +4,9 @@
 //! path or opens it.
 
 pub mod center;
+pub mod chart;
+pub mod compare;
+pub mod copilot;
 pub mod frame;
 pub mod list;
 pub mod modals;
@@ -124,6 +127,10 @@ pub struct CockpitModel {
     pub copilot_focus: bool,
     /// Bumped when a copilot ask was taken, so its input can clear itself.
     pub copilot_sent: u64,
+    /// **Suggest as a test in a comment** waits for the selected scenario's script.
+    pub suggest_after_script: bool,
+    /// Why the copilot's input did not send what it holds; cleared by the next send.
+    pub copilot_error: Option<String>,
     /// The `failed` text the reviewer dismissed.
     pub dismissed_failed: Option<String>,
     /// Mirrored: the Auto Tests or the function cases are busy.
@@ -634,6 +641,7 @@ impl CockpitModels {
             model.live_run = None;
             model.stopping = false;
             model.run_after_approve = None;
+            model.suggest_after_script = false;
             model.script_asked = None;
             model.touch();
         }
@@ -768,6 +776,9 @@ pub fn register(app: &mut App) {
                 .after(frame::fill_center_frame)
                 .after(list::fill_list),
         );
+    chart::register(app);
+    compare::register(app);
+    copilot::register(app);
 }
 
 #[cfg(test)]
