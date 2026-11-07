@@ -3965,6 +3965,645 @@ pub fn demo_function_code(function: &str) -> DiagramCode {
     }
 }
 
+// The QA cockpit's demo views.
+
+use clusia_core::cockpit::{
+    BenchView, CockpitActivity, CockpitView, CompareOutcome, ComparisonView, CopilotFrom,
+    CopilotMessage, CopilotView, Delta, DeltaLabel, ErrorLine, Freshness, Input, InputKind,
+    InputView, ItemKind, ItemRef, ItemSupport, MainPhase, MainView, Metric, MetricRow, PassCount,
+    RunSide, Sample, ScenarioApproval, ScenarioScript, ScenarioView, ScriptMeta, Series, SideStat,
+    SideView, Suggestion as CopilotSuggestion, Verdict as CompareVerdict, approval_hash,
+    bench_hash, bench_input_hash, bench_status, scenario_hash, scenario_input_hash,
+    scenario_status, scenarios_hash, script_sha, verdict_line,
+};
+
+/// What the cockpit's demo shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemoCockpit {
+    /// A review with nothing written yet.
+    Empty,
+    /// Three scenarios and two benchmarks, with results.
+    Scenario,
+    /// `Scenario`, with a benchmark running on main's side of its third round.
+    BenchRunning,
+    /// `Scenario`: the approval modal opens on its third scenario.
+    Approve,
+    /// `Scenario`, with main waiting for its setup to be approved.
+    Main,
+}
+
+const DEMO_MAIN_AT: &str = "4e1f2a0c9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f";
+const DEMO_RECIPE_HASH: &str = "9c2e41a0f8d7b6c5e4d3a2b1c0f9e8d7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1";
+
+fn demo_input(name: &str, label: &str, kind: InputKind, value: &str) -> InputView {
+    InputView {
+        input: Input {
+            name: name.into(),
+            label: label.into(),
+            kind,
+            choices: Vec::new(),
+            default: value.into(),
+        },
+        value: value.into(),
+        edited: false,
+    }
+}
+
+fn demo_stat(median: u64, spread: u64, n: u32) -> Option<SideStat> {
+    Some(SideStat { median, spread, n })
+}
+
+fn demo_row(
+    metric: Metric,
+    main: (u64, u64),
+    pr: (u64, u64),
+    n: u32,
+    label: DeltaLabel,
+    percent: i64,
+) -> MetricRow {
+    MetricRow {
+        metric,
+        main: demo_stat(main.0, main.1, n),
+        pr: demo_stat(pr.0, pr.1, n),
+        delta: Delta {
+            label,
+            percent: Some(percent),
+        },
+    }
+}
+
+fn demo_side(
+    sha: &str,
+    rounds: u32,
+    passed: u32,
+    points: Vec<Sample>,
+    errors: Vec<ErrorLine>,
+) -> SideView {
+    SideView {
+        freshness: Freshness::Current,
+        sha: sha.into(),
+        rounds,
+        pass: Some(PassCount { passed, rounds }),
+        series: Series { points },
+        errors,
+        outputs: BTreeMap::new(),
+        stopped: false,
+    }
+}
+
+/// `count` samples every `SAMPLE_EVERY_MS`, memory going from `from_mb` to `to_mb` in a line.
+fn demo_series(count: u32, from_mb: u64, to_mb: u64, cpu_milli: u32) -> Vec<Sample> {
+    (0..count)
+        .map(|i| {
+            let mb = from_mb + (to_mb - from_mb) * u64::from(i) / u64::from(count.max(2) - 1);
+            Sample {
+                t_ms: i * 250,
+                rss_kb: Some(mb * 1024),
+                cpu_milli: Some(cpu_milli),
+            }
+        })
+        .collect()
+}
+
+/// The files of a demo scenario by its slug, as `(name, text)`.
+fn demo_script_files(slug: &str) -> Option<Vec<(String, String)>> {
+    let oauth = "import sys\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n\n\
+        class Handler(BaseHTTPRequestHandler):\n    def do_POST(self):\n        \
+        self.send_response(200)\n        self.end_headers()\n        \
+        self.wfile.write(b'{\"access_token\": \"fake\"}')\n\nHTTPServer((\"127.0.0.1\", 8099), Handler).serve_forever()\n";
+    let files = match slug {
+        "two-requests-refresh-at-once" => vec![
+            (
+                "once.sh",
+                "#!/bin/sh\npython3 fake_oauth.py &\nsrv=$!\ntrap 'kill $srv' EXIT\ncargo run -q --example two_callers\necho \"output exchanges $(cat .exchanges)\"\ntest \"$(cat .exchanges)\" -eq 1\n",
+            ),
+            ("fake_oauth.py", oauth),
+        ],
+        "refresh-under-steady-traffic" => vec![
+            (
+                "refresh.sh",
+                "python3 fake_oauth.py --latency \"$CLUSIA_ARG_ENDPOINT_LATENCY\" &\ncargo run -q --example callers -- --n \"$1\" --for \"$CLUSIA_ARG_DURATION\"\necho \"output exchanges $(cat .exchanges)\"\n",
+            ),
+            ("fake_oauth.py", oauth),
+        ],
+        "token-endpoint-is-down" => vec![
+            (
+                "down.sh",
+                "#!/bin/sh\npython3 fake_oauth.py --status 503 &\nsrv=$!\ntrap 'kill $srv' EXIT\ncargo run -q --example refresh_once -- --retries \"$1\" --timeout \"$2\"\ncode=$?\necho \"output exit_code $code\"\necho \"output exchanges $(cat .exchanges)\"\n# the refresh must give up and keep the old token\ntest \"$code\" -eq 3\n",
+            ),
+            ("fake_oauth.py", oauth),
+        ],
+        _ => return None,
+    };
+    Some(
+        files
+            .into_iter()
+            .map(|(name, text)| (name.to_string(), text.to_string()))
+            .collect(),
+    )
+}
+
+fn demo_command(slug: &str) -> &'static str {
+    match slug {
+        "two-requests-refresh-at-once" => "sh once.sh",
+        "refresh-under-steady-traffic" => "sh refresh.sh \"$CLUSIA_ARG_CALLERS\"",
+        _ => "sh down.sh \"$CLUSIA_ARG_RETRIES\" \"$CLUSIA_ARG_TIMEOUT\"",
+    }
+}
+
+/// The script a demo scenario's approval is for.
+pub fn demo_cockpit_script(scenario: &str) -> Option<ScenarioScript> {
+    let files = demo_script_files(scenario)?;
+    let hash = approval_hash(demo_command(scenario), &files.iter().cloned().collect());
+    Some(ScenarioScript {
+        scenario: scenario.into(),
+        files,
+        approval_hash: hash,
+    })
+}
+
+/// The script of the third demo scenario, the one the approval modal reads.
+pub fn demo_scenario_script() -> ScenarioScript {
+    demo_cockpit_script("token-endpoint-is-down").expect("a demo scenario")
+}
+
+struct DemoScenarioSpec {
+    slug: &'static str,
+    title: &'static str,
+    purpose: &'static str,
+    steps: &'static [&'static str],
+    inputs: Vec<InputView>,
+    approved: bool,
+    bytes: &'static [u32],
+}
+
+fn demo_scenario(spec: DemoScenarioSpec, comparison: Option<ComparisonView>) -> ScenarioView {
+    let script = demo_cockpit_script(spec.slug).expect("a demo scenario");
+    let values: BTreeMap<String, String> = spec
+        .inputs
+        .iter()
+        .map(|i| (i.input.name.clone(), i.value.clone()))
+        .collect();
+    let input_hash = scenario_input_hash(&script.approval_hash, &values);
+    let support = if spec.approved {
+        ItemSupport::Ready
+    } else {
+        ItemSupport::NeedsApproval
+    };
+    let mut view = ScenarioView {
+        slug: spec.slug.into(),
+        title: spec.title.into(),
+        purpose: spec.purpose.into(),
+        steps: spec.steps.iter().map(|s| (*s).to_string()).collect(),
+        inputs: spec.inputs,
+        run: demo_command(spec.slug).into(),
+        command: Some(demo_command(spec.slug).into()),
+        scripts: script
+            .files
+            .iter()
+            .zip(spec.bytes)
+            .map(|((name, text), bytes)| ScriptMeta {
+                name: name.clone(),
+                bytes: *bytes,
+                sha: script_sha(text.as_bytes()),
+                edited: false,
+            })
+            .collect(),
+        rounds: 3,
+        timeout_secs: 120,
+        edited: false,
+        approval: if spec.approved {
+            ScenarioApproval::Approved
+        } else {
+            ScenarioApproval::NotApproved
+        },
+        approval_hash: script.approval_hash,
+        input_hash: input_hash.clone(),
+        support: support.clone(),
+        last: comparison.as_ref().map(|c| c.pr.clone()),
+        comparison,
+        status: String::new(),
+        hash: scenario_hash(&input_hash, spec.approved, 3, 120, &support),
+    };
+    view.status = scenario_status(&view, false);
+    view
+}
+
+fn demo_comparison(
+    run: &str,
+    pr: SideView,
+    main: SideView,
+    rows: Vec<MetricRow>,
+    verdict: CompareVerdict,
+    outcome: CompareOutcome,
+    now: i64,
+) -> ComparisonView {
+    ComparisonView {
+        run: run.into(),
+        pr,
+        main,
+        rows,
+        line: verdict_line(&verdict),
+        verdict,
+        exercises: Some(true),
+        outcome,
+        at: now - 600,
+    }
+}
+
+fn demo_scenarios(now: i64) -> Vec<ScenarioView> {
+    let two = demo_comparison(
+        "demo-run-1",
+        demo_side(HEAD_SHA, 3, 3, Vec::new(), Vec::new()),
+        demo_side(DEMO_MAIN_AT, 3, 0, Vec::new(), Vec::new()),
+        Vec::new(),
+        CompareVerdict::PassDiffers {
+            pr: true,
+            main: false,
+        },
+        CompareOutcome::Done,
+        now,
+    );
+    let mut pr_side = demo_side(
+        HEAD_SHA,
+        3,
+        3,
+        demo_series(81, 180, 410, 410),
+        vec![ErrorLine {
+            text: "token store busy".into(),
+            count: 12,
+            first_ms: 1800,
+        }],
+    );
+    pr_side.outputs.insert("exchanges".into(), "412".into());
+    let main_side = demo_side(
+        DEMO_MAIN_AT,
+        3,
+        3,
+        demo_series(81, 190, 191, 380),
+        Vec::new(),
+    );
+    let steady = demo_comparison(
+        "demo-run-2",
+        pr_side,
+        main_side,
+        vec![
+            demo_row(
+                Metric::Duration,
+                (20_400, 200),
+                (20_500, 300),
+                3,
+                DeltaLabel::Same,
+                0,
+            ),
+            demo_row(
+                Metric::PeakMemory,
+                (194_560, 6_144),
+                (419_840, 14_336),
+                3,
+                DeltaLabel::Worse,
+                116,
+            ),
+            demo_row(Metric::AvgCpu, (380, 30), (410, 40), 3, DeltaLabel::Same, 8),
+        ],
+        CompareVerdict::Worse {
+            metrics: vec![Metric::PeakMemory],
+        },
+        CompareOutcome::Done,
+        now,
+    );
+    vec![
+        demo_scenario(
+            DemoScenarioSpec {
+                slug: "two-requests-refresh-at-once",
+                title: "Two requests refresh at once",
+                purpose: "Two callers find the token expired in the same instant.",
+                steps: &[
+                    "Store a token that has just expired",
+                    "Call token() from two callers together",
+                    "Count the exchanges",
+                ],
+                inputs: vec![demo_input("callers", "callers", InputKind::Integer, "2")],
+                approved: true,
+                bytes: &[310, 1946],
+            },
+            Some(two),
+        ),
+        demo_scenario(
+            DemoScenarioSpec {
+                slug: "refresh-under-steady-traffic",
+                title: "Refresh under steady traffic",
+                purpose: "Many callers ask for a token while it expires every few seconds.",
+                steps: &[
+                    "Store a token that expires soon",
+                    "Call token() from every caller",
+                    "Count exchanges and errors",
+                ],
+                inputs: vec![
+                    demo_input("callers", "callers", InputKind::Integer, "40"),
+                    demo_input(
+                        "token_lifetime",
+                        "token lifetime",
+                        InputKind::Duration,
+                        "3 s",
+                    ),
+                    demo_input(
+                        "endpoint_latency",
+                        "endpoint latency",
+                        InputKind::Duration,
+                        "200 ms",
+                    ),
+                    demo_input("duration", "duration", InputKind::Duration, "20 s"),
+                ],
+                approved: true,
+                bytes: &[236, 1946],
+            },
+            Some(steady),
+        ),
+        demo_scenario(
+            DemoScenarioSpec {
+                slug: "token-endpoint-is-down",
+                title: "Token endpoint is down",
+                purpose: "The endpoint answers 503; the refresh must give up and keep the old token.",
+                steps: &[
+                    "Start a fake endpoint that answers 503",
+                    "Refresh with a short timeout",
+                    "Check the old token is kept",
+                ],
+                inputs: vec![
+                    demo_input("retries", "retries", InputKind::Integer, "5"),
+                    demo_input("timeout", "timeout", InputKind::Duration, "2 s"),
+                ],
+                approved: false,
+                bytes: &[412, 1946],
+            },
+            None,
+        ),
+    ]
+}
+
+fn demo_bench(
+    file: &str,
+    qualified: &str,
+    change: FunctionChange,
+    params: Vec<Param>,
+    values: &[(&str, &str)],
+    comparison: Option<ComparisonView>,
+    running: bool,
+) -> BenchView {
+    let slug = function_slug(file, qualified);
+    let values: BTreeMap<String, String> = values
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    let input_hash = bench_input_hash(
+        &format!("demo-bench:{slug}"),
+        "cargo bench",
+        &values,
+        1000,
+        6,
+    );
+    let support = ItemSupport::Ready;
+    let mut view = BenchView {
+        path: format!(".clusia/functions/{slug}/bench.rs"),
+        slug,
+        qualified: qualified.into(),
+        file: file.into(),
+        lang: FunctionLang::Rust,
+        change,
+        params,
+        values,
+        warmup: 1000,
+        secs: 6,
+        rounds: 5,
+        edited: false,
+        hash: bench_hash(&input_hash, 5, &support),
+        support,
+        input_hash,
+        last: comparison.as_ref().map(|c| c.pr.clone()),
+        comparison,
+        status: String::new(),
+    };
+    view.status = bench_status(&view, running);
+    view
+}
+
+fn demo_backoff_rows() -> Vec<MetricRow> {
+    vec![
+        demo_row(Metric::P50, (41, 2), (43, 2), 5, DeltaLabel::Same, 3),
+        demo_row(Metric::P95, (58, 4), (61, 3), 5, DeltaLabel::Same, 2),
+        demo_row(
+            Metric::CallsPerSec,
+            (21_900_000_000, 0),
+            (21_100_000_000, 0),
+            5,
+            DeltaLabel::Same,
+            1,
+        ),
+        demo_row(
+            Metric::PeakMemory,
+            (3_072, 0),
+            (3_174, 0),
+            5,
+            DeltaLabel::Same,
+            1,
+        ),
+        demo_row(Metric::AvgCpu, (990, 0), (990, 0), 5, DeltaLabel::Same, 0),
+    ]
+}
+
+fn demo_benches(now: i64, running: bool) -> Vec<BenchView> {
+    let params = vec![
+        demo_param("attempt", "attempt", ParamKind::Int),
+        demo_param("base", "base", ParamKind::Text),
+    ];
+    let values = [("attempt", "7"), ("base", "Duration::from_millis(200)")];
+    let comparison = if running {
+        let mut pr = demo_side(HEAD_SHA, 3, 3, demo_series(8, 3, 3, 990), Vec::new());
+        pr.pass = None;
+        let mut main = demo_side(DEMO_MAIN_AT, 2, 2, demo_series(8, 3, 3, 990), Vec::new());
+        main.pass = None;
+        demo_comparison(
+            "demo-bench-run",
+            pr,
+            main,
+            demo_backoff_rows()
+                .into_iter()
+                .map(|mut r| {
+                    r.delta = Delta {
+                        label: DeltaLabel::NoVerdict,
+                        percent: None,
+                    };
+                    r
+                })
+                .collect(),
+            CompareVerdict::Running,
+            CompareOutcome::Running,
+            now,
+        )
+    } else {
+        let mut pr = demo_side(HEAD_SHA, 5, 5, demo_series(24, 3, 3, 990), Vec::new());
+        pr.pass = None;
+        let mut main = demo_side(DEMO_MAIN_AT, 5, 5, demo_series(24, 3, 3, 990), Vec::new());
+        main.pass = None;
+        demo_comparison(
+            "demo-run-3",
+            pr,
+            main,
+            demo_backoff_rows(),
+            CompareVerdict::NoDifference,
+            CompareOutcome::Done,
+            now,
+        )
+    };
+    vec![
+        demo_bench(
+            "http/retry.rs",
+            "backoff_delay",
+            FunctionChange::Signature,
+            params,
+            &values,
+            Some(comparison),
+            running,
+        ),
+        demo_bench(
+            "store/refresh.rs",
+            "TokenStore::refresh",
+            FunctionChange::Changed,
+            vec![demo_param("max_waiters", "max waiters", ParamKind::Int)],
+            &[("max_waiters", "8")],
+            None,
+            false,
+        ),
+    ]
+}
+
+fn demo_copilot(now: i64, running: bool) -> CopilotView {
+    let messages = if running {
+        vec![CopilotMessage {
+            id: 1,
+            at: now - 60,
+            from: CopilotFrom::Agent,
+            item: None,
+            text: "I wrote a benchmark for backoff_delay at attempt 7, where the new cap applies. Run it when you're ready; nothing runs on its own.".into(),
+            suggestions: Vec::new(),
+        }]
+    } else {
+        vec![
+            CopilotMessage {
+                id: 1,
+                at: now - 120,
+                from: CopilotFrom::Reviewer,
+                item: Some(ItemRef {
+                    kind: ItemKind::Scenario,
+                    id: "refresh-under-steady-traffic".into(),
+                }),
+                text: "Why does memory grow?".into(),
+                suggestions: Vec::new(),
+            },
+            CopilotMessage {
+                id: 2,
+                at: now - 100,
+                from: CopilotFrom::Agent,
+                item: Some(ItemRef {
+                    kind: ItemKind::Scenario,
+                    id: "refresh-under-steady-traffic".into(),
+                }),
+                text: "Memory grows for the whole run on this PR and stays flat on main. The new refresh queue keeps every waiter that timed out, so it never shrinks. The 12 \"token store busy\" errors come from the same queue.".into(),
+                suggestions: vec![CopilotSuggestion {
+                    kind: ItemKind::Scenario,
+                    title: "Waiters that time out are dropped".into(),
+                    why: "A caller that gives up must leave the refresh queue".into(),
+                    function: None,
+                }],
+            },
+        ]
+    };
+    CopilotView {
+        messages,
+        busy: false,
+        failed: None,
+    }
+}
+
+/// The cockpit of the demo review in one of the mockups' states: `HEAD_SHA`, every hash computed
+/// from the item's own data.
+pub fn demo_cockpit(now: i64, state: DemoCockpit) -> CockpitView {
+    let mut view = CockpitView::new(HEAD_SHA);
+    view.base = Some(BASE_SHA.into());
+    view.runner = Some(RunnerKind::Container);
+    if state == DemoCockpit::Empty {
+        return view;
+    }
+    let running = state == DemoCockpit::BenchRunning;
+    view.scenarios = demo_scenarios(now);
+    view.benches = demo_benches(now, running);
+    view.hash = scenarios_hash(&view.scenarios);
+    view.main = MainView {
+        phase: MainPhase::Ready,
+        base: Some(BASE_SHA.into()),
+        at: Some(DEMO_MAIN_AT.into()),
+        plan: None,
+        image: Some("clusia/rzorzal-clusia:4f2a91c".into()),
+        first_build: false,
+    };
+    view.copilot = demo_copilot(now, running);
+    if running {
+        let item = ItemRef {
+            kind: ItemKind::Bench,
+            id: view.benches[0].slug.clone(),
+        };
+        view.activity = Some(CockpitActivity::Running {
+            run: "demo-bench-run".into(),
+            item,
+            side: RunSide::Main,
+            round: 3,
+            rounds: 5,
+            done_items: 0,
+            total_items: 1,
+        });
+    }
+    if state == DemoCockpit::Main {
+        let step = |id: &str, title: &str, command: &str, network: bool| PlanStep {
+            id: id.into(),
+            title: title.into(),
+            command: command.into(),
+            place: StepPlace::Container,
+            network,
+            hint: None,
+            state: StepState::Missing,
+            approved: false,
+        };
+        view.main.phase = MainPhase::NeedsSetup;
+        view.main.first_build = true;
+        view.main.plan = Some(SetupPlan {
+            recipe_hash: DEMO_RECIPE_HASH.into(),
+            steps: vec![
+                step(
+                    STEP_STACK,
+                    "Fetch dependencies",
+                    "cargo fetch --locked",
+                    true,
+                ),
+                step(
+                    clusia_core::tests::STEP_TESTS,
+                    "Build the tests",
+                    "cargo test --no-run --workspace",
+                    false,
+                ),
+            ],
+            commands: vec![PlanCommand {
+                key: "all".into(),
+                command: "cargo test --workspace".into(),
+            }],
+            commands_approved: false,
+            ready: false,
+            blocked: None,
+        });
+    }
+    view
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -5456,5 +6095,101 @@ mod tests {
         }
         assert!(!text.contains("github.com/") && !text.contains("https://"));
         assert!(text.contains("rzorzal/"));
+    }
+
+    #[test]
+    fn the_demo_cockpit_holds_together() {
+        use clusia_core::cockpit::{
+            CockpitActivity, MainPhase, RunSide, approval_hash, scenario_hash, scenarios_hash,
+            verdict_line,
+        };
+        for state in [
+            DemoCockpit::Empty,
+            DemoCockpit::Scenario,
+            DemoCockpit::BenchRunning,
+            DemoCockpit::Approve,
+            DemoCockpit::Main,
+        ] {
+            let v = demo_cockpit(NOW, state);
+            assert_eq!(v.head, HEAD_SHA);
+            assert_eq!(v.hash, scenarios_hash(&v.scenarios), "{state:?}");
+            for s in &v.scenarios {
+                assert_eq!(
+                    s.hash,
+                    scenario_hash(
+                        &s.input_hash,
+                        s.approval == clusia_core::cockpit::ScenarioApproval::Approved,
+                        s.rounds,
+                        s.timeout_secs,
+                        &s.support
+                    ),
+                    "{}",
+                    s.slug
+                );
+            }
+        }
+        let v = demo_cockpit(NOW, DemoCockpit::Scenario);
+        let c = v.scenarios[1].comparison.as_ref().expect("comparison");
+        assert_eq!(verdict_line(&c.verdict), "Worse than main: memory");
+        assert_eq!(c.line, "Worse than main: memory");
+        let script = demo_scenario_script();
+        assert_eq!(script.approval_hash, v.scenarios[2].approval_hash);
+        assert_eq!(
+            script.approval_hash,
+            approval_hash(
+                v.scenarios[2].command.as_deref().expect("command"),
+                &script.files.clone().into_iter().collect()
+            )
+        );
+        for s in &v.scenarios {
+            assert!(demo_cockpit_script(&s.slug).is_some(), "{}", s.slug);
+        }
+        assert!(demo_cockpit_script("nope").is_none());
+        let main = demo_cockpit(NOW, DemoCockpit::Main);
+        assert!(main.main.first_build);
+        assert!(matches!(main.main.phase, MainPhase::NeedsSetup));
+        assert!(
+            main.main
+                .plan
+                .as_ref()
+                .expect("plan")
+                .recipe_hash
+                .starts_with("9c2e41a")
+        );
+        let running = demo_cockpit(NOW, DemoCockpit::BenchRunning);
+        match running.activity {
+            Some(CockpitActivity::Running {
+                ref item,
+                side,
+                round,
+                rounds,
+                ..
+            }) => {
+                assert_eq!((side, round, rounds), (RunSide::Main, 3, 5));
+                assert_eq!(item.id, running.benches[0].slug);
+            }
+            ref other => panic!("{other:?}"),
+        }
+        let all = format!("{v:?}{running:?}{main:?}");
+        assert!(!all.contains("github.com/") && !all.contains("https://"));
+        // The demo review is rzorzal's: its image is named after the repository.
+        assert!(all.contains("clusia/rzorzal-clusia:"));
+        // The image tag is Clúsia's own naming, not a repository.
+        let text = all.replace("clusia/rzorzal-clusia:", "image:");
+        for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || "/-_.".contains(c))) {
+            let repo_shaped = token.matches('/').count() == 1
+                && !token.contains('.')
+                && token.split('/').all(|part| {
+                    part.chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphanumeric())
+                });
+            if repo_shaped {
+                assert!(
+                    token.starts_with("rzorzal/") || token.starts_with("acme/"),
+                    "{token}"
+                );
+            }
+        }
     }
 }

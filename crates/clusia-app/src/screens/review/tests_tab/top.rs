@@ -390,7 +390,8 @@ fn run_card(i: &Inputs, state: &TabState) -> RunCard {
             let near = view.near.len();
             let sending = pending == Some(TestsAskKind::Run);
             let running_cases = i.model.functions_busy;
-            let off = i.read_only.is_some() || sending || running_cases;
+            let cockpit = i.model.cockpit_busy;
+            let off = i.read_only.is_some() || sending || running_cases || cockpit;
             let near_reason = match view.listed {
                 None => Some("List the tests first to find the ones near this change"),
                 Some(_) if near == 0 => Some("No tests near this change were found"),
@@ -400,6 +401,7 @@ fn run_card(i: &Inputs, state: &TabState) -> RunCard {
                 .then(|| "Function cases are running".to_string())
                 .into_iter()
                 .collect();
+            notes.extend(cockpit.then(|| "The QA cockpit is running".to_string()));
             notes.extend(i.read_only.map(str::to_string));
             notes.extend(near_reason.map(str::to_string));
             RunCard::Ready {
@@ -1632,5 +1634,44 @@ mod tests {
             app.update();
         }
         assert_eq!(testing::tree_signature(&app, region), signature);
+    }
+
+    #[test]
+    fn the_auto_run_buttons_are_off_while_the_cockpit_runs() {
+        use crate::bridge::{CockpitTell, Tell};
+        use crate::fixture::{DemoCockpit, demo_cockpit};
+        use crate::screens::review::tests_tab::SubTab;
+        use clusia_core::tests::TestsPhase;
+        let mut app = testing::demo_review_app();
+        let pr = crate::fixture::demo_pr();
+        testing::set_section(&mut app, &pr, crate::review_state::ReviewSection::Tests);
+        let mut ready = testing::tests_view(&app, &pr, TestsPhase::Ready);
+        ready.plan = Some(testing::tests_plan(Vec::new(), true));
+        testing::open_tests(&mut app, &pr, ready);
+        let run_buttons = |app: &mut App| {
+            app.world_mut()
+                .query::<&RunButton>()
+                .iter(app.world())
+                .count()
+        };
+        assert!(run_buttons(&mut app) > 0);
+        assert_eq!(
+            app.world().resource::<TestsModels>().0[&pr].sub,
+            SubTab::Auto
+        );
+        testing::tell(
+            &mut app,
+            Tell::Cockpit(CockpitTell::Loaded {
+                pr: pr.clone(),
+                view: Box::new(demo_cockpit(testing::NOW, DemoCockpit::BenchRunning)),
+            }),
+        );
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "The QA cockpit is running"));
+        assert_eq!(
+            run_buttons(&mut app),
+            0,
+            "a disabled button carries no marker"
+        );
     }
 }

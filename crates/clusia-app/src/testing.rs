@@ -582,6 +582,37 @@ pub fn open_functions(app: &mut App, pr: &PrRef, view: clusia_core::functions::F
     settle(app);
 }
 
+/// Opens the Tests tab of `pr` ready with a recipe on the cockpit, the cockpit asked at the
+/// review tab's head and `view` told as what it answered, then settles.
+pub fn open_cockpit(app: &mut App, pr: &PrRef, view: clusia_core::cockpit::CockpitView) {
+    use crate::screens::review::tests_tab::cockpit::CockpitModels;
+    use crate::screens::review::tests_tab::{SubTab, TestsModels};
+    let mut tests = tests_view(app, pr, clusia_core::tests::TestsPhase::Ready);
+    tests.plan = Some(tests_plan(Vec::new(), true));
+    tests.recipe = Some(tests_recipe());
+    open_tests(app, pr, tests);
+    app.world_mut()
+        .resource_mut::<TestsModels>()
+        .0
+        .entry(pr.clone())
+        .or_default()
+        .sub = SubTab::Cockpit;
+    let head = ready(app, pr).view.review.head_sha.clone();
+    {
+        let mut models = app.world_mut().resource_mut::<CockpitModels>();
+        let model = models.0.entry(pr.clone()).or_default();
+        let _ = model.ask_load(pr, &head);
+    }
+    tell(
+        app,
+        Tell::Cockpit(crate::bridge::CockpitTell::Loaded {
+            pr: pr.clone(),
+            view: Box::new(view),
+        }),
+    );
+    settle(app);
+}
+
 /// The demo app with the demo review open and ready (`fixture::demo_review` without its
 /// What's new rows, so no modal opens), and no recorded asks.
 pub fn demo_review_app() -> App {

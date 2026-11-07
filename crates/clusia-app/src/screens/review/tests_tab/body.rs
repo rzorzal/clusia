@@ -167,7 +167,7 @@ fn engine_here(view: &TestsView) -> Option<String> {
 /// The right-aligned label of the sub-tab bar under Run Function tests: where the cases run, and
 /// whether the setup that lets them run is done. The engine is the one a container runner uses;
 /// a local runner is the macOS sandbox; with no probe yet, Docker.
-fn bar_label(view: &TestsView) -> String {
+pub(crate) fn bar_label(view: &TestsView) -> String {
     let env = view.env.as_ref();
     let place = match env {
         Some(env) if env.runner == RunnerKind::Container => env
@@ -231,7 +231,12 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
             actions: actions(),
         },
         _ => Shape::Auto {
-            sub: model.sub,
+            // The cockpit's screen draws itself over this tab; underneath, the Auto sub-tab.
+            sub: if model.sub == SubTab::Cockpit {
+                SubTab::Auto
+            } else {
+                model.sub
+            },
             bar: (model.sub == SubTab::Functions).then(|| bar_label(view)),
         },
     }
@@ -328,6 +333,9 @@ fn on_sub_tab(
     };
     let model = models.0.entry(pr.clone()).or_default();
     if model.sub != *sub {
+        if matches!(*sub, SubTab::Auto | SubTab::Functions) {
+            model.last_sub = *sub;
+        }
         model.sub = *sub;
         model.touch();
     }

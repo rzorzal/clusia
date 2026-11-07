@@ -588,6 +588,9 @@ pub fn run_disabled_reason(
     if tests.is_some_and(TestsModel::tests_busy) {
         return Some("The tests are busy");
     }
+    if tests.is_some_and(|t| t.cockpit_busy) {
+        return Some("The QA cockpit is running");
+    }
     if functions.is_some_and(FunctionsModel::busy) {
         return Some("Function cases are running");
     }
