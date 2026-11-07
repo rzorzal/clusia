@@ -4,6 +4,7 @@
 use bevy::prelude::*;
 use bevy::ui_widgets::ScrollArea;
 use clusia_core::checks::{AuditArea, default_areas};
+use clusia_core::cockpit::{CockpitActivity, ItemKind, ItemRef, Sample, ScenarioScript};
 use clusia_core::diagram::{Change, DiagramKind, DiagramVersion, EntryState, VersionPhase};
 use clusia_core::draft::{DraftKind, ThreadRef};
 use clusia_core::functions::Support;
@@ -18,12 +19,12 @@ use clusia_protocol::{
 
 use crate::args::Scene;
 use crate::bridge::{
-    CallsTell, DiagramsTell, FunctionsTell, Model, Outbox, ProbeState, RevalidationTell, Tell,
-    TestsTell,
+    CallsTell, CockpitTell, DiagramsTell, FunctionsTell, Model, Outbox, ProbeState,
+    RevalidationTell, Tell, TestsTell,
 };
 use crate::clock::Clock;
 use crate::fixture;
-use crate::fixture::{DemoFunctions, DemoTests};
+use crate::fixture::{DemoCockpit, DemoFunctions, DemoTests};
 use crate::nav::{Nav, Section};
 use crate::review_state::{
     CameraPose, DiffMode, EditTarget, Editor, KeywordsUi, Modal, Phase, Ready, RevalView,
@@ -36,6 +37,7 @@ use crate::screens::review::calls::CallsRequest;
 use crate::screens::review::diagrams::Diagrams;
 use crate::screens::review::diagrams::keywords::render::{focus_pose, view_pose};
 use crate::screens::review::story::{self, StoryStage};
+use crate::screens::review::tests_tab::cockpit::{CockpitModal, CockpitModel, CockpitModels};
 use crate::screens::review::tests_tab::functions::{DriverModal, FunctionsModels};
 use crate::screens::review::tests_tab::{SubTab, TestMachine, TestsModels};
 use crate::ui::code_select::{At, CodeLine, CodeSelection};
@@ -527,7 +529,13 @@ fn tests_state(scene: Scene) -> Option<DemoTests> {
         Scene::TestsFunctions
         | Scene::TestsFunctionsRunning
         | Scene::TestsFunctionsStale
-        | Scene::TestsFunctionsDriver => DemoTests::Functions,
+        | Scene::TestsFunctionsDriver
+        | Scene::CockpitEntry
+        | Scene::CockpitEmpty
+        | Scene::CockpitScenario
+        | Scene::CockpitBench
+        | Scene::CockpitApprove
+        | Scene::CockpitMain => DemoTests::Functions,
         Scene::ConfigTests => DemoTests::Config,
         _ => return None,
     })
@@ -570,6 +578,13 @@ fn put_tests(world: &mut World, pr: &PrRef, now: i64, state: DemoTests) {
 fn functions_state(scene: Scene) -> Option<DemoFunctions> {
     Some(match scene {
         Scene::TestsFunctions | Scene::TestsEmpty => DemoFunctions::Mockup,
+        // The sub-tab bar asks for the functions when it opens, so every cockpit scene fills them.
+        Scene::CockpitEntry
+        | Scene::CockpitEmpty
+        | Scene::CockpitScenario
+        | Scene::CockpitBench
+        | Scene::CockpitApprove
+        | Scene::CockpitMain => DemoFunctions::Mockup,
         Scene::TestsFunctionsRunning => DemoFunctions::Running,
         Scene::TestsFunctionsStale => DemoFunctions::Stale,
         Scene::TestsFunctionsDriver => DemoFunctions::Driver,
@@ -612,6 +627,132 @@ fn put_functions(world: &mut World, pr: &PrRef, now: i64, state: DemoFunctions) 
             });
         }
         DemoFunctions::Mockup | DemoFunctions::Running => {}
+    }
+}
+
+/// The demo data of the QA cockpit a scene shows; the entry scene shows the sub-tab bar only.
+fn cockpit_state(scene: Scene) -> Option<DemoCockpit> {
+    Some(match scene {
+        Scene::CockpitEmpty => DemoCockpit::Empty,
+        Scene::CockpitScenario => DemoCockpit::Scenario,
+        Scene::CockpitBench => DemoCockpit::BenchRunning,
+        Scene::CockpitApprove => DemoCockpit::Approve,
+        Scene::CockpitMain => DemoCockpit::Main,
+        _ => return None,
+    })
+}
+
+/// Fills the cockpit model of `pr` with what the daemon would answer for `state`, and marks it
+/// as asked so the screen sends nothing. Each state also stages the selection, the script or
+/// the live samples its mockup shows.
+fn put_cockpit(world: &mut World, pr: &PrRef, now: i64, state: DemoCockpit) {
+    let head = world.resource::<ReviewTabs>().0[pr]
+        .ready()
+        .map(|r| r.view.review.head_sha.clone());
+    world
+        .resource_mut::<TestsModels>()
+        .0
+        .entry(pr.clone())
+        .or_default()
+        .sub = SubTab::Cockpit;
+    world
+        .resource_mut::<TestsModels>()
+        .0
+        .entry(pr.clone())
+        .or_default()
+        .last_sub = SubTab::Functions;
+    let view = fixture::demo_cockpit(now, state);
+    let bench = view.benches.first().map(|b| b.slug.clone());
+    let live_run = match &view.activity {
+        Some(CockpitActivity::Running {
+            run,
+            item,
+            side,
+            round,
+            ..
+        }) => Some((run.clone(), item.clone(), *side, *round)),
+        _ => None,
+    };
+    let mut models = world.resource_mut::<CockpitModels>();
+    let model = models.0.entry(pr.clone()).or_default();
+    model.asked = true;
+    model.asked_head = head;
+    model.apply(&CockpitTell::Loaded {
+        pr: pr.clone(),
+        view: Box::new(view),
+    });
+    let scenario = |slug: &str| ItemRef {
+        kind: ItemKind::Scenario,
+        id: slug.into(),
+    };
+    let script = |model: &mut CockpitModel, script: ScenarioScript| {
+        model.apply(&CockpitTell::Script {
+            pr: pr.clone(),
+            script: Box::new(script),
+        });
+    };
+    match state {
+        DemoCockpit::Empty => {}
+        DemoCockpit::Main => {
+            // The first scenario is selected by default; its script is staged so the center
+            // does not ask for it behind the modal.
+            let first = model
+                .selected
+                .as_ref()
+                .filter(|i| i.kind == ItemKind::Scenario)
+                .and_then(|i| fixture::demo_cockpit_script(&i.id));
+            if let Some(s) = first {
+                script(model, s);
+            }
+        }
+        DemoCockpit::Scenario => {
+            model.select(scenario("refresh-under-steady-traffic"));
+            model.on_main = true;
+            if let Some(s) = fixture::demo_cockpit_script("refresh-under-steady-traffic") {
+                script(model, s);
+            }
+        }
+        DemoCockpit::BenchRunning => {
+            model.on_main = true;
+            if let Some(bench) = bench {
+                model.select(ItemRef {
+                    kind: ItemKind::Bench,
+                    id: bench,
+                });
+            }
+            if let Some((run, item, side, round)) = live_run {
+                model.apply(&CockpitTell::Samples {
+                    pr: pr.clone(),
+                    run,
+                    item,
+                    side,
+                    round,
+                    points: (0..14)
+                        .map(|i| Sample {
+                            t_ms: i * 250,
+                            rss_kb: Some(3_000 + u64::from(i) * 8),
+                            cpu_milli: Some(985 + (i % 3) * 5),
+                        })
+                        .collect(),
+                });
+            }
+        }
+        DemoCockpit::Approve => {
+            model.select(scenario("token-endpoint-is-down"));
+            script(model, fixture::demo_scenario_script());
+            model.modal = Some(CockpitModal::Approve {
+                scenario: "token-endpoint-is-down".into(),
+            });
+        }
+    }
+    if state == DemoCockpit::Main {
+        let checked = model
+            .view
+            .as_ref()
+            .and_then(|v| v.main.plan.as_ref())
+            .map(|p| p.steps.iter().map(|s| s.id.clone()).collect())
+            .unwrap_or_default();
+        model.modal = Some(CockpitModal::PrepareMain { checked });
     }
 }
 
@@ -872,7 +1013,13 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::TestsFunctions
         | Scene::TestsFunctionsRunning
         | Scene::TestsFunctionsStale
-        | Scene::TestsFunctionsDriver => {
+        | Scene::TestsFunctionsDriver
+        | Scene::CockpitEntry
+        | Scene::CockpitEmpty
+        | Scene::CockpitScenario
+        | Scene::CockpitBench
+        | Scene::CockpitApprove
+        | Scene::CockpitMain => {
             ui.section = ReviewSection::Tests;
             if scene == Scene::TestsFunctionsDriver {
                 ui.modal = Some(Modal::DriverCode);
@@ -919,6 +1066,9 @@ pub fn stage(world: &mut World, scene: Scene) {
         }
         if let Some(state) = functions_state(scene) {
             put_functions(world, &pr, now, state);
+        }
+        if let Some(state) = cockpit_state(scene) {
+            put_cockpit(world, &pr, now, state);
         }
     }
     if scene.diff_view().is_some() {
@@ -1045,6 +1195,7 @@ mod tests {
     };
     use crate::screens::review::shell::ModalFor;
     use crate::testing::{self, NOW};
+    use crate::ui::spinner::Spinner;
     use clap::ValueEnum;
 
     fn staged(scene: Scene) -> App {
@@ -1264,7 +1415,13 @@ mod tests {
                 | Scene::TestsFunctions
                 | Scene::TestsFunctionsRunning
                 | Scene::TestsFunctionsStale
-                | Scene::TestsFunctionsDriver => {
+                | Scene::TestsFunctionsDriver
+                | Scene::CockpitEntry
+                | Scene::CockpitEmpty
+                | Scene::CockpitScenario
+                | Scene::CockpitBench
+                | Scene::CockpitApprove
+                | Scene::CockpitMain => {
                     assert_eq!(tab.ui.section, ReviewSection::Tests, "{scene:?}");
                 }
                 Scene::DiffStory
@@ -1559,7 +1716,7 @@ mod tests {
         }
     }
 
-    const TESTS_SCENES: [Scene; 13] = [
+    const TESTS_SCENES: [Scene; 19] = [
         Scene::TestsEmpty,
         Scene::TestsGenerating,
         Scene::TestsAuto,
@@ -1573,7 +1730,24 @@ mod tests {
         Scene::TestsFunctionsRunning,
         Scene::TestsFunctionsStale,
         Scene::TestsFunctionsDriver,
+        Scene::CockpitEntry,
+        Scene::CockpitEmpty,
+        Scene::CockpitScenario,
+        Scene::CockpitBench,
+        Scene::CockpitApprove,
+        Scene::CockpitMain,
     ];
+
+    /// The asks a cockpit scene records must be those of opening the review on a plain
+    /// Tests sub-tab scene: any ask of the cockpit or the tests is new and fails.
+    fn cockpit_asks(app: &mut App) -> Vec<Ask> {
+        let mut base = staged(Scene::TestsFunctions);
+        let base = testing::recorded(&mut base);
+        testing::recorded(app)
+            .into_iter()
+            .filter(|ask| !base.contains(ask))
+            .collect()
+    }
 
     fn shows_all(app: &mut App, scene: Scene, needles: &[&str]) {
         for needle in needles {
@@ -1799,6 +1973,158 @@ mod tests {
                 "Approve all and set up",
             ],
         );
+    }
+
+    #[test]
+    fn the_entry_scene_shows_the_button_on_the_functions_sub_tab() {
+        let mut app = staged(Scene::CockpitEntry);
+        let pr = fixture::demo_pr();
+        assert_eq!(
+            app.world().resource::<TestsModels>().0[&pr].sub,
+            SubTab::Functions
+        );
+        shows_all(
+            &mut app,
+            Scene::CockpitEntry,
+            &[
+                "Run Function tests",
+                "Open the QA cockpit →",
+                "CHANGED FUNCTIONS · 5",
+            ],
+        );
+        assert!(
+            !app.world()
+                .resource::<CockpitModels>()
+                .0
+                .get(&pr)
+                .is_some_and(|m| m.asked)
+        );
+        let asks = cockpit_asks(&mut app);
+        assert!(asks.is_empty(), "{asks:?}");
+    }
+
+    #[test]
+    fn the_empty_cockpit_scene_is_the_empty_card() {
+        let mut app = staged(Scene::CockpitEmpty);
+        shows_all(
+            &mut app,
+            Scene::CockpitEmpty,
+            &[
+                "QA cockpit",
+                "SCENARIOS · 0",
+                "BENCHMARKS · ON DEMAND · 0",
+                "LOAD · COMES LATER",
+                "No scenarios yet. Ask Claude Code to write them from the diff.",
+                "Check this change end to end",
+                "Write scenarios with Claude Code",
+                "Run on main too",
+                "QA copilot · Claude Code",
+            ],
+        );
+        assert!(
+            !testing::shows(&mut app, "Auto Tests"),
+            "the sub-tab bar is hidden"
+        );
+        assert_eq!(testing::count::<Spinner>(&mut app), 0);
+        let asks = cockpit_asks(&mut app);
+        assert!(asks.is_empty(), "{asks:?}");
+    }
+
+    #[test]
+    fn the_scenario_scene_is_the_mockup() {
+        let mut app = staged(Scene::CockpitScenario);
+        shows_all(
+            &mut app,
+            Scene::CockpitScenario,
+            &[
+                "SCENARIOS · 3",
+                "Two requests refresh at once",
+                "Refresh under steady traffic",
+                "Token endpoint is down",
+                "BENCHMARKS · ON DEMAND · 2",
+                "backoff_delay",
+                ".clusia/e2e/refresh-under-steady-traffic",
+                "Inputs",
+                "callers",
+                "token lifetime",
+                "Script",
+                "refresh.sh",
+                "Memory and CPU during the run",
+                "Errors",
+                "▶ Run on this PR and main",
+                "Suggest as a test in a comment",
+                "This PR vs main",
+                "Result",
+                "Peak memory",
+                "Worse than main",
+            ],
+        );
+        let asks = cockpit_asks(&mut app);
+        assert!(asks.is_empty(), "{asks:?}");
+    }
+
+    #[test]
+    fn the_bench_scene_runs_live_with_no_verdict() {
+        let mut app = staged(Scene::CockpitBench);
+        shows_all(
+            &mut app,
+            Scene::CockpitBench,
+            &[
+                "backoff_delay",
+                "running…",
+                "live",
+                "■ Stop",
+                "Rounds",
+                "Running: no verdict yet",
+            ],
+        );
+        assert!(!testing::shows(&mut app, "Worse than main"));
+        assert!(!testing::shows(&mut app, "▶ Run on this PR"));
+        let asks = cockpit_asks(&mut app);
+        assert!(asks.is_empty(), "{asks:?}");
+    }
+
+    #[test]
+    fn the_approve_scene_opens_the_approval_modal() {
+        let mut app = staged(Scene::CockpitApprove);
+        shows_all(
+            &mut app,
+            Scene::CockpitApprove,
+            &[
+                "Run this scenario?",
+                "Token endpoint is down",
+                "COMMAND",
+                "SCRIPT · DOWN.SH, FAKE_OAUTH.PY",
+                "Values reach the script only as environment variables",
+                "INPUTS",
+                "Main runs the same files from a read-only copy.",
+                "Cancel",
+                "Approve",
+                "Approve and run",
+            ],
+        );
+        assert_eq!(testing::count::<Spinner>(&mut app), 0);
+        let asks = cockpit_asks(&mut app);
+        assert!(asks.is_empty(), "{asks:?}");
+    }
+
+    #[test]
+    fn the_main_scene_opens_prepare_main() {
+        let mut app = staged(Scene::CockpitMain);
+        shows_all(
+            &mut app,
+            Scene::CockpitMain,
+            &[
+                "Prepare main",
+                "SETUP ON MAIN · 2 STEPS",
+                "COMMANDS ON MAIN · NO NETWORK",
+                "USES",
+                "Approve and prepare",
+                "needs setup",
+            ],
+        );
+        let asks = cockpit_asks(&mut app);
+        assert!(asks.is_empty(), "{asks:?}");
     }
 
     #[test]

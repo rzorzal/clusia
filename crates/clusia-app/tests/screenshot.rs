@@ -87,7 +87,7 @@ fn demo_screenshots() {
             vec!["--demo", "--dark", "--scene", scene],
         ));
     }
-    // The Tests tab and Config › Tests: seven scenes in both themes, seven in light only.
+    // The Tests tab and Config › Tests: thirteen scenes in both themes, seven in light only.
     for scene in [
         "tests-empty",
         "tests-auto",
@@ -96,6 +96,12 @@ fn demo_screenshots() {
         "tests-running",
         "tests-failed",
         "tests-functions",
+        "cockpit-entry",
+        "cockpit-empty",
+        "cockpit-scenario",
+        "cockpit-bench",
+        "cockpit-approve",
+        "cockpit-main",
     ] {
         shots.push((format!("{scene}-light"), vec!["--demo", "--scene", scene]));
         shots.push((
@@ -159,6 +165,10 @@ fn demo_screenshots() {
         if name.starts_with("tests-functions-") && !name.contains("driver") {
             let share = non_background_share(&out, (0.03, 0.28, 0.25, 0.85));
             assert!(share > 0.02, "{name}: the function list is empty ({share})");
+        }
+        if name.starts_with("cockpit-") && !name.starts_with("cockpit-entry") {
+            let share = non_background_share(&out, (0.03, 0.14, 0.97, 0.90));
+            assert!(share > 0.02, "{name}: the cockpit is empty ({share})");
         }
         if let Ok(keep) = std::env::var("CLUSIA_SCREENSHOTS") {
             std::fs::copy(&out, Path::new(&keep).join(format!("{name}.png"))).unwrap();

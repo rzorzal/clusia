@@ -32,6 +32,8 @@ pub enum Swatch {
     /// The fill of a chosen or emphasised card, row or chip: a faint green close to the surface it
     /// sits on, so muted text stays readable on it in both themes.
     GreenTint,
+    /// The border of a field the reviewer changed.
+    GreenLine,
     /// A softer added-line tint (diff and code previews).
     AddedBg,
     /// The removed-line tint.
@@ -110,6 +112,7 @@ pub struct Tokens {
     pub on_green: Color,
     pub green_soft: Color,
     pub green_tint: Color,
+    pub green_line: Color,
     pub added_bg: Color,
     pub removed_bg: Color,
     pub added_strong: Color,
@@ -169,6 +172,7 @@ impl Tokens {
             Swatch::OnGreen => self.on_green,
             Swatch::GreenSoft => self.green_soft,
             Swatch::GreenTint => self.green_tint,
+            Swatch::GreenLine => self.green_line,
             Swatch::AddedBg => self.added_bg,
             Swatch::RemovedBg => self.removed_bg,
             Swatch::AddedStrong => self.added_strong,
@@ -245,6 +249,7 @@ pub const LIGHT: Tokens = Tokens {
     on_green: Color::srgb_u8(0xFF, 0xFF, 0xFF),
     green_soft: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x24),
     green_tint: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x24),
+    green_line: Color::srgb_u8(0xBF, 0xE3, 0xC6),
     added_bg: Color::srgb_u8(0xE9, 0xF6, 0xEB),
     removed_bg: Color::srgb_u8(0xFC, 0xEE, 0xE8),
     added_strong: Color::srgba_u8(0x2F, 0x9E, 0x44, 0x42),
@@ -331,6 +336,7 @@ pub const DARK: Tokens = Tokens {
     on_green: Color::srgb_u8(0x0C, 0x1A, 0x0F),
     green_soft: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x29),
     green_tint: Color::srgb_u8(0x1E, 0x2B, 0x22),
+    green_line: Color::srgb_u8(0x2C, 0x5A, 0x35),
     added_bg: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x0C),
     removed_bg: Color::srgba_u8(0xF0, 0x7A, 0x4A, 0x0C),
     added_strong: Color::srgba_u8(0x4C, 0xC3, 0x5F, 0x18),

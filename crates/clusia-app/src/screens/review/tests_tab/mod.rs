@@ -5,6 +5,7 @@
 //! text helpers make it printable and nothing in this module acts on its content.
 
 pub mod body;
+pub mod cockpit;
 pub(crate) mod detail;
 pub mod functions;
 pub(crate) mod github_checks;
@@ -79,6 +80,10 @@ pub struct TestsModel {
     pub run_scope: Option<TestScope>,
     /// Function cases are being written or run, which the Auto Tests run buttons wait for.
     pub functions_busy: bool,
+    /// The sub-tab the cockpit's back link returns to.
+    pub last_sub: SubTab,
+    /// A cockpit run or write goes on, which the Auto Tests and function run buttons wait for.
+    pub cockpit_busy: bool,
 }
 
 /// The run that goes now: its results so far and the end of its output.
@@ -108,6 +113,7 @@ pub enum SubTab {
     #[default]
     Auto,
     Functions,
+    Cockpit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -252,7 +258,7 @@ impl TestsModel {
 
     /// Whether the daemon is doing something for this review.
     pub fn busy(&self) -> bool {
-        self.functions_busy || self.tests_busy()
+        self.functions_busy || self.cockpit_busy || self.tests_busy()
     }
 
     /// Whether the daemon is generating, setting up or running the Auto Tests, whatever the
@@ -752,6 +758,7 @@ impl Plugin for TestsPlugin {
                     .chain()
                     .after(functions::cases::fill_cases),
             );
+        cockpit::register(app);
     }
 }
 

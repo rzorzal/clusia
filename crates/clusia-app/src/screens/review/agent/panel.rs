@@ -30,7 +30,7 @@ use crate::screens::review::ReviewSystems;
 use crate::screens::review::activity::elapsed_label;
 use crate::screens::review::editor::read_only_reason;
 use crate::screens::review::shell::{
-    HarnessButton, OpenSetting, RightPanel, on_harness, on_open_setting,
+    CockpitHidden, HarnessButton, OpenSetting, RightPanel, on_harness, on_open_setting,
 };
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
@@ -392,18 +392,22 @@ pub struct PanelClosing;
 /// The column's visibility and width, and which tab's body is shown. Showing or hiding the
 /// column slides it (its width is set at once, so it is laid out only when it appears and when
 /// it goes); the first frame of a column and Reduce Motion just show or hide it.
-fn layout(
+pub(crate) fn layout(
     mut commands: Commands,
     chats: Res<Chats>,
     motion: Res<Motion>,
-    mut columns: Query<(
-        Entity,
-        Ref<PanelColumn>,
-        &mut Node,
-        Has<PanelClosing>,
-        Has<Tween>,
-        &UiTransform,
-    )>,
+    // A column the cockpit hides is left alone: its display is not the panel's to flip back.
+    mut columns: Query<
+        (
+            Entity,
+            Ref<PanelColumn>,
+            &mut Node,
+            Has<PanelClosing>,
+            Has<Tween>,
+            &UiTransform,
+        ),
+        Without<CockpitHidden>,
+    >,
     layers: Query<
         (Entity, &ChildOf, Has<Shroud>, &BackgroundColor),
         Or<(With<Veil>, With<Shroud>)>,

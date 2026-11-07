@@ -1,0 +1,37 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="cockpit.css"></head><body>
+<script>if(location.hash==="#dark")document.body.className="dark"</script>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#123</span><b>auth refresh</b></span></div>
+  <div class="ck"><span class="back">‹ Tests</span><b>QA cockpit</b><span class="f">scenarios and benchmarks for this change — this PR vs main</span>
+    <span class="mainst" style="margin-left:auto"><span class="m">main</span><span class="f">not set up</span></span>
+    <span class="mainst" style="margin-left:14px"><span class="ok">●</span>QA copilot · Claude Code</span></div>
+  <div class="cols">
+    <div class="col left">
+      <div class="grp">SCENARIOS · 0</div>
+      <div class="it"><span class="f" style="font-size:12px">No scenarios yet. Ask Claude Code to write them from the diff.</span></div>
+      <div class="grp" style="margin-top:8px">BENCHMARKS · ON DEMAND · 0</div>
+      <div class="it"><span class="f" style="font-size:12px">Ask the copilot for one on a changed function.</span></div>
+      <div class="grp" style="margin-top:8px;color:var(--faint)">LOAD · COMES LATER</div>
+      <div style="margin-top:auto;display:flex;flex-direction:column;gap:8px">
+        <span style="display:flex;align-items:center;gap:8px;padding:0 4px" class="m"><span class="chk"></span>Run on main too</span>
+        <span class="btn" style="opacity:.5">Run all · this PR</span>
+      </div>
+    </div>
+    <div class="col mid" style="align-items:center;justify-content:center;text-align:center">
+      <div style="font-size:16px;font-weight:600">Check this change end to end</div>
+      <div class="m" style="margin-top:8px;max-width:440px;line-height:1.5">Claude Code reads the diff and writes scenarios: a script, its steps and inputs with fake values. You read and approve each one before it runs, on this PR and, if you want, on main.</div>
+      <span class="btn p" style="margin-top:18px">Write scenarios with Claude Code</span>
+      <div class="f" style="margin-top:10px;font-size:12px">Nothing runs until you click Run · container · no network</div>
+    </div>
+    <div class="col right">
+      <b>This PR vs main</b>
+      <div class="m" style="margin-top:8px;line-height:1.5">Run on main too prepares a second checkout at this PR's base, <span class="mono">4e1f2a0</span>, with its own caches and its own setup approval. Its first run builds from scratch.</div>
+      <div style="font-weight:600;margin:20px 0 8px">QA copilot</div>
+      <div style="display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
+        <div class="f" style="font-size:12.5px;line-height:1.5">Ask what to test, or why a result came out the way it did. The copilot reads the diff and the results; it never runs anything itself.</div>
+      </div>
+      <div class="compose">Ask for a scenario, or what to try next…<span class="send">↑</span></div>
+    </div>
+  </div>
+</div></body></html>

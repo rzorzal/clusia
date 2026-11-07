@@ -125,6 +125,12 @@ pub enum Modal {
     TestSetup,
     /// The driver of a changed function, for `FunctionsModel.driver`.
     DriverCode,
+    /// The approval of a scenario's command and script, for `CockpitModel.modal`.
+    CockpitApprove,
+    /// Main's setup plan in the cockpit, for `CockpitModel.modal`.
+    CockpitMain,
+    /// The confirmation to remove a scenario, for `CockpitModel.modal`.
+    CockpitRemove,
 }
 
 /// What the comment editor writes.

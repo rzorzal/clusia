@@ -18,6 +18,10 @@ use bevy::window::RequestRedraw;
 use bevy::winit::{EventLoopProxyWrapper, WinitUserEvent};
 use clusia_calls::{CallGraph, StaticStep};
 use clusia_core::checks::{CheckKind, CheckResult, Finding, Pass};
+use clusia_core::cockpit::{
+    BenchAsk, BenchInput, CockpitScope, CockpitView, CopilotAsk, ItemRef, RoundResult, RunSide,
+    Sample, ScenarioAsk, ScenarioInput, ScenarioScript,
+};
 use clusia_core::diagram::{DiagramVersion, DiagramVersionInfo, EntryState};
 use clusia_core::draft::Origin;
 use clusia_core::functions::{
@@ -52,6 +56,7 @@ use crate::screens::review::checks::{self, Checks, proposed_comment};
 use crate::screens::review::diagrams::{Diagrams, modal};
 use crate::screens::review::revalidation::Revalidations;
 use crate::screens::review::story::model::Stories;
+use crate::screens::review::tests_tab::cockpit::CockpitModels;
 use crate::screens::review::tests_tab::functions::FunctionsModels;
 use crate::screens::review::tests_tab::{TestMachine, TestsModels};
 use crate::snapshot::{self, GiphyKey, Refresh, Snapshot};
@@ -65,7 +70,7 @@ pub const TOAST_SECS: f64 = 4.0;
 /// What a write ask says when the daemon is not there to take it.
 pub const NOT_SENT: &str = "Not connected to clusiad — not sent";
 /// What a tests write ask says in demo mode, where nothing reaches a daemon.
-const DEMO_NOT_SENT: &str = "Demo mode: nothing is sent to the daemon";
+pub(crate) const DEMO_NOT_SENT: &str = "Demo mode: nothing is sent to the daemon";
 
 /// The `Model.rejected` key under which a refusal Giphy gave for the stored key is kept.
 pub const GIPHY_KEY_REFUSAL: &str = "giphy.key";
@@ -395,6 +400,80 @@ pub enum Ask {
     CheckTestEngine {
         pr: Option<PrRef>,
     },
+    /// The QA cockpit of a review: `CockpitTell::Loaded`.
+    GetCockpit(PrRef),
+    /// Saves the reviewer's overlay of a scenario: `CockpitTell::Loaded`.
+    SaveScenario {
+        pr: PrRef,
+        scenario: String,
+        input: ScenarioInput,
+    },
+    /// Drops the reviewer's edits of a scenario: `CockpitTell::Loaded`.
+    ResetScenario {
+        pr: PrRef,
+        scenario: String,
+    },
+    /// Removes a scenario with its approval and results: `CockpitTell::Loaded`.
+    RemoveScenario {
+        pr: PrRef,
+        scenario: String,
+    },
+    /// Approves the command and script whose approval hash the reviewer read:
+    /// `CockpitTell::Loaded`.
+    ApproveScenario {
+        pr: PrRef,
+        scenario: String,
+        hash: String,
+    },
+    /// The script files of a scenario: `CockpitTell::Script`.
+    GetScenarioScript {
+        pr: PrRef,
+        scenario: String,
+    },
+    /// Has the agent write scenarios; the view follows on topic `tests`: `CockpitTell::Acked`.
+    WriteScenarios {
+        pr: PrRef,
+        ask: ScenarioAsk,
+    },
+    /// Saves the reviewer's overlay of a benchmark: `CockpitTell::Loaded`.
+    SaveBench {
+        pr: PrRef,
+        function: String,
+        input: BenchInput,
+    },
+    /// Drops the reviewer's edits of a benchmark: `CockpitTell::Loaded`.
+    ResetBench {
+        pr: PrRef,
+        function: String,
+    },
+    /// Has the agent write a benchmark; the view follows on topic `tests`:
+    /// `CockpitTell::Acked`.
+    WriteBench {
+        pr: PrRef,
+        function: String,
+        ask: BenchAsk,
+    },
+    /// Creates main's worktree at the review's base: `CockpitTell::Acked`.
+    OpenMain(PrRef),
+    /// Approves main's setup plan `main_hash` and runs it: `CockpitTell::Acked`.
+    PrepareMain {
+        pr: PrRef,
+        main_hash: String,
+        approve: Approve,
+    },
+    /// Runs scenarios or one item of the view `seen` describes: `CockpitTell::Started`.
+    RunCockpit {
+        pr: PrRef,
+        scope: CockpitScope,
+        on_main: bool,
+        seen: String,
+    },
+    /// Asks the QA copilot; its answer follows on topic `tests`: `CockpitTell::Acked`.
+    AskCopilot {
+        pr: PrRef,
+        item: Option<ItemRef>,
+        ask: CopilotAsk,
+    },
 }
 
 /// Which tests ask a refusal or a click belongs to.
@@ -555,6 +634,108 @@ impl FunctionsTell {
                 function,
                 result,
             },
+            _ => return None,
+        })
+    }
+}
+
+/// Which cockpit ask a refusal or an answer belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CockpitAskKind {
+    Load,
+    Save,
+    Reset,
+    Remove,
+    Approve,
+    Script,
+    Write,
+    OpenMain,
+    PrepareMain,
+    Run,
+    Copilot,
+}
+
+impl CockpitAskKind {
+    /// Whether the ask only reads: a refusal of one says nothing in a toast.
+    pub fn reads(self) -> bool {
+        matches!(self, CockpitAskKind::Load | CockpitAskKind::Script)
+    }
+}
+
+/// What the QA cockpit of a review did, from the daemon's events and the answers to the cockpit
+/// asks. Every ask gets exactly one answer tell.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CockpitTell {
+    /// A reply that carries the view: a read or a save, reset, remove or approve.
+    Loaded { pr: PrRef, view: Box<CockpitView> },
+    /// The event: something changed on the daemon's side.
+    Changed { pr: PrRef, view: Box<CockpitView> },
+    Samples {
+        pr: PrRef,
+        run: String,
+        item: ItemRef,
+        side: RunSide,
+        round: u32,
+        points: Vec<Sample>,
+    },
+    Round {
+        pr: PrRef,
+        run: String,
+        result: Box<RoundResult>,
+    },
+    Script {
+        pr: PrRef,
+        script: Box<ScenarioScript>,
+    },
+    Started {
+        pr: PrRef,
+        run: String,
+        skipped: Vec<String>,
+    },
+    /// A write the daemon took; its effect follows as an event.
+    Acked { pr: PrRef, kind: CockpitAskKind },
+    /// An ask that did not go through: its control is free again.
+    Refused {
+        pr: PrRef,
+        kind: CockpitAskKind,
+        message: String,
+    },
+}
+
+impl CockpitTell {
+    pub fn pr(&self) -> &PrRef {
+        match self {
+            CockpitTell::Loaded { pr, .. }
+            | CockpitTell::Changed { pr, .. }
+            | CockpitTell::Samples { pr, .. }
+            | CockpitTell::Round { pr, .. }
+            | CockpitTell::Script { pr, .. }
+            | CockpitTell::Started { pr, .. }
+            | CockpitTell::Acked { pr, .. }
+            | CockpitTell::Refused { pr, .. } => pr,
+        }
+    }
+
+    /// The tell for a cockpit event; `None` for every other event.
+    pub fn from_event(event: &Event) -> Option<CockpitTell> {
+        Some(match event.clone() {
+            Event::CockpitChanged { pr, view } => CockpitTell::Changed { pr, view },
+            Event::CockpitSamples {
+                pr,
+                run,
+                item,
+                side,
+                round,
+                points,
+            } => CockpitTell::Samples {
+                pr,
+                run,
+                item,
+                side,
+                round,
+                points,
+            },
+            Event::CockpitRound { pr, run, result } => CockpitTell::Round { pr, run, result },
             _ => return None,
         })
     }
@@ -1216,6 +1397,8 @@ pub enum Tell {
     Tests(TestsTell),
     /// What the review's function cases did.
     Functions(FunctionsTell),
+    /// What the review's QA cockpit did.
+    Cockpit(CockpitTell),
     /// What the test runs keep on this machine, or why that is not known.
     TestDisk(Result<DiskReport, String>),
     /// The engine and the sandbox the tests would use, or why that is not known.
@@ -1555,6 +1738,23 @@ fn offline(ask: &Ask, teller: &Teller) -> bool {
         Ask::WriteCases { pr, .. } => functions_not_sent(teller, pr, FunctionsAskKind::Write),
         Ask::RunCases { pr, .. } => functions_not_sent(teller, pr, FunctionsAskKind::Run),
         Ask::GetDriver { pr, .. } => functions_not_sent(teller, pr, FunctionsAskKind::Driver),
+        Ask::GetCockpit(pr) => cockpit_not_sent(teller, pr, CockpitAskKind::Load),
+        Ask::GetScenarioScript { pr, .. } => cockpit_not_sent(teller, pr, CockpitAskKind::Script),
+        Ask::SaveScenario { pr, .. } | Ask::SaveBench { pr, .. } => {
+            cockpit_not_sent(teller, pr, CockpitAskKind::Save);
+        }
+        Ask::ResetScenario { pr, .. } | Ask::ResetBench { pr, .. } => {
+            cockpit_not_sent(teller, pr, CockpitAskKind::Reset);
+        }
+        Ask::RemoveScenario { pr, .. } => cockpit_not_sent(teller, pr, CockpitAskKind::Remove),
+        Ask::ApproveScenario { pr, .. } => cockpit_not_sent(teller, pr, CockpitAskKind::Approve),
+        Ask::WriteScenarios { pr, .. } | Ask::WriteBench { pr, .. } => {
+            cockpit_not_sent(teller, pr, CockpitAskKind::Write);
+        }
+        Ask::OpenMain(pr) => cockpit_not_sent(teller, pr, CockpitAskKind::OpenMain),
+        Ask::PrepareMain { pr, .. } => cockpit_not_sent(teller, pr, CockpitAskKind::PrepareMain),
+        Ask::RunCockpit { pr, .. } => cockpit_not_sent(teller, pr, CockpitAskKind::Run),
+        Ask::AskCopilot { pr, .. } => cockpit_not_sent(teller, pr, CockpitAskKind::Copilot),
         Ask::GetTestDisk => teller.send(Tell::TestDisk(Err("Not connected to clusiad".into()))),
         Ask::CleanUpTests { .. } => {
             teller.send(Tell::Notice {
@@ -1749,6 +1949,8 @@ async fn follow(
                 teller.send(Tell::Tests(tell));
             } else if let Some(tell) = FunctionsTell::from_event(other) {
                 teller.send(Tell::Functions(tell));
+            } else if let Some(tell) = CockpitTell::from_event(other) {
+                teller.send(Tell::Cockpit(tell));
             }
         }
     }
@@ -1983,6 +2185,20 @@ async fn answer(
         | Ask::WriteCases { .. }
         | Ask::RunCases { .. }
         | Ask::GetDriver { .. } => functions_ask(client, teller, ask).await?,
+        Ask::GetCockpit(_)
+        | Ask::SaveScenario { .. }
+        | Ask::ResetScenario { .. }
+        | Ask::RemoveScenario { .. }
+        | Ask::ApproveScenario { .. }
+        | Ask::GetScenarioScript { .. }
+        | Ask::WriteScenarios { .. }
+        | Ask::SaveBench { .. }
+        | Ask::ResetBench { .. }
+        | Ask::WriteBench { .. }
+        | Ask::OpenMain(_)
+        | Ask::PrepareMain { .. }
+        | Ask::RunCockpit { .. }
+        | Ask::AskCopilot { .. } => cockpit_ask(client, teller, ask).await?,
         Ask::LoadConversation(pr) => match client
             .request(Command::GetConversation { pr: pr.clone() })
             .await
@@ -3033,6 +3249,217 @@ fn functions_not_sent(teller: &Teller, pr: &PrRef, kind: FunctionsAskKind) {
     }));
 }
 
+/// The command a cockpit ask is, with the review it is about and the kind its answer waits for;
+/// `None` for every other ask.
+fn cockpit_command(ask: Ask) -> Option<(Command, PrRef, CockpitAskKind)> {
+    Some(match ask {
+        Ask::GetCockpit(pr) => (
+            Command::GetCockpit { pr: pr.clone() },
+            pr,
+            CockpitAskKind::Load,
+        ),
+        Ask::SaveScenario {
+            pr,
+            scenario,
+            input,
+        } => (
+            Command::SaveScenario {
+                pr: pr.clone(),
+                scenario,
+                input,
+            },
+            pr,
+            CockpitAskKind::Save,
+        ),
+        Ask::ResetScenario { pr, scenario } => (
+            Command::ResetScenario {
+                pr: pr.clone(),
+                scenario,
+            },
+            pr,
+            CockpitAskKind::Reset,
+        ),
+        Ask::RemoveScenario { pr, scenario } => (
+            Command::RemoveScenario {
+                pr: pr.clone(),
+                scenario,
+            },
+            pr,
+            CockpitAskKind::Remove,
+        ),
+        Ask::ApproveScenario { pr, scenario, hash } => (
+            Command::ApproveScenario {
+                pr: pr.clone(),
+                scenario,
+                hash,
+            },
+            pr,
+            CockpitAskKind::Approve,
+        ),
+        Ask::GetScenarioScript { pr, scenario } => (
+            Command::GetScenarioScript {
+                pr: pr.clone(),
+                scenario,
+            },
+            pr,
+            CockpitAskKind::Script,
+        ),
+        Ask::WriteScenarios { pr, ask } => (
+            Command::WriteScenarios {
+                pr: pr.clone(),
+                ask,
+            },
+            pr,
+            CockpitAskKind::Write,
+        ),
+        Ask::SaveBench {
+            pr,
+            function,
+            input,
+        } => (
+            Command::SaveBench {
+                pr: pr.clone(),
+                function,
+                input,
+            },
+            pr,
+            CockpitAskKind::Save,
+        ),
+        Ask::ResetBench { pr, function } => (
+            Command::ResetBench {
+                pr: pr.clone(),
+                function,
+            },
+            pr,
+            CockpitAskKind::Reset,
+        ),
+        Ask::WriteBench { pr, function, ask } => (
+            Command::WriteBench {
+                pr: pr.clone(),
+                function,
+                ask,
+            },
+            pr,
+            CockpitAskKind::Write,
+        ),
+        Ask::OpenMain(pr) => (
+            Command::OpenMain { pr: pr.clone() },
+            pr,
+            CockpitAskKind::OpenMain,
+        ),
+        Ask::PrepareMain {
+            pr,
+            main_hash,
+            approve,
+        } => (
+            Command::PrepareMain {
+                pr: pr.clone(),
+                main_hash,
+                approve,
+            },
+            pr,
+            CockpitAskKind::PrepareMain,
+        ),
+        Ask::RunCockpit {
+            pr,
+            scope,
+            on_main,
+            seen,
+        } => (
+            Command::RunCockpit {
+                pr: pr.clone(),
+                scope,
+                on_main,
+                seen,
+            },
+            pr,
+            CockpitAskKind::Run,
+        ),
+        Ask::AskCopilot { pr, item, ask } => (
+            Command::AskCopilot {
+                pr: pr.clone(),
+                item,
+                ask,
+            },
+            pr,
+            CockpitAskKind::Copilot,
+        ),
+        _ => return None,
+    })
+}
+
+/// What a cockpit ask answered with a reply it does not expect is refused with, so the control
+/// that waits for it is freed and a view ask stops being owed.
+pub const UNEXPECTED_ANSWER: &str = "Unexpected answer";
+
+/// The tell a reply to a cockpit ask becomes; a reply the ask does not expect is a refusal.
+fn cockpit_tell(pr: &PrRef, kind: CockpitAskKind, reply: Reply) -> CockpitTell {
+    let pr = pr.clone();
+    match (kind, reply) {
+        (
+            CockpitAskKind::Load
+            | CockpitAskKind::Save
+            | CockpitAskKind::Reset
+            | CockpitAskKind::Remove
+            | CockpitAskKind::Approve,
+            Reply::Cockpit(view),
+        ) => CockpitTell::Loaded { pr, view },
+        (CockpitAskKind::Script, Reply::ScenarioScript(script)) => {
+            CockpitTell::Script { pr, script }
+        }
+        (CockpitAskKind::Run, Reply::CockpitStarted { run, skipped }) => {
+            CockpitTell::Started { pr, run, skipped }
+        }
+        (
+            CockpitAskKind::Write
+            | CockpitAskKind::OpenMain
+            | CockpitAskKind::PrepareMain
+            | CockpitAskKind::Copilot,
+            Reply::Ack,
+        ) => CockpitTell::Acked { pr, kind },
+        _ => CockpitTell::Refused {
+            pr,
+            kind,
+            message: UNEXPECTED_ANSWER.into(),
+        },
+    }
+}
+
+/// One cockpit ask on `client`: the answer becomes the tell the model waits for; a refusal
+/// becomes a `Refused`, with a warning unless the ask only reads. A lost connection is `Err`.
+async fn cockpit_ask(client: &mut Client, teller: &Teller, ask: Ask) -> Result<(), String> {
+    let Some((cmd, pr, kind)) = cockpit_command(ask) else {
+        return Ok(());
+    };
+    match client.request(cmd).await {
+        Ok(reply) => teller.send(Tell::Cockpit(cockpit_tell(&pr, kind, reply))),
+        Err(ClientError::Server(e)) => cockpit_refused(teller, &pr, kind, e.message),
+        Err(e) => return Err(lost(e)),
+    }
+    Ok(())
+}
+
+/// A refused cockpit ask: the refusal frees its control, and a write says why in one toast, in
+/// text that is safe to draw.
+fn cockpit_refused(teller: &Teller, pr: &PrRef, kind: CockpitAskKind, message: String) {
+    if !kind.reads() {
+        teller.send(Tell::Notice {
+            text: clusia_core::printable::printable(&message),
+            warning: true,
+        });
+    }
+    teller.send(Tell::Cockpit(CockpitTell::Refused {
+        pr: pr.clone(),
+        kind,
+        message,
+    }));
+}
+
+/// A cockpit ask that cannot go: the refusal frees its control, and a write says so in a toast.
+fn cockpit_not_sent(teller: &Teller, pr: &PrRef, kind: CockpitAskKind) {
+    cockpit_refused(teller, pr, kind, NOT_SENT.into());
+}
+
 fn tests_refused(
     teller: &Teller,
     ask: &Ask,
@@ -3477,6 +3904,7 @@ pub(crate) struct ReviewModels<'w> {
     people: ResMut<'w, People>,
     tests: ResMut<'w, TestsModels>,
     functions: ResMut<'w, FunctionsModels>,
+    cockpit: ResMut<'w, CockpitModels>,
     machine: ResMut<'w, TestMachine>,
 }
 
@@ -3508,6 +3936,7 @@ pub(crate) fn pump(
         mut people,
         mut tests,
         mut functions,
+        mut cockpit,
         mut machine,
     } = models;
     // Tells are mostly about other things than the tabs, and every rebuild system wakes for a
@@ -3601,6 +4030,7 @@ pub(crate) fn pump(
                 }
                 tests.lost();
                 functions.lost();
+                cockpit.lost();
                 machine.lost();
             }
             Tell::Quit => {
@@ -3664,6 +4094,8 @@ pub(crate) fn pump(
                 }
                 functions.apply(&tell);
             }
+            // A refused write already said why in its `Notice`.
+            Tell::Cockpit(tell) => cockpit.apply(&tell),
             Tell::TestDisk(report) => machine.disk_arrived(report),
             Tell::TestEngine(info) => machine.engine_arrived(info),
             Tell::Diagrams(tell) => diagrams.apply(&tell),
@@ -3742,6 +4174,7 @@ pub(crate) fn demo_answers(
     time: Res<Time>,
     mut redraw: MessageWriter<RequestRedraw>,
     mut rule_granted: Local<bool>,
+    mut cockpit_written: Local<HashSet<PrRef>>,
 ) {
     if asks.recorded.is_empty() {
         return;
@@ -4176,6 +4609,97 @@ pub(crate) fn demo_answers(
                     }));
                 }
             }
+            Ask::GetCockpit(pr) => {
+                if tabs.0.get(&pr).and_then(|t| t.ready()).is_some() {
+                    let view = demo_cockpit_now(now, cockpit_written.contains(&pr));
+                    tells.push(Tell::Cockpit(CockpitTell::Loaded {
+                        pr,
+                        view: Box::new(view),
+                    }));
+                } else {
+                    tells.push(Tell::Cockpit(CockpitTell::Refused {
+                        pr,
+                        kind: CockpitAskKind::Load,
+                        message: DEMO_NOT_SENT.into(),
+                    }));
+                }
+            }
+            Ask::WriteScenarios { pr, .. } => {
+                cockpit_written.insert(pr.clone());
+                tells.push(Tell::Cockpit(CockpitTell::Acked {
+                    pr: pr.clone(),
+                    kind: CockpitAskKind::Write,
+                }));
+                tells.push(Tell::Cockpit(CockpitTell::Changed {
+                    pr,
+                    view: Box::new(demo_cockpit_now(now, true)),
+                }));
+            }
+            Ask::SaveScenario { pr, .. }
+            | Ask::ResetScenario { pr, .. }
+            | Ask::RemoveScenario { pr, .. }
+            | Ask::ApproveScenario { pr, .. }
+            | Ask::SaveBench { pr, .. }
+            | Ask::ResetBench { pr, .. } => {
+                let view = demo_cockpit_now(now, cockpit_written.contains(&pr));
+                tells.push(Tell::Cockpit(CockpitTell::Loaded {
+                    pr,
+                    view: Box::new(view),
+                }));
+            }
+            Ask::GetScenarioScript { pr, scenario } => {
+                tells.push(Tell::Cockpit(
+                    match fixture::demo_cockpit_script(&scenario) {
+                        Some(script) => CockpitTell::Script {
+                            pr,
+                            script: Box::new(script),
+                        },
+                        None => CockpitTell::Refused {
+                            pr,
+                            kind: CockpitAskKind::Script,
+                            message: "Demo mode has no such script".into(),
+                        },
+                    },
+                ));
+            }
+            Ask::WriteBench { pr, .. } => {
+                demo_cockpit_acked(&mut tells, &cockpit_written, now, pr, CockpitAskKind::Write);
+            }
+            Ask::OpenMain(pr) => {
+                demo_cockpit_acked(
+                    &mut tells,
+                    &cockpit_written,
+                    now,
+                    pr,
+                    CockpitAskKind::OpenMain,
+                );
+            }
+            Ask::PrepareMain { pr, .. } => {
+                demo_cockpit_acked(
+                    &mut tells,
+                    &cockpit_written,
+                    now,
+                    pr,
+                    CockpitAskKind::PrepareMain,
+                );
+            }
+            Ask::AskCopilot { pr, .. } => {
+                demo_cockpit_acked(
+                    &mut tells,
+                    &cockpit_written,
+                    now,
+                    pr,
+                    CockpitAskKind::Copilot,
+                );
+            }
+            Ask::RunCockpit { pr, .. } => {
+                demo_toast(&mut toasts, &time);
+                tells.push(Tell::Cockpit(CockpitTell::Refused {
+                    pr,
+                    kind: CockpitAskKind::Run,
+                    message: DEMO_NOT_SENT.into(),
+                }));
+            }
             Ask::GetDriver { pr, function } => {
                 tells.push(Tell::Functions(FunctionsTell::Driver {
                     pr,
@@ -4285,6 +4809,37 @@ fn demo_functions_refused(
         pr,
         ask,
         message: DEMO_NOT_SENT.into(),
+    }));
+}
+
+/// The demo's cockpit: scenarios once they were written, nothing before.
+fn demo_cockpit_now(now: i64, written: bool) -> CockpitView {
+    fixture::demo_cockpit(
+        now,
+        if written {
+            fixture::DemoCockpit::Scenario
+        } else {
+            fixture::DemoCockpit::Empty
+        },
+    )
+}
+
+/// A cockpit write the demo takes: the ack, then the current view as the event the daemon would
+/// send.
+fn demo_cockpit_acked(
+    tells: &mut Vec<Tell>,
+    written: &HashSet<PrRef>,
+    now: i64,
+    pr: PrRef,
+    kind: CockpitAskKind,
+) {
+    tells.push(Tell::Cockpit(CockpitTell::Acked {
+        pr: pr.clone(),
+        kind,
+    }));
+    tells.push(Tell::Cockpit(CockpitTell::Changed {
+        view: Box::new(demo_cockpit_now(now, written.contains(&pr))),
+        pr,
     }));
 }
 
@@ -4913,6 +5468,7 @@ mod tests {
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
             .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
+            .init_resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -4965,6 +5521,7 @@ mod tests {
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
             .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
+            .init_resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -5015,6 +5572,7 @@ mod tests {
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
             .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
+            .init_resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(demo_queue())
@@ -5080,6 +5638,7 @@ mod tests {
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
             .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
+            .init_resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -5442,6 +6001,7 @@ mod tests {
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
             .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
+            .init_resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -5607,6 +6167,7 @@ mod tests {
                 .init_resource::<Calls>()
                 .init_resource::<TestsModels>()
                 .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
+                .init_resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
                 .init_resource::<TestMachine>()
                 .init_resource::<crate::screens::review::agent::PermissionQueue>()
                 .add_plugins(BridgePlugin {
@@ -6156,6 +6717,7 @@ mod tests {
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
             .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
+            .init_resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
             .init_resource::<TestMachine>()
             .insert_resource(Clock(Some(1_790_000_000)))
             .insert_resource(PermissionQueue::default())
@@ -6249,6 +6811,7 @@ mod tests {
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
             .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
+            .init_resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
             .init_resource::<TestMachine>()
             .init_resource::<People>()
             .insert_resource(Clock(Some(1_790_000_000)))
@@ -6673,6 +7236,7 @@ mod tests {
             .init_resource::<Calls>()
             .init_resource::<TestsModels>()
             .init_resource::<crate::screens::review::tests_tab::functions::FunctionsModels>()
+            .init_resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
             .init_resource::<TestMachine>()
             .init_resource::<People>()
             .insert_resource(Clock(Some(1_790_000_000)))
@@ -7246,5 +7810,562 @@ mod tests {
             })
             .collect();
         assert_eq!(refused, [FunctionsAskKind::Run, FunctionsAskKind::Write]);
+    }
+
+    fn cockpit_view() -> CockpitView {
+        CockpitView::new("abc")
+    }
+
+    #[test]
+    fn cockpit_events_become_cockpit_tells() {
+        use clusia_core::cockpit::{ItemKind, RoundEnd, RoundResult, RunSide, Sample};
+        let pr = fixture::demo_pr();
+        let view = cockpit_view();
+        assert_eq!(
+            CockpitTell::from_event(&Event::CockpitChanged {
+                pr: pr.clone(),
+                view: Box::new(view.clone())
+            }),
+            Some(CockpitTell::Changed {
+                pr: pr.clone(),
+                view: Box::new(view)
+            })
+        );
+        let item = ItemRef {
+            kind: ItemKind::Bench,
+            id: "f".into(),
+        };
+        let points = vec![Sample {
+            t_ms: 250,
+            rss_kb: Some(10),
+            cpu_milli: None,
+        }];
+        assert_eq!(
+            CockpitTell::from_event(&Event::CockpitSamples {
+                pr: pr.clone(),
+                run: "r1".into(),
+                item: item.clone(),
+                side: RunSide::Main,
+                round: 2,
+                points: points.clone(),
+            }),
+            Some(CockpitTell::Samples {
+                pr: pr.clone(),
+                run: "r1".into(),
+                item: item.clone(),
+                side: RunSide::Main,
+                round: 2,
+                points,
+            })
+        );
+        let result = RoundResult {
+            item,
+            side: RunSide::Pr,
+            round: 1,
+            sha: "s".into(),
+            passed: Some(true),
+            end: RoundEnd::Finished,
+            exit_code: Some(0),
+            metrics: Default::default(),
+            outputs: Default::default(),
+            errors: Vec::new(),
+            message: None,
+            tail: String::new(),
+            took_ms: 1,
+            at: 0,
+        };
+        assert_eq!(
+            CockpitTell::from_event(&Event::CockpitRound {
+                pr: pr.clone(),
+                run: "r1".into(),
+                result: Box::new(result.clone())
+            }),
+            Some(CockpitTell::Round {
+                pr: pr.clone(),
+                run: "r1".into(),
+                result: Box::new(result)
+            })
+        );
+        assert_eq!(
+            CockpitTell::from_event(&Event::FunctionsChanged {
+                pr: pr.clone(),
+                view: Box::new(clusia_core::functions::FunctionsView::new("abc")),
+            }),
+            None
+        );
+        let changed = Event::CockpitChanged {
+            pr,
+            view: Box::new(cockpit_view()),
+        };
+        assert_eq!(FunctionsTell::from_event(&changed), None);
+        assert_eq!(TestsTell::from_event(&changed), None);
+    }
+
+    #[test]
+    fn cockpit_replies_become_the_tell_their_ask_waits_for() {
+        use clusia_core::cockpit::ScenarioScript;
+        let pr = fixture::demo_pr();
+        let view = Box::new(cockpit_view());
+        assert_eq!(
+            cockpit_tell(&pr, CockpitAskKind::Load, Reply::Cockpit(view.clone())),
+            CockpitTell::Loaded {
+                pr: pr.clone(),
+                view: view.clone()
+            }
+        );
+        assert!(
+            matches!(
+                cockpit_tell(&pr, CockpitAskKind::Save, Reply::Cockpit(view.clone())),
+                CockpitTell::Loaded { .. }
+            ),
+            "a save answers with the view"
+        );
+        let script = Box::new(ScenarioScript {
+            scenario: "s".into(),
+            files: vec![("a.sh".into(), "echo".into())],
+            approval_hash: "h".into(),
+        });
+        assert_eq!(
+            cockpit_tell(
+                &pr,
+                CockpitAskKind::Script,
+                Reply::ScenarioScript(script.clone())
+            ),
+            CockpitTell::Script {
+                pr: pr.clone(),
+                script
+            }
+        );
+        assert_eq!(
+            cockpit_tell(
+                &pr,
+                CockpitAskKind::Run,
+                Reply::CockpitStarted {
+                    run: "r1".into(),
+                    skipped: vec!["b".into()]
+                }
+            ),
+            CockpitTell::Started {
+                pr: pr.clone(),
+                run: "r1".into(),
+                skipped: vec!["b".into()]
+            }
+        );
+        assert_eq!(
+            cockpit_tell(&pr, CockpitAskKind::Copilot, Reply::Ack),
+            CockpitTell::Acked {
+                pr: pr.clone(),
+                kind: CockpitAskKind::Copilot
+            }
+        );
+        let unexpected = |kind| CockpitTell::Refused {
+            pr: pr.clone(),
+            kind,
+            message: UNEXPECTED_ANSWER.into(),
+        };
+        assert_eq!(
+            cockpit_tell(&pr, CockpitAskKind::Load, Reply::Ack),
+            unexpected(CockpitAskKind::Load)
+        );
+        assert_eq!(
+            cockpit_tell(&pr, CockpitAskKind::Run, Reply::Cockpit(view)),
+            unexpected(CockpitAskKind::Run)
+        );
+    }
+
+    #[test]
+    fn each_cockpit_ask_is_its_command() {
+        use clusia_core::cockpit::{BenchAsk, BenchInput, CopilotAsk, ItemKind, ScenarioAsk};
+        let pr = fixture::demo_pr();
+        let item = ItemRef {
+            kind: ItemKind::Scenario,
+            id: "s".into(),
+        };
+        let scenario_input = ScenarioInput {
+            values: [("a".to_string(), "1".to_string())].into(),
+            ..ScenarioInput::default()
+        };
+        let bench_input = BenchInput {
+            values: [("p".to_string(), "2".to_string())].into(),
+            warmup: Some(10),
+            secs: Some(6),
+            rounds: Some(5),
+        };
+        let rows: Vec<(Ask, Command, CockpitAskKind)> = vec![
+            (
+                Ask::GetCockpit(pr.clone()),
+                Command::GetCockpit { pr: pr.clone() },
+                CockpitAskKind::Load,
+            ),
+            (
+                Ask::SaveScenario {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                    input: scenario_input.clone(),
+                },
+                Command::SaveScenario {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                    input: scenario_input,
+                },
+                CockpitAskKind::Save,
+            ),
+            (
+                Ask::ResetScenario {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                },
+                Command::ResetScenario {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                },
+                CockpitAskKind::Reset,
+            ),
+            (
+                Ask::RemoveScenario {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                },
+                Command::RemoveScenario {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                },
+                CockpitAskKind::Remove,
+            ),
+            (
+                Ask::ApproveScenario {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                    hash: "h".into(),
+                },
+                Command::ApproveScenario {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                    hash: "h".into(),
+                },
+                CockpitAskKind::Approve,
+            ),
+            (
+                Ask::GetScenarioScript {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                },
+                Command::GetScenarioScript {
+                    pr: pr.clone(),
+                    scenario: "s".into(),
+                },
+                CockpitAskKind::Script,
+            ),
+            (
+                Ask::WriteScenarios {
+                    pr: pr.clone(),
+                    ask: ScenarioAsk::Fresh,
+                },
+                Command::WriteScenarios {
+                    pr: pr.clone(),
+                    ask: ScenarioAsk::Fresh,
+                },
+                CockpitAskKind::Write,
+            ),
+            (
+                Ask::SaveBench {
+                    pr: pr.clone(),
+                    function: "f".into(),
+                    input: bench_input.clone(),
+                },
+                Command::SaveBench {
+                    pr: pr.clone(),
+                    function: "f".into(),
+                    input: bench_input,
+                },
+                CockpitAskKind::Save,
+            ),
+            (
+                Ask::ResetBench {
+                    pr: pr.clone(),
+                    function: "f".into(),
+                },
+                Command::ResetBench {
+                    pr: pr.clone(),
+                    function: "f".into(),
+                },
+                CockpitAskKind::Reset,
+            ),
+            (
+                Ask::WriteBench {
+                    pr: pr.clone(),
+                    function: "f".into(),
+                    ask: BenchAsk::Values,
+                },
+                Command::WriteBench {
+                    pr: pr.clone(),
+                    function: "f".into(),
+                    ask: BenchAsk::Values,
+                },
+                CockpitAskKind::Write,
+            ),
+            (
+                Ask::OpenMain(pr.clone()),
+                Command::OpenMain { pr: pr.clone() },
+                CockpitAskKind::OpenMain,
+            ),
+            (
+                Ask::PrepareMain {
+                    pr: pr.clone(),
+                    main_hash: "m".into(),
+                    approve: Approve::Steps(vec!["fetch".into()]),
+                },
+                Command::PrepareMain {
+                    pr: pr.clone(),
+                    main_hash: "m".into(),
+                    approve: Approve::Steps(vec!["fetch".into()]),
+                },
+                CockpitAskKind::PrepareMain,
+            ),
+            (
+                Ask::RunCockpit {
+                    pr: pr.clone(),
+                    scope: CockpitScope::Item { item: item.clone() },
+                    on_main: true,
+                    seen: "h".into(),
+                },
+                Command::RunCockpit {
+                    pr: pr.clone(),
+                    scope: CockpitScope::Item { item: item.clone() },
+                    on_main: true,
+                    seen: "h".into(),
+                },
+                CockpitAskKind::Run,
+            ),
+            (
+                Ask::AskCopilot {
+                    pr: pr.clone(),
+                    item: Some(item.clone()),
+                    ask: CopilotAsk::Next,
+                },
+                Command::AskCopilot {
+                    pr: pr.clone(),
+                    item: Some(item),
+                    ask: CopilotAsk::Next,
+                },
+                CockpitAskKind::Copilot,
+            ),
+        ];
+        assert_eq!(rows.len(), 14);
+        for (ask, command, kind) in rows {
+            assert_eq!(
+                cockpit_command(ask.clone()),
+                Some((command, pr.clone(), kind)),
+                "{ask:?}"
+            );
+        }
+        assert_eq!(cockpit_command(Ask::StopTests(pr)), None);
+    }
+
+    #[test]
+    fn a_refused_cockpit_write_says_so_once_in_printable_text() {
+        let hostile = "no\u{1b}[2J\u{202e}way";
+        for kind in [CockpitAskKind::Copilot, CockpitAskKind::Write] {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let teller = Teller {
+                tx,
+                wake: Arc::new(|| {}),
+            };
+            let pr = fixture::demo_pr();
+            cockpit_refused(&teller, &pr, kind, hostile.into());
+            let told: Vec<Tell> = rx.try_iter().collect();
+            let mut app = crate::testing::demo_review_app();
+            let before = app.world().resource::<Toasts>().0.len();
+            for tell in told {
+                crate::testing::tell(&mut app, tell);
+            }
+            let shown: Vec<String> = app.world().resource::<Toasts>().0[before..]
+                .iter()
+                .map(|t| t.text.clone())
+                .collect();
+            assert_eq!(
+                shown,
+                [clusia_core::printable::printable(hostile)],
+                "{kind:?}"
+            );
+            assert_ne!(shown[0], hostile);
+            let model = &app
+                .world()
+                .resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
+                .0[&pr];
+            assert_eq!(model.pending, None);
+        }
+    }
+
+    #[test]
+    fn a_reply_the_cockpit_ask_does_not_expect_is_refused() {
+        let pr = fixture::demo_pr();
+        assert_eq!(
+            cockpit_tell(&pr, CockpitAskKind::Run, Reply::Ack),
+            CockpitTell::Refused {
+                pr: pr.clone(),
+                kind: CockpitAskKind::Run,
+                message: UNEXPECTED_ANSWER.into(),
+            }
+        );
+        let mut m = crate::screens::review::tests_tab::cockpit::CockpitModel::default();
+        let _ = m.click_run(&pr, CockpitScope::Scenarios, false, "h".into());
+        assert_eq!(m.pending, Some(CockpitAskKind::Run));
+        m.apply(&cockpit_tell(&pr, CockpitAskKind::Run, Reply::Ack));
+        assert_eq!(m.pending, None);
+        assert!(!m.busy());
+        let _ = m.ask_load(&pr, "head");
+        m.apply(&cockpit_tell(&pr, CockpitAskKind::Load, Reply::Ack));
+        assert!(m.awaiting.is_empty(), "the view ask is not owed any more");
+    }
+
+    #[test]
+    fn offline_cockpit_asks_are_refused_and_reads_say_nothing() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let teller = Teller {
+            tx,
+            wake: Arc::new(|| {}),
+        };
+        let pr = fixture::demo_pr();
+        assert!(offline(
+            &Ask::RunCockpit {
+                pr: pr.clone(),
+                scope: CockpitScope::Scenarios,
+                on_main: false,
+                seen: "h".into(),
+            },
+            &teller
+        ));
+        let told: Vec<Tell> = rx.try_iter().collect();
+        assert_eq!(
+            told,
+            [
+                Tell::Notice {
+                    text: NOT_SENT.into(),
+                    warning: true
+                },
+                Tell::Cockpit(CockpitTell::Refused {
+                    pr: pr.clone(),
+                    kind: CockpitAskKind::Run,
+                    message: NOT_SENT.into()
+                })
+            ]
+        );
+        assert!(offline(&Ask::GetCockpit(pr.clone()), &teller));
+        let told: Vec<Tell> = rx.try_iter().collect();
+        assert_eq!(
+            told,
+            [Tell::Cockpit(CockpitTell::Refused {
+                pr: pr.clone(),
+                kind: CockpitAskKind::Load,
+                message: NOT_SENT.into()
+            })]
+        );
+        assert!(offline(
+            &Ask::GetScenarioScript {
+                pr: pr.clone(),
+                scenario: "s".into()
+            },
+            &teller
+        ));
+        let told: Vec<Tell> = rx.try_iter().collect();
+        assert_eq!(
+            told,
+            [Tell::Cockpit(CockpitTell::Refused {
+                pr,
+                kind: CockpitAskKind::Script,
+                message: NOT_SENT.into()
+            })]
+        );
+    }
+
+    fn cockpit_tells(tells: &[Tell]) -> Vec<&CockpitTell> {
+        tells
+            .iter()
+            .filter_map(|t| match t {
+                Tell::Cockpit(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn demo_cockpit_is_empty_until_scenarios_are_written() {
+        let pr = fixture::demo_pr();
+        let tells = demo_tells(vec![Ask::GetCockpit(pr.clone())]);
+        // The review is not open in this app, so the tab is not ready: a refusal, no toast.
+        assert!(matches!(
+            cockpit_tells(&tells)[..],
+            [CockpitTell::Refused {
+                kind: CockpitAskKind::Load,
+                ..
+            }]
+        ));
+        let tells = demo_agent_tells(vec![Ask::GetCockpit(pr.clone())]);
+        let [CockpitTell::Loaded { view, .. }] = cockpit_tells(&tells)[..] else {
+            panic!("{tells:?}")
+        };
+        assert!(view.scenarios.is_empty());
+        let tells = demo_agent_tells(vec![
+            Ask::WriteScenarios {
+                pr: pr.clone(),
+                ask: ScenarioAsk::Fresh,
+            },
+            Ask::GetCockpit(pr.clone()),
+        ]);
+        let told = cockpit_tells(&tells);
+        assert!(matches!(
+            told[0],
+            CockpitTell::Acked {
+                kind: CockpitAskKind::Write,
+                ..
+            }
+        ));
+        let CockpitTell::Changed { view, .. } = told[1] else {
+            panic!("{told:?}")
+        };
+        assert_eq!(view.scenarios.len(), 3);
+        let CockpitTell::Loaded { view, .. } = told[2] else {
+            panic!("{told:?}")
+        };
+        assert_eq!(view.scenarios.len(), 3);
+    }
+
+    #[test]
+    fn demo_runs_nothing_and_answers_scripts() {
+        let pr = fixture::demo_pr();
+        let tells = demo_tells(vec![
+            Ask::RunCockpit {
+                pr: pr.clone(),
+                scope: CockpitScope::Scenarios,
+                on_main: false,
+                seen: "h".into(),
+            },
+            Ask::GetScenarioScript {
+                pr: pr.clone(),
+                scenario: "token-endpoint-is-down".into(),
+            },
+            Ask::GetScenarioScript {
+                pr: pr.clone(),
+                scenario: "nope".into(),
+            },
+        ]);
+        let told = cockpit_tells(&tells);
+        assert!(matches!(
+            told[0],
+            CockpitTell::Refused { kind: CockpitAskKind::Run, message, .. }
+                if message == DEMO_NOT_SENT
+        ));
+        let CockpitTell::Script { script, .. } = told[1] else {
+            panic!("{told:?}")
+        };
+        assert_eq!(**script, fixture::demo_scenario_script());
+        assert!(matches!(
+            told[2],
+            CockpitTell::Refused {
+                kind: CockpitAskKind::Script,
+                ..
+            }
+        ));
     }
 }

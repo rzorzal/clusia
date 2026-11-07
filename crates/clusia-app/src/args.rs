@@ -121,6 +121,19 @@ pub enum Scene {
     TestsFunctionsStale,
     /// The Run Function tests sub-tab with a function's driver open as plain text.
     TestsFunctionsDriver,
+    /// The Tests tab's Run Function tests sub-tab with the **Open the QA cockpit →** button.
+    CockpitEntry,
+    /// The QA cockpit of a review with nothing written yet.
+    CockpitEmpty,
+    /// The QA cockpit with three scenarios, two benchmarks and a comparison; *Refresh under
+    /// steady traffic* is selected.
+    CockpitScenario,
+    /// The QA cockpit with a benchmark running live on main's side of its third round.
+    CockpitBench,
+    /// The QA cockpit with the approval modal of a scenario open.
+    CockpitApprove,
+    /// The QA cockpit with the Prepare main modal open.
+    CockpitMain,
     /// Config › Tests (Tests-config.png).
     ConfigTests,
 }
@@ -175,6 +188,12 @@ impl Scene {
                 | Scene::TestsFunctionsRunning
                 | Scene::TestsFunctionsStale
                 | Scene::TestsFunctionsDriver
+                | Scene::CockpitEntry
+                | Scene::CockpitEmpty
+                | Scene::CockpitScenario
+                | Scene::CockpitBench
+                | Scene::CockpitApprove
+                | Scene::CockpitMain
         )
     }
 
@@ -464,6 +483,12 @@ mod tests {
             ),
             ("tests-functions-stale", Scene::TestsFunctionsStale, true),
             ("tests-functions-driver", Scene::TestsFunctionsDriver, true),
+            ("cockpit-entry", Scene::CockpitEntry, true),
+            ("cockpit-empty", Scene::CockpitEmpty, true),
+            ("cockpit-scenario", Scene::CockpitScenario, true),
+            ("cockpit-bench", Scene::CockpitBench, true),
+            ("cockpit-approve", Scene::CockpitApprove, true),
+            ("cockpit-main", Scene::CockpitMain, true),
             ("config-tests", Scene::ConfigTests, false),
         ] {
             assert_eq!(

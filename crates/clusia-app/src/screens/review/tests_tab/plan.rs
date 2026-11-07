@@ -12,7 +12,7 @@ use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::tests::{
-    Approve, PlanStep, STEP_ENGINE, STEP_STACK, STEP_TESTS, StepPlace, StepState,
+    Approve, PlanStep, STEP_ENGINE, STEP_STACK, STEP_TESTS, SetupPlan, StepPlace, StepState,
 };
 
 use super::body::{EditRecipe, on_edit_recipe};
@@ -163,27 +163,8 @@ pub(super) fn plan_view(
     let view = model.view.as_ref()?;
     let plan = view.plan.as_ref()?;
     let modal = model.plan.as_ref()?;
-    let steps = plan
-        .steps
-        .iter()
-        .map(|s| StepRow {
-            id: s.id.clone(),
-            title: printable(&s.title),
-            command: printable_lines(&s.command),
-            place: s.place,
-            network: s.network,
-            hint: s.hint.as_deref().map(printable),
-            kind: row_kind(s),
-            checked: modal.checked.contains(&s.id),
-        })
-        .collect();
-    let commands = COMMAND_KEYS
-        .iter()
-        .filter_map(|(key, label)| {
-            let c = plan.commands.iter().find(|c| c.key == *key)?;
-            Some((*label, printable_lines(&c.command)))
-        })
-        .collect();
+    let steps = step_rows(plan, |id| modal.checked.contains(id));
+    let commands = command_rows(plan);
     let recipe = view.recipe.as_ref();
     let variables = recipe.filter(|r| !r.env.is_empty()).map(|r| {
         r.env
@@ -217,6 +198,35 @@ pub(super) fn plan_view(
         sending: modal.sending,
         can_edit,
     })
+}
+
+/// The rows of a plan's steps, each checked as `checked` says. The plan modal and the cockpit's
+/// Prepare main modal draw the same rows.
+pub(super) fn step_rows(plan: &SetupPlan, checked: impl Fn(&str) -> bool) -> Vec<StepRow> {
+    plan.steps
+        .iter()
+        .map(|s| StepRow {
+            id: s.id.clone(),
+            title: printable(&s.title),
+            command: printable_lines(&s.command),
+            place: s.place,
+            network: s.network,
+            hint: s.hint.as_deref().map(printable),
+            kind: row_kind(s),
+            checked: checked(&s.id),
+        })
+        .collect()
+}
+
+/// The plan's test commands in the order the modals list them, each `printable_lines`.
+pub(super) fn command_rows(plan: &SetupPlan) -> Vec<(&'static str, String)> {
+    COMMAND_KEYS
+        .iter()
+        .filter_map(|(key, label)| {
+            let c = plan.commands.iter().find(|c| c.key == *key)?;
+            Some((*label, printable_lines(&c.command)))
+        })
+        .collect()
 }
 
 fn row_kind(step: &PlanStep) -> RowKind {
@@ -437,9 +447,9 @@ pub(super) fn refocus(
     commands.entity(add.entity).remove::<Refocus>();
 }
 
-type Spawner<'a> = ChildSpawnerCommands<'a>;
+pub(super) type Spawner<'a> = ChildSpawnerCommands<'a>;
 
-const SECTION: Type = Type {
+pub(super) const SECTION: Type = Type {
     size: 11.0,
     weight: 600,
     ink: Swatch::Muted,
@@ -558,7 +568,14 @@ fn draw_body(
         let steps = if n == 1 { "STEP" } else { "STEPS" };
         body.spawn(text(fonts, format!("SETUP · {n} {steps}"), SECTION));
         for row in &view.steps {
-            draw_step(body, fonts, pr, row, focused == Some(row.id.as_str()));
+            draw_step(
+                body,
+                fonts,
+                pr,
+                row,
+                focused == Some(row.id.as_str()),
+                false,
+            );
         }
     }
     body.spawn(Node {
@@ -587,7 +604,12 @@ fn draw_body(
     }
 }
 
-fn labelled(body: &mut Spawner, fonts: &UiFonts, label: &str, content: impl FnOnce(&mut Spawner)) {
+pub(super) fn labelled(
+    body: &mut Spawner,
+    fonts: &UiFonts,
+    label: &str,
+    content: impl FnOnce(&mut Spawner),
+) {
     body.spawn(Node {
         width: percent(100),
         column_gap: px(16),
@@ -614,7 +636,16 @@ fn labelled(body: &mut Spawner, fonts: &UiFonts, label: &str, content: impl FnOn
     });
 }
 
-fn draw_step(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, row: &StepRow, focused: bool) {
+/// One step's row. `for_main` makes its checkbox the cockpit's Prepare main one, which toggles
+/// the cockpit modal's choice and not the plan modal's.
+pub(super) fn draw_step(
+    body: &mut Spawner,
+    fonts: &UiFonts,
+    pr: &PrRef,
+    row: &StepRow,
+    focused: bool,
+    for_main: bool,
+) {
     let approvable = row.kind == RowKind::Approvable;
     let host = approvable && row.place == StepPlace::Host;
     let title_ink = if approvable {
@@ -639,14 +670,24 @@ fn draw_step(body: &mut Spawner, fonts: &UiFonts, pr: &PrRef, row: &StepRow, foc
     }
     e.with_children(|r| {
         if approvable {
-            let mut b = r.spawn((
-                checkbox(row.checked),
-                PlanStepBox {
-                    pr: pr.clone(),
-                    id: row.id.clone(),
-                },
-                observe(on_toggle),
-            ));
+            let mut b = r.spawn(checkbox(row.checked));
+            if for_main {
+                b.insert((
+                    super::cockpit::modals::PrepareMainStepBox {
+                        pr: pr.clone(),
+                        id: row.id.clone(),
+                    },
+                    observe(super::cockpit::modals::on_toggle_step),
+                ));
+            } else {
+                b.insert((
+                    PlanStepBox {
+                        pr: pr.clone(),
+                        id: row.id.clone(),
+                    },
+                    observe(on_toggle),
+                ));
+            }
             if focused {
                 b.insert(Refocus);
             }

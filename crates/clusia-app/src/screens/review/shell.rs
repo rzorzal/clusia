@@ -219,9 +219,14 @@ pub struct DraftCardPlace;
 #[derive(Component, Debug)]
 pub struct DraftList;
 
+/// A part of the review's screen another screen covers. The right column's own layout leaves a
+/// column with this alone, so its display is not flipped back while it is covered.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CockpitHidden;
+
 #[derive(Component)]
 pub(crate) struct ShellTop {
-    pr: PrRef,
+    pub(crate) pr: PrRef,
     built: Option<TopView>,
 }
 
@@ -233,7 +238,7 @@ pub(crate) struct RightPanel {
 
 #[derive(Component)]
 pub(crate) struct StatusBar {
-    pr: PrRef,
+    pub(crate) pr: PrRef,
     built: Option<StatusView>,
 }
 
