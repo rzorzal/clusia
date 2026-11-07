@@ -1,0 +1,74 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="cockpit.css"></head><body>
+<script>if(location.hash==="#dark")document.body.className="dark"</script>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#123</span><b>auth refresh</b></span></div>
+  <div class="ck"><span class="back">‹ Tests</span><b>QA cockpit</b><span class="f">scenarios and benchmarks for this change — this PR vs main</span>
+    <span class="mainst" style="margin-left:auto"><span class="m">main</span><span class="mono">4e1f2a0</span><span class="ok">● ready</span></span>
+    <span class="mainst" style="margin-left:14px"><span class="ok">●</span>QA copilot · Claude Code</span></div>
+  <div class="cols">
+    <div class="col left">
+      <div class="grp">SCENARIOS · 3</div>
+      <div class="it"><span>Two requests refresh at once</span><span class="s"><span class="ok">passed</span> <span class="f">· main: failed</span></span></div>
+      <div class="it on"><span style="font-weight:600">Refresh under steady traffic</span><span class="s bad">worse than main: memory</span></div>
+      <div class="it"><span>Token endpoint is down</span><span class="s amb">needs your approval</span></div>
+      <div class="grp" style="margin-top:8px">BENCHMARKS · ON DEMAND · 2</div>
+      <div class="it"><span class="mono">backoff_delay</span><span class="s f">no clear difference from main</span></div>
+      <div class="it"><span class="mono">TokenStore::refresh</span><span class="s f">not run</span></div>
+      <div class="grp" style="margin-top:8px;color:var(--faint)">LOAD · COMES LATER</div>
+      <span class="btn" style="margin-top:10px;height:32px">+ Ask the copilot for a scenario</span>
+      <div style="margin-top:auto;display:flex;flex-direction:column;gap:8px">
+        <span style="display:flex;align-items:center;gap:8px;padding:0 4px"><span class="chk on">✓</span>Run on main too</span>
+        <span class="btn">Run all · this PR and main</span>
+      </div>
+    </div>
+    <div class="col mid">
+      <div style="display:flex;align-items:baseline;gap:10px"><span style="font-size:16px;font-weight:600">Refresh under steady traffic</span><span class="f mono" style="margin-left:auto;font-size:11px">.clusia/e2e/refresh-under-steady-traffic</span></div>
+      <div class="m" style="margin-top:4px">Many callers ask for a token while it expires every few seconds. Written by Claude Code from the diff; edit anything.</div>
+      <div class="m" style="margin-top:6px;font-size:12px">1 Store a token that expires soon · 2 Call <span class="mono">token()</span> from every caller · 3 Count exchanges and errors</div>
+      <div class="h">Inputs <span class="r f" style="font-size:12px">fake values, safe to change</span></div>
+      <div style="display:grid;grid-template-columns:118px 1fr 118px 1fr;gap:7px 10px;align-items:center">
+        <span class="lbl">callers</span><span class="in e">40</span>
+        <span class="lbl">token lifetime</span><span class="in">3 s</span>
+        <span class="lbl">endpoint latency</span><span class="in">200 ms</span>
+        <span class="lbl">duration</span><span class="in">20 s</span>
+      </div>
+      <div class="h">Script <span class="r f mono" style="font-size:11px">sh refresh.sh "$CLUSIA_ARG_CALLERS" · approved</span></div>
+      <div class="pane" style="height:96px"><div class="ftabs"><span class="on">refresh.sh</span><span>fake_oauth.py</span></div><div style="padding:6px 10px">python3 fake_oauth.py --latency "$CLUSIA_ARG_ENDPOINT_LATENCY" &amp;
+cargo run -q --example callers -- --n "$1" --for "$CLUSIA_ARG_DURATION"
+echo "output exchanges $(cat .exchanges)"</div></div>
+      <div class="h">Memory and CPU during the run <span class="r legend"><span>— this PR</span><span>- - main</span><span class="f">median round of 3</span></span></div>
+      <div style="display:flex;gap:10px;height:128px">
+        <div class="chart"><div class="legend" style="justify-content:space-between"><span>Memory</span><span class="bad">180 → 410 MB</span></div>
+          <svg width="100%" height="92" viewBox="0 0 270 92" preserveAspectRatio="none"><polyline fill="none" stroke="var(--orange)" stroke-width="2" points="0,80 30,70 60,63 90,57 120,50 150,42 180,34 210,27 240,18 270,10"/><polyline fill="none" stroke="var(--faint)" stroke-width="1.6" stroke-dasharray="5 4" points="0,82 30,74 60,72 90,73 120,72 150,72 180,73 210,72 240,72 270,72"/></svg></div>
+        <div class="chart"><div class="legend" style="justify-content:space-between"><span>CPU</span><span>41% · main 38%</span></div>
+          <svg width="100%" height="92" viewBox="0 0 270 92" preserveAspectRatio="none"><polyline fill="none" stroke="var(--fg)" stroke-width="2" points="0,70 30,40 60,46 90,38 120,44 150,40 180,47 210,39 240,45 270,42"/><polyline fill="none" stroke="var(--faint)" stroke-width="1.6" stroke-dasharray="5 4" points="0,72 30,46 60,48 90,44 120,49 150,45 180,47 210,44 240,48 270,46"/></svg></div>
+      </div>
+      <div class="h">Errors</div>
+      <div><span class="bad">12 × "token store busy"</span> <span class="m">· first at 1.8 s · this PR</span> <span class="f">· none on main</span></div>
+      <div style="display:flex;gap:10px;margin-top:auto;padding-top:12px;align-items:center">
+        <span class="btn p">▶ Run on this PR and main</span><span class="m" style="font-size:12px">3 rounds a side, alternated</span>
+        <span class="u" style="margin-left:auto">Suggest as a test in a comment</span>
+      </div>
+    </div>
+    <div class="col right">
+      <div style="display:flex;align-items:baseline"><b>This PR vs main</b><span class="f" style="margin-left:auto;font-size:11.5px">median ± spread · 3 rounds</span></div>
+      <table class="cmp" style="margin-top:8px"><tbody>
+        <tr class="hd"><td></td><td class="n">main</td><td class="n">this PR</td><td class="n" style="width:58px">Δ</td></tr>
+        <tr><td>Result</td><td class="n ok">3 of 3</td><td class="n ok">3 of 3</td><td class="n f">—</td></tr>
+        <tr><td>Duration</td><td class="n">20.4 s <span class="sp">±0.2</span></td><td class="n">20.5 s <span class="sp">±0.3</span></td><td class="n m">≈</td></tr>
+        <tr><td>Peak memory</td><td class="n">190 MB <span class="sp">±6</span></td><td class="n">410 MB <span class="sp">±14</span></td><td class="n bad">+116%</td></tr>
+        <tr><td>CPU (avg)</td><td class="n">38% <span class="sp">±3</span></td><td class="n">41% <span class="sp">±4</span></td><td class="n m">≈</td></tr>
+      </tbody></table>
+      <div class="verdict v-bad">Worse than main: memory</div>
+      <div class="f" style="font-size:11.5px;margin-top:6px">Both sides at this head and base · container · no network</div>
+      <div style="font-weight:600;margin:16px 0 8px">QA copilot</div>
+      <div style="display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
+        <div class="msg me">Why does memory grow?</div>
+        <div class="msg">Memory grows for the whole run on this PR and stays flat on main. The new refresh queue keeps every waiter that timed out, so it never shrinks. The 12 "token store busy" errors come from the same queue.</div>
+        <div class="sug"><span class="pill" style="background:var(--bluebg);color:var(--blue)">scenario</span><span style="flex:1">Waiters that time out are dropped</span><span class="u">Write it</span></div>
+      </div>
+      <div class="compose">Ask why, or what to try next…<span class="send">↑</span></div>
+    </div>
+  </div>
+</div></body></html>

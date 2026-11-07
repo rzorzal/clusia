@@ -1,0 +1,77 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="cockpit.css"></head><body>
+<script>if(location.hash==="#dark")document.body.className="dark"</script>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#123</span><b>auth refresh</b></span></div>
+  <div class="ck"><span class="back">‹ Tests</span><b>QA cockpit</b><span class="f">scenarios and benchmarks for this change — this PR vs main</span>
+    <span class="mainst" style="margin-left:auto"><span class="m">main</span><span class="mono">4e1f2a0</span><span class="ok">● ready</span></span>
+    <span class="mainst" style="margin-left:14px"><span class="ok">●</span>QA copilot · Claude Code</span></div>
+  <div class="cols">
+    <div class="col left">
+      <div class="grp">SCENARIOS · 3</div>
+      <div class="it"><span>Two requests refresh at once</span><span class="s"><span class="ok">passed</span> <span class="f">· main: failed</span></span></div>
+      <div class="it"><span>Refresh under steady traffic</span><span class="s bad">worse than main: memory</span></div>
+      <div class="it"><span>Token endpoint is down</span><span class="s amb">needs your approval</span></div>
+      <div class="grp" style="margin-top:8px">BENCHMARKS · ON DEMAND · 2</div>
+      <div class="it on"><span class="mono" style="font-weight:600">backoff_delay</span><span class="s ok">running · main, round 3 of 5</span></div>
+      <div class="it"><span class="mono">TokenStore::refresh</span><span class="s f">not run</span></div>
+      <div class="grp" style="margin-top:8px;color:var(--faint)">LOAD · COMES LATER</div>
+      <span class="btn" style="margin-top:10px;height:32px">+ Ask the copilot for a scenario</span>
+      <div style="margin-top:auto;display:flex;flex-direction:column;gap:8px">
+        <span style="display:flex;align-items:center;gap:8px;padding:0 4px"><span class="chk on">✓</span>Run on main too</span>
+        <span class="btn" style="opacity:.5">Run all · this PR and main</span>
+      </div>
+    </div>
+    <div class="col mid">
+      <div style="display:flex;align-items:baseline;gap:10px"><span class="mono" style="font-size:14px"><b>pub fn backoff_delay</b>(attempt: u32, base: Duration) -&gt; Duration</span></div>
+      <div class="m" style="margin-top:4px">http/retry.rs · signature changed. Benchmark written by Claude Code from the diff; edit anything.</div>
+      <div class="h">Values <span class="r f" style="font-size:12px">passed as env, like the function's cases</span></div>
+      <div style="display:grid;grid-template-columns:118px 1fr 118px 1fr;gap:7px 10px;align-items:center">
+        <span class="lbl">attempt</span><span class="in">7</span>
+        <span class="lbl">base</span><span class="in">Duration::from_millis(200)</span>
+      </div>
+      <div class="h">Loop</div>
+      <div style="display:grid;grid-template-columns:118px 1fr 118px 1fr;gap:7px 10px;align-items:center">
+        <span class="lbl">warm-up calls</span><span class="in">1000</span>
+        <span class="lbl">seconds a round</span><span class="in">6</span>
+        <span class="lbl">rounds a side</span><span class="in">5</span>
+        <span class="f" style="grid-column:span 2;font-size:12px">at most 10 rounds × 30 s a side</span>
+      </div>
+      <div class="h">Loop file <span class="r f mono" style="font-size:11px">.clusia/functions/backoff-delay/bench.rs</span></div>
+      <div class="pane" style="height:70px;padding:6px 10px">let start = Instant::now();
+let d = backoff_delay(arg_attempt(), arg_base());
+clusia_bench::took(start.elapsed());</div>
+      <div class="h">Memory and CPU during the run <span class="r legend"><span>— this PR</span><span>- - main</span><span class="ok">live</span></span></div>
+      <div style="display:flex;gap:10px;height:118px">
+        <div class="chart"><div class="legend" style="justify-content:space-between"><span>Memory</span><span>3.1 MB · main 3.0 MB</span></div>
+          <svg width="100%" height="82" viewBox="0 0 270 82" preserveAspectRatio="none"><polyline fill="none" stroke="var(--fg)" stroke-width="2" points="0,70 30,40 60,40 90,41 120,40 150,40 180,40"/><polyline fill="none" stroke="var(--faint)" stroke-width="1.6" stroke-dasharray="5 4" points="0,72 30,42 60,41 90,42 120,42"/></svg></div>
+        <div class="chart"><div class="legend" style="justify-content:space-between"><span>CPU</span><span>99% · main 99%</span></div>
+          <svg width="100%" height="82" viewBox="0 0 270 82" preserveAspectRatio="none"><polyline fill="none" stroke="var(--fg)" stroke-width="2" points="0,60 30,12 60,11 90,12 120,11 150,12 180,11"/><polyline fill="none" stroke="var(--faint)" stroke-width="1.6" stroke-dasharray="5 4" points="0,62 30,14 60,13 90,13 120,14"/></svg></div>
+      </div>
+      <div class="h">Errors</div>
+      <div class="f">None</div>
+      <div style="display:flex;gap:10px;margin-top:auto;padding-top:12px;align-items:center">
+        <span class="btn">■ Stop</span><span class="m" style="font-size:12px">main, round 3 of 5 · about 30 s left · finished rounds are kept</span>
+      </div>
+    </div>
+    <div class="col right">
+      <div style="display:flex;align-items:baseline"><b>This PR vs main</b><span class="f" style="margin-left:auto;font-size:11.5px">median ± spread · rounds so far</span></div>
+      <table class="cmp" style="margin-top:8px"><tbody>
+        <tr class="hd"><td></td><td class="n">main</td><td class="n">this PR</td><td class="n" style="width:58px">Δ</td></tr>
+        <tr><td>Latency p50</td><td class="n">41 ns <span class="sp">±2</span></td><td class="n">43 ns <span class="sp">±2</span></td><td class="n f">—</td></tr>
+        <tr><td>Latency p95</td><td class="n">58 ns <span class="sp">±4</span></td><td class="n">61 ns <span class="sp">±3</span></td><td class="n f">—</td></tr>
+        <tr><td>Calls / s</td><td class="n">21.9 M</td><td class="n">21.1 M</td><td class="n f">—</td></tr>
+        <tr><td>Peak memory</td><td class="n">3.0 MB</td><td class="n">3.1 MB</td><td class="n f">—</td></tr>
+        <tr><td>CPU (avg)</td><td class="n">99%</td><td class="n">99%</td><td class="n f">—</td></tr>
+        <tr><td class="f">Rounds</td><td class="n f">2 of 5</td><td class="n f">3 of 5</td><td></td></tr>
+      </tbody></table>
+      <div class="verdict v-n">Running: no verdict yet</div>
+      <div class="f" style="font-size:11.5px;margin-top:6px">Alternated: this PR → main → this PR… · each round starts with 1000 warm-up calls that are not counted</div>
+      <div style="font-weight:600;margin:16px 0 8px">QA copilot</div>
+      <div style="display:flex;flex-direction:column;gap:8px;flex:1;min-height:0">
+        <div class="msg">I wrote a benchmark for <span class="mono">backoff_delay</span> at attempt 7, where the new cap applies. Run it when you're ready; nothing runs on its own.</div>
+      </div>
+      <div class="compose">Ask why, or what to try next…<span class="send">↑</span></div>
+    </div>
+  </div>
+</div></body></html>
