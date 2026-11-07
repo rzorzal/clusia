@@ -713,6 +713,7 @@ fn put_cockpit(world: &mut World, pr: &PrRef, now: i64, state: DemoCockpit) {
             }
         }
         DemoCockpit::BenchRunning => {
+            model.on_main = true;
             if let Some(bench) = bench {
                 model.select(ItemRef {
                     kind: ItemKind::Bench,
@@ -1194,6 +1195,7 @@ mod tests {
     };
     use crate::screens::review::shell::ModalFor;
     use crate::testing::{self, NOW};
+    use crate::ui::spinner::Spinner;
     use clap::ValueEnum;
 
     fn staged(scene: Scene) -> App {
@@ -1736,24 +1738,14 @@ mod tests {
         Scene::CockpitMain,
     ];
 
-    /// What the window sent about the Tests tab, its sub-tabs or the cockpit; the asks every
-    /// opened review makes (seen, checks, diagrams) are not about them.
-    fn cockpit_asks(app: &mut App) -> Vec<String> {
+    /// The asks a cockpit scene records must be those of opening the review on a plain
+    /// Tests sub-tab scene: any ask of the cockpit or the tests is new and fails.
+    fn cockpit_asks(app: &mut App) -> Vec<Ask> {
+        let mut base = staged(Scene::TestsFunctions);
+        let base = testing::recorded(&mut base);
         testing::recorded(app)
             .into_iter()
-            .map(|a| format!("{a:?}"))
-            .filter(|a| {
-                [
-                    "Tests",
-                    "Functions",
-                    "Cockpit",
-                    "Scenario",
-                    "Bench",
-                    "Recipe",
-                ]
-                .iter()
-                .any(|word| a.contains(word))
-            })
+            .filter(|ask| !base.contains(ask))
             .collect()
     }
 
@@ -2033,6 +2025,7 @@ mod tests {
             !testing::shows(&mut app, "Auto Tests"),
             "the sub-tab bar is hidden"
         );
+        assert_eq!(testing::count::<Spinner>(&mut app), 0);
         let asks = cockpit_asks(&mut app);
         assert!(asks.is_empty(), "{asks:?}");
     }
@@ -2110,6 +2103,7 @@ mod tests {
                 "Approve and run",
             ],
         );
+        assert_eq!(testing::count::<Spinner>(&mut app), 0);
         let asks = cockpit_asks(&mut app);
         assert!(asks.is_empty(), "{asks:?}");
     }

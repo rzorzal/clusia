@@ -34,7 +34,7 @@ use crate::theme::Swatch;
 use crate::ui::composer::ComposerMode;
 use crate::ui::composer::popover::Placeholder;
 use crate::ui::kit::{
-    Fill, Stroke, Tone, Type, Variant, badge, button, disabled_button, text, text_field,
+    Fill, Preview, Stroke, Tone, Type, Variant, badge, button, disabled_button, text, text_field,
     wrapped_text,
 };
 use crate::ui::spinner::spinner;
@@ -561,11 +561,16 @@ fn draw_input(
         ..default()
     })
     .with_children(|row| {
-        row.spawn(Node {
-            flex_grow: 1.0,
-            min_width: px(0),
-            ..default()
-        })
+        // The placeholder is cut at the input's edge when the text is very large.
+        row.spawn((
+            Node {
+                flex_grow: 1.0,
+                min_width: px(0),
+                overflow: Overflow::clip_x(),
+                ..default()
+            },
+            Preview,
+        ))
         .with_children(|wrap| {
             let mut field = wrap.spawn((
                 text_field(fonts, typed, INPUT_W, false),
@@ -1344,13 +1349,13 @@ mod tests {
         assert!(
             texts_under::<CopilotInputRow>(&mut app)
                 .iter()
-                .any(|t| t == "Ask for a scenario…")
+                .any(|t| t == "Ask for a scenario, or what to try next…")
         );
         let (mut app, _pr) = support::app_with(scenario());
         assert!(
             texts_under::<CopilotInputRow>(&mut app)
                 .iter()
-                .any(|t| t == "Ask why, or what to try…")
+                .any(|t| t == "Ask why, or what to try next…")
         );
     }
 

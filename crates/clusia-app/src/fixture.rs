@@ -4530,7 +4530,7 @@ fn demo_copilot(now: i64, running: bool) -> CopilotView {
 /// from the item's own data.
 pub fn demo_cockpit(now: i64, state: DemoCockpit) -> CockpitView {
     let mut view = CockpitView::new(HEAD_SHA);
-    view.base = Some(BASE_SHA.into());
+    view.base = Some(DEMO_MAIN_AT.into());
     view.runner = Some(RunnerKind::Container);
     if state == DemoCockpit::Empty {
         return view;
@@ -4541,7 +4541,7 @@ pub fn demo_cockpit(now: i64, state: DemoCockpit) -> CockpitView {
     view.hash = scenarios_hash(&view.scenarios);
     view.main = MainView {
         phase: MainPhase::Ready,
-        base: Some(BASE_SHA.into()),
+        base: Some(DEMO_MAIN_AT.into()),
         at: Some(DEMO_MAIN_AT.into()),
         plan: None,
         image: Some("clusia/rzorzal-clusia:4f2a91c".into()),
@@ -4606,6 +4606,18 @@ pub fn demo_cockpit(now: i64, state: DemoCockpit) -> CockpitView {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_cockpit_demo_has_one_base_everywhere() {
+        for state in [DemoCockpit::Empty, DemoCockpit::Scenario, DemoCockpit::Main] {
+            let view = demo_cockpit(1_790_000_000, state);
+            assert_eq!(view.base.as_deref(), Some(DEMO_MAIN_AT), "{state:?}");
+            if state != DemoCockpit::Empty {
+                assert_eq!(view.main.base.as_deref(), Some(DEMO_MAIN_AT), "{state:?}");
+                assert_eq!(view.main.at.as_deref(), Some(DEMO_MAIN_AT), "{state:?}");
+            }
+        }
+    }
 
     #[test]
     fn the_functions_mockup_is_the_mockups_data() {

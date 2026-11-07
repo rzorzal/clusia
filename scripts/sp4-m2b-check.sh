@@ -3,9 +3,10 @@
 # on your own pull request (rzorzal/*); it refuses every other owner. Your own agent spends one
 # turn for each Write scenarios, Write it, Ask for new values and copilot message you click, and
 # the runs execute the pull request's code on this Mac, in the container or sandbox you approved.
-# You click everything: the script approves nothing and runs nothing but the two reads it makes
-# of `clusia tests <pr> --scenarios --json`. It changes no setting, publishes nothing to GitHub
-# and discards the review only when you say yes.
+# You click everything: the script approves nothing and runs no scenario, benchmark or write.
+# The only commands it runs are the `clusia tests <pr> --scenarios --json` reads, `clusia daemon
+# status`, `clusia open <pr>` and, only when you say yes, the discard of the review. It changes no
+# setting and publishes nothing to GitHub.
 #
 #   scripts/sp4-m2b-check.sh [rzorzal/blog#37]    run the check (asks first)
 #   scripts/sp4-m2b-check.sh --list               print the steps and exit
@@ -104,6 +105,11 @@ usage() {
   echo "usage: $0 [--list | rzorzal/repo#N]" >&2
 }
 
+# How many scenarios the daemon says are approved.
+approved_count() {
+  clusia --json tests "$PR" --scenarios 2>/dev/null | tr -d ' \n' | grep -o '"approval":"approved"' | wc -l | tr -d ' '
+}
+
 # Whether the cockpit view holds `$1` (spaces and newlines removed).
 cockpit_has() {
   clusia --json tests "$PR" --scenarios 2>/dev/null | tr -d ' \n' | grep -q "$1"
@@ -185,9 +191,9 @@ echo "This opens the Clúsia window on demo data for six scenes, then on your ow
 echo "Your own agent spends one turn for each Write scenarios, Write it, Ask for new values and"
 echo "copilot message you click. Runs execute the pull request's code on this Mac, in the container"
 echo "or the sandbox you approved. You click everything: the script approves nothing and runs"
-echo "nothing but the two reads it makes of 'clusia tests $PR --scenarios --json'. It changes no"
-echo "setting, asks before it discards the review of $PR on this Mac at the end, and publishes"
-echo "nothing to GitHub."
+echo "no scenario, benchmark or write: only the reads of 'clusia tests $PR --scenarios --json',"
+echo "'clusia daemon status' and 'clusia open $PR'. It changes no setting, asks before it"
+echo "discards the review of $PR on this Mac at the end, and publishes nothing to GitHub."
 printf 'Continue? [y/N] '
 read -r answer || answer=n
 case "$answer" in y | Y | yes) ;; *) exit 1 ;; esac
@@ -219,7 +225,7 @@ pause "click Write scenarios (or + Ask the copilot for a scenario, then Write it
 read -r SCENARIOS BENCHES < <(counts) || true
 if [ "${SCENARIOS:-0}" -gt 0 ] 2>/dev/null; then
   pass "the daemon lists $SCENARIOS scenario(s)"
-  check "none is approved yet" cockpit_has '"approval":"not_approved"'
+  check "none is approved yet" test "$(approved_count)" = 0
   ask "Scenarios appeared in the window unapproved and nothing ran"
 else
   say "No scenario was written, so the steps that need one are skipped."
@@ -263,7 +269,10 @@ fi
 say "${STEPS[16]}"
 if yes_or_no "Discard the review of $PR on this Mac now"; then
   check "the review is discarded" clusia review discard "$PR"
-  sleep 2
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if no_main_worktree && no_main_volume && no_container_left; then break; fi
+    sleep 1
+  done
   check "no main worktree is left" no_main_worktree
   check "no volume of the review is left" no_main_volume
   check "no container of the review is left" no_container_left
