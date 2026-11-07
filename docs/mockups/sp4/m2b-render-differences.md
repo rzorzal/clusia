@@ -22,6 +22,8 @@ The renders are `docs/assets/sp4-m2b-<scene>-{light,dark}.png`, made with
 | Stop line | "main, round 3 of 5 · about 30 s left · finished rounds are kept" | "main, round 3 of 5 · finished rounds are kept" | no time estimate exists in the view |
 | Empty state list | no button under *Load · comes later* | **+ Ask the copilot for a scenario** is drawn | the button is always in the list |
 | Scenario center | title and path on one line, no **Remove** | **Remove** under the path; the description wraps in two lines | a scenario can be removed; the path is the card's right column |
+| Scenario inputs | `callers` has the green edited border | no input has the edited border, and no **Reset** is drawn | the demo's inputs are all at the scenario's own values; an edited value gets the border in the window |
+| Scenario list | "passed" on *Two requests refresh at once* in green | "passed" in the faint tone | the list's status tones: green only for a running item, orange for worse or failed, amber for an approval, faint otherwise |
 | Scenario right panel | one suggestion card of one line | the suggestion card with its description and a **scenario** pill | the copilot draws the suggestion's text |
 | Approval modal and Prepare main scrim | a dark scrim over the whole window | the app's scrim over the cockpit, with the page under it still readable | the app's modal scrim |
 | Prepare main steps | a `☑` mark; recipe "sha 9c2e…41a" | the kit's checkbox; recipe "sha 9c2e…2d1" | the kit's checkbox; the demo shows the end of the recipe hash |
