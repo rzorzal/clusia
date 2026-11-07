@@ -4,14 +4,14 @@
 
 use std::collections::BTreeSet;
 
-use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::ButtonInput;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_core::cockpit::{
-    CockpitScope, InputKind, ItemKind, ItemRef, MainPhase, ScenarioApproval, ScenarioView,
+    CockpitScope, InputKind, ItemKind, ItemRef, MainPhase, SCRIPT_MAX_BYTES, ScenarioApproval,
+    ScenarioView,
 };
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::tests::{Approve, RunnerKind, STEP_TESTS};
@@ -29,7 +29,7 @@ use crate::screens::review::shell::ModalFor;
 use crate::screens::review::tests_tab::TestsModels;
 use crate::screens::review::tests_tab::body::cockpit_open;
 use crate::screens::review::tests_tab::plan::{
-    RowKind, SECTION, StepRow, command_rows, draw_step, labelled, step_rows,
+    RowKind, SECTION, Spawner, StepRow, command_rows, draw_step, labelled, step_rows,
 };
 use crate::theme::Swatch;
 use crate::ui::kit::{
@@ -53,6 +53,8 @@ pub struct ScriptDrawn {
     pub tabs: Vec<String>,
     pub selected: usize,
     pub text: String,
+    /// "+ <k> more lines" when the text was cut.
+    pub more: Option<String>,
     /// The hash this script is approved by.
     pub approval_hash: String,
 }
@@ -81,6 +83,17 @@ pub(in crate::screens::review::tests_tab) struct PrepareView {
     pub commands: Vec<(&'static str, String)>,
     pub uses: Vec<(&'static str, String)>,
     pub recipe_hash: String,
+}
+
+/// `text` cut to `SCRIPT_MAX_BYTES` characters, and how many whole lines the cut took away.
+fn bounded(text: &str) -> (String, Option<String>) {
+    let Some((at, _)) = text.char_indices().nth(SCRIPT_MAX_BYTES) else {
+        return (text.to_string(), None);
+    };
+    let kept = &text[..at];
+    // A line cut in the middle counts as shown; the rest of it is not "more lines".
+    let more = text[at..].matches('\n').count();
+    (kept.to_string(), Some(format!("+ {more} more lines")))
 }
 
 /// "412 B" or "1.9 KB", as the mockup writes a script's size.
@@ -128,15 +141,18 @@ impl ApproveView {
                 })
                 .collect();
             let selected = model.script_tab.min(sc.files.len().saturating_sub(1));
+            let (text, more) = bounded(
+                &sc.files
+                    .get(selected)
+                    .map(|(_, text)| printable_lines(text))
+                    .unwrap_or_default(),
+            );
             ScriptDrawn {
                 header: format!("SCRIPT · {}", names.join(", ").to_uppercase()),
                 tabs,
                 selected,
-                text: sc
-                    .files
-                    .get(selected)
-                    .map(|(_, text)| printable_lines(text))
-                    .unwrap_or_default(),
+                text,
+                more,
                 approval_hash: sc.approval_hash.clone(),
             }
         });
@@ -277,8 +293,6 @@ fn scenario_of<'a>(model: &'a CockpitModel, slug: &str) -> Option<&'a ScenarioVi
         .find(|s| s.slug == slug)
 }
 
-type Spawner<'a> = ChildSpawnerCommands<'a>;
-
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ApproveButton(pub PrRef);
 
@@ -363,7 +377,8 @@ pub fn open_cockpit_modals(
         let up = tab.ui.modal;
         let on_screen = tab.ready().is_some()
             && tab.ui.section == ReviewSection::Tests
-            && cockpit_open(tests.0.get(pr));
+            && cockpit_open(tests.0.get(pr))
+            && !models.0.get(pr).is_some_and(target_gone);
         match (want, up) {
             (Some(_), _) if !on_screen => {
                 drop_model.push(pr.clone());
@@ -389,6 +404,28 @@ pub fn open_cockpit_modals(
         if let Some(tab) = tabs.0.get_mut(&pr) {
             tab.ui.modal = modal;
         }
+    }
+}
+
+/// Whether what the open modal is about is no longer in the view: a removed scenario, a plan
+/// that went away.
+fn target_gone(model: &CockpitModel) -> bool {
+    match &model.modal {
+        Some(CockpitModal::Approve { scenario } | CockpitModal::Remove { scenario }) => {
+            model.loaded && scenario_of(model, scenario).is_none()
+        }
+        // Main still needs its setup (or failed it): the modal has a reason to stay.
+        Some(CockpitModal::PrepareMain { .. }) => {
+            model.loaded
+                && model.view.as_ref().is_none_or(|v| {
+                    v.main.plan.is_none()
+                        && !matches!(
+                            v.main.phase,
+                            MainPhase::NeedsSetup | MainPhase::Failed { .. }
+                        )
+                })
+        }
+        None => false,
     }
 }
 
@@ -620,11 +657,16 @@ fn draw_approve(card: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &ApproveV
                         ..default()
                     })
                     .insert((ScrollArea, ScrollPosition::default()))
-                    .with_child(wrapped_text(
-                        fonts,
-                        script.text.clone(),
-                        Type::MONO.ink(Swatch::Fg),
-                    ));
+                    .with_children(|t| {
+                        t.spawn(wrapped_text(
+                            fonts,
+                            script.text.clone(),
+                            Type::MONO.ink(Swatch::Fg),
+                        ));
+                        if let Some(more) = &script.more {
+                            t.spawn(text(fonts, more.clone(), Type::META.ink(Swatch::Faint)));
+                        }
+                    });
                 });
             }
             None => {
@@ -827,7 +869,12 @@ fn on_approve_and_run(
 /// the scenario with the hash its approved view has. A refused approval or a view that is still
 /// not approved ends the wait and runs nothing. Written around change detection and announced
 /// only when something was written.
-pub fn run_after_approval(mut models: ResMut<CockpitModels>, mut asks: ResMut<Asks>) {
+pub fn run_after_approval(
+    mut models: ResMut<CockpitModels>,
+    mut asks: ResMut<Asks>,
+    mut toasts: ResMut<Toasts>,
+    time: Res<Time>,
+) {
     let mut wrote = false;
     for (pr, model) in &mut models.bypass_change_detection().0 {
         let Some(item) = model.run_after_approve.clone() else {
@@ -846,15 +893,21 @@ pub fn run_after_approval(mut models: ResMut<CockpitModels>, mut asks: ResMut<As
         }
         let seen = s.hash.clone();
         let on_main = model.on_main;
-        if model
-            .run_disabled_reason(Some(&item), on_main, model.tests_busy)
-            .is_some()
-            || (on_main
-                && model
-                    .view
-                    .as_ref()
-                    .is_some_and(|v| v.main.phase == MainPhase::NotCreated))
+        if let Some(reason) = model.run_disabled_reason(Some(&item), on_main, model.tests_busy) {
+            not_sent(&mut toasts, &time, &reason);
+            continue;
+        }
+        if on_main
+            && model
+                .view
+                .as_ref()
+                .is_some_and(|v| v.main.phase == MainPhase::NotCreated)
         {
+            // Main is made first; the reviewer clicks Run once it is ready.
+            if model.pending != Some(CockpitAskKind::OpenMain) {
+                asks.send(Ask::OpenMain(pr.clone()));
+                model.sent(CockpitAskKind::OpenMain);
+            }
             continue;
         }
         if let Some(ask) = model.click_run(pr, CockpitScope::Item { item }, on_main, seen) {
@@ -1263,6 +1316,36 @@ mod tests {
     }
 
     #[test]
+    fn the_approval_pane_is_bounded_and_plain() {
+        let mut m = approve_model();
+        let hash = scenario_of(&m, THIRD)
+            .expect("scenario")
+            .approval_hash
+            .clone();
+        let long = format!("[x](http://evil)\u{202e}{}", "a".repeat(10_000));
+        let many: String = (0..20_000).map(|i| format!("l{i}\n")).collect();
+        m.script = Some(clusia_core::cockpit::ScenarioScript {
+            scenario: THIRD.into(),
+            files: vec![("a.sh".into(), format!("{long}\n{many}"))],
+            approval_hash: hash,
+        });
+        let view = ApproveView::of(&m, "Claude Code").expect("a view");
+        let script = view.script.expect("drawn");
+        assert!(script.text.chars().count() <= clusia_core::cockpit::SCRIPT_MAX_BYTES + 1);
+        assert!(
+            !script
+                .text
+                .chars()
+                .any(clusia_core::printable::is_invisible)
+        );
+        let more = script.more.expect("cut");
+        assert!(
+            more.starts_with("+ ") && more.ends_with(" more lines"),
+            "{more}"
+        );
+    }
+
+    #[test]
     fn main_approval_names_the_drawn_plan() {
         let m = model_with(
             DemoCockpit::Main,
@@ -1450,6 +1533,76 @@ mod app_tests {
     }
 
     #[test]
+    fn approve_and_run_with_main_not_created_opens_main() {
+        let (mut app, pr) = scenario_app();
+        edit_model(&mut app, &pr, |m| m.on_main = true);
+        open_approval(&mut app, &pr);
+        tell(&mut app, script_tell());
+        click::<ApproveAndRunButton>(&mut app, |b| b.0 == pr);
+        testing::recorded(&mut app);
+        let mut reply = approved_reply();
+        reply.main.phase = clusia_core::cockpit::MainPhase::NotCreated;
+        tell(
+            &mut app,
+            CockpitTell::Loaded {
+                pr: pr.clone(),
+                view: Box::new(reply),
+            },
+        );
+        testing::settle(&mut app);
+        assert_eq!(testing::recorded(&mut app), [Ask::OpenMain(pr.clone())]);
+        assert_eq!(model(&app, &pr).run_after_approve, None);
+    }
+
+    #[test]
+    fn approve_and_run_says_why_it_did_not_run() {
+        let (mut app, pr) = scenario_app();
+        open_approval(&mut app, &pr);
+        tell(&mut app, script_tell());
+        click::<ApproveAndRunButton>(&mut app, |b| b.0 == pr);
+        testing::recorded(&mut app);
+        let mut reply = approved_reply();
+        reply
+            .scenarios
+            .iter_mut()
+            .find(|s| s.slug == THIRD)
+            .expect("third")
+            .support = clusia_core::cockpit::ItemSupport::Stale {
+            reason: "The script is stale".into(),
+        };
+        tell(
+            &mut app,
+            CockpitTell::Loaded {
+                pr: pr.clone(),
+                view: Box::new(reply),
+            },
+        );
+        testing::settle(&mut app);
+        assert!(testing::recorded(&mut app).is_empty());
+        let toasts = &app.world().resource::<crate::bridge::Toasts>().0;
+        assert!(toasts.iter().any(|t| t.text == "The script is stale"));
+    }
+
+    #[test]
+    fn a_modal_whose_target_vanished_closes() {
+        let (mut app, pr) = scenario_app();
+        select(&mut app, &pr, scenario_item(THIRD));
+        click::<RemoveScenarioButton>(&mut app, |b| b.pr == pr);
+        assert_eq!(modals_up(&mut app), 1);
+        let mut view = demo_cockpit(NOW, DemoCockpit::Scenario);
+        view.scenarios.retain(|s| s.slug != THIRD);
+        changed(&mut app, view);
+        assert_eq!(model(&app, &pr).modal, None);
+        assert_eq!(modals_up(&mut app), 0);
+        let (mut app, pr) = app_with(demo_cockpit(NOW, DemoCockpit::Main));
+        edit_model(&mut app, &pr, super::super::list::open_prepare_main);
+        assert_eq!(modals_up(&mut app), 1);
+        changed(&mut app, demo_cockpit(NOW, DemoCockpit::Scenario));
+        assert_eq!(model(&app, &pr).modal, None);
+        assert_eq!(modals_up(&mut app), 0);
+    }
+
+    #[test]
     fn a_reply_that_is_still_not_approved_runs_nothing() {
         let (mut app, pr) = scenario_app();
         open_approval(&mut app, &pr);
@@ -1574,7 +1727,7 @@ mod app_tests {
         assert_eq!(
             sub(&app),
             SubTab::Cockpit,
-            "a second Escape leaves the screen"
+            "a second Escape does not leave the screen"
         );
     }
 

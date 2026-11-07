@@ -4,13 +4,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::ecs::system::EntityCommands;
 use bevy::input_focus::InputFocus;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::text::{EditableText, TextEdit};
+use bevy::text::{EditableText, TextEdit, Underline};
 use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
 use clusia_core::PrRef;
 use clusia_core::cockpit::{
@@ -33,7 +32,7 @@ use crate::review_state::ReviewTabs;
 use crate::screens::review::editor::{not_sent, read_only_reason};
 use crate::screens::review::tests_tab::TestsModels;
 use crate::screens::review::tests_tab::body::cockpit_open;
-use crate::screens::review::tests_tab::plan::Refocus;
+use crate::screens::review::tests_tab::plan::{Refocus, Spawner};
 use crate::theme::Swatch;
 use crate::ui::kit::{
     Clickable, Field as Kept, FieldCommitted, Fill, HoverFill, Stroke, Type, Variant, button,
@@ -48,6 +47,8 @@ const SEGMENT_CHARS_MAX: usize = 12;
 pub const ERRORS_SHOWN: usize = 5;
 /// Lines of a script before "+ k more lines".
 pub const SCRIPT_LINES_SHOWN: usize = 12;
+/// Characters of one script line before it is cut with "…".
+pub const SCRIPT_LINE_SHOWN: usize = 240;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputRow {
@@ -568,10 +569,19 @@ pub(super) fn bench_form(model: &CockpitModel, b: &BenchView, agent: &str) -> Be
     }
 }
 
+/// `line` cut to `SCRIPT_LINE_SHOWN` characters, with "…" where it was cut.
+fn cut_line(line: &str) -> String {
+    match line.char_indices().nth(SCRIPT_LINE_SHOWN) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line.to_string(),
+    }
+}
+
 /// The script's lines as the pane shows them: at most `SCRIPT_LINES_SHOWN`, then how many more.
 pub fn script_lines(text: &str) -> (String, Option<String>) {
     let plain = printable_lines(text);
-    let lines: Vec<&str> = plain.lines().collect();
+    let cut: Vec<String> = plain.lines().map(cut_line).collect();
+    let lines: Vec<&str> = cut.iter().map(String::as_str).collect();
     let more = lines
         .len()
         .checked_sub(SCRIPT_LINES_SHOWN)
@@ -643,8 +653,6 @@ fn item_of(kind: ItemKind, id: &str) -> ItemRef {
         id: id.to_string(),
     }
 }
-
-type Spawner<'a> = ChildSpawnerCommands<'a>;
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ScenarioField {
@@ -1405,7 +1413,7 @@ fn draw_bench(
         match &form.ask_off {
             None => {
                 row.spawn((
-                    button(fonts, &form.ask_label, Variant::Link),
+                    text_link(fonts, &form.ask_label),
                     WriteBenchValues {
                         pr: pr.clone(),
                         function: form.function.clone(),
@@ -1413,19 +1421,33 @@ fn draw_bench(
                     observe(on_write_bench_values),
                 ));
             }
-            Some(reason) => {
-                row.spawn(Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::FlexEnd,
-                    ..default()
-                })
-                .with_children(|off| {
-                    off.spawn(disabled_button(fonts, &form.ask_label));
-                    off.spawn(text(fonts, reason.clone(), Type::META.ink(Swatch::Faint)));
-                });
+            Some(_) => {
+                row.spawn(text(
+                    fonts,
+                    form.ask_label.clone(),
+                    Type::META.ink(Swatch::Faint),
+                ));
             }
         }
     });
+}
+
+/// Underlined text in the regular ink that is clicked: a link on a row of actions.
+fn text_link(fonts: &UiFonts, label: &str) -> impl Bundle {
+    (
+        Node {
+            flex_shrink: 0.0,
+            ..default()
+        },
+        (WidgetButton, Clickable),
+        Hovered::default(),
+        TabIndex(0),
+        children![(
+            text(fonts, label.to_string(), Type::META.ink(Swatch::Fg)),
+            TextLayout::no_wrap(),
+            Underline,
+        )],
+    )
 }
 
 fn draw_foot(
@@ -1485,7 +1507,7 @@ fn draw_action(
     p.spawn(Node {
         width: percent(100),
         align_items: AlignItems::Center,
-        column_gap: px(12),
+        column_gap: px(8),
         flex_wrap: FlexWrap::Wrap,
         ..default()
     })
@@ -1556,7 +1578,7 @@ fn draw_action(
                     fonts,
                     &rounds.value,
                     typed.map(str::to_string).as_ref(),
-                    52.0,
+                    42.0,
                     false,
                     focused,
                     RoundsField {
@@ -1578,13 +1600,15 @@ fn draw_action(
                 justify_content: JustifyContent::FlexEnd,
                 ..default()
             })
-            .with_child((
-                button(fonts, "Suggest as a test in a comment", Variant::Link),
-                SuggestAsComment {
-                    pr: pr.clone(),
-                    scenario: view.item.id.clone(),
-                },
-            ));
+            .with_children(|end| {
+                end.spawn((
+                    text_link(fonts, "Suggest as a test in a comment"),
+                    SuggestAsComment {
+                        pr: pr.clone(),
+                        scenario: view.item.id.clone(),
+                    },
+                ));
+            });
         }
     });
     if let ActionView::Run {
@@ -2513,8 +2537,36 @@ mod tests {
             let c = s.comparison.as_mut().expect("a comparison");
             c.pr.errors = vec![line(&hostile(), 1)];
         }
-        let m = model_of(view);
+        let mut m = model_of(view);
+        let hash = m
+            .selected_scenario()
+            .expect("selected")
+            .approval_hash
+            .clone();
+        let hostile_line = format!("{HOSTILE}{}", "b".repeat(10_000));
+        m.script = Some(clusia_core::cockpit::ScenarioScript {
+            scenario: REFRESH.into(),
+            files: vec![(
+                "x.sh".into(),
+                format!("{hostile_line}\nsecond\tline\n{hostile_line}"),
+            )],
+            approval_hash: hash,
+        });
         let center = center_view(&m, "Claude Code", NOW);
+        let Some(PaneBody::Text { lines, .. }) = center.script.as_ref().map(|p| p.body.clone())
+        else {
+            panic!("the held script is drawn");
+        };
+        assert!(lines.contains("[x](http://evil)"));
+        assert!(!lines.chars().any(is_invisible));
+        assert!(lines.contains("second\tline"), "tabs stay tabs");
+        for l in lines.lines() {
+            assert!(
+                l.chars().count() <= SCRIPT_LINE_SHOWN + 1,
+                "{} chars",
+                l.chars().count()
+            );
+        }
         let texts = all_text(&center);
         assert!(texts.iter().any(|t| t.contains("[x](http://evil)")));
         let cap = PURPOSE_SHOWN.max(TITLE_SHOWN).max(VALUE_SHOWN) + 80;
