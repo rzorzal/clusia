@@ -70,13 +70,11 @@ pub fn open_prepare_main(model: &mut CockpitModel) {
         .map(approvable_ids)
         .unwrap_or_default();
     model.modal = Some(CockpitModal::PrepareMain { checked });
-    model.touch();
 }
 
 /// Asks the copilot's input to take the focus.
 pub fn focus_copilot_input(model: &mut CockpitModel) {
     model.copilot_focus = true;
-    model.touch();
 }
 
 pub fn fill_list(
@@ -418,7 +416,6 @@ fn on_toggle_main(
     };
     if model.on_main {
         model.on_main = false;
-        model.touch();
         return;
     }
     let phase = model.view.as_ref().map(|v| v.main.phase.clone());
@@ -427,7 +424,6 @@ fn on_toggle_main(
         Some(MainPhase::Unavailable { .. }) | None => {}
         Some(MainPhase::Ready | MainPhase::Creating | MainPhase::Preparing { .. }) => {
             model.on_main = true;
-            model.touch();
         }
         Some(MainPhase::NotCreated) => {
             if let Some(reason) = read_only_reason(&tabs, &app_model, pr) {
@@ -437,8 +433,6 @@ fn on_toggle_main(
             if model.pending != Some(CockpitAskKind::OpenMain) {
                 asks.send(Ask::OpenMain(pr.clone()));
                 model.sent(CockpitAskKind::OpenMain);
-            } else {
-                model.touch();
             }
         }
         Some(MainPhase::NeedsSetup | MainPhase::Failed { .. }) => {
@@ -859,11 +853,9 @@ mod tests {
     }
 
     #[test]
-    fn focus_copilot_input_sets_the_flag_and_bumps_the_version() {
+    fn focus_copilot_input_sets_the_flag() {
         let mut model = CockpitModel::default();
-        let before = model.version;
         focus_copilot_input(&mut model);
         assert!(model.copilot_focus);
-        assert!(model.version > before);
     }
 }

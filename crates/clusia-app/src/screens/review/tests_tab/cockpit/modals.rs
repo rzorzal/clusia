@@ -276,11 +276,9 @@ pub fn on_toggle_step(
     };
     if let Some(model) = models.0.get_mut(pr)
         && let Some(CockpitModal::PrepareMain { checked }) = model.modal.as_mut()
+        && !checked.remove(id)
     {
-        if !checked.remove(id) {
-            checked.insert(id.clone());
-        }
-        model.touch();
+        checked.insert(id.clone());
     }
 }
 
@@ -397,7 +395,6 @@ pub fn open_cockpit_modals(
     for pr in drop_model {
         if let Some(model) = models.0.get_mut(&pr) {
             model.modal = None;
-            model.touch();
         }
     }
     for (pr, modal) in set_tab {
@@ -434,7 +431,6 @@ fn close_modal(pr: &PrRef, tabs: &mut ReviewTabs, models: &mut CockpitModels) {
         && model.modal.is_some()
     {
         model.modal = None;
-        model.touch();
     }
     if let Some(tab) = tabs.0.get_mut(pr)
         && tab.ui.modal.is_some_and(is_ours)

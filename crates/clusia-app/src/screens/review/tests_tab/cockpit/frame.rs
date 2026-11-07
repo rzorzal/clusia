@@ -224,7 +224,6 @@ fn on_dismiss_failed(
     };
     if let Some(model) = models.0.get_mut(pr) {
         model.dismissed_failed = model.view.as_ref().and_then(|v| v.failed.clone());
-        model.touch();
     }
 }
 

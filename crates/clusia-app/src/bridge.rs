@@ -3388,8 +3388,12 @@ fn cockpit_command(ask: Ask) -> Option<(Command, PrRef, CockpitAskKind)> {
     })
 }
 
-/// The tell a reply to a cockpit ask becomes; any reply the ask does not expect tells nothing.
-fn cockpit_tell(pr: &PrRef, kind: CockpitAskKind, reply: Reply) -> Option<CockpitTell> {
+/// What a cockpit ask answered with a reply it does not expect is refused with, so the control
+/// that waits for it is freed and a view ask stops being owed.
+pub const UNEXPECTED_ANSWER: &str = "Unexpected answer";
+
+/// The tell a reply to a cockpit ask becomes; a reply the ask does not expect is a refusal.
+fn cockpit_tell(pr: &PrRef, kind: CockpitAskKind, reply: Reply) -> CockpitTell {
     let pr = pr.clone();
     match (kind, reply) {
         (
@@ -3399,12 +3403,12 @@ fn cockpit_tell(pr: &PrRef, kind: CockpitAskKind, reply: Reply) -> Option<Cockpi
             | CockpitAskKind::Remove
             | CockpitAskKind::Approve,
             Reply::Cockpit(view),
-        ) => Some(CockpitTell::Loaded { pr, view }),
+        ) => CockpitTell::Loaded { pr, view },
         (CockpitAskKind::Script, Reply::ScenarioScript(script)) => {
-            Some(CockpitTell::Script { pr, script })
+            CockpitTell::Script { pr, script }
         }
         (CockpitAskKind::Run, Reply::CockpitStarted { run, skipped }) => {
-            Some(CockpitTell::Started { pr, run, skipped })
+            CockpitTell::Started { pr, run, skipped }
         }
         (
             CockpitAskKind::Write
@@ -3412,8 +3416,12 @@ fn cockpit_tell(pr: &PrRef, kind: CockpitAskKind, reply: Reply) -> Option<Cockpi
             | CockpitAskKind::PrepareMain
             | CockpitAskKind::Copilot,
             Reply::Ack,
-        ) => Some(CockpitTell::Acked { pr, kind }),
-        _ => None,
+        ) => CockpitTell::Acked { pr, kind },
+        _ => CockpitTell::Refused {
+            pr,
+            kind,
+            message: UNEXPECTED_ANSWER.into(),
+        },
     }
 }
 
@@ -3424,42 +3432,32 @@ async fn cockpit_ask(client: &mut Client, teller: &Teller, ask: Ask) -> Result<(
         return Ok(());
     };
     match client.request(cmd).await {
-        Ok(reply) => {
-            if let Some(tell) = cockpit_tell(&pr, kind, reply) {
-                teller.send(Tell::Cockpit(tell));
-            }
-        }
-        Err(ClientError::Server(e)) => {
-            if !kind.reads() {
-                teller.send(Tell::Notice {
-                    text: e.message.clone(),
-                    warning: true,
-                });
-            }
-            teller.send(Tell::Cockpit(CockpitTell::Refused {
-                pr,
-                kind,
-                message: e.message,
-            }));
-        }
+        Ok(reply) => teller.send(Tell::Cockpit(cockpit_tell(&pr, kind, reply))),
+        Err(ClientError::Server(e)) => cockpit_refused(teller, &pr, kind, e.message),
         Err(e) => return Err(lost(e)),
     }
     Ok(())
 }
 
-/// A cockpit ask that cannot go: the refusal frees its control, and a write says so in a toast.
-fn cockpit_not_sent(teller: &Teller, pr: &PrRef, kind: CockpitAskKind) {
+/// A refused cockpit ask: the refusal frees its control, and a write says why in one toast, in
+/// text that is safe to draw.
+fn cockpit_refused(teller: &Teller, pr: &PrRef, kind: CockpitAskKind, message: String) {
     if !kind.reads() {
         teller.send(Tell::Notice {
-            text: NOT_SENT.into(),
+            text: clusia_core::printable::printable(&message),
             warning: true,
         });
     }
     teller.send(Tell::Cockpit(CockpitTell::Refused {
         pr: pr.clone(),
         kind,
-        message: NOT_SENT.into(),
+        message,
     }));
+}
+
+/// A cockpit ask that cannot go: the refusal frees its control, and a write says so in a toast.
+fn cockpit_not_sent(teller: &Teller, pr: &PrRef, kind: CockpitAskKind) {
+    cockpit_refused(teller, pr, kind, NOT_SENT.into());
 }
 
 fn tests_refused(
@@ -4096,22 +4094,8 @@ pub(crate) fn pump(
                 }
                 functions.apply(&tell);
             }
-            Tell::Cockpit(tell) => {
-                // A question or a write the reviewer clicked was not taken: say why once.
-                if let CockpitTell::Refused {
-                    kind: CockpitAskKind::Copilot | CockpitAskKind::Write,
-                    message,
-                    ..
-                } = &tell
-                {
-                    toasts.0.push(Toast {
-                        text: clusia_core::printable::printable(message),
-                        warning: true,
-                        until: time.elapsed_secs_f64() + TOAST_SECS,
-                    });
-                }
-                cockpit.apply(&tell);
-            }
+            // A refused write already said why in its `Notice`.
+            Tell::Cockpit(tell) => cockpit.apply(&tell),
             Tell::TestDisk(report) => machine.disk_arrived(report),
             Tell::TestEngine(info) => machine.engine_arrived(info),
             Tell::Diagrams(tell) => diagrams.apply(&tell),
@@ -7924,13 +7908,16 @@ mod tests {
         let view = Box::new(cockpit_view());
         assert_eq!(
             cockpit_tell(&pr, CockpitAskKind::Load, Reply::Cockpit(view.clone())),
-            Some(CockpitTell::Loaded {
+            CockpitTell::Loaded {
                 pr: pr.clone(),
                 view: view.clone()
-            })
+            }
         );
         assert!(
-            cockpit_tell(&pr, CockpitAskKind::Save, Reply::Cockpit(view.clone())).is_some(),
+            matches!(
+                cockpit_tell(&pr, CockpitAskKind::Save, Reply::Cockpit(view.clone())),
+                CockpitTell::Loaded { .. }
+            ),
             "a save answers with the view"
         );
         let script = Box::new(ScenarioScript {
@@ -7944,10 +7931,10 @@ mod tests {
                 CockpitAskKind::Script,
                 Reply::ScenarioScript(script.clone())
             ),
-            Some(CockpitTell::Script {
+            CockpitTell::Script {
                 pr: pr.clone(),
                 script
-            })
+            }
         );
         assert_eq!(
             cockpit_tell(
@@ -7958,23 +7945,31 @@ mod tests {
                     skipped: vec!["b".into()]
                 }
             ),
-            Some(CockpitTell::Started {
+            CockpitTell::Started {
                 pr: pr.clone(),
                 run: "r1".into(),
                 skipped: vec!["b".into()]
-            })
+            }
         );
         assert_eq!(
             cockpit_tell(&pr, CockpitAskKind::Copilot, Reply::Ack),
-            Some(CockpitTell::Acked {
+            CockpitTell::Acked {
                 pr: pr.clone(),
                 kind: CockpitAskKind::Copilot
-            })
+            }
         );
-        assert_eq!(cockpit_tell(&pr, CockpitAskKind::Load, Reply::Ack), None);
+        let unexpected = |kind| CockpitTell::Refused {
+            pr: pr.clone(),
+            kind,
+            message: UNEXPECTED_ANSWER.into(),
+        };
+        assert_eq!(
+            cockpit_tell(&pr, CockpitAskKind::Load, Reply::Ack),
+            unexpected(CockpitAskKind::Load)
+        );
         assert_eq!(
             cockpit_tell(&pr, CockpitAskKind::Run, Reply::Cockpit(view)),
-            None
+            unexpected(CockpitAskKind::Run)
         );
     }
 
@@ -8165,6 +8160,63 @@ mod tests {
             );
         }
         assert_eq!(cockpit_command(Ask::StopTests(pr)), None);
+    }
+
+    #[test]
+    fn a_refused_cockpit_write_says_so_once_in_printable_text() {
+        let hostile = "no\u{1b}[2J\u{202e}way";
+        for kind in [CockpitAskKind::Copilot, CockpitAskKind::Write] {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let teller = Teller {
+                tx,
+                wake: Arc::new(|| {}),
+            };
+            let pr = fixture::demo_pr();
+            cockpit_refused(&teller, &pr, kind, hostile.into());
+            let told: Vec<Tell> = rx.try_iter().collect();
+            let mut app = crate::testing::demo_review_app();
+            let before = app.world().resource::<Toasts>().0.len();
+            for tell in told {
+                crate::testing::tell(&mut app, tell);
+            }
+            let shown: Vec<String> = app.world().resource::<Toasts>().0[before..]
+                .iter()
+                .map(|t| t.text.clone())
+                .collect();
+            assert_eq!(
+                shown,
+                [clusia_core::printable::printable(hostile)],
+                "{kind:?}"
+            );
+            assert_ne!(shown[0], hostile);
+            let model = &app
+                .world()
+                .resource::<crate::screens::review::tests_tab::cockpit::CockpitModels>()
+                .0[&pr];
+            assert_eq!(model.pending, None);
+        }
+    }
+
+    #[test]
+    fn a_reply_the_cockpit_ask_does_not_expect_is_refused() {
+        let pr = fixture::demo_pr();
+        assert_eq!(
+            cockpit_tell(&pr, CockpitAskKind::Run, Reply::Ack),
+            CockpitTell::Refused {
+                pr: pr.clone(),
+                kind: CockpitAskKind::Run,
+                message: UNEXPECTED_ANSWER.into(),
+            }
+        );
+        let mut m = crate::screens::review::tests_tab::cockpit::CockpitModel::default();
+        let _ = m.click_run(&pr, CockpitScope::Scenarios, false, "h".into());
+        assert_eq!(m.pending, Some(CockpitAskKind::Run));
+        m.apply(&cockpit_tell(&pr, CockpitAskKind::Run, Reply::Ack));
+        assert_eq!(m.pending, None);
+        assert!(!m.busy());
+        let _ = m.ask_load(&pr, "head");
+        m.apply(&cockpit_tell(&pr, CockpitAskKind::Load, Reply::Ack));
+        assert!(m.awaiting.is_empty(), "the view ask is not owed any more");
     }
 
     #[test]

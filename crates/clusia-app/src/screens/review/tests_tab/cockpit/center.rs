@@ -2,7 +2,7 @@
 //! run buttons. Every string the views here hold is already printable and bounded; the drawers
 //! below put them on screen as plain text.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use bevy::ecs::system::EntityCommands;
 use bevy::input_focus::InputFocus;
@@ -13,10 +13,10 @@ use bevy::text::{EditableText, TextEdit, Underline};
 use bevy::ui_widgets::{Activate, Button as WidgetButton, observe};
 use clusia_core::PrRef;
 use clusia_core::cockpit::{
-    BENCH_SECS_MAX, BENCH_SECS_MIN, BENCH_WARMUP_MAX, BenchAsk, BenchInput, BenchView,
-    CockpitActivity, CockpitScope, ComparisonView, Input, InputKind, ItemKind, ItemRef,
-    ItemSupport, MainPhase, ROUNDS_MAX, RunSide, SCENARIO_ROUNDS_MIN, ScenarioApproval,
-    ScenarioInput, ScenarioView, SideView, check_input, error_text,
+    BENCH_SECS_MAX, BENCH_SECS_MIN, BENCH_WARMUP_MAX, BenchAsk, BenchView, CockpitActivity,
+    CockpitScope, ComparisonView, Input, InputKind, ItemKind, ItemRef, ItemSupport, MainPhase,
+    ROUNDS_MAX, RunSide, SCENARIO_ROUNDS_MIN, ScenarioApproval, ScenarioView, SideView,
+    check_input, error_text,
 };
 use clusia_core::functions::check_value;
 use clusia_core::printable::{printable, printable_lines};
@@ -172,60 +172,23 @@ fn bench_of<'a>(model: &'a CockpitModel, slug: &str) -> Option<&'a BenchView> {
 /// Keeps `message` under the field it is about, and says so to the model's views.
 fn fail(model: &mut CockpitModel, key: FieldKey, message: String) -> Result<Option<Ask>, String> {
     model.field_errors.insert(key, message.clone());
-    model.touch();
     Err(message)
 }
 
-/// Sends the whole of a scenario's overlay with one value, or the rounds, changed: the daemon
-/// replaces the overlay, so the command, the rounds, the timeout and the edited script files go
-/// again. The script of an edited file must be held, or nothing is sent.
-fn save_scenario(
+/// Commits a checked `text` to `field` of `item`: an error the save cannot be built with stays
+/// under the field.
+fn save(
     model: &mut CockpitModel,
     pr: &PrRef,
-    slug: &str,
+    item: ItemRef,
     field: Field,
-    values: impl FnOnce(&mut BTreeMap<String, String>),
-    rounds: Option<u32>,
+    text: String,
 ) -> Result<Option<Ask>, String> {
-    let key = FieldKey {
-        item: item_of(ItemKind::Scenario, slug),
-        field,
-    };
-    let Some(s) = scenario_of(model, slug) else {
-        return Ok(None);
-    };
-    let mut all: BTreeMap<String, String> = s
-        .inputs
-        .iter()
-        .map(|i| (i.input.name.clone(), i.value.clone()))
-        .collect();
-    values(&mut all);
-    let files = if s.scripts.iter().any(|f| f.edited) {
-        let held = model
-            .script
-            .as_ref()
-            .filter(|sc| sc.scenario == s.slug && sc.approval_hash == s.approval_hash);
-        match held {
-            Some(script) => script.files.iter().cloned().collect(),
-            None => return fail(model, key, "Loading the script…".into()),
-        }
-    } else {
-        BTreeMap::new()
-    };
-    let input = ScenarioInput {
-        values: all,
-        files,
-        run: Some(s.run.clone()),
-        rounds: Some(rounds.unwrap_or(s.rounds)),
-        timeout_secs: Some(s.timeout_secs),
-    };
-    model.field_errors.remove(&key);
-    let ask = Ask::SaveScenario {
-        pr: pr.clone(),
-        scenario: slug.to_string(),
-        input,
-    };
-    Ok(model.send_save(key, ask))
+    let key = FieldKey { item, field };
+    match model.commit(pr, key.clone(), text) {
+        Err(message) => fail(model, key, message),
+        ok => ok,
+    }
 }
 
 /// An input of a scenario committed with `text`: checked, then saved with every other value as
@@ -250,15 +213,12 @@ pub fn input_commit(
         };
         return fail(model, key, message);
     }
-    save_scenario(
+    save(
         model,
         pr,
-        scenario,
+        item_of(ItemKind::Scenario, scenario),
         Field::Value(name.to_string()),
-        |values| {
-            values.insert(name.to_string(), text.to_string());
-        },
-        None,
+        text.to_string(),
     )
 }
 
@@ -270,7 +230,13 @@ pub fn rounds_commit(
     text: &str,
 ) -> Result<Option<Ask>, String> {
     match in_range(text, SCENARIO_ROUNDS_MIN, ROUNDS_MAX) {
-        Ok(n) => save_scenario(model, pr, scenario, Field::Rounds, |_| {}, Some(n)),
+        Ok(n) => save(
+            model,
+            pr,
+            item_of(ItemKind::Scenario, scenario),
+            Field::Rounds,
+            n.to_string(),
+        ),
         Err(message) => {
             let key = FieldKey {
                 item: item_of(ItemKind::Scenario, scenario),
@@ -293,46 +259,28 @@ pub fn bench_commit(
     let Some(b) = bench_of(model, function) else {
         return Ok(None);
     };
-    let (mut warmup, mut secs, mut rounds) = (b.warmup, b.secs, b.rounds);
-    let mut values = b.values.clone();
     let field = match name {
         "warmup" => Field::Warmup,
         "secs" => Field::Secs,
         "rounds" => Field::Rounds,
         other => Field::Value(other.to_string()),
     };
-    let checked: Result<(), String> = match name {
-        "warmup" => in_range(text, 0, BENCH_WARMUP_MAX).map(|n| warmup = n),
-        "secs" => in_range(text, BENCH_SECS_MIN, BENCH_SECS_MAX).map(|n| secs = n),
-        "rounds" => in_range(text, 1, ROUNDS_MAX).map(|n| rounds = n),
+    let checked: Result<String, String> = match name {
+        "warmup" => in_range(text, 0, BENCH_WARMUP_MAX).map(|n| n.to_string()),
+        "secs" => in_range(text, BENCH_SECS_MIN, BENCH_SECS_MAX).map(|n| n.to_string()),
+        "rounds" => in_range(text, 1, ROUNDS_MAX).map(|n| n.to_string()),
         _ => match b.params.iter().find(|p| p.name == name) {
             Some(p) => check_value(p.kind, text)
-                .map(|()| {
-                    values.insert(name.to_string(), text.to_string());
-                })
+                .map(|()| text.to_string())
                 .map_err(str::to_string),
             None => return Ok(None),
         },
     };
-    let key = FieldKey {
-        item: item_of(ItemKind::Bench, function),
-        field,
-    };
-    if let Err(message) = checked {
-        return fail(model, key, message);
+    let item = item_of(ItemKind::Bench, function);
+    match checked {
+        Ok(text) => save(model, pr, item, field, text),
+        Err(message) => fail(model, FieldKey { item, field }, message),
     }
-    model.field_errors.remove(&key);
-    let ask = Ask::SaveBench {
-        pr: pr.clone(),
-        function: function.to_string(),
-        input: BenchInput {
-            values,
-            warmup: Some(warmup),
-            secs: Some(secs),
-            rounds: Some(rounds),
-        },
-    };
-    Ok(model.send_save(key, ask))
 }
 
 /// "this PR" or "main", as the error lines and the run text say it.
@@ -1757,7 +1705,6 @@ fn on_open_approval(
         model.modal = Some(CockpitModal::Approve {
             scenario: scenario.clone(),
         });
-        model.touch();
     }
 }
 
@@ -1797,7 +1744,6 @@ fn on_remove(
         model.modal = Some(CockpitModal::Remove {
             scenario: scenario.clone(),
         });
-        model.touch();
     }
 }
 
@@ -1843,7 +1789,6 @@ fn on_script_tab(
         && model.script_tab != *index
     {
         model.script_tab = *index;
-        model.touch();
     }
 }
 
@@ -2213,7 +2158,7 @@ mod tests {
             Err(clusia_core::cockpit::check_input(InputKind::Integer, &[], "abc").unwrap_err())
         );
         assert_eq!(m.field_errors[&key("callers")], "Enter a whole number");
-        assert!(m.saving.is_none() && m.queued_save.is_none());
+        assert!(m.saving.is_none() && m.queued_saves.is_empty());
         assert!(m.awaiting.is_empty());
     }
 
@@ -2252,6 +2197,26 @@ mod tests {
         assert_eq!(input.timeout_secs, Some(s.timeout_secs));
     }
 
+    fn set_input(view: &mut CockpitView, name: &str, value: &str) {
+        let s = view
+            .scenarios
+            .iter_mut()
+            .find(|s| s.slug == REFRESH)
+            .expect("refresh");
+        s.inputs
+            .iter_mut()
+            .find(|i| i.input.name == name)
+            .expect("input")
+            .value = value.into();
+    }
+
+    fn scenario_values(ask: &Ask) -> &BTreeMap<String, String> {
+        let Ask::SaveScenario { input, .. } = ask else {
+            panic!("a scenario save: {ask:?}");
+        };
+        &input.values
+    }
+
     #[test]
     fn a_second_commit_replaces_the_queued_save() {
         let mut m = scenario_model();
@@ -2261,19 +2226,130 @@ mod tests {
             input_commit(&mut m, &pr(), REFRESH, "duration", "30 s"),
             Ok(None)
         );
+        assert_eq!(
+            input_commit(&mut m, &pr(), REFRESH, "duration", "40 s"),
+            Ok(None)
+        );
         let b = input_commit(&mut m, &pr(), REFRESH, "token_lifetime", "4 s");
         assert_eq!(b, Ok(None));
-        let queued = m.queued_save.as_ref().expect("queued").ask.clone();
-        m.apply(&loaded(demo_cockpit(NOW, DemoCockpit::Scenario)));
+        let mut landed = demo_cockpit(NOW, DemoCockpit::Scenario);
+        set_input(&mut landed, "callers", "1");
+        m.apply(&loaded(landed));
+        let super::super::Released::Send(queued) = m.release_queued(&pr()) else {
+            panic!("the queued save goes");
+        };
+        let values = scenario_values(&queued);
+        assert_eq!(values["callers"], "1", "the save that landed");
+        assert_eq!(values["duration"], "40 s", "the last value of a field wins");
+        assert_eq!(values["token_lifetime"], "4 s");
+        assert_eq!(m.release_queued(&pr()), super::super::Released::Nothing);
+    }
+
+    #[test]
+    fn a_save_behind_one_in_flight_carries_every_edit_of_its_item() {
+        let mut m = scenario_model();
+        assert!(matches!(
+            input_commit(&mut m, &pr(), REFRESH, "callers", "80"),
+            Ok(Some(_))
+        ));
+        assert_eq!(
+            input_commit(&mut m, &pr(), REFRESH, "duration", "30 s"),
+            Ok(None)
+        );
+        assert_eq!(rounds_commit(&mut m, &pr(), REFRESH, "4"), Ok(None));
+        // The daemon's view after the first save does not have the later edits yet.
+        let mut landed = demo_cockpit(NOW, DemoCockpit::Scenario);
+        set_input(&mut landed, "callers", "80");
+        m.apply(&loaded(landed.clone()));
+        let super::super::Released::Send(ask) = m.release_queued(&pr()) else {
+            panic!("the queued save goes");
+        };
+        let Ask::SaveScenario { input, .. } = &ask else {
+            panic!("a scenario save");
+        };
+        assert_eq!(input.values["callers"], "80");
+        assert_eq!(input.values["duration"], "30 s");
+        assert_eq!(input.rounds, Some(4));
+        // Once that lands too, nothing of it is pending any more.
+        set_input(&mut landed, "duration", "30 s");
+        m.apply(&loaded(landed));
+        assert_eq!(m.release_queued(&pr()), super::super::Released::Nothing);
+        assert!(m.edits.is_empty());
+    }
+
+    #[test]
+    fn a_bench_save_behind_one_in_flight_carries_every_edit_of_its_bench() {
+        let view = demo_cockpit(NOW, DemoCockpit::Scenario);
+        let slug = view.benches[0].slug.clone();
+        let mut m = model_of(view.clone());
+        assert!(matches!(
+            bench_commit(&mut m, &pr(), &slug, "attempt", "9"),
+            Ok(Some(_))
+        ));
+        assert_eq!(bench_commit(&mut m, &pr(), &slug, "secs", "10"), Ok(None));
+        assert_eq!(bench_commit(&mut m, &pr(), &slug, "rounds", "3"), Ok(None));
+        let mut landed = view.clone();
+        landed.benches[0]
+            .values
+            .insert("attempt".into(), "9".into());
+        m.apply(&loaded(landed));
+        let super::super::Released::Send(Ask::SaveBench { input, .. }) = m.release_queued(&pr())
+        else {
+            panic!("the queued bench save goes");
+        };
+        assert_eq!(input.values["attempt"], "9");
+        assert_eq!(input.secs, Some(10));
+        assert_eq!(input.rounds, Some(3));
+        assert_eq!(input.warmup, Some(view.benches[0].warmup));
+    }
+
+    #[test]
+    fn a_queued_scenario_save_and_a_queued_bench_save_both_go() {
+        let view = demo_cockpit(NOW, DemoCockpit::Scenario);
+        let slug = view.benches[0].slug.clone();
+        let mut m = model_of(view.clone());
+        assert!(matches!(
+            input_commit(&mut m, &pr(), REFRESH, "callers", "80"),
+            Ok(Some(_))
+        ));
+        assert_eq!(
+            input_commit(&mut m, &pr(), REFRESH, "duration", "30 s"),
+            Ok(None)
+        );
+        assert_eq!(bench_commit(&mut m, &pr(), &slug, "attempt", "9"), Ok(None));
+        let scope = CockpitScope::Item { item: refresh() };
+        assert_eq!(m.click_run(&pr(), scope.clone(), false, "h".into()), None);
+        let mut landed = view.clone();
+        set_input(&mut landed, "callers", "80");
+        m.apply(&loaded(landed.clone()));
+        let super::super::Released::Send(first) = m.release_queued(&pr()) else {
+            panic!("a save goes");
+        };
+        assert_eq!(scenario_values(&first)["duration"], "30 s");
+        assert_eq!(m.release_queued(&pr()), super::super::Released::Nothing);
+        set_input(&mut landed, "duration", "30 s");
+        m.apply(&loaded(landed.clone()));
+        let super::super::Released::Send(Ask::SaveBench { input, .. }) = m.release_queued(&pr())
+        else {
+            panic!("the bench save goes next");
+        };
+        assert_eq!(input.values["attempt"], "9");
+        assert_eq!(m.release_queued(&pr()), super::super::Released::Nothing);
+        landed.benches[0]
+            .values
+            .insert("attempt".into(), "9".into());
+        landed.scenarios[1].hash = "after-saves".into();
+        m.apply(&loaded(landed));
         assert_eq!(
             m.release_queued(&pr()),
-            super::super::Released::Send(queued.clone())
+            super::super::Released::Send(Ask::RunCockpit {
+                pr: pr(),
+                scope,
+                on_main: false,
+                seen: "after-saves".into()
+            }),
+            "the run goes last, with the hash read after every save"
         );
-        let Ask::SaveScenario { input, .. } = queued else {
-            panic!("a save");
-        };
-        assert_eq!(input.values["token_lifetime"], "4 s");
-        assert_eq!(m.release_queued(&pr()), super::super::Released::Nothing);
     }
 
     #[test]
@@ -2644,6 +2720,8 @@ mod tests {
 
 #[cfg(test)]
 mod app_tests {
+    use std::collections::BTreeMap;
+
     use clusia_core::cockpit::{
         BenchAsk, COCKPIT_CHANGED, CockpitView, ErrorLine, ScriptMeta, Verdict,
     };
@@ -2989,6 +3067,62 @@ mod app_tests {
         assert!(testing::recorded(&mut app).is_empty(), "a second click");
         changed(&mut app, demo_cockpit(NOW, DemoCockpit::Scenario));
         assert_eq!(model(&app, &pr).pending, None);
+    }
+
+    #[test]
+    fn enter_in_a_field_then_run_before_the_reply_runs_with_the_saved_hash() {
+        let (mut app, pr) = scenario_app();
+        select(&mut app, &pr, scenario_item(REFRESH));
+        let _ = testing::recorded(&mut app);
+        let f = field_of(&mut app, "callers");
+        focus(&mut app, f);
+        testing::type_into(&mut app, f, "0");
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Enter);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        click::<RunThisItem>(&mut app, |b| b.pr == pr);
+        let sent = testing::recorded(&mut app);
+        let [Ask::SaveScenario { input, .. }] = sent.as_slice() else {
+            panic!("only the save goes: {sent:?}");
+        };
+        assert_eq!(input.values["callers"], "400");
+        let mut saved = demo_cockpit(NOW, DemoCockpit::Scenario);
+        let refresh = saved
+            .scenarios
+            .iter_mut()
+            .find(|s| s.slug == REFRESH)
+            .expect("refresh");
+        refresh.hash = "after-save".into();
+        if let Some(callers) = refresh
+            .inputs
+            .iter_mut()
+            .find(|i| i.input.name == "callers")
+        {
+            callers.value = "400".into();
+        }
+        tell(
+            &mut app,
+            CockpitTell::Loaded {
+                pr: pr.clone(),
+                view: Box::new(saved),
+            },
+        );
+        testing::settle(&mut app);
+        assert_eq!(
+            testing::recorded(&mut app),
+            [Ask::RunCockpit {
+                pr: pr.clone(),
+                scope: clusia_core::cockpit::CockpitScope::Item {
+                    item: scenario_item(REFRESH)
+                },
+                on_main: false,
+                seen: "after-save".into(),
+            }]
+        );
     }
 
     #[test]

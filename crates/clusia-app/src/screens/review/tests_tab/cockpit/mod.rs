@@ -17,9 +17,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use bevy::prelude::*;
 use clusia_core::PrRef;
 use clusia_core::cockpit::{
-    BenchView, COCKPIT_CHANGED, CockpitActivity, CockpitScope, CockpitView, ItemKind, ItemRef,
-    ItemSupport, MAIN_FIRST, MainPhase, NEW_FUNCTION, NO_SCENARIOS, RunSide, SERIES_MAX, Sample,
-    ScenarioApproval, ScenarioScript, ScenarioView,
+    BenchInput, BenchView, COCKPIT_CHANGED, CockpitActivity, CockpitScope, CockpitView, ItemKind,
+    ItemRef, ItemSupport, MAIN_FIRST, MainPhase, NEW_FUNCTION, NO_SCENARIOS, RunSide, SERIES_MAX,
+    Sample, ScenarioApproval, ScenarioInput, ScenarioScript, ScenarioView,
 };
 use clusia_core::functions::FunctionChange;
 use clusia_core::printable::printable;
@@ -51,11 +51,12 @@ pub struct FieldKey {
     pub field: Field,
 }
 
-/// A save in flight, or waiting behind one.
+/// The save in flight: the field last committed, where a refusal shows, and the edits it
+/// carried, which stop being pending once it lands.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Saving {
     pub field: FieldKey,
-    pub ask: Ask,
+    pub carried: BTreeMap<FieldKey, String>,
 }
 
 /// A run waiting for the saves in front of it.
@@ -103,8 +104,12 @@ pub struct CockpitModel {
     pub field_errors: BTreeMap<FieldKey, String>,
     /// The save in flight.
     pub saving: Option<Saving>,
-    /// The one commit waiting behind it; the last one wins.
-    pub queued_save: Option<Saving>,
+    /// Committed values the daemon has not answered yet, by field. A save is built from the view
+    /// plus these, so a save that waited never brings back a value an earlier one changed.
+    pub edits: BTreeMap<FieldKey, String>,
+    /// The items whose save waits behind the one in flight, in commit order, one per item, each
+    /// with the field committed last.
+    pub queued_saves: Vec<FieldKey>,
     /// A run waiting for the saves.
     pub queued_run: Option<QueuedRun>,
     /// The asks whose answer is a view, in send order: the daemon answers in that order.
@@ -125,8 +130,11 @@ pub struct CockpitModel {
     /// The scenario **Approve and run** runs once its approval lands.
     pub run_after_approve: Option<ItemRef>,
     pub copilot_focus: bool,
-    /// Bumped when a copilot ask was taken, so its input can clear itself.
+    /// Bumped when a question typed in the copilot's input was taken, so the input can clear
+    /// itself. Explain and What should I try next leave a draft where it is.
     pub copilot_sent: u64,
+    /// The copilot ask in flight is the input's question.
+    pub free_in_flight: bool,
     /// The scenario whose **Suggest as a test in a comment** waits for its script. Selecting
     /// another item drops it.
     pub suggest_for: Option<String>,
@@ -136,18 +144,9 @@ pub struct CockpitModel {
     pub dismissed_failed: Option<String>,
     /// Mirrored: the Auto Tests or the function cases are busy.
     pub tests_busy: bool,
-    /// Bumped by every change but samples.
-    pub version: u64,
-    /// Bumped by every change, samples included.
-    pub chart_version: u64,
 }
 
 impl CockpitModel {
-    pub fn touch(&mut self) {
-        self.version += 1;
-        self.chart_version += 1;
-    }
-
     pub fn selected_scenario(&self) -> Option<&ScenarioView> {
         let item = self
             .selected
@@ -204,7 +203,6 @@ impl CockpitModel {
         if self.selected.as_ref() != Some(&item) && self.has_item(&item) {
             self.selected = Some(item);
             self.suggest_for = None;
-            self.touch();
         }
     }
 
@@ -224,7 +222,12 @@ impl CockpitModel {
         if !matches!(kind, CockpitAskKind::Load | CockpitAskKind::Script) {
             self.pending = Some(kind);
         }
-        self.touch();
+    }
+
+    /// Notes that the input's question goes out.
+    pub fn sent_free(&mut self) {
+        self.free_in_flight = true;
+        self.sent(CockpitAskKind::Copilot);
     }
 
     /// The only way to build `GetCockpit`.
@@ -256,24 +259,139 @@ impl CockpitModel {
         })
     }
 
-    /// A committed field: the save goes now, or waits behind the one in flight, replacing any
-    /// that waited. `ask` must be a save.
-    pub fn send_save(&mut self, field: FieldKey, ask: Ask) -> Option<Ask> {
-        if !matches!(ask, Ask::SaveScenario { .. } | Ask::SaveBench { .. }) {
-            return None;
-        }
-        let saving = Saving {
-            field,
-            ask: ask.clone(),
+    /// The edits of `item` not answered yet.
+    fn edits_of(&self, item: &ItemRef) -> BTreeMap<FieldKey, String> {
+        self.edits
+            .iter()
+            .filter(|(k, _)| &k.item == item)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// The save of `item`: the whole overlay (the daemon replaces it) as the view has it, with
+    /// every pending edit of that item on top. A scenario resends its command, rounds, timeout
+    /// and, when a file was edited, the held script's files; without that script held it is
+    /// "Loading the script…". `None` when the view no longer has the item.
+    pub fn save_ask(&self, pr: &PrRef, item: &ItemRef) -> Result<Option<Ask>, String> {
+        let Some(view) = self.view.as_ref() else {
+            return Ok(None);
         };
-        if self.saving.is_some() {
-            self.queued_save = Some(saving);
-            self.touch();
-            return None;
+        let edits = self.edits_of(item);
+        let number = |field: Field| {
+            edits
+                .get(&FieldKey {
+                    item: item.clone(),
+                    field,
+                })
+                .and_then(|t| t.trim().parse::<u32>().ok())
+        };
+        let values = |mut all: BTreeMap<String, String>| {
+            for (k, v) in &edits {
+                if let Field::Value(name) = &k.field {
+                    all.insert(name.clone(), v.clone());
+                }
+            }
+            all
+        };
+        match item.kind {
+            ItemKind::Scenario => {
+                let Some(s) = view.scenarios.iter().find(|s| s.slug == item.id) else {
+                    return Ok(None);
+                };
+                let files = if s.scripts.iter().any(|f| f.edited) {
+                    let held = self
+                        .script
+                        .as_ref()
+                        .filter(|sc| sc.scenario == s.slug && sc.approval_hash == s.approval_hash);
+                    match held {
+                        Some(script) => script.files.iter().cloned().collect(),
+                        None => return Err("Loading the script…".into()),
+                    }
+                } else {
+                    BTreeMap::new()
+                };
+                Ok(Some(Ask::SaveScenario {
+                    pr: pr.clone(),
+                    scenario: s.slug.clone(),
+                    input: ScenarioInput {
+                        values: values(
+                            s.inputs
+                                .iter()
+                                .map(|i| (i.input.name.clone(), i.value.clone()))
+                                .collect(),
+                        ),
+                        files,
+                        run: Some(s.run.clone()),
+                        rounds: Some(number(Field::Rounds).unwrap_or(s.rounds)),
+                        timeout_secs: Some(s.timeout_secs),
+                    },
+                }))
+            }
+            ItemKind::Bench => {
+                let Some(b) = view.benches.iter().find(|b| b.slug == item.id) else {
+                    return Ok(None);
+                };
+                Ok(Some(Ask::SaveBench {
+                    pr: pr.clone(),
+                    function: b.slug.clone(),
+                    input: BenchInput {
+                        values: values(b.values.clone()),
+                        warmup: Some(number(Field::Warmup).unwrap_or(b.warmup)),
+                        secs: Some(number(Field::Secs).unwrap_or(b.secs)),
+                        rounds: Some(number(Field::Rounds).unwrap_or(b.rounds)),
+                    },
+                }))
+            }
+            ItemKind::Load => Ok(None),
         }
-        self.saving = Some(saving);
+    }
+
+    /// A field committed with `text`, already checked: its save goes now, or waits behind the
+    /// one in flight (one waiting save per item, built when it goes). An error is the caller's
+    /// to show; the edit is then not kept.
+    pub fn commit(
+        &mut self,
+        pr: &PrRef,
+        field: FieldKey,
+        text: String,
+    ) -> Result<Option<Ask>, String> {
+        let before = self.edits.insert(field.clone(), text);
+        let ask = match self.save_ask(pr, &field.item) {
+            Ok(Some(ask)) => ask,
+            other => {
+                match before {
+                    Some(b) => self.edits.insert(field.clone(), b),
+                    None => self.edits.remove(&field),
+                };
+                return other;
+            }
+        };
+        self.field_errors.remove(&field);
+        if self.saving.is_some() {
+            match self.queued_saves.iter_mut().find(|k| k.item == field.item) {
+                Some(queued) => *queued = field,
+                None => self.queued_saves.push(field),
+            }
+            return Ok(None);
+        }
+        self.start_save(field);
+        Ok(Some(ask))
+    }
+
+    fn start_save(&mut self, field: FieldKey) {
+        let carried = self.edits_of(&field.item);
+        self.saving = Some(Saving { field, carried });
         self.sent(CockpitAskKind::Save);
-        Some(ask)
+    }
+
+    /// Drops what `saving` carried from the pending edits, unless the field was committed again
+    /// since.
+    fn settle(&mut self, saving: &Saving) {
+        for (k, v) in &saving.carried {
+            if self.edits.get(k) == Some(v) {
+                self.edits.remove(k);
+            }
+        }
     }
 
     /// A click on a run button; `seen` is the hash the caller drew. The run waits for saves.
@@ -287,9 +405,8 @@ impl CockpitModel {
         if self.busy() {
             return None;
         }
-        if self.saving.is_some() || self.queued_save.is_some() {
+        if self.saving.is_some() || !self.queued_saves.is_empty() {
             self.queued_run = Some(QueuedRun { scope, on_main });
-            self.touch();
             return None;
         }
         self.sent(CockpitAskKind::Run);
@@ -308,7 +425,6 @@ impl CockpitModel {
         }
         self.stopping = true;
         self.pending = Some(CockpitAskKind::Run);
-        self.touch();
         Some(Ask::StopTests(pr.clone()))
     }
 
@@ -318,16 +434,24 @@ impl CockpitModel {
         if self.saving.is_some() {
             return Released::Nothing;
         }
-        if let Some(next) = self.queued_save.take() {
-            let ask = next.ask.clone();
-            self.saving = Some(next);
-            self.sent(CockpitAskKind::Save);
-            return Released::Send(ask);
+        while !self.queued_saves.is_empty() {
+            let next = self.queued_saves.remove(0);
+            match self.save_ask(pr, &next.item) {
+                Ok(Some(ask)) => {
+                    self.start_save(next);
+                    return Released::Send(ask);
+                }
+                Ok(None) => self.edits.retain(|k, _| k.item != next.item),
+                Err(message) => {
+                    self.edits.retain(|k, _| k.item != next.item);
+                    self.field_errors.insert(next, message);
+                    self.queued_run = None;
+                }
+            }
         }
         let Some(run) = self.queued_run.take() else {
             return Released::Nothing;
         };
-        self.touch();
         let seen = self.view.as_ref().and_then(|v| match &run.scope {
             CockpitScope::Scenarios => Some(v.hash.clone()),
             CockpitScope::Item { item } => match item.kind {
@@ -487,6 +611,10 @@ impl CockpitModel {
         match kind {
             CockpitAskKind::Save => {
                 if let Some(saving) = self.saving.take() {
+                    self.settle(&saving);
+                    for field in saving.carried.keys() {
+                        self.field_errors.remove(field);
+                    }
                     self.field_errors.remove(&saving.field);
                 }
                 if self.pending == Some(CockpitAskKind::Save) {
@@ -514,13 +642,11 @@ impl CockpitModel {
                 if self.of_this_head(view) {
                     self.take_view(view);
                 }
-                self.touch();
             }
             CockpitTell::Changed { view, .. } => {
                 if self.of_this_head(view) {
                     self.take_view(view);
                 }
-                self.touch();
             }
             CockpitTell::Samples {
                 run,
@@ -554,12 +680,10 @@ impl CockpitModel {
                         list.drain(..cut);
                     }
                 }
-                self.chart_version += 1;
             }
             CockpitTell::Round { run, result, .. } => {
                 if let Some(live) = self.live.as_mut().filter(|l| &l.run == run) {
                     live.done.insert((result.side, result.round));
-                    self.chart_version += 1;
                 }
             }
             CockpitTell::Script { script, .. } => {
@@ -568,7 +692,6 @@ impl CockpitModel {
                 }
                 self.script = Some((**script).clone());
                 self.script_error = None;
-                self.touch();
             }
             CockpitTell::Started { run, .. } => {
                 if self.pending == Some(CockpitAskKind::Run) {
@@ -577,16 +700,14 @@ impl CockpitModel {
                 if self.view.as_ref().is_some_and(|v| v.activity.is_some()) {
                     self.live_run = Some(run.clone());
                 }
-                self.touch();
             }
             CockpitTell::Acked { kind, .. } => {
                 if self.pending == Some(*kind) {
                     self.pending = None;
                 }
-                if *kind == CockpitAskKind::Copilot {
+                if *kind == CockpitAskKind::Copilot && std::mem::take(&mut self.free_in_flight) {
                     self.copilot_sent += 1;
                 }
-                self.touch();
             }
             CockpitTell::Refused { kind, message, .. } => {
                 if self.pending == Some(*kind) {
@@ -598,6 +719,7 @@ impl CockpitModel {
                 match kind {
                     CockpitAskKind::Save => {
                         if let Some(saving) = self.saving.take() {
+                            self.settle(&saving);
                             self.field_errors.insert(saving.field, printable(message));
                         }
                         self.queued_run = None;
@@ -614,10 +736,10 @@ impl CockpitModel {
                         }
                     }
                     CockpitAskKind::Approve => self.run_after_approve = None,
+                    CockpitAskKind::Copilot => self.free_in_flight = false,
                     CockpitAskKind::Script => self.script_error = Some(printable(message)),
                     _ => {}
                 }
-                self.touch();
             }
         }
     }
@@ -639,14 +761,15 @@ impl CockpitModels {
             model.pending = None;
             model.awaiting.clear();
             model.saving = None;
-            model.queued_save = None;
+            model.edits.clear();
+            model.queued_saves.clear();
             model.queued_run = None;
             model.live_run = None;
             model.stopping = false;
             model.run_after_approve = None;
             model.suggest_for = None;
+            model.free_in_flight = false;
             model.script_asked = None;
-            model.touch();
         }
     }
 }
@@ -718,7 +841,6 @@ pub fn mirror_busy(
                 .is_some_and(functions::FunctionsModel::busy);
         if m.tests_busy != busy {
             m.tests_busy = busy;
-            m.touch();
             wrote_cockpit = true;
         }
     }
@@ -787,9 +909,7 @@ pub fn register(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use clusia_core::cockpit::{
-        RoundEnd, RoundResult, SERVICES_ON_MAIN, ScenarioApproval, ScenarioInput,
-    };
+    use clusia_core::cockpit::{RoundEnd, RoundResult, SERVICES_ON_MAIN, ScenarioApproval};
 
     use super::*;
     use crate::fixture::{self, DemoCockpit, demo_cockpit};
@@ -851,15 +971,9 @@ mod tests {
         }
     }
 
-    fn save_ask(callers: &str) -> Ask {
-        Ask::SaveScenario {
-            pr: pr(),
-            scenario: REFRESH.into(),
-            input: ScenarioInput {
-                values: [("callers".to_string(), callers.to_string())].into(),
-                ..ScenarioInput::default()
-            },
-        }
+    fn commit(m: &mut CockpitModel, name: &str, text: &str) -> Option<Ask> {
+        m.commit(&pr(), key(name), text.into())
+            .expect("a valid value")
     }
 
     fn hash_of(view: &CockpitView, slug: &str) -> String {
@@ -923,8 +1037,10 @@ mod tests {
     fn run_after_an_unsaved_edit_waits_for_the_save_and_carries_the_new_hash() {
         let mut m = model_of(scenario());
         let old = hash_of(&scenario(), REFRESH);
-        let save = save_ask("80");
-        assert_eq!(m.send_save(key("callers"), save.clone()), Some(save));
+        assert!(matches!(
+            commit(&mut m, "callers", "80"),
+            Some(Ask::SaveScenario { .. })
+        ));
         let scope = CockpitScope::Item { item: refresh() };
         assert_eq!(m.click_run(&pr(), scope.clone(), false, old), None);
         assert_eq!(m.release_queued(&pr()), Released::Nothing, "the save flies");
@@ -952,7 +1068,7 @@ mod tests {
     fn a_reply_to_an_earlier_load_does_not_land_the_save() {
         let mut m = model_of(scenario());
         let _ = m.ask_load(&pr(), &scenario().head);
-        let _ = m.send_save(key("callers"), save_ask("80"));
+        let _ = commit(&mut m, "callers", "80");
         let scope = CockpitScope::Item { item: refresh() };
         assert_eq!(m.click_run(&pr(), scope.clone(), false, "old".into()), None);
         let mut stale = scenario();
@@ -981,30 +1097,41 @@ mod tests {
     }
 
     #[test]
-    fn a_second_commit_while_saving_replaces_the_queued_one_and_goes_after() {
+    fn commits_while_saving_wait_as_one_save_of_their_item_and_go_after() {
         let mut m = model_of(scenario());
-        let (a, b, c) = (save_ask("1"), save_ask("2"), save_ask("3"));
-        assert_eq!(m.send_save(key("callers"), a.clone()), Some(a));
-        assert_eq!(m.send_save(key("duration"), b), None);
-        assert_eq!(m.send_save(key("token_lifetime"), c.clone()), None);
-        assert_eq!(m.queued_save.as_ref().map(|s| &s.ask), Some(&c));
+        assert!(commit(&mut m, "callers", "1").is_some());
+        assert_eq!(commit(&mut m, "duration", "30 s"), None);
+        assert_eq!(commit(&mut m, "token_lifetime", "4 s"), None);
+        assert_eq!(m.queued_saves, vec![key("token_lifetime")]);
         m.apply(&loaded(scenario()));
-        assert_eq!(m.release_queued(&pr()), Released::Send(c));
+        assert!(matches!(
+            m.release_queued(&pr()),
+            Released::Send(Ask::SaveScenario { .. })
+        ));
+        let saving = m.saving.as_ref().expect("in flight");
+        assert_eq!(saving.field, key("token_lifetime"));
         assert_eq!(
-            m.saving.as_ref().map(|s| s.field.clone()),
-            Some(key("token_lifetime"))
+            saving.carried.keys().cloned().collect::<Vec<_>>(),
+            vec![key("duration"), key("token_lifetime")]
         );
-        assert_eq!(
-            m.send_save(key("x"), Ask::StopTests(pr())),
-            None,
-            "only a save"
-        );
+        assert!(m.queued_saves.is_empty());
+    }
+
+    #[test]
+    fn a_save_that_cannot_be_built_keeps_no_edit() {
+        let mut m = model_of(scenario());
+        let gone = FieldKey {
+            item: item(ItemKind::Scenario, "nope"),
+            field: Field::Value("callers".into()),
+        };
+        assert_eq!(m.commit(&pr(), gone, "1".into()), Ok(None));
+        assert!(m.edits.is_empty() && m.saving.is_none());
     }
 
     #[test]
     fn a_refused_save_shows_under_its_field_and_drops_the_waiting_run() {
         let mut m = model_of(scenario());
-        let _ = m.send_save(key("callers"), save_ask("x"));
+        let _ = commit(&mut m, "callers", "x");
         let scope = CockpitScope::Item { item: refresh() };
         assert_eq!(m.click_run(&pr(), scope, false, "h".into()), None);
         assert!(m.queued_run.is_some());
@@ -1016,9 +1143,10 @@ mod tests {
         assert_eq!(m.field_errors[&key("callers")], "Not a whole number");
         assert!(m.queued_run.is_none());
         assert!(m.saving.is_none());
+        assert!(m.edits.is_empty(), "a refused value is not resent");
         assert!(m.awaiting.is_empty());
         // The next landed save of that field clears its error.
-        let _ = m.send_save(key("callers"), save_ask("8"));
+        let _ = commit(&mut m, "callers", "8");
         m.apply(&loaded(scenario()));
         assert!(!m.field_errors.contains_key(&key("callers")));
     }
@@ -1060,18 +1188,16 @@ mod tests {
     }
 
     #[test]
-    fn a_flood_of_samples_keeps_the_newest_series_max_and_moves_only_the_chart() {
+    fn a_flood_of_samples_keeps_the_newest_series_max_of_the_running_item_only() {
         let view = running();
         let bench = item(ItemKind::Bench, &backoff_slug(&view));
-        let mut m = model_of(view);
-        let (v, c) = (m.version, m.chart_version);
+        let mut m = model_of(view.clone());
         m.apply(&flood("demo-bench-run", &bench, RunSide::Main, 3, 10_000));
         let live = m.live.as_ref().expect("live");
         let points = &live.points[&(RunSide::Main, 3)];
         assert_eq!(points.len(), SERIES_MAX);
         assert_eq!(points[0].t_ms, 10_000 - SERIES_MAX as u32);
-        assert_eq!(m.version, v);
-        assert!(m.chart_version > c);
+        assert_eq!(m.view.as_ref(), Some(&view), "samples never touch the view");
         let before = m.live.clone();
         m.apply(&flood("other", &bench, RunSide::Main, 3, 5));
         m.apply(&flood("demo-bench-run", &refresh(), RunSide::Main, 3, 5));
@@ -1145,14 +1271,27 @@ mod tests {
     #[test]
     fn an_acked_copilot_ask_frees_the_input() {
         let mut m = model_of(scenario());
-        m.sent(CockpitAskKind::Copilot);
-        assert_eq!(m.pending, Some(CockpitAskKind::Copilot));
-        m.apply(&CockpitTell::Acked {
+        let acked = CockpitTell::Acked {
             pr: pr(),
             kind: CockpitAskKind::Copilot,
-        });
+        };
+        m.sent(CockpitAskKind::Copilot);
+        assert_eq!(m.pending, Some(CockpitAskKind::Copilot));
+        m.apply(&acked);
         assert_eq!(m.pending, None);
+        assert_eq!(m.copilot_sent, 0, "not the input's question");
+        m.sent_free();
+        m.apply(&acked);
         assert_eq!(m.copilot_sent, 1);
+        m.sent_free();
+        m.apply(&CockpitTell::Refused {
+            pr: pr(),
+            kind: CockpitAskKind::Copilot,
+            message: "busy".into(),
+        });
+        m.sent(CockpitAskKind::Copilot);
+        m.apply(&acked);
+        assert_eq!(m.copilot_sent, 1, "a refused question is not taken later");
     }
 
     #[test]
@@ -1260,8 +1399,8 @@ mod tests {
         models.apply(&loaded(scenario()));
         let m = models.0.get_mut(&pr()).expect("model");
         let _ = m.ask_load(&pr(), &scenario().head);
-        let _ = m.send_save(key("callers"), save_ask("1"));
-        let _ = m.send_save(key("duration"), save_ask("2"));
+        let _ = commit(m, "callers", "1");
+        let _ = commit(m, "duration", "2 s");
         m.queued_run = Some(QueuedRun {
             scope: CockpitScope::Scenarios,
             on_main: false,
@@ -1273,7 +1412,8 @@ mod tests {
         models.lost();
         let m = &models.0[&pr()];
         assert!(!m.asked);
-        assert!(m.saving.is_none() && m.queued_save.is_none() && m.queued_run.is_none());
+        assert!(m.saving.is_none() && m.queued_saves.is_empty() && m.queued_run.is_none());
+        assert!(m.edits.is_empty());
         assert!(m.awaiting.is_empty());
         assert!(m.live_run.is_none() && !m.stopping && m.pending.is_none());
         assert!(m.script_asked.is_none());

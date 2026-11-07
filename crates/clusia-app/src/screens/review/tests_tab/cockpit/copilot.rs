@@ -651,7 +651,6 @@ fn send_free(model: &mut CockpitModel, pr: &PrRef, text: &str, asks: &mut Asks) 
     if !copilot_ask_ok(text) {
         if model.copilot_error.as_deref() != Some(TOO_LONG) {
             model.copilot_error = Some(TOO_LONG.into());
-            model.touch();
         }
         return;
     }
@@ -663,7 +662,7 @@ fn send_free(model: &mut CockpitModel, pr: &PrRef, text: &str, asks: &mut Asks) 
             text: text.to_string(),
         },
     });
-    model.sent(CockpitAskKind::Copilot);
+    model.sent_free();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -875,7 +874,6 @@ pub fn on_suggest(
     if let Some(ask) = model.want_script(pr) {
         asks.send(ask);
     }
-    model.touch();
 }
 
 /// Fills the review's general comment with the selected scenario once its script for the current
@@ -1286,10 +1284,8 @@ mod tests {
         );
         assert_eq!(input_text(&mut app), "why?");
         assert!(
-            toasts(&app)
-                .iter()
-                .any(|t| t == &clusia_core::printable::printable("busy \u{202e}now")),
-            "{:?}",
+            toasts(&app).iter().all(|t| !t.contains("busy")),
+            "the bridge's notice is the one toast: {:?}",
             toasts(&app)
         );
         support::click::<CopilotSend>(&mut app, |b| b.0 == pr);
@@ -1341,6 +1337,28 @@ mod tests {
         // The refresh scenario has a message about it: no Explain link.
         support::select(&mut app, &pr, scenario_item(REFRESH));
         assert_eq!(testing::count::<ExplainThis>(&mut app), 0);
+    }
+
+    #[test]
+    fn explain_and_next_keep_the_draft_the_reviewer_typed() {
+        let (mut app, pr) = support::app_with(scenario());
+        type_text(&mut app, "half a quest");
+        support::click::<ExplainThis>(&mut app, |b| b.0 == pr);
+        assert_eq!(testing::recorded(&mut app).len(), 1);
+        let acked = CockpitTell::Acked {
+            pr: pr.clone(),
+            kind: CockpitAskKind::Copilot,
+        };
+        support::tell(&mut app, acked.clone());
+        assert_eq!(input_text(&mut app), "half a quest");
+        support::click::<TryNext>(&mut app, |b| b.0 == pr);
+        assert_eq!(testing::recorded(&mut app).len(), 1);
+        support::tell(&mut app, acked.clone());
+        assert_eq!(input_text(&mut app), "half a quest");
+        support::click::<CopilotSend>(&mut app, |b| b.0 == pr);
+        assert_eq!(testing::recorded(&mut app).len(), 1);
+        support::tell(&mut app, acked);
+        assert_eq!(input_text(&mut app), "", "the question itself was taken");
     }
 
     #[test]
