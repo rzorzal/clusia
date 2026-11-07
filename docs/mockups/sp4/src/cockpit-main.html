@@ -4,24 +4,24 @@
   <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
     <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#123</span><b>auth refresh</b></span></div>
   <div class="ck"><span class="back">‹ Tests</span><b>QA cockpit</b><span class="f">scenarios and benchmarks for this change — this PR vs main</span>
-    <span class="mainst" style="margin-left:auto"><span class="m">main</span><span class="mono">4e1f2a0</span><span class="amb">● needs setup</span></span></div>
+    <span class="mainst" style="margin-left:auto"><span class="m">main ·</span><span class="mono">4e1f2a0</span><span class="amb">● needs setup</span></span></div>
   <div class="cols" style="opacity:.35"><div class="col left"></div><div class="col mid"></div><div class="col right"></div></div>
   <div style="position:absolute;inset:0;background:rgba(20,24,22,.28)"></div>
   <div class="card" style="position:absolute;left:230px;top:96px;width:820px;padding:22px 24px;box-shadow:0 18px 50px rgba(0,0,0,.18)">
-    <div style="font-size:16px;font-weight:600">Set up main for comparison</div>
-    <div class="m" style="margin:6px 0 14px;line-height:1.5">A second checkout at this PR's base, <span class="mono">4e1f2a0</span>, with the same image and its own caches, so neither side warms the other. These steps are approved for main on their own. The first run builds from scratch.</div>
+    <div style="font-size:16px;font-weight:600">Prepare main</div>
+    <div class="m mono" style="margin:6px 0 4px;font-size:12px">main · 4e1f2a0 · this pull request's image clusia/rzorzal-clusia:4f2a91c · recipe 9c2e41a</div><div class="m" style="margin-bottom:14px;line-height:1.5">Main builds in its own worktree with its own caches; its first run builds from scratch.</div>
     <div class="m" style="font-size:12px;font-weight:600;letter-spacing:.04em;margin-bottom:6px">SETUP ON MAIN · 2 STEPS</div>
     <table><tbody>
       <tr><td style="width:26px">☑</td><td style="width:250px">Fetch dependencies</td><td class="mono m">cargo fetch --locked</td><td style="text-align:right;width:150px"><span class="pill" style="background:var(--chrome)">container</span> <span class="pill" style="background:var(--bluebg);color:var(--blue)">network</span></td></tr>
       <tr><td>☑</td><td>Build the tests</td><td class="mono m">cargo test --no-run --workspace</td><td style="text-align:right"><span class="pill" style="background:var(--chrome)">container</span></td></tr>
     </tbody></table>
-    <div class="m" style="font-size:12px;font-weight:600;letter-spacing:.04em;margin:16px 0 6px">USES</div>
+    <div class="m" style="font-size:12px;font-weight:600;letter-spacing:.04em;margin:16px 0 6px">COMMANDS ON MAIN · NO NETWORK</div><div class="mono" style="margin-bottom:10px">cargo test --workspace</div><div class="m" style="font-size:12px;font-weight:600;letter-spacing:.04em;margin:6px 0 6px">USES</div>
     <div style="display:grid;grid-template-columns:110px 1fr;row-gap:5px">
       <span class="m">Recipe</span><span>this PR's recipe <span class="f">(main has none)</span> · <span class="mono">sha 9c2e…41a</span></span>
       <span class="m">Image</span><span class="mono">clusia/rzorzal-clusia:4f2a91c</span>
       <span class="m">Caches</span><span>main's own · <span class="mono">clusia-main-*</span> volumes</span>
       <span class="m">Removed</span><span>with the review, and by Prune</span>
     </div>
-    <div style="display:flex;gap:10px;margin-top:18px;align-items:center"><span class="btn" style="margin-left:auto">Cancel</span><span class="btn p">Approve and prepare main</span></div>
+    <div style="display:flex;gap:10px;margin-top:18px;align-items:center"><span class="btn" style="margin-left:auto">Cancel</span><span class="btn p">Approve and prepare</span></div>
   </div>
 </div></body></html>
