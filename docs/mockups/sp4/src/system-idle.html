@@ -1,0 +1,37 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="system.css"></head><body>
+<script>if(location.hash==="#dark")document.body.className="dark"</script>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#123</span><b>auth refresh</b></span></div>
+  <div class="hdr"><h1><small>rzorzal/clusia &nbsp;#123</small> feat: auth refresh</h1>
+    <div class="sec"><span>Diagrams</span><span>Security</span><span>Diff</span><span>Audits</span><span>Comments</span><span class="on">Tests</span></div></div>
+  <div class="sub"><span>Auto Tests</span><span>Run Function tests</span><span class="on">System</span><span class="f" style="margin-left:auto;padding-right:0">Docker · Colima · ready</span><span class="btn" style="height:30px;margin-left:12px;padding:0 12px">Open the QA cockpit →</span></div>
+  <div class="sys">
+    <div class="lcol">
+      <div class="card">
+        <div class="st"><span class="dot" style="background:var(--faint)"></span>Not started</div>
+        <div class="m" style="margin-top:6px;line-height:1.5">Start the PR's system in a container to try it. Its ports open on <span class="mono">127.0.0.1</span> only, and it gets no outbound network unless you allow it.</div>
+        <div class="cap" style="margin-top:14px">FROM THE RECIPE</div>
+        <div style="display:grid;grid-template-columns:70px 1fr;gap:5px 8px;font-size:12.5px">
+          <span class="m">start</span><span class="mono">cargo run -q --bin auth-api -- --port 8080</span>
+          <span class="m">ports</span><span class="mono">api 8080 · admin 9090</span>
+          <span class="m">health</span><span class="mono">GET /health on api</span>
+          <span class="m">services</span><span class="mono">postgres</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)"><span class="tog"></span><span>Outbound network</span><span class="f" style="margin-left:auto;font-size:12px">off</span></div>
+        <span class="btn p" style="margin-top:14px;width:100%">▶ Start the system</span>
+        <div class="f" style="font-size:11.5px;margin-top:8px">First start builds the app in the container: about 2 min.</div>
+      </div>
+    </div>
+    <div class="rcol">
+      <div class="card" style="padding:0">
+        <div style="display:flex;align-items:baseline;padding:12px 14px 8px"><b>Where to test</b><span class="f" style="margin-left:10px;font-size:12px">endpoints this PR changed · read from the diff by Claude Code</span></div>
+        <div class="ep"><span class="meth post">POST</span><span class="mono">/oauth/token</span><span class="f" style="font-size:12px">start the system to send</span><span></span><span class="m" style="font-size:12px;grid-column:span 2">Refresh now goes through the shared queue; concurrent callers wait for one exchange.</span></div>
+        <div class="ep"><span class="meth get">GET</span><span class="mono">/oauth/status</span><span></span><span></span><span class="m" style="font-size:12px;grid-column:span 2">New: reports the queue length and the last exchange.</span></div>
+        <div class="ep"><span class="meth del">DELETE</span><span class="mono">/oauth/token/{id}</span><span></span><span></span><span class="m" style="font-size:12px;grid-column:span 2">Revoking now also drops queued waiters for that token.</span></div>
+      </div>
+      <div class="card" style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--faint)">Logs appear here once the system starts.</div>
+    </div>
+  </div>
+  <div class="status"><span class="ok">●</span> Claude Code · session active <span class="f">Draft saved · 4 items</span><span class="btn p" style="margin-left:auto">Finalize review</span></div>
+</div></body></html>

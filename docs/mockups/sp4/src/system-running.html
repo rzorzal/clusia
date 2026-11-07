@@ -1,0 +1,57 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="system.css"></head><body>
+<script>if(location.hash==="#dark")document.body.className="dark"</script>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#123</span><b>auth refresh</b></span></div>
+  <div class="hdr"><h1><small>rzorzal/clusia &nbsp;#123</small> feat: auth refresh</h1>
+    <div class="sec"><span>Diagrams</span><span>Security</span><span>Diff</span><span>Audits</span><span>Comments</span><span class="on">Tests</span></div></div>
+  <div class="sub"><span>Auto Tests</span><span>Run Function tests</span><span class="on">System</span><span class="f" style="margin-left:auto;padding-right:0">Docker · Colima · ready</span><span class="btn" style="height:30px;margin-left:12px;padding:0 12px">Open the QA cockpit →</span></div>
+  <div class="sys">
+    <div class="lcol">
+      <div class="card">
+        <div class="st"><span class="dot" style="background:var(--green)"></span>Running <span class="f" style="font-weight:400;font-size:12px;margin-left:4px">healthy · up 2 min</span></div>
+        <div class="m" style="font-size:12px;margin-top:4px">At <span class="mono">8f3c21d</span> · container · <span class="mono">GET /health</span> → 200</div>
+        <div class="cap" style="margin-top:14px">PORTS · 127.0.0.1 ONLY</div>
+        <div class="port"><b>api</b><span class="url">http://127.0.0.1:49152/</span><span></span><span class="f mono" style="font-size:11.5px">:8080 in the container</span></div>
+        <div class="port"><b>admin</b><span class="url">http://127.0.0.1:49153/admin</span><span></span><span class="f mono" style="font-size:11.5px">:9090 in the container</span></div>
+        <div class="cap" style="margin-top:12px">SERVICES</div>
+        <div style="display:flex;align-items:center;gap:8px;font-size:12.5px"><span class="ok">●</span><span class="mono">postgres</span><span class="f" style="margin-left:auto">Clúsia's own · internal</span></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)"><span class="tog"></span><span>Outbound network</span><span class="f" style="margin-left:auto;font-size:12px">off for this review</span></div>
+        <div style="display:flex;gap:10px;margin-top:14px"><span class="btn">■ Stop</span><span class="btn">Restart</span></div>
+        <div class="f" style="font-size:11.5px;margin-top:8px">Stops when the review closes or Clúsia quits.</div>
+      </div>
+      <div class="card" style="flex:1;display:flex;flex-direction:column">
+        <div class="cap">START COMMAND · APPROVED</div>
+        <div class="mono" style="background:var(--code);border-radius:6px;padding:8px 10px">cargo run -q --bin auth-api -- --port 8080</div>
+        <div class="m" style="font-size:12px;margin-top:8px;overflow-wrap:anywhere">env <span class="mono">DATABASE_URL=postgres://test:test@postgres/auth</span> <span class="f">(fake)</span></div>
+        <div style="margin-top:auto;display:flex;gap:14px;font-size:12px"><span class="u">Edit recipe</span><span class="u">Ask Claude Code to fix the start</span></div>
+      </div>
+    </div>
+    <div class="rcol">
+      <div class="card" style="padding:0">
+        <div style="display:flex;align-items:baseline;padding:12px 14px 8px"><b>Where to test</b><span class="f" style="margin-left:10px;font-size:12px">endpoints this PR changed · read from the diff by Claude Code</span><span class="u" style="margin-left:auto;font-size:12px">Ask again</span></div>
+        <div class="ep on"><span class="meth post">POST</span><span><span class="mono">/oauth/token</span> <span class="f" style="font-size:12px">· api</span></span><span style="display:flex;gap:8px"><span class="btn" style="height:28px">Copy curl</span><span class="btn p" style="height:28px">Send</span></span>
+          <span></span><span class="m" style="font-size:12px;grid-column:span 2">Refresh now goes through the shared queue; concurrent callers wait for one exchange.</span>
+          <span></span><span class="mono" style="grid-column:span 2;background:var(--code);border-radius:6px;padding:8px 10px;white-space:pre;font-size:11.5px">curl -s -X POST http://127.0.0.1:49152/oauth/token \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  -d 'grant_type=refresh_token&amp;refresh_token=fake_rt_7c2e'</span>
+          <span></span><div class="resp" style="grid-column:span 2;margin-top:4px"><span class="ok" style="font-weight:600">200 OK</span><span class="f">38 ms · 214 B · just now</span><span class="f">body</span><span class="mono" style="font-size:11.5px">{"access_token":"fake_at_91d0","expires_in":3600}</span></div>
+        </div>
+        <div class="ep"><span class="meth get">GET</span><span><span class="mono">/oauth/status</span> <span class="f" style="font-size:12px">· api · new</span></span><span style="display:flex;gap:8px"><span class="btn" style="height:28px">Copy curl</span><span class="btn" style="height:28px">Send</span></span>
+          <span></span><span class="m" style="font-size:12px;grid-column:span 2">New: reports the queue length and the last exchange.</span></div>
+        <div class="ep"><span class="meth del">DELETE</span><span><span class="mono">/oauth/token/{id}</span> <span class="f" style="font-size:12px">· api</span></span><span style="display:flex;gap:8px"><span class="btn" style="height:28px">Copy curl</span><span class="btn" style="height:28px">Send</span></span>
+          <span></span><span class="m" style="font-size:12px;grid-column:span 2">Revoking now also drops queued waiters for that token.</span></div>
+      </div>
+      <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0;padding:12px 14px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><b>Logs</b><span class="ltabs"><span class="on">api</span><span>postgres</span></span><span style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px"><span class="tog on"></span>Follow</span><span class="u" style="font-size:12px">Copy</span></div>
+        <div class="logs">12:01:04  INFO auth_api: connected to postgres
+12:01:04  INFO auth_api: listening on 0.0.0.0:8080
+12:01:05  INFO health: GET /health 200 1ms
+12:02:41  INFO token: POST /oauth/token grant=refresh_token
+12:02:41  INFO queue: 1 waiter, starting exchange
+12:02:41  INFO token: exchange done in 34ms, 200</div>
+      </div>
+    </div>
+  </div>
+  <div class="status"><span class="ok">●</span> Claude Code · session active <span class="f">Draft saved · 4 items</span><span class="btn p" style="margin-left:auto">Finalize review</span></div>
+</div></body></html>

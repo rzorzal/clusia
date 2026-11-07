@@ -1,0 +1,45 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="system.css"></head><body>
+<script>if(location.hash==="#dark")document.body.className="dark"</script>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#123</span><b>auth refresh</b></span></div>
+  <div class="hdr"><h1><small>rzorzal/clusia &nbsp;#123</small> feat: auth refresh</h1>
+    <div class="sec"><span>Diagrams</span><span>Security</span><span>Diff</span><span>Audits</span><span>Comments</span><span class="on">Tests</span></div></div>
+  <div class="sub"><span>Auto Tests</span><span>Run Function tests</span><span class="on">System</span><span class="f" style="margin-left:auto;padding-right:0">Docker · Colima · ready</span><span class="btn" style="height:30px;margin-left:12px;padding:0 12px">Open the QA cockpit →</span></div>
+  <div class="sys">
+    <div class="lcol">
+      <div class="card">
+        <div class="st"><span class="dot" style="background:var(--amber)"></span><span class="amb">Unhealthy</span> <span class="f" style="font-weight:400;font-size:12px;margin-left:4px">running · up 1 min</span></div>
+        <div class="m" style="font-size:12px;margin-top:4px;line-height:1.5"><span class="mono">GET /health</span> on api answered <b>503</b> for 60 s. The system is still running; its logs are on the right.</div>
+        <div class="cap" style="margin-top:14px">PORTS · 127.0.0.1 ONLY</div>
+        <div class="port"><b>api</b><span class="url">http://127.0.0.1:49152/</span><span></span><span class="f mono" style="font-size:11.5px">:8080 in the container</span></div>
+        <div class="port"><b>admin</b><span class="url">http://127.0.0.1:49153/admin</span><span></span><span class="f mono" style="font-size:11.5px">:9090 in the container</span></div>
+        <div class="cap" style="margin-top:12px">SERVICES</div>
+        <div style="display:flex;align-items:center;gap:8px;font-size:12.5px"><span class="bad">●</span><span class="mono">postgres</span><span class="bad" style="margin-left:auto;font-size:12px">exited · code 1</span></div>
+        <div style="display:flex;gap:10px;margin-top:14px"><span class="btn">■ Stop</span><span class="btn">Restart</span></div>
+      </div>
+      <div class="card" style="flex:1;display:flex;flex-direction:column">
+        <div class="cap">WHAT RAN</div>
+        <div style="display:grid;grid-template-columns:70px 1fr;gap:5px 8px;font-size:12.5px">
+          <span class="m">command</span><span class="mono">docker compose -p clusia-clusia-123 up -d postgres</span>
+          <span class="m">where</span><span><span class="pill" style="background:var(--amberbg);color:var(--amber);border:1px solid var(--amberline)">host</span></span>
+          <span class="m">exit</span><span class="mono bad">1</span>
+        </div>
+        <div style="margin-top:auto;display:flex;gap:14px;font-size:12px"><span class="u">Edit recipe</span><span class="u">Ask Claude Code why</span></div>
+      </div>
+    </div>
+    <div class="rcol">
+      <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0;padding:12px 14px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><b>Logs</b><span class="ltabs"><span>api</span><span class="on">postgres <span class="bad">●</span></span></span><span style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px"><span class="tog on"></span>Follow</span><span class="u" style="font-size:12px">Copy</span></div>
+        <div class="logs">The files belonging to this database system will be owned by user "postgres".
+initdb: error: directory "/var/lib/postgresql/data" exists but is not empty
+initdb: hint: If you want to create a new database system, either remove or empty
+the directory "/var/lib/postgresql/data" or run initdb with an argument other than
+"/var/lib/postgresql/data".
+<span class="bad">postgres exited with code 1</span></div>
+      </div>
+      <div class="card" style="padding:12px 14px;display:flex;align-items:center;gap:10px"><span class="m">Where to test is waiting for a healthy system.</span><span class="u" style="margin-left:auto;font-size:12px">Send anyway</span></div>
+    </div>
+  </div>
+  <div class="status"><span class="ok">●</span> Claude Code · session active <span class="f">Draft saved · 4 items</span><span class="btn p" style="margin-left:auto">Finalize review</span></div>
+</div></body></html>
