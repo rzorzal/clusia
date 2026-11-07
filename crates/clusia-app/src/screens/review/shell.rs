@@ -221,7 +221,7 @@ pub struct DraftList;
 
 #[derive(Component)]
 pub(crate) struct ShellTop {
-    pr: PrRef,
+    pub(crate) pr: PrRef,
     built: Option<TopView>,
 }
 
@@ -233,7 +233,7 @@ pub(crate) struct RightPanel {
 
 #[derive(Component)]
 pub(crate) struct StatusBar {
-    pr: PrRef,
+    pub(crate) pr: PrRef,
     built: Option<StatusView>,
 }
 

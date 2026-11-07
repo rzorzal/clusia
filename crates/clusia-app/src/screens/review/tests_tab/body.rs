@@ -10,10 +10,11 @@ use clusia_core::functions::{FUNCTIONS_MAX, FunctionsView};
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::tests::{ACTIVITY_WRITING, RECIPE_FILE, RunnerKind, TestsView};
 
+use super::cockpit::{self, CockpitModels};
 use super::functions::{self, FunctionsBody, FunctionsModel, FunctionsModels};
 use super::{SubTab, TabState, TestsModel, TestsModels, engine_label, tab_state};
 use crate::agent_name;
-use crate::bridge::{Ask, Asks, Model, TestsAskKind, Toasts};
+use crate::bridge::{Ask, Asks, Connection, Model, TestsAskKind, Toasts};
 use crate::fonts::UiFonts;
 use crate::review_state::{ReviewSection, ReviewTabs};
 use crate::screens::review::editor::{not_sent, read_only_reason};
@@ -63,6 +64,9 @@ pub(super) enum Shape {
         sub: SubTab,
         bar: Option<String>,
     },
+    /// The QA cockpit's screen. A unit variant, so the root is never rebuilt by cockpit data:
+    /// each region draws its own.
+    Cockpit,
 }
 
 /// How many changed functions the cases of step 2 are for: the ones with a language pack in a
@@ -126,6 +130,10 @@ pub struct SubTabButton {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct GenerateButton(pub PrRef);
 
+/// **Open the QA cockpit →**, at the right end of the sub-tab bar.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct OpenCockpit(pub PrRef);
+
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct StopButton(pub PrRef);
 
@@ -184,6 +192,24 @@ pub(crate) fn bar_label(view: &TestsView) -> String {
     ))
 }
 
+/// Whether the cockpit is what the Tests tab shows: it was opened, and the tab has the sub-tabs
+/// (a recipe exists and nothing is generating or refused). When the recipe goes away the tab
+/// draws its own state again.
+pub fn cockpit_open(model: Option<&TestsModel>) -> bool {
+    let Some(model) = model.filter(|m| m.sub == SubTab::Cockpit) else {
+        return false;
+    };
+    model.view.as_ref().is_some_and(|view| {
+        !matches!(
+            tab_state(view, model.live.as_ref()),
+            TabState::Empty
+                | TabState::Generating { .. }
+                | TabState::Failed { .. }
+                | TabState::Refused { .. }
+        )
+    })
+}
+
 pub(super) fn body_view(i: &Inputs) -> Shape {
     let pending = i.model.and_then(|m| m.pending);
     let Some((model, view)) = i.model.and_then(|m| Some((m, m.view.as_ref()?))) else {
@@ -230,13 +256,9 @@ pub(super) fn body_view(i: &Inputs) -> Shape {
             reason: printable_lines(&reason),
             actions: actions(),
         },
+        _ if model.sub == SubTab::Cockpit => Shape::Cockpit,
         _ => Shape::Auto {
-            // The cockpit's screen draws itself over this tab; underneath, the Auto sub-tab.
-            sub: if model.sub == SubTab::Cockpit {
-                SubTab::Auto
-            } else {
-                model.sub
-            },
+            sub: model.sub,
             bar: (model.sub == SubTab::Functions).then(|| bar_label(view)),
         },
     }
@@ -321,6 +343,41 @@ pub(super) fn on_check_again(
         return;
     };
     asks.send(Ask::CheckTestEngine { pr: pr.clone() });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn on_open_cockpit(
+    activate: On<Activate>,
+    buttons: Query<&OpenCockpit>,
+    tabs: Res<ReviewTabs>,
+    app_model: Res<Model>,
+    mut tests: ResMut<TestsModels>,
+    mut cockpit: ResMut<CockpitModels>,
+    mut asks: ResMut<Asks>,
+) {
+    let Ok(OpenCockpit(pr)) = buttons.get(activate.entity) else {
+        return;
+    };
+    let Some(model) = tests.0.get_mut(pr) else {
+        return;
+    };
+    if matches!(model.sub, SubTab::Auto | SubTab::Functions) {
+        model.last_sub = model.sub;
+    }
+    model.sub = SubTab::Cockpit;
+    model.touch();
+    let live = tabs
+        .0
+        .get(pr)
+        .and_then(|t| t.ready())
+        .filter(|r| r.cached_at.is_none());
+    let (Some(ready), true) = (live, app_model.connection == Connection::Live) else {
+        return;
+    };
+    let cockpit = cockpit.0.entry(pr.clone()).or_default();
+    if !cockpit.asked {
+        asks.send(cockpit.ask_load(pr, &ready.view.review.head_sha));
+    }
 }
 
 fn on_sub_tab(
@@ -515,6 +572,7 @@ fn draw(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, shape: &Shape) {
             );
         }),
         Shape::Auto { sub, bar } => auto(p, fonts, pr, *sub, bar.as_deref()),
+        Shape::Cockpit => cockpit::frame::draw_body(p, fonts, pr),
     }
 }
 
@@ -731,9 +789,21 @@ fn auto(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, sub: SubTab, bar: Option<&
                 ));
             }
         });
-        if let Some(bar) = bar {
-            row.spawn(text(fonts, bar.to_string(), Type::MUTED));
-        }
+        row.spawn(Node {
+            align_items: AlignItems::Center,
+            column_gap: px(14),
+            ..default()
+        })
+        .with_children(|right| {
+            if let Some(bar) = bar {
+                right.spawn(text(fonts, bar.to_string(), Type::MUTED));
+            }
+            right.spawn((
+                button(fonts, "Open the QA cockpit →", Variant::Primary),
+                OpenCockpit(pr.clone()),
+                observe(on_open_cockpit),
+            ));
+        });
     });
     if sub == SubTab::Functions {
         p.spawn((
@@ -888,6 +958,48 @@ mod tests {
         let mut dots: Vec<(u8, Light)> = q.iter(app.world()).map(|d| (d.n, d.light)).collect();
         dots.sort_by_key(|d| d.0);
         dots
+    }
+
+    #[test]
+    fn the_cockpit_is_open_only_on_its_sub_tab_and_with_a_recipe() {
+        assert!(!cockpit_open(None));
+        let mut app = testing::app(fixture::demo(NOW));
+        let pr = testing::open_ready(&mut app, false);
+        let ready = testing::tests_view(&app, &pr, TestsPhase::Ready);
+        let mut m = TestsModel {
+            view: Some(ready),
+            ..TestsModel::default()
+        };
+        assert!(!cockpit_open(Some(&m)), "the Auto sub-tab");
+        m.sub = SubTab::Cockpit;
+        assert!(cockpit_open(Some(&m)));
+        for phase in [
+            TestsPhase::NotGenerated,
+            TestsPhase::Generating { activity: None },
+            TestsPhase::Failed {
+                message: "x".into(),
+            },
+        ] {
+            m.view = Some(testing::tests_view(&app, &pr, phase));
+            assert!(!cockpit_open(Some(&m)));
+        }
+        m.view = None;
+        assert!(!cockpit_open(Some(&m)), "nothing loaded");
+    }
+
+    #[test]
+    fn a_cockpit_sub_tab_with_a_vanished_recipe_draws_the_tab_itself() {
+        let (mut app, pr) = tests_app();
+        open(&mut app, &pr, TestsPhase::NotGenerated);
+        app.world_mut()
+            .resource_mut::<TestsModels>()
+            .0
+            .get_mut(&pr)
+            .expect("a model")
+            .sub = SubTab::Cockpit;
+        testing::settle(&mut app);
+        assert!(testing::shows(&mut app, "Test this change"));
+        assert_eq!(testing::count::<cockpit::frame::CockpitBody>(&mut app), 0);
     }
 
     #[test]

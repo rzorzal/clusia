@@ -3,6 +3,8 @@
 //! now. Everything the daemon sent is text here: nothing in this module draws it, parses it as a
 //! path or opens it.
 
+pub mod frame;
+pub mod list;
 pub mod views;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -17,8 +19,8 @@ use clusia_core::cockpit::{
 use clusia_core::functions::FunctionChange;
 use clusia_core::printable::printable;
 
-use super::TestsModels;
 use super::functions::{self, FunctionsModels};
+use super::{TestsModels, body};
 use crate::bridge::{
     Ask, Asks, CockpitAskKind, CockpitTell, DEMO_NOT_SENT, NOT_SENT, TOAST_SECS, Toast, Toasts,
 };
@@ -710,21 +712,34 @@ pub fn mirror_busy(
 /// Adds the cockpit's resource and systems. Every region's fill system joins here, after the
 /// Tests body that holds its nodes.
 pub fn register(app: &mut App) {
-    app.init_resource::<CockpitModels>().add_systems(
-        Update,
-        (
-            send_queued.run_if(resource_changed::<CockpitModels>),
-            mirror_busy
-                .run_if(
-                    resource_changed::<CockpitModels>
-                        .or_eager(resource_changed::<TestsModels>)
-                        .or_eager(resource_changed::<FunctionsModels>),
-                )
-                .after(functions::mirror_busy),
+    app.init_resource::<CockpitModels>()
+        .add_systems(
+            Update,
+            (
+                send_queued.run_if(resource_changed::<CockpitModels>),
+                mirror_busy
+                    .run_if(
+                        resource_changed::<CockpitModels>
+                            .or_eager(resource_changed::<TestsModels>)
+                            .or_eager(resource_changed::<FunctionsModels>),
+                    )
+                    .after(functions::mirror_busy),
+            )
+                .chain()
+                .after(ReviewSystems),
         )
-            .chain()
-            .after(ReviewSystems),
-    );
+        .add_systems(
+            Update,
+            (
+                frame::load_cockpit.run_if(frame::load_changed),
+                frame::hide_for_cockpit.run_if(frame::screen_changed),
+                frame::fill_header.run_if(frame::regions_changed),
+                frame::fill_center_frame.run_if(frame::regions_changed),
+                list::fill_list.run_if(frame::regions_changed),
+            )
+                .after(body::fill_tests)
+                .after(ReviewSystems),
+        );
 }
 
 #[cfg(test)]

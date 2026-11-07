@@ -97,6 +97,8 @@ pub struct EmptyCenter {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListView {
+    /// The agent's name as the status bar shows it.
+    pub agent: String,
     pub rows: Vec<Row>,
     pub scenarios_writing: Option<String>,
     pub bench_writing: BTreeMap<String, String>,
@@ -208,6 +210,7 @@ pub fn list_view(model: &CockpitModel, agent: &str, _now: i64) -> ListView {
     let agent = printable(agent);
     let on_main = model.on_main;
     let mut view = ListView {
+        agent: agent.clone(),
         rows: Vec::new(),
         scenarios_writing: None,
         bench_writing: BTreeMap::new(),

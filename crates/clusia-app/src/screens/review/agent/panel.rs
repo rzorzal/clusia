@@ -32,6 +32,7 @@ use crate::screens::review::editor::read_only_reason;
 use crate::screens::review::shell::{
     HarnessButton, OpenSetting, RightPanel, on_harness, on_open_setting,
 };
+use crate::screens::review::tests_tab::cockpit::frame::CockpitHidden;
 use crate::snapshot::Snapshot;
 use crate::theme::{Swatch, Theme};
 use crate::ui::kit::{
@@ -396,14 +397,18 @@ fn layout(
     mut commands: Commands,
     chats: Res<Chats>,
     motion: Res<Motion>,
-    mut columns: Query<(
-        Entity,
-        Ref<PanelColumn>,
-        &mut Node,
-        Has<PanelClosing>,
-        Has<Tween>,
-        &UiTransform,
-    )>,
+    // A column the cockpit hides is left alone: its display is not the panel's to flip back.
+    mut columns: Query<
+        (
+            Entity,
+            Ref<PanelColumn>,
+            &mut Node,
+            Has<PanelClosing>,
+            Has<Tween>,
+            &UiTransform,
+        ),
+        Without<CockpitHidden>,
+    >,
     layers: Query<
         (Entity, &ChildOf, Has<Shroud>, &BackgroundColor),
         Or<(With<Veil>, With<Shroud>)>,
