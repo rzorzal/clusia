@@ -185,7 +185,9 @@ pub fn apply(snap: &mut Snapshot, event: Event) -> (Refresh, Option<WindowTarget
         | Event::CaseDone { .. }
         | Event::CockpitChanged { .. }
         | Event::CockpitSamples { .. }
-        | Event::CockpitRound { .. } => {}
+        | Event::CockpitRound { .. }
+        | Event::SystemChanged { .. }
+        | Event::SystemLogs { .. } => {}
     }
     (r, None)
 }

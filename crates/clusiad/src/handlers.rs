@@ -297,6 +297,15 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
             crate::tests::run_cases(shared, &pr, scope, seen).await
         }
         Command::GetCockpit { pr } => crate::tests::cockpit(shared, &pr).await,
+        Command::GetSystem { .. }
+        | Command::StartSystem { .. }
+        | Command::StopSystem { .. }
+        | Command::RestartSystem { .. }
+        | Command::SetSystemNetwork { .. }
+        | Command::GetSystemLogs { .. }
+        | Command::WriteEndpoints { .. }
+        | Command::FixSystem { .. }
+        | Command::SendEndpoint { .. } => crate::reviews::invalid_state(SYSTEM_NOT_SERVED),
         Command::SaveScenario {
             pr,
             scenario,
@@ -394,6 +403,8 @@ async fn open_in_editor(shared: &Shared, path: &str, line: Option<u32>) -> Outco
 }
 
 /// The setting that is also the login agent's `RunAtLoad`.
+/// What every system command answers until the daemon serves them.
+const SYSTEM_NOT_SERVED: &str = "not served yet";
 const START_AT_LOGIN: &str = "general.start_at_login";
 
 /// Saves one setting. `general.start_at_login` must also go to the login agent, which

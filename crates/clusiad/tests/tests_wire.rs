@@ -84,3 +84,56 @@ async fn the_cockpit_is_served_through_the_wire() {
     );
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn system_commands_are_refused_until_served() {
+    use clusia_core::cockpit::RunSide;
+
+    let daemon = TestDaemon::start().await;
+    let mut client = daemon.client().await;
+    let pr: PrRef = "acme/widgets#7".parse().unwrap();
+    let commands = [
+        Command::GetSystem { pr: pr.clone() },
+        Command::StartSystem {
+            pr: pr.clone(),
+            side: RunSide::Pr,
+            recipe_hash: "h".into(),
+            keep: false,
+        },
+        Command::StopSystem {
+            pr: pr.clone(),
+            side: RunSide::Pr,
+        },
+        Command::RestartSystem {
+            pr: pr.clone(),
+            side: RunSide::Pr,
+            recipe_hash: "h".into(),
+        },
+        Command::SetSystemNetwork {
+            pr: pr.clone(),
+            allowed: true,
+            recipe_hash: "h".into(),
+        },
+        Command::GetSystemLogs {
+            pr: pr.clone(),
+            side: RunSide::Pr,
+            process: "start".into(),
+            lines: 10,
+        },
+        Command::WriteEndpoints { pr: pr.clone() },
+        Command::FixSystem { pr: pr.clone() },
+        Command::SendEndpoint {
+            pr,
+            side: RunSide::Pr,
+            endpoint: "GET /".into(),
+        },
+    ];
+    for command in commands {
+        let Err(ClientError::Server(refusal)) = client.request(command.clone()).await else {
+            panic!("{command:?} was not refused");
+        };
+        assert_eq!(refusal.code, ErrorCode::InvalidState, "{command:?}");
+        assert_eq!(refusal.message, "not served yet", "{command:?}");
+    }
+    daemon.stop().await;
+}

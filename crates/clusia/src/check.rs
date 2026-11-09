@@ -246,7 +246,8 @@ fn kind_of(origin: TurnOrigin) -> Option<CheckKind> {
         | TurnOrigin::Cases
         | TurnOrigin::Scenarios
         | TurnOrigin::Bench
-        | TurnOrigin::Copilot => None,
+        | TurnOrigin::Copilot
+        | TurnOrigin::System => None,
         TurnOrigin::Security => Some(CheckKind::Security),
         TurnOrigin::Audit => Some(CheckKind::Audit),
     }
@@ -501,6 +502,7 @@ mod tests {
         assert_eq!(kind_of(TurnOrigin::Scenarios), None);
         assert_eq!(kind_of(TurnOrigin::Bench), None);
         assert_eq!(kind_of(TurnOrigin::Copilot), None);
+        assert_eq!(kind_of(TurnOrigin::System), None);
     }
 
     fn finding(
