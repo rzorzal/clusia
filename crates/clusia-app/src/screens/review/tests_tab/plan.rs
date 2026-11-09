@@ -4,6 +4,7 @@
 //! The modal is open exactly while the model holds a plan and the tab shows Tests. Approval
 //! reads the plan the modal last **drew**, never the model, so what is sent is what was seen.
 
+use bevy::clipboard::Clipboard;
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::input::ButtonInput;
 use bevy::input_focus::{FocusCause, InputFocus};
@@ -28,6 +29,7 @@ use crate::theme::Swatch;
 use crate::ui::kit::{
     Fill, Stroke, Tone, Type, Variant, badge, button, checkbox, disabled_button, text, wrapped_text,
 };
+use crate::ui::markdown::{CopiedText, copy_text};
 use crate::ui::modal::{BackdropClicked, escape_pressed, modal_card, modal_root};
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -41,6 +43,10 @@ pub struct ApproveSelected(pub PrRef);
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct ApproveAll(pub PrRef);
+
+/// The Copy log button of a failed step: the text it copies is the text the row drew.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct CopyStepLog(pub String);
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct CancelPlan(pub PrRef);
@@ -69,6 +75,10 @@ pub(super) struct StepRow {
     pub hint: Option<String>,
     pub kind: RowKind,
     pub checked: bool,
+    /// The message of a failed step, `printable` and cut.
+    pub failure: Option<String>,
+    /// The output of a failed step as `failed_log` kept it.
+    pub log: Option<String>,
 }
 
 /// What the modal draws. The approve buttons read the one it last drew.
@@ -96,6 +106,19 @@ pub(super) struct PlanView {
 impl PlanView {
     fn approvable(&self) -> impl Iterator<Item = &StepRow> {
         self.steps.iter().filter(|s| s.kind == RowKind::Approvable)
+    }
+
+    /// An approvable step failed before, so approving again is a retry.
+    fn retrying(&self) -> bool {
+        self.approvable().any(|s| s.failure.is_some())
+    }
+
+    fn approve_label(&self) -> &'static str {
+        if self.retrying() {
+            "Try again"
+        } else {
+            "Approve all and set up"
+        }
     }
 
     fn offers_selected(&self) -> bool {
@@ -163,7 +186,10 @@ pub(super) fn plan_view(
     let view = model.view.as_ref()?;
     let plan = view.plan.as_ref()?;
     let modal = model.plan.as_ref()?;
-    let steps = step_rows(plan, |id| modal.checked.contains(id));
+    let mut steps = step_rows(plan, |id| modal.checked.contains(id));
+    for row in steps.iter_mut().filter(|r| r.failure.is_some()) {
+        row.log = model.failed_logs.get(&row.id).cloned();
+    }
     let commands = command_rows(plan);
     let recipe = view.recipe.as_ref();
     let variables = recipe.filter(|r| !r.env.is_empty()).map(|r| {
@@ -214,6 +240,11 @@ pub(super) fn step_rows(plan: &SetupPlan, checked: impl Fn(&str) -> bool) -> Vec
             hint: s.hint.as_deref().map(printable),
             kind: row_kind(s),
             checked: checked(&s.id),
+            failure: match &s.state {
+                StepState::Failed { message } => Some(super::top::cut(&printable(message))),
+                _ => None,
+            },
+            log: None,
         })
         .collect()
 }
@@ -718,6 +749,13 @@ pub(super) fn draw_step(
                     Type::META.ink(Swatch::HostInk),
                 ));
             }
+            if let Some(failure) = &row.failure {
+                t.spawn(wrapped_text(
+                    fonts,
+                    format!("failed · {failure}"),
+                    Type::META.ink(Swatch::Orange),
+                ));
+            }
             if let RowKind::Skipped(why) = &row.kind {
                 t.spawn(wrapped_text(fonts, format!("skipped · {why}"), Type::META));
             }
@@ -748,6 +786,18 @@ pub(super) fn draw_step(
             if let Some(hint) = &row.hint {
                 c.spawn(wrapped_text(fonts, hint.clone(), Type::META));
             }
+            if let Some(log) = &row.log {
+                c.spawn(wrapped_text(
+                    fonts,
+                    log.clone(),
+                    Type::MONO.ink(Swatch::Muted),
+                ));
+                c.spawn((
+                    button(fonts, "Copy log", Variant::Link),
+                    CopyStepLog(log.clone()),
+                    observe(on_copy_log),
+                ));
+            }
         });
         r.spawn(Node {
             column_gap: px(6),
@@ -756,6 +806,9 @@ pub(super) fn draw_step(
         })
         .with_children(|tags| match &row.kind {
             RowKind::Approvable => {
+                if row.failure.is_some() {
+                    tags.spawn(badge(fonts, "failed", Tone::Orange));
+                }
                 let (label, tone) = match row.place {
                     StepPlace::Container => ("container", Tone::Neutral),
                     StepPlace::LocalSandbox => ("sandbox", Tone::Neutral),
@@ -825,12 +878,12 @@ fn draw_buttons(card: &mut Spawner, fonts: &UiFonts, pr: &PrRef, view: &PlanView
         }
         if view.offers_all() {
             row.spawn((
-                button(fonts, "Approve all and set up", Variant::Primary),
+                button(fonts, view.approve_label(), Variant::Primary),
                 ApproveAll(pr.clone()),
                 observe(on_approve_all),
             ));
         } else {
-            row.spawn(disabled_button(fonts, "Approve all and set up"));
+            row.spawn(disabled_button(fonts, view.approve_label()));
         }
     });
 }
@@ -988,6 +1041,17 @@ fn send_approval(
     }
 }
 
+fn on_copy_log(
+    activate: On<Activate>,
+    logs: Query<&CopyStepLog>,
+    recorder: Option<ResMut<CopiedText>>,
+    clipboard: Option<ResMut<Clipboard>>,
+) {
+    if let Ok(log) = logs.get(activate.entity) {
+        copy_text(recorder, clipboard, &log.0);
+    }
+}
+
 fn on_cancel(
     activate: On<Activate>,
     buttons: Query<&CancelPlan>,
@@ -1020,6 +1084,7 @@ mod tests {
     use crate::testing::{self, NOW};
     use crate::theme::Swatch;
     use crate::ui::kit::Fill;
+    use crate::ui::markdown::{MdBody, MdLink};
     use bevy::input_focus::{FocusCause, InputFocus};
     use bevy::ui_widgets::Activate;
     use clusia_core::tests::{
@@ -1302,6 +1367,156 @@ mod tests {
             .filter(|e| app.world().get::<Fill>(*e).unwrap().0 == Swatch::NetBlueSoft)
             .count();
         assert_eq!((amber, blue), (1, 2), "one host tag, two network tags");
+    }
+
+    fn failed_image() -> Vec<PlanStep> {
+        let mut steps = base_steps();
+        steps[0].state = StepState::Failed {
+            message: "docker build exited with 1: no space left on device".into(),
+        };
+        steps
+    }
+
+    #[test]
+    fn a_failed_step_is_marked_says_why_and_stays_approvable() {
+        let (mut app, pr) = tests_app();
+        let view = needs_setup(&app, &pr, "h1", failed_image());
+        testing::open_tests(&mut app, &pr, view);
+        open_modal(&mut app, &pr);
+        assert!(testing::shows(
+            &mut app,
+            "failed · docker build exited with 1: no space left on device"
+        ));
+        assert!(testing::shows(&mut app, "Try again"));
+        assert!(!testing::shows(&mut app, "Approve all and set up"));
+        assert_eq!(
+            testing::count::<PlanStepBox>(&mut app),
+            3,
+            "the failed row can be checked again"
+        );
+        assert_eq!(testing::count::<ApproveAll>(&mut app), 1);
+    }
+
+    #[test]
+    fn a_plan_without_a_failed_step_keeps_the_approve_label() {
+        let (mut app, pr) = tests_app();
+        let view = needs_setup(&app, &pr, "h1", base_steps());
+        testing::open_tests(&mut app, &pr, view);
+        open_modal(&mut app, &pr);
+        assert!(testing::shows(&mut app, "Approve all and set up"));
+        assert!(!testing::shows(&mut app, "Try again"));
+        assert!(!testing::shows(&mut app, "failed ·"));
+    }
+
+    #[test]
+    fn a_failed_message_is_plain_cut_text() {
+        let (mut app, pr) = tests_app();
+        let mut steps = base_steps();
+        steps[0].state = StepState::Failed {
+            message: format!(
+                "boom\u{1b}[31m\n[click](https://evil.example)\u{202e} {}",
+                "x".repeat(5000)
+            ),
+        };
+        let view = needs_setup(&app, &pr, "h1", steps);
+        testing::open_tests(&mut app, &pr, view);
+        open_modal(&mut app, &pr);
+        assert!(testing::shows(
+            &mut app,
+            "failed · boom\\u{1b}[31m\\n[click](https://evil.example)\\u{202e} xxx"
+        ));
+        assert!(testing::shows(&mut app, "…"));
+        assert!(!testing::shows(&mut app, &"x".repeat(400)));
+        assert_eq!(testing::count::<MdBody>(&mut app), 0, "no markdown node");
+        assert_eq!(testing::count::<MdLink>(&mut app), 0, "no link");
+    }
+
+    fn tell_failed(app: &mut App, pr: &PrRef, state: StepState, tail: Option<String>) {
+        testing::tell(
+            app,
+            Tell::Tests(TestsTell::Step {
+                pr: pr.clone(),
+                step: "image".into(),
+                state,
+                tail,
+            }),
+        );
+        testing::settle(app);
+    }
+
+    fn failed_state() -> StepState {
+        StepState::Failed {
+            message: "It exited with code 1".into(),
+        }
+    }
+
+    #[test]
+    fn a_failed_steps_output_shows_under_its_row_and_copy_log_copies_what_is_drawn() {
+        let (mut app, pr) = tests_app();
+        let mut steps = base_steps();
+        steps[0].state = failed_state();
+        let view = needs_setup(&app, &pr, "h1", steps);
+        testing::open_tests(&mut app, &pr, view);
+        open_modal(&mut app, &pr);
+        let tail = (1..=60)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tell_failed(&mut app, &pr, failed_state(), Some(tail));
+        assert!(testing::shows(&mut app, "line 60"));
+        assert!(testing::shows(&mut app, "line 21"));
+        assert!(
+            !testing::shows(&mut app, "line 20\n"),
+            "only the last 40 lines"
+        );
+        assert!(!testing::shows(&mut app, "line 1\n"));
+        let drawn = (21..=60)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let copy = testing::find::<CopyStepLog>(&mut app, |_| true);
+        testing::activate(&mut app, copy);
+        assert_eq!(
+            app.world().resource::<crate::ui::markdown::CopiedText>().0,
+            [drawn]
+        );
+    }
+
+    #[test]
+    fn a_hostile_output_is_plain_cut_text() {
+        let (mut app, pr) = tests_app();
+        let mut steps = base_steps();
+        steps[0].state = failed_state();
+        let view = needs_setup(&app, &pr, "h1", steps);
+        testing::open_tests(&mut app, &pr, view);
+        open_modal(&mut app, &pr);
+        let tail = format!(
+            "ok\n\u{1b}[31m[click](https://evil.example)\u{202e}\n{}",
+            "y".repeat(5000)
+        );
+        tell_failed(&mut app, &pr, failed_state(), Some(tail));
+        assert!(testing::shows(
+            &mut app,
+            "\\u{1b}[31m[click](https://evil.example)\\u{202e}"
+        ));
+        assert!(!testing::shows(&mut app, &"y".repeat(400)));
+        assert_eq!(testing::count::<MdBody>(&mut app), 0, "no markdown node");
+        assert_eq!(testing::count::<MdLink>(&mut app), 0, "no link");
+    }
+
+    #[test]
+    fn the_output_goes_when_the_step_runs_again() {
+        let (mut app, pr) = tests_app();
+        let mut steps = base_steps();
+        steps[0].state = failed_state();
+        let view = needs_setup(&app, &pr, "h1", steps);
+        testing::open_tests(&mut app, &pr, view);
+        open_modal(&mut app, &pr);
+        tell_failed(&mut app, &pr, failed_state(), Some("no space left".into()));
+        assert!(testing::shows(&mut app, "no space left"));
+        tell_failed(&mut app, &pr, StepState::Running, None);
+        assert!(!testing::shows(&mut app, "no space left"));
+        assert_eq!(testing::count::<CopyStepLog>(&mut app), 0);
     }
 
     #[test]

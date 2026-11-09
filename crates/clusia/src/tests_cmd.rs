@@ -515,6 +515,62 @@ pub(crate) fn step_line(plan: &SetupPlan, step: &str, state: &StepState) -> Opti
     Some(format!("{title}: {said}"))
 }
 
+/// The most lines of a failed step's output the setup prints.
+const STEP_LOG_LINES: usize = 40;
+
+/// A step that failed and the end of its output, each line `line_of`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct FailedStep {
+    pub step: String,
+    pub title: String,
+    pub message: String,
+    pub tail: Vec<String>,
+}
+
+/// The last `STEP_LOG_LINES` lines of `tail`, each `line_of`, without the blank ones at the end.
+fn tail_lines(tail: &str) -> Vec<String> {
+    let lines: Vec<&str> = tail.lines().collect();
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    lines[end.saturating_sub(STEP_LOG_LINES)..end]
+        .iter()
+        .map(|l| line_of(l))
+        .collect()
+}
+
+/// What the setup prints for a step: its line, then, when it failed with output, the end of
+/// that output indented under it. The failure is also kept in `failed`.
+fn step_lines(
+    plan: &SetupPlan,
+    step: &str,
+    state: &StepState,
+    tail: Option<&str>,
+    failed: &mut Vec<FailedStep>,
+) -> Vec<String> {
+    let mut lines: Vec<String> = step_line(plan, step, state).into_iter().collect();
+    if let StepState::Failed { message } = state {
+        let tail = tail.map(tail_lines).unwrap_or_default();
+        lines.extend(tail.iter().map(|l| format!("  {l}")));
+        let title = plan
+            .steps
+            .iter()
+            .find(|s| s.id == step)
+            .map_or_else(|| line_of(step), |s| line_of(&s.title));
+        failed.retain(|f| f.step != step);
+        failed.push(FailedStep {
+            step: line_of(step),
+            title,
+            message: line_of(message),
+            tail,
+        });
+    } else {
+        failed.retain(|f| f.step != step);
+    }
+    lines
+}
+
 fn setting_up(phase: &TestsPhase) -> bool {
     matches!(phase, TestsPhase::Waiting | TestsPhase::Preparing { .. })
 }
@@ -538,6 +594,7 @@ fn told_before_ack(
     events: Vec<(String, Event)>,
     pr: &PrRef,
     plan: &SetupPlan,
+    failed: &mut Vec<FailedStep>,
 ) -> (Vec<String>, Option<TestsView>) {
     let mut lines = Vec::new();
     let mut last = None;
@@ -547,8 +604,10 @@ fn told_before_ack(
                 pr: of,
                 step,
                 state,
-                ..
-            } if of == *pr => lines.extend(step_line(plan, &step, &state)),
+                tail,
+            } if of == *pr => {
+                lines.extend(step_lines(plan, &step, &state, tail.as_deref(), failed));
+            }
             Event::TestEnv { pr: of, view } if of == *pr => last = Some(*view),
             _ => {}
         }
@@ -573,6 +632,7 @@ async fn setup(
     pr: &PrRef,
     view: TestsView,
     yes: bool,
+    failed: &mut Vec<FailedStep>,
     stop: &mut Interrupts<'_>,
 ) -> Result<TestsView, CliError> {
     let Some(plan) = view.plan.clone() else {
@@ -596,7 +656,7 @@ async fn setup(
             message: "Setup not approved; nothing ran.".into(),
         });
     }
-    prepare(client, pr, &plan, approval_of(&plan), stop).await
+    prepare_logged(client, pr, &plan, approval_of(&plan), failed, stop).await
 }
 
 /// Sends the approval and waits for the setup to end; `plan` is what was shown, so a step is
@@ -608,13 +668,25 @@ pub(crate) async fn prepare(
     approve: Approve,
     stop: &mut Interrupts<'_>,
 ) -> Result<TestsView, CliError> {
+    prepare_logged(client, pr, plan, approve, &mut Vec::new(), stop).await
+}
+
+/// `prepare`, also keeping in `failed` each step that failed and the end of its output.
+async fn prepare_logged(
+    client: &mut Client,
+    pr: &PrRef,
+    plan: &SetupPlan,
+    approve: Approve,
+    failed: &mut Vec<FailedStep>,
+    stop: &mut Interrupts<'_>,
+) -> Result<TestsView, CliError> {
     let request = Request::PrepareTests {
         pr: pr.clone(),
         recipe_hash: plan.recipe_hash.clone(),
         approve,
     };
     stop.ask(client, request, true, "the setup").await?;
-    let (lines, told_end) = told_before_ack(client.take_events(), pr, plan);
+    let (lines, told_end) = told_before_ack(client.take_events(), pr, plan, failed);
     for line in lines {
         eprintln!("{line}");
     }
@@ -632,9 +704,9 @@ pub(crate) async fn prepare(
                     pr: of,
                     step,
                     state,
-                    ..
+                    tail,
                 } if of == *pr => {
-                    if let Some(line) = step_line(plan, &step, &state) {
+                    for line in step_lines(plan, &step, &state, tail.as_deref(), failed) {
                         eprintln!("{line}");
                     }
                 }
@@ -839,7 +911,16 @@ pub(crate) async fn tests(
         view = generate(&mut client, &pr, json, &mut stop).await?;
     }
     if wanted.setup {
-        view = setup(&mut client, &pr, view, wanted.yes, &mut stop).await?;
+        let mut failed = Vec::new();
+        view = match setup(&mut client, &pr, view, wanted.yes, &mut failed, &mut stop).await {
+            Ok(view) => view,
+            Err(e) => {
+                if json && !failed.is_empty() {
+                    println!("{}", json!({ "setup": { "failed": failed } }));
+                }
+                return Err(e);
+            }
+        };
     }
     let mut human: Vec<String> = Vec::new();
     let mut object = serde_json::Map::new();
@@ -1232,6 +1313,88 @@ mod tests {
         );
     }
 
+    fn image_plan() -> SetupPlan {
+        SetupPlan {
+            recipe_hash: "ab".into(),
+            steps: vec![PlanStep {
+                id: "image".into(),
+                title: "Build the image".into(),
+                command: "docker build …".into(),
+                place: StepPlace::Container,
+                network: true,
+                hint: None,
+                state: StepState::Missing,
+                approved: true,
+            }],
+            commands: vec![],
+            commands_approved: true,
+            ready: false,
+            blocked: None,
+            system: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_step_prints_the_end_of_its_output_under_its_line() {
+        let plan = image_plan();
+        let state = StepState::Failed {
+            message: "It exited with code 1".into(),
+        };
+        let tail = (1..=60)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut failed = Vec::new();
+        let lines = step_lines(&plan, "image", &state, Some(&tail), &mut failed);
+        assert_eq!(lines[0], "Build the image: failed: It exited with code 1");
+        assert_eq!(lines.len(), 1 + STEP_LOG_LINES);
+        assert_eq!(lines[1], "  line 21");
+        assert_eq!(lines[STEP_LOG_LINES], "  line 60");
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].tail.len(), STEP_LOG_LINES);
+        assert_eq!(failed[0].title, "Build the image");
+        let json = serde_json::to_value(&failed).unwrap();
+        assert_eq!(json[0]["step"], "image");
+        assert_eq!(json[0]["tail"][39], "line 60");
+    }
+
+    #[test]
+    fn a_hostile_output_is_printed_as_escaped_lines() {
+        let plan = image_plan();
+        let state = StepState::Failed {
+            message: "boom".into(),
+        };
+        let mut failed = Vec::new();
+        let lines = step_lines(
+            &plan,
+            "image",
+            &state,
+            Some("ok\n\u{1b}[2J[x](https://evil.example)\u{202e}\n\n"),
+            &mut failed,
+        );
+        assert_eq!(lines.len(), 3, "the blank end is dropped: {lines:?}");
+        assert!(lines[2].contains("\\u{1b}"), "{}", lines[2]);
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains('\u{1b}') || l.contains('\u{202e}'))
+        );
+    }
+
+    #[test]
+    fn a_step_that_runs_again_forgets_its_failure_and_one_without_output_prints_none() {
+        let plan = image_plan();
+        let state = StepState::Failed {
+            message: "boom".into(),
+        };
+        let mut failed = Vec::new();
+        let lines = step_lines(&plan, "image", &state, None, &mut failed);
+        assert_eq!(lines, ["Build the image: failed: boom"]);
+        assert_eq!(failed.len(), 1);
+        step_lines(&plan, "image", &StepState::Running, None, &mut failed);
+        assert!(failed.is_empty());
+    }
+
     #[test]
     fn an_end_told_before_the_ack_ends_the_setup() {
         let acme: PrRef = "acme/widgets#7".parse().unwrap();
@@ -1280,12 +1443,12 @@ mod tests {
             env_event(&acme, TestsPhase::NeedsSetup),
             env_event(&other, TestsPhase::Waiting),
         ];
-        let (lines, ended) = told_before_ack(events, &acme, &plan);
+        let (lines, ended) = told_before_ack(events, &acme, &plan, &mut Vec::new());
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(ended.map(|v| v.phase), Some(TestsPhase::NeedsSetup));
 
         let still_going = vec![env_event(&acme, TestsPhase::Waiting), step];
-        let (_, ended) = told_before_ack(still_going, &acme, &plan);
+        let (_, ended) = told_before_ack(still_going, &acme, &plan, &mut Vec::new());
         assert_eq!(ended, None);
     }
 

@@ -112,6 +112,9 @@ pub enum Scene {
     TestsProposal,
     /// The setup plan to approve, over the tab (Tests-setup.png).
     TestsSetup,
+    /// The setup plan after the image build failed: the badge, the failed row, its output and
+    /// Try again.
+    TestsSetupFailed,
     /// The Run Function tests sub-tab as Tests-functions.png shows it: the changed functions,
     /// the failed case open and its result.
     TestsFunctions,
@@ -184,6 +187,7 @@ impl Scene {
                 | Scene::TestsStale
                 | Scene::TestsProposal
                 | Scene::TestsSetup
+                | Scene::TestsSetupFailed
                 | Scene::TestsFunctions
                 | Scene::TestsFunctionsRunning
                 | Scene::TestsFunctionsStale
@@ -475,6 +479,7 @@ mod tests {
             ("tests-stale", Scene::TestsStale, true),
             ("tests-proposal", Scene::TestsProposal, true),
             ("tests-setup", Scene::TestsSetup, true),
+            ("tests-setup-failed", Scene::TestsSetupFailed, true),
             ("tests-functions", Scene::TestsFunctions, true),
             (
                 "tests-functions-running",

@@ -695,6 +695,8 @@ pub enum DemoTests {
     Stale,
     Proposal,
     Setup,
+    /// `Setup` after the image build failed.
+    SetupFailed,
     Functions,
     Config,
 }
@@ -707,6 +709,25 @@ const TESTS_RECIPE_HASH: &str = "5d1c0f3a9b7e";
 const TESTS_FAILING: &str = "store::refresh::failed_exchange_keeps_old_token";
 /// The failure's message: libtest's panic line names the place, as `failure_place` reads it.
 const TESTS_FAILURE: &str = "thread 'refresh::failed_exchange_keeps_old_token' panicked at src/auth/refresh.rs:44:9:\nassertion `left == right` failed\n  left: Token { value: \"\", .. }\n right: Token { value: \"old\", .. }";
+
+/// The state of the demo's image step after a failed build.
+pub fn demo_image_failure() -> StepState {
+    StepState::Failed {
+        message: "It exited with code 1".into(),
+    }
+}
+
+/// The end of the output of that failed build.
+pub fn demo_image_failure_tail() -> String {
+    [
+        "#8 [4/6] RUN cargo fetch",
+        "#8 12.4 error: failed to download `widgets-core v0.9.2`",
+        "#8 12.4 Caused by: failed to get `widgets-core` as a dependency of package `acme-widgets`",
+        "#8 12.4 Caused by: network unreachable",
+        "ERROR: failed to solve: process \"/bin/sh -c cargo fetch\" did not complete successfully: exit code: 101",
+    ]
+    .join("\n")
+}
 
 fn demo_tests_env(now: i64) -> EnvState {
     EnvState {
@@ -921,17 +942,18 @@ pub fn demo_tests(now: i64, state: DemoTests) -> TestsView {
             };
             view.env = Some(demo_tests_env(now));
         }
-        DemoTests::Setup => {
+        DemoTests::Setup | DemoTests::SetupFailed => {
             view.phase = TestsPhase::NeedsSetup;
             let mut env = demo_tests_env(now);
             env.existing.images.clear();
             env.existing.reviewer_services = vec!["postgres".into()];
             view.env = Some(env);
             view.recipe = Some(demo_tests_recipe(false, &["postgres"]));
-            view.plan = Some(demo_tests_plan(
-                demo_setup_steps(StepState::Missing, false),
-                false,
-            ));
+            let mut steps = demo_setup_steps(StepState::Missing, false);
+            if state == DemoTests::SetupFailed {
+                steps[0].state = demo_image_failure();
+            }
+            view.plan = Some(demo_tests_plan(steps, false));
         }
         DemoTests::Failed => {
             view.phase = TestsPhase::Failed {
@@ -5847,7 +5869,7 @@ mod tests {
         assert!(gone.unavailable.is_some() && gone.lines.is_empty());
     }
 
-    const ALL_TESTS_STATES: [DemoTests; 11] = [
+    const ALL_TESTS_STATES: [DemoTests; 12] = [
         DemoTests::Empty,
         DemoTests::Generating,
         DemoTests::Auto,
@@ -5857,6 +5879,7 @@ mod tests {
         DemoTests::Stale,
         DemoTests::Proposal,
         DemoTests::Setup,
+        DemoTests::SetupFailed,
         DemoTests::Functions,
         DemoTests::Config,
     ];

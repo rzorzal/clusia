@@ -59,6 +59,9 @@ pub struct TestsModel {
     pub live: Option<LiveRun>,
     /// The state and the output tail of each setup step the daemon told while it ran.
     pub steps: BTreeMap<String, (StepState, Option<String>)>,
+    /// The output of each step that failed, as the setup plan draws it (`failed_log`), until
+    /// that step runs again.
+    pub failed_logs: BTreeMap<String, String>,
     pub pending: Option<TestsAskKind>,
     pub sub: SubTab,
     pub filter: TestFilter,
@@ -184,6 +187,25 @@ fn approvable_ids(plan: &SetupPlan) -> BTreeSet<String> {
         .filter(|s| matches!(s.state, StepState::Missing | StepState::Failed { .. }))
         .map(|s| s.id.clone())
         .collect()
+}
+
+/// The most lines of a failed step's output the setup plan keeps.
+pub const FAILED_LOG_LINES: usize = 40;
+
+/// The last `FAILED_LOG_LINES` lines of a failed step's output, each `printable` and cut, with
+/// the blank lines at the end dropped. This is the text the plan draws and Copy log copies.
+pub fn failed_log(tail: &str) -> String {
+    let lines: Vec<&str> = tail.lines().collect();
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    let start = end.saturating_sub(FAILED_LOG_LINES);
+    lines[start..end]
+        .iter()
+        .map(|l| top::cut(&printable(l)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The end of `text`, at most `TAIL_MAX` bytes, starting on a char boundary.
@@ -349,6 +371,14 @@ impl TestsModel {
             } => {
                 self.steps
                     .insert(step.clone(), (state.clone(), tail.clone()));
+                match (state, tail) {
+                    (StepState::Failed { .. }, Some(tail)) => {
+                        self.failed_logs.insert(step.clone(), failed_log(tail));
+                    }
+                    _ => {
+                        self.failed_logs.remove(step);
+                    }
+                }
             }
             TestsTell::RunStarted { run, .. } => {
                 let scope = self.run_scope.take();

@@ -7,7 +7,9 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ScrollArea, observe};
 use clusia_core::PrRef;
 use clusia_core::printable::{printable, printable_lines};
-use clusia_core::tests::{RunOutcome, RunnerKind, StepState, TestRun, TestScope, TestsView};
+use clusia_core::tests::{
+    PlanStep, RunOutcome, RunnerKind, SetupPlan, StepState, TestRun, TestScope, TestsView,
+};
 use clusia_view::status::format_age;
 
 use super::body::{CheckAgain, EditRecipe, GenerateButton, StopButton, TopRegion};
@@ -96,6 +98,8 @@ struct EnvCard {
     /// `env.note`, shown under "Runs in" when no stopped-engine note shows.
     note: Option<String>,
     problems: Vec<String>,
+    /// `<step> failed: <message>`, `printable` and cut: the setup step that stopped the setup.
+    failed: Option<String>,
     /// The recipe line and whether its commands are approved.
     recipe: Option<(String, bool)>,
     engine_note: Option<String>,
@@ -144,6 +148,14 @@ enum RunCard {
     },
 }
 
+/// The first plan step whose last run failed.
+fn failed_step(plan: &SetupPlan) -> Option<(&PlanStep, &str)> {
+    plan.steps.iter().find_map(|s| match &s.state {
+        StepState::Failed { message } => Some((s, message.as_str())),
+        _ => None,
+    })
+}
+
 /// The badge of the Environment card: what is left before the tests can run.
 pub(super) fn env_badge(view: &TestsView, state: &TabState) -> (String, Tone) {
     if matches!(state, TabState::Preparing { .. }) {
@@ -155,6 +167,9 @@ pub(super) fn env_badge(view: &TestsView, state: &TabState) -> (String, Tone) {
     }
     if *state != TabState::NeedsSetup {
         return ("Ready".into(), Tone::Green);
+    }
+    if plan.is_some_and(|p| failed_step(p).is_some()) {
+        return ("Setup failed".into(), Tone::Orange);
     }
     let steps = plan.map_or(0, |p| {
         p.steps
@@ -170,7 +185,7 @@ pub(super) fn env_badge(view: &TestsView, state: &TabState) -> (String, Tone) {
     (label, Tone::Orange)
 }
 
-fn cut(line: &str) -> String {
+pub(super) fn cut(line: &str) -> String {
     if line.chars().count() <= PROBLEM_CHARS {
         return line.to_string();
     }
@@ -287,6 +302,13 @@ fn env_card(i: &Inputs, state: &TabState) -> EnvCard {
             .map(printable),
         rows,
         problems,
+        failed: plan.and_then(failed_step).map(|(step, message)| {
+            cut(&format!(
+                "{} failed: {}",
+                printable(&step.title),
+                printable(message)
+            ))
+        }),
         recipe: recipe.map(|r| {
             let by = if r.by_hand {
                 "Recipe edited by you".to_string()
@@ -638,6 +660,13 @@ fn draw_env(p: &mut Spawner, fonts: &UiFonts, pr: &PrRef, env: &EnvCard) {
             c.spawn(wrapped_text(
                 fonts,
                 problem.clone(),
+                Type::BODY.ink(Swatch::Orange),
+            ));
+        }
+        if let Some(failed) = &env.failed {
+            c.spawn(wrapped_text(
+                fonts,
+                failed.clone(),
                 Type::BODY.ink(Swatch::Orange),
             ));
         }
@@ -1074,7 +1103,7 @@ mod tests {
         ));
         assert_eq!(
             env_badge(&view, &TabState::NeedsSetup),
-            ("2 steps to set up".to_string(), Tone::Orange)
+            ("Setup failed".to_string(), Tone::Orange)
         );
         view.plan.as_mut().unwrap().steps.remove(2);
         assert_eq!(
@@ -1104,6 +1133,74 @@ mod tests {
             env_badge(&view, &TabState::NeedsSetup),
             ("Blocked".to_string(), Tone::Orange)
         );
+    }
+
+    fn failed_image_plan(message: &str) -> impl FnOnce(&mut TestsView) {
+        let message = message.to_string();
+        move |v| {
+            let plan = v.plan.as_mut().unwrap();
+            plan.commands_approved = false;
+            plan.steps = vec![
+                step("image", StepState::Failed { message }),
+                step("work:1", StepState::Missing),
+            ];
+            plan.steps[0].title = "Build the image".into();
+        }
+    }
+
+    #[test]
+    fn a_failed_setup_step_is_named_with_its_reason_in_the_card() {
+        let (mut app, _, view) = show(|v| {
+            failed_image_plan("docker build exited with 1: no space left on device")(v);
+            v.phase = TestsPhase::NeedsSetup;
+        });
+        assert_eq!(
+            env_badge(&view, &TabState::NeedsSetup),
+            ("Setup failed".to_string(), Tone::Orange)
+        );
+        assert!(testing::shows(&mut app, "Setup failed"));
+        assert!(!testing::shows(&mut app, "steps to set up"));
+        assert!(testing::shows(
+            &mut app,
+            "Build the image failed: docker build exited with 1: no space left on device"
+        ));
+        assert!(testing::shows(&mut app, "Set up…"));
+    }
+
+    #[test]
+    fn missing_steps_alone_keep_the_count_and_say_nothing_failed() {
+        let (mut app, _, _) = show(|v| {
+            v.phase = TestsPhase::NeedsSetup;
+            let plan = v.plan.as_mut().unwrap();
+            plan.commands_approved = false;
+            plan.steps = vec![
+                step("image", StepState::Missing),
+                step("work:1", StepState::Missing),
+            ];
+        });
+        assert!(testing::shows(&mut app, "2 steps to set up"));
+        assert!(!testing::shows(&mut app, "Setup failed"));
+        assert!(!testing::shows(&mut app, " failed: "));
+    }
+
+    #[test]
+    fn a_failed_message_in_the_card_is_plain_cut_text() {
+        let nasty = format!(
+            "boom\u{1b}[31m\n[click](https://evil.example)\u{202e} {}",
+            "x".repeat(5000)
+        );
+        let (mut app, _, _) = show(|v| {
+            failed_image_plan(&nasty)(v);
+            v.phase = TestsPhase::NeedsSetup;
+        });
+        assert!(testing::shows(
+            &mut app,
+            "Build the image failed: boom\\u{1b}[31m\\n[click](https://evil.example)\\u{202e} xxx"
+        ));
+        assert!(testing::shows(&mut app, "…"));
+        assert!(!testing::shows(&mut app, &"x".repeat(400)));
+        assert_eq!(testing::count::<MdBody>(&mut app), 0, "no markdown node");
+        assert_eq!(testing::count::<MdLink>(&mut app), 0, "no link");
     }
 
     #[test]

@@ -92,6 +92,7 @@ fn demo_screenshots() {
         "tests-empty",
         "tests-auto",
         "tests-setup",
+        "tests-setup-failed",
         "config-tests",
         "tests-running",
         "tests-failed",
