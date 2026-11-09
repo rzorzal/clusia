@@ -526,6 +526,7 @@ fn tests_state(scene: Scene) -> Option<DemoTests> {
         Scene::TestsStale => DemoTests::Stale,
         Scene::TestsProposal => DemoTests::Proposal,
         Scene::TestsSetup => DemoTests::Setup,
+        Scene::TestsSetupFailed => DemoTests::SetupFailed,
         Scene::TestsFunctions
         | Scene::TestsFunctionsRunning
         | Scene::TestsFunctionsStale
@@ -569,6 +570,15 @@ fn put_tests(world: &mut World, pr: &PrRef, now: i64, state: DemoTests) {
             });
         }
         DemoTests::Setup => model.open_plan(),
+        DemoTests::SetupFailed => {
+            model.open_plan();
+            model.apply(&TestsTell::Step {
+                pr: pr.clone(),
+                step: clusia_core::tests::STEP_IMAGE.into(),
+                state: fixture::demo_image_failure(),
+                tail: Some(fixture::demo_image_failure_tail()),
+            });
+        }
         DemoTests::Functions => model.sub = SubTab::Functions,
         _ => {}
     }
@@ -1010,6 +1020,7 @@ pub fn stage(world: &mut World, scene: Scene) {
         | Scene::TestsStale
         | Scene::TestsProposal
         | Scene::TestsSetup
+        | Scene::TestsSetupFailed
         | Scene::TestsFunctions
         | Scene::TestsFunctionsRunning
         | Scene::TestsFunctionsStale
@@ -1412,6 +1423,7 @@ mod tests {
                 | Scene::TestsStale
                 | Scene::TestsProposal
                 | Scene::TestsSetup
+                | Scene::TestsSetupFailed
                 | Scene::TestsFunctions
                 | Scene::TestsFunctionsRunning
                 | Scene::TestsFunctionsStale
@@ -1716,7 +1728,7 @@ mod tests {
         }
     }
 
-    const TESTS_SCENES: [Scene; 19] = [
+    const TESTS_SCENES: [Scene; 20] = [
         Scene::TestsEmpty,
         Scene::TestsGenerating,
         Scene::TestsAuto,
@@ -1726,6 +1738,7 @@ mod tests {
         Scene::TestsStale,
         Scene::TestsProposal,
         Scene::TestsSetup,
+        Scene::TestsSetupFailed,
         Scene::TestsFunctions,
         Scene::TestsFunctionsRunning,
         Scene::TestsFunctionsStale,
@@ -1971,6 +1984,22 @@ mod tests {
                 "Cancel",
                 "Approve selected",
                 "Approve all and set up",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_failed_setup_scene_says_why_and_offers_try_again() {
+        let mut app = staged(Scene::TestsSetupFailed);
+        assert!(modal_shown(&mut app, Modal::TestSetup));
+        shows_all(
+            &mut app,
+            Scene::TestsSetupFailed,
+            &[
+                "failed · It exited with code 1",
+                "network unreachable",
+                "Copy log",
+                "Try again",
             ],
         );
     }
