@@ -13,7 +13,7 @@ use clusia_testrun::testkit::FakeReply;
 
 use super::lab::{Lab, Machine, lab, pr};
 use super::send_lab::{install, install_pr, teardown_rules};
-use super::system_lab::system_of;
+use super::system_lab::{project, system_base, system_of};
 use super::*;
 use crate::connection::Listener;
 use crate::turns::Why;
@@ -27,12 +27,21 @@ fn two() -> Lab {
     )
 }
 
-/// `text` with the plan's stand-in slug `acme-widgets-1a2b3c` replaced by the real one.
-fn real(text: &str) -> String {
-    text.replace(
-        "acme-widgets-1a2b3c",
-        &clusia_testrun::names::repo_slug("acme", "widgets"),
-    )
+/// The system's base name of review `n`, which its container also bears.
+fn sys(n: u64) -> String {
+    system_base(n)
+}
+
+/// An engine listing: the base name of each review in `ns` with each of `suffixes`, then
+/// `tail`, one per line.
+fn lines_of(ns: &[u64], suffixes: &[&str], tail: &str) -> String {
+    ns.iter()
+        .flat_map(|n| {
+            suffixes
+                .iter()
+                .map(move |s| format!("{}{s}{tail}\n", sys(*n)))
+        })
+        .collect()
 }
 
 /// The `docker` calls whose first argument is `verb`.
@@ -108,7 +117,7 @@ async fn a_system_stops_when_its_review_closes_publishes_or_discards() {
         let lab = two();
         install(&lab, 7, state, false, &[("api", 8080, Some(49_152))]);
         let record = TestsRecord {
-            stack: Some(real("clusia-acme-widgets-1a2b3c-7")),
+            stack: Some(project(7)),
             ..TestsRecord::default()
         };
         save_tests(&lab.shared.paths, &pr(7), &record).unwrap();
@@ -125,17 +134,11 @@ async fn a_system_stops_when_its_review_closes_publishes_or_discards() {
                 .position(|c| c.starts_with(needle))
                 .unwrap_or_else(|| panic!("{needle} in {ran:?}"))
         };
+        assert!(at(&format!("stop -t 10 {}", sys(7))) < at(&format!("rm -f {} ", sys(7))));
+        assert!(at("rm -f clusia-system-") < at(&format!("network rm {}-pub", sys(7))));
         assert!(
-            at(&real("stop -t 10 clusia-system-acme-widgets-1a2b3c-7"))
-                < at(&real("rm -f clusia-system-acme-widgets-1a2b3c-7 "))
-        );
-        assert!(
-            at("rm -f clusia-system-")
-                < at(&real("network rm clusia-system-acme-widgets-1a2b3c-7-pub"))
-        );
-        assert!(
-            at(&real("network rm clusia-system-acme-widgets-1a2b3c-7-net"))
-                < at(&real("compose -p clusia-acme-widgets-1a2b3c-7 down"))
+            at(&format!("network rm {}-net", sys(7)))
+                < at(&format!("compose -p {} down", project(7)))
         );
         assert_eq!(
             state_of(&lab, 7),
@@ -334,7 +337,7 @@ async fn a_daemon_shutdown_stops_every_system_before_the_stacks_go_down() {
     installed_two(&lab);
     for n in [7, 6] {
         let record = TestsRecord {
-            stack: Some(real(&format!("clusia-acme-widgets-1a2b3c-{n}"))),
+            stack: Some(project(n)),
             ..TestsRecord::default()
         };
         save_tests(&lab.shared.paths, &pr(n), &record).unwrap();
@@ -373,16 +376,8 @@ async fn a_daemon_shutdown_stops_every_system_before_the_stacks_go_down() {
 
 #[tokio::test]
 async fn the_sweep_removes_orphan_systems_and_keeps_live_ones() {
-    let listing = real(
-        "clusia-system-acme-widgets-1a2b3c-7 \n\
-                   clusia-system-acme-widgets-1a2b3c-7-fwd \n\
-                   clusia-system-acme-widgets-1a2b3c-9 \n\
-                   clusia-system-acme-widgets-1a2b3c-9-fwd \n",
-    );
-    let networks = real(
-        "clusia-system-acme-widgets-1a2b3c-7-pub\nclusia-system-acme-widgets-1a2b3c-7-net\n\
-                    clusia-system-acme-widgets-1a2b3c-9-pub\nclusia-system-acme-widgets-1a2b3c-9-net\n",
-    );
+    let listing = lines_of(&[7, 9], &["", "-fwd"], " ");
+    let networks = lines_of(&[7, 9], &["-pub", "-net"], "");
     let lab = lab(
         Machine::Colima { running: true },
         Vec::new(),
@@ -417,8 +412,8 @@ async fn the_sweep_removes_orphan_systems_and_keeps_live_ones() {
         [
             "rm",
             "-f",
-            real("clusia-system-acme-widgets-1a2b3c-9").as_str(),
-            real("clusia-system-acme-widgets-1a2b3c-9-fwd").as_str()
+            sys(9).as_str(),
+            format!("{}-fwd", sys(9)).as_str()
         ]
     );
     let net_rm: Vec<Vec<String>> = calls_of(&lab, "network")
@@ -430,8 +425,8 @@ async fn the_sweep_removes_orphan_systems_and_keeps_live_ones() {
         vec![vec![
             "network",
             "rm",
-            real("clusia-system-acme-widgets-1a2b3c-9-pub").as_str(),
-            real("clusia-system-acme-widgets-1a2b3c-9-net").as_str()
+            format!("{}-pub", sys(9)).as_str(),
+            format!("{}-net", sys(9)).as_str()
         ]]
     );
     assert!(kept_logs.exists(), "a review with a record keeps its logs");
@@ -443,10 +438,8 @@ async fn the_sweep_removes_orphan_systems_and_keeps_live_ones() {
 
 #[tokio::test]
 async fn a_daemon_restart_leaves_no_system_and_says_so() {
-    let listing =
-        real("clusia-system-acme-widgets-1a2b3c-7 \nclusia-system-acme-widgets-1a2b3c-7-fwd \n");
-    let networks =
-        real("clusia-system-acme-widgets-1a2b3c-7-pub\nclusia-system-acme-widgets-1a2b3c-7-net\n");
+    let listing = lines_of(&[7], &["", "-fwd"], " ");
+    let networks = lines_of(&[7], &["-pub", "-net"], "");
     let lab = lab(
         Machine::Colima { running: true },
         Vec::new(),
@@ -496,8 +489,8 @@ async fn a_daemon_restart_leaves_no_system_and_says_so() {
         [
             "rm",
             "-f",
-            real("clusia-system-acme-widgets-1a2b3c-7").as_str(),
-            real("clusia-system-acme-widgets-1a2b3c-7-fwd").as_str()
+            sys(7).as_str(),
+            format!("{}-fwd", sys(7)).as_str()
         ]
     );
     assert!(
@@ -542,18 +535,8 @@ async fn live_names_cover_a_live_system_and_a_stopped_one_has_none() {
     );
     let names = env::live_names(&lab.shared);
     for suffix in ["", "-fwd", "-pub", "-net"] {
-        assert!(
-            names.contains(&real(&format!(
-                "clusia-system-acme-widgets-1a2b3c-7{suffix}"
-            ))),
-            "{suffix}"
-        );
-        assert!(
-            !names.contains(&real(&format!(
-                "clusia-system-acme-widgets-1a2b3c-6{suffix}"
-            ))),
-            "{suffix}"
-        );
+        assert!(names.contains(&format!("{}{suffix}", sys(7))), "{suffix}");
+        assert!(!names.contains(&format!("{}{suffix}", sys(6))), "{suffix}");
     }
 }
 
@@ -583,7 +566,7 @@ async fn clean_up_refuses_while_a_live_system_belongs_to_the_repository() {
         "Stop the system of acme/widgets#7 first"
     );
     // Another repository's live system does not block this one, and a stopped system never blocks.
-    let other: PrRef = "octo/gizmo#2".parse().unwrap();
+    let other: PrRef = "rzorzal/blog#2".parse().unwrap();
     lab.shared.tests.with(&pr(7), |e| {
         e.system.as_mut().unwrap().state = SystemState::Stopped {
             why: StopWhy::Reviewer,
@@ -635,4 +618,43 @@ async fn a_teardown_returns_with_the_log_files_complete() {
 
     let log = lab.shared.paths.system_logs_for(&pr(7)).join("start.log");
     assert_eq!(std::fs::read_to_string(log).unwrap(), "ready on 8080\n");
+}
+
+#[tokio::test]
+async fn a_start_whose_review_is_forgotten_removes_what_it_made() {
+    // `docker start` answers late: the review is forgotten while the start waits on it.
+    let (lab, _api) = super::system_lab::system_lab_without_health_with(vec![], |x| {
+        x.on(
+            "docker",
+            &["start"],
+            FakeReply::after(Duration::from_millis(300), FakeReply::ok("")),
+        );
+    })
+    .await;
+    super::system_lab::start(&lab, false).await;
+    let give_up = std::time::Instant::now() + Duration::from_secs(5);
+    while calls_of(&lab, "start").is_empty() && std::time::Instant::now() < give_up {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    forget(&lab.shared, &pr(7));
+
+    // The background removal goes at once; the start task, once it has ended, removes its own
+    // names again, so nothing it made in between is left. (A start's pre-clean removes them
+    // before it makes anything; only the removals after its `docker start` count.)
+    let removals = |lab: &Lab| {
+        let ran = ran(lab);
+        let start_at = ran.iter().position(|c| c.starts_with("start ")).unwrap();
+        ran[start_at..]
+            .iter()
+            .filter(|c| c.starts_with(&format!("rm -f {} ", sys(7))))
+            .count()
+    };
+    let give_up = std::time::Instant::now() + Duration::from_secs(5);
+    while removals(&lab) < 2 && std::time::Instant::now() < give_up {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(removals(&lab), 2, "{:?}", ran(&lab));
+    // The forgotten review is not brought back as an empty entry.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!lab.shared.tests.table.lock().unwrap().contains_key(&pr(7)));
 }

@@ -53,7 +53,7 @@ const STREAM_LIMIT: Duration = Duration::from_secs(7 * 24 * 3600);
 const OUTPUT_EVERY: Duration = Duration::from_millis(clusia_core::tests::OUTPUT_EVERY_MS);
 /// How long a teardown that finds another one under way waits for it.
 const TEARDOWN_WAIT: Duration = Duration::from_secs(60);
-/// How long a teardown waits for a stopped log stream to finish its file.
+/// How long a teardown waits for the stopped log streams to finish their files.
 const STREAM_FINISH_WAIT: Duration = Duration::from_secs(10);
 const START: &str = "start";
 
@@ -175,16 +175,21 @@ impl SystemRun {
     }
 }
 
-/// Changes run `id` of `pr`, when it is still the review's run.
+/// Changes run `id` of `pr`, when it is still the review's run. A review that was forgotten
+/// is not brought back.
 fn with_run<R>(
     shared: &Shared,
     pr: &PrRef,
     id: u64,
     change: impl FnOnce(&mut SystemRun) -> R,
 ) -> Option<R> {
-    shared.tests.with(pr, |entry| {
-        entry.system.as_mut().filter(|run| run.id == id).map(change)
-    })
+    let mut table = shared.tests.table.lock().unwrap_or_else(|p| p.into_inner());
+    table
+        .get_mut(pr)?
+        .system
+        .as_mut()
+        .filter(|run| run.id == id)
+        .map(change)
 }
 
 /// Every live system: what the sweep must leave alone and what the app's quit stops.
@@ -236,7 +241,8 @@ pub(super) async fn store_send(shared: &Shared, pr: &PrRef, result: SendResult) 
 }
 
 /// Called whenever a system leaves `Starting`: with no window open, the app may have quit
-/// while it started, so the app's systems go on notice as when the last window went.
+/// while it started, so the app's systems go on notice as when the last window went. A start
+/// with `keep: false` thus assumes a window: a client without one starts with `keep: true`.
 pub(super) fn on_settled(shared: &Arc<Shared>) {
     if shared.window_listeners.load(Ordering::SeqCst) == 0 {
         super::windows_gone(shared);
@@ -698,7 +704,9 @@ async fn launch(
             state: ServiceState::NotStarted,
         })
         .collect();
-    run.docker = docker_of(&accepted);
+    let docker = docker_of(&accepted);
+    let own_names = run.names.clone();
+    run.docker = docker.clone();
     run.activity = Some(started.id);
     let installed = {
         let mut table = shared.tests.table.lock().unwrap_or_else(|p| p.into_inner());
@@ -744,12 +752,36 @@ async fn launch(
             };
             fail(&shared, &pr, run_id, failure).await;
         }
-        // Whatever way the start ended, a run it left starting or stopping is torn down.
-        stop_start(&shared, &pr, run_id).await;
-        end_activity(&shared, &pr, act);
+        let forgotten = {
+            let table = shared.tests.table.lock().unwrap_or_else(|p| p.into_inner());
+            table.get(&pr).is_none_or(|entry| entry.system.is_none())
+        };
+        if forgotten {
+            // The review was forgotten while the start ran: what the start made after the
+            // background removal is removed here, once nothing of the start runs any more. A
+            // newer run of the review bears the same names, so then nothing is removed.
+            forgotten_start(&shared, &pr, docker, &own_names).await;
+        } else {
+            // Whatever way the start ended, a run it left starting or stopping is torn down.
+            stop_start(&shared, &pr, run_id).await;
+            end_activity(&shared, &pr, act);
+        }
         drop(started.live);
     });
     Ok(())
+}
+
+/// Removes `names` of a start whose review is gone.
+async fn forgotten_start(shared: &Shared, pr: &PrRef, docker: Option<Docker>, names: &SystemNames) {
+    let docker = match docker {
+        Some(docker) => Some(docker),
+        None => env::docker_now(shared).await,
+    };
+    if let Some(docker) = docker
+        && let Err(e) = remove_system(shared.test_exec.as_ref(), &docker, names).await
+    {
+        tracing::warn!(error = %e, pr = %pr, "the system was not removed whole");
+    }
 }
 
 /// Ends the system activity `id`, leaving every failure of the review as it is.
@@ -1689,12 +1721,12 @@ async fn teardown_quiet(shared: &Shared, pr: &PrRef, id: u64) {
     {
         tracing::warn!(error = %e, pr = %pr, "the system was not removed whole");
     }
+    // One deadline for every stream of the run, so a teardown never waits more than that.
+    let deadline = tokio::time::Instant::now() + STREAM_FINISH_WAIT;
     for stream in streams {
-        if tokio::time::timeout(STREAM_FINISH_WAIT, stream)
-            .await
-            .is_err()
-        {
+        if tokio::time::timeout_at(deadline, stream).await.is_err() {
             tracing::warn!(pr = %pr, "a system log was still being written after {STREAM_FINISH_WAIT:?}");
+            break;
         }
     }
     with_run(shared, pr, id, |run| {
@@ -1937,6 +1969,20 @@ fn valid_process(process: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.-".contains(c))
 }
 
+/// How much of an endpoint id from a client a refusal repeats.
+const SHOWN_ID_MAX: usize = 200;
+
+/// An endpoint id from a client, safe to show and bounded.
+fn shown_id(id: &str) -> String {
+    let text = printable(id);
+    if text.chars().count() <= SHOWN_ID_MAX {
+        return text;
+    }
+    let mut out: String = text.chars().take(SHOWN_ID_MAX - 1).collect();
+    out.push('…');
+    out
+}
+
 /// `SendEndpoint`: sends one listed endpoint to its mapped port and keeps the result.
 pub(crate) async fn send_endpoint(
     shared: &Shared,
@@ -1949,7 +1995,7 @@ pub(crate) async fn send_endpoint(
     }
     let view = system_view(shared, pr).await;
     let Some(listed) = view.endpoints.list.iter().find(|e| e.id == endpoint) else {
-        return reviews::bad_request(format!("No endpoint {} in {pr}", printable(&endpoint)));
+        return reviews::bad_request(format!("No endpoint {} in {pr}", shown_id(&endpoint)));
     };
     if !matches!(view.state, SystemState::Running | SystemState::Unhealthy) {
         return refuse(NOT_UP);

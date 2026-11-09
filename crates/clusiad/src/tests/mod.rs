@@ -866,13 +866,15 @@ pub(crate) fn windows_gone(shared: &Arc<Shared>) {
     // The sleep holds no `Live`: a shutdown never waits for a grace.
     runtime.spawn(async move {
         tokio::time::sleep_until(until).await;
+        // Counted before `closing` is read: a shutdown that starts after the read waits for
+        // these teardowns, and one that started before is seen here.
+        let _live = Live::new(&shared.tests);
         let still_gone = shared.window_listeners.load(Ordering::SeqCst) == 0
             && shared.tests.quit_epoch.load(Ordering::SeqCst) == epoch
             && !shared.tests.closing.load(Ordering::SeqCst);
         if !still_gone {
             return;
         }
-        let _live = Live::new(&shared.tests);
         for (pr, _, keep) in system::live_systems(&shared) {
             if !keep {
                 system::teardown(&shared, &pr, StopWhy::AppQuit).await;

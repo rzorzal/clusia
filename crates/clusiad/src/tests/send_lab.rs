@@ -576,3 +576,41 @@ async fn a_started_system_answers_send_through_the_real_start() {
     };
     assert_eq!((result.status, result.body.as_str()), (Some(200), "[]"));
 }
+
+#[tokio::test]
+async fn a_refusal_repeats_a_long_endpoint_id_bounded() {
+    let lab = mock_lab(49_152);
+    stored_for(&lab);
+    let id = format!("GET /{}", "x".repeat(500));
+    let message = bad(send_endpoint(&lab.shared, &pr(7), RunSide::Pr, id).await);
+    let shown = message
+        .strip_prefix("No endpoint ")
+        .and_then(|m| m.strip_suffix(" in acme/widgets#7"))
+        .unwrap();
+    assert_eq!(shown.chars().count(), 200);
+    assert!(shown.ends_with('…'));
+}
+
+#[tokio::test]
+async fn every_value_of_a_repeated_response_header_is_kept() {
+    let mock = MockServer::start().await;
+    Mock::given(path("/x"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .append_header("set-cookie", "a=1")
+                .append_header("x-other", "o")
+                .append_header("set-cookie", "b=2"),
+        )
+        .mount(&mock)
+        .await;
+    let host = mock.address().port();
+    let (lab, _) = running_on(host);
+    let result = system_http::send(&lab.shared, &pr(7), "GET /x", request(host, "/x")).await;
+    let cookies: Vec<&str> = result
+        .headers
+        .iter()
+        .filter(|(k, _)| k == "set-cookie")
+        .map(|(_, v)| v.as_str())
+        .collect();
+    assert_eq!(cookies, ["a=1", "b=2"]);
+}

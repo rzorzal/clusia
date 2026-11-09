@@ -127,9 +127,12 @@ pub(super) async fn send(
     let read = async {
         let mut response = builder.send().await?;
         let status = response.status();
-        let headers = response
-            .headers()
-            .iter()
+        let headers = response.headers();
+        // Each name in the order it first came, with all its values in theirs: the values of a
+        // repeated name are listed together.
+        let headers = headers
+            .keys()
+            .flat_map(|name| headers.get_all(name).iter().map(move |value| (name, value)))
             .take(SEND_HEADERS_MAX)
             .map(|(name, value)| {
                 (
