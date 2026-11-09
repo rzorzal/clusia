@@ -2725,7 +2725,7 @@ mod tests_against_a_scripted_daemon {
         }
     }
 
-    fn view(phase: TestsPhase, plan: Option<SetupPlan>) -> TestsView {
+    pub(super) fn view(phase: TestsPhase, plan: Option<SetupPlan>) -> TestsView {
         TestsView {
             head: "9be1d07".into(),
             phase,
@@ -4865,5 +4865,1279 @@ mod tests_against_a_scripted_daemon {
             "{out}"
         );
         assert!(out.contains("run.py:\n```\nprint('ok')\n```"), "{out}");
+    }
+}
+
+mod system_against_a_scripted_daemon {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use clusia_core::PrRef;
+    use clusia_core::cockpit::RunSide;
+    use clusia_core::system::*;
+    use clusia_core::tests::{
+        PlanStep, RECIPE_CHANGED, SetupPlan, StepPlace, StepState, TestsPhase, TestsView,
+    };
+    use clusia_protocol::{
+        Command as Request, ErrorCode, Event, ProtocolError, Reply, ServerMessage,
+    };
+    use tokio::sync::mpsc::UnboundedSender;
+
+    use super::check_against_a_scripted_daemon::{
+        daemon_result, ended_within, interrupt, stderr_of, stdout_of,
+    };
+    use super::tests_against_a_scripted_daemon::view as tests_view;
+
+    type Say = UnboundedSender<ServerMessage>;
+    type Answer = Option<Result<Reply, ProtocolError>>;
+
+    fn pr() -> PrRef {
+        "acme/widgets#7".parse().unwrap()
+    }
+
+    fn ok(reply: Reply) -> Answer {
+        Some(Ok(reply))
+    }
+
+    fn refused(text: &str) -> Answer {
+        Some(Err(ProtocolError::new(ErrorCode::InvalidState, text)))
+    }
+
+    fn endpoint(method: HttpMethod, path: &str, why: &str, curl: &str) -> EndpointView {
+        let endpoint = Endpoint {
+            method,
+            path: path.into(),
+            port: "api".into(),
+            why: why.into(),
+            new: false,
+            headers: BTreeMap::new(),
+            body: None,
+            params: BTreeMap::new(),
+        };
+        EndpointView {
+            id: endpoint.id(),
+            endpoint,
+            curl: Some(curl.into()),
+            last: None,
+        }
+    }
+
+    /// A system view in `state`, with the ports, spec, endpoints and processes of a running one.
+    fn sview(state: SystemState) -> SystemView {
+        let mut v = SystemView::new("9be1d07");
+        v.support = SystemSupport::Ready;
+        v.state = state;
+        v.started_head = Some("9be1d07".into());
+        v.running_since = Some(1_000_000);
+        v.ports = vec![PortView {
+            name: "api".into(),
+            port: 8080,
+            path: "/".into(),
+            host_port: Some(49152),
+            url: Some("http://127.0.0.1:49152/".into()),
+        }];
+        v.health = Some(HealthCheck {
+            ok: true,
+            result: "200".into(),
+            at: 1,
+            failing_since: None,
+        });
+        v.spec = Some(SystemSpecView {
+            start: "cargo run -q".into(),
+            note: None,
+            ports: vec![SystemPort {
+                name: "api".into(),
+                port: 8080,
+                path: "/".into(),
+            }],
+            health: Some("GET /health on api".into()),
+            health_timeout_secs: Some(60),
+            services: Vec::new(),
+            env: BTreeMap::new(),
+        });
+        v.endpoints = EndpointsView {
+            list: vec![
+                endpoint(
+                    HttpMethod::Post,
+                    "/oauth/token",
+                    "Refresh goes through the queue.",
+                    "curl -s -X POST http://127.0.0.1:49152/oauth/token",
+                ),
+                endpoint(
+                    HttpMethod::Get,
+                    "/oauth/status",
+                    "New status route.",
+                    "curl -s http://127.0.0.1:49152/oauth/status",
+                ),
+            ],
+            written_head: Some("9be1d07".into()),
+            ..EndpointsView::default()
+        };
+        v.processes = vec![
+            ProcessView {
+                id: "start".into(),
+                label: "api".into(),
+                last: 2,
+                log: None,
+            },
+            ProcessView {
+                id: "service:postgres".into(),
+                label: "postgres".into(),
+                last: 1,
+                log: None,
+            },
+        ];
+        v
+    }
+
+    fn starting(stage: StartStage) -> SystemView {
+        sview(SystemState::Starting { stage })
+    }
+
+    fn failed_view() -> SystemView {
+        let mut v = sview(SystemState::Failed);
+        v.failure = Some(SystemFailure {
+            command: "docker create".into(),
+            place: StepPlace::Container,
+            exit_code: Some(125),
+            message: "no such image".into(),
+            process: None,
+            tail: "first line\nlast line\n".into(),
+        });
+        v
+    }
+
+    fn plan_step(id: &str, state: StepState) -> PlanStep {
+        PlanStep {
+            id: id.into(),
+            title: format!("Step {id}"),
+            command: "true".into(),
+            place: StepPlace::Container,
+            network: false,
+            hint: None,
+            state,
+            approved: false,
+        }
+    }
+
+    /// A setup plan with a SYSTEM section: `approved` is both the plan's `ready` and the
+    /// system's `approved`.
+    fn plan(approved: bool) -> SetupPlan {
+        SetupPlan {
+            recipe_hash: "h1".into(),
+            steps: vec![plan_step("image", StepState::Done)],
+            commands: Vec::new(),
+            commands_approved: approved,
+            ready: approved,
+            blocked: None,
+            system: Some(SystemPlan {
+                steps: if approved {
+                    Vec::new()
+                } else {
+                    vec![plan_step("system:forwarder", StepState::Missing)]
+                },
+                start: "cargo run -q".into(),
+                health: Some("GET /health on api · up to 60 s".into()),
+                ports: vec![SystemPort {
+                    name: "api".into(),
+                    port: 8080,
+                    path: "/".into(),
+                }],
+                env: BTreeMap::new(),
+                services: Vec::new(),
+                network: false,
+                endpoints: vec!["POST /oauth/token".into()],
+                approved,
+                blocked: None,
+            }),
+        }
+    }
+
+    fn changed(view: SystemView) -> ServerMessage {
+        ServerMessage::Event {
+            topic: "tests".into(),
+            event: Event::SystemChanged {
+                pr: pr(),
+                view: Box::new(view),
+            },
+        }
+    }
+
+    /// Tells each view in turn, `gap` apart, on a task of the daemon's runtime.
+    fn tell(say: &Say, gap: u64, views: Vec<SystemView>) {
+        let say = say.clone();
+        tokio::spawn(async move {
+            for view in views {
+                tokio::time::sleep(Duration::from_millis(gap)).await;
+                let _ = say.send(changed(view));
+            }
+        });
+    }
+
+    /// The commands the scripted daemon got, as their Debug text.
+    type Asked = Arc<Mutex<Vec<String>>>;
+    type Tests = Arc<Mutex<TestsView>>;
+
+    fn tests_of(plan: SetupPlan) -> Tests {
+        Arc::new(Mutex::new(tests_view(TestsPhase::Ready, Some(plan))))
+    }
+
+    /// Records every request, answers `GetTests` with `tests`, `Subscribe` and `OpenReview`
+    /// with an `Ack`, and leaves the rest to `then`.
+    fn scripted(
+        dir: &Path,
+        rt: &tokio::runtime::Runtime,
+        tests: Tests,
+        mut then: impl FnMut(&Request, &Say) -> Answer + Send + 'static,
+    ) -> Asked {
+        let asked: Asked = Arc::default();
+        let seen = asked.clone();
+        daemon_result(
+            rt,
+            &clusia_core::Paths::new(dir).socket(),
+            move |cmd, say| {
+                seen.lock().unwrap().push(format!("{cmd:?}"));
+                match cmd {
+                    Request::GetTests { .. } => {
+                        ok(Reply::Tests(Box::new(tests.lock().unwrap().clone())))
+                    }
+                    Request::Subscribe { .. } | Request::OpenReview { .. } => ok(Reply::Ack),
+                    other => then(other, say),
+                }
+            },
+        );
+        asked
+    }
+
+    fn system_cmd_with(home: &Path, globals: &[&str], args: &[&str]) -> std::process::Child {
+        std::process::Command::new(env!("CARGO_BIN_EXE_clusia"))
+            .arg("--home")
+            .arg(home)
+            .args(globals)
+            .arg("system")
+            .args(args)
+            .env("CLUSIA_CLAUDE_BIN", "/nonexistent/claude")
+            .env("CLUSIA_CODEX_BIN", "/nonexistent/codex")
+            .env("CLUSIA_DOCKER_BIN", "/nonexistent/docker")
+            .env("CLUSIA_SANDBOX_EXEC_BIN", "/nonexistent/sandbox-exec")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    fn system_cmd(home: &Path, args: &[&str]) -> std::process::Child {
+        system_cmd_with(home, &[], args)
+    }
+
+    const WAIT: Duration = Duration::from_secs(20);
+
+    /// What a finished child said.
+    struct Done {
+        code: Option<i32>,
+        out: String,
+        err: String,
+    }
+
+    fn finish(mut child: std::process::Child) -> Done {
+        let code = ended_within(&mut child, WAIT);
+        Done {
+            code,
+            out: stdout_of(&mut child),
+            err: stderr_of(&mut child),
+        }
+    }
+
+    /// The names of the requests that start with one of `names`, in the order they came.
+    fn names(asked: &Asked, wanted: &[&str]) -> Vec<String> {
+        asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| {
+                let name = c.split([' ', '{']).next().unwrap_or("");
+                wanted.contains(&name).then(|| name.to_string())
+            })
+            .collect()
+    }
+
+    fn sent(asked: &Asked, name: &str) -> Vec<String> {
+        asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.starts_with(name))
+            .cloned()
+            .collect()
+    }
+
+    /// Waits until the daemon got a request that starts with `name`.
+    fn wait_for(asked: &Asked, name: &str) {
+        let give_up = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < give_up {
+            if !sent(asked, name).is_empty() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!("the daemon never got {name}");
+    }
+
+    #[test]
+    fn start_asks_prepares_and_starts_kept_then_exits_0_when_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(false)),
+            |cmd, say| match cmd {
+                Request::StartSystem { .. } => {
+                    // The daemon keeps what a terminal start asked to keep.
+                    let mut running = sview(SystemState::Running);
+                    running.keep = true;
+                    tell(
+                        say,
+                        100,
+                        vec![
+                            starting(StartStage::Start),
+                            starting(StartStage::Health),
+                            running,
+                        ],
+                    );
+                    ok(Reply::System(Box::new(starting(StartStage::Services))))
+                }
+                _ => ok(Reply::Ack),
+            },
+        );
+        let done = finish(system_cmd(
+            dir.path(),
+            &["start", "acme/widgets#7", "--yes"],
+        ));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert_eq!(
+            names(&asked, &["GetTests", "PrepareTests", "StartSystem"]),
+            ["GetTests", "PrepareTests", "GetTests", "StartSystem"]
+        );
+        let prepare = &sent(&asked, "PrepareTests")[0];
+        assert!(prepare.contains("recipe_hash: \"h1\""), "{prepare}");
+        assert!(
+            prepare.contains("Steps([\"system:forwarder\", \"tests\", \"system\"])"),
+            "{prepare}"
+        );
+        let start = &sent(&asked, "StartSystem")[0];
+        assert!(start.contains("side: Pr"), "{start}");
+        assert!(start.contains("recipe_hash: \"h1\""), "{start}");
+        assert!(start.contains("keep: true"), "{start}");
+        let at = |needle: &str| {
+            done.err
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing: {}", done.err))
+        };
+        assert!(at("Starting · services…") < at("Starting · start command…"));
+        assert!(at("Starting · start command…") < at("Starting · waiting for health…"));
+        assert!(
+            done.err.contains("SYSTEM · IN THE CONTAINER"),
+            "{}",
+            done.err
+        );
+        for expected in [
+            "Running · healthy · up",
+            "  api  :8080 → 127.0.0.1:49152",
+            "    http://127.0.0.1:49152/",
+            "Outbound network off for this review",
+            STOPS_WHEN_KEPT,
+        ] {
+            assert!(done.out.contains(expected), "{expected}\n{}", done.out);
+        }
+    }
+
+    #[test]
+    fn start_with_no_system_section_says_so_and_asks_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut without = plan(true);
+        without.system = None;
+        let asked = scripted(dir.path(), &rt, tests_of(without), |_, _| ok(Reply::Ack));
+        let done = finish(system_cmd(
+            dir.path(),
+            &["start", "acme/widgets#7", "--yes"],
+        ));
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        assert!(
+            done.err.contains("This recipe has no [system] section"),
+            "{}",
+            done.err
+        );
+        assert!(names(&asked, &["PrepareTests", "StartSystem"]).is_empty());
+    }
+
+    #[test]
+    fn start_without_a_recipe_says_to_generate_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tests: Tests = Arc::new(Mutex::new(tests_view(TestsPhase::NotGenerated, None)));
+        let asked = scripted(dir.path(), &rt, tests, |_, _| ok(Reply::Ack));
+        let done = finish(system_cmd(
+            dir.path(),
+            &["start", "acme/widgets#7", "--yes"],
+        ));
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        assert!(
+            done.err.contains(
+                "There is no recipe yet; run clusia tests acme/widgets#7 --generate first"
+            ),
+            "{}",
+            done.err
+        );
+        assert!(names(&asked, &["PrepareTests", "StartSystem"]).is_empty());
+    }
+
+    #[test]
+    fn start_without_yes_and_a_no_answer_runs_nothing() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(dir.path(), &rt, tests_of(plan(false)), |_, _| {
+            ok(Reply::Ack)
+        });
+        let mut child = system_cmd(dir.path(), &["start", "acme/widgets#7"]);
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"n\n").unwrap();
+        drop(stdin);
+        let done = finish(child);
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        assert!(
+            done.err.contains("Setup not approved; nothing ran."),
+            "{}",
+            done.err
+        );
+        assert!(
+            done.err
+                .contains("Approve the setup, the system and its test commands? [y/N]"),
+            "{}",
+            done.err
+        );
+        assert!(names(&asked, &["PrepareTests", "StartSystem"]).is_empty());
+    }
+
+    #[test]
+    fn start_exits_1_when_failed_and_prints_the_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(true)),
+            |cmd, say| match cmd {
+                Request::StartSystem { .. } => {
+                    tell(say, 100, vec![failed_view()]);
+                    ok(Reply::System(Box::new(starting(StartStage::Start))))
+                }
+                _ => ok(Reply::Ack),
+            },
+        );
+        let done = finish(system_cmd(
+            dir.path(),
+            &["start", "acme/widgets#7", "--yes"],
+        ));
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        for expected in [
+            "WHAT RAN",
+            "  command  docker create",
+            "  exit     125",
+            "    last line",
+        ] {
+            assert!(done.out.contains(expected), "{expected}\n{}", done.out);
+        }
+    }
+
+    #[test]
+    fn start_exits_124_when_unhealthy_and_says_it_is_still_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(true)),
+            |cmd, say| match cmd {
+                Request::StartSystem { .. } => {
+                    let mut unhealthy = sview(SystemState::Unhealthy);
+                    unhealthy.health = Some(HealthCheck {
+                        ok: false,
+                        result: "503".into(),
+                        at: 2,
+                        failing_since: Some(1),
+                    });
+                    tell(say, 100, vec![unhealthy]);
+                    ok(Reply::System(Box::new(starting(StartStage::Health))))
+                }
+                _ => ok(Reply::Ack),
+            },
+        );
+        let done = finish(system_cmd(
+            dir.path(),
+            &["start", "acme/widgets#7", "--yes"],
+        ));
+        assert_eq!(done.code, Some(124), "{}", done.err);
+        assert!(
+            done.out
+                .contains("GET /health on api answered 503 for 60 s."),
+            "{}",
+            done.out
+        );
+        assert!(
+            done.out.contains("The system is still running."),
+            "{}",
+            done.out
+        );
+        assert!(sent(&asked, "StopSystem").is_empty());
+    }
+
+    #[test]
+    fn system_start_exits_130_when_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::StartSystem { .. } => ok(Reply::System(Box::new(starting(StartStage::Start)))),
+            Request::StopSystem { .. } => ok(Reply::System(Box::new(sview(SystemState::Stopping)))),
+            _ => ok(Reply::Ack),
+        });
+        let mut child = system_cmd(dir.path(), &["start", "acme/widgets#7", "--yes"]);
+        wait_for(&asked, "StartSystem");
+        std::thread::sleep(Duration::from_millis(300));
+        interrupt(&child);
+        let code = ended_within(&mut child, WAIT);
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(130), "{err}");
+        assert!(err.contains("Starting · start command…"), "{err}");
+        assert!(err.contains("Stopped the system."), "{err}");
+        let stop = &sent(&asked, "StopSystem");
+        assert_eq!(stop.len(), 1, "{stop:?}");
+        assert!(stop[0].contains("side: Pr"), "{stop:?}");
+        assert!(sent(&asked, "StopTests").is_empty());
+    }
+
+    #[test]
+    fn a_second_ctrl_c_exits_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::StartSystem { .. } => ok(Reply::System(Box::new(starting(StartStage::Start)))),
+            Request::StopSystem { .. } => None,
+            _ => ok(Reply::Ack),
+        });
+        let mut child = system_cmd(dir.path(), &["start", "acme/widgets#7", "--yes"]);
+        wait_for(&asked, "StartSystem");
+        std::thread::sleep(Duration::from_millis(300));
+        interrupt(&child);
+        wait_for(&asked, "StopSystem");
+        std::thread::sleep(Duration::from_millis(500));
+        interrupt(&child);
+        let code = ended_within(&mut child, Duration::from_secs(3));
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(130), "{err}");
+        assert!(err.contains("The daemon did not answer"), "{err}");
+    }
+
+    #[test]
+    fn a_ctrl_c_before_anything_started_stops_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked: Asked = Arc::default();
+        let seen = asked.clone();
+        daemon_result(
+            &rt,
+            &clusia_core::Paths::new(dir.path()).socket(),
+            move |cmd, _| {
+                seen.lock().unwrap().push(format!("{cmd:?}"));
+                match cmd {
+                    Request::GetTests { .. } => None,
+                    _ => ok(Reply::Ack),
+                }
+            },
+        );
+        let mut child = system_cmd(dir.path(), &["start", "acme/widgets#7", "--yes"]);
+        wait_for(&asked, "GetTests");
+        std::thread::sleep(Duration::from_millis(300));
+        interrupt(&child);
+        let code = ended_within(&mut child, WAIT);
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(130), "{err}");
+        assert!(err.contains("Interrupted: nothing ran."), "{err}");
+        assert!(sent(&asked, "StopSystem").is_empty());
+    }
+
+    #[test]
+    fn restart_never_asks_for_the_plan_and_a_refusal_exits_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::RestartSystem { .. } => refused(SYSTEM_NOT_APPROVED),
+            _ => ok(Reply::Ack),
+        });
+        let done = finish(system_cmd(dir.path(), &["restart", "acme/widgets#7"]));
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        assert!(
+            done.err
+                .contains("Approve the system in the setup plan first"),
+            "{}",
+            done.err
+        );
+        assert!(sent(&asked, "PrepareTests").is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(true)),
+            |cmd, say| match cmd {
+                Request::RestartSystem { .. } => {
+                    tell(
+                        say,
+                        100,
+                        vec![starting(StartStage::Start), sview(SystemState::Running)],
+                    );
+                    ok(Reply::System(Box::new(sview(SystemState::Stopping))))
+                }
+                _ => ok(Reply::Ack),
+            },
+        );
+        let done = finish(system_cmd(dir.path(), &["restart", "acme/widgets#7"]));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert!(done.err.contains("Stopping…"), "{}", done.err);
+        let restart = &sent(&asked, "RestartSystem")[0];
+        assert!(restart.contains("side: Pr"), "{restart}");
+        assert!(restart.contains("recipe_hash: \"h1\""), "{restart}");
+        assert!(sent(&asked, "PrepareTests").is_empty());
+    }
+
+    #[test]
+    fn stop_waits_for_stopped_and_prints_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(true)),
+            |cmd, say| match cmd {
+                Request::StopSystem { .. } => {
+                    tell(
+                        say,
+                        100,
+                        vec![sview(SystemState::Stopped {
+                            why: StopWhy::Reviewer,
+                        })],
+                    );
+                    ok(Reply::System(Box::new(sview(SystemState::Stopping))))
+                }
+                _ => ok(Reply::Ack),
+            },
+        );
+        let done = finish(system_cmd(dir.path(), &["stop", "acme/widgets#7"]));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert_eq!(done.out.trim(), "Stopped");
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::StopSystem { .. } => {
+                ok(Reply::System(Box::new(sview(SystemState::Stopped {
+                    why: StopWhy::ReviewClosed,
+                }))))
+            }
+            _ => ok(Reply::Ack),
+        });
+        let done = finish(system_cmd(dir.path(), &["stop", "acme/widgets#7"]));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert_eq!(done.out.trim(), "Stopped when the review closed");
+
+        // Never told Stopped: still waiting. The 60 s limit is `STOP_WAIT_SECS`.
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::StopSystem { .. } => ok(Reply::System(Box::new(sview(SystemState::Stopping)))),
+            _ => ok(Reply::Ack),
+        });
+        let mut child = system_cmd(dir.path(), &["stop", "acme/widgets#7"]);
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "it gave up on the stop early"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn status_exits_by_state_and_prints_json_with_the_global_flag() {
+        for (state, code, title) in [
+            (SystemState::Running, 0, "Running"),
+            (SystemState::Unhealthy, 1, "Unhealthy"),
+            (SystemState::Failed, 1, "Failed"),
+            (SystemState::NotStarted, 4, "Not started"),
+            (
+                SystemState::Stopped {
+                    why: StopWhy::AppQuit,
+                },
+                4,
+                "Stopped",
+            ),
+            (SystemState::Stopping, 4, "Stopping…"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let asked = scripted(
+                dir.path(),
+                &rt,
+                tests_of(plan(true)),
+                move |cmd, _| match cmd {
+                    Request::GetSystem { .. } => ok(Reply::System(Box::new(sview(state)))),
+                    _ => ok(Reply::Ack),
+                },
+            );
+            let done = finish(system_cmd(dir.path(), &["status", "acme/widgets#7"]));
+            assert_eq!(done.code, Some(code), "{state:?}: {}", done.err);
+            assert!(done.out.starts_with(title), "{state:?}: {}", done.out);
+            let all = asked.lock().unwrap().clone();
+            assert_eq!(all.len(), 1, "status reads and nothing else: {all:?}");
+            assert!(all[0].starts_with("GetSystem"), "{all:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::GetSystem { .. } => ok(Reply::System(Box::new(sview(SystemState::Running)))),
+            _ => ok(Reply::Ack),
+        });
+        let done = finish(system_cmd_with(
+            dir.path(),
+            &["--json"],
+            &["status", "acme/widgets#7"],
+        ));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        let json: serde_json::Value = serde_json::from_str(done.out.trim()).unwrap();
+        assert_eq!(json["state"], "running");
+    }
+
+    /// A daemon whose system has two processes and whose tails are `a b` and `p`; with `events`
+    /// it then tells the log events the follow test reads, and `Stopped`.
+    fn log_daemon(dir: &Path, rt: &tokio::runtime::Runtime, events: bool) -> Asked {
+        scripted(dir, rt, tests_of(plan(true)), move |cmd, say| match cmd {
+            Request::GetSystem { .. } => ok(Reply::System(Box::new(sview(SystemState::Running)))),
+            Request::GetSystemLogs { process, .. } => {
+                let tail = if process == "start" {
+                    LogTail {
+                        process: process.clone(),
+                        first: 1,
+                        lines: vec!["a".into(), "b".into()],
+                    }
+                } else {
+                    if events {
+                        let say = say.clone();
+                        tokio::spawn(async move {
+                            let logs = |first: u64, lines: &[&str]| ServerMessage::Event {
+                                topic: "tests".into(),
+                                event: Event::SystemLogs {
+                                    pr: pr(),
+                                    side: RunSide::Pr,
+                                    process: "start".into(),
+                                    first,
+                                    lines: lines.iter().map(|l| l.to_string()).collect(),
+                                    skipped: 0,
+                                },
+                            };
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            let _ = say.send(logs(3, &["c"]));
+                            let _ = say.send(logs(6, &["f"]));
+                            let _ = say.send(logs(6, &["f", "g"]));
+                            let _ = say.send(changed(sview(SystemState::Stopped {
+                                why: StopWhy::Reviewer,
+                            })));
+                        });
+                    }
+                    LogTail {
+                        process: process.clone(),
+                        first: 1,
+                        lines: vec!["p".into()],
+                    }
+                };
+                ok(Reply::SystemLogs(Box::new(tail)))
+            }
+            _ => ok(Reply::Ack),
+        })
+    }
+
+    #[test]
+    fn logs_print_every_process_prefixed_and_follow_fills_gaps_without_stopping_the_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        log_daemon(dir.path(), &rt, false);
+        let done = finish(system_cmd(dir.path(), &["logs", "acme/widgets#7"]));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert_eq!(
+            done.out.lines().collect::<Vec<_>>(),
+            ["api │ a", "api │ b", "postgres │ p"]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = log_daemon(dir.path(), &rt, true);
+        let done = finish(system_cmd(
+            dir.path(),
+            &["logs", "acme/widgets#7", "--follow"],
+        ));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert_eq!(
+            done.out.lines().collect::<Vec<_>>(),
+            [
+                "api │ a",
+                "api │ b",
+                "postgres │ p",
+                "api │ c",
+                "… 2 lines skipped …",
+                "api │ f",
+                "api │ g",
+            ]
+        );
+        assert!(sent(&asked, "StopSystem").is_empty());
+        assert!(sent(&asked, "StopTests").is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = log_daemon(dir.path(), &rt, false);
+        let done = finish(system_cmd(
+            dir.path(),
+            &["logs", "acme/widgets#7", "--process", "service:redis"],
+        ));
+        assert_eq!(done.code, Some(2), "{}", done.err);
+        assert!(
+            done.err
+                .contains("No process service:redis in the system of acme/widgets#7"),
+            "{}",
+            done.err
+        );
+        assert!(sent(&asked, "GetSystemLogs").is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = log_daemon(dir.path(), &rt, false);
+        let done = finish(system_cmd(
+            dir.path(),
+            &["logs", "acme/widgets#7", "--lines", "0"],
+        ));
+        assert_eq!(done.code, Some(2), "{}", done.err);
+        assert!(asked.lock().unwrap().is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = log_daemon(dir.path(), &rt, false);
+        let done = finish(system_cmd(
+            dir.path(),
+            &["logs", "acme/widgets#7", "--lines", "5000"],
+        ));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert!(
+            sent(&asked, "GetSystemLogs")
+                .iter()
+                .all(|c| c.contains("lines: 2000")),
+            "{:?}",
+            sent(&asked, "GetSystemLogs")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        log_daemon(dir.path(), &rt, false);
+        let done = finish(system_cmd_with(
+            dir.path(),
+            &["--json"],
+            &["logs", "acme/widgets#7", "--process", "start"],
+        ));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        let lines: Vec<serde_json::Value> = done
+            .out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                serde_json::json!({"process": "start", "n": 1, "line": "a"}),
+                serde_json::json!({"process": "start", "n": 2, "line": "b"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn logs_follow_never_stops_the_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = log_daemon(dir.path(), &rt, false);
+        let mut child = system_cmd(dir.path(), &["logs", "acme/widgets#7", "--follow"]);
+        let give_up = Instant::now() + WAIT;
+        while sent(&asked, "GetSystemLogs").len() < 2 {
+            assert!(Instant::now() < give_up, "the tails never came");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        interrupt(&child);
+        let code = ended_within(&mut child, WAIT);
+        let err = stderr_of(&mut child);
+        assert_eq!(code, Some(130), "{err}");
+        assert!(err.contains("Interrupted."), "{err}");
+        assert!(sent(&asked, "StopSystem").is_empty());
+        assert!(sent(&asked, "StopTests").is_empty());
+    }
+
+    fn sent_result(endpoint: &str, status: Option<u16>, error: Option<&str>) -> SendResult {
+        SendResult {
+            endpoint: endpoint.into(),
+            method: HttpMethod::Post,
+            url: "http://127.0.0.1:49152/oauth/token".into(),
+            status,
+            reason: status.map(|_| "OK".to_string()),
+            took_ms: 38,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: "{\"ok\":true}".into(),
+            body_bytes: 11,
+            truncated: false,
+            error: error.map(str::to_string),
+            at: 1,
+        }
+    }
+
+    fn send_run(wanted: &str, answer: Answer) -> (Done, Asked) {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let answer = Mutex::new(Some(answer));
+        let asked = scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(true)),
+            move |cmd, _| match cmd {
+                Request::GetSystem { .. } => {
+                    ok(Reply::System(Box::new(sview(SystemState::Running))))
+                }
+                Request::SendEndpoint { .. } => answer.lock().unwrap().take().unwrap(),
+                _ => ok(Reply::Ack),
+            },
+        );
+        let done = finish(system_cmd(dir.path(), &["send", "acme/widgets#7", wanted]));
+        (done, asked)
+    }
+
+    #[test]
+    fn send_prints_the_result_and_exits_by_status_and_unknown_endpoints_exit_2_before_any_request()
+    {
+        let (done, asked) = send_run(
+            "1",
+            ok(Reply::Sent(Box::new(sent_result(
+                "POST /oauth/token",
+                Some(200),
+                None,
+            )))),
+        );
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert!(done.out.starts_with("200 OK · 38 ms"), "{}", done.out);
+        assert!(
+            done.out.contains("  content-type: application/json"),
+            "{}",
+            done.out
+        );
+        let request = &sent(&asked, "SendEndpoint")[0];
+        assert!(
+            request.contains("endpoint: \"POST /oauth/token\""),
+            "{request}"
+        );
+        assert!(request.contains("side: Pr"), "{request}");
+
+        let (done, asked) = send_run(
+            "GET /oauth/status",
+            ok(Reply::Sent(Box::new(sent_result(
+                "GET /oauth/status",
+                Some(404),
+                None,
+            )))),
+        );
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        assert!(sent(&asked, "SendEndpoint")[0].contains("endpoint: \"GET /oauth/status\""));
+
+        let (done, _) = send_run(
+            "1",
+            ok(Reply::Sent(Box::new(sent_result(
+                "POST /oauth/token",
+                None,
+                Some(SEND_TIMEOUT_TEXT),
+            )))),
+        );
+        assert_eq!(done.code, Some(124), "{}", done.err);
+        assert!(done.out.contains(SEND_TIMEOUT_TEXT), "{}", done.out);
+
+        let (done, asked) = send_run("9", ok(Reply::Ack));
+        assert_eq!(done.code, Some(2), "{}", done.err);
+        assert!(done.err.contains("No endpoint 9"), "{}", done.err);
+        assert!(sent(&asked, "SendEndpoint").is_empty());
+
+        let (done, _) = send_run("1", refused(NOT_UP));
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        assert!(done.err.contains(NOT_UP), "{}", done.err);
+    }
+
+    #[test]
+    fn network_sends_the_hash_and_follows_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(true)),
+            |cmd, say| match cmd {
+                Request::SetSystemNetwork { .. } => {
+                    let mut running = sview(SystemState::Running);
+                    running.network = true;
+                    tell(say, 100, vec![starting(StartStage::Start), running]);
+                    ok(Reply::System(Box::new(sview(SystemState::Stopping))))
+                }
+                _ => ok(Reply::Ack),
+            },
+        );
+        let done = finish(system_cmd(dir.path(), &["network", "acme/widgets#7", "on"]));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert!(
+            done.out.contains("Outbound network on for this review"),
+            "{}",
+            done.out
+        );
+        let request = &sent(&asked, "SetSystemNetwork")[0];
+        assert!(request.contains("allowed: true"), "{request}");
+        assert!(request.contains("recipe_hash: \"h1\""), "{request}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::SetSystemNetwork { .. } => {
+                ok(Reply::System(Box::new(sview(SystemState::NotStarted))))
+            }
+            _ => ok(Reply::Ack),
+        });
+        let done = finish(system_cmd(
+            dir.path(),
+            &["network", "acme/widgets#7", "off"],
+        ));
+        assert_eq!(
+            done.code,
+            Some(0),
+            "no live system, nothing to wait for: {}",
+            done.err
+        );
+        assert!(
+            done.out.contains("Outbound network off for this review"),
+            "{}",
+            done.out
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(dir.path(), &rt, tests_of(plan(true)), |_, _| ok(Reply::Ack));
+        let done = finish(system_cmd(
+            dir.path(),
+            &["network", "acme/widgets#7", "maybe"],
+        ));
+        assert_eq!(done.code, Some(2), "{}", done.err);
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "a usage error asks nothing"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::SetSystemNetwork { .. } => refused(RECIPE_CHANGED),
+            _ => ok(Reply::Ack),
+        });
+        let done = finish(system_cmd(dir.path(), &["network", "acme/widgets#7", "on"]));
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        assert!(done.err.contains(RECIPE_CHANGED), "{}", done.err);
+    }
+
+    /// A view with no endpoints that is writing, and one with them.
+    fn endpoints_run(finally: SystemView, interrupt_it: bool) -> (Done, Asked) {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut base = sview(SystemState::Running);
+        base.endpoints.list.clear();
+        let reading = base.clone();
+        let asked = scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(true)),
+            move |cmd, say| match cmd {
+                Request::GetSystem { .. } => ok(Reply::System(Box::new(reading.clone()))),
+                Request::WriteEndpoints { .. } => {
+                    if !interrupt_it {
+                        let mut writing = reading.clone();
+                        writing.endpoints.writing = true;
+                        tell(say, 100, vec![writing, finally.clone()]);
+                    }
+                    ok(Reply::Ack)
+                }
+                _ => ok(Reply::Ack),
+            },
+        );
+        let child = system_cmd(dir.path(), &["endpoints", "acme/widgets#7", "--write"]);
+        if interrupt_it {
+            wait_for(&asked, "WriteEndpoints");
+            std::thread::sleep(Duration::from_millis(400));
+            interrupt(&child);
+        }
+        (finish(child), asked)
+    }
+
+    #[test]
+    fn endpoints_write_waits_for_the_turn_and_reports_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let asked = scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::GetSystem { .. } => ok(Reply::System(Box::new(sview(SystemState::Running)))),
+            _ => ok(Reply::Ack),
+        });
+        let done = finish(system_cmd(dir.path(), &["endpoints", "acme/widgets#7"]));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert!(done.out.contains("Where to test"), "{}", done.out);
+        assert!(
+            done.out
+                .contains("  1. POST /oauth/token · api  Refresh goes through the queue."),
+            "{}",
+            done.out
+        );
+        assert_eq!(asked.lock().unwrap().len(), 1, "reads GetSystem only");
+
+        let (done, asked) = endpoints_run(sview(SystemState::Running), false);
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert!(
+            done.out.contains("  2. GET /oauth/status · api"),
+            "{}",
+            done.out
+        );
+        assert_eq!(sent(&asked, "WriteEndpoints").len(), 1);
+
+        let mut bad = sview(SystemState::Running);
+        bad.endpoints.list.clear();
+        bad.endpoints.failed = Some("Claude Code's endpoints are not valid: x".into());
+        let (done, _) = endpoints_run(bad, false);
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        assert!(
+            done.err
+                .contains("Claude Code's endpoints are not valid: x"),
+            "{}",
+            done.err
+        );
+
+        let (done, asked) = endpoints_run(sview(SystemState::Running), true);
+        assert_eq!(done.code, Some(130), "{}", done.err);
+        assert_eq!(sent(&asked, "StopTests").len(), 1);
+        assert!(sent(&asked, "StopSystem").is_empty());
+    }
+
+    #[test]
+    fn fix_waits_for_the_recipe_turn_and_prints_the_new_system_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tests = Arc::new(Mutex::new(tests_view(TestsPhase::Ready, Some(plan(false)))));
+        let shared = tests.clone();
+        scripted(dir.path(), &rt, tests, move |cmd, say| match cmd {
+            Request::FixSystem { .. } => {
+                *shared.lock().unwrap() =
+                    tests_view(TestsPhase::Generating { activity: None }, Some(plan(false)));
+                let (say, shared) = (say.clone(), shared.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let mut fixed = plan(false);
+                    fixed.system.as_mut().unwrap().start = "cargo run -q --release".into();
+                    let ready = tests_view(TestsPhase::Ready, Some(fixed));
+                    *shared.lock().unwrap() = ready.clone();
+                    let _ = say.send(ServerMessage::Event {
+                        topic: "tests".into(),
+                        event: Event::TestEnv {
+                            pr: pr(),
+                            view: Box::new(ready),
+                        },
+                    });
+                });
+                ok(Reply::Ack)
+            }
+            _ => ok(Reply::Ack),
+        });
+        let done = finish(system_cmd(dir.path(), &["fix", "acme/widgets#7"]));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        assert!(
+            done.out.contains("SYSTEM · IN THE CONTAINER"),
+            "{}",
+            done.out
+        );
+        assert!(
+            done.out.contains("  start    cargo run -q --release"),
+            "{}",
+            done.out
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::FixSystem { .. } => refused(NOTHING_TO_FIX),
+            _ => ok(Reply::Ack),
+        });
+        let done = finish(system_cmd(dir.path(), &["fix", "acme/widgets#7"]));
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        assert!(
+            done.err.contains("The system has not failed"),
+            "{}",
+            done.err
+        );
+    }
+
+    #[test]
+    fn a_hostile_daemon_cannot_repaint_the_terminal() {
+        let hostile = "x\u{1b}[2J\u{202e}y\rz";
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(true)),
+            move |cmd, _| match cmd {
+                Request::GetSystem { .. } => {
+                    let mut v = sview(SystemState::NotStarted);
+                    v.note = Some(hostile.into());
+                    v.support = SystemSupport::Unavailable {
+                        reason: hostile.into(),
+                    };
+                    v.endpoints.list[0].endpoint.why = hostile.into();
+                    v.endpoints.list[0].endpoint.path = format!("/{hostile}");
+                    ok(Reply::System(Box::new(v)))
+                }
+                Request::GetSystemLogs { process, .. } => {
+                    ok(Reply::SystemLogs(Box::new(LogTail {
+                        process: process.clone(),
+                        first: 1,
+                        lines: vec![hostile.into()],
+                    })))
+                }
+                _ => ok(Reply::Ack),
+            },
+        );
+        let done = finish(system_cmd(dir.path(), &["status", "acme/widgets#7"]));
+        let logs = finish(system_cmd(dir.path(), &["logs", "acme/widgets#7"]));
+        for text in [&done.out, &done.err, &logs.out, &logs.err] {
+            assert!(
+                !text.contains('\u{1b}') && !text.contains('\u{202e}') && !text.contains('\r'),
+                "{text:?}"
+            );
+        }
+        assert!(done.out.contains("x\\u{1b}[2J"), "{}", done.out);
+        assert!(logs.out.contains("api │ x\\u{1b}[2J"), "{}", logs.out);
     }
 }

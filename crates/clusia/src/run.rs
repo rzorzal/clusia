@@ -312,7 +312,7 @@ fn state_name(state: SyncState) -> String {
         .unwrap_or_default()
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

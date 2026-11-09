@@ -4,17 +4,30 @@
 //! is data from the pull request or its agent: it is printed through `printable` or
 //! `printable_lines`, so it can neither repaint the terminal nor pass for a line of its own.
 
-#![allow(dead_code)]
-
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
+use std::time::Duration;
 
+use clusia_core::cockpit::RunSide;
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::system::*;
-use clusia_core::tests::{Approve, STEP_SYSTEM, STEP_TESTS, SetupPlan, StepPlace, StepState};
+use clusia_core::tests::{
+    Approve, STEP_SYSTEM, STEP_TESTS, SetupPlan, StepPlace, StepState, TestsView,
+};
 use clusia_core::{Paths, PrRef};
+use clusia_protocol::{Client, Command as Request, Event, Reply, topics};
+use serde_json::json;
 
-use crate::run::{CliError, Output};
-use crate::tests_cmd::command_lines;
+use crate::agent::streamed;
+use crate::check::line_of;
+use crate::review::parse_pr;
+use crate::run::{CliError, Output, connect, now_unix, unexpected};
+use crate::tests_cmd::{
+    Interrupts, StopWith, command_lines, confirm, generated, plan_lines, prepare, view_of,
+};
+
+/// How long `stop` waits for the system to be down.
+const STOP_WAIT_SECS: u64 = 60;
 
 /// What one `clusia system` call asks for, as clap read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,14 +55,645 @@ pub(crate) enum SystemAction {
     Fix,
 }
 
+/// Which Ctrl-C a command gets: what it stops once it has started something.
+fn stop_with(action: &SystemAction) -> StopWith {
+    match action {
+        SystemAction::Start { .. } | SystemAction::Restart | SystemAction::Network { .. } => {
+            StopWith::System
+        }
+        SystemAction::Fix | SystemAction::Endpoints { write: true } => StopWith::Tests,
+        _ => StopWith::Nothing,
+    }
+}
+
+/// Whether the command subscribes and opens the review first, as every acting command does.
+fn opens(action: &SystemAction) -> bool {
+    !matches!(
+        action,
+        SystemAction::Status | SystemAction::Endpoints { write: false }
+    )
+}
+
 pub(crate) async fn system(
-    _paths: &Paths,
-    _home: Option<&Path>,
-    _pr: &str,
-    _action: SystemAction,
-    _json: bool,
+    paths: &Paths,
+    home: Option<&Path>,
+    pr: &str,
+    action: SystemAction,
+    json: bool,
 ) -> Result<Output, CliError> {
-    todo!()
+    let pr = parse_pr(pr)?;
+    // Checked before any connection, so a usage error never starts the daemon.
+    if matches!(action, SystemAction::Logs { lines: 0, .. }) {
+        return Err(CliError::Usage("--lines must be at least 1".into()));
+    }
+    let mut stop = Interrupts::new(paths, home, pr.clone(), stop_with(&action))?;
+    let mut client = connect(paths, home).await?;
+    if opens(&action) {
+        // The requests read the review's worktree, which opening prepares.
+        let topics = vec![topics::TESTS.into()];
+        stop.ask(
+            &mut client,
+            Request::Subscribe { topics },
+            false,
+            "subscribing",
+        )
+        .await?;
+        stop.ask(
+            &mut client,
+            Request::OpenReview { pr: pr.clone() },
+            false,
+            "opening the review",
+        )
+        .await?;
+    }
+    let (client, stop) = (&mut client, &mut stop);
+    match action {
+        SystemAction::Start { yes } => start(client, &pr, yes, json, stop).await,
+        SystemAction::Restart => restart(client, &pr, json, stop).await,
+        SystemAction::Stop => stop_system(client, &pr, stop).await,
+        SystemAction::Status => status(client, &pr, stop).await,
+        SystemAction::Logs {
+            process,
+            lines,
+            follow,
+        } => logs(client, &pr, process.as_deref(), lines, follow, json, stop).await,
+        SystemAction::Send { endpoint } => send(client, &pr, &endpoint, stop).await,
+        SystemAction::Network { allowed } => network(client, &pr, allowed, json, stop).await,
+        SystemAction::Endpoints { write } => endpoints(client, &pr, write, stop).await,
+        SystemAction::Fix => fix(client, &pr, json, stop).await,
+    }
+}
+
+fn exit(code: u8, message: impl Into<String>) -> CliError {
+    CliError::Exit {
+        code,
+        message: message.into(),
+    }
+}
+
+/// What a command prints: `human` lines, or the JSON value with `--json`.
+fn output(human: Vec<String>, json: serde_json::Value) -> Output {
+    Output {
+        human: human.join("\n"),
+        json,
+    }
+}
+
+/// `output`, for a command that ends with a code: a non-zero one prints the output first, as
+/// `clusia tests` does, and then fails with that code.
+fn ended(output: Output, code: u8, message: &str, json: bool) -> Result<Output, CliError> {
+    if code == 0 {
+        return Ok(output);
+    }
+    if json {
+        println!("{}", output.json);
+    } else {
+        println!("{}", streamed(&output.human));
+    }
+    Err(exit(code, message))
+}
+
+fn view_json(view: &SystemView) -> serde_json::Value {
+    serde_json::to_value(view).unwrap_or(serde_json::Value::Null)
+}
+
+async fn system_of(
+    client: &mut Client,
+    pr: &PrRef,
+    stop: &mut Interrupts<'_>,
+) -> Result<SystemView, CliError> {
+    match stop
+        .ask(
+            client,
+            Request::GetSystem { pr: pr.clone() },
+            false,
+            "reading the system",
+        )
+        .await?
+    {
+        Reply::System(view) => Ok(*view),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// The reply of a request that answers with the whole view.
+async fn ask_system(
+    client: &mut Client,
+    request: Request,
+    acts: bool,
+    what: &str,
+    stop: &mut Interrupts<'_>,
+) -> Result<SystemView, CliError> {
+    match stop.ask(client, request, acts, what).await? {
+        Reply::System(view) => Ok(*view),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// The recipe's plan and its system section, or why a system cannot start from it.
+fn system_plan_of(
+    view: &TestsView,
+    pr: &PrRef,
+    check_blocked: bool,
+) -> Result<(SetupPlan, SystemPlan), CliError> {
+    let Some(plan) = view.plan.clone() else {
+        return Err(exit(
+            1,
+            format!("There is no recipe yet; run clusia tests {pr} --generate first"),
+        ));
+    };
+    let Some(system) = plan.system.clone() else {
+        return Err(exit(1, NO_SYSTEM));
+    };
+    if check_blocked && let Some(blocked) = &plan.blocked {
+        return Err(exit(1, format!("Blocked: {}", line_of(blocked))));
+    }
+    Ok((plan, system))
+}
+
+/// Follows the system until it is neither starting nor stopping, telling each stage once. It
+/// reads the daemon's own events and sets no timer. `told` are the events that came before the
+/// reply: the last of them is newer than `first`.
+async fn settle(
+    client: &mut Client,
+    pr: &PrRef,
+    first: SystemView,
+    json: bool,
+    stop: &mut Interrupts<'_>,
+) -> Result<SystemView, CliError> {
+    let mut pending: VecDeque<SystemView> = client
+        .take_events()
+        .into_iter()
+        .filter_map(|(_, event)| match event {
+            Event::SystemChanged { pr: of, view } if of == *pr => Some(*view),
+            _ => None,
+        })
+        .collect();
+    if pending.is_empty() {
+        pending.push_back(first);
+    }
+    let mut said: Option<String> = None;
+    loop {
+        let view = match pending.pop_front() {
+            Some(view) => view,
+            None => loop {
+                if let Event::SystemChanged { pr: of, view } =
+                    stop.event(client, "the system").await?
+                    && of == *pr
+                {
+                    break *view;
+                }
+            },
+        };
+        if !matches!(
+            view.state,
+            SystemState::Starting { .. } | SystemState::Stopping
+        ) && pending.is_empty()
+        {
+            return Ok(view);
+        }
+        let line = state_line(&view, now_unix());
+        if !json && said.as_deref() != Some(line.as_str()) {
+            eprintln!("{line}");
+        }
+        said = Some(line);
+    }
+}
+
+/// What a start, a restart or a network change ends with.
+fn started(view: &SystemView, json: bool) -> Result<Output, CliError> {
+    let code = start_exit_code(&view.state);
+    let message = match code {
+        1 => "the system failed to start",
+        124 => "the system is unhealthy; it is still running",
+        _ => "the system was stopped",
+    };
+    ended(
+        output(start_lines(view, now_unix()), view_json(view)),
+        code,
+        message,
+        json,
+    )
+}
+
+async fn start(
+    client: &mut Client,
+    pr: &PrRef,
+    yes: bool,
+    json: bool,
+    stop: &mut Interrupts<'_>,
+) -> Result<Output, CliError> {
+    let tests = view_of(client, pr, stop).await?;
+    let (plan, system) = system_plan_of(&tests, pr, true)?;
+    let mut recipe_hash = plan.recipe_hash.clone();
+    if !plan.ready || !system.approved {
+        for line in plan_lines(&plan) {
+            eprintln!("{line}");
+        }
+        for line in system_plan_lines(&system) {
+            eprintln!("{line}");
+        }
+        if !yes && !confirm("Approve the setup, the system and its test commands? [y/N] ").await? {
+            return Err(exit(1, "Setup not approved; nothing ran."));
+        }
+        // The setup is stopped as any setup is; the system, once it starts, as a system.
+        stop.stop_with(StopWith::Tests);
+        let mut shown = plan.clone();
+        shown.steps.extend(system.steps.iter().cloned());
+        let ready = prepare(client, pr, &shown, system_approval_of(&plan, &system), stop).await?;
+        stop.stop_with(StopWith::System);
+        recipe_hash = match ready.plan {
+            Some(plan) => plan.recipe_hash,
+            None => {
+                let (plan, _) = system_plan_of(&view_of(client, pr, stop).await?, pr, false)?;
+                plan.recipe_hash
+            }
+        };
+    }
+    let reply = ask_system(
+        client,
+        Request::StartSystem {
+            pr: pr.clone(),
+            side: RunSide::Pr,
+            recipe_hash,
+            keep: true,
+        },
+        true,
+        "the system",
+        stop,
+    )
+    .await?;
+    let view = settle(client, pr, reply, json, stop).await?;
+    started(&view, json)
+}
+
+async fn restart(
+    client: &mut Client,
+    pr: &PrRef,
+    json: bool,
+    stop: &mut Interrupts<'_>,
+) -> Result<Output, CliError> {
+    let tests = view_of(client, pr, stop).await?;
+    let (plan, _) = system_plan_of(&tests, pr, false)?;
+    let reply = ask_system(
+        client,
+        Request::RestartSystem {
+            pr: pr.clone(),
+            side: RunSide::Pr,
+            recipe_hash: plan.recipe_hash,
+        },
+        true,
+        "the system",
+        stop,
+    )
+    .await?;
+    let view = settle(client, pr, reply, json, stop).await?;
+    started(&view, json)
+}
+
+async fn network(
+    client: &mut Client,
+    pr: &PrRef,
+    allowed: bool,
+    json: bool,
+    stop: &mut Interrupts<'_>,
+) -> Result<Output, CliError> {
+    let tests = view_of(client, pr, stop).await?;
+    let (plan, _) = system_plan_of(&tests, pr, false)?;
+    let reply = ask_system(
+        client,
+        Request::SetSystemNetwork {
+            pr: pr.clone(),
+            allowed,
+            recipe_hash: plan.recipe_hash,
+        },
+        true,
+        "the system",
+        stop,
+    )
+    .await?;
+    if matches!(
+        reply.state,
+        SystemState::Starting { .. } | SystemState::Stopping
+    ) {
+        let view = settle(client, pr, reply, json, stop).await?;
+        return started(&view, json);
+    }
+    Ok(output(
+        vec![network_text(allowed).into()],
+        view_json(&reply),
+    ))
+}
+
+async fn stop_system(
+    client: &mut Client,
+    pr: &PrRef,
+    stop: &mut Interrupts<'_>,
+) -> Result<Output, CliError> {
+    let reply = ask_system(
+        client,
+        Request::StopSystem {
+            pr: pr.clone(),
+            side: RunSide::Pr,
+        },
+        false,
+        "the system",
+        stop,
+    )
+    .await?;
+    let told: Vec<SystemView> = client
+        .take_events()
+        .into_iter()
+        .filter_map(|(_, event)| match event {
+            Event::SystemChanged { pr: of, view } if of == *pr => Some(*view),
+            _ => None,
+        })
+        .collect();
+    // A system that is already down says so; one that is going down is waited for.
+    let mut view = told.last().cloned().unwrap_or(reply);
+    let down = |view: &SystemView| !view.state.is_live();
+    if !down(&view) {
+        let waited = tokio::time::timeout(Duration::from_secs(STOP_WAIT_SECS), async {
+            loop {
+                if let Event::SystemChanged { pr: of, view } =
+                    stop.event(client, "the system").await?
+                    && of == *pr
+                    && down(&view)
+                {
+                    return Ok::<_, CliError>(*view);
+                }
+            }
+        })
+        .await;
+        view = match waited {
+            Ok(view) => view?,
+            Err(_) => {
+                return Err(exit(
+                    1,
+                    format!("The system did not stop in {STOP_WAIT_SECS} s"),
+                ));
+            }
+        };
+    }
+    let line = match view.state {
+        SystemState::Stopped { why } => stop_text(why).to_string(),
+        _ => state_line(&view, now_unix()),
+    };
+    Ok(output(vec![line], view_json(&view)))
+}
+
+async fn status(
+    client: &mut Client,
+    pr: &PrRef,
+    stop: &mut Interrupts<'_>,
+) -> Result<Output, CliError> {
+    let view = system_of(client, pr, stop).await?;
+    let code = status_exit_code(&view.state);
+    let message = match code {
+        1 => "the system is not healthy",
+        _ => "the system is not running",
+    };
+    ended(
+        output(system_lines(&view, now_unix()), view_json(&view)),
+        code,
+        message,
+        false,
+    )
+}
+
+async fn logs(
+    client: &mut Client,
+    pr: &PrRef,
+    process: Option<&str>,
+    lines: u32,
+    follow: bool,
+    json: bool,
+    stop: &mut Interrupts<'_>,
+) -> Result<Output, CliError> {
+    let view = system_of(client, pr, stop).await?;
+    let wanted = pick_processes(&view, process, pr)?;
+    let lines = lines.min(LOG_LINES_MAX as u32);
+    // The number of the next line to print and the label, per process.
+    let mut next: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    for p in wanted {
+        let reply = stop
+            .ask(
+                client,
+                Request::GetSystemLogs {
+                    pr: pr.clone(),
+                    side: RunSide::Pr,
+                    process: p.id.clone(),
+                    lines,
+                },
+                false,
+                "reading the logs",
+            )
+            .await?;
+        let Reply::SystemLogs(tail) = reply else {
+            return Err(unexpected(reply));
+        };
+        for (i, line) in tail.lines.iter().enumerate() {
+            print_log(&p.id, &p.label, tail.first + i as u64, line, json);
+        }
+        next.insert(
+            p.id.clone(),
+            (tail.first.max(1) + tail.lines.len() as u64, p.label.clone()),
+        );
+    }
+    let ended = Output {
+        human: String::new(),
+        json: serde_json::Value::Null,
+    };
+    if !follow {
+        return Ok(ended);
+    }
+    if !view.state.is_live() {
+        return follow_end(&view.state, ended);
+    }
+    loop {
+        match stop.event(client, "the logs").await? {
+            Event::SystemLogs {
+                pr: of,
+                process,
+                first,
+                lines,
+                ..
+            } if of == *pr => {
+                let Some((expected, label)) = next.get_mut(&process) else {
+                    continue;
+                };
+                if first > *expected {
+                    println!("… {} lines skipped …", first - *expected);
+                    *expected = first;
+                }
+                let skip = expected.saturating_sub(first) as usize;
+                for (i, line) in lines.iter().enumerate().skip(skip) {
+                    print_log(&process, label, first + i as u64, line, json);
+                }
+                *expected = (*expected).max(first + lines.len() as u64);
+            }
+            Event::SystemChanged { pr: of, view } if of == *pr => {
+                if matches!(
+                    view.state,
+                    SystemState::Stopped { .. } | SystemState::Failed
+                ) {
+                    return follow_end(&view.state, ended);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A follow ends 0 on a stopped system and 1 on a failed one.
+fn follow_end(state: &SystemState, ended: Output) -> Result<Output, CliError> {
+    match state {
+        SystemState::Failed => Err(exit(1, "the system failed")),
+        _ => Ok(ended),
+    }
+}
+
+fn print_log(process: &str, label: &str, n: u64, line: &str, json: bool) {
+    if json {
+        println!("{}", json!({ "process": process, "n": n, "line": line }));
+    } else {
+        println!("{}", log_line_text(label, line));
+    }
+}
+
+async fn send(
+    client: &mut Client,
+    pr: &PrRef,
+    wanted: &str,
+    stop: &mut Interrupts<'_>,
+) -> Result<Output, CliError> {
+    let view = system_of(client, pr, stop).await?;
+    let endpoint = match pick_endpoint(&view.endpoints, wanted) {
+        Ok(endpoint) => endpoint.id.clone(),
+        Err(CliError::Usage(message)) => {
+            return Err(CliError::Usage(format!("{message} in {pr}")));
+        }
+        Err(other) => return Err(other),
+    };
+    let reply = stop
+        .ask(
+            client,
+            Request::SendEndpoint {
+                pr: pr.clone(),
+                side: RunSide::Pr,
+                endpoint,
+            },
+            false,
+            "the request",
+        )
+        .await?;
+    let Reply::Sent(result) = reply else {
+        return Err(unexpected(reply));
+    };
+    let code = send_exit_code(&result);
+    let message = match (&result.error, result.status) {
+        (Some(error), _) => line_of(error),
+        (None, Some(status)) => format!("the endpoint answered {status}"),
+        (None, None) => "the request failed".into(),
+    };
+    let value = serde_json::to_value(&*result).unwrap_or(serde_json::Value::Null);
+    ended(output(send_lines(&result), value), code, &message, false)
+}
+
+async fn endpoints(
+    client: &mut Client,
+    pr: &PrRef,
+    write: bool,
+    stop: &mut Interrupts<'_>,
+) -> Result<Output, CliError> {
+    let before = system_of(client, pr, stop).await?;
+    if !write {
+        let live = before.state.is_live();
+        return Ok(output(
+            endpoint_lines(&before.endpoints, live),
+            view_json(&before),
+        ));
+    }
+    stop.ask(
+        client,
+        Request::WriteEndpoints { pr: pr.clone() },
+        true,
+        "the endpoints",
+    )
+    .await?;
+    let mut writing_seen = false;
+    let mut ended: Option<SystemView> = None;
+    // What was told before the `Ack` comes first, in order.
+    for (_, event) in client.take_events() {
+        if let Event::SystemChanged { pr: of, view } = event
+            && of == *pr
+        {
+            ended = turn_end(&mut writing_seen, *view).or(ended);
+        }
+    }
+    if ended.is_none() {
+        let now = system_of(client, pr, stop).await?;
+        let e = &now.endpoints;
+        if e.writing {
+            writing_seen = true;
+        } else if e.written_head != before.endpoints.written_head
+            || e.failed != before.endpoints.failed
+        {
+            ended = Some(now);
+        }
+    }
+    let view = loop {
+        if let Some(view) = ended {
+            break view;
+        }
+        if let Event::SystemChanged { pr: of, view } = stop.event(client, "the endpoints").await?
+            && of == *pr
+        {
+            ended = turn_end(&mut writing_seen, *view);
+        }
+    };
+    let live = view.state.is_live();
+    let out = output(endpoint_lines(&view.endpoints, live), view_json(&view));
+    match &view.endpoints.failed {
+        Some(failed) => ended_with(out, line_of(failed)),
+        None => Ok(out),
+    }
+}
+
+/// The view that ends an endpoints turn: one that stopped writing after one that was.
+fn turn_end(writing_seen: &mut bool, view: SystemView) -> Option<SystemView> {
+    if view.endpoints.writing {
+        *writing_seen = true;
+        None
+    } else {
+        (*writing_seen).then_some(view)
+    }
+}
+
+fn ended_with(out: Output, message: String) -> Result<Output, CliError> {
+    println!("{}", streamed(&out.human));
+    Err(exit(1, message))
+}
+
+async fn fix(
+    client: &mut Client,
+    pr: &PrRef,
+    json: bool,
+    stop: &mut Interrupts<'_>,
+) -> Result<Output, CliError> {
+    stop.ask(
+        client,
+        Request::FixSystem { pr: pr.clone() },
+        true,
+        "the fix",
+    )
+    .await?;
+    let view = generated(client, pr, json, stop).await?;
+    let human = match view.plan.as_ref().and_then(|p| p.system.as_ref()) {
+        Some(system) => system_plan_lines(system),
+        None => vec!["The new recipe has no [system] section.".into()],
+    };
+    Ok(output(human, json!({ "view": view })))
 }
 
 /// How many lines of a failure's tail are shown.

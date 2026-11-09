@@ -4,6 +4,7 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use clusia_core::cockpit::RunSide;
 use clusia_core::functions::CaseStatus;
 use clusia_core::printable::printable_lines;
 use clusia_core::tests::{
@@ -265,35 +266,90 @@ fn io_error(e: io::Error) -> CliError {
     CliError::Other(e.to_string())
 }
 
-/// What a Ctrl-C needs: where to reach the daemon again, which review, and whether a request
-/// that starts an activity has gone out.
+/// What a Ctrl-C asks the daemon to stop once an activity may have started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopWith {
+    /// The review's test activity (`StopTests`).
+    Tests,
+    /// The review's system (`StopSystem`).
+    System,
+    /// Nothing: the command only reads, so it just ends.
+    Nothing,
+}
+
+/// What a Ctrl-C needs: where to reach the daemon again, which review, what to stop, and
+/// whether a request that starts an activity has gone out.
 pub(crate) struct Interrupts<'a> {
     signal: Signal,
     paths: &'a Paths,
     home: Option<&'a Path>,
     pr: PrRef,
     acting: bool,
+    stop_with: StopWith,
 }
 
-impl Interrupts<'_> {
+impl<'a> Interrupts<'a> {
+    /// Catches Ctrl-C from here on: one before the first poll of a handler would end the
+    /// process without a word.
+    pub(crate) fn new(
+        paths: &'a Paths,
+        home: Option<&'a Path>,
+        pr: PrRef,
+        stop_with: StopWith,
+    ) -> Result<Self, CliError> {
+        Ok(Self {
+            signal: signal(SignalKind::interrupt()).map_err(io_error)?,
+            paths,
+            home,
+            pr,
+            acting: false,
+            stop_with,
+        })
+    }
+
+    /// Changes what a Ctrl-C stops, for a command whose later part starts another kind of
+    /// activity than its first. Nothing that went out before is stopped by the new kind.
+    pub(crate) fn stop_with(&mut self, stop_with: StopWith) {
+        self.stop_with = stop_with;
+        self.acting = false;
+    }
+
     /// Ends the command for a Ctrl-C. Once an activity may have started, it is stopped over a
     /// fresh connection: the request the Ctrl-C cut short may still be answered on the old one.
-    async fn end(&self, what: &str) -> ! {
+    async fn end(&mut self, what: &str) -> ! {
+        if self.stop_with == StopWith::Nothing {
+            eprintln!("Interrupted.");
+            std::process::exit(130);
+        }
         if !self.acting {
             eprintln!("Interrupted: nothing ran.");
             std::process::exit(130);
         }
-        let stopped = tokio::time::timeout(STOP_WAIT, async {
-            let mut client = connect(self.paths, self.home).await?;
-            client
-                .request(Request::StopTests {
+        let (request, what) = match self.stop_with {
+            StopWith::System => (
+                Request::StopSystem {
                     pr: self.pr.clone(),
-                })
-                .await
-                .map_err(CliError::from)
-        })
-        .await;
-        if matches!(stopped, Ok(Ok(_))) {
+                    side: RunSide::Pr,
+                },
+                "the system",
+            ),
+            _ => (
+                Request::StopTests {
+                    pr: self.pr.clone(),
+                },
+                what,
+            ),
+        };
+        let stop = tokio::time::timeout(STOP_WAIT, async {
+            let mut client = connect(self.paths, self.home).await?;
+            client.request(request).await.map_err(CliError::from)
+        });
+        // A second Ctrl-C while the stop is awaited does not wait any longer.
+        let stopped = tokio::select! {
+            stopped = stop => Some(stopped),
+            _ = self.signal.recv() => None,
+        };
+        if matches!(stopped, Some(Ok(Ok(_)))) {
             eprintln!("Stopped {what}.");
         } else {
             eprintln!("The daemon did not answer; {what} may still go on (Stop in the window).");
@@ -365,6 +421,16 @@ async fn generate(
         "generating",
     )
     .await?;
+    generated(client, pr, json, stop).await
+}
+
+/// Waits for the recipe turn a request just started, and returns the view it ends with.
+pub(crate) async fn generated(
+    client: &mut Client,
+    pr: &PrRef,
+    json: bool,
+    stop: &mut Interrupts<'_>,
+) -> Result<TestsView, CliError> {
     // What was told before the `Ack` may be the end itself. The daemon set the phase before it
     // answered, so the view read now is never the one from before the request.
     client.take_events();
@@ -433,7 +499,7 @@ async fn approved_at_terminal(plan: &SetupPlan) -> Result<bool, CliError> {
 }
 
 /// A step as the setup tells it: by the title the plan gave it, else by its id.
-fn step_line(plan: &SetupPlan, step: &str, state: &StepState) -> Option<String> {
+pub(crate) fn step_line(plan: &SetupPlan, step: &str, state: &StepState) -> Option<String> {
     let title = plan
         .steps
         .iter()
@@ -530,13 +596,25 @@ async fn setup(
             message: "Setup not approved; nothing ran.".into(),
         });
     }
+    prepare(client, pr, &plan, approval_of(&plan), stop).await
+}
+
+/// Sends the approval and waits for the setup to end; `plan` is what was shown, so a step is
+/// told by the title it had there.
+pub(crate) async fn prepare(
+    client: &mut Client,
+    pr: &PrRef,
+    plan: &SetupPlan,
+    approve: Approve,
+    stop: &mut Interrupts<'_>,
+) -> Result<TestsView, CliError> {
     let request = Request::PrepareTests {
         pr: pr.clone(),
         recipe_hash: plan.recipe_hash.clone(),
-        approve: approval_of(&plan),
+        approve,
     };
     stop.ask(client, request, true, "the setup").await?;
-    let (lines, told_end) = told_before_ack(client.take_events(), pr, &plan);
+    let (lines, told_end) = told_before_ack(client.take_events(), pr, plan);
     for line in lines {
         eprintln!("{line}");
     }
@@ -556,7 +634,7 @@ async fn setup(
                     state,
                     ..
                 } if of == *pr => {
-                    if let Some(line) = step_line(&plan, &step, &state) {
+                    if let Some(line) = step_line(plan, &step, &state) {
                         eprintln!("{line}");
                     }
                 }
@@ -723,13 +801,7 @@ pub(crate) async fn tests(
     let pr = parse_pr(pr)?;
     // Caught from here on: a Ctrl-C before the first poll of a handler would end the process
     // without a word.
-    let mut stop = Interrupts {
-        signal: signal(SignalKind::interrupt()).map_err(io_error)?,
-        paths,
-        home,
-        pr: pr.clone(),
-        acting: false,
-    };
+    let mut stop = Interrupts::new(paths, home, pr.clone(), StopWith::Tests)?;
     let mut client = connect(paths, home).await?;
     let acts = wanted.generate
         || wanted.setup
