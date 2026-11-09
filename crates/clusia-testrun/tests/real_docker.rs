@@ -312,6 +312,39 @@ async fn start_all(
         .unwrap()
 }
 
+/// Removes a system's engine objects when dropped, so a failed assertion leaves nothing
+/// behind. Drop cannot await, so it runs the CLI directly.
+struct Teardown {
+    docker: Docker,
+    names: system::SystemNames,
+}
+
+impl Drop for Teardown {
+    fn drop(&mut self) {
+        let n = &self.names;
+        let nets = [n.publish_net.clone(), n.inner_net.clone()];
+        let mut steps: Vec<Vec<String>> = vec![vec![
+            "rm".into(),
+            "-f".into(),
+            n.container.clone(),
+            n.forwarder.clone(),
+        ]];
+        steps.extend(nets.map(|net| vec!["network".to_string(), "rm".into(), net]));
+        for args in steps {
+            let _ = std::process::Command::new(&self.docker.cli)
+                .args(args)
+                .env_clear()
+                .envs(self.docker.env.iter().cloned())
+                .output();
+        }
+    }
+}
+
+/// An image with a `httpd` applet; alpine's busybox has none.
+const SYSTEM_IMAGE: &str = "busybox:1.36";
+const SYSTEM_START: &str =
+    "mkdir -p /tmp/www && echo ok > /tmp/www/index.html && exec httpd -f -p 80 -h /tmp/www";
+
 #[tokio::test]
 async fn a_real_system_publishes_on_loopback_and_cannot_reach_out() {
     if std::env::var("CLUSIA_TEST_DOCKER").as_deref() != Ok("1") {
@@ -335,15 +368,15 @@ async fn a_real_system_publishes_on_loopback_and_cannot_reach_out() {
         cli: PathBuf::from(&engine.cli),
         env: engine::cli_env(Path::new(&engine.cli), &host),
     };
-    if !container::image_present(&exec, &docker, "alpine:3.20").await {
+    if !container::image_present(&exec, &docker, SYSTEM_IMAGE).await {
         if !online {
             eprintln!(
-                "skipped: alpine:3.20 is not on the engine; set CLUSIA_TEST_NETWORK=1 to pull it"
+                "skipped: {SYSTEM_IMAGE} is not on the engine; set CLUSIA_TEST_NETWORK=1 to pull it"
             );
             return;
         }
         let pulled = exec
-            .output(&docker.command(["pull", "alpine:3.20"]), LIMIT)
+            .output(&docker.command(["pull", SYSTEM_IMAGE]), LIMIT)
             .await
             .unwrap();
         assert_eq!(
@@ -404,11 +437,10 @@ async fn a_real_system_publishes_on_loopback_and_cannot_reach_out() {
     };
 
     let names = system::system_names(&slug, 1, RunSide::Pr, None);
-    let job_for = |network: bool| {
-        SystemJob {
+    let job_for = |network: bool| SystemJob {
         names: names.clone(),
-        image: "alpine:3.20".into(),
-        start: "mkdir -p /tmp/www && echo ok > /tmp/www/index.html && exec busybox httpd -f -p 80 -h /tmp/www".into(),
+        image: SYSTEM_IMAGE.into(),
+        start: SYSTEM_START.into(),
         env: vec![],
         ports: vec![80],
         network,
@@ -419,10 +451,13 @@ async fn a_real_system_publishes_on_loopback_and_cannot_reach_out() {
             repo: "rzorzal/clusia-system-test".into(),
             kind: LabelKind::System,
         },
-    }
     };
-    // A left-over of an earlier failed run.
+    // A left-over of an earlier failed run, and whatever this one leaves, even on a panic.
     let _ = system::remove_system(&exec, &docker, &names).await;
+    let _teardown = Teardown {
+        docker: docker.clone(),
+        names: names.clone(),
+    };
 
     let mapped = start_all(&exec, &docker, &job_for(false), &mounts).await;
     let host_port = mapped[&80];
@@ -467,7 +502,10 @@ async fn a_real_system_publishes_on_loopback_and_cannot_reach_out() {
 
     system::remove_system(&exec, &docker, &names).await.unwrap();
     let review = "label=io.clusia.review=rzorzal~clusia-system-test~1";
-    for verb in [["ps", "-a"], ["network", "ls"]] {
+    for (verb, format) in [
+        (&["ps", "-a"][..], "{{.Names}}"),
+        (&["network", "ls"][..], "{{.Name}}"),
+    ] {
         let mut args: Vec<&str> = verb.to_vec();
         args.extend([
             "--filter",
@@ -475,20 +513,8 @@ async fn a_real_system_publishes_on_loopback_and_cannot_reach_out() {
             "--filter",
             review,
             "--format",
-            "{{.Names}}",
+            format,
         ]);
-        if verb[0] == "network" {
-            args = vec![
-                "network",
-                "ls",
-                "--filter",
-                "label=io.clusia.kind=system",
-                "--filter",
-                review,
-                "--format",
-                "{{.Name}}",
-            ];
-        }
         assert_eq!(listed(&exec, &docker, &args).await, "", "{verb:?}");
     }
 }

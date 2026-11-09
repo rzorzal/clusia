@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use clusia_core::cockpit::RunSide;
+use clusia_core::printable::printable;
 use clusia_core::system::{LOG_LINE_MAX, SYSTEM_STOP_SECS, log_line, off_loopback_text};
 
 use crate::compose::internal_network;
@@ -18,7 +19,7 @@ use crate::container::{create_caches, first_line};
 use crate::docker::{Docker, RunMounts, common_args, git_file_problem, mount_problem};
 use crate::exec::{Exec, Output};
 use crate::image::ImagePlan;
-use crate::names::{Labels, sha256_hex};
+use crate::names::{LabelKind, Labels, sha256_hex};
 
 /// The limit of one engine call made for a system.
 const SYSTEM_CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -93,10 +94,19 @@ pub struct SystemJob {
     pub labels: Labels,
 }
 
+/// The review's labels with the kind of a system's objects, whatever kind the caller built.
+fn system_labels(labels: &Labels) -> Labels {
+    Labels {
+        kind: LabelKind::System,
+        ..labels.clone()
+    }
+}
+
 /// `docker create` for the system container. It joins the internal network only, has no `-p`
 /// and no `--rm` (`remove_system` removes it). Without network, `--dns 127.0.0.1` leaves the
 /// embedded resolver answering the names of its own networks and nothing outside.
 pub fn system_create_args(job: &SystemJob, mounts: &RunMounts) -> Vec<String> {
+    let labels = system_labels(&job.labels);
     let mut args: Vec<String> = [
         "create",
         "--name",
@@ -110,7 +120,7 @@ pub fn system_create_args(job: &SystemJob, mounts: &RunMounts) -> Vec<String> {
         args.extend(["--dns", "127.0.0.1"].map(String::from));
     }
     args.extend(common_args(
-        &job.labels,
+        &labels,
         &job.env,
         mounts,
         job.cpus,
@@ -145,7 +155,7 @@ pub fn forwarder_create_args(job: &SystemJob) -> Vec<String> {
     ]
     .map(String::from)
     .to_vec();
-    args.extend(job.labels.args());
+    args.extend(system_labels(&job.labels).args());
     for port in &job.ports {
         args.extend(["-p".to_string(), format!("127.0.0.1::{port}")]);
     }
@@ -232,10 +242,7 @@ pub async fn create_networks(
     names: &SystemNames,
     labels: &Labels,
 ) -> Result<(), String> {
-    let labels = Labels {
-        kind: crate::names::LabelKind::System,
-        ..labels.clone()
-    };
+    let labels = system_labels(labels);
     let make = |internal: bool, name: &str| {
         let mut args = vec!["network".to_string(), "create".to_string()];
         if internal {
@@ -342,7 +349,8 @@ pub fn parse_port_lines(text: &str) -> Result<BTreeMap<u16, u16>, String> {
             .and_then(|a| a.strip_suffix(']'))
             .unwrap_or(address);
         if address != "127.0.0.1" {
-            return Err(off_loopback_text(address));
+            let shown: String = printable(address).chars().take(64).collect();
+            return Err(off_loopback_text(&shown));
         }
         let container = container.trim().strip_suffix("/tcp").unwrap_or(container);
         match (container.parse::<u16>(), host.parse::<u16>()) {
@@ -496,7 +504,7 @@ pub async fn remove_system(
         match run(exec, docker, args, &verb, limit).await {
             Err(note) => notes.push(note),
             Ok(out) if out.code != Some(0) && !is_gone(&out) => {
-                notes.push(format!("docker {verb} failed: {}", first_line(&out)));
+                notes.push(format!("docker {verb} failed: {}", real_failure(&out)));
             }
             Ok(_) => {}
         }
@@ -508,11 +516,33 @@ pub async fn remove_system(
     }
 }
 
+/// The first line that is not a "gone" one, or the first line.
+fn real_failure(out: &Output) -> String {
+    let text = String::from_utf8_lossy(&out.stderr);
+    let line = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .find(|l| !l.contains("No such container") && !l.contains("No such network"))
+        .unwrap_or("");
+    printable(line)
+}
+
+/// Whether every line the engine printed says a thing is already gone; one other line is a
+/// real failure that must not hide behind it.
 fn is_gone(out: &Output) -> bool {
     let text = String::from_utf8_lossy(&out.stderr);
-    ["No such container", "No such network", "not found"]
-        .iter()
-        .any(|gone| text.contains(gone))
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .peekable();
+    lines.peek().is_some()
+        && lines.all(|line| {
+            ["No such container", "No such network", "not found"]
+                .iter()
+                .any(|gone| line.contains(gone))
+        })
 }
 
 /// The newest lines of one process's output, numbered from 1, each cleaned once as it
@@ -1359,5 +1389,51 @@ mod tests {
             err,
             "docker stop failed: permission denied; docker network failed: network has active endpoints; docker network failed: network has active endpoints"
         );
+    }
+
+    #[tokio::test]
+    async fn a_real_failure_is_not_hidden_behind_a_gone_container() {
+        let fake = FakeExec::new();
+        fake.on("docker", &["stop"], FakeReply::ok(""));
+        fake.on(
+            "docker",
+            &["rm"],
+            FakeReply::fail(
+                1,
+                "Error: No such container: a\nError: removal of container b is already in progress",
+            ),
+        );
+        fake.on("docker", &["network", "rm"], FakeReply::ok(""));
+        let err = remove_system(&fake, &docker(), &names(false))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "docker rm failed: Error: removal of container b is already in progress"
+        );
+    }
+
+    #[test]
+    fn the_objects_carry_the_system_kind_whatever_the_caller_built() {
+        let mut other = job(names(false), &[8080], false);
+        other.labels.kind = LabelKind::Run;
+        for args in [
+            system_create_args(&other, &mounts()),
+            forwarder_create_args(&other),
+        ] {
+            let kinds: Vec<String> = values(&args, "--label")
+                .into_iter()
+                .filter(|l| l.starts_with("io.clusia.kind="))
+                .collect();
+            assert_eq!(kinds, ["io.clusia.kind=system"]);
+        }
+    }
+
+    #[test]
+    fn an_odd_address_is_shown_clean_and_short() {
+        let long = "x".repeat(200);
+        let err = parse_port_lines(&format!("80/tcp -> \u{1b}[31m{long}:1")).unwrap_err();
+        assert!(!err.contains('\u{1b}'));
+        assert!(err.len() < 200);
     }
 }
