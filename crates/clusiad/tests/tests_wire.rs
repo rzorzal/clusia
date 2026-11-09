@@ -92,42 +92,11 @@ async fn system_commands_are_refused_until_served() {
     let daemon = TestDaemon::start().await;
     let mut client = daemon.client().await;
     let pr: PrRef = "acme/widgets#7".parse().unwrap();
-    let commands = [
-        Command::GetSystem { pr: pr.clone() },
-        Command::StartSystem {
-            pr: pr.clone(),
-            side: RunSide::Pr,
-            recipe_hash: "h".into(),
-            keep: false,
-        },
-        Command::StopSystem {
-            pr: pr.clone(),
-            side: RunSide::Pr,
-        },
-        Command::RestartSystem {
-            pr: pr.clone(),
-            side: RunSide::Pr,
-            recipe_hash: "h".into(),
-        },
-        Command::SetSystemNetwork {
-            pr: pr.clone(),
-            allowed: true,
-            recipe_hash: "h".into(),
-        },
-        Command::GetSystemLogs {
-            pr: pr.clone(),
-            side: RunSide::Pr,
-            process: "start".into(),
-            lines: 10,
-        },
-        Command::WriteEndpoints { pr: pr.clone() },
-        Command::FixSystem { pr: pr.clone() },
-        Command::SendEndpoint {
-            pr,
-            side: RunSide::Pr,
-            endpoint: "GET /".into(),
-        },
-    ];
+    let commands = [Command::SendEndpoint {
+        pr,
+        side: RunSide::Pr,
+        endpoint: "GET /".into(),
+    }];
     for command in commands {
         let Err(ClientError::Server(refusal)) = client.request(command.clone()).await else {
             panic!("{command:?} was not refused");
@@ -135,5 +104,62 @@ async fn system_commands_are_refused_until_served() {
         assert_eq!(refusal.code, ErrorCode::InvalidState, "{command:?}");
         assert_eq!(refusal.message, "not served yet", "{command:?}");
     }
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn the_system_is_served_through_the_wire() {
+    use clusia_core::cockpit::RunSide;
+    use clusia_core::system::{NO_REVIEW_SYSTEM, SystemState, SystemSupport};
+
+    let daemon = TestDaemon::start().await;
+    let mut client = daemon.client().await;
+    let pr = |text: &str| -> PrRef { text.parse().unwrap() };
+    // A review that is not open: the view says why, and the writes are refused with text.
+    let Ok(Reply::System(view)) = client
+        .request(Command::GetSystem {
+            pr: pr("acme/widgets#7"),
+        })
+        .await
+    else {
+        panic!("a system view");
+    };
+    assert_eq!(
+        view.support,
+        SystemSupport::Unavailable {
+            reason: NO_REVIEW_SYSTEM.into()
+        }
+    );
+    assert_eq!(view.state, SystemState::NotStarted);
+    for command in [
+        Command::StopSystem {
+            pr: pr("acme/widgets#7"),
+            side: RunSide::Pr,
+        },
+        Command::WriteEndpoints {
+            pr: pr("acme/widgets#7"),
+        },
+        Command::FixSystem {
+            pr: pr("acme/widgets#7"),
+        },
+    ] {
+        let Err(ClientError::Server(err)) = client.request(command.clone()).await else {
+            panic!("{command:?} was not refused");
+        };
+        assert_eq!(err.code, ErrorCode::InvalidState);
+        assert_ne!(err.message, "not served yet");
+    }
+    let Err(ClientError::Server(err)) = client
+        .request(Command::GetSystemLogs {
+            pr: pr("acme/widgets#7"),
+            side: RunSide::Pr,
+            process: "../x".into(),
+            lines: 10,
+        })
+        .await
+    else {
+        panic!("a bad process id was not refused");
+    };
+    assert_eq!(err.message, "invalid process id");
     daemon.stop().await;
 }

@@ -190,6 +190,9 @@ pub(crate) struct Cached {
     pub image_present: bool,
     /// The Compose version check, for a recipe with services.
     pub compose: Option<Result<(), String>>,
+    /// Whether Clúsia's port forwarder image exists, asked only for a container runner and a
+    /// recipe with `[system]`.
+    pub forwarder_present: bool,
 }
 
 /// Everything a decision about `pr` reads, read once.
@@ -294,6 +297,19 @@ async fn compute_cached(
         image_present =
             container::image_present(shared.test_exec.as_ref(), &docker, &plan.tag).await;
     }
+    let mut forwarder_present = false;
+    if container
+        && recipe.system.is_some()
+        && let Some(engine) = env.engine.as_ref().filter(|e| e.running)
+    {
+        let docker = docker_for(engine, &ctx.host);
+        forwarder_present = container::image_present(
+            shared.test_exec.as_ref(),
+            &docker,
+            &clusia_testrun::system::forwarder_tag(),
+        )
+        .await;
+    }
     // Only the version Clúsia already knows: `docker compose config` reads the PR's compose
     // file, which belongs to the approved `services` step.
     let compose = (container && recipe.services.is_some()).then(|| {
@@ -313,6 +329,7 @@ async fn compute_cached(
         image,
         image_present,
         compose,
+        forwarder_present,
     }
 }
 
@@ -369,9 +386,26 @@ fn plan_of(
             .as_ref()
             .and_then(|c| c.as_ref().err().cloned())
             .or(refused),
-        forwarder_present: false,
+        forwarder_present: cached.forwarder_present,
     };
     let mut plan = setup_plan(recipe, hash, env, &facts, record.approval.as_ref());
+    if let (Some(system), Some(spec)) = (plan.system.as_mut(), recipe.system.as_ref()) {
+        system.network = record.system.network;
+        system.endpoints = super::endpoints::read_endpoints(&ctx.worktree, &spec.port_names())
+            .list
+            .iter()
+            .map(|e| e.id())
+            .collect();
+        for step in &mut system.steps {
+            if step.state == StepState::Missing
+                && let Some(message) = failures.get(&step.id)
+            {
+                step.state = StepState::Failed {
+                    message: message.clone(),
+                };
+            }
+        }
+    }
     for step in &mut plan.steps {
         if step.state == StepState::Missing
             && let Some(message) = failures.get(&step.id)
@@ -399,11 +433,13 @@ pub(super) async fn view(shared: &Shared, pr: &PrRef) -> TestsView {
     let snap = snapshot(shared, pr).await;
     let (live, failed) = shared.tests.with(pr, |entry| {
         (
-            // A functions or cockpit activity has no phase of the tests'.
+            // A functions, cockpit or system activity has no phase of the tests'.
             entry
                 .activity
                 .as_ref()
-                .filter(|a| !a.doing.is_functions() && !a.doing.is_cockpit())
+                .filter(|a| {
+                    !a.doing.is_functions() && !a.doing.is_cockpit() && !a.doing.is_system()
+                })
                 .map(|a| a.phase.clone()),
             entry.failed.clone(),
         )

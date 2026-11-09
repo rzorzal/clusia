@@ -12,6 +12,7 @@ mod cockpit_turn;
 mod compare;
 #[cfg(test)]
 mod compare_lab;
+mod endpoints;
 mod env;
 #[cfg(test)]
 mod functions_lab;
@@ -23,6 +24,10 @@ mod main_tree;
 pub(crate) mod recipe_file;
 pub(crate) mod recipe_turn;
 mod scenarios;
+mod system;
+mod system_http;
+#[cfg(test)]
+mod system_lab;
 mod work;
 
 use std::collections::{BTreeMap, HashMap};
@@ -50,9 +55,13 @@ pub(crate) use case_turn::write_cases;
 pub(crate) use cases::{driver, functions, remove_case, reset_case, save_case};
 pub(crate) use cockpit_turn::{ask_copilot, write_bench, write_scenarios};
 pub(crate) use compare::run_cockpit;
+pub(crate) use endpoints::{fix_system, write_endpoints};
 pub(crate) use main_tree::{open_main, prepare_main, remove_main, sweep_main};
 pub(crate) use scenarios::{
     approve_scenario, cockpit, remove_scenario, reset_scenario, save_scenario, scenario_script,
+};
+pub(crate) use system::{
+    restart_system, set_system_network, start_system, stop_system, system, system_logs,
 };
 
 /// How long `stop_all` waits for the activity of a review to end; a container's stop may take
@@ -82,6 +91,8 @@ pub(super) enum Doing {
     Bench,
     Main,
     Cockpit,
+    System,
+    Endpoints,
 }
 
 impl Doing {
@@ -97,7 +108,15 @@ impl Doing {
             Doing::Bench => "writing a benchmark",
             Doing::Main => "preparing main",
             Doing::Cockpit => "running the QA cockpit",
+            Doing::System => "starting the system",
+            Doing::Endpoints => "reading the endpoints",
         }
+    }
+
+    /// Whether the activity is about the review's system, which leaves the tests' phase and
+    /// their failure alone, and takes no place among `tests.parallel_runs`.
+    pub(super) fn is_system(self) -> bool {
+        matches!(self, Doing::System | Doing::Endpoints)
     }
 
     /// Whether the activity is about the function cases, which leave the tests' phase alone.
@@ -177,6 +196,10 @@ pub(super) struct Entry {
     pub main_failed: Option<String>,
     /// Why each of main's setup steps failed in the last walk, by step id.
     pub main_step_failures: BTreeMap<String, String>,
+    /// The review's system: the live one, or the last one after it stopped or failed.
+    pub system: Option<system::SystemRun>,
+    /// Why the last endpoints turn failed, until the next one begins.
+    pub endpoints_failed: Option<String>,
 }
 
 /// The tests of every review.
@@ -194,6 +217,10 @@ pub(crate) struct Bench {
     mounts: Mutex<HashMap<(String, PathBuf), Result<(), String>>>,
     /// How long one wait for the call index lasts, in milliseconds.
     index_wait_ms: AtomicU64,
+    /// How long a system's health loop sleeps between checks, in milliseconds.
+    health_every: AtomicU64,
+    /// How long a Send waits for its answer, in milliseconds.
+    send_timeout: AtomicU64,
 }
 
 impl Default for Bench {
@@ -209,6 +236,8 @@ impl Default for Bench {
             index_wait_ms: AtomicU64::new(
                 u64::try_from(cases::INDEX_WAIT.as_millis()).unwrap_or(u64::MAX),
             ),
+            health_every: AtomicU64::new(clusia_core::system::HEALTH_EVERY_MS),
+            send_timeout: AtomicU64::new(clusia_core::system::SEND_TIMEOUT_SECS * 1000),
         }
     }
 }
@@ -227,6 +256,28 @@ impl Bench {
     pub(super) fn set_index_wait(&self, wait: Duration) {
         let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
         self.index_wait_ms.store(ms, Ordering::SeqCst);
+    }
+
+    pub(super) fn health_every(&self) -> Duration {
+        Duration::from_millis(self.health_every.load(Ordering::SeqCst))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_health_every(&self, every: Duration) {
+        let ms = u64::try_from(every.as_millis()).unwrap_or(u64::MAX);
+        self.health_every.store(ms, Ordering::SeqCst);
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn send_timeout(&self) -> Duration {
+        Duration::from_millis(self.send_timeout.load(Ordering::SeqCst))
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(super) fn set_send_timeout(&self, wait: Duration) {
+        let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+        self.send_timeout.store(ms, Ordering::SeqCst);
     }
 
     pub(super) fn seq(&self) -> u32 {
@@ -372,6 +423,10 @@ pub(super) fn begin(
             entry.main_step_failures.clear();
         } else if doing.is_cockpit() {
             entry.cockpit_failed = None;
+        } else if doing.is_system() {
+            if doing == Doing::Endpoints {
+                entry.endpoints_failed = None;
+            }
         } else {
             entry.failed = None;
         }
@@ -483,6 +538,15 @@ pub(crate) async fn get(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
 
 /// `GenerateTests`: probes the machine and has the agent write the recipe, in the background.
 pub(crate) async fn generate(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
+    generate_with(shared, pr, None).await
+}
+
+/// `generate`, with what made the system fail given to the agent as data when set.
+pub(super) async fn generate_with(
+    shared: &Arc<Shared>,
+    pr: &PrRef,
+    system_failure: Option<String>,
+) -> Outcome {
     let review = match active(shared, pr) {
         Ok(review) => review,
         Err(out) => return out,
@@ -500,7 +564,14 @@ pub(crate) async fn generate(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
     tell(shared, pr).await;
     cases::tell_functions(shared, pr).await;
     let id = started.id;
-    let job = work::generate(shared.clone(), pr.clone(), review, id, started.turn.clone());
+    let job = work::generate(
+        shared.clone(),
+        pr.clone(),
+        review,
+        id,
+        started.turn.clone(),
+        system_failure,
+    );
     let live = guard.hand_off();
     let (shared, pr) = (shared.clone(), pr.clone());
     tokio::spawn(async move {
