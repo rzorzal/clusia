@@ -59,9 +59,10 @@ pub struct TestsModel {
     pub live: Option<LiveRun>,
     /// The state and the output tail of each setup step the daemon told while it ran.
     pub steps: BTreeMap<String, (StepState, Option<String>)>,
-    /// The output of each step that failed, as the setup plan draws it (`failed_log`), until
-    /// that step runs again.
-    pub failed_logs: BTreeMap<String, String>,
+    /// The output of each step that failed, as the setup plan draws it (`failed_log`), with the
+    /// failure message it came with: it draws only under that same message, and goes when the
+    /// step runs again or a view no longer has the step failed.
+    pub failed_logs: BTreeMap<String, (String, String)>,
     pub pending: Option<TestsAskKind>,
     pub sub: SubTab,
     pub filter: TestFilter,
@@ -372,8 +373,9 @@ impl TestsModel {
                 self.steps
                     .insert(step.clone(), (state.clone(), tail.clone()));
                 match (state, tail) {
-                    (StepState::Failed { .. }, Some(tail)) => {
-                        self.failed_logs.insert(step.clone(), failed_log(tail));
+                    (StepState::Failed { message }, Some(tail)) => {
+                        self.failed_logs
+                            .insert(step.clone(), (message.clone(), failed_log(tail)));
                     }
                     _ => {
                         self.failed_logs.remove(step);
@@ -439,6 +441,13 @@ impl TestsModel {
     }
 
     fn loaded(&mut self, view: &TestsView) {
+        self.failed_logs.retain(|id, _| {
+            view.plan.as_ref().is_some_and(|p| {
+                p.steps
+                    .iter()
+                    .any(|s| s.id == *id && matches!(s.state, StepState::Failed { .. }))
+            })
+        });
         let before = self.view.as_ref().map(|v| v.phase.clone());
         self.loaded = true;
         self.asked = true;

@@ -527,7 +527,20 @@ pub(crate) struct FailedStep {
     pub tail: Vec<String>,
 }
 
-/// The last `STEP_LOG_LINES` lines of `tail`, each `line_of`, without the blank ones at the end.
+/// The longest line of a failed step's output the setup prints, as in the window.
+const STEP_LOG_CHARS: usize = 160;
+
+/// `line_of(line)`, cut to `STEP_LOG_CHARS` with an ellipsis.
+fn log_line(line: &str) -> String {
+    let line = line_of(line);
+    if line.chars().count() <= STEP_LOG_CHARS {
+        return line;
+    }
+    let head: String = line.chars().take(STEP_LOG_CHARS - 1).collect();
+    format!("{head}…")
+}
+
+/// The last `STEP_LOG_LINES` lines of `tail`, each `log_line`, without the blank ones at the end.
 fn tail_lines(tail: &str) -> Vec<String> {
     let lines: Vec<&str> = tail.lines().collect();
     let end = lines
@@ -536,7 +549,7 @@ fn tail_lines(tail: &str) -> Vec<String> {
         .map_or(0, |i| i + 1);
     lines[end.saturating_sub(STEP_LOG_LINES)..end]
         .iter()
-        .map(|l| line_of(l))
+        .map(|l| log_line(l))
         .collect()
 }
 
@@ -1356,6 +1369,22 @@ mod tests {
         let json = serde_json::to_value(&failed).unwrap();
         assert_eq!(json[0]["step"], "image");
         assert_eq!(json[0]["tail"][39], "line 60");
+    }
+
+    #[test]
+    fn a_long_output_line_is_cut_like_the_windows() {
+        let plan = image_plan();
+        let state = StepState::Failed {
+            message: "boom".into(),
+        };
+        let mut failed = Vec::new();
+        let long = "z".repeat(5000);
+        let lines = step_lines(&plan, "image", &state, Some(&long), &mut failed);
+        assert_eq!(lines[1].chars().count(), 2 + 160);
+        assert!(lines[1].ends_with('…'));
+        assert_eq!(failed[0].tail[0].chars().count(), 160);
+        let short = step_lines(&plan, "image", &state, Some("fine"), &mut failed);
+        assert_eq!(short[1], "  fine");
     }
 
     #[test]

@@ -187,8 +187,13 @@ pub(super) fn plan_view(
     let plan = view.plan.as_ref()?;
     let modal = model.plan.as_ref()?;
     let mut steps = step_rows(plan, |id| modal.checked.contains(id));
-    for row in steps.iter_mut().filter(|r| r.failure.is_some()) {
-        row.log = model.failed_logs.get(&row.id).cloned();
+    for (row, step) in steps.iter_mut().zip(&plan.steps) {
+        if let (StepState::Failed { message }, Some((kept, log))) =
+            (&step.state, model.failed_logs.get(&row.id))
+            && kept == message
+        {
+            row.log = Some(log.clone());
+        }
     }
     let commands = command_rows(plan);
     let recipe = view.recipe.as_ref();
@@ -1479,6 +1484,40 @@ mod tests {
         assert_eq!(
             app.world().resource::<crate::ui::markdown::CopiedText>().0,
             [drawn]
+        );
+    }
+
+    #[test]
+    fn a_kept_log_never_draws_under_another_failure() {
+        let (mut app, pr) = tests_app();
+        let mut steps = base_steps();
+        steps[0].state = failed_state();
+        let view = needs_setup(&app, &pr, "h1", steps);
+        testing::open_tests(&mut app, &pr, view);
+        open_modal(&mut app, &pr);
+        let other = StepState::Failed {
+            message: "a different failure".into(),
+        };
+        tell_failed(&mut app, &pr, other, Some("old output".into()));
+        assert!(!testing::shows(&mut app, "old output"), "another message");
+        tell_failed(&mut app, &pr, failed_state(), Some("new output".into()));
+        assert!(testing::shows(&mut app, "new output"));
+        let mut steps = base_steps();
+        steps[0].state = StepState::Failed {
+            message: "yet another".into(),
+        };
+        let view = needs_setup(&app, &pr, "h1", steps);
+        testing::open_tests(&mut app, &pr, view);
+        assert!(!testing::shows(&mut app, "new output"));
+        let mut steps = base_steps();
+        steps[0].state = StepState::Done;
+        let view = needs_setup(&app, &pr, "h1", steps);
+        testing::open_tests(&mut app, &pr, view);
+        assert!(
+            app.world().resource::<TestsModels>().0[&pr]
+                .failed_logs
+                .is_empty(),
+            "a step that is no longer failed keeps no log"
         );
     }
 
