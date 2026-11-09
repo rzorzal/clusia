@@ -17,10 +17,10 @@ use clusia_core::cockpit::RunSide;
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::system::{
     HEALTH_COMMAND_SECS, HealthCheck, LOG_BATCH_MAX, LOG_LINES_MAX, LOG_TAIL_LINES, LogTail,
-    MAIN_SYSTEM_LATER, NEEDS_CONTAINER, NO_REVIEW_SYSTEM, NO_SYSTEM, NOT_UP, PortView, ProcessView,
-    SYSTEM_NOT_APPROVED, SYSTEM_STOPPING, SendResult, ServiceState, ServiceView, StartStage,
-    StopWhy, SystemFailure, SystemLive, SystemState, SystemSupport, SystemView, older_head_text,
-    send_request, systems_full_text,
+    MAIN_SYSTEM_LATER, NEEDS_CONTAINER, NO_REVIEW_SYSTEM, NO_SYSTEM, NOT_UP, OLDER_RECIPE_TEXT,
+    PortView, ProcessView, SYSTEM_NOT_APPROVED, SYSTEM_STOPPING, SendResult, ServiceState,
+    ServiceView, StartStage, StopWhy, SystemFailure, SystemLive, SystemState, SystemSupport,
+    SystemView, older_head_text, send_request, systems_full_text,
 };
 use clusia_core::tests::{
     RECIPE_CHANGED, RunnerKind, StepPlace, StepState, TestsPhase, TestsRecord,
@@ -45,6 +45,7 @@ use super::{Doing, Live, SET_UP_FIRST, Started};
 use crate::reviews;
 use crate::state::Shared;
 use crate::sync::now_unix;
+use crate::turns::{Stop, Why};
 
 /// The limit of one engine call made for a system.
 const SYSTEM_CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -275,6 +276,7 @@ struct RunSeen {
     state: SystemState,
     keep: bool,
     head: String,
+    recipe_hash: String,
     ports: Vec<PortView>,
     services: Vec<ServiceView>,
     health: Option<HealthCheck>,
@@ -303,6 +305,7 @@ fn seen(run: &SystemRun) -> RunSeen {
         state: run.state,
         keep: run.keep,
         head: run.head.clone(),
+        recipe_hash: run.recipe_hash.clone(),
         ports: run.ports.clone(),
         services: run.services.clone(),
         health: run.health.clone(),
@@ -467,6 +470,13 @@ pub(super) async fn system_view(shared: &Shared, pr: &PrRef) -> SystemView {
                 }
                 if !snap.head.is_empty() && run.head != snap.head {
                     view.note = Some(older_head_text(&snap.head));
+                } else if snap
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.recipe_hash != run.recipe_hash)
+                {
+                    // `spec` above is the current recipe's, not the one the containers run.
+                    view.note = Some(OLDER_RECIPE_TEXT.into());
                 }
             }
         }
@@ -739,6 +749,7 @@ async fn launch(
             accepted,
             run_id,
             started.stop.clone(),
+            started.turn.clone(),
         ));
         if task.await.is_err() {
             tracing::error!(pr = %pr, "a system start failed inside the daemon");
@@ -763,7 +774,7 @@ async fn launch(
             forgotten_start(&shared, &pr, docker, &own_names).await;
         } else {
             // Whatever way the start ended, a run it left starting or stopping is torn down.
-            stop_start(&shared, &pr, run_id).await;
+            stop_start(&shared, &pr, run_id, stopped_why(&started.turn)).await;
             end_activity(&shared, &pr, act);
         }
         drop(started.live);
@@ -892,6 +903,8 @@ struct Start {
     pr: PrRef,
     run_id: u64,
     act_stop: Arc<StopFlag>,
+    /// The activity's turn, which says why it was stopped.
+    turn: Arc<Stop>,
     run_stop: Arc<StopFlag>,
     docker: Docker,
 }
@@ -908,6 +921,15 @@ impl Start {
 
     fn stopped(&self) -> bool {
         self.act_stop.fired() || self.run_stop.fired()
+    }
+
+    /// Changes the review's record while this start still runs: a forgotten review's record
+    /// is never written back.
+    /// Whether it was written; when not, the start was stopped or its review forgotten.
+    async fn update_record(&self, change: impl FnOnce(&mut TestsRecord)) -> bool {
+        let still =
+            || !self.stopped() && with_run(&self.shared, &self.pr, self.run_id, |_| ()).is_some();
+        env::update_record_while(&self.shared, &self.pr, still, change).await
     }
 
     /// One engine call that must exit 0, raced against a stop.
@@ -956,13 +978,32 @@ macro_rules! step {
 
 /// The stop came while the system was starting: what it made goes, and it ends `Stopped`.
 async fn stopped_while_starting(start: &Start) {
-    stop_start(&start.shared, &start.pr, start.run_id).await;
+    stop_start(
+        &start.shared,
+        &start.pr,
+        start.run_id,
+        stopped_why(&start.turn),
+    )
+    .await;
+}
+
+/// Why a start ends `Stopped`: a closing review or a shutdown fires the activity's turn with
+/// its reason; the reviewer's stop fires only the activity's flag.
+fn stopped_why(turn: &Stop) -> StopWhy {
+    if !turn.fired() {
+        return StopWhy::Reviewer;
+    }
+    match turn.why() {
+        Why::Ended => StopWhy::ReviewClosed,
+        Why::Shutdown => StopWhy::Shutdown,
+        Why::User | Why::Superseded => StopWhy::Reviewer,
+    }
 }
 
 /// Tears down run `id` whose start ended without settling it, and ends it `Stopped` by the
 /// reviewer. Nothing happens when the run settled, or when a teardown of it (a failure's)
 /// already owns it: that one finishes the job.
-async fn stop_start(shared: &Arc<Shared>, pr: &PrRef, id: u64) {
+async fn stop_start(shared: &Arc<Shared>, pr: &PrRef, id: u64, why: StopWhy) {
     let ours = with_run(shared, pr, id, |run| {
         if run.tearing
             || !matches!(
@@ -984,9 +1025,7 @@ async fn stop_start(shared: &Arc<Shared>, pr: &PrRef, id: u64) {
     tell_system(shared, pr).await;
     teardown_quiet(shared, pr, id).await;
     with_run(shared, pr, id, |run| {
-        run.state = SystemState::Stopped {
-            why: StopWhy::Reviewer,
-        };
+        run.state = SystemState::Stopped { why };
         run.tearing = false;
     });
     release(shared, pr, id);
@@ -1122,8 +1161,14 @@ async fn services_up(start: &Start, accepted: &Accepted, project: &str) -> Step<
     match ended {
         Ok(Ended::Exited(Some(0))) => {
             let project = stack.project.clone();
-            env::update_record(shared, &start.pr, |record| record.stack = Some(project)).await;
-            Step::Done(())
+            if start
+                .update_record(|record| record.stack = Some(project))
+                .await
+            {
+                Step::Done(())
+            } else {
+                Step::Stopped
+            }
         }
         Ok(Ended::Stopped) => Step::Stopped,
         Ok(Ended::Exited(code)) => failed(code, tail.text()),
@@ -1140,6 +1185,7 @@ async fn run_start(
     accepted: Accepted,
     run_id: u64,
     act_stop: Arc<StopFlag>,
+    turn: Arc<Stop>,
 ) {
     let Some(run_stop) = with_run(&shared, &pr, run_id, |run| run.stop.clone()) else {
         return;
@@ -1161,6 +1207,7 @@ async fn run_start(
         pr: pr.clone(),
         run_id,
         act_stop,
+        turn,
         run_stop,
         docker,
     };
@@ -1254,7 +1301,13 @@ async fn run_start(
         at: now_unix(),
         keep: with_run(&shared, &pr, run_id, |run| run.keep).unwrap_or(false),
     };
-    env::update_record(&shared, &pr, |record| record.system.live = Some(live)).await;
+    if !start
+        .update_record(|record| record.system.live = Some(live))
+        .await
+    {
+        stopped_while_starting(&start).await;
+        return;
+    }
     if let Some(problem) = mount_problem(&mounts).or_else(|| git_file_problem(&mounts.worktree)) {
         let failure = SystemFailure {
             command: String::new(),
@@ -1864,7 +1917,16 @@ pub(crate) async fn restart_system(
         Ok(started) => started,
         Err(refused) => return refused.outcome(pr),
     };
-    restart(shared, pr, accepted, started).await
+    restart(shared, pr, accepted, started, Restart::Always).await
+}
+
+/// Whether a restart that finds nothing live starts the system.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Restart {
+    /// `RestartSystem`: a system that went down is started again.
+    Always,
+    /// A network change: a system that went down, or is going down, stays down.
+    OnlyLive,
 }
 
 /// Stops the live system, if any, and starts again with the last run's `keep`, with no
@@ -1874,19 +1936,27 @@ async fn restart(
     pr: &PrRef,
     accepted: Accepted,
     started: Started,
+    when: Restart,
 ) -> Outcome {
-    let (old, keep) = shared.tests.with(pr, |entry| {
+    let (old, keep, down) = shared.tests.with(pr, |entry| {
         let Some(run) = entry.system.as_mut() else {
-            return (None, false);
+            return (None, false, true);
         };
-        if !run.state.is_live() {
-            return (None, run.keep);
+        // A stop that came after the request's checks is already tearing this run down.
+        let going = run.state == SystemState::Stopping || run.tearing;
+        if !run.state.is_live() || (when == Restart::OnlyLive && going) {
+            return (None, run.keep, true);
         }
         run.state = SystemState::Stopping;
         run.tearing = true;
         run.stop.fire();
-        (Some(run.id), run.keep)
+        (Some(run.id), run.keep, false)
     });
+    if down && when == Restart::OnlyLive {
+        end_activity(shared, pr, started.id);
+        tell_system(shared, pr).await;
+        return reply(system_view(shared, pr).await);
+    }
     let Some(old) = old else {
         if let Err(out) = launch(shared, pr, accepted, keep, started).await {
             return out;
@@ -1900,6 +1970,7 @@ async fn restart(
         teardown_quiet(&shared, &pr, old).await;
         let stopped = started.stop.fired();
         let id = started.id;
+        let turn = started.turn.clone();
         let launched = if stopped {
             Err(())
         } else {
@@ -1910,7 +1981,7 @@ async fn restart(
         if launched.is_err() {
             with_run(&shared, &pr, old, |run| {
                 run.state = SystemState::Stopped {
-                    why: StopWhy::Reviewer,
+                    why: stopped_why(&turn),
                 };
                 run.tearing = false;
             });
@@ -1945,12 +2016,23 @@ pub(crate) async fn set_system_network(
         Ok(Accept::Live) => return reply(system_view(shared, pr).await),
         Err(out) => return out,
     };
+    network_restart(shared, pr, allowed, accepted).await
+}
+
+/// The rest of an accepted network change: takes the slot, stores the choice, and restarts
+/// the system with it.
+async fn network_restart(
+    shared: &Arc<Shared>,
+    pr: &PrRef,
+    allowed: bool,
+    accepted: Accepted,
+) -> Outcome {
     let started = match super::begin(shared, pr, Doing::System, TestsPhase::Waiting) {
         Ok(started) => started,
         Err(refused) => return refused.outcome(pr),
     };
     env::update_record(shared, pr, |record| record.system.network = allowed).await;
-    restart(shared, pr, accepted, started).await
+    restart(shared, pr, accepted, started, Restart::OnlyLive).await
 }
 
 /// A process id a client may ask for: `start` or `service:<name>`.
@@ -2347,6 +2429,18 @@ mod tests {
             env::load(&lab.shared, &pr(7)).system.live.map(|l| l.keep),
             Some(true)
         );
+    }
+
+    #[tokio::test]
+    async fn a_live_system_started_from_an_older_recipe_says_so() {
+        let (lab, _api) = system_lab_without_health().await;
+        start(&lab, false).await;
+        until_state(&lab, |v| v.state == SystemState::Running).await;
+        assert_eq!(system_of(system(&lab.shared, &pr(7)).await).note, None);
+        edit_recipe_start(&lab, 7, "cargo run -q --bin auth-api -- --port 8081");
+        let v = system_of(system(&lab.shared, &pr(7)).await);
+        assert_eq!(v.state, SystemState::Running);
+        assert_eq!(v.note.as_deref(), Some(OLDER_RECIPE_TEXT));
     }
 
     #[tokio::test]
@@ -2927,6 +3021,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_network_toggle_whose_system_stopped_during_its_checks_only_stores_the_choice() {
+        for stopped in ["by the reviewer", "while it was stopping"] {
+            let (lab, _api) = system_lab_without_health().await;
+            start(&lab, false).await;
+            until_state(&lab, |v| v.state == SystemState::Running).await;
+            let hash = plan_of(&lab, 7).await.recipe_hash;
+            // The toggle saw a live system and passed its checks; the system then went down.
+            let accepted = match accept_start(&lab.shared, &pr(7), RunSide::Pr, &hash, true).await {
+                Ok(Accept::Start(accepted)) => *accepted,
+                _ => panic!("not accepted"),
+            };
+            if stopped == "by the reviewer" {
+                stop_and_wait(&lab, 7).await;
+            } else {
+                stop_system(&lab.shared, &pr(7), RunSide::Pr).await;
+            }
+            let v = system_of(network_restart(&lab.shared, &pr(7), true, accepted).await);
+            assert!(v.network, "{stopped}");
+            assert!(
+                !v.state.is_live() || v.state == SystemState::Stopping,
+                "{stopped}: {v:?}"
+            );
+            let down = until_state(&lab, |v| matches!(v.state, SystemState::Stopped { .. })).await;
+            assert_eq!(
+                down.state,
+                SystemState::Stopped {
+                    why: StopWhy::Reviewer
+                },
+                "{stopped}"
+            );
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(
+                docker_calls(&lab, "create").len(),
+                2,
+                "{stopped}: the toggle started nothing"
+            );
+            assert!(env::load(&lab.shared, &pr(7)).system.network, "{stopped}");
+            assert!(idle(&lab.shared, 7), "{stopped}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_network_toggle_refused_as_busy_changes_nothing() {
         let (lab, _api) = system_lab_without_health().await;
         start(&lab, false).await;
@@ -3219,6 +3355,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_start_racing_a_forget_writes_no_record_back() {
+        let (lab, _api) = system_lab_without_health().await;
+        start(&lab, false).await;
+        // The start is parked after its networks, before it names the run in the record.
+        let config = lab.shared.config.write().await;
+        let publish = format!("{}-pub", system_base(7));
+        for _ in 0..200 {
+            let made = docker_calls(&lab, "network")
+                .iter()
+                .any(|a| a[1] == "create" && a.last() == Some(&publish));
+            if made {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        {
+            let _guard = reviews::lock(&lab.shared, &pr(7)).await;
+            crate::tests::forget(&lab.shared, &pr(7));
+        }
+        assert!(!lab.shared.paths.tests_file(&pr(7)).exists());
+        drop(config);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !lab.shared.paths.tests_file(&pr(7)).exists(),
+            "the forgotten review's record came back"
+        );
+        assert!(
+            docker_calls(&lab, "create")
+                .iter()
+                .all(|a| a[2] != system_base(7)),
+            "no system container was made"
+        );
+    }
+
+    #[tokio::test]
     async fn teardown_is_awaited_and_idempotent() {
         let (lab, _api) = system_lab_without_health().await;
         tokio::time::pause();
@@ -3253,6 +3425,25 @@ mod tests {
             }
         );
         assert!(idle(&lab.shared, 7));
+    }
+
+    #[tokio::test]
+    async fn a_starting_system_stopped_by_a_closing_review_or_a_shutdown_says_why() {
+        for why in [StopWhy::ReviewClosed, StopWhy::Shutdown] {
+            let (lab, _api) = system_lab_with(vec![], |x| {
+                x.on("docker", &["create"], FakeReply::hang());
+            })
+            .await;
+            start(&lab, false).await;
+            if why == StopWhy::ReviewClosed {
+                crate::tests::stop_all(&lab.shared, &pr(7), crate::turns::Why::Ended).await;
+            } else {
+                crate::tests::shutdown(&lab.shared).await;
+            }
+            let v = system_of(system(&lab.shared, &pr(7)).await);
+            assert_eq!(v.state, SystemState::Stopped { why }, "{why:?}");
+            assert!(idle(&lab.shared, 7), "{why:?}");
+        }
     }
 
     #[tokio::test]

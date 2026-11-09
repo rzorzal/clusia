@@ -947,7 +947,7 @@ pub(crate) async fn clean_up(shared: &Shared, repo: Option<String>) -> Outcome {
         && let Err(e) = clusia_testrun::cleanup::remove_orphans(
             shared.test_exec.as_ref(),
             docker,
-            &env::live_names(shared),
+            &|| env::live_names(shared),
             only.flatten().as_deref(),
         )
         .await
@@ -1148,15 +1148,20 @@ pub(crate) async fn sweep(shared: &Shared, cutoff: i64) {
     sweep_main(shared).await;
     if let Some(docker) = env::docker_now(shared).await {
         let exec = shared.test_exec.as_ref();
-        if let Err(e) =
-            clusia_testrun::cleanup::remove_orphans(exec, &docker, &env::live_names(shared), None)
-                .await
+        if let Err(e) = clusia_testrun::cleanup::remove_orphans(
+            exec,
+            &docker,
+            &|| env::live_names(shared),
+            None,
+        )
+        .await
         {
             tracing::warn!(error = %e, "cannot remove the orphan test containers");
         }
-        if let Err(e) =
-            clusia_testrun::cleanup::remove_orphan_networks(exec, &docker, &env::live_names(shared))
-                .await
+        if let Err(e) = clusia_testrun::cleanup::remove_orphan_networks(exec, &docker, &|| {
+            env::live_names(shared)
+        })
+        .await
         {
             tracing::warn!(error = %e, "cannot remove the orphan system networks");
         }

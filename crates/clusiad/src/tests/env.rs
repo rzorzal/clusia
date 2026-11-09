@@ -709,6 +709,24 @@ pub(super) async fn update_record(
     true
 }
 
+/// `update_record`, made only while `still` holds under the review lock: `forget` runs under
+/// that lock, so a check of the review's entry there cannot be overtaken by it.
+pub(super) async fn update_record_while(
+    shared: &Shared,
+    pr: &PrRef,
+    still: impl FnOnce() -> bool,
+    change: impl FnOnce(&mut TestsRecord),
+) -> bool {
+    let _guard = reviews::lock(shared, pr).await;
+    if !still() || !alive(shared, pr) {
+        return false;
+    }
+    let mut record = load(shared, pr);
+    change(&mut record);
+    save(shared, pr, &record);
+    true
+}
+
 /// Whether the review of `pr` exists and has not ended.
 pub(super) fn alive(shared: &Shared, pr: &PrRef) -> bool {
     matches!(reviews::load_stored(shared, pr), Ok(Some(review)) if !review.state.is_terminal())

@@ -1058,6 +1058,9 @@ pub fn off_loopback_text(address: &str) -> String {
     format!("A port was published on {address}, not 127.0.0.1; the system was stopped")
 }
 
+/// The note of a live system whose `[system]` changed since it started.
+pub const OLDER_RECIPE_TEXT: &str = "Started from an older recipe; restart to use it.";
+
 pub fn older_head_text(head: &str) -> String {
     format!(
         "Started at an older commit; restart to try {}.",
