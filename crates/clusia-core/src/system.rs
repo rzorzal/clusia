@@ -64,6 +64,8 @@ pub const LOG_LINE_MAX: usize = 2000;
 pub const LOG_BATCH_MAX: usize = 200;
 /// Lines of a process's log that go with a failure.
 pub const LOG_TAIL_LINES: usize = 40;
+/// The longest command or message of a failure in the prompt, in characters.
+const FAILURE_FIELD_MAX: usize = 2000;
 
 pub const SYSTEM_STOP_SECS: u64 = 10;
 pub const SYSTEM_QUIT_GRACE_SECS: u64 = 10;
@@ -444,6 +446,9 @@ pub fn check_url_path(path: &str, max: usize, params: bool) -> Result<(), String
     if bytes.first() != Some(&b'/') {
         return Err(URL_PATH_RULE.to_string());
     }
+    if bytes.get(1) == Some(&b'/') {
+        return Err("must not start with //".to_string());
+    }
     if bytes.len() > max {
         return Err(format!("must be at most {max} bytes"));
     }
@@ -576,6 +581,10 @@ fn check_headers(headers: &BTreeMap<String, String>) -> Result<(), String> {
         }
         if !value.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
             return Err(format!("headers.{name} must be printable ASCII"));
+        }
+        // curl sends no header whose value is blank, so Send must not send one either.
+        if value.trim().is_empty() {
+            return Err(format!("headers.{name} must not be blank"));
         }
         if value.len() > HEADER_VALUE_MAX {
             return Err(format!(
@@ -1056,6 +1065,16 @@ pub fn older_head_text(head: &str) -> String {
     )
 }
 
+/// `text` cut to `FAILURE_FIELD_MAX` characters, ending in `…` when it was cut.
+fn cut(text: String) -> String {
+    if text.chars().count() <= FAILURE_FIELD_MAX {
+        return text;
+    }
+    let mut out: String = text.chars().take(FAILURE_FIELD_MAX - 1).collect();
+    out.push('…');
+    out
+}
+
 /// What ran and how it ended, as data for the agent: a bounded tail of the log.
 pub fn failure_prompt_text(f: &SystemFailure) -> String {
     let place = match f.place {
@@ -1068,8 +1087,8 @@ pub fn failure_prompt_text(f: &SystemFailure) -> String {
         .map_or_else(|| "none".to_string(), |code| code.to_string());
     let mut out = format!(
         "command: {}\nwhere: {place}\nexit: {exit}\nmessage: {}\n",
-        printable(&f.command),
-        printable(&f.message)
+        cut(printable(&f.command)),
+        cut(printable(&f.message))
     );
     let lines: Vec<&str> = f.tail.lines().collect();
     if !lines.is_empty() {
@@ -1182,6 +1201,12 @@ mod tests {
             Err(rule.to_string()),
             "braces need params"
         );
+        assert_eq!(
+            ok("//evil.example/x", false),
+            Err("must not start with //".to_string()),
+            "a second slash would read as a host"
+        );
+        assert_eq!(ok("/a//b", false), Ok(()));
         assert_eq!(
             check_url_path(&format!("/{}", "a".repeat(200)), 200, false),
             Err("must be at most 200 bytes".to_string())
@@ -1443,6 +1468,15 @@ mod tests {
                 ("accept".to_string(), "*/*".to_string())
             ]
         );
+        for blank in ["", "  "] {
+            let mut e = token();
+            e.headers.insert("x-a".into(), blank.into());
+            assert_eq!(
+                check_endpoint(&e, &ports()),
+                Err("headers.x-a must not be blank".to_string()),
+                "curl sends no header with a blank value, so Send must not either: {blank:?}"
+            );
+        }
         let mut bare = token();
         bare.headers.clear();
         let r = send_request(&bare, 1);
@@ -1483,6 +1517,7 @@ mod tests {
             "a bare escape takes its next character"
         );
     }
+
     fn view(state: SystemState) -> SystemView {
         let mut v = SystemView::new("8f3c21d0000000000000000000000000000000aa");
         v.state = state;
@@ -1822,6 +1857,22 @@ mod tests {
         assert_eq!(lines[5], "    line 21");
         assert_eq!(lines.last().copied(), Some("    line 60"));
         assert_eq!(lines.len(), 5 + 40);
+        let long = failure_prompt_text(&SystemFailure {
+            command: "c".repeat(5000),
+            place: crate::tests::StepPlace::Host,
+            exit_code: None,
+            message: "m\u{1b}".repeat(2000),
+            process: None,
+            tail: String::new(),
+        });
+        let lines: Vec<&str> = long.lines().collect();
+        assert_eq!(lines[0].chars().count(), "command: ".len() + 2000);
+        assert!(
+            lines[3].chars().count() <= "message: ".len() + 2000,
+            "{}",
+            lines[3]
+        );
+        assert!(lines[3].ends_with('…') && lines[0].ends_with('…'));
     }
 
     #[test]

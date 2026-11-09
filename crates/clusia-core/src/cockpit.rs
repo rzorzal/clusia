@@ -2273,13 +2273,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::functions::{Param, ParamKind};
+    use crate::tests::RunnerKind;
 
     #[test]
     fn a_side_defaults_to_the_pr() {
         assert_eq!(RunSide::default(), RunSide::Pr);
     }
-    use crate::functions::{Param, ParamKind};
-    use crate::tests::RunnerKind;
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs

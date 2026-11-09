@@ -402,9 +402,9 @@ async fn open_in_editor(shared: &Shared, path: &str, line: Option<u32>) -> Outco
     }
 }
 
-/// The setting that is also the login agent's `RunAtLoad`.
 /// What every system command answers until the daemon serves them.
 const SYSTEM_NOT_SERVED: &str = "not served yet";
+/// The setting that is also the login agent's `RunAtLoad`.
 const START_AT_LOGIN: &str = "general.start_at_login";
 
 /// Saves one setting. `general.start_at_login` must also go to the login agent, which
