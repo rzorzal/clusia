@@ -111,15 +111,15 @@ pub(crate) async fn system(
         SystemAction::Start { yes } => start(client, &pr, yes, json, stop).await,
         SystemAction::Restart => restart(client, &pr, json, stop).await,
         SystemAction::Stop => stop_system(client, &pr, stop).await,
-        SystemAction::Status => status(client, &pr, stop).await,
+        SystemAction::Status => status(client, &pr, json, stop).await,
         SystemAction::Logs {
             process,
             lines,
             follow,
         } => logs(client, &pr, process.as_deref(), lines, follow, json, stop).await,
-        SystemAction::Send { endpoint } => send(client, &pr, &endpoint, stop).await,
+        SystemAction::Send { endpoint } => send(client, &pr, &endpoint, json, stop).await,
         SystemAction::Network { allowed } => network(client, &pr, allowed, json, stop).await,
-        SystemAction::Endpoints { write } => endpoints(client, &pr, write, stop).await,
+        SystemAction::Endpoints { write } => endpoints(client, &pr, write, json, stop).await,
         SystemAction::Fix => fix(client, &pr, json, stop).await,
     }
 }
@@ -445,6 +445,7 @@ async fn stop_system(
 async fn status(
     client: &mut Client,
     pr: &PrRef,
+    json: bool,
     stop: &mut Interrupts<'_>,
 ) -> Result<Output, CliError> {
     let view = system_of(client, pr, stop).await?;
@@ -457,7 +458,7 @@ async fn status(
         output(system_lines(&view, now_unix()), view_json(&view)),
         code,
         message,
-        false,
+        json,
     )
 }
 
@@ -523,7 +524,14 @@ async fn logs(
                     continue;
                 };
                 if first > *expected {
-                    println!("… {} lines skipped …", first - *expected);
+                    if json {
+                        println!(
+                            "{}",
+                            json!({ "process": process, "skipped": first - *expected })
+                        );
+                    } else {
+                        println!("… {} lines skipped …", first - *expected);
+                    }
                     *expected = first;
                 }
                 let skip = expected.saturating_sub(first) as usize;
@@ -565,6 +573,7 @@ async fn send(
     client: &mut Client,
     pr: &PrRef,
     wanted: &str,
+    json: bool,
     stop: &mut Interrupts<'_>,
 ) -> Result<Output, CliError> {
     let view = system_of(client, pr, stop).await?;
@@ -597,13 +606,14 @@ async fn send(
         (None, None) => "the request failed".into(),
     };
     let value = serde_json::to_value(&*result).unwrap_or(serde_json::Value::Null);
-    ended(output(send_lines(&result), value), code, &message, false)
+    ended(output(send_lines(&result), value), code, &message, json)
 }
 
 async fn endpoints(
     client: &mut Client,
     pr: &PrRef,
     write: bool,
+    json: bool,
     stop: &mut Interrupts<'_>,
 ) -> Result<Output, CliError> {
     let before = system_of(client, pr, stop).await?;
@@ -622,16 +632,16 @@ async fn endpoints(
     )
     .await?;
     let mut writing_seen = false;
-    let mut ended: Option<SystemView> = None;
+    let mut turn: Option<SystemView> = None;
     // What was told before the `Ack` comes first, in order.
     for (_, event) in client.take_events() {
         if let Event::SystemChanged { pr: of, view } = event
             && of == *pr
         {
-            ended = turn_end(&mut writing_seen, *view).or(ended);
+            turn = turn_end(&mut writing_seen, *view).or(turn);
         }
     }
-    if ended.is_none() {
+    if turn.is_none() {
         let now = system_of(client, pr, stop).await?;
         let e = &now.endpoints;
         if e.writing {
@@ -639,23 +649,23 @@ async fn endpoints(
         } else if e.written_head != before.endpoints.written_head
             || e.failed != before.endpoints.failed
         {
-            ended = Some(now);
+            turn = Some(now);
         }
     }
     let view = loop {
-        if let Some(view) = ended {
+        if let Some(view) = turn {
             break view;
         }
         if let Event::SystemChanged { pr: of, view } = stop.event(client, "the endpoints").await?
             && of == *pr
         {
-            ended = turn_end(&mut writing_seen, *view);
+            turn = turn_end(&mut writing_seen, *view);
         }
     };
     let live = view.state.is_live();
     let out = output(endpoint_lines(&view.endpoints, live), view_json(&view));
     match &view.endpoints.failed {
-        Some(failed) => ended_with(out, line_of(failed)),
+        Some(failed) => ended(out, 1, &line_of(failed), json),
         None => Ok(out),
     }
 }
@@ -668,11 +678,6 @@ fn turn_end(writing_seen: &mut bool, view: SystemView) -> Option<SystemView> {
     } else {
         (*writing_seen).then_some(view)
     }
-}
-
-fn ended_with(out: Output, message: String) -> Result<Output, CliError> {
-    println!("{}", streamed(&out.human));
-    Err(exit(1, message))
 }
 
 async fn fix(

@@ -6140,4 +6140,108 @@ mod system_against_a_scripted_daemon {
         assert!(done.out.contains("x\\u{1b}[2J"), "{}", done.out);
         assert!(logs.out.contains("api │ x\\u{1b}[2J"), "{}", logs.out);
     }
+
+    #[test]
+    fn json_prints_the_view_or_result_also_when_the_command_ends_with_a_code() {
+        for (state, code, wanted) in [
+            (SystemState::NotStarted, 4, "not_started"),
+            (SystemState::Failed, 1, "failed"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            scripted(
+                dir.path(),
+                &rt,
+                tests_of(plan(true)),
+                move |cmd, _| match cmd {
+                    Request::GetSystem { .. } => ok(Reply::System(Box::new(sview(state)))),
+                    _ => ok(Reply::Ack),
+                },
+            );
+            let done = finish(system_cmd_with(
+                dir.path(),
+                &["--json"],
+                &["status", "acme/widgets#7"],
+            ));
+            assert_eq!(done.code, Some(code), "{}", done.err);
+            let json: serde_json::Value = serde_json::from_str(done.out.trim())
+                .unwrap_or_else(|e| panic!("{e}: {}", done.out));
+            assert_eq!(json["state"], wanted);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        scripted(dir.path(), &rt, tests_of(plan(true)), |cmd, _| match cmd {
+            Request::GetSystem { .. } => ok(Reply::System(Box::new(sview(SystemState::Running)))),
+            Request::SendEndpoint { .. } => ok(Reply::Sent(Box::new(sent_result(
+                "POST /oauth/token",
+                Some(404),
+                None,
+            )))),
+            _ => ok(Reply::Ack),
+        });
+        let done = finish(system_cmd_with(
+            dir.path(),
+            &["--json"],
+            &["send", "acme/widgets#7", "1"],
+        ));
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        let json: serde_json::Value =
+            serde_json::from_str(done.out.trim()).unwrap_or_else(|e| panic!("{e}: {}", done.out));
+        assert_eq!(json["status"], 404);
+
+        let mut bad = sview(SystemState::Running);
+        bad.endpoints.list.clear();
+        bad.endpoints.failed = Some("Claude Code's endpoints are not valid: x".into());
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut base = sview(SystemState::Running);
+        base.endpoints.list.clear();
+        scripted(
+            dir.path(),
+            &rt,
+            tests_of(plan(true)),
+            move |cmd, say| match cmd {
+                Request::GetSystem { .. } => ok(Reply::System(Box::new(base.clone()))),
+                Request::WriteEndpoints { .. } => {
+                    let mut writing = base.clone();
+                    writing.endpoints.writing = true;
+                    tell(say, 100, vec![writing, bad.clone()]);
+                    ok(Reply::Ack)
+                }
+                _ => ok(Reply::Ack),
+            },
+        );
+        let done = finish(system_cmd_with(
+            dir.path(),
+            &["--json"],
+            &["endpoints", "acme/widgets#7", "--write"],
+        ));
+        assert_eq!(done.code, Some(1), "{}", done.err);
+        let json: serde_json::Value =
+            serde_json::from_str(done.out.trim()).unwrap_or_else(|e| panic!("{e}: {}", done.out));
+        assert!(json["endpoints"]["failed"].is_string());
+    }
+
+    #[test]
+    fn a_json_follow_tells_a_gap_as_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        log_daemon(dir.path(), &rt, true);
+        let done = finish(system_cmd_with(
+            dir.path(),
+            &["--json"],
+            &["logs", "acme/widgets#7", "--follow"],
+        ));
+        assert_eq!(done.code, Some(0), "{}", done.err);
+        let lines: Vec<serde_json::Value> = done
+            .out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+            .collect();
+        assert!(
+            lines.contains(&serde_json::json!({"process": "start", "skipped": 2})),
+            "{lines:?}"
+        );
+    }
 }

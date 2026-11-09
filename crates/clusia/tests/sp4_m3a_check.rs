@@ -26,7 +26,7 @@ fn recording_clusia(dir: &Path, log: &Path) {
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {}\necho old\nexit 0\n",
+            "#!/bin/sh\necho \"$*\" >> {}\ncase \"$1 $2 $3\" in\n  \"--json system status\") echo '{{\"state\":\"not_started\",\"spec\":{{}}}}'; exit 4 ;;\nesac\necho old\nexit 0\n",
             log.display()
         ),
     )
@@ -341,4 +341,27 @@ fn the_readme_documents_start_the_system() {
     ] {
         assert!(section.contains(needle), "{needle}");
     }
+}
+
+#[test]
+fn it_reads_the_json_status_for_its_checks_and_stops_what_it_started() {
+    let text = source();
+    assert!(text.contains("clusia --json system status"));
+    assert!(text.contains("clusia system stop \"$PR\""));
+    // A run that is stopped after the system started stops it, and says so.
+    let (out, calls) = run(&[DEFAULT_PR], b"y\ny\ny\ny\ny\ny\nn\n");
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    let calls = calls.expect("it ran");
+    assert!(
+        said.contains("Stopping the system this check started"),
+        "{said}"
+    );
+    let all: Vec<&str> = calls.lines().collect();
+    let last_stop = all
+        .iter()
+        .rposition(|l| *l == format!("system stop {DEFAULT_PR}"));
+    let last_start = all
+        .iter()
+        .rposition(|l| *l == format!("system start {DEFAULT_PR}"));
+    assert!(last_stop > last_start, "{calls}");
 }

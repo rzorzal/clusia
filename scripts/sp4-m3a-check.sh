@@ -30,10 +30,22 @@ ERR="$(mktemp -t sp4-m3a-check.XXXXXX)" || {
   exit 1
 }
 
+# Set once the check starts a system, and cleared when it is stopped or the review is discarded.
+STARTED=0
+
 drop_err() {
   if [ -n "$ERR" ]; then rm -f "$ERR" "$ERR".*; fi
 }
-trap 'drop_err' EXIT
+
+# However the script ends, a system it started and did not stop is stopped, and it says so.
+finish_up() {
+  if [ "$STARTED" = 1 ]; then
+    echo "Stopping the system this check started (clusia system stop $PR)"
+    clusia system stop "$PR" >/dev/null 2>&1 || echo "  It could not be stopped; stop it with: clusia system stop $PR"
+  fi
+  drop_err
+}
+trap 'finish_up' EXIT
 # clusia exits 130 on a Ctrl-C by status, not by the signal; the script ends instead.
 trap 'exit 130' INT TERM HUP
 
@@ -215,6 +227,7 @@ say "${STEPS[2]}"
 echo "  The next command prints the SYSTEM section of the plan. Read it, then answer."
 say "${STEPS[3]}"
 go_on "run clusia system start $PR (it sets up what you approve and starts the system in a container)"
+STARTED=1
 clusia system start "$PR"
 code=$?
 echo "  clusia exited $code (0 running, 1 failed, 124 unhealthy, 130 stopped)."
@@ -261,13 +274,16 @@ clusia system start "$PR"
 say "${STEPS[10]}"
 go_on "run clusia system stop $PR"
 clusia system stop "$PR"
+STARTED=0
 check "no system container or network is left" no_system_object
 
 say "${STEPS[11]}"
 go_on "run clusia system start $PR again"
+STARTED=1
 clusia system start "$PR"
 if yes_or_no "Discard the review of $PR on this Mac now"; then
   check "the review is discarded" clusia review discard "$PR"
+  STARTED=0
   sleep 2
   check "no system container or network is left" no_system_object
 else
