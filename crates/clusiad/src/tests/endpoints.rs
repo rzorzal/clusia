@@ -94,7 +94,8 @@ pub(super) fn read_endpoints(worktree: &Path, ports: &[String]) -> Loaded {
     };
     let mut list = Vec::new();
     let mut reasons = Vec::new();
-    if stored.endpoints.len() > ENDPOINTS_MAX {
+    let over = stored.endpoints.len().saturating_sub(ENDPOINTS_MAX);
+    if over > 0 {
         reasons.push(format!(
             "the file lists {} endpoints; the most read is {ENDPOINTS_MAX}",
             stored.endpoints.len()
@@ -109,13 +110,15 @@ pub(super) fn read_endpoints(worktree: &Path, ports: &[String]) -> Loaded {
             Err(reason) => reasons.push(reason),
         }
     }
-    let note = reasons.first().map(|first| {
-        format!(
-            "{} endpoints were left out: {}",
-            reasons.len(),
-            printable(first)
-        )
-    });
+    // The cap's reason stands for every endpoint past it; each other reason is one endpoint.
+    let left_out = if over > 0 {
+        over + reasons.len() - 1
+    } else {
+        reasons.len()
+    };
+    let note = reasons
+        .first()
+        .map(|first| format!("{left_out} endpoints were left out: {}", printable(first)));
     Loaded {
         stored: Some(stored),
         list,
@@ -482,7 +485,15 @@ mod tests {
         write_endpoints_file(wt.path(), &big).unwrap();
         let loaded = read_endpoints(wt.path(), &["api".into()]);
         assert_eq!(loaded.list.len(), ENDPOINTS_MAX);
-        assert!(loaded.note.unwrap().contains("the file lists 25 endpoints"));
+        let note = loaded.note.unwrap();
+        assert!(note.starts_with("5 endpoints were left out: "), "{note}");
+        assert!(note.contains("the file lists 25 endpoints"), "{note}");
+        // The ones over the cap and the ones the checks refused are both counted.
+        big.endpoints[3].path = big.endpoints[2].path.clone();
+        big.endpoints[4].port = "nope".into();
+        write_endpoints_file(wt.path(), &big).unwrap();
+        let note = read_endpoints(wt.path(), &["api".into()]).note.unwrap();
+        assert!(note.starts_with("7 endpoints were left out: "), "{note}");
         let view = endpoints_view(
             read_endpoints(wt.path(), &["api".into()]),
             "h1",

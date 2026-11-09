@@ -86,24 +86,38 @@ async fn the_cockpit_is_served_through_the_wire() {
 }
 
 #[tokio::test]
-async fn system_commands_are_refused_until_served() {
+async fn send_endpoint_is_served_through_the_wire() {
     use clusia_core::cockpit::RunSide;
+    use clusia_core::system::MAIN_SYSTEM_LATER;
 
     let daemon = TestDaemon::start().await;
     let mut client = daemon.client().await;
     let pr: PrRef = "acme/widgets#7".parse().unwrap();
-    let commands = [Command::SendEndpoint {
-        pr,
-        side: RunSide::Pr,
-        endpoint: "GET /".into(),
-    }];
-    for command in commands {
-        let Err(ClientError::Server(refusal)) = client.request(command.clone()).await else {
-            panic!("{command:?} was not refused");
-        };
-        assert_eq!(refusal.code, ErrorCode::InvalidState, "{command:?}");
-        assert_eq!(refusal.message, "not served yet", "{command:?}");
-    }
+    // A review that is not open lists no endpoint.
+    let Err(ClientError::Server(refusal)) = client
+        .request(Command::SendEndpoint {
+            pr: pr.clone(),
+            side: RunSide::Pr,
+            endpoint: "GET /health".into(),
+        })
+        .await
+    else {
+        panic!("a send to an unknown endpoint was not refused");
+    };
+    assert_eq!(refusal.code, ErrorCode::BadRequest);
+    assert_eq!(refusal.message, "No endpoint GET /health in acme/widgets#7");
+    let Err(ClientError::Server(refusal)) = client
+        .request(Command::SendEndpoint {
+            pr,
+            side: RunSide::Main,
+            endpoint: "GET /health".into(),
+        })
+        .await
+    else {
+        panic!("a send on main's side was not refused");
+    };
+    assert_eq!(refusal.code, ErrorCode::InvalidState);
+    assert_eq!(refusal.message, MAIN_SYSTEM_LATER);
     daemon.stop().await;
 }
 

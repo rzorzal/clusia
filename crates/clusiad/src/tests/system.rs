@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use clusia_core::PrRef;
@@ -16,10 +17,10 @@ use clusia_core::cockpit::RunSide;
 use clusia_core::printable::{printable, printable_lines};
 use clusia_core::system::{
     HEALTH_COMMAND_SECS, HealthCheck, LOG_BATCH_MAX, LOG_LINES_MAX, LOG_TAIL_LINES, LogTail,
-    MAIN_SYSTEM_LATER, NEEDS_CONTAINER, NO_REVIEW_SYSTEM, NO_SYSTEM, PortView, ProcessView,
+    MAIN_SYSTEM_LATER, NEEDS_CONTAINER, NO_REVIEW_SYSTEM, NO_SYSTEM, NOT_UP, PortView, ProcessView,
     SYSTEM_NOT_APPROVED, SYSTEM_STOPPING, SendResult, ServiceState, ServiceView, StartStage,
     StopWhy, SystemFailure, SystemLive, SystemState, SystemSupport, SystemView, older_head_text,
-    systems_full_text,
+    send_request, systems_full_text,
 };
 use clusia_core::tests::{
     RECIPE_CHANGED, RunnerKind, StepPlace, StepState, TestsPhase, TestsRecord,
@@ -36,6 +37,7 @@ use clusia_testrun::system::{
     network_steps, parse_service_exit, pick_ports, port_args, remove_system, service_ps_args,
     system_names, system_steps, wait_args,
 };
+use tokio::task::JoinHandle;
 
 use super::env::{self, RecipeState, Snapshot};
 use super::work::{self, Usable, Walk};
@@ -51,6 +53,8 @@ const STREAM_LIMIT: Duration = Duration::from_secs(7 * 24 * 3600);
 const OUTPUT_EVERY: Duration = Duration::from_millis(clusia_core::tests::OUTPUT_EVERY_MS);
 /// How long a teardown that finds another one under way waits for it.
 const TEARDOWN_WAIT: Duration = Duration::from_secs(60);
+/// How long a teardown waits for a stopped log stream to finish its file.
+const STREAM_FINISH_WAIT: Duration = Duration::from_secs(10);
 const START: &str = "start";
 
 /// One process's output: the ring the view and `GetSystemLogs` read, the file, and the lines
@@ -58,9 +62,8 @@ const START: &str = "start";
 pub(crate) struct ProcessLog {
     pub label: String,
     pub ring: LogRing,
-    /// The file, while no stream writes it; a stream takes it for its whole life, so its
-    /// writes never hold the table's lock.
-    pub file: Option<CappedLog>,
+    /// The file, which the process's stream task owns and finishes; its writes never hold
+    /// the table's lock.
     pub path: Option<PathBuf>,
     pub pending: Vec<(u64, String)>,
     /// Pending lines dropped before a flush, so `pending` stays bounded; they count as skipped.
@@ -74,7 +77,6 @@ impl ProcessLog {
         Self {
             label,
             ring: LogRing::new(LOG_LINES_MAX),
-            file: None,
             path,
             pending: Vec::new(),
             dropped: 0,
@@ -110,14 +112,6 @@ impl ProcessLog {
         let lines = pending.into_iter().map(|(_, l)| l).collect();
         Some((first, lines, u32::try_from(dropped).unwrap_or(u32::MAX)))
     }
-
-    fn finish(&mut self) {
-        if let Some(file) = self.file.take()
-            && let Err(e) = file.finish()
-        {
-            tracing::warn!(error = %e, "cannot finish the system log");
-        }
-    }
 }
 
 /// One start of a review's system, from `Starting` until a new start replaces it.
@@ -145,6 +139,8 @@ pub(crate) struct SystemRun {
     pub activity: Option<u64>,
     /// A teardown of this run is under way; no other one starts.
     pub tearing: bool,
+    /// The log stream tasks, which finish their files once the stop ends them.
+    pub streams: Vec<JoinHandle<()>>,
 }
 
 impl SystemRun {
@@ -174,6 +170,7 @@ impl SystemRun {
             docker: None,
             activity: None,
             tearing: false,
+            streams: Vec::new(),
         }
     }
 }
@@ -229,7 +226,6 @@ pub(super) fn mapped_host_ports(shared: &Shared, pr: &PrRef) -> Vec<u16> {
 }
 
 /// Keeps a Send result as the endpoint's last, and tells the windows.
-#[allow(dead_code)]
 pub(super) async fn store_send(shared: &Shared, pr: &PrRef, result: SendResult) {
     shared.tests.with(pr, |entry| {
         if let Some(run) = entry.system.as_mut() {
@@ -239,9 +235,33 @@ pub(super) async fn store_send(shared: &Shared, pr: &PrRef, result: SendResult) 
     tell_system(shared, pr).await;
 }
 
-/// Called whenever a system leaves `Starting`.
+/// Called whenever a system leaves `Starting`: with no window open, the app may have quit
+/// while it started, so the app's systems go on notice as when the last window went.
 pub(super) fn on_settled(shared: &Arc<Shared>) {
-    let _ = shared;
+    if shared.window_listeners.load(Ordering::SeqCst) == 0 {
+        super::windows_gone(shared);
+    }
+}
+
+/// Removes a system whose review is gone, in the background; shutdown waits for it. A failure
+/// is logged, and the sweep finds what is left.
+pub(super) fn teardown_later(shared: &Shared, names: SystemNames) {
+    let live = Live::new(&shared.tests);
+    let exec = shared.test_exec.clone();
+    let host = env::host(shared);
+    tokio::spawn(async move {
+        let _live = live;
+        let Some(engine) = clusia_testrun::engine::detect(exec.as_ref(), &host).await else {
+            return;
+        };
+        if !engine.running {
+            return;
+        }
+        let docker = env::docker_for(&engine, &host);
+        if let Err(e) = remove_system(exec.as_ref(), &docker, &names).await {
+            tracing::warn!(error = %e, system = %names.base, "the system was not removed whole");
+        }
+    });
 }
 
 /// What `system_view` reads of the run, taken under the lock.
@@ -1424,12 +1444,13 @@ fn spawn_watchers(start: &Start, names: &SystemNames, project: Option<&str>, acc
             );
         }
     });
+    let mut streams = Vec::new();
     for (process, _, _, file) in made {
         let args = log_stream_args(names, project, &process);
         if args.is_empty() {
             continue;
         }
-        tokio::spawn(stream_process(
+        streams.push(tokio::spawn(stream_process(
             shared.clone(),
             pr.clone(),
             id,
@@ -1439,8 +1460,10 @@ fn spawn_watchers(start: &Start, names: &SystemNames, project: Option<&str>, acc
             start.run_stop.clone(),
             project.map(str::to_string),
             file,
-        ));
+        )));
     }
+    // A teardown that already took the run's streams fired its stop first: these end at once.
+    with_run(shared, pr, id, |run| run.streams.extend(streams));
     tokio::spawn(wait_exit(
         shared.clone(),
         pr.clone(),
@@ -1641,16 +1664,17 @@ async fn wait_exit(
     fail(&shared, &pr, id, failure).await;
 }
 
-/// Removes run `id`'s engine objects and finishes its logs, then clears the record's live
-/// system. The run's own stop is fired first, so its streams, wait and health end before
-/// anything is removed. Publishes nothing.
+/// Removes run `id`'s engine objects, waits for its log streams to finish their files, then
+/// clears the record's live system. The run's own stop is fired first, so its streams, wait
+/// and health end before anything is removed. Publishes nothing.
 async fn teardown_quiet(shared: &Shared, pr: &PrRef, id: u64) {
-    let Some((names, docker, recipe_hash)) = with_run(shared, pr, id, |run| {
+    let Some((names, docker, recipe_hash, streams)) = with_run(shared, pr, id, |run| {
         run.stop.fire();
         (
             run.names.clone(),
             run.docker.clone(),
             run.recipe_hash.clone(),
+            std::mem::take(&mut run.streams),
         )
     }) else {
         return;
@@ -1665,9 +1689,16 @@ async fn teardown_quiet(shared: &Shared, pr: &PrRef, id: u64) {
     {
         tracing::warn!(error = %e, pr = %pr, "the system was not removed whole");
     }
+    for stream in streams {
+        if tokio::time::timeout(STREAM_FINISH_WAIT, stream)
+            .await
+            .is_err()
+        {
+            tracing::warn!(pr = %pr, "a system log was still being written after {STREAM_FINISH_WAIT:?}");
+        }
+    }
     with_run(shared, pr, id, |run| {
         for log in run.logs.values_mut() {
-            log.finish();
             log.pending.clear();
             log.dropped = 0;
         }
@@ -1904,6 +1935,37 @@ fn valid_process(process: &str) -> bool {
             .next()
             .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.-".contains(c))
+}
+
+/// `SendEndpoint`: sends one listed endpoint to its mapped port and keeps the result.
+pub(crate) async fn send_endpoint(
+    shared: &Shared,
+    pr: &PrRef,
+    side: RunSide,
+    endpoint: String,
+) -> Outcome {
+    if side == RunSide::Main {
+        return refuse(MAIN_SYSTEM_LATER);
+    }
+    let view = system_view(shared, pr).await;
+    let Some(listed) = view.endpoints.list.iter().find(|e| e.id == endpoint) else {
+        return reviews::bad_request(format!("No endpoint {} in {pr}", printable(&endpoint)));
+    };
+    if !matches!(view.state, SystemState::Running | SystemState::Unhealthy) {
+        return refuse(NOT_UP);
+    }
+    let host_port = view
+        .ports
+        .iter()
+        .find(|p| p.name == listed.endpoint.port)
+        .and_then(|p| p.host_port);
+    let Some(host_port) = host_port else {
+        return refuse(NOT_UP);
+    };
+    let request = send_request(&listed.endpoint, host_port);
+    let result = super::system_http::send(shared, pr, &endpoint, request).await;
+    store_send(shared, pr, result.clone()).await;
+    Outcome::Ok(Reply::Sent(Box::new(result)))
 }
 
 /// `GetSystemLogs`: the newest lines of one process, from the live run or the last one.
@@ -2889,6 +2951,8 @@ mod tests {
             );
         })
         .await;
+        // The app that started it keeps a window open, so its quit grace never runs.
+        let _window = crate::connection::Listener::window(&lab.shared);
         tokio::time::pause();
         start(&lab, false).await;
         until_state(&lab, |v| v.state == SystemState::Running).await;

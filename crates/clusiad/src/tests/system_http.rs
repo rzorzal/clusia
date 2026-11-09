@@ -2,26 +2,29 @@
 //! `127.0.0.1` port of this review's live system, follows no redirect and uses no proxy.
 
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clusia_core::PrRef;
 use clusia_core::cockpit::RunSide;
+use clusia_core::printable::{is_invisible, printable};
 use clusia_core::system::{
-    HEALTH_REQUEST_SECS, MAIN_SYSTEM_LATER, SEND_CONNECT_SECS, SEND_GUARD, SEND_TIMEOUT_SECS,
+    HEALTH_REQUEST_SECS, MAIN_SYSTEM_LATER, RESERVED_HEADERS, SEND_BODY_MAX, SEND_CONNECT_SECS,
+    SEND_GUARD, SEND_HEADER_TEXT_MAX, SEND_HEADERS_MAX, SEND_TIMEOUT_TEXT, SendRequest, SendResult,
 };
 
 use super::system::mapped_host_ports;
 use crate::state::Shared;
+use crate::sync::now_unix;
 
 /// The one builder of the system's client: no proxy (the daemon's `HTTP_PROXY` must never see
-/// a system's traffic), no redirect, HTTP/1 only, and bounded waits.
+/// a system's traffic), no redirect, HTTP/1 only, and a bounded connect. Every request sets
+/// its own timeout.
 pub(super) fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .http1_only()
         .connect_timeout(Duration::from_secs(SEND_CONNECT_SECS))
-        .timeout(Duration::from_secs(SEND_TIMEOUT_SECS))
         .build()
         .expect("a plain HTTP client builds")
 }
@@ -69,6 +72,130 @@ pub(super) fn guard(
     Ok(url)
 }
 
+/// Sends `request` to this review's system and answers what came back; every failure is a
+/// result with no status and its error.
+pub(super) async fn send(
+    shared: &Shared,
+    pr: &PrRef,
+    endpoint: &str,
+    request: SendRequest,
+) -> SendResult {
+    let mut result = SendResult {
+        endpoint: endpoint.to_string(),
+        method: request.method,
+        url: format!("http://127.0.0.1:{}{}", request.port, request.target),
+        status: None,
+        reason: None,
+        took_ms: 0,
+        headers: Vec::new(),
+        body: String::new(),
+        body_bytes: 0,
+        truncated: false,
+        error: None,
+        at: now_unix(),
+    };
+    let url = match guard(shared, pr, RunSide::Pr, request.port, &request.target) {
+        Ok(url) => url,
+        Err(refusal) => {
+            result.error = Some(refusal);
+            return result;
+        }
+    };
+    let method = reqwest::Method::from_bytes(request.method.as_str().as_bytes())
+        .unwrap_or(reqwest::Method::GET);
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in &request.headers {
+        if RESERVED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        // The endpoint checks refuse what no header can hold; anything left is skipped.
+        if let (Ok(name), Ok(value)) = (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            headers.append(name, value);
+        }
+    }
+    let mut builder = client()
+        .request(method, url)
+        .headers(headers)
+        .timeout(shared.tests.send_timeout());
+    if let Some(body) = request.body {
+        builder = builder.body(body);
+    }
+    let began = Instant::now();
+    let read = async {
+        let mut response = builder.send().await?;
+        let status = response.status();
+        let headers = response
+            .headers()
+            .iter()
+            .take(SEND_HEADERS_MAX)
+            .map(|(name, value)| {
+                (
+                    header_text(name.as_str()),
+                    header_text(&String::from_utf8_lossy(value.as_bytes())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut body: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        while let Some(chunk) = response.chunk().await? {
+            let room = SEND_BODY_MAX - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok::<_, reqwest::Error>((status, headers, body, truncated))
+    };
+    match read.await {
+        Ok((status, headers, body, truncated)) => {
+            result.status = Some(status.as_u16());
+            result.reason = status.canonical_reason().map(printable);
+            result.headers = headers;
+            result.body_bytes = body.len() as u64;
+            result.body = clean_body(&body);
+            result.truncated = truncated;
+        }
+        Err(e) if e.is_timeout() => result.error = Some(SEND_TIMEOUT_TEXT.to_string()),
+        Err(e) => {
+            let reason: String = printable(&error_chain(&e)).chars().take(200).collect();
+            result.error = Some(format!("Could not connect: {reason}"));
+        }
+    }
+    result.took_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+    result
+}
+
+/// A response header's name or value, safe to show and bounded.
+fn header_text(text: &str) -> String {
+    printable(text).chars().take(SEND_HEADER_TEXT_MAX).collect()
+}
+
+/// The body as text: invalid UTF-8 replaced, and every control character but a line break or
+/// a tab, and every invisible one, dropped.
+fn clean_body(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|&c| !((c.is_control() && c != '\n' && c != '\t') || is_invisible(c)))
+        .collect()
+}
+
+/// An error with its causes, which say what went wrong with the connection.
+fn error_chain(e: &reqwest::Error) -> String {
+    let mut text = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 /// One health check: `GET` on `path` of the mapped `host_port`. Healthy is 200 to 399; the text
 /// is the status, or "no answer" when nothing answered in time. The body is never read.
 pub(super) async fn check(
@@ -103,6 +230,65 @@ mod tests {
     use super::*;
     use crate::tests::lab::pr;
     use crate::tests::system_lab::{stop_live_system, store_live_system, system_lab};
+
+    /// Runs this test binary again for `no_proxy_child`, with every proxy variable pointing at
+    /// a listener held here: the child's request must never reach it. The variables live only
+    /// in the child's environment.
+    #[test]
+    fn the_client_ignores_the_proxy_environment() {
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        proxy.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", proxy.local_addr().unwrap());
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "tests::system_http::tests::no_proxy_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CLUSIA_NO_PROXY_CHILD", "1")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy");
+        for name in ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+            child.env(name, &url);
+        }
+        let out = child.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(stdout.contains("1 passed"), "the child ran: {stdout}");
+        assert_eq!(
+            proxy.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the fake proxy never saw a connection"
+        );
+    }
+
+    /// The child half of `the_client_ignores_the_proxy_environment`: does nothing unless that
+    /// test started it.
+    #[tokio::test]
+    #[ignore]
+    async fn no_proxy_child() {
+        if std::env::var("CLUSIA_NO_PROXY_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        let mock = MockServer::start().await;
+        Mock::given(path("/x"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let answer = build_client()
+            .get(format!("http://127.0.0.1:{}/x", mock.address().port()))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        assert_eq!(answer.unwrap().status(), 200);
+    }
 
     #[tokio::test]
     async fn the_guard_accepts_only_the_mapped_loopback_port_of_this_review() {

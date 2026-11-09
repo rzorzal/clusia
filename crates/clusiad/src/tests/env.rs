@@ -624,14 +624,17 @@ pub(super) async fn refresh_shipped(shared: &Shared, ctx: &Ctx) -> Option<String
     problem
 }
 
-/// The containers and compose projects that belong to something live, which the orphan sweep
-/// leaves alone.
+/// The containers, compose projects and system networks that belong to something live, which
+/// the orphan sweep leaves alone.
 pub(super) fn live_names(shared: &Shared) -> Vec<String> {
     let mut names = shared.tests.containers();
     for (pr, _) in super::recorded(shared) {
         if let Some(stack) = load(shared, &pr).stack {
             names.push(stack);
         }
+    }
+    for (_, system, _) in super::system::live_systems(shared) {
+        names.extend(clusia_testrun::system::live_names(&system));
     }
     names
 }
