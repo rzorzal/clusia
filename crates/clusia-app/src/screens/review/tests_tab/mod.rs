@@ -874,6 +874,7 @@ mod tests {
             commands_approved: false,
             ready: false,
             blocked: None,
+            system: None,
         }
     }
 

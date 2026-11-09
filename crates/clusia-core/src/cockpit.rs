@@ -137,9 +137,12 @@ impl ItemRef {
 }
 
 /// Which worktree a run is on. `RunSide` and not `Side`, which is the diff's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RunSide {
+    #[default]
     Pr,
     Main,
 }
@@ -2270,6 +2273,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_side_defaults_to_the_pr() {
+        assert_eq!(RunSide::default(), RunSide::Pr);
+    }
     use crate::functions::{Param, ParamKind};
     use crate::tests::RunnerKind;
 

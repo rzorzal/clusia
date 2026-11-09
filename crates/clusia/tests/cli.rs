@@ -2879,6 +2879,7 @@ mod tests_against_a_scripted_daemon {
             commands_approved: false,
             ready: false,
             blocked: None,
+            system: None,
         };
         daemon(
             &rt,
@@ -2936,6 +2937,7 @@ mod tests_against_a_scripted_daemon {
             commands_approved: false,
             ready: false,
             blocked: None,
+            system: None,
         }
     }
 

@@ -583,6 +583,7 @@ pub const TEST_CPUS_MAX: u32 = 256;
 pub const TEST_MEMORY_RANGE: std::ops::RangeInclusive<u32> = 512..=262_144;
 pub const RUN_TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 60..=14_400;
 pub const PARALLEL_RUNS_RANGE: std::ops::RangeInclusive<u32> = 1..=4;
+pub const SYSTEMS_MAX_RANGE: std::ops::RangeInclusive<u32> = 1..=4;
 
 /// How the PR's tests run: where, with how much, for how long and how many at once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -595,6 +596,8 @@ pub struct Tests {
     pub run_timeout_secs: u32,
     /// Activities (setup steps, runs, lists) that may run at once across every review.
     pub parallel_runs: u32,
+    /// Systems that may run at once across every review.
+    pub systems_max: u32,
 }
 
 impl Default for Tests {
@@ -605,6 +608,7 @@ impl Default for Tests {
             memory_mb: 4096,
             run_timeout_secs: 1800,
             parallel_runs: 1,
+            systems_max: 2,
         }
     }
 }
@@ -1181,6 +1185,7 @@ impl Config {
                 &RUN_TIMEOUT_RANGE,
             ),
             ("parallel_runs", tests.parallel_runs, &PARALLEL_RUNS_RANGE),
+            ("systems_max", tests.systems_max, &SYSTEMS_MAX_RANGE),
         ] {
             if !range.contains(&value) {
                 return Err(format!(
@@ -2243,6 +2248,7 @@ mod tests {
                 memory_mb: 4096,
                 run_timeout_secs: 1800,
                 parallel_runs: 1,
+                systems_max: 2,
             }
         );
         assert_eq!(t.cpus_for(10), 5);
@@ -2256,6 +2262,7 @@ mod tests {
             serde_json::from_str(r#"{"tests":{"runner":"local","parallel_runs":2}}"#).unwrap();
         assert_eq!(some.tests.runner, crate::tests::RunnerChoice::Local);
         assert_eq!((some.tests.parallel_runs, some.tests.memory_mb), (2, 4096));
+        assert_eq!(some.tests.systems_max, 2);
     }
 
     #[test]
@@ -2303,5 +2310,15 @@ mod tests {
             Some("tests.parallel_runs must be between 1 and 4, got 5"),
         );
         check(&|t| t.parallel_runs = 4, None);
+        assert_eq!(Tests::default().systems_max, 2);
+        check(
+            &|t| t.systems_max = 0,
+            Some("tests.systems_max must be between 1 and 4, got 0"),
+        );
+        check(
+            &|t| t.systems_max = 5,
+            Some("tests.systems_max must be between 1 and 4, got 5"),
+        );
+        check(&|t| t.systems_max = 4, None);
     }
 }

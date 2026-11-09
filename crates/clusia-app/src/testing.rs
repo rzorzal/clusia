@@ -890,6 +890,7 @@ pub fn tests_plan(
         commands_approved: approved,
         ready: approved,
         blocked: None,
+        system: None,
     }
 }
 

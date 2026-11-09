@@ -81,6 +81,7 @@ pub fn setup_plan(
             commands_approved: false,
             ready: false,
             blocked: Some(problem.clone()),
+            system: None,
         };
     }
 
@@ -165,6 +166,7 @@ pub fn setup_plan(
         ready: blocked.is_none() && steps_done && commands_approved && mounted,
         blocked,
         steps,
+        system: None,
     }
 }
 
@@ -223,6 +225,7 @@ pub fn main_plan(
             commands_approved: false,
             ready: false,
             blocked: Some(problem.clone()),
+            system: None,
         };
     }
     let mut steps = setup_steps(recipe, container, facts);
@@ -242,6 +245,7 @@ pub fn main_plan(
         ready: blocked.is_none() && steps_done && commands_approved,
         blocked,
         steps,
+        system: None,
     }
 }
 

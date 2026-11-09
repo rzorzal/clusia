@@ -1180,6 +1180,7 @@ mod tests {
             commands_approved: true,
             ready: false,
             blocked: None,
+            system: None,
         };
         let env_event = |pr: &PrRef, phase: TestsPhase| {
             let mut view = TestsView::new("9be1d07");
@@ -1267,6 +1268,7 @@ mod tests {
             commands_approved: false,
             ready: false,
             blocked: None,
+            system: None,
         };
         assert_eq!(
             plan_lines(&plan),
@@ -1334,6 +1336,7 @@ mod tests {
             commands_approved: false,
             ready: false,
             blocked: None,
+            system: None,
         };
         assert_eq!(
             approval_of(&plan),

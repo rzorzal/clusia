@@ -249,6 +249,7 @@ mod tests {
             current: None,
             cases: false,
             functions: Vec::new(),
+            system_failure: None,
         }
     }
 

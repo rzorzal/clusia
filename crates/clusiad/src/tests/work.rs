@@ -355,6 +355,7 @@ pub(super) async fn generate(
         current,
         cases: !briefs.is_empty(),
         functions: briefs.clone(),
+        system_failure: None,
     };
     let answer = match recipe_turn::run_recipe_turn(&shared, &pr, prompt, turn.clone()).await {
         Ok(answer) => answer,

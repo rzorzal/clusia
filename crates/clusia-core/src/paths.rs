@@ -139,6 +139,11 @@ impl Paths {
         self.tests_dir().join("logs").join(pr.file_key())
     }
 
+    /// The log files of the system of `pr`, one folder per review; `main/` stays free under it.
+    pub fn system_logs_for(&self, pr: &crate::PrRef) -> PathBuf {
+        self.tests_dir().join("system").join(pr.file_key())
+    }
+
     pub fn test_log(&self, pr: &crate::PrRef, run: &str) -> PathBuf {
         self.test_logs_for(pr).join(format!("{run}.log"))
     }
@@ -558,5 +563,15 @@ mod tests {
         );
         let other = crate::PrRef::new("acme", "widgets", 8).unwrap();
         assert_ne!(p.test_tmp_for(&pr), p.test_tmp_for(&other));
+    }
+
+    #[test]
+    fn system_logs_live_under_tests_system_per_review() {
+        let paths = Paths::new("/data");
+        let pr: crate::PrRef = "acme/widgets#7".parse().unwrap();
+        assert_eq!(
+            paths.system_logs_for(&pr),
+            std::path::Path::new("/data/tests/system/acme~widgets~7")
+        );
     }
 }
