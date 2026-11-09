@@ -507,6 +507,7 @@ mod tests {
                 results: ResultsFormat::Libtest,
                 env: BTreeMap::new(),
             },
+            system: None,
         }
     }
 

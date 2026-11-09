@@ -452,6 +452,7 @@ mod tests {
                 results: clusia_core::tests::ResultsFormat::Libtest,
                 env: BTreeMap::new(),
             },
+            system: None,
         }
     }
 

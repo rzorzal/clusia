@@ -120,6 +120,7 @@ async fn a_real_engine_builds_runs_stops_and_cleans_up() {
             results: ResultsFormat::Plain,
             env: BTreeMap::new(),
         },
+        system: None,
     };
     let plan = image::plan_image(
         &recipe,
