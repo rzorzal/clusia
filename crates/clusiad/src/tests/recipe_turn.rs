@@ -26,6 +26,8 @@ pub(crate) struct RecipeAnswer {
     pub unreadable: u32,
     /// Its `clusia-function` blocks, not checked yet.
     pub functions: Vec<serde_json::Value>,
+    /// Its first `clusia-endpoints` block, not checked yet.
+    pub endpoints: Option<serde_json::Value>,
 }
 
 /// Runs the recipe turn. `Err` is why no answer came (the program failed, the limit passed, a
@@ -115,6 +117,7 @@ fn answer_of(text: String) -> RecipeAnswer {
         near: blocks.near_tests,
         unreadable: blocks.unreadable,
         functions: blocks.functions,
+        endpoints: blocks.endpoints,
     }
 }
 
@@ -249,6 +252,7 @@ mod tests {
             current: None,
             cases: false,
             functions: Vec::new(),
+            system_failure: None,
         }
     }
 

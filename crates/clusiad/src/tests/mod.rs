@@ -12,6 +12,7 @@ mod cockpit_turn;
 mod compare;
 #[cfg(test)]
 mod compare_lab;
+mod endpoints;
 mod env;
 #[cfg(test)]
 mod functions_lab;
@@ -23,6 +24,14 @@ mod main_tree;
 pub(crate) mod recipe_file;
 pub(crate) mod recipe_turn;
 mod scenarios;
+#[cfg(test)]
+mod send_lab;
+#[cfg(test)]
+mod shutdown_lab;
+mod system;
+mod system_http;
+#[cfg(test)]
+mod system_lab;
 mod work;
 
 use std::collections::{BTreeMap, HashMap};
@@ -34,6 +43,7 @@ use std::time::{Duration, Instant};
 use clusia_core::PrRef;
 use clusia_core::cockpit::CockpitActivity;
 use clusia_core::functions::FunctionsActivity;
+use clusia_core::system::StopWhy;
 use clusia_core::tests::{Approve, TestEngineInfo, TestScope, TestsPhase, TestsView};
 use clusia_protocol::{ErrorCode, Event, Outcome, ProtocolError, Reply, topics};
 use clusia_testrun::exec::StopFlag;
@@ -50,9 +60,14 @@ pub(crate) use case_turn::write_cases;
 pub(crate) use cases::{driver, functions, remove_case, reset_case, save_case};
 pub(crate) use cockpit_turn::{ask_copilot, write_bench, write_scenarios};
 pub(crate) use compare::run_cockpit;
+pub(crate) use endpoints::{fix_system, write_endpoints};
 pub(crate) use main_tree::{open_main, prepare_main, remove_main, sweep_main};
 pub(crate) use scenarios::{
     approve_scenario, cockpit, remove_scenario, reset_scenario, save_scenario, scenario_script,
+};
+pub(crate) use system::{
+    restart_system, send_endpoint, set_system_network, start_system, stop_system, system,
+    system_logs,
 };
 
 /// How long `stop_all` waits for the activity of a review to end; a container's stop may take
@@ -82,6 +97,8 @@ pub(super) enum Doing {
     Bench,
     Main,
     Cockpit,
+    System,
+    Endpoints,
 }
 
 impl Doing {
@@ -97,7 +114,15 @@ impl Doing {
             Doing::Bench => "writing a benchmark",
             Doing::Main => "preparing main",
             Doing::Cockpit => "running the QA cockpit",
+            Doing::System => "starting the system",
+            Doing::Endpoints => "reading the endpoints",
         }
+    }
+
+    /// Whether the activity is about the review's system, which leaves the tests' phase and
+    /// their failure alone, and takes no place among `tests.parallel_runs`.
+    pub(super) fn is_system(self) -> bool {
+        matches!(self, Doing::System | Doing::Endpoints)
     }
 
     /// Whether the activity is about the function cases, which leave the tests' phase alone.
@@ -177,6 +202,10 @@ pub(super) struct Entry {
     pub main_failed: Option<String>,
     /// Why each of main's setup steps failed in the last walk, by step id.
     pub main_step_failures: BTreeMap<String, String>,
+    /// The review's system: the live one, or the last one after it stopped or failed.
+    pub system: Option<system::SystemRun>,
+    /// Why the last endpoints turn failed, until the next one begins.
+    pub endpoints_failed: Option<String>,
 }
 
 /// The tests of every review.
@@ -194,6 +223,14 @@ pub(crate) struct Bench {
     mounts: Mutex<HashMap<(String, PathBuf), Result<(), String>>>,
     /// How long one wait for the call index lasts, in milliseconds.
     index_wait_ms: AtomicU64,
+    /// How long a system's health loop sleeps between checks, in milliseconds.
+    health_every: AtomicU64,
+    /// How long a Send waits for its answer, in milliseconds.
+    send_timeout: AtomicU64,
+    /// How long the app's systems outlive the last window, in milliseconds.
+    quit_grace: AtomicU64,
+    /// Counts "the last window went"; a grace that ends finds whether a later one superseded it.
+    quit_epoch: AtomicU64,
 }
 
 impl Default for Bench {
@@ -209,6 +246,10 @@ impl Default for Bench {
             index_wait_ms: AtomicU64::new(
                 u64::try_from(cases::INDEX_WAIT.as_millis()).unwrap_or(u64::MAX),
             ),
+            health_every: AtomicU64::new(clusia_core::system::HEALTH_EVERY_MS),
+            send_timeout: AtomicU64::new(clusia_core::system::SEND_TIMEOUT_SECS * 1000),
+            quit_grace: AtomicU64::new(clusia_core::system::SYSTEM_QUIT_GRACE_SECS * 1000),
+            quit_epoch: AtomicU64::new(0),
         }
     }
 }
@@ -227,6 +268,36 @@ impl Bench {
     pub(super) fn set_index_wait(&self, wait: Duration) {
         let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
         self.index_wait_ms.store(ms, Ordering::SeqCst);
+    }
+
+    pub(super) fn health_every(&self) -> Duration {
+        Duration::from_millis(self.health_every.load(Ordering::SeqCst))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_health_every(&self, every: Duration) {
+        let ms = u64::try_from(every.as_millis()).unwrap_or(u64::MAX);
+        self.health_every.store(ms, Ordering::SeqCst);
+    }
+
+    pub(super) fn send_timeout(&self) -> Duration {
+        Duration::from_millis(self.send_timeout.load(Ordering::SeqCst))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_send_timeout(&self, wait: Duration) {
+        let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+        self.send_timeout.store(ms, Ordering::SeqCst);
+    }
+
+    pub(super) fn quit_grace(&self) -> Duration {
+        Duration::from_millis(self.quit_grace.load(Ordering::SeqCst))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_quit_grace(&self, grace: Duration) {
+        let ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
+        self.quit_grace.store(ms, Ordering::SeqCst);
     }
 
     pub(super) fn seq(&self) -> u32 {
@@ -372,6 +443,10 @@ pub(super) fn begin(
             entry.main_step_failures.clear();
         } else if doing.is_cockpit() {
             entry.cockpit_failed = None;
+        } else if doing.is_system() {
+            if doing == Doing::Endpoints {
+                entry.endpoints_failed = None;
+            }
         } else {
             entry.failed = None;
         }
@@ -483,6 +558,15 @@ pub(crate) async fn get(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
 
 /// `GenerateTests`: probes the machine and has the agent write the recipe, in the background.
 pub(crate) async fn generate(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
+    generate_with(shared, pr, None).await
+}
+
+/// `generate`, with what made the system fail given to the agent as data when set.
+pub(super) async fn generate_with(
+    shared: &Arc<Shared>,
+    pr: &PrRef,
+    system_failure: Option<String>,
+) -> Outcome {
     let review = match active(shared, pr) {
         Ok(review) => review,
         Err(out) => return out,
@@ -500,7 +584,14 @@ pub(crate) async fn generate(shared: &Arc<Shared>, pr: &PrRef) -> Outcome {
     tell(shared, pr).await;
     cases::tell_functions(shared, pr).await;
     let id = started.id;
-    let job = work::generate(shared.clone(), pr.clone(), review, id, started.turn.clone());
+    let job = work::generate(
+        shared.clone(),
+        pr.clone(),
+        review,
+        id,
+        started.turn.clone(),
+        system_failure,
+    );
     let live = guard.hand_off();
     let (shared, pr) = (shared.clone(), pr.clone());
     tokio::spawn(async move {
@@ -758,6 +849,40 @@ fn repo_name(repo: &str) -> Option<(String, String)> {
         .map(|pr| (pr.owner, pr.repo))
 }
 
+/// The last window went: after the quit grace, the systems the app started stop, unless a
+/// window came back or a later "last window gone" took over.
+pub(crate) fn windows_gone(shared: &Arc<Shared>) {
+    if shared.tests.closing.load(Ordering::SeqCst) {
+        return;
+    }
+    // A window's drop may come while the runtime itself goes away: nothing is left to stop.
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let epoch = shared.tests.quit_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    // The grace counts from now, not from when the task first runs.
+    let until = tokio::time::Instant::now() + shared.tests.quit_grace();
+    let shared = shared.clone();
+    // The sleep holds no `Live`: a shutdown never waits for a grace.
+    runtime.spawn(async move {
+        tokio::time::sleep_until(until).await;
+        // Counted before `closing` is read: a shutdown that starts after the read waits for
+        // these teardowns, and one that started before is seen here.
+        let _live = Live::new(&shared.tests);
+        let still_gone = shared.window_listeners.load(Ordering::SeqCst) == 0
+            && shared.tests.quit_epoch.load(Ordering::SeqCst) == epoch
+            && !shared.tests.closing.load(Ordering::SeqCst);
+        if !still_gone {
+            return;
+        }
+        for (pr, _, keep) in system::live_systems(&shared) {
+            if !keep {
+                system::teardown(&shared, &pr, StopWhy::AppQuit).await;
+            }
+        }
+    });
+}
+
 /// `CleanUpTests`: removes the images, volumes and caches of one repository, or of every one
 /// with a cache folder, and the orphan containers; answers the new disk report.
 pub(crate) async fn clean_up(shared: &Shared, repo: Option<String>) -> Outcome {
@@ -783,6 +908,13 @@ pub(crate) async fn clean_up(shared: &Shared, repo: Option<String>) -> Outcome {
             })
             .collect(),
     };
+    // A live system's containers carry the repository's labels: they would go with it.
+    if let Some((pr, _, _)) = system::live_systems(shared)
+        .into_iter()
+        .find(|(pr, _, _)| repos.iter().any(|(o, n)| pr.owner == *o && pr.repo == *n))
+    {
+        return reviews::invalid_state(format!("Stop the system of {pr} first"));
+    }
     for (owner, name) in &repos {
         let busy = {
             let table = shared.tests.table.lock().unwrap_or_else(|p| p.into_inner());
@@ -815,7 +947,7 @@ pub(crate) async fn clean_up(shared: &Shared, repo: Option<String>) -> Outcome {
         && let Err(e) = clusia_testrun::cleanup::remove_orphans(
             shared.test_exec.as_ref(),
             docker,
-            &env::live_names(shared),
+            &|| env::live_names(shared),
             only.flatten().as_deref(),
         )
         .await
@@ -860,6 +992,8 @@ pub(crate) async fn stop_all(shared: &Shared, pr: &PrRef, why: Why) {
     while !shared.tests.with(pr, |entry| entry.activity.is_none()) && Instant::now() < give_up {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // The system may use the stack's network and services: it goes first.
+    system::teardown(shared, pr, StopWhy::ReviewClosed).await;
     env::take_stack_down(shared, pr).await;
     shared.tests.with(pr, |entry| {
         entry.services_ready = None;
@@ -869,8 +1003,8 @@ pub(crate) async fn stop_all(shared: &Shared, pr: &PrRef, why: Why) {
 }
 
 /// The review was published or discarded: its entry, record, logs and temp folder go, and a
-/// stack the record still names is taken down in the background. The caller holds the review
-/// lock.
+/// stack the record still names, or a system still live, is taken down in the background. The
+/// caller holds the review lock.
 pub(crate) fn forget(shared: &Shared, pr: &PrRef) {
     let removed = shared
         .tests
@@ -884,6 +1018,14 @@ pub(crate) fn forget(shared: &Shared, pr: &PrRef) {
     if let Some(copilot) = removed.as_ref().and_then(|entry| entry.copilot.as_ref()) {
         copilot.fire(Why::Ended);
     }
+    if let Some(run) = removed
+        .and_then(|entry| entry.system)
+        .filter(|run| run.state.is_live())
+    {
+        run.stop.fire();
+        system::teardown_later(shared, run.names);
+    }
+    remove_folder(&shared.paths.system_logs_for(pr));
     let record = clusia_store::load_tests(&shared.paths, pr).unwrap_or_default();
     if let Err(e) = clusia_store::delete_tests(&shared.paths, pr) {
         tracing::warn!(error = %e, pr = %pr, "cannot delete the test record");
@@ -937,6 +1079,18 @@ pub(crate) async fn after_checkout_removed(shared: &Shared, pr: &PrRef) {
     remove_cache(shared, &pr.owner, &pr.repo);
 }
 
+/// Removes `path` and what is under it; a link is unlinked, never followed.
+fn remove_folder(path: &Path) {
+    let removed = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(_) => return,
+    };
+    if let Err(e) = removed {
+        tracing::warn!(error = %e, folder = %path.display(), "cannot remove a folder");
+    }
+}
+
 /// Removes the scenario run folders under `dir`, then `dir` itself.
 fn remove_runs(dir: &Path) {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -968,7 +1122,8 @@ fn recorded(shared: &Shared) -> Vec<(PrRef, PathBuf)> {
 }
 
 /// The retention sweep: records with no review older than `cutoff` go (the rule of the stored
-/// check results), then the `clusia-` containers no live run or stack owns.
+/// check results) with their system logs, then the `clusia-` containers and system networks
+/// nothing live owns.
 pub(crate) async fn sweep(shared: &Shared, cutoff: i64) {
     for (pr, file) in recorded(shared) {
         let old = || {
@@ -989,17 +1144,43 @@ pub(crate) async fn sweep(shared: &Shared, cutoff: i64) {
         }
     }
     sweep_runs(shared);
+    sweep_system_logs(shared);
     sweep_main(shared).await;
-    if let Some(docker) = env::docker_now(shared).await
-        && let Err(e) = clusia_testrun::cleanup::remove_orphans(
-            shared.test_exec.as_ref(),
+    if let Some(docker) = env::docker_now(shared).await {
+        let exec = shared.test_exec.as_ref();
+        if let Err(e) = clusia_testrun::cleanup::remove_orphans(
+            exec,
             &docker,
-            &env::live_names(shared),
+            &|| env::live_names(shared),
             None,
         )
         .await
+        {
+            tracing::warn!(error = %e, "cannot remove the orphan test containers");
+        }
+        if let Err(e) = clusia_testrun::cleanup::remove_orphan_networks(exec, &docker, &|| {
+            env::live_names(shared)
+        })
+        .await
+        {
+            tracing::warn!(error = %e, "cannot remove the orphan system networks");
+        }
+    }
+}
+
+/// Removes the system log folders of every review whose test record is gone; a review with a
+/// record keeps the logs of its last system.
+fn sweep_system_logs(shared: &Shared) {
+    let tests = shared.paths.tests_dir();
+    for entry in std::fs::read_dir(tests.join("system"))
+        .into_iter()
+        .flatten()
+        .flatten()
     {
-        tracing::warn!(error = %e, "cannot remove the orphan test containers");
+        let key = entry.file_name().to_string_lossy().into_owned();
+        if !tests.join(format!("{key}.json")).exists() {
+            remove_folder(&entry.path());
+        }
     }
 }
 
@@ -1019,8 +1200,8 @@ fn sweep_runs(shared: &Shared) {
     }
 }
 
-/// The daemon is stopping: no new activity, every running one stopped, then every stored
-/// compose stack taken down.
+/// The daemon is stopping: no new activity, every running one stopped, then every live system
+/// (kept or not) and every stored compose stack taken down.
 pub(crate) async fn shutdown(shared: &Shared) {
     shared.tests.closing.store(true, Ordering::SeqCst);
     {
@@ -1040,6 +1221,9 @@ pub(crate) async fn shutdown(shared: &Shared) {
         .is_err()
     {
         tracing::warn!("stopping with test activities still running after {SHUTDOWN_WAIT:?}");
+    }
+    for (pr, _, _) in system::live_systems(shared) {
+        system::teardown(shared, &pr, StopWhy::Shutdown).await;
     }
     for (pr, _) in recorded(shared) {
         env::take_stack_down(shared, &pr).await;

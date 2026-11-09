@@ -1,0 +1,21 @@
+.in{display:flex;align-items:center;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--input);font-family:"JetBrains Mono",monospace;font-size:12px}
+.sub{display:flex;gap:6px;padding:12px 24px 0;align-items:center}.sub>span{padding:6px 12px;border-radius:6px;color:var(--muted)}.sub>span.on{background:var(--surface);border:1px solid var(--line);color:var(--fg);font-weight:600}
+.sys{flex:1;display:flex;gap:14px;padding:12px 24px 16px;min-height:0}
+.lcol{width:330px;display:flex;flex-direction:column;gap:12px}
+.rcol{flex:1;display:flex;flex-direction:column;gap:12px;min-width:0}
+.cap{color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.05em;margin-bottom:8px}
+.st{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
+.dot{width:9px;height:9px;border-radius:5px;display:inline-block}
+.port{display:grid;grid-template-columns:52px 1fr;gap:2px 8px;padding:7px 0;border-top:1px solid var(--line);font-size:12.5px}
+.port:first-of-type{border-top:0}
+.url{color:var(--blue);text-decoration:underline;font-family:"JetBrains Mono",monospace;font-size:12px}
+.ep{display:grid;grid-template-columns:58px 1fr auto;gap:3px 10px;padding:9px 12px;border-top:1px solid var(--line);align-items:center}
+.ep.on{background:var(--greenbg)}
+.meth{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:700;padding:1px 6px;border-radius:4px;text-align:center}
+.post{background:var(--bluebg);color:var(--blue)}.get{background:var(--greenbg);color:var(--green)}.del{background:var(--redbg);color:var(--orange)}
+.logs{background:var(--code);border:1px solid var(--line);border-radius:6px;font-family:"JetBrains Mono",monospace;font-size:11.5px;line-height:1.6;white-space:pre;overflow:hidden;padding:8px 10px;flex:1}
+.ltabs{display:flex;gap:2px;align-items:center}.ltabs span{padding:4px 9px;border-radius:5px;color:var(--muted);font-size:12px}.ltabs span.on{background:var(--chrome);color:var(--fg);font-weight:600}
+.tog{display:inline-flex;width:28px;height:16px;border-radius:8px;background:var(--line);position:relative;vertical-align:middle}
+.tog::after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:6px;background:#fff}
+.tog.on{background:var(--green)}.tog.on::after{left:14px}
+.resp{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px}

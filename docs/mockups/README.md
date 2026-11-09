@@ -42,3 +42,15 @@ The cockpit boards follow the owner's sketch (`docs/assets/sp4-m2-cockpit-sketch
 | `main` | Main's own setup plan |
 
 The Load group is shown as "comes later" (M3).
+
+### SP4 · M3: the System sub-tab and the Load group
+
+M3 adds a third Tests sub-tab, **System**, where the PR's system starts in a container with its ports on `127.0.0.1` only, and the cockpit's **Load · on demand** group, which compares PR vs main under load. Sources: `sp4/src/system-*.html` with `system.css`, and `sp4/src/cockpit-load.html`; a `#dark` hash renders the dark board (headless Chrome at 1282×802).
+
+| Board | Light | Dark |
+|---|---|---|
+| System, not started | `sp4/png/System-idle.png` | `sp4/png/Dark-System-idle.png` |
+| System, running, Where to test | `sp4/png/System-running.png` | `sp4/png/Dark-System-running.png` |
+| System, unhealthy | `sp4/png/System-unhealthy.png` | `sp4/png/Dark-System-unhealthy.png` |
+| Start the system (approval) | `sp4/png/System-setup.png` | `sp4/png/Dark-System-setup.png` |
+| Cockpit, a load item PR vs main | `sp4/png/Cockpit-load.png` | `sp4/png/Dark-Cockpit-load.png` |

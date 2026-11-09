@@ -12,12 +12,13 @@ use serde_json::json;
 
 use crate::cli::{
     AgentCommand, AuthCommand, Command, ConfigCommand, DaemonCommand, HarnessCommand, InstallArgs,
-    UninstallArgs,
+    OnOff, SystemCommand, UninstallArgs,
 };
 use crate::cockpit_cmd::{CockpitFlags, CockpitWanted};
+use crate::system_cmd::SystemAction;
 use crate::{
     agent, calls, check, diagrams, harness_test, install, revalidate, review, spawn, story,
-    tests_cmd,
+    system_cmd, tests_cmd,
 };
 
 /// What a successful command prints: `human` normally, `json` with `--json`.
@@ -178,6 +179,37 @@ pub async fn run(
             };
             tests_cmd::tests(paths, home, &pr, wanted, json).await
         }
+        Command::System(cmd) => {
+            let (pr, action) = match cmd {
+                SystemCommand::Start { pr, yes } => (pr, SystemAction::Start { yes }),
+                SystemCommand::Stop { pr } => (pr, SystemAction::Stop),
+                SystemCommand::Restart { pr } => (pr, SystemAction::Restart),
+                SystemCommand::Status { pr } => (pr, SystemAction::Status),
+                SystemCommand::Logs {
+                    pr,
+                    process,
+                    lines,
+                    follow,
+                } => (
+                    pr,
+                    SystemAction::Logs {
+                        process,
+                        lines,
+                        follow,
+                    },
+                ),
+                SystemCommand::Send { pr, endpoint } => (pr, SystemAction::Send { endpoint }),
+                SystemCommand::Network { pr, state } => (
+                    pr,
+                    SystemAction::Network {
+                        allowed: matches!(state, OnOff::On),
+                    },
+                ),
+                SystemCommand::Endpoints { pr, write } => (pr, SystemAction::Endpoints { write }),
+                SystemCommand::Fix { pr } => (pr, SystemAction::Fix),
+            };
+            system_cmd::system(paths, home, &pr, action, json).await
+        }
         Command::Harness(HarnessCommand::Test {
             program,
             permission,
@@ -280,7 +312,7 @@ fn state_name(state: SyncState) -> String {
         .unwrap_or_default()
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

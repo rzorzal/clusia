@@ -855,6 +855,7 @@ fn demo_tests_plan(steps: Vec<PlanStep>, done: bool) -> SetupPlan {
         commands_approved: done,
         ready: done,
         blocked: None,
+        system: None,
     }
 }
 
@@ -951,7 +952,7 @@ pub fn demo_tests(now: i64, state: DemoTests) -> TestsView {
                 blocked: Some(
                     "This pull request ships its own .clusia folder. Clúsia will not run a recipe that comes with the code it tests."
                         .into(),
-                ),
+                ), system: None,
             });
         }
         DemoTests::Auto
@@ -4599,6 +4600,7 @@ pub fn demo_cockpit(now: i64, state: DemoCockpit) -> CockpitView {
             commands_approved: false,
             ready: false,
             blocked: None,
+            system: None,
         });
     }
     view

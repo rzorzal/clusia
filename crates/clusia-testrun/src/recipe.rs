@@ -6,7 +6,11 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use clusia_core::functions::FunctionLang;
-use clusia_core::printable::{is_invisible, plain_relative};
+use clusia_core::printable::{is_invisible, plain_relative, printable};
+use clusia_core::system::{
+    HEALTH_TIMEOUT_DEFAULT, HEALTH_TIMEOUT_MAX, HEALTH_TIMEOUT_MIN, PORT_PATH_MAX, PORTS_MAX,
+    SYSTEM_NOTE_MAX, SystemPort, SystemSpecView, check_url_path,
+};
 use clusia_core::tests::{NEAR_MAX, RecipeSummary, ResultsFormat, RunnerChoice, TestScope};
 use serde::Deserialize;
 
@@ -71,6 +75,103 @@ pub struct Recipe {
     pub tests: TestsSpec,
     /// How to run a function's driver, per language; none when the recipe sets no command.
     pub functions: Option<FunctionsSpec>,
+    /// What a reviewer can start and call, run in the container after the setup steps.
+    pub system: Option<SystemSpec>,
+}
+
+/// The recipe's `[system]`: a long-running start command, its named ports, a health check and
+/// fake environment variables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemSpec {
+    pub start: String,
+    pub note: Option<String>,
+    /// The first port is the main one.
+    pub ports: Vec<PortSpec>,
+    pub health: Option<HealthSpec>,
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortSpec {
+    pub name: String,
+    pub port: u16,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthSpec {
+    /// `GET <path>` on a named port; 200 to 399 is healthy.
+    Http {
+        port: String,
+        path: String,
+        timeout_secs: u32,
+    },
+    /// A command run in the container; exit 0 is healthy.
+    Command { command: String, timeout_secs: u32 },
+}
+
+impl HealthSpec {
+    pub fn timeout_secs(&self) -> u32 {
+        match self {
+            Self::Http { timeout_secs, .. } | Self::Command { timeout_secs, .. } => *timeout_secs,
+        }
+    }
+
+    /// The check as a short phrase.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Http { port, path, .. } => format!("GET {path} on {port}"),
+            Self::Command { .. } => "The health command".to_string(),
+        }
+    }
+
+    /// The check as the setup plan shows it.
+    pub fn plan_text(&self) -> String {
+        match self {
+            Self::Http {
+                port,
+                path,
+                timeout_secs,
+            } => format!("GET {path} on {port} · up to {timeout_secs} s"),
+            Self::Command {
+                command,
+                timeout_secs,
+            } => format!("{command} in the container · up to {timeout_secs} s"),
+        }
+    }
+}
+
+impl SystemSpec {
+    pub fn port_names(&self) -> Vec<String> {
+        self.ports.iter().map(|p| p.name.clone()).collect()
+    }
+
+    /// The section as shown: `system.env` laid over the tests' `env`.
+    pub fn spec_view(
+        &self,
+        tests_env: &BTreeMap<String, String>,
+        services: &[String],
+    ) -> SystemSpecView {
+        let mut env = tests_env.clone();
+        env.extend(self.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        SystemSpecView {
+            start: self.start.clone(),
+            note: self.note.clone(),
+            ports: self
+                .ports
+                .iter()
+                .map(|p| SystemPort {
+                    name: p.name.clone(),
+                    port: p.port,
+                    path: p.path.clone(),
+                })
+                .collect(),
+            health: self.health.as_ref().map(HealthSpec::text),
+            health_timeout_secs: self.health.as_ref().map(HealthSpec::timeout_secs),
+            services: services.to_vec(),
+            env,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +229,36 @@ struct RawRecipe {
     services: Option<Services>,
     tests: RawTests,
     functions: Option<RawFunctions>,
+    system: Option<RawSystem>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSystem {
+    start: String,
+    note: Option<String>,
+    #[serde(default)]
+    ports: Vec<RawPort>,
+    health: Option<RawHealth>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPort {
+    name: String,
+    port: u16,
+    path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHealth {
+    port: Option<String>,
+    path: Option<String>,
+    command: Option<String>,
+    timeout_secs: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -173,7 +304,7 @@ struct RawTests {
 
 /// A problem and the rank of its field, so the reading and validation problems merge in field
 /// order: image 0, setup 1, services 2, tests.all 3, one 4, some 5, list 6, results 7, env 8,
-/// functions 9.
+/// functions 9, system 10.
 type Ranked = (u8, String);
 
 const IMAGE: u8 = 0;
@@ -186,6 +317,7 @@ const LIST: u8 = 6;
 const RESULTS: u8 = 7;
 const ENV: u8 = 8;
 const FUNCTIONS: u8 = 9;
+const SYSTEM: u8 = 10;
 
 impl FunctionsSpec {
     /// The command of `lang`, when the recipe sets one.
@@ -254,8 +386,54 @@ impl RawRecipe {
                     javascript: f.javascript,
                 })
                 .filter(|spec| !spec.entries().is_empty()),
+            system: self.system.map(|raw| raw.into_spec(&mut problems)),
         };
         (recipe, problems)
+    }
+}
+
+impl RawSystem {
+    fn into_spec(self, problems: &mut Vec<Ranked>) -> SystemSpec {
+        SystemSpec {
+            start: self.start,
+            note: self.note,
+            ports: self
+                .ports
+                .into_iter()
+                .map(|p| PortSpec {
+                    name: p.name,
+                    port: p.port,
+                    path: p.path.unwrap_or_else(|| "/".to_string()),
+                })
+                .collect(),
+            health: self.health.and_then(|raw| raw.into_spec(problems)),
+            env: self.env,
+        }
+    }
+}
+
+impl RawHealth {
+    fn into_spec(self, problems: &mut Vec<Ranked>) -> Option<HealthSpec> {
+        let timeout_secs = self.timeout_secs.unwrap_or(HEALTH_TIMEOUT_DEFAULT);
+        let mut refuse = |text: &str| {
+            problems.push((SYSTEM, text.to_string()));
+            None
+        };
+        match (self.port, self.path, self.command) {
+            (None, None, Some(command)) => Some(HealthSpec::Command {
+                command,
+                timeout_secs,
+            }),
+            (port, path, Some(_)) if port.is_some() || path.is_some() => {
+                refuse("system.health takes a port and a path, or a command, not both")
+            }
+            (Some(port), path, None) => Some(HealthSpec::Http {
+                port,
+                path: path.unwrap_or_else(|| "/".to_string()),
+                timeout_secs,
+            }),
+            _ => refuse("system.health needs a port or a command"),
+        }
     }
 }
 
@@ -336,6 +514,7 @@ impl Recipe {
         self.services_problems(&mut out);
         self.tests_problems(&mut out);
         self.functions_problems(&mut out);
+        self.system_problems(&mut out);
         out
     }
 
@@ -450,35 +629,38 @@ impl Recipe {
     }
 
     fn env_problems(&self, out: &mut Vec<Ranked>) {
-        let env = &self.tests.env;
-        if env.len() > ENV_MAX {
-            out.push((
-                ENV,
-                format!(
-                    "tests.env has {} variables; the most allowed is {ENV_MAX}",
-                    env.len()
-                ),
-            ));
-            return;
-        }
-        for (key, value) in env {
-            if !valid_env_name(key) {
-                out.push((ENV, format!("tests.env key \"{key}\" is not a valid name")));
-            } else if env_is_forbidden(key) {
-                out.push((ENV, format!("tests.env key \"{key}\" is reserved")));
-            }
-            let field = format!("tests.env.{key}");
-            if value.chars().count() > ENV_VALUE_MAX {
-                out.push((
-                    ENV,
-                    format!("{field} must be at most {ENV_VALUE_MAX} characters"),
-                ));
-            } else if value.chars().any(char::is_control) {
-                out.push((ENV, format!("{field} holds a control character")));
-            } else if value.chars().any(is_invisible) {
-                out.push((ENV, format!("{field} holds an invisible character")));
+        env_problems("tests", &self.tests.env, ENV, out);
+    }
+
+    fn system_problems(&self, out: &mut Vec<Ranked>) {
+        let Some(system) = &self.system else { return };
+        let mut push = |problem: Option<String>| out.extend(problem.map(|p| (SYSTEM, p)));
+        push(check_text("system.start", &system.start, COMMAND_MAX));
+        if let Some(note) = &system.note {
+            let length = note.chars().count();
+            if length == 0
+                || length > SYSTEM_NOTE_MAX
+                || note.chars().any(|c| c.is_control() || is_invisible(c))
+            {
+                push(Some(format!(
+                    "system.note must be between 1 and {SYSTEM_NOTE_MAX} characters on one line"
+                )));
             }
         }
+        for problem in port_problems(&system.ports) {
+            push(Some(problem));
+        }
+        if let Some(health) = &system.health {
+            // A list that is empty or too long is already a problem; naming a port in it adds none.
+            let names = system.port_names();
+            for problem in health_problems(
+                health,
+                (!names.is_empty() && names.len() <= PORTS_MAX).then_some(&names[..]),
+            ) {
+                push(Some(problem));
+            }
+        }
+        env_problems("system", &system.env, SYSTEM, out);
     }
 
     /// The recipe as `.clusia/recipe.toml`, written by hand so the text is exact.
@@ -540,6 +722,9 @@ impl Recipe {
                 .collect();
             let _ = writeln!(out, "env = {{ {} }}", pairs.join(", "));
         }
+        if let Some(system) = &self.system {
+            system.write_toml(&mut out);
+        }
         if let Some(spec) = &self.functions {
             out.push_str("\n[functions]\n");
             for (lang, text) in spec.entries() {
@@ -582,6 +767,173 @@ impl Recipe {
                 .map(|s| s.names.clone())
                 .unwrap_or_default(),
             problems: Vec::new(),
+        }
+    }
+}
+
+impl SystemSpec {
+    fn write_toml(&self, out: &mut String) {
+        let _ = write!(out, "\n[system]\nstart = {}\n", quoted(&self.start));
+        if let Some(note) = &self.note {
+            let _ = writeln!(out, "note = {}", quoted(note));
+        }
+        if !self.env.is_empty() {
+            let pairs: Vec<_> = self
+                .env
+                .iter()
+                .map(|(k, v)| format!("{k} = {}", quoted(v)))
+                .collect();
+            let _ = writeln!(out, "env = {{ {} }}", pairs.join(", "));
+        }
+        match &self.health {
+            Some(HealthSpec::Http {
+                port,
+                path,
+                timeout_secs,
+            }) => {
+                let _ = writeln!(
+                    out,
+                    "health = {{ port = {}, path = {}, timeout_secs = {timeout_secs} }}",
+                    quoted(port),
+                    quoted(path)
+                );
+            }
+            Some(HealthSpec::Command {
+                command,
+                timeout_secs,
+            }) => {
+                let _ = writeln!(
+                    out,
+                    "health = {{ command = {}, timeout_secs = {timeout_secs} }}",
+                    quoted(command)
+                );
+            }
+            None => {}
+        }
+        for port in &self.ports {
+            let _ = write!(
+                out,
+                "\n[[system.ports]]\nname = {}\nport = {}\npath = {}\n",
+                quoted(&port.name),
+                port.port,
+                quoted(&port.path)
+            );
+        }
+    }
+}
+
+fn port_problems(ports: &[PortSpec]) -> Vec<String> {
+    if ports.is_empty() {
+        return vec!["system.ports must list at least one port".to_string()];
+    }
+    if ports.len() > PORTS_MAX {
+        return vec![format!(
+            "system.ports has {} ports; the most allowed is {PORTS_MAX}",
+            ports.len()
+        )];
+    }
+    let mut out = Vec::new();
+    for (i, port) in ports.iter().enumerate() {
+        let earlier = &ports[..i];
+        if !valid_port_name(&port.name) {
+            out.push(format!(
+                "system.ports[{i}].name \"{}\" is not a valid name",
+                printable(&port.name)
+            ));
+        } else if earlier.iter().any(|p| p.name == port.name) {
+            out.push(format!(
+                "system.ports[{i}].name \"{}\" is used twice",
+                port.name
+            ));
+        }
+        if port.port == 0 {
+            out.push(format!(
+                "system.ports[{i}].port 0 must be between 1 and 65535"
+            ));
+        } else if earlier.iter().any(|p| p.port == port.port) {
+            out.push(format!(
+                "system.ports[{i}].port {} is used twice",
+                port.port
+            ));
+        }
+        if let Err(rule) = check_url_path(&port.path, PORT_PATH_MAX, false) {
+            out.push(format!("system.ports[{i}].path {rule}"));
+        }
+    }
+    out
+}
+
+fn health_problems(health: &HealthSpec, ports: Option<&[String]>) -> Vec<String> {
+    let mut out = Vec::new();
+    match health {
+        HealthSpec::Http { port, path, .. } => {
+            if ports.is_some_and(|ports| !ports.contains(port)) {
+                out.push(format!(
+                    "system.health.port \"{}\" is not one of the ports",
+                    printable(port)
+                ));
+            }
+            if let Err(rule) = check_url_path(path, PORT_PATH_MAX, false) {
+                out.push(format!("system.health.path {rule}"));
+            }
+        }
+        HealthSpec::Command { command, .. } => {
+            out.extend(check_text("system.health.command", command, COMMAND_MAX));
+            if command.contains('\n') {
+                out.push("system.health.command must be one line".to_string());
+            }
+        }
+    }
+    if !(HEALTH_TIMEOUT_MIN..=HEALTH_TIMEOUT_MAX).contains(&health.timeout_secs()) {
+        out.push(format!(
+            "system.health.timeout_secs must be between {HEALTH_TIMEOUT_MIN} and {HEALTH_TIMEOUT_MAX}"
+        ));
+    }
+    out
+}
+
+/// `^[a-z][a-z0-9_-]{0,15}$`
+fn valid_port_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 16
+        && bytes[0].is_ascii_lowercase()
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-')
+}
+
+/// The problems of an `env` table found under `prefix` (`tests` or `system`).
+fn env_problems(prefix: &str, env: &BTreeMap<String, String>, rank: u8, out: &mut Vec<Ranked>) {
+    if env.len() > ENV_MAX {
+        out.push((
+            rank,
+            format!(
+                "{prefix}.env has {} variables; the most allowed is {ENV_MAX}",
+                env.len()
+            ),
+        ));
+        return;
+    }
+    for (key, value) in env {
+        if !valid_env_name(key) {
+            out.push((
+                rank,
+                format!("{prefix}.env key \"{key}\" is not a valid name"),
+            ));
+        } else if env_is_forbidden(key) {
+            out.push((rank, format!("{prefix}.env key \"{key}\" is reserved")));
+        }
+        let field = format!("{prefix}.env.{key}");
+        if value.chars().count() > ENV_VALUE_MAX {
+            out.push((
+                rank,
+                format!("{field} must be at most {ENV_VALUE_MAX} characters"),
+            ));
+        } else if value.chars().any(char::is_control) {
+            out.push((rank, format!("{field} holds a control character")));
+        } else if value.chars().any(is_invisible) {
+            out.push((rank, format!("{field} holds an invisible character")));
         }
     }
 }
@@ -841,6 +1193,7 @@ env = { RUST_BACKTRACE = "1" }
                 names: vec!["postgres".into()],
             }),
             functions: None,
+            system: None,
             tests: TestsSpec {
                 all: "cargo test --workspace".into(),
                 one: Some("cargo test --workspace -- --exact {name}".into()),
@@ -936,9 +1289,11 @@ env = { RUST_BACKTRACE = "1" }
     fn a_recipe_without_tests_or_with_an_unknown_key_is_refused() {
         let missing = problems(json!({"runner": "auto"}));
         assert!(missing.iter().any(|p| p.contains("tests")), "{missing:?}");
-        let unknown = problems(json!({"tests": {"all": "x"}, "system": {}}));
+        let unknown = problems(json!({"tests": {"all": "x"}, "sandbox": {}}));
         assert!(
-            unknown.iter().any(|p| p.contains("unknown field `system`")),
+            unknown
+                .iter()
+                .any(|p| p.contains("unknown field `sandbox`")),
             "{unknown:?}"
         );
         let nested = problems(json!({"tests": {"all": "x", "retries": 3}}));
@@ -1674,5 +2029,308 @@ env = { RUST_BACKTRACE = "1" }
                 "functions.python must contain {driver}".into(),
             ]
         );
+    }
+
+    const SYSTEM_TOML: &str = r#"
+[system]
+start = "cargo run -q --bin auth-api -- --port 8080"
+note = "First start builds the app in the container: about 2 min."
+env = { DATABASE_URL = "postgres://test:test@postgres/auth", RUST_LOG = "info" }
+health = { port = "api", path = "/health", timeout_secs = 60 }
+
+[[system.ports]]
+name = "api"
+port = 8080
+path = "/"
+
+[[system.ports]]
+name = "admin"
+port = 9090
+path = "/admin"
+"#;
+
+    fn with_system() -> Recipe {
+        let mut recipe = full();
+        recipe.system = Some(SystemSpec {
+            start: "cargo run -q --bin auth-api -- --port 8080".into(),
+            note: Some("First start builds the app in the container: about 2 min.".into()),
+            ports: vec![
+                PortSpec {
+                    name: "api".into(),
+                    port: 8080,
+                    path: "/".into(),
+                },
+                PortSpec {
+                    name: "admin".into(),
+                    port: 9090,
+                    path: "/admin".into(),
+                },
+            ],
+            health: Some(HealthSpec::Http {
+                port: "api".into(),
+                path: "/health".into(),
+                timeout_secs: 60,
+            }),
+            env: BTreeMap::from([
+                (
+                    "DATABASE_URL".to_string(),
+                    "postgres://test:test@postgres/auth".to_string(),
+                ),
+                ("RUST_LOG".to_string(), "info".to_string()),
+            ]),
+        });
+        recipe
+    }
+
+    #[test]
+    fn the_system_section_round_trips_through_toml_and_json() {
+        let recipe = with_system();
+        let toml = recipe.to_toml();
+        assert!(toml.contains(SYSTEM_TOML), "{toml}");
+        assert!(toml.find("[tests]").unwrap() < toml.find("[system]").unwrap());
+        let mut with_functions = recipe.clone();
+        with_functions.functions = Some(FunctionsSpec {
+            python: Some("python3 {driver}".into()),
+            ..Default::default()
+        });
+        let toml_with_functions = with_functions.to_toml();
+        assert!(
+            toml_with_functions.find("[system]").unwrap()
+                < toml_with_functions.find("[functions]").unwrap()
+        );
+        assert_eq!(Recipe::parse_toml(&toml).unwrap(), recipe);
+        let json = serde_json::json!({
+            "runner": "container", "image": {"base": "rust:1"},
+            "tests": {"all": "cargo test"},
+            "system": {
+                "start": "run", "note": "n",
+                "ports": [{"name": "api", "port": 8080}, {"name": "admin", "port": 9090, "path": "/admin"}],
+                "health": {"command": "curl -f localhost:8080", "timeout_secs": 30},
+                "env": {"A": "b"}
+            }
+        });
+        let parsed = Recipe::from_json(&json).unwrap();
+        let system = parsed.system.as_ref().unwrap();
+        assert_eq!(system.ports[0].path, "/", "the path defaults to /");
+        assert_eq!(
+            system.health,
+            Some(HealthSpec::Command {
+                command: "curl -f localhost:8080".into(),
+                timeout_secs: 30
+            })
+        );
+        assert_eq!(Recipe::parse_toml(&parsed.to_toml()).unwrap(), parsed);
+        // No health, no note, no env: nothing of them is written; a default timeout is.
+        let bare = r#"
+runner = "container"
+
+[image]
+base = "rust:1"
+
+[tests]
+all = "cargo test"
+results = "plain"
+
+[system]
+start = "run"
+
+[[system.ports]]
+name = "web"
+port = 3000
+path = "/"
+"#;
+        let bare = Recipe::parse_toml(bare).unwrap();
+        assert!(bare.system.as_ref().unwrap().health.is_none());
+        assert!(!bare.to_toml().contains("health") && !bare.to_toml().contains("note"));
+        let defaulted = Recipe::from_json(&serde_json::json!({
+            "runner": "container", "image": {"base": "rust:1"}, "tests": {"all": "t"},
+            "system": {"start": "s", "ports": [{"name": "w", "port": 1}], "health": {"port": "w"}}
+        }))
+        .unwrap();
+        assert!(
+            defaulted
+                .to_toml()
+                .contains(r#"health = { port = "w", path = "/", timeout_secs = 60 }"#)
+        );
+    }
+
+    #[test]
+    fn a_changed_system_section_changes_the_recipe_hash() {
+        let a = with_system();
+        let mut b = with_system();
+        b.system.as_mut().unwrap().start = "cargo run -q --bin auth-api -- --port 8081".into();
+        let mut c = with_system();
+        c.system
+            .as_mut()
+            .unwrap()
+            .env
+            .insert("RUST_LOG".into(), "debug".into());
+        let hash = |r: &Recipe| recipe_hash(r.to_toml().as_bytes());
+        assert_ne!(hash(&a), hash(&b));
+        assert_ne!(hash(&a), hash(&c));
+        assert_eq!(hash(&a), hash(&with_system()));
+        assert_ne!(hash(&full()), hash(&a), "adding [system] changes it too");
+    }
+
+    #[test]
+    fn the_system_problems_are_named_and_ranked_after_functions() {
+        let problems = |change: &dyn Fn(&mut SystemSpec)| {
+            let mut recipe = with_system();
+            change(recipe.system.as_mut().unwrap());
+            recipe.validate().unwrap_err()
+        };
+        assert_eq!(
+            problems(&|s| s.ports.clear()),
+            ["system.ports must list at least one port"]
+        );
+        assert_eq!(
+            problems(&|s| s.ports = (0..9)
+                .map(|i| PortSpec {
+                    name: format!("p{i}"),
+                    port: 100 + i as u16,
+                    path: "/".into()
+                })
+                .collect()),
+            ["system.ports has 9 ports; the most allowed is 8"]
+        );
+        assert_eq!(
+            problems(&|s| s.ports[1].name = "API".into()),
+            ["system.ports[1].name \"API\" is not a valid name"]
+        );
+        assert_eq!(
+            problems(&|s| s.ports[1].port = 8080),
+            ["system.ports[1].port 8080 is used twice"]
+        );
+        assert_eq!(
+            problems(&|s| s.ports[1].port = 0),
+            ["system.ports[1].port 0 must be between 1 and 65535"]
+        );
+        assert_eq!(
+            problems(&|s| s.ports[1].name = "api".into()),
+            ["system.ports[1].name \"api\" is used twice"]
+        );
+        assert!(
+            problems(&|s| s.ports[0].path = "x y".into())[0]
+                .starts_with("system.ports[0].path must start with /")
+        );
+        assert_eq!(
+            problems(&|s| s.health = Some(HealthSpec::Http {
+                port: "web".into(),
+                path: "/".into(),
+                timeout_secs: 60
+            })),
+            ["system.health.port \"web\" is not one of the ports"]
+        );
+        assert_eq!(
+            problems(&|s| s.health = Some(HealthSpec::Http {
+                port: "api".into(),
+                path: "/".into(),
+                timeout_secs: 4
+            })),
+            ["system.health.timeout_secs must be between 5 and 300"]
+        );
+        assert_eq!(
+            problems(&|s| s.health = Some(HealthSpec::Command {
+                command: "x".into(),
+                timeout_secs: 301
+            })),
+            ["system.health.timeout_secs must be between 5 and 300"]
+        );
+        assert_eq!(
+            problems(&|s| s.start = "a\u{202e}b".into()),
+            ["system.start holds an invisible character"]
+        );
+        assert_eq!(
+            problems(&|s| s.note = Some("two\nlines".into())),
+            ["system.note must be between 1 and 200 characters on one line"]
+        );
+        assert_eq!(
+            problems(&|s| {
+                s.env.insert("PATH".into(), "x".into());
+            }),
+            ["system.env key \"PATH\" is reserved"]
+        );
+        assert_eq!(
+            problems(&|s| {
+                s.env.insert("A".into(), "a\u{7}".into());
+            }),
+            ["system.env.A holds a control character"]
+        );
+        // Ranked after `functions` (9): a bad function and a bad system come out in that order.
+        let mut recipe = with_system();
+        recipe.system.as_mut().unwrap().start = String::new();
+        recipe.functions = Some(FunctionsSpec {
+            python: Some("python3".into()),
+            ..Default::default()
+        });
+        let all = recipe.validate().unwrap_err();
+        assert_eq!(all[0], "functions.python must contain {driver}");
+        assert!(all[1].starts_with("system.start must be between 1 and"));
+    }
+
+    #[test]
+    fn the_health_object_is_one_of_two_shapes_and_unknown_keys_are_refused() {
+        let health = |h: serde_json::Value| {
+            Recipe::from_json(&serde_json::json!({
+                "runner": "container", "image": {"base": "rust:1"}, "tests": {"all": "t"},
+                "system": {"start": "s", "ports": [{"name": "w", "port": 1}], "health": h}
+            }))
+        };
+        assert_eq!(
+            health(serde_json::json!({"port": "w", "command": "x"})).unwrap_err(),
+            ["system.health takes a port and a path, or a command, not both"]
+        );
+        assert_eq!(
+            health(serde_json::json!({"timeout_secs": 9})).unwrap_err(),
+            ["system.health needs a port or a command"]
+        );
+        assert!(health(serde_json::json!({"port": "w", "extra": 1})).is_err());
+        assert!(
+            Recipe::from_json(&serde_json::json!({
+                "runner": "container", "image": {"base": "rust:1"}, "tests": {"all": "t"},
+                "system": {"start": "s", "ports": [{"name": "w", "port": 1}], "services": ["x"]}
+            }))
+            .is_err(),
+            "[system] has no services key"
+        );
+        let http = HealthSpec::Http {
+            port: "api".into(),
+            path: "/health".into(),
+            timeout_secs: 60,
+        };
+        let cmd = HealthSpec::Command {
+            command: "pg_isready".into(),
+            timeout_secs: 20,
+        };
+        assert_eq!(
+            (http.text().as_str(), http.plan_text().as_str()),
+            ("GET /health on api", "GET /health on api · up to 60 s")
+        );
+        assert_eq!(
+            (cmd.text().as_str(), cmd.plan_text().as_str()),
+            (
+                "The health command",
+                "pg_isready in the container · up to 20 s"
+            )
+        );
+        assert_eq!((http.timeout_secs(), cmd.timeout_secs()), (60, 20));
+    }
+
+    #[test]
+    fn the_spec_view_lays_system_env_over_the_tests_env() {
+        let recipe = with_system();
+        let tests_env = BTreeMap::from([
+            ("RUST_LOG".to_string(), "warn".to_string()),
+            ("CI".to_string(), "1".to_string()),
+        ]);
+        let spec = recipe.system.as_ref().unwrap();
+        let view = spec.spec_view(&tests_env, &["postgres".to_string()]);
+        assert_eq!(view.env["RUST_LOG"], "info", "system.env wins");
+        assert_eq!(view.env["CI"], "1");
+        assert_eq!(view.health.as_deref(), Some("GET /health on api"));
+        assert_eq!(view.health_timeout_secs, Some(60));
+        assert_eq!(view.services, ["postgres"]);
+        assert_eq!(spec.port_names(), ["api", "admin"]);
+        assert_eq!(view.ports[1].path, "/admin");
     }
 }

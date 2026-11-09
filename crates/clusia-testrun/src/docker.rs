@@ -71,12 +71,34 @@ pub fn run_args(job: &ContainerJob, mounts: &RunMounts) -> Vec<String> {
         ContainerNet::Bridge => "bridge".to_string(),
         ContainerNet::Internal(name) => name.clone(),
     };
-    let wt = mounts.worktree.display();
-    let git = mounts.git_common.display();
     let mut args: Vec<String> = ["run", "--rm", "--name", &job.name, "--network", &net]
         .iter()
         .map(|s| s.to_string())
         .collect();
+    args.extend(common_args(
+        &job.labels,
+        &job.env,
+        mounts,
+        job.cpus,
+        job.memory_mb,
+    ));
+    args.extend(["--entrypoint", "/bin/sh", &job.image, "-c", &job.command].map(String::from));
+    args
+}
+
+/// The part of `run_args` between the container's name and network and its entrypoint: the
+/// image policy, the user, the limits, the labels, the mounts, the environment and the
+/// resource caps.
+pub(crate) fn common_args(
+    labels: &Labels,
+    env: &[(String, String)],
+    mounts: &RunMounts,
+    cpus: Option<u32>,
+    memory_mb: Option<u32>,
+) -> Vec<String> {
+    let wt = mounts.worktree.display();
+    let git = mounts.git_common.display();
+    let mut args: Vec<String> = Vec::new();
     args.extend(["--pull", "never", "--user", "0:0", "--init"].map(String::from));
     args.extend(
         [
@@ -87,7 +109,7 @@ pub fn run_args(job: &ContainerJob, mounts: &RunMounts) -> Vec<String> {
         ]
         .map(String::from),
     );
-    args.extend(job.labels.args());
+    args.extend(labels.args());
     for volume in [
         format!("{wt}:{WORK_DIR}"),
         format!("{wt}/.clusia:{WORK_DIR}/.clusia:ro"),
@@ -110,17 +132,16 @@ pub fn run_args(job: &ContainerJob, mounts: &RunMounts) -> Vec<String> {
         args.extend(["-v".to_string(), volume]);
     }
     args.extend(["-e".to_string(), "GIT_OPTIONAL_LOCKS=0".to_string()]);
-    for (key, value) in &job.env {
+    for (key, value) in env {
         args.extend(["-e".to_string(), format!("{key}={value}")]);
     }
     args.extend(["-w", WORK_DIR].map(String::from));
-    if let Some(cpus) = job.cpus {
+    if let Some(cpus) = cpus {
         args.extend(["--cpus".to_string(), cpus.to_string()]);
     }
-    if let Some(mb) = job.memory_mb {
+    if let Some(mb) = memory_mb {
         args.extend(["--memory".to_string(), format!("{mb}m")]);
     }
-    args.extend(["--entrypoint", "/bin/sh", &job.image, "-c", &job.command].map(String::from));
     args
 }
 
@@ -496,5 +517,28 @@ mod tests {
                 .iter()
                 .all(|m| !pr.contains(m))
         );
+    }
+
+    #[test]
+    fn common_args_are_the_run_parts_without_the_container_head_and_tail() {
+        let mut job = job();
+        job.env = vec![("RUST_LOG".into(), "info".into())];
+        job.cpus = Some(2);
+        job.memory_mb = Some(2048);
+        let mut expected: Vec<String> = ["run", "--rm", "--name", &job.name, "--network", "bridge"]
+            .map(String::from)
+            .to_vec();
+        expected.extend(common_args(
+            &job.labels,
+            &job.env,
+            &mounts(),
+            job.cpus,
+            job.memory_mb,
+        ));
+        expected
+            .extend(["--entrypoint", "/bin/sh", &job.image, "-c", &job.command].map(String::from));
+        let mut shared = job.clone();
+        shared.net = ContainerNet::Bridge;
+        assert_eq!(run_args(&shared, &mounts()), expected);
     }
 }

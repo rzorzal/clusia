@@ -12,6 +12,7 @@ use clusia_core::functions::{
 };
 use clusia_core::revalidation::Revalidation;
 use clusia_core::story::{StoryVersion, StoryVersionState};
+use clusia_core::system::{LogTail, SendResult, SystemView};
 use clusia_core::tests::{
     Approve, DiskReport, KnownTest, StepState, TestCaseResult, TestEngineInfo, TestRun, TestScope,
     TestsView,
@@ -37,8 +38,8 @@ pub mod topics {
     /// The review agent's chat: every `Agent*` event and `SessionState`.
     pub const AGENT: &str = "agent";
     /// The test setup, the test runs, the function cases and the QA cockpit: every `Test*`,
-    /// `FunctionsChanged`, `CaseDone`, `CockpitChanged`, `CockpitSamples` and `CockpitRound`
-    /// event.
+    /// `FunctionsChanged`, `CaseDone`, `CockpitChanged`, `CockpitSamples`, `CockpitRound`,
+    /// `SystemChanged` and `SystemLogs` event.
     pub const TESTS: &str = "tests";
 }
 
@@ -401,6 +402,64 @@ pub enum Command {
     /// The QA cockpit of a pull request (`Reply::Cockpit`).
     GetCockpit {
         pr: PrRef,
+    },
+    /// The system of a pull request (`Reply::System`).
+    GetSystem {
+        pr: PrRef,
+    },
+    /// Starts the system of the review, which must be approved for `recipe_hash`
+    /// (`Reply::System`). `keep` leaves it running when the app quits.
+    StartSystem {
+        pr: PrRef,
+        #[serde(default)]
+        side: RunSide,
+        recipe_hash: String,
+        keep: bool,
+    },
+    /// Stops the system (`Reply::System`).
+    StopSystem {
+        pr: PrRef,
+        #[serde(default)]
+        side: RunSide,
+    },
+    /// Stops the system and starts it again (`Reply::System`).
+    RestartSystem {
+        pr: PrRef,
+        #[serde(default)]
+        side: RunSide,
+        recipe_hash: String,
+    },
+    /// Allows or refuses the system outbound network for this review, restarting a live system
+    /// (`Reply::System`).
+    SetSystemNetwork {
+        pr: PrRef,
+        allowed: bool,
+        recipe_hash: String,
+    },
+    /// The last `lines` lines of one process's log (`Reply::SystemLogs`).
+    GetSystemLogs {
+        pr: PrRef,
+        #[serde(default)]
+        side: RunSide,
+        process: String,
+        lines: u32,
+    },
+    /// Asks the agent to read the endpoints the pull request changes, in the background
+    /// (`Reply::Ack`).
+    WriteEndpoints {
+        pr: PrRef,
+    },
+    /// Asks the agent to fix a system that failed to start or is unhealthy, in the background
+    /// (`Reply::Ack`).
+    FixSystem {
+        pr: PrRef,
+    },
+    /// Sends one endpoint to the running system (`Reply::Sent`).
+    SendEndpoint {
+        pr: PrRef,
+        #[serde(default)]
+        side: RunSide,
+        endpoint: String,
     },
     /// Saves the reviewer's overlay of one scenario (`Reply::Cockpit`).
     SaveScenario {
@@ -769,6 +828,12 @@ pub enum Reply {
     },
     /// What `GetCockpit` and every cockpit write know.
     Cockpit(Box<CockpitView>),
+    /// What `GetSystem` and every system write know.
+    System(Box<SystemView>),
+    /// The end of one process's log.
+    SystemLogs(Box<LogTail>),
+    /// What one endpoint answered.
+    Sent(Box<SendResult>),
     /// The script files of one scenario and the hash an approval must name.
     ScenarioScript(Box<ScenarioScript>),
     /// A cockpit run was accepted and has this id; its events follow on topic `tests`.
@@ -1209,6 +1274,26 @@ pub enum Event {
         run: String,
         result: Box<RoundResult>,
     },
+    /// The system's state, ports, health, endpoints or network changed (topic `tests`).
+    SystemChanged {
+        pr: PrRef,
+        view: Box<SystemView>,
+    },
+    /// New lines of one process's log, at most one batch per process every 250 ms (topic
+    /// `tests`). `first` numbers `lines[0]`; `skipped` counts the older pending lines a flood
+    /// left out of the batch.
+    ///
+    /// Each run numbers its lines from 1: a view that turns `Starting` (a start, a restart, a
+    /// network change) begins a new numbering from 1, and a follower resets the next line it
+    /// expects to 1. A batch with `first == 1` after later lines is the same new run.
+    SystemLogs {
+        pr: PrRef,
+        side: RunSide,
+        process: String,
+        first: u64,
+        lines: Vec<String>,
+        skipped: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1623,6 +1708,8 @@ pub enum TurnOrigin {
     Scenarios,
     Bench,
     Copilot,
+    /// The endpoints turn of the system.
+    System,
 }
 
 impl TurnOrigin {
@@ -5240,6 +5327,184 @@ mod tests {
             assert!(!origin.is_chat());
             round_trip(origin);
         }
+    }
+
+    #[test]
+    fn system_commands_wire_format() {
+        let request = |cmd| wire(&ClientMessage::Request { id: 5, cmd });
+        let body = |cmd| {
+            let text = request(cmd);
+            text.strip_prefix(r#"{"type":"request","id":5,"cmd":"#)
+                .unwrap()
+                .strip_suffix('}')
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            body(Command::GetSystem { pr: acme() }),
+            r#"{"get_system":{"pr":"acme/widgets#7"}}"#
+        );
+        assert_eq!(
+            body(Command::StartSystem {
+                pr: acme(),
+                side: RunSide::Pr,
+                recipe_hash: "abc".into(),
+                keep: false
+            }),
+            r#"{"start_system":{"pr":"acme/widgets#7","side":"pr","recipe_hash":"abc","keep":false}}"#
+        );
+        let read: Command = serde_json::from_str(
+            r#"{"start_system":{"pr":"acme/widgets#7","recipe_hash":"abc","keep":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read,
+            Command::StartSystem {
+                pr: acme(),
+                side: RunSide::Pr,
+                recipe_hash: "abc".into(),
+                keep: true
+            }
+        );
+        assert_eq!(
+            body(Command::SetSystemNetwork {
+                pr: acme(),
+                allowed: true,
+                recipe_hash: "abc".into()
+            }),
+            r#"{"set_system_network":{"pr":"acme/widgets#7","allowed":true,"recipe_hash":"abc"}}"#
+        );
+        assert_eq!(
+            body(Command::GetSystemLogs {
+                pr: acme(),
+                side: RunSide::Pr,
+                process: "service:postgres".into(),
+                lines: 200
+            }),
+            r#"{"get_system_logs":{"pr":"acme/widgets#7","side":"pr","process":"service:postgres","lines":200}}"#
+        );
+        assert_eq!(
+            body(Command::SendEndpoint {
+                pr: acme(),
+                side: RunSide::Pr,
+                endpoint: "POST /widgets".into()
+            }),
+            r#"{"send_endpoint":{"pr":"acme/widgets#7","side":"pr","endpoint":"POST /widgets"}}"#
+        );
+        for cmd in [
+            Command::StopSystem {
+                pr: acme(),
+                side: RunSide::Main,
+            },
+            Command::RestartSystem {
+                pr: acme(),
+                side: RunSide::Pr,
+                recipe_hash: "h".into(),
+            },
+            Command::WriteEndpoints { pr: acme() },
+            Command::FixSystem { pr: acme() },
+        ] {
+            round_trip(cmd);
+        }
+        let stop: Command =
+            serde_json::from_str(r#"{"stop_system":{"pr":"acme/widgets#7"}}"#).unwrap();
+        assert_eq!(
+            stop,
+            Command::StopSystem {
+                pr: acme(),
+                side: RunSide::Pr
+            }
+        );
+    }
+
+    #[test]
+    fn system_replies_and_events_wire_format() {
+        use clusia_core::system::{LogTail, SystemView};
+        let reply = |reply| {
+            wire(&ServerMessage::Response {
+                id: 5,
+                result: Outcome::Ok(reply),
+            })
+        };
+        let view = SystemView::new("abc");
+        assert_eq!(
+            reply(Reply::System(Box::new(view.clone()))),
+            format!(
+                r#"{{"type":"response","id":5,"result":{{"ok":{{"system":{}}}}}}}"#,
+                wire(&view)
+            )
+        );
+        let tail = LogTail {
+            process: "start".into(),
+            first: 1,
+            lines: vec!["a".into()],
+        };
+        assert_eq!(
+            reply(Reply::SystemLogs(Box::new(tail.clone()))),
+            r#"{"type":"response","id":5,"result":{"ok":{"system_logs":{"process":"start","first":1,"lines":["a"]}}}}"#
+        );
+        round_trip(Reply::SystemLogs(Box::new(tail)));
+        let event = |event| {
+            wire(&ServerMessage::Event {
+                topic: topics::TESTS.into(),
+                event,
+            })
+        };
+        assert_eq!(
+            event(Event::SystemChanged {
+                pr: acme(),
+                view: Box::new(view.clone())
+            }),
+            format!(
+                r#"{{"type":"event","topic":"tests","event":{{"system_changed":{{"pr":"acme/widgets#7","view":{}}}}}}}"#,
+                wire(&view)
+            )
+        );
+        assert_eq!(
+            event(Event::SystemLogs {
+                pr: acme(),
+                side: RunSide::Pr,
+                process: "start".into(),
+                first: 3,
+                lines: vec!["x".into()],
+                skipped: 0
+            }),
+            r#"{"type":"event","topic":"tests","event":{"system_logs":{"pr":"acme/widgets#7","side":"pr","process":"start","first":3,"lines":["x"],"skipped":0}}}"#
+        );
+        round_trip(Event::SystemChanged {
+            pr: acme(),
+            view: Box::new(view),
+        });
+        assert_eq!(wire(&TurnOrigin::System), r#""system""#);
+        assert!(!TurnOrigin::System.is_chat());
+    }
+
+    #[test]
+    fn a_sent_reply_carries_the_result() {
+        use clusia_core::system::{HttpMethod, SendResult};
+        let result = SendResult {
+            endpoint: "GET /x".into(),
+            method: HttpMethod::Get,
+            url: "http://127.0.0.1:49152/x".into(),
+            status: Some(200),
+            reason: Some("OK".into()),
+            took_ms: 38,
+            headers: vec![("content-type".into(), "text/plain".into())],
+            body: "ok".into(),
+            body_bytes: 2,
+            truncated: false,
+            error: None,
+            at: 9,
+        };
+        let text = wire(&ServerMessage::Response {
+            id: 5,
+            result: Outcome::Ok(Reply::Sent(Box::new(result.clone()))),
+        });
+        assert!(
+            text.contains(r#""ok":{"sent":{"endpoint":"GET /x","method":"GET""#),
+            "{text}"
+        );
+        round_trip(Reply::Sent(Box::new(result)));
     }
 
     #[test]

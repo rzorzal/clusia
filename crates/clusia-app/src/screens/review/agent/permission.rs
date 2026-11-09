@@ -207,6 +207,7 @@ pub fn title_for_origin(tool: &str, origin: TurnOrigin, agent: &str) -> String {
         TurnOrigin::Scenarios => "Test scenarios",
         TurnOrigin::Bench => "Benchmark",
         TurnOrigin::Copilot => "QA copilot",
+        TurnOrigin::System => "System endpoints",
     };
     match tool {
         "Bash" => format!("{who} wants to run a command"),
@@ -1925,6 +1926,10 @@ mod tests {
             ),
             (TurnOrigin::Bench, "Benchmark wants to run a command"),
             (TurnOrigin::Copilot, "QA copilot wants to run a command"),
+            (
+                TurnOrigin::System,
+                "System endpoints wants to run a command",
+            ),
         ] {
             assert_eq!(title_for_origin("Bash", origin, "Claude Code"), title);
         }

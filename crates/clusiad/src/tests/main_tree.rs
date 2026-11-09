@@ -219,6 +219,7 @@ pub(super) async fn main_state_of(shared: &Shared, pr: &PrRef, snap: &Snapshot) 
             stack_up: false,
             clusia_problem,
             compose_problem: None,
+            forwarder_present: false,
         };
         let mut built = main_plan(
             recipe,

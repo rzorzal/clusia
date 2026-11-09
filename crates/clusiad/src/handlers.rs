@@ -297,6 +297,35 @@ pub(crate) async fn handle(shared: &Arc<Shared>, client: &str, cmd: Command) -> 
             crate::tests::run_cases(shared, &pr, scope, seen).await
         }
         Command::GetCockpit { pr } => crate::tests::cockpit(shared, &pr).await,
+        Command::GetSystem { pr } => crate::tests::system(shared, &pr).await,
+        Command::StartSystem {
+            pr,
+            side,
+            recipe_hash,
+            keep,
+        } => crate::tests::start_system(shared, &pr, side, &recipe_hash, keep).await,
+        Command::StopSystem { pr, side } => crate::tests::stop_system(shared, &pr, side).await,
+        Command::RestartSystem {
+            pr,
+            side,
+            recipe_hash,
+        } => crate::tests::restart_system(shared, &pr, side, &recipe_hash).await,
+        Command::SetSystemNetwork {
+            pr,
+            allowed,
+            recipe_hash,
+        } => crate::tests::set_system_network(shared, &pr, allowed, &recipe_hash).await,
+        Command::GetSystemLogs {
+            pr,
+            side,
+            process,
+            lines,
+        } => crate::tests::system_logs(shared, &pr, side, &process, lines).await,
+        Command::WriteEndpoints { pr } => crate::tests::write_endpoints(shared, &pr).await,
+        Command::FixSystem { pr } => crate::tests::fix_system(shared, &pr).await,
+        Command::SendEndpoint { pr, side, endpoint } => {
+            crate::tests::send_endpoint(shared, &pr, side, endpoint).await
+        }
         Command::SaveScenario {
             pr,
             scenario,

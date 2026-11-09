@@ -1195,6 +1195,7 @@ async fn the_tests_settings_round_trip_and_a_bad_one_is_refused() {
             memory_mb: 8192,
             run_timeout_secs: 2700,
             parallel_runs: 2,
+            systems_max: 2,
         }
     );
     link.ask

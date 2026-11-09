@@ -1794,6 +1794,7 @@ mod tests {
                 commands_approved: false,
                 ready: false,
                 blocked: blocked.map(Into::into),
+                system: None,
             };
             plan.steps = base_steps();
             v.plan = Some(plan);

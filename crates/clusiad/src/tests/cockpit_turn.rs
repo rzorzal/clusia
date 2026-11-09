@@ -38,17 +38,17 @@ use crate::sync::now_unix;
 use crate::turns::{self, SessionSource, Stop, TurnEnd, TurnRun};
 
 /// What one turn is asked, in both forms: continuing the review's session, and fresh.
-struct Spec {
-    origin: TurnOrigin,
-    prompt: String,
-    fresh_prompt: String,
+pub(super) struct Spec {
+    pub origin: TurnOrigin,
+    pub prompt: String,
+    pub fresh_prompt: String,
     /// Finishes "<agent> could not …" when the program fails without a message.
-    failure: &'static str,
+    pub failure: &'static str,
 }
 
 /// Runs one forked, read-only turn and gives the text it answered. `Err` is why no answer came
 /// (the program failed, the limit passed, a stop).
-async fn run_text(
+pub(super) async fn run_text(
     shared: &Arc<Shared>,
     pr: &PrRef,
     spec: Spec,

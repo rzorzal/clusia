@@ -34,25 +34,46 @@ fn bad_request(id: u64, message: impl Into<String>) -> ServerMessage {
     }
 }
 
-/// Counts its connection in one of `Shared`'s listener counters while it lives.
-struct Listener {
+/// Counts its connection in one of `Shared`'s listener counters while it lives. `on_zero`
+/// runs when the last listener of its counter goes.
+pub(crate) struct Listener {
     shared: Arc<Shared>,
     count: fn(&Shared) -> &AtomicUsize,
+    on_zero: Option<fn(&Arc<Shared>)>,
 }
 
 impl Listener {
-    fn new(shared: &Arc<Shared>, count: fn(&Shared) -> &AtomicUsize) -> Self {
+    pub(crate) fn new(
+        shared: &Arc<Shared>,
+        count: fn(&Shared) -> &AtomicUsize,
+        on_zero: Option<fn(&Arc<Shared>)>,
+    ) -> Self {
         count(shared).fetch_add(1, Ordering::SeqCst);
         Self {
             shared: shared.clone(),
             count,
+            on_zero,
         }
+    }
+
+    /// A window's listener: when the last window goes, the app's systems are on notice.
+    pub(crate) fn window(shared: &Arc<Shared>) -> Self {
+        Self::new(
+            shared,
+            |s| &s.window_listeners,
+            Some(crate::tests::windows_gone),
+        )
     }
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        (self.count)(&self.shared).fetch_sub(1, Ordering::SeqCst);
+        let previous = (self.count)(&self.shared).fetch_sub(1, Ordering::SeqCst);
+        if previous == 1
+            && let Some(on_zero) = self.on_zero
+        {
+            on_zero(&self.shared);
+        }
     }
 }
 
@@ -192,10 +213,10 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
                 if let Command::Subscribe { topics: wanted } = &cmd {
                     topics.extend(wanted.iter().cloned());
                     if window.is_none() && topics.contains(clusia_protocol::topics::WINDOW) {
-                        window = Some(Listener::new(shared, |s| &s.window_listeners));
+                        window = Some(Listener::window(shared));
                     }
                     if tray.is_none() && topics.contains(clusia_protocol::topics::TRAY) {
-                        tray = Some(Listener::new(shared, |s| &s.tray_listeners));
+                        tray = Some(Listener::new(shared, |s| &s.tray_listeners, None));
                     }
                 }
                 let stop = matches!(cmd, Command::Shutdown);
@@ -255,6 +276,64 @@ async fn session(stream: UnixStream, shared: &Arc<Shared>) -> Result<(), CodecEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shared() -> (tempfile::TempDir, Arc<Shared>) {
+        let dir = tempfile::tempdir().unwrap();
+        let options = crate::options::DaemonOptions {
+            github_api: Some("http://127.0.0.1:9".into()),
+            github_token: None,
+            gh_program: "/nonexistent/gh".into(),
+            secrets: Arc::new(clusia_platform::MemoryStore::default()),
+            background_sync: false,
+            tray_program: None,
+            spawner: Arc::new(crate::spawner::RecordingSpawner::default()),
+            media_extra_hosts: Vec::new(),
+            media_allow_local: false,
+            media_resolve: Vec::new(),
+            giphy_api: Some("http://127.0.0.1:9".into()),
+            harness_search_paths: Vec::new(),
+            bridge_program: None,
+            harness_env: Vec::new(),
+            test_exec: Arc::new(clusia_testrun::testkit::FakeExec::new()),
+            docker_program: Some("/nonexistent/docker".into()),
+            sandbox_exec_program: "/nonexistent/sandbox-exec".into(),
+            claude_program: Some("/nonexistent/claude".into()),
+            codex_program: Some("/nonexistent/codex".into()),
+            gh_config_dir: None,
+        };
+        let shared = Shared::new(
+            clusia_core::Paths::new(dir.path()),
+            clusia_core::Config::default(),
+            options,
+        );
+        (dir, Arc::new(shared))
+    }
+
+    static HOOK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn hook(_: &Arc<Shared>) {
+        HOOK_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn the_last_window_listener_calls_its_hook_once() {
+        let (_dir, shared) = shared();
+        let first = Listener::new(&shared, |s| &s.window_listeners, Some(hook));
+        let second = Listener::new(&shared, |s| &s.window_listeners, Some(hook));
+        assert_eq!(shared.window_listeners.load(Ordering::SeqCst), 2);
+        drop(first);
+        assert_eq!(
+            HOOK_CALLS.load(Ordering::SeqCst),
+            0,
+            "a listener is still there"
+        );
+        drop(second);
+        assert_eq!(HOOK_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(shared.window_listeners.load(Ordering::SeqCst), 0);
+        // Without a hook, the last one going calls nothing.
+        drop(Listener::new(&shared, |s| &s.tray_listeners, None));
+        assert_eq!(HOOK_CALLS.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn opening_and_closing_a_review_changes_what_a_connection_holds() {

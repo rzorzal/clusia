@@ -9,7 +9,7 @@ use clusia_core::tests::{DiskItem, DiskKind, DiskReport};
 
 use crate::docker::Docker;
 use crate::exec::{Exec, Output};
-use crate::names::LABEL_REPO;
+use crate::names::{LABEL_KIND, LABEL_REPO};
 
 pub const CLEANUP_TIMEOUT: Duration = Duration::from_secs(120);
 pub const BASE_NOTE: &str = "Base images that builds pulled are not counted or removed; docker image prune can remove the unused ones.";
@@ -49,13 +49,13 @@ pub async fn remove_repo(exec: &dyn Exec, docker: &Docker, repo: &str) -> Result
 }
 
 /// Removes `clusia-` containers that no live run or stack owns: a container of a dead compose
-/// project takes its project down once, any other goes into one `rm -f`. `live` holds the
-/// names of running run containers and the projects of live stacks. With `repo`, only that
+/// project takes its project down once, any other goes into one `rm -f`. `live` gives the
+/// names of running run containers and the projects of live stacks, read after the listing. With `repo`, only that
 /// repository's containers are looked at.
 pub async fn remove_orphans(
     exec: &dyn Exec,
     docker: &Docker,
-    live: &[String],
+    live: &(dyn Fn() -> Vec<String> + Sync),
     repo: Option<&str>,
 ) -> Result<(), String> {
     let format = "{{.Names}} {{.Label \"com.docker.compose.project\"}}";
@@ -66,6 +66,8 @@ pub async fn remove_orphans(
     }
     args.extend(["--format", format]);
     let out = call(exec, docker, &args).await?;
+    // Read after the listing: a run made after this read has no container in it yet.
+    let live = live();
     let mut projects: Vec<String> = Vec::new();
     let mut names: Vec<String> = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -98,6 +100,37 @@ pub async fn remove_orphans(
         }
     }
     joined(notes)
+}
+
+/// Removes the networks of systems that are not in `live`: those labelled as a system's whose
+/// name is Clúsia's own. A failure is noted and returned after the rest ran.
+pub async fn remove_orphan_networks(
+    exec: &dyn Exec,
+    docker: &Docker,
+    live: &(dyn Fn() -> Vec<String> + Sync),
+) -> Result<(), String> {
+    let filter = format!("label={LABEL_KIND}=system");
+    let list = [
+        "network",
+        "ls",
+        "--filter",
+        filter.as_str(),
+        "--format",
+        "{{.Name}}",
+    ];
+    let out = call(exec, docker, &list).await?;
+    // Read after the listing, for the same reason as in `remove_orphans`.
+    let live = live();
+    let orphans: Vec<String> = ids(&out)
+        .into_iter()
+        .filter(|name| name.starts_with("clusia-system-") && !live.contains(name))
+        .collect();
+    if orphans.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["network".to_string(), "rm".to_string()];
+    args.extend(orphans);
+    call(exec, docker, &args).await.map(|_| ())
 }
 
 /// What Clúsia keeps on disk: labelled images and volumes (when an engine is there), then the
@@ -465,7 +498,10 @@ mod tests {
             "clusia-run-acme-widgets-abc123-7-1",
             "clusia-acme-widgets-abc123-7",
         ]);
-        assert_eq!(remove_orphans(&fake, &docker(), &live, None).await, Ok(()));
+        assert_eq!(
+            remove_orphans(&fake, &docker(), &|| live.clone(), None).await,
+            Ok(())
+        );
         assert_eq!(
             calls(&fake),
             [
@@ -495,7 +531,10 @@ mod tests {
             &["ps"],
             FakeReply::ok("clusia-run-acme-widgets-abc123-7-1\n"),
         );
-        assert_eq!(remove_orphans(&quiet, &docker(), &live, None).await, Ok(()));
+        assert_eq!(
+            remove_orphans(&quiet, &docker(), &|| live.clone(), None).await,
+            Ok(())
+        );
         assert_eq!(
             calls(&quiet).len(),
             1,
@@ -505,7 +544,7 @@ mod tests {
         let one_repo = FakeExec::new();
         one_repo.on("docker", &["ps"], FakeReply::ok(""));
         assert_eq!(
-            remove_orphans(&one_repo, &docker(), &live, Some("acme/widgets")).await,
+            remove_orphans(&one_repo, &docker(), &|| live.clone(), Some("acme/widgets")).await,
             Ok(())
         );
         assert_eq!(
@@ -661,5 +700,105 @@ mod tests {
         assert_eq!(parse_size("0B"), Some(0));
         assert_eq!(parse_size("2TB"), Some(2_000_000_000_000));
         assert_eq!(parse_size("N/A"), None);
+    }
+
+    #[tokio::test]
+    async fn orphan_networks_are_removed_by_label_and_the_live_ones_stay() {
+        let fake = FakeExec::new();
+        fake.on(
+            "docker",
+            &["network", "ls"],
+            FakeReply::ok("clusia-system-acme-widgets-1a2b3c-7-pub\nclusia-system-acme-widgets-1a2b3c-9-pub\nclusia-system-acme-widgets-1a2b3c-9-net\nbridge\nsomeone-elses\n"),
+        );
+        fake.on("docker", &["network", "rm"], FakeReply::ok(""));
+        let live = vec!["clusia-system-acme-widgets-1a2b3c-7-pub".to_string()];
+        remove_orphan_networks(&fake, &docker(), &|| live.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls(&fake),
+            vec![
+                vec![
+                    "network",
+                    "ls",
+                    "--filter",
+                    "label=io.clusia.kind=system",
+                    "--format",
+                    "{{.Name}}"
+                ],
+                vec![
+                    "network",
+                    "rm",
+                    "clusia-system-acme-widgets-1a2b3c-9-pub",
+                    "clusia-system-acme-widgets-1a2b3c-9-net"
+                ],
+            ],
+            "only listed, unowned `clusia-system-` names are named"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_reads_what_is_live_after_its_listing() {
+        // A system installed while the listing ran is live by the time anything is removed.
+        let system = "clusia-system-acme-widgets-1a2b3c-7";
+        let fake = FakeExec::new();
+        fake.on("docker", &["ps"], FakeReply::ok(format!("{system} \n")))
+            .on(
+                "docker",
+                &["network", "ls"],
+                FakeReply::ok(format!("{system}-pub\n")),
+            )
+            .on("docker", &["rm"], FakeReply::ok(""))
+            .on("docker", &["network", "rm"], FakeReply::ok(""));
+        let live = || {
+            if calls(&fake).is_empty() {
+                Vec::new()
+            } else {
+                vec![system.to_string(), format!("{system}-pub")]
+            }
+        };
+        assert_eq!(remove_orphans(&fake, &docker(), &live, None).await, Ok(()));
+        remove_orphan_networks(&fake, &docker(), &live)
+            .await
+            .unwrap();
+        assert_eq!(
+            calls(&fake)
+                .iter()
+                .filter(|a| a.iter().any(|w| w == "rm"))
+                .count(),
+            0,
+            "{:?}",
+            calls(&fake)
+        );
+    }
+
+    #[tokio::test]
+    async fn no_orphan_network_means_no_rm_and_a_failure_is_noted() {
+        let fake = FakeExec::new();
+        fake.on(
+            "docker",
+            &["network", "ls"],
+            FakeReply::ok("clusia-system-a-1-pub\n"),
+        );
+        let live = vec!["clusia-system-a-1-pub".to_string()];
+        remove_orphan_networks(&fake, &docker(), &|| live.clone())
+            .await
+            .unwrap();
+        assert_eq!(calls(&fake).len(), 1);
+        let fake = FakeExec::new();
+        fake.on(
+            "docker",
+            &["network", "ls"],
+            FakeReply::ok("clusia-system-a-2-pub\n"),
+        );
+        fake.on(
+            "docker",
+            &["network", "rm"],
+            FakeReply::fail(1, "has active endpoints"),
+        );
+        let err = remove_orphan_networks(&fake, &docker(), &Vec::new)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "docker network failed: has active endpoints");
     }
 }

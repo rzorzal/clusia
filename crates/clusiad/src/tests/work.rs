@@ -13,8 +13,9 @@ use clusia_core::cockpit::{RunSide, Sample};
 use clusia_core::tests::{
     Approval, Approve, EnvState, Listing, MESSAGE_MAX, PlanStep, RECIPE_CHANGED, RECIPE_FILE,
     RESULTS_MAX, RecipePromptContext, RecipeProposal, ResultsFormat, RunOutcome, RunnerKind,
-    STEP_ENGINE, STEP_IMAGE, STEP_SERVICES, STEP_STACK, STEP_TESTS, SetupPlan, StepState, TAIL_MAX,
-    TestCaseResult, TestRun, TestScope, TestStatus, TestsPhase, Totals, keep_runs,
+    STEP_ENGINE, STEP_FORWARDER, STEP_IMAGE, STEP_SERVICES, STEP_STACK, STEP_SYSTEM, STEP_TESTS,
+    SetupPlan, StepState, TAIL_MAX, TestCaseResult, TestRun, TestScope, TestStatus, TestsPhase,
+    Totals, keep_runs,
 };
 use clusia_core::{PrRef, Review};
 use clusia_protocol::{ErrorCode, Event, Outcome, ProtocolError, Reply, topics};
@@ -40,8 +41,12 @@ use crate::sync::now_unix;
 use crate::turns::Stop;
 
 /// How many cores the machine has, for `tests.cpus = 0`; 1 when it cannot say.
-fn cores() -> u32 {
+pub(super) fn cores() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX))
+}
+
+async fn sessions_name(shared: &Shared, pr: &PrRef) -> String {
+    crate::sessions::name_for(shared, pr).await
 }
 
 /// How often the engine is asked whether it is up after its start command.
@@ -272,7 +277,7 @@ fn not_alive(message: String) -> Outcome {
 /// What a request that runs recipe text needs, checked in the order the reviewer fixes them:
 /// the pull request's own `.clusia/`, the probe, the recipe, a blocked plan.
 #[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
-fn usable(snap: Snapshot) -> Result<Usable, Outcome> {
+pub(super) fn usable(snap: Snapshot) -> Result<Usable, Outcome> {
     if let Some(problem) = snap.shipped {
         return Err(not_alive(problem));
     }
@@ -317,6 +322,7 @@ pub(super) async fn generate(
     review: Review,
     id: u64,
     turn: Arc<Stop>,
+    system_failure: Option<String>,
 ) -> Result<(), String> {
     let ctx = Ctx::new(&shared, &pr)?;
     if let Some(problem) = env::refresh_shipped(&shared, &ctx).await {
@@ -355,6 +361,7 @@ pub(super) async fn generate(
         current,
         cases: !briefs.is_empty(),
         functions: briefs.clone(),
+        system_failure,
     };
     let answer = match recipe_turn::run_recipe_turn(&shared, &pr, prompt, turn.clone()).await {
         Ok(answer) => answer,
@@ -366,6 +373,7 @@ pub(super) async fn generate(
     }
     let near = answer.near;
     let answer_functions = answer.functions;
+    let answer_endpoints = answer.endpoints;
     let recipe = answer
         .recipe
         .map_err(|reasons| format!("The agent's recipe is not valid: {}", reasons.join("; ")))?;
@@ -405,6 +413,19 @@ pub(super) async fn generate(
     if unused > 0 {
         tracing::warn!(pr = %pr, unused, "the recipe answer held function blocks that could not be used");
     }
+    if recipe.system.is_some() {
+        let failed = super::endpoints::adopt(
+            &ctx.worktree,
+            &recipe,
+            answer_endpoints.as_ref(),
+            &review.head_sha,
+            now_unix(),
+            &sessions_name(&shared, &pr).await,
+        );
+        shared
+            .tests
+            .with(&pr, |entry| entry.endpoints_failed = failed);
+    }
     record.agent_near = near;
     record.generated_inputs = Some(env.inputs_hash.clone());
     record.generated_at = Some(now_unix());
@@ -431,6 +452,19 @@ pub(super) async fn accept_setup(
     if recipe_hash != plan.recipe_hash {
         return Err(not_alive(RECIPE_CHANGED.into()));
     }
+    // The system's own ids: only a client that showed the SYSTEM section names them.
+    let system_ids: Vec<String> = plan
+        .system
+        .as_ref()
+        .map(|system| {
+            system
+                .steps
+                .iter()
+                .map(|s| s.id.clone())
+                .chain([STEP_SYSTEM.to_string()])
+                .collect()
+        })
+        .unwrap_or_default();
     let wanted: BTreeSet<String> = match approve {
         Approve::All => plan
             .steps
@@ -440,7 +474,10 @@ pub(super) async fn accept_setup(
             .collect(),
         Approve::Steps(ids) => {
             for id in ids {
-                if id != STEP_TESTS && !plan.steps.iter().any(|s| s.id == *id) {
+                if id != STEP_TESTS
+                    && !plan.steps.iter().any(|s| s.id == *id)
+                    && !system_ids.contains(id)
+                {
                     return Err(not_alive(format!(
                         "There is no step {id} in the setup plan"
                     )));
@@ -502,9 +539,17 @@ pub(super) async fn prepare(
             mount(&shared, &pr, id, &ctx, &env, &image.tag).await;
             continue;
         }
+        // The system's steps come after the plan's own, and only in a plan that can run them.
+        let system_steps = plan
+            .system
+            .as_ref()
+            .filter(|system| system.blocked.is_none())
+            .map(|system| system.steps.as_slice())
+            .unwrap_or_default();
         let next = plan
             .steps
             .iter()
+            .chain(system_steps)
             .find(|s| matches!(s.state, StepState::Missing | StepState::Failed { .. }))
             .cloned();
         let Some(step) = next else {
@@ -729,6 +774,34 @@ pub(super) async fn run_step(walk: &Walk<'_>, step: &PlanStep) -> StepEnd {
             exec,
             &docker,
             &image,
+            &build_dir,
+            &walk.ctx.labels(LabelKind::Image),
+            limit,
+            walk.stop,
+            &mut |stream, bytes: &[u8]| sink.chunk(stream, bytes),
+        )
+        .await;
+        sink.flush();
+        return step_end(ended, limit, sink.tail());
+    }
+    if id == STEP_FORWARDER {
+        let docker = match docker_of(walk) {
+            Ok(found) => found,
+            Err(end) => return end,
+        };
+        // Its own build folder beside the review's, never inside the worktree: the build
+        // empties the folder first.
+        let image_dir = env::build_dir(shared, walk.pr);
+        let mut name = image_dir
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_default();
+        name.push("-system-forwarder");
+        let build_dir = image_dir.with_file_name(name);
+        let ended = container::build_image(
+            exec,
+            &docker,
+            &clusia_testrun::system::forwarder_plan(),
             &build_dir,
             &walk.ctx.labels(LabelKind::Image),
             limit,
@@ -990,7 +1063,7 @@ async fn work_step(
     Ok(ended)
 }
 
-fn mounts(ctx: &Ctx, env: &EnvState) -> RunMounts {
+pub(super) fn mounts(ctx: &Ctx, env: &EnvState) -> RunMounts {
     RunMounts {
         worktree: ctx.worktree.clone(),
         git_common: ctx.git_common.clone(),
@@ -1063,7 +1136,7 @@ fn names_key(line: &str, name: &str) -> bool {
 
 /// The recipe's compose stack: the file read as text, then `docker compose config`, its
 /// refusals and the override Clúsia writes for it.
-async fn compose_stack(walk: &Walk<'_>, docker: &Docker) -> Result<Stack, String> {
+pub(super) async fn compose_stack(walk: &Walk<'_>, docker: &Docker) -> Result<Stack, String> {
     let shared = walk.shared;
     let ctx = walk.ctx;
     let Some(services) = &walk.recipe.services else {

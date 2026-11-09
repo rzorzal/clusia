@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="system.css"></head><body>
+<script>if(location.hash==="#dark")document.body.className="dark"</script>
+<div class="win">
+  <div class="top"><span class="dots"><span style="background:#ff5f57"></span><span style="background:#febc2e"></span><span style="background:#28c840"></span></span>
+    <span class="tab">Home</span><span class="tab on"><span class="f" style="margin-right:6px">#123</span><b>auth refresh</b></span></div>
+  <div class="hdr"><h1><small>rzorzal/clusia &nbsp;#123</small> feat: auth refresh</h1>
+    <div class="sec"><span>Diagrams</span><span>Security</span><span>Diff</span><span>Audits</span><span>Comments</span><span class="on">Tests</span></div></div>
+  <div class="body" style="opacity:.35"><div class="row" style="height:178px"><div class="card" style="flex:1"></div><div class="card" style="flex:1"></div></div><div class="card" style="flex:1"></div></div>
+  <div style="position:absolute;inset:0;background:rgba(20,24,22,.28)"></div>
+  <div class="card" style="position:absolute;left:220px;top:56px;width:840px;padding:22px 24px;box-shadow:0 18px 50px rgba(0,0,0,.18)">
+    <div style="font-size:16px;font-weight:600">Start the system for #123</div>
+    <div class="m" style="margin:6px 0 14px">Claude Code added a system to the recipe. Nothing starts until you approve it; a change to any line asks again.</div>
+    <div class="m" style="font-size:12px;font-weight:600;letter-spacing:.04em;margin-bottom:6px">SETUP · 1 STEP</div>
+    <table><tbody>
+      <tr style="background:var(--amberbg)"><td style="width:26px">☑</td><td style="width:270px">Start Clúsia's own <span class="mono">postgres</span><div class="amb" style="font-size:12px">Runs on your Mac: no host folders, no open ports, internal network</div></td><td class="mono m">docker compose -p clusia-clusia-123 up -d postgres</td><td style="text-align:right;width:110px"><span class="pill" style="background:var(--amberbg);color:var(--amber);border:1px solid var(--amberline)">host</span></td></tr>
+    </tbody></table>
+    <div class="m" style="font-size:12px;font-weight:600;letter-spacing:.04em;margin:16px 0 6px">SYSTEM · IN THE CONTAINER</div>
+    <div style="display:grid;grid-template-columns:110px 1fr;row-gap:6px;align-items:baseline">
+      <span class="m">Start</span><span class="mono">cargo run -q --bin auth-api -- --port 8080</span>
+      <span class="m">Health</span><span class="mono">GET /health on api · up to 60 s</span>
+      <span class="m">Ports</span><span><span class="mono">api 8080</span>, <span class="mono">admin 9090</span> <span class="f">→ free ports on 127.0.0.1 only</span></span>
+      <span class="m">Variables</span><span class="mono">DATABASE_URL=postgres://test:test@postgres/auth &nbsp;RUST_LOG=info <span class="f">(fake · edit in the recipe)</span></span>
+      <span class="m">Network</span><span style="display:flex;align-items:center;gap:8px"><span class="tog"></span>Outbound network <span class="f">— off: the system can reach its services and nothing else</span></span>
+    </div>
+    <div class="m" style="font-size:12px;font-weight:600;letter-spacing:.04em;margin:16px 0 6px">WHERE TO TEST · 3 ENDPOINTS</div>
+    <div class="m" style="font-size:12.5px"><span class="mono">POST /oauth/token</span> · <span class="mono">GET /oauth/status</span> · <span class="mono">DELETE /oauth/token/{id}</span> <span class="f">— read from the diff; the curl and Send are built by Clúsia</span></div>
+    <div class="m" style="margin-top:14px;font-size:12px">Uses the approved test image · stops when the review closes or Clúsia quits</div>
+    <div style="display:flex;gap:10px;margin-top:18px;align-items:center"><span style="text-decoration:underline">Edit recipe</span><span class="btn" style="margin-left:auto">Cancel</span><span class="btn">Approve</span><span class="btn p">Approve and start</span></div>
+  </div>
+</div></body></html>

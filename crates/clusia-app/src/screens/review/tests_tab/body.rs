@@ -1231,6 +1231,7 @@ mod tests {
             commands_approved: false,
             ready: false,
             blocked: Some(reason.into()),
+            system: None,
         }
     }
 
