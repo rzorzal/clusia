@@ -192,6 +192,10 @@ pub enum Command {
         #[arg(long, value_name = "SLUG")]
         as_comment: Option<String>,
     },
+    /// The system of a review: start the pull request's code in a container, see it, call it
+    /// and stop it.
+    #[command(subcommand)]
+    System(SystemCommand),
     /// Check a custom command against Clúsia's JSON-lines protocol.
     #[command(subcommand)]
     Harness(HarnessCommand),
@@ -288,6 +292,64 @@ pub enum ReviewCommand {
     Close { pr: String },
     /// Throw the review away.
     Discard { pr: String },
+}
+
+/// What `clusia system` does; every `pr` is `owner/repo#number` or a pull request URL.
+#[derive(Debug, Subcommand)]
+pub enum SystemCommand {
+    /// Show the system section of the setup plan, ask, set up, and start the system; it stays
+    /// until `clusia system stop`, the review closes or the daemon stops.
+    Start {
+        pr: String,
+        /// Approve the setup, the system and its test commands without asking.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Stop the system and wait until it is down.
+    Stop { pr: String },
+    /// Stop the system and start it again; the plan is not asked again.
+    Restart { pr: String },
+    /// The state, ports, services, network, start command and endpoints of the system. The
+    /// exit code is 0 only while it runs.
+    Status { pr: String },
+    /// Print the last lines of every process's log, or of one.
+    Logs {
+        pr: String,
+        /// Only this process: `start` or `service:<name>`.
+        #[arg(long, value_name = "ID")]
+        process: Option<String>,
+        /// How many lines of each (at most 2000).
+        #[arg(long, default_value_t = 200)]
+        lines: u32,
+        /// Keep printing new lines until the system stops; Ctrl-C ends it and leaves the system
+        /// running.
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Send one endpoint to the running system, by the number `status` prints or by its id.
+    Send { pr: String, endpoint: String },
+    /// Allow or refuse the system outbound network for this review; a running system restarts.
+    Network {
+        pr: String,
+        #[arg(value_enum)]
+        state: OnOff,
+    },
+    /// The endpoints the pull request changes; `--write` has the agent read them again.
+    Endpoints {
+        pr: String,
+        /// Ask the agent to read the endpoints from the diff (one turn of the agent).
+        #[arg(long)]
+        write: bool,
+    },
+    /// Ask the agent to fix a system that failed to start or is unhealthy (one turn of the
+    /// agent).
+    Fix { pr: String },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]

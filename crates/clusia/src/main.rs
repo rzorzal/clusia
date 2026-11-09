@@ -13,6 +13,7 @@ mod review;
 mod run;
 mod spawn;
 mod story;
+mod system_cmd;
 mod tests_cmd;
 
 use std::process::ExitCode;

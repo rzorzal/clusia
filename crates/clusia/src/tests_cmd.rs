@@ -183,7 +183,7 @@ pub(crate) fn exit_code_of(run: &TestRun) -> u8 {
 
 /// A command as lines: `$` before the first, the rest lined up under it. Line breaks stay, so
 /// what is approved is what runs.
-fn command_lines(indent: &str, text: &str) -> Vec<String> {
+pub(crate) fn command_lines(indent: &str, text: &str) -> Vec<String> {
     printable_lines(text)
         .lines()
         .enumerate()
