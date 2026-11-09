@@ -15,7 +15,7 @@ use clusia_core::printable::printable;
 use clusia_core::system::{LOG_LINE_MAX, SYSTEM_STOP_SECS, log_line, off_loopback_text};
 
 use crate::compose::internal_network;
-use crate::container::{create_caches, first_line};
+use crate::container::{cache_volume_args, first_line};
 use crate::docker::{Docker, RunMounts, common_args, git_file_problem, mount_problem};
 use crate::exec::{Exec, Output};
 use crate::image::ImagePlan;
@@ -235,13 +235,31 @@ async fn run_ok(
     Ok(out)
 }
 
-/// The internal network (only when Clúsia owns it), then the publish bridge.
-pub async fn create_networks(
+/// What an engine call is named in its failure: `network create`, `volume create`, `start`…
+fn what(args: &[String]) -> String {
+    match args.first().map(String::as_str) {
+        Some("network" | "volume") => args.iter().take(2).cloned().collect::<Vec<_>>().join(" "),
+        Some(verb) => verb.to_string(),
+        None => String::new(),
+    }
+}
+
+/// Runs each call of `steps` in turn; the first that does not exit 0 stops them.
+async fn run_steps(
     exec: &dyn Exec,
     docker: &Docker,
-    names: &SystemNames,
-    labels: &Labels,
+    steps: Vec<Vec<String>>,
 ) -> Result<(), String> {
+    for args in steps {
+        let verb = what(&args);
+        run_ok(exec, docker, args, &verb).await?;
+    }
+    Ok(())
+}
+
+/// The calls that make a system's networks: the internal one (only when Clúsia owns it),
+/// then the publish bridge, each with the review's labels of kind `system`.
+pub fn network_steps(names: &SystemNames, labels: &Labels) -> Vec<Vec<String>> {
     let labels = system_labels(labels);
     let make = |internal: bool, name: &str| {
         let mut args = vec!["network".to_string(), "create".to_string()];
@@ -252,17 +270,83 @@ pub async fn create_networks(
         args.push(name.to_string());
         args
     };
+    let mut steps = Vec::new();
     if names.owns_inner {
-        run_ok(exec, docker, make(true, &names.inner_net), "network create").await?;
+        steps.push(make(true, &names.inner_net));
     }
-    run_ok(
-        exec,
-        docker,
-        make(false, &names.publish_net),
-        "network create",
-    )
-    .await?;
-    Ok(())
+    steps.push(make(false, &names.publish_net));
+    steps
+}
+
+/// The calls that make and start the system container: its cache volumes, the create, the
+/// publish network when allowed, then the start.
+pub fn system_steps(job: &SystemJob, mounts: &RunMounts) -> Vec<Vec<String>> {
+    let cache = Labels {
+        kind: LabelKind::Cache,
+        ..job.labels.clone()
+    };
+    let mut steps: Vec<Vec<String>> = mounts
+        .caches
+        .iter()
+        .map(|(volume, _)| cache_volume_args(&cache, volume))
+        .collect();
+    steps.push(system_create_args(job, mounts));
+    if job.network {
+        steps.push(
+            [
+                "network",
+                "connect",
+                &job.names.publish_net,
+                &job.names.container,
+            ]
+            .map(String::from)
+            .to_vec(),
+        );
+    }
+    steps.push(vec!["start".into(), job.names.container.clone()]);
+    steps
+}
+
+/// The calls that make the forwarder, put it on the internal network too, and start it.
+pub fn forwarder_steps(job: &SystemJob) -> Vec<Vec<String>> {
+    let names = &job.names;
+    vec![
+        forwarder_create_args(job),
+        ["network", "connect", &names.inner_net, &names.forwarder]
+            .map(String::from)
+            .to_vec(),
+        vec!["start".into(), names.forwarder.clone()],
+    ]
+}
+
+/// `docker port` of the forwarder.
+pub fn port_args(names: &SystemNames) -> Vec<String> {
+    vec!["port".into(), names.forwarder.clone()]
+}
+
+/// The host ports of `ports` in a `docker port` answer, only those; any line off loopback,
+/// or a port missing, refuses the whole answer.
+pub fn pick_ports(text: &str, ports: &[u16]) -> Result<BTreeMap<u16, u16>, String> {
+    let found = parse_port_lines(text)?;
+    ports
+        .iter()
+        .map(|port| {
+            found
+                .get(port)
+                .map(|host| (*port, *host))
+                .ok_or_else(|| format!("Port {port} was not published"))
+        })
+        .collect()
+}
+
+/// The internal network (only when Clúsia owns it), then the publish bridge.
+pub async fn create_networks(
+    exec: &dyn Exec,
+    docker: &Docker,
+    names: &SystemNames,
+    labels: &Labels,
+) -> Result<(), String> {
+    run_steps(exec, docker, network_steps(names, labels)).await
 }
 
 /// The cache volumes, then create, connect to the publish bridge when allowed, then start.
@@ -275,33 +359,7 @@ pub async fn create_system(
     if let Some(problem) = mount_problem(mounts).or_else(|| git_file_problem(&mounts.worktree)) {
         return Err(problem);
     }
-    create_caches(exec, docker, mounts, &job.labels)
-        .await
-        .map_err(|e| e.to_string())?;
-    run_ok(exec, docker, system_create_args(job, mounts), "create").await?;
-    if job.network {
-        let connect = [
-            "network",
-            "connect",
-            &job.names.publish_net,
-            &job.names.container,
-        ];
-        run_ok(
-            exec,
-            docker,
-            connect.map(String::from).to_vec(),
-            "network connect",
-        )
-        .await?;
-    }
-    run_ok(
-        exec,
-        docker,
-        vec!["start".into(), job.names.container.clone()],
-        "start",
-    )
-    .await?;
-    Ok(())
+    run_steps(exec, docker, system_steps(job, mounts)).await
 }
 
 /// Create the forwarder, put it on the internal network too, then start it.
@@ -310,24 +368,7 @@ pub async fn start_forwarder(
     docker: &Docker,
     job: &SystemJob,
 ) -> Result<(), String> {
-    let names = &job.names;
-    run_ok(exec, docker, forwarder_create_args(job), "create").await?;
-    let connect = ["network", "connect", &names.inner_net, &names.forwarder];
-    run_ok(
-        exec,
-        docker,
-        connect.map(String::from).to_vec(),
-        "network connect",
-    )
-    .await?;
-    run_ok(
-        exec,
-        docker,
-        vec!["start".into(), names.forwarder.clone()],
-        "start",
-    )
-    .await?;
-    Ok(())
+    run_steps(exec, docker, forwarder_steps(job)).await
 }
 
 /// Reads `docker port` lines (`8080/tcp -> 127.0.0.1:49153`) into container port → host port.
@@ -373,23 +414,8 @@ pub async fn mapped_ports(
     names: &SystemNames,
     ports: &[u16],
 ) -> Result<BTreeMap<u16, u16>, String> {
-    let out = run_ok(
-        exec,
-        docker,
-        vec!["port".into(), names.forwarder.clone()],
-        "port",
-    )
-    .await?;
-    let found = parse_port_lines(&String::from_utf8_lossy(&out.stdout))?;
-    ports
-        .iter()
-        .map(|port| {
-            found
-                .get(port)
-                .map(|host| (*port, *host))
-                .ok_or_else(|| format!("Port {port} was not published"))
-        })
-        .collect()
+    let out = run_ok(exec, docker, port_args(names), "port").await?;
+    pick_ports(&String::from_utf8_lossy(&out.stdout), ports)
 }
 
 pub fn health_exec_args(names: &SystemNames, command: &str) -> Vec<String> {

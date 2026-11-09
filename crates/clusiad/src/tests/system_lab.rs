@@ -775,14 +775,19 @@ pub(super) async fn system_lab_always_503_with_turns(
     (lab, api)
 }
 
-/// A lab, built without health, whose start command logs one line 100 ms in.
+/// A lab, built without health, whose start command logs a line every 100 ms for a minute.
 pub(super) async fn system_lab_with_a_chatty_log() -> (Lab, MockServer) {
+    let lines = (1..=600)
+        .map(|i| {
+            (
+                Duration::from_millis(100),
+                Stream::Out,
+                format!("tick {i}\n"),
+            )
+        })
+        .collect();
     system_lab_without_health_with(vec![], |x| {
-        x.on(
-            "docker",
-            &["logs"],
-            FakeReply::after(Duration::from_millis(100), log_reply("tick\n")),
-        );
+        x.on("docker", &["logs"], FakeReply::timed(lines, 0));
     })
     .await
 }

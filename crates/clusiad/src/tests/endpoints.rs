@@ -9,10 +9,10 @@ use std::sync::Arc;
 use clusia_core::PrRef;
 use clusia_core::printable::printable;
 use clusia_core::system::{
-    ENDPOINTS_FILE_MAX, Endpoint, EndpointView, EndpointsPromptContext, EndpointsView,
-    LOG_TAIL_LINES, NO_SYSTEM, NOTHING_TO_FIX, SendResult, StoredEndpoints, SystemFailure,
-    SystemState, check_endpoint, curl_command, endpoints_from_json, endpoints_prompt,
-    failure_prompt_text, unhealthy_text,
+    ENDPOINTS_FILE_MAX, ENDPOINTS_MAX, Endpoint, EndpointView, EndpointsPromptContext,
+    EndpointsView, LOG_TAIL_LINES, NO_SYSTEM, NOTHING_TO_FIX, SendResult, StoredEndpoints,
+    SystemFailure, SystemState, check_endpoint, curl_command, endpoints_from_json,
+    endpoints_prompt, failure_prompt_text, unhealthy_text,
 };
 use clusia_core::tests::{StepPlace, TestsPhase};
 use clusia_harness::extract_endpoints_block;
@@ -30,6 +30,8 @@ use crate::state::Shared;
 use crate::sync::now_unix;
 
 const FILE: &str = "endpoints.toml";
+/// The longest `written_head` shown: a commit id is 40 hex digits.
+const HEAD_MAX: usize = 64;
 const NOT_PLAIN: &str = "Clúsia's folder for the endpoints is not a plain folder";
 /// How much of a turn's failure is kept, after `printable`.
 const FAILED_MAX: usize = 300;
@@ -92,7 +94,13 @@ pub(super) fn read_endpoints(worktree: &Path, ports: &[String]) -> Loaded {
     };
     let mut list = Vec::new();
     let mut reasons = Vec::new();
-    for endpoint in &stored.endpoints {
+    if stored.endpoints.len() > ENDPOINTS_MAX {
+        reasons.push(format!(
+            "the file lists {} endpoints; the most read is {ENDPOINTS_MAX}",
+            stored.endpoints.len()
+        ));
+    }
+    for endpoint in stored.endpoints.iter().take(ENDPOINTS_MAX) {
         match check_endpoint(endpoint, ports) {
             Ok(()) if !list.iter().any(|e: &Endpoint| e.id() == endpoint.id()) => {
                 list.push(endpoint.clone());
@@ -142,10 +150,11 @@ pub(super) fn endpoints_view(
     writing: bool,
     failed: Option<String>,
 ) -> EndpointsView {
-    let written_head = loaded.stored.as_ref().map(|s| s.written_head.clone());
-    let stale = written_head
-        .as_deref()
-        .is_some_and(|written| !head.is_empty() && written != head);
+    let stored_head = loaded.stored.as_ref().map(|s| s.written_head.as_str());
+    let stale = stored_head.is_some_and(|written| !head.is_empty() && written != head);
+    // A hand edit can put anything there: shown as one short line.
+    let written_head =
+        stored_head.map(|written| printable(written).chars().take(HEAD_MAX).collect());
     EndpointsView {
         list: loaded
             .list
@@ -456,6 +465,36 @@ mod tests {
         let loaded = read_endpoints(wt.path(), &["api".into()]);
         assert!(loaded.list.is_empty());
         assert!(loaded.note.is_some());
+    }
+
+    #[test]
+    fn a_hand_edited_file_is_read_bounded() {
+        let wt = tempdir();
+        let mut big = stored();
+        big.written_head = format!("{}\u{202e}", "f".repeat(500));
+        big.endpoints = (0..25)
+            .map(|i| {
+                let mut e = post_token();
+                e.path = format!("/widgets/{i}");
+                e
+            })
+            .collect();
+        write_endpoints_file(wt.path(), &big).unwrap();
+        let loaded = read_endpoints(wt.path(), &["api".into()]);
+        assert_eq!(loaded.list.len(), ENDPOINTS_MAX);
+        assert!(loaded.note.unwrap().contains("the file lists 25 endpoints"));
+        let view = endpoints_view(
+            read_endpoints(wt.path(), &["api".into()]),
+            "h1",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            None,
+        );
+        let shown = view.written_head.unwrap();
+        assert!(shown.chars().count() <= HEAD_MAX);
+        assert!(!shown.contains('\u{202e}'));
+        assert!(view.stale);
     }
 
     #[cfg(unix)]

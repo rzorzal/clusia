@@ -159,6 +159,14 @@ async fn kill(exec: &dyn Exec, docker: &Docker, name: &str) -> bool {
     out.is_ok_and(|out| out.code == Some(0) && !out.timed_out)
 }
 
+/// `docker volume create` for one cache volume with `labels` (of kind `cache`).
+pub fn cache_volume_args(labels: &Labels, volume: &str) -> Vec<String> {
+    let mut args = vec!["volume".to_string(), "create".to_string()];
+    args.extend(labels.args());
+    args.push(volume.to_string());
+    args
+}
+
 /// Creates each cache volume with its labels: a volume `docker run -v` creates on the fly has
 /// none, and cleanup finds volumes by label only.
 pub(crate) async fn create_caches(
@@ -172,10 +180,12 @@ pub(crate) async fn create_caches(
         ..labels.clone()
     };
     for (volume, _) in &mounts.caches {
-        let mut args = vec!["volume".to_string(), "create".to_string()];
-        args.extend(cache.args());
-        args.push(volume.clone());
-        let out = exec.output(&docker.command(args), QUICK_TIMEOUT).await?;
+        let out = exec
+            .output(
+                &docker.command(cache_volume_args(&cache, volume)),
+                QUICK_TIMEOUT,
+            )
+            .await?;
         if out.code != Some(0) || out.timed_out {
             return Err(io::Error::other(format!(
                 "docker volume create failed: {}",

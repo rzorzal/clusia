@@ -29,12 +29,12 @@ use clusia_testrun::container::{self, COMPOSE_TIMEOUT};
 use clusia_testrun::docker::{Docker, RunMounts, git_file_problem, mount_problem};
 use clusia_testrun::exec::{Ended, Output, StopFlag, Stream};
 use clusia_testrun::log::{CappedLog, Tail};
-use clusia_testrun::names::{self, LabelKind, Labels};
+use clusia_testrun::names::{self, LabelKind};
 use clusia_testrun::recipe::{HealthSpec, Recipe, SystemSpec};
 use clusia_testrun::system::{
-    LogRing, SystemJob, SystemNames, forwarder_create_args, health_exec_args, log_stream_args,
-    parse_port_lines, parse_service_exit, remove_system, service_ps_args, system_create_args,
-    system_names, wait_args,
+    LogRing, SystemJob, SystemNames, forwarder_steps, health_exec_args, log_stream_args,
+    network_steps, parse_service_exit, pick_ports, port_args, remove_system, service_ps_args,
+    system_names, system_steps, wait_args,
 };
 
 use super::env::{self, RecipeState, Snapshot};
@@ -58,6 +58,8 @@ const START: &str = "start";
 pub(crate) struct ProcessLog {
     pub label: String,
     pub ring: LogRing,
+    /// The file, while no stream writes it; a stream takes it for its whole life, so its
+    /// writes never hold the table's lock.
     pub file: Option<CappedLog>,
     pub path: Option<PathBuf>,
     pub pending: Vec<(u64, String)>,
@@ -69,11 +71,10 @@ pub(crate) struct ProcessLog {
 
 impl ProcessLog {
     fn new(label: String, path: Option<PathBuf>) -> Self {
-        let file = path.as_deref().and_then(|p| CappedLog::create(p).ok());
         Self {
             label,
             ring: LogRing::new(LOG_LINES_MAX),
-            file,
+            file: None,
             path,
             pending: Vec::new(),
             dropped: 0,
@@ -81,14 +82,8 @@ impl ProcessLog {
         }
     }
 
-    /// Takes `bytes` into the file and the ring; answers whether a flush must be armed.
+    /// Takes `bytes` into the ring; answers whether a flush must be armed.
     fn push(&mut self, bytes: &[u8]) -> bool {
-        if let Some(file) = self.file.as_mut()
-            && let Err(e) = file.write(bytes)
-        {
-            tracing::warn!(error = %e, "cannot write the system log");
-            self.file = None;
-        }
         let done = self.ring.push(bytes);
         if done.is_empty() {
             return false;
@@ -612,7 +607,9 @@ pub(crate) async fn start_system(
         Ok(started) => started,
         Err(refused) => return refused.outcome(pr),
     };
-    launch(shared, pr, *accepted, keep, started).await;
+    if let Err(out) = launch(shared, pr, *accepted, keep, started).await {
+        return out;
+    }
     reply(system_view(shared, pr).await)
 }
 
@@ -637,14 +634,19 @@ async fn set_keep(shared: &Shared, pr: &PrRef) {
     }
 }
 
-/// Puts a new run in `Starting`, tells the windows, and starts it in the background.
+/// Puts a new run in `Starting` unless the systems limit is reached, tells the windows, and
+/// starts it in the background. The live systems of other reviews are counted under the same
+/// lock that installs the run, so two starts can never pass the limit together. A refusal
+/// ends `started`.
+#[allow(clippy::result_large_err)] // `Outcome` is the handlers' error currency
 async fn launch(
     shared: &Arc<Shared>,
     pr: &PrRef,
     accepted: Accepted,
     keep: bool,
     started: Started,
-) {
+) -> Result<(), Outcome> {
+    let max = shared.config.read().await.tests.systems_max;
     let run_id = u64::from(shared.tests.seq());
     let usable = &accepted.usable;
     let project = usable
@@ -678,7 +680,27 @@ async fn launch(
         .collect();
     run.docker = docker_of(&accepted);
     run.activity = Some(started.id);
-    shared.tests.with(pr, |entry| entry.system = Some(run));
+    let installed = {
+        let mut table = shared.tests.table.lock().unwrap_or_else(|p| p.into_inner());
+        let mut others: Vec<PrRef> = table
+            .iter()
+            .filter(|(other, entry)| {
+                *other != pr && entry.system.as_ref().is_some_and(|r| r.state.is_live())
+            })
+            .map(|(other, _)| other.clone())
+            .collect();
+        others.sort();
+        if others.len() >= max as usize {
+            Err(systems_full_text(max, &others))
+        } else {
+            table.entry(pr.clone()).or_default().system = Some(run);
+            Ok(())
+        }
+    };
+    if let Err(message) = installed {
+        end_activity(shared, pr, started.id);
+        return Err(refuse(message));
+    }
     tell_system(shared, pr).await;
     let (shared, pr) = (shared.clone(), pr.clone());
     tokio::spawn(async move {
@@ -702,9 +724,12 @@ async fn launch(
             };
             fail(&shared, &pr, run_id, failure).await;
         }
+        // Whatever way the start ended, a run it left starting or stopping is torn down.
+        stop_start(&shared, &pr, run_id).await;
         end_activity(&shared, &pr, act);
         drop(started.live);
     });
+    Ok(())
 }
 
 /// Ends the system activity `id`, leaving every failure of the review as it is.
@@ -778,10 +803,22 @@ fn failure_of(
         command,
         place,
         exit_code,
-        message: message.unwrap_or_else(|| format!("docker {verb} failed: {why}")),
+        message: cut_text(message.unwrap_or_else(|| format!("docker {verb} failed: {why}"))),
         process: None,
         tail: tail_text(&text),
     }
+}
+
+/// How much of a failure's message is kept: it may hold an engine's first output line.
+const MESSAGE_MAX: usize = 300;
+
+fn cut_text(text: String) -> String {
+    if text.chars().count() <= MESSAGE_MAX {
+        return text;
+    }
+    let mut out: String = text.chars().take(MESSAGE_MAX - 1).collect();
+    out.push('…');
+    out
 }
 
 /// The last `LOG_TAIL_LINES` lines of `text`, safe to show.
@@ -808,6 +845,15 @@ struct Start {
 }
 
 impl Start {
+    /// `fut`, unless a stop comes first.
+    async fn race<T>(&self, fut: impl std::future::Future<Output = T>) -> Option<T> {
+        tokio::select! {
+            out = fut => Some(out),
+            _ = self.act_stop.notified() => None,
+            _ = self.run_stop.notified() => None,
+        }
+    }
+
     fn stopped(&self) -> bool {
         self.act_stop.fired() || self.run_stop.fired()
     }
@@ -858,12 +904,20 @@ macro_rules! step {
 
 /// The stop came while the system was starting: what it made goes, and it ends `Stopped`.
 async fn stopped_while_starting(start: &Start) {
-    let (shared, pr, id) = (&start.shared, &start.pr, start.run_id);
+    stop_start(&start.shared, &start.pr, start.run_id).await;
+}
+
+/// Tears down run `id` whose start ended without settling it, and ends it `Stopped` by the
+/// reviewer. Nothing happens when the run settled, or when a teardown of it (a failure's)
+/// already owns it: that one finishes the job.
+async fn stop_start(shared: &Arc<Shared>, pr: &PrRef, id: u64) {
     let ours = with_run(shared, pr, id, |run| {
-        if !matches!(
-            run.state,
-            SystemState::Starting { .. } | SystemState::Stopping
-        ) {
+        if run.tearing
+            || !matches!(
+                run.state,
+                SystemState::Starting { .. } | SystemState::Stopping
+            )
+        {
             return false;
         }
         run.state = SystemState::Stopping;
@@ -881,6 +935,7 @@ async fn stopped_while_starting(start: &Start) {
         run.state = SystemState::Stopped {
             why: StopWhy::Reviewer,
         };
+        run.tearing = false;
     });
     release(shared, pr, id);
     tell_system(shared, pr).await;
@@ -905,6 +960,7 @@ async fn fail(shared: &Arc<Shared>, pr: &PrRef, id: u64, failure: SystemFailure)
     with_run(shared, pr, id, |run| {
         run.state = SystemState::Failed;
         run.failure = Some(failure);
+        run.tearing = false;
     });
     release(shared, pr, id);
     on_settled(shared);
@@ -955,8 +1011,10 @@ fn service_runs(json: &str) -> bool {
 async fn services_up(start: &Start, accepted: &Accepted, project: &str) -> Step<()> {
     let usable = &accepted.usable;
     let services = services_of(&usable.recipe);
-    if stack_running(start, project, &services).await {
-        return Step::Done(());
+    match start.race(stack_running(start, project, &services)).await {
+        None => return Step::Stopped,
+        Some(true) => return Step::Done(()),
+        Some(false) => {}
     }
     let shared = &start.shared;
     let walk = Walk {
@@ -993,9 +1051,10 @@ async fn services_up(start: &Start, accepted: &Accepted, project: &str) -> Step<
     });
     let stack = match kept {
         Some(stack) => stack,
-        None => match work::compose_stack(&walk, &start.docker).await {
-            Ok(stack) => stack,
-            Err(reasons) => return failed(None, reasons),
+        None => match start.race(work::compose_stack(&walk, &start.docker)).await {
+            None => return Step::Stopped,
+            Some(Ok(stack)) => stack,
+            Some(Err(reasons)) => return failed(None, reasons),
         },
     };
     let mut tail = Tail::new(clusia_core::tests::TAIL_MAX);
@@ -1083,22 +1142,23 @@ async fn run_start(
     }
 
     // This review's own left-overs of an earlier start never block this one.
-    let _ = remove_system(shared.test_exec.as_ref(), &start.docker, &names).await;
+    if start
+        .race(remove_system(
+            shared.test_exec.as_ref(),
+            &start.docker,
+            &names,
+        ))
+        .await
+        .is_none()
+    {
+        stopped_while_starting(&start).await;
+        return;
+    }
     let usable = &accepted.usable;
-    let labels = Labels {
-        kind: LabelKind::System,
-        ..usable.ctx.labels(LabelKind::System)
-    };
-    if names.owns_inner {
-        let mut args = vec!["network".to_string(), "create".into(), "--internal".into()];
-        args.extend(labels.args());
-        args.push(names.inner_net.clone());
+    let labels = usable.ctx.labels(LabelKind::System);
+    for args in network_steps(&names, &labels) {
         step!(start, start.call(args).await);
     }
-    let mut args = vec!["network".to_string(), "create".into()];
-    args.extend(labels.args());
-    args.push(names.publish_net.clone());
-    step!(start, start.call(args).await);
 
     let record = env::load(&shared, &pr);
     let network = record.system.network;
@@ -1155,52 +1215,20 @@ async fn run_start(
         fail(&shared, &pr, run_id, failure).await;
         return;
     }
-    let cache = Labels {
-        kind: LabelKind::Cache,
-        ..labels.clone()
-    };
-    for (volume, _) in &mounts.caches {
-        let mut args = vec!["volume".to_string(), "create".into()];
-        args.extend(cache.args());
-        args.push(volume.clone());
+    // The same calls as `create_system` and `start_forwarder`, one by one, so a failure keeps
+    // its command and exit code.
+    for args in system_steps(&job, &mounts) {
         step!(start, start.call(args).await);
     }
-    step!(start, start.call(system_create_args(&job, &mounts)).await);
-    if network {
-        let args = ["network", "connect", &names.publish_net, &names.container];
-        step!(start, start.call(args.map(String::from).to_vec()).await);
-    }
-    step!(
-        start,
-        start
-            .call(vec!["start".into(), names.container.clone()])
-            .await
-    );
     with_run(&shared, &pr, run_id, |run| {
         run.running_since = Some(now_unix())
     });
-    step!(start, start.call(forwarder_create_args(&job)).await);
-    let args = ["network", "connect", &names.inner_net, &names.forwarder];
-    step!(start, start.call(args.map(String::from).to_vec()).await);
-    step!(
-        start,
-        start
-            .call(vec!["start".into(), names.forwarder.clone()])
-            .await
-    );
-    let port_args = vec!["port".to_string(), names.forwarder.clone()];
+    for args in forwarder_steps(&job) {
+        step!(start, start.call(args).await);
+    }
+    let port_args = port_args(&names);
     let out = step!(start, start.call(port_args.clone()).await);
-    let mapped = parse_port_lines(&String::from_utf8_lossy(&out.stdout)).and_then(|found| {
-        job.ports
-            .iter()
-            .map(|port| {
-                found
-                    .get(port)
-                    .map(|host| (*port, *host))
-                    .ok_or_else(|| format!("Port {port} was not published"))
-            })
-            .collect::<Result<BTreeMap<u16, u16>, String>>()
-    });
+    let mapped = pick_ports(&String::from_utf8_lossy(&out.stdout), &job.ports);
     let mapped = match mapped {
         Ok(mapped) => mapped,
         Err(message) => {
@@ -1373,14 +1401,30 @@ fn spawn_watchers(start: &Start, names: &SystemNames, project: Option<&str>, acc
             ));
         }
     }
-    with_run(shared, pr, id, |run| {
-        for (process, label, file) in &processes {
+    // The files are made (truncated) here, before the table's lock is taken.
+    let made: Vec<(String, String, Option<PathBuf>, Option<CappedLog>)> = processes
+        .into_iter()
+        .map(|(process, label, file)| {
             let path = dir_ok.then(|| dir.join(file));
-            run.logs
-                .insert(process.clone(), ProcessLog::new(label.clone(), path));
+            let log = path.as_deref().and_then(|p| match CappedLog::create(p) {
+                Ok(log) => Some(log),
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot create the system log");
+                    None
+                }
+            });
+            (process, label, path.filter(|_| log.is_some()), log)
+        })
+        .collect();
+    with_run(shared, pr, id, |run| {
+        for (process, label, path, _) in &made {
+            run.logs.insert(
+                process.clone(),
+                ProcessLog::new(label.clone(), path.clone()),
+            );
         }
     });
-    for (process, _, _) in processes {
+    for (process, _, _, file) in made {
         let args = log_stream_args(names, project, &process);
         if args.is_empty() {
             continue;
@@ -1394,6 +1438,7 @@ fn spawn_watchers(start: &Start, names: &SystemNames, project: Option<&str>, acc
             process,
             start.run_stop.clone(),
             project.map(str::to_string),
+            file,
         ));
     }
     tokio::spawn(wait_exit(
@@ -1471,15 +1516,28 @@ async fn stream_process(
     process: String,
     stop: Arc<StopFlag>,
     project: Option<String>,
+    mut file: Option<CappedLog>,
 ) {
     let cmd = docker.command(&args);
     {
-        let mut chunk =
-            |_: Stream, bytes: &[u8]| take_bytes(&shared, &pr, id, &process, &stop, bytes);
+        let mut chunk = |_: Stream, bytes: &[u8]| {
+            if let Some(log) = file.as_mut()
+                && let Err(e) = log.write(bytes)
+            {
+                tracing::warn!(error = %e, "cannot write the system log");
+                file = None;
+            }
+            take_bytes(&shared, &pr, id, &process, &stop, bytes);
+        };
         let _ = shared
             .test_exec
             .stream(&cmd, STREAM_LIMIT, &stop, &mut chunk)
             .await;
+    }
+    if let Some(log) = file.take()
+        && let Err(e) = log.finish()
+    {
+        tracing::warn!(error = %e, "cannot finish the system log");
     }
     if stop.fired() {
         return;
@@ -1626,9 +1684,9 @@ async fn teardown_quiet(shared: &Shared, pr: &PrRef, id: u64) {
 }
 
 /// The one teardown: the review's live system stops for `why` and is gone when this returns.
-/// Nothing happens when the review has no live system. A system still starting is stopped
-/// through its start, which tears down what it made; a teardown already under way is waited
-/// for.
+/// Nothing happens when the review has no live system. A system whose start still runs (or
+/// a restart between its two halves) is stopped through that start, which tears down what it
+/// made; a teardown already under way is waited for.
 pub(super) async fn teardown(shared: &Shared, pr: &PrRef, why: StopWhy) {
     enum Next {
         Gone,
@@ -1642,11 +1700,10 @@ pub(super) async fn teardown(shared: &Shared, pr: &PrRef, why: StopWhy) {
             let Some(run) = entry.system.as_mut().filter(|run| run.state.is_live()) else {
                 return Next::Gone;
             };
-            if let SystemState::Starting { .. } = run.state {
-                let act = run.activity;
-                if let Some(activity) = entry.activity.as_ref().filter(|a| Some(a.id) == act) {
-                    activity.stop.fire();
-                }
+            // The review's system activity is a start or a restart: its stop ends it.
+            let starting = entry.activity.as_ref().filter(|a| a.doing == Doing::System);
+            if let Some(activity) = starting {
+                activity.stop.fire();
                 run.stop.fire();
                 stopped_start = Some(run.id);
                 return Next::Wait;
@@ -1662,22 +1719,25 @@ pub(super) async fn teardown(shared: &Shared, pr: &PrRef, why: StopWhy) {
         match next {
             Next::Take(id) => break Some(id),
             Next::Gone => break None,
-            Next::Wait if tokio::time::Instant::now() >= give_up => break None,
+            Next::Wait if tokio::time::Instant::now() >= give_up => {
+                tracing::warn!(pr = %pr, "the system was still being stopped after {TEARDOWN_WAIT:?}");
+                break None;
+            }
             Next::Wait => tokio::time::sleep(Duration::from_millis(50)).await,
         }
     };
     let Some(id) = id else {
         // A start this stopped ends `Stopped` by the reviewer: it is this `why`.
-        if let Some(id) = stopped_start
-            && with_run(shared, pr, id, |run| {
-                let renamed = matches!(run.state, SystemState::Stopped { .. });
-                if renamed {
-                    run.state = SystemState::Stopped { why };
-                }
-                renamed
-            })
-            .unwrap_or(false)
-        {
+        let renamed = shared.tests.with(pr, |entry| {
+            let run = entry.system.as_mut()?;
+            let ours = stopped_start.is_some()
+                && run.state
+                    == SystemState::Stopped {
+                        why: StopWhy::Reviewer,
+                    };
+            ours.then(|| run.state = SystemState::Stopped { why })
+        });
+        if renamed.is_some() {
             tell_system(shared, pr).await;
         }
         return;
@@ -1701,18 +1761,15 @@ pub(crate) async fn stop_system(shared: &Arc<Shared>, pr: &PrRef, side: RunSide)
     }
     let stopping = shared.tests.with(pr, |entry| {
         let run = entry.system.as_mut().filter(|run| run.state.is_live())?;
-        match run.state {
-            // The start sees its stop and tears down what it made.
-            SystemState::Starting { .. } => {
-                run.tearing = true;
-                let act = run.activity;
-                if let Some(activity) = entry.activity.as_ref().filter(|a| Some(a.id) == act) {
-                    activity.stop.fire();
-                }
-            }
-            SystemState::Stopping => return None,
-            _ => run.stop.fire(),
+        // A start or a restart under way is stopped through its own stop: it tears down what
+        // it made, and a restart starts nothing again.
+        if let Some(activity) = entry.activity.as_ref().filter(|a| a.doing == Doing::System) {
+            activity.stop.fire();
         }
+        if run.state == SystemState::Stopping {
+            return None;
+        }
+        run.stop.fire();
         run.state = SystemState::Stopping;
         Some(())
     });
@@ -1740,25 +1797,37 @@ pub(crate) async fn restart_system(
         Ok(Accept::Live) => return reply(system_view(shared, pr).await),
         Err(out) => return out,
     };
-    restart(shared, pr, accepted).await
-}
-
-/// Stops the live system, if any, and starts again with the same `keep`, with no `Stopped`
-/// between.
-async fn restart(shared: &Arc<Shared>, pr: &PrRef, accepted: Accepted) -> Outcome {
     let started = match super::begin(shared, pr, Doing::System, TestsPhase::Waiting) {
         Ok(started) => started,
         Err(refused) => return refused.outcome(pr),
     };
-    let old = shared.tests.with(pr, |entry| {
-        let run = entry.system.as_mut().filter(|run| run.state.is_live())?;
+    restart(shared, pr, accepted, started).await
+}
+
+/// Stops the live system, if any, and starts again with the last run's `keep`, with no
+/// `Stopped` between. `started` holds the review's slot.
+async fn restart(
+    shared: &Arc<Shared>,
+    pr: &PrRef,
+    accepted: Accepted,
+    started: Started,
+) -> Outcome {
+    let (old, keep) = shared.tests.with(pr, |entry| {
+        let Some(run) = entry.system.as_mut() else {
+            return (None, false);
+        };
+        if !run.state.is_live() {
+            return (None, run.keep);
+        }
         run.state = SystemState::Stopping;
         run.tearing = true;
         run.stop.fire();
-        Some((run.id, run.keep))
+        (Some(run.id), run.keep)
     });
-    let Some((old, keep)) = old else {
-        launch(shared, pr, accepted, false, started).await;
+    let Some(old) = old else {
+        if let Err(out) = launch(shared, pr, accepted, keep, started).await {
+            return out;
+        }
         return reply(system_view(shared, pr).await);
     };
     tell_system(shared, pr).await;
@@ -1766,23 +1835,31 @@ async fn restart(shared: &Arc<Shared>, pr: &PrRef, accepted: Accepted) -> Outcom
     let (shared, pr) = (shared.clone(), pr.clone());
     tokio::spawn(async move {
         teardown_quiet(&shared, &pr, old).await;
-        if started.stop.fired() {
+        let stopped = started.stop.fired();
+        let id = started.id;
+        let launched = if stopped {
+            Err(())
+        } else {
+            launch(&shared, &pr, accepted, keep, started)
+                .await
+                .map_err(|out| tracing::warn!(pr = %pr, ?out, "the system did not start again"))
+        };
+        if launched.is_err() {
             with_run(&shared, &pr, old, |run| {
                 run.state = SystemState::Stopped {
                     why: StopWhy::Reviewer,
                 };
+                run.tearing = false;
             });
-            end_activity(&shared, &pr, started.id);
+            end_activity(&shared, &pr, id);
             tell_system(&shared, &pr).await;
-            return;
         }
-        launch(&shared, &pr, accepted, keep, started).await;
     });
     reply(view)
 }
 
 /// `SetSystemNetwork`: stores the choice; a live system restarts with it, and only with the
-/// approved recipe.
+/// approved recipe and the review's slot: a refused toggle changes nothing.
 pub(crate) async fn set_system_network(
     shared: &Arc<Shared>,
     pr: &PrRef,
@@ -1805,8 +1882,12 @@ pub(crate) async fn set_system_network(
         Ok(Accept::Live) => return reply(system_view(shared, pr).await),
         Err(out) => return out,
     };
+    let started = match super::begin(shared, pr, Doing::System, TestsPhase::Waiting) {
+        Ok(started) => started,
+        Err(refused) => return refused.outcome(pr),
+    };
     env::update_record(shared, pr, |record| record.system.network = allowed).await;
-    restart(shared, pr, accepted).await
+    restart(shared, pr, accepted, started).await
 }
 
 /// A process id a client may ask for: `start` or `service:<name>`.
@@ -1899,6 +1980,20 @@ mod tests {
             Outcome::Ok(Reply::SystemLogs(t)) => *t,
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_failure_message_from_engine_output_is_bounded() {
+        let out = Output {
+            code: Some(1),
+            stderr: format!("{}\nsecond line", "x".repeat(5000)).into_bytes(),
+            ..Output::default()
+        };
+        let args = vec!["start".to_string(), "clusia-system-x".to_string()];
+        let f = failure_of(&args, StepPlace::Container, Ok(&out), None);
+        assert!(f.message.chars().count() <= 300, "{}", f.message.len());
+        assert!(f.message.starts_with("docker start failed: xxx"));
+        assert!(f.message.ends_with('…'));
     }
 
     #[tokio::test]
@@ -2566,18 +2661,20 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert_eq!(tail.lines, ["ok red evil"]);
-        // The file keeps the raw bytes.
+        // The file keeps the raw bytes, escapes included.
         let view = system_of(system(&lab.shared, &pr(7)).await);
         let file = view.processes[0].log.clone().expect("a log file");
-        assert!(
-            file.starts_with(
-                &lab.shared
-                    .paths
-                    .system_logs_for(&pr(7))
-                    .display()
-                    .to_string()
-            )
-        );
+        let dir = lab.shared.paths.system_logs_for(&pr(7));
+        assert!(std::path::Path::new(&file).starts_with(&dir), "{file}");
+        let give_up = std::time::Instant::now() + Duration::from_secs(5);
+        let raw = loop {
+            let raw = std::fs::read(&file).unwrap_or_default();
+            if !raw.is_empty() || std::time::Instant::now() > give_up {
+                break raw;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(raw, "ok \x1b[31mred\x1b[0m \u{202e}evil\r\n".as_bytes());
     }
 
     #[tokio::test]
@@ -2596,6 +2693,190 @@ mod tests {
         );
         let main = system_logs(&lab.shared, &pr(7), RunSide::Main, "start", 10).await;
         assert_eq!(refused(main), MAIN_SYSTEM_LATER);
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_a_slow_health_check_tears_the_system_down() {
+        // The health check is in flight when the stop comes: the start still tears down.
+        let (lab, api) = system_lab(vec![]).await;
+        lab.shared.tests.set_health_every(Duration::from_millis(20));
+        api.reset().await;
+        Mock::given(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(1)))
+            .mount(&api)
+            .await;
+        start(&lab, false).await;
+        until_state(&lab, |v| {
+            v.state
+                == SystemState::Starting {
+                    stage: StartStage::Health,
+                }
+        })
+        .await;
+        let give_up = std::time::Instant::now() + Duration::from_secs(5);
+        while api.received_requests().await.unwrap().is_empty() {
+            assert!(std::time::Instant::now() < give_up, "no health request");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let reply = system_of(stop_system(&lab.shared, &pr(7), RunSide::Pr).await);
+        assert_eq!(reply.state, SystemState::Stopping);
+        let stopped = until_state(&lab, |v| matches!(v.state, SystemState::Stopped { .. })).await;
+        assert_eq!(
+            stopped.state,
+            SystemState::Stopped {
+                why: StopWhy::Reviewer
+            }
+        );
+        assert_eq!(
+            docker_calls_after_create(&lab, "rm").len(),
+            1,
+            "torn down once"
+        );
+        assert!(env::load(&lab.shared, &pr(7)).system.live.is_none());
+        assert!(idle(&lab.shared, 7));
+    }
+
+    #[tokio::test]
+    async fn a_start_command_exiting_while_waiting_for_health_fails_the_start() {
+        let (lab, api) = system_lab_with(vec![], |x| {
+            x.on(
+                "docker",
+                &["wait"],
+                FakeReply::after(Duration::from_millis(300), FakeReply::ok("1\n")),
+            );
+            // The start's own pre-clean answers at once; the teardown takes a while, as a
+            // real `docker stop` does.
+            x.on_sequence(
+                "docker",
+                &["stop"],
+                vec![
+                    FakeReply::ok(""),
+                    FakeReply::after(Duration::from_millis(200), FakeReply::ok("")),
+                ],
+            );
+        })
+        .await;
+        lab.shared.tests.set_health_every(Duration::from_millis(20));
+        api.reset().await;
+        Mock::given(path("/health"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&api)
+            .await;
+        start(&lab, false).await;
+        let failed = until_state(&lab, |v| !v.state.is_live()).await;
+        assert_eq!(failed.state, SystemState::Failed, "{failed:#?}");
+        let f = failed.failure.unwrap();
+        assert_eq!(f.exit_code, Some(1));
+        assert_eq!(f.process.as_deref(), Some("start"));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            docker_calls_after_create(&lab, "rm").len(),
+            1,
+            "torn down once"
+        );
+        assert_eq!(
+            system_of(system(&lab.shared, &pr(7)).await).state,
+            SystemState::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_a_restart_starts_nothing_again() {
+        // The restart's teardown takes a while, as a real `docker stop` does.
+        let (lab, _api) = system_lab_without_health_with(vec![], |x| {
+            x.on_sequence(
+                "docker",
+                &["stop"],
+                vec![
+                    FakeReply::ok(""),
+                    FakeReply::after(Duration::from_millis(300), FakeReply::ok("")),
+                    FakeReply::ok(""),
+                ],
+            );
+        })
+        .await;
+        start(&lab, false).await;
+        until_state(&lab, |v| v.state == SystemState::Running).await;
+        let hash = plan_of(&lab, 7).await.recipe_hash;
+        let reply = system_of(restart_system(&lab.shared, &pr(7), RunSide::Pr, &hash).await);
+        assert_eq!(reply.state, SystemState::Stopping);
+        stop_system(&lab.shared, &pr(7), RunSide::Pr).await;
+        let stopped = until_state(&lab, |v| matches!(v.state, SystemState::Stopped { .. })).await;
+        assert_eq!(
+            stopped.state,
+            SystemState::Stopped {
+                why: StopWhy::Reviewer
+            }
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            docker_calls(&lab, "create").len(),
+            2,
+            "no second system was made"
+        );
+        assert!(idle(&lab.shared, 7));
+        assert!(env::load(&lab.shared, &pr(7)).system.live.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_network_toggle_refused_as_busy_changes_nothing() {
+        let (lab, _api) = system_lab_without_health().await;
+        start(&lab, false).await;
+        until_state(&lab, |v| v.state == SystemState::Running).await;
+        let hash = plan_of(&lab, 7).await.recipe_hash;
+        let slot = hold_slot(&lab, 7, Doing::Run);
+        assert_eq!(
+            refused(set_system_network(&lab.shared, &pr(7), true, &hash).await),
+            "The tests of acme/widgets#7 are busy running the tests; wait for it or stop it"
+        );
+        assert!(!env::load(&lab.shared, &pr(7)).system.network);
+        assert_eq!(
+            system_of(system(&lab.shared, &pr(7)).await).state,
+            SystemState::Running
+        );
+        drop(slot);
+    }
+
+    #[tokio::test]
+    async fn two_starts_at_once_never_pass_the_limit() {
+        let (lab, _api) = system_lab_with_reviews(&[6, 7]).await;
+        lab.shared.config.write().await.tests.systems_max = 1;
+        let six = plan_of_n(&lab, 6).await.recipe_hash;
+        let seven = plan_of_n(&lab, 7).await.recipe_hash;
+        let (pr6, pr7) = (pr(6), pr(7));
+        let (a, b) = tokio::join!(
+            start_system(&lab.shared, &pr6, RunSide::Pr, &six, false),
+            start_system(&lab.shared, &pr7, RunSide::Pr, &seven, false)
+        );
+        let started = [&a, &b]
+            .iter()
+            .filter(|out| matches!(out, Outcome::Ok(Reply::System(_))))
+            .count();
+        assert_eq!(started, 1, "{a:?} {b:?}");
+        let refusal = match (a, b) {
+            (Outcome::Err(e), _) | (_, Outcome::Err(e)) => e.message,
+            _ => unreachable!(),
+        };
+        assert!(
+            refusal.starts_with("At most 1 system runs at once."),
+            "{refusal}"
+        );
+        assert!(
+            idle(&lab.shared, 6) || idle(&lab.shared, 7),
+            "the refused start holds no slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_with_nothing_live_keeps_the_last_runs_keep() {
+        let (lab, _api) = system_lab_without_health().await;
+        start(&lab, true).await;
+        until_state(&lab, |v| v.state == SystemState::Running).await;
+        stop_and_wait(&lab, 7).await;
+        let hash = plan_of(&lab, 7).await.recipe_hash;
+        system_of(restart_system(&lab.shared, &pr(7), RunSide::Pr, &hash).await);
+        let running = until_state(&lab, |v| v.state == SystemState::Running).await;
+        assert!(running.keep);
     }
 
     #[tokio::test]
@@ -2688,6 +2969,28 @@ mod tests {
         let mut events = events(&lab);
         start(&lab, false).await;
         until_state(&lab, |v| v.state == SystemState::Running).await;
+        // The log streams lines across the stop.
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(
+            !system_logs_events(&mut events).is_empty(),
+            "the log was streaming before the stop"
+        );
+        // One more line: its batch is armed when the stop comes.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(lab.shared.tests.with(&pr(7), |entry| {
+            entry
+                .system
+                .as_ref()
+                .is_some_and(|run| run.logs["start"].armed)
+        }));
         stop_system(&lab.shared, &pr(7), RunSide::Pr).await;
         until_state(&lab, |v| matches!(v.state, SystemState::Stopped { .. })).await;
         for _ in 0..50 {
@@ -3001,7 +3304,8 @@ mod tests {
             !prompt.contains("\nIgnore the rules"),
             "every line of the tail is indented as data"
         );
-        // The recipe it wrote follows M1's adoption, and the hash changed, so the plan asks
+        // The recipe it wrote follows the recipe's adoption rule (written when the file is
+        // Clúsia's, proposed otherwise), and the hash changed, so the plan asks
         // again.
         let plan = plan_of(&lab, 7).await.system.unwrap();
         assert!(!plan.approved);

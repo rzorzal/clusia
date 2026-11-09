@@ -27,6 +27,11 @@ enum Reply {
     },
     Hang,
     Missing,
+    /// Each piece after its own delay, then the exit code.
+    Timed {
+        pieces: Vec<(Duration, Stream, String)>,
+        code: i32,
+    },
     Slow {
         after: Duration,
         then: Box<Reply>,
@@ -61,6 +66,12 @@ impl FakeReply {
     /// value of that entry of the call's environment, else of a `CLUSIA_MARK=<v>` argument.
     pub fn marked(chunks: Vec<(Stream, String)>, code: i32) -> Self {
         Self(Reply::Marked { chunks, code })
+    }
+
+    /// Each piece after its own delay on the (paused or real) clock, then exits with `code`;
+    /// a stop ends it between pieces.
+    pub fn timed(pieces: Vec<(Duration, Stream, String)>, code: i32) -> Self {
+        Self(Reply::Timed { pieces, code })
     }
 
     /// Never ends on its own: only the limit or a stop does.
@@ -266,6 +277,20 @@ impl Exec for FakeExec {
                     stderr: stderr.into_bytes(),
                     timed_out: false,
                 }),
+                Reply::Timed { pieces, code } => {
+                    let mut out = Output {
+                        code: Some(code),
+                        ..Output::default()
+                    };
+                    for (after, stream, text) in pieces {
+                        tokio::time::sleep(after).await;
+                        match stream {
+                            Stream::Out => out.stdout.extend_from_slice(text.as_bytes()),
+                            Stream::Err => out.stderr.extend_from_slice(text.as_bytes()),
+                        }
+                    }
+                    Ok(out)
+                }
                 Reply::Chunks { chunks, code } | Reply::Marked { chunks, code } => {
                     let mut out = Output {
                         code: Some(code),
@@ -303,6 +328,16 @@ impl Exec for FakeExec {
             };
             let (pieces, code) = match reply {
                 Reply::Missing | Reply::Slow { .. } => return Err(not_found(cmd)),
+                Reply::Timed { pieces, code } => {
+                    for (after, stream, text) in pieces {
+                        tokio::select! {
+                            _ = stop.notified() => return Ok(Ended::Stopped),
+                            _ = tokio::time::sleep(after) => {}
+                        }
+                        chunk(stream, text.as_bytes());
+                    }
+                    return Ok(Ended::Exited(Some(code)));
+                }
                 Reply::Hang => {
                     return Ok(tokio::select! {
                         _ = stop.notified() => Ended::Stopped,
@@ -373,6 +408,39 @@ mod tests {
 
     fn docker(args: &[&str]) -> CommandSpec {
         CommandSpec::new("/opt/homebrew/bin/docker").args(args)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_reply_sends_each_piece_after_its_delay_until_stopped() {
+        let fake = FakeExec::new();
+        let second = Duration::from_secs(1);
+        fake.on(
+            "docker",
+            &["logs"],
+            FakeReply::timed(
+                vec![
+                    (second, Stream::Out, "one\n".into()),
+                    (second, Stream::Out, "two\n".into()),
+                    (second, Stream::Out, "three\n".into()),
+                ],
+                0,
+            ),
+        );
+        let stop = StopFlag::new();
+        let mut seen = Vec::new();
+        let mut chunk = |_: Stream, bytes: &[u8]| {
+            seen.push(String::from_utf8_lossy(bytes).into_owned());
+            if seen.len() == 2 {
+                stop.fire();
+            }
+        };
+        let cmd = docker(&["logs", "-f"]);
+        let ended = fake
+            .stream(&cmd, Duration::from_secs(60), &stop, &mut chunk)
+            .await
+            .unwrap();
+        assert_eq!(ended, Ended::Stopped);
+        assert_eq!(seen, ["one\n", "two\n"]);
     }
 
     #[tokio::test]
