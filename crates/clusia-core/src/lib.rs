@@ -28,6 +28,7 @@ pub mod publish;
 pub mod revalidation;
 pub mod review;
 pub mod story;
+pub mod system;
 pub mod tabs;
 #[cfg(any(test, feature = "test-kit"))]
 pub mod testkit;
