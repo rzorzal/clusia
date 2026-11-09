@@ -216,6 +216,11 @@ pub fn near_tests_block(json: serde_json::Value) -> String {
     format!("```clusia-near-tests\n{json}\n```")
 }
 
+/// A fenced `clusia-endpoints` block holding `json`, `{"endpoints": [..]}`.
+pub fn endpoints_block(json: serde_json::Value) -> String {
+    format!("```clusia-endpoints\n{json}\n```")
+}
+
 /// A fenced `clusia-function` block holding `json`.
 pub fn function_block(json: serde_json::Value) -> String {
     format!("```clusia-function\n{json}\n```")

@@ -33,8 +33,8 @@ pub use diagram_blocks::{
 pub use parse::{AgentEvent, ParseState, parse_line};
 pub use probe::parse_probe;
 pub use recipe_blocks::{
-    FUNCTION_BLOCKS_MAX, FUNCTION_INFO, NEAR_TESTS_INFO, RECIPE_INFO, RecipeBlocks,
-    extract_recipe_blocks,
+    ENDPOINTS_INFO, FUNCTION_BLOCKS_MAX, FUNCTION_INFO, NEAR_TESTS_INFO, RECIPE_INFO, RecipeBlocks,
+    extract_endpoints_block, extract_recipe_blocks,
 };
 pub use revalidation_blocks::{RawVerdict, extract_diagrams_stale, extract_revalidation_blocks};
 pub use suggestions::extract_suggestions;

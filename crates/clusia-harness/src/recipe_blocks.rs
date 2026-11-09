@@ -8,6 +8,7 @@ use crate::fenced::fenced_blocks;
 pub const RECIPE_INFO: &str = "clusia-recipe";
 pub const NEAR_TESTS_INFO: &str = "clusia-near-tests";
 pub use clusia_core::functions::FUNCTION_INFO;
+pub use clusia_core::system::ENDPOINTS_INFO;
 /// The most clusia-function blocks an answer keeps.
 pub const FUNCTION_BLOCKS_MAX: usize = 24;
 /// The most near-test names an answer keeps.
@@ -26,6 +27,8 @@ pub struct RecipeBlocks {
     pub near_tests: Vec<String>,
     /// The clusia-function blocks that are JSON objects, in order, at most FUNCTION_BLOCKS_MAX.
     pub functions: Vec<Value>,
+    /// The first `clusia-endpoints` block whose body is a JSON object.
+    pub endpoints: Option<Value>,
     /// The blocks that could not be used, or could be used only in part.
     pub unreadable: u32,
 }
@@ -38,10 +41,15 @@ pub struct RecipeBlocks {
 /// counts as unreadable. A near-tests block is `{"tests": [..]}`; a name that is not a string,
 /// is blank, is over 300 characters, holds a control or invisible character or comes past the
 /// 200th is dropped, and a block that dropped one counts once as unreadable. A `clusia-function`
-/// block is kept when its body is a JSON object, up to 24; any other counts as unreadable.
+/// block is kept when its body is a JSON object, up to 24; any other counts as unreadable. Only
+/// the first `clusia-endpoints` block that is a JSON object is kept, the others are unreadable.
 pub fn extract_recipe_blocks(text: &str) -> RecipeBlocks {
-    let (kept, blocks) = fenced_blocks(text, &[RECIPE_INFO, NEAR_TESTS_INFO, FUNCTION_INFO]);
+    let (kept, blocks) = fenced_blocks(
+        text,
+        &[RECIPE_INFO, NEAR_TESTS_INFO, FUNCTION_INFO, ENDPOINTS_INFO],
+    );
     let mut recipe = None;
+    let mut endpoints = None;
     let mut functions = Vec::new();
     let mut near_tests = Vec::new();
     let mut unreadable = 0u32;
@@ -49,6 +57,11 @@ pub fn extract_recipe_blocks(text: &str) -> RecipeBlocks {
         if info == RECIPE_INFO {
             match serde_json::from_str::<Value>(&body) {
                 Ok(value) if value.is_object() && recipe.is_none() => recipe = Some(value),
+                _ => unreadable += 1,
+            }
+        } else if info == ENDPOINTS_INFO {
+            match serde_json::from_str::<Value>(&body) {
+                Ok(value) if value.is_object() && endpoints.is_none() => endpoints = Some(value),
                 _ => unreadable += 1,
             }
         } else if info == FUNCTION_INFO {
@@ -67,8 +80,24 @@ pub fn extract_recipe_blocks(text: &str) -> RecipeBlocks {
         recipe,
         near_tests,
         functions,
+        endpoints,
         unreadable,
     }
+}
+
+/// The first `clusia-endpoints` block of `text`, with how many blocks were unreadable. For the
+/// endpoints turn, whose answer holds only that block.
+pub fn extract_endpoints_block(text: &str) -> (Option<Value>, u32) {
+    let (_, blocks) = fenced_blocks(text, &[ENDPOINTS_INFO]);
+    let mut endpoints = None;
+    let mut unreadable = 0;
+    for (_, body) in blocks {
+        match serde_json::from_str::<Value>(&body) {
+            Ok(value) if value.is_object() && endpoints.is_none() => endpoints = Some(value),
+            _ => unreadable += 1,
+        }
+    }
+    (endpoints, unreadable)
 }
 
 fn read_near(body: &str, names: &mut Vec<String>, unreadable: &mut u32) {
@@ -259,5 +288,52 @@ mod tests {
         assert_eq!(blocks.functions[23], f("f23"));
         assert_eq!(blocks.unreadable, 2);
         assert_eq!(FUNCTION_INFO, "clusia-function");
+    }
+
+    #[test]
+    fn the_endpoints_block_is_found_beside_the_recipe() {
+        use crate::testkit::{endpoints_block, recipe_block};
+        let text = format!(
+            "Here.\n\n{}\n\n{}\n\n{}\n\nDone.",
+            recipe_block(json!({"runner": "container"})),
+            endpoints_block(
+                json!({"endpoints": [{"method": "GET", "path": "/x", "port": "api", "why": "w"}]})
+            ),
+            endpoints_block(json!({"endpoints": []})),
+        );
+        let blocks = extract_recipe_blocks(&text);
+        assert_eq!(
+            blocks.endpoints,
+            Some(
+                json!({"endpoints": [{"method": "GET", "path": "/x", "port": "api", "why": "w"}]})
+            )
+        );
+        assert_eq!(
+            blocks.unreadable, 1,
+            "the second endpoints block is unreadable"
+        );
+        assert!(!blocks.text.contains("clusia-endpoints"));
+        assert!(blocks.recipe.is_some());
+        let bad = extract_recipe_blocks("```clusia-endpoints\n[1]\n```");
+        assert_eq!((bad.endpoints, bad.unreadable), (None, 1));
+    }
+
+    #[test]
+    fn the_endpoints_turn_reads_only_that_block() {
+        use crate::testkit::endpoints_block;
+        let only = format!(
+            "Read them.\n\n{}\n",
+            endpoints_block(json!({"endpoints": []}))
+        );
+        assert_eq!(
+            extract_endpoints_block(&only),
+            (Some(json!({"endpoints": []})), 0)
+        );
+        assert_eq!(extract_endpoints_block("no block"), (None, 0));
+        assert_eq!(
+            extract_endpoints_block("```clusia-endpoints\nnot json\n```").1,
+            1
+        );
+        assert_eq!(ENDPOINTS_INFO, "clusia-endpoints");
     }
 }
