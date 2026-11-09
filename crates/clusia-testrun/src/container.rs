@@ -161,7 +161,7 @@ async fn kill(exec: &dyn Exec, docker: &Docker, name: &str) -> bool {
 
 /// Creates each cache volume with its labels: a volume `docker run -v` creates on the fly has
 /// none, and cleanup finds volumes by label only.
-async fn create_caches(
+pub(crate) async fn create_caches(
     exec: &dyn Exec,
     docker: &Docker,
     mounts: &RunMounts,
@@ -453,7 +453,7 @@ async fn compose_output(
 }
 
 /// The first non-empty line of stderr, safe to show.
-fn first_line(out: &Output) -> String {
+pub(crate) fn first_line(out: &Output) -> String {
     let text = String::from_utf8_lossy(&out.stderr);
     printable(
         text.lines()

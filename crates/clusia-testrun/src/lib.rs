@@ -22,5 +22,6 @@ pub mod sample;
 pub mod sandbox;
 pub mod scan;
 pub mod scenario;
+pub mod system;
 #[cfg(any(test, feature = "test-kit"))]
 pub mod testkit;

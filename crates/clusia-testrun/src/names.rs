@@ -74,6 +74,7 @@ pub enum LabelKind {
     Cache,
     Stack,
     Probe,
+    System,
 }
 
 impl LabelKind {
@@ -84,6 +85,7 @@ impl LabelKind {
             LabelKind::Cache => "cache",
             LabelKind::Stack => "stack",
             LabelKind::Probe => "probe",
+            LabelKind::System => "system",
         }
     }
 }
@@ -233,5 +235,17 @@ mod tests {
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn label_kind_system_is_written_as_system() {
+        assert_eq!(LabelKind::System.as_str(), "system");
+        let labels = Labels {
+            review: "acme~widgets~7".into(),
+            repo: "acme/widgets".into(),
+            kind: LabelKind::System,
+        };
+        let args = labels.args();
+        assert_eq!(args[args.len() - 2..], ["--label", "io.clusia.kind=system"]);
     }
 }

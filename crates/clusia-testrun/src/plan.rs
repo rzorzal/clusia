@@ -4,14 +4,16 @@
 use std::collections::BTreeMap;
 
 use clusia_core::cockpit::SERVICES_ON_MAIN;
+use clusia_core::system::{NEEDS_CONTAINER, SystemPlan};
 use clusia_core::tests::{
     Approval, Engine, EngineKind, EnvState, PlanCommand, PlanStep, RunnerChoice, RunnerKind,
-    STEP_ENGINE, STEP_IMAGE, STEP_SERVICES, STEP_STACK, STEP_TESTS, SetupPlan, StepPlace,
-    StepState,
+    STEP_ENGINE, STEP_FORWARDER, STEP_IMAGE, STEP_SERVICES, STEP_STACK, STEP_SYSTEM, STEP_TESTS,
+    SetupPlan, StepPlace, StepState,
 };
 
 use crate::names::sha256_hex;
-use crate::recipe::{ImageSource, Recipe, SetupStep, StepInto};
+use crate::recipe::{HealthSpec, ImageSource, Recipe, SetupStep, StepInto};
+use crate::system::FORWARDER_DOCKERFILE;
 
 /// The block of a container plan whose recipe has no `[image]`.
 pub const NO_IMAGE: &str =
@@ -40,6 +42,8 @@ pub struct Facts {
     /// The pull request ships its own `.clusia/` folder.
     pub clusia_problem: Option<String>,
     pub compose_problem: Option<String>,
+    /// Clúsia's port forwarder image is on the engine.
+    pub forwarder_present: bool,
 }
 
 /// The runner: a configured one wins, then the recipe's, then a container when an engine was
@@ -166,7 +170,7 @@ pub fn setup_plan(
         ready: blocked.is_none() && steps_done && commands_approved && mounted,
         blocked,
         steps,
-        system: None,
+        system: system_plan(recipe, hash, env, facts, approval),
     }
 }
 
@@ -204,6 +208,55 @@ fn setup_steps(recipe: &Recipe, container: bool, facts: &Facts) -> Vec<PlanStep>
         }
     }
     steps
+}
+
+/// The SYSTEM section of the plan, from the recipe's `[system]`. The system is approved when
+/// its own key is, for this recipe, and every step it needs is approved or done. Its
+/// forwarder image is built only in a container.
+pub fn system_plan(
+    recipe: &Recipe,
+    hash: &str,
+    env: &EnvState,
+    facts: &Facts,
+    approval: Option<&Approval>,
+) -> Option<SystemPlan> {
+    let spec = recipe.system.as_ref()?;
+    let container = env.runner == RunnerKind::Container;
+    let mut steps = Vec::new();
+    if container {
+        let mut step = plan_step(
+            STEP_FORWARDER,
+            "Build Clúsia's port forwarder",
+            FORWARDER_DOCKERFILE.trim_end_matches('\n'),
+            StepPlace::Container,
+            true,
+        );
+        step.state = done_if(facts.forwarder_present);
+        step.approved =
+            matches!(step.state, StepState::Skipped { .. }) || approved(approval, hash, &step.id);
+        steps.push(step);
+    }
+    let services: Vec<String> = recipe
+        .services
+        .as_ref()
+        .map(|s| s.names.clone())
+        .unwrap_or_default();
+    let view = spec.spec_view(&recipe.tests.env, &services);
+    let steps_ready = steps
+        .iter()
+        .all(|s| s.approved || matches!(s.state, StepState::Done));
+    Some(SystemPlan {
+        steps,
+        start: spec.start.clone(),
+        health: spec.health.as_ref().map(HealthSpec::plan_text),
+        ports: view.ports,
+        env: view.env,
+        services,
+        network: false,
+        endpoints: Vec::new(),
+        approved: approved(approval, hash, STEP_SYSTEM) && steps_ready,
+        blocked: (!container).then(|| NEEDS_CONTAINER.to_string()),
+    })
 }
 
 /// The plan of main's worktree: only the setup steps that run in the work folder and the
@@ -388,8 +441,10 @@ mod tests {
 
     use clusia_core::tests::{EngineKind, Existing, RepoSignals};
 
+    use clusia_core::system::SystemPort;
+
     use super::*;
-    use crate::recipe::{ImageSource, Services, SetupStep, StepInto, TestsSpec};
+    use crate::recipe::{PortSpec, Services, SystemSpec, TestsSpec};
 
     const HASH: &str = "feedface";
 
@@ -473,6 +528,7 @@ mod tests {
             stack_up: true,
             clusia_problem: None,
             compose_problem: None,
+            forwarder_present: false,
         }
     }
 
@@ -1247,5 +1303,194 @@ mod tests {
             None,
         );
         assert_eq!(plan.blocked.as_deref(), Some(NO_SANDBOX));
+    }
+
+    fn system_recipe() -> Recipe {
+        Recipe {
+            system: Some(SystemSpec {
+                start: "cargo run -q --bin auth-api -- --port 8080".into(),
+                note: None,
+                ports: vec![
+                    PortSpec {
+                        name: "api".into(),
+                        port: 8080,
+                        path: "/".into(),
+                    },
+                    PortSpec {
+                        name: "admin".into(),
+                        port: 9090,
+                        path: "/admin".into(),
+                    },
+                ],
+                health: Some(HealthSpec::Http {
+                    port: "api".into(),
+                    path: "/health".into(),
+                    timeout_secs: 60,
+                }),
+                env: BTreeMap::from([("RUST_LOG".to_string(), "info".to_string())]),
+            }),
+            ..recipe()
+        }
+    }
+
+    fn system_plan_of(facts: &Facts, approval: Option<&Approval>) -> SystemPlan {
+        setup_plan(
+            &system_recipe(),
+            HASH,
+            &env(RunnerKind::Container, Some(colima())),
+            facts,
+            approval,
+        )
+        .system
+        .expect("the recipe has a system")
+    }
+
+    #[test]
+    fn the_system_plan_needs_its_own_approval() {
+        let missing = system_plan_of(&running(), None);
+        assert_eq!(missing.steps.len(), 1);
+        assert_eq!(missing.steps[0].id, STEP_FORWARDER);
+        assert_eq!(missing.steps[0].title, "Build Clúsia's port forwarder");
+        assert_eq!(
+            missing.steps[0].command,
+            "FROM alpine:3.20\nRUN apk add --no-cache socat"
+        );
+        assert_eq!(
+            (
+                missing.steps[0].place,
+                missing.steps[0].network,
+                missing.steps[0].state.clone()
+            ),
+            (StepPlace::Container, true, StepState::Missing)
+        );
+        assert!(!missing.approved, "no approval at all");
+
+        let mut forwarded = done();
+        forwarded.forwarder_present = true;
+        // Everything the tests need is approved, the system is not: still not approved.
+        let tests_only = approval(&[
+            "image",
+            "services",
+            "work:1",
+            "stack",
+            "tests",
+            "engine",
+            STEP_FORWARDER,
+        ]);
+        let plan = system_plan_of(&forwarded, Some(&tests_only));
+        assert_eq!(plan.steps[0].state, StepState::Done);
+        assert!(!plan.approved, "STEP_SYSTEM was not approved");
+        // STEP_SYSTEM approved, forwarder built: approved.
+        let with_system = approval(&["tests", STEP_SYSTEM]);
+        assert!(
+            system_plan_of(&forwarded, Some(&with_system)).approved,
+            "a Done step needs no approval of its own"
+        );
+        // STEP_SYSTEM approved, forwarder neither built nor approved: not approved.
+        assert!(!system_plan_of(&running(), Some(&with_system)).approved);
+        // The forwarder step approved counts, built or not.
+        let full = approval(&[STEP_SYSTEM, STEP_FORWARDER]);
+        assert!(system_plan_of(&running(), Some(&full)).approved);
+        // An approval for another recipe hash holds for nothing.
+        let mut stale = full.clone();
+        stale.recipe_hash = "other".into();
+        assert!(!system_plan_of(&forwarded, Some(&stale)).approved);
+        // The forwarder step is a step of the plan only; the stack stays the plan's own host step.
+        let plan = setup_plan(
+            &system_recipe(),
+            HASH,
+            &env(RunnerKind::Container, Some(colima())),
+            &forwarded,
+            Some(&full),
+        );
+        assert!(plan.steps.iter().all(|s| s.id != STEP_FORWARDER));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.id == "stack" && s.place == StepPlace::Host)
+        );
+    }
+
+    #[test]
+    fn the_system_section_reads_the_recipe() {
+        let plan = system_plan_of(&running(), None);
+        assert_eq!(plan.start, "cargo run -q --bin auth-api -- --port 8080");
+        assert_eq!(
+            plan.health.as_deref(),
+            Some("GET /health on api · up to 60 s")
+        );
+        assert_eq!(
+            plan.ports,
+            vec![
+                SystemPort {
+                    name: "api".into(),
+                    port: 8080,
+                    path: "/".into()
+                },
+                SystemPort {
+                    name: "admin".into(),
+                    port: 9090,
+                    path: "/admin".into()
+                },
+            ]
+        );
+        assert_eq!(plan.env.get("RUST_LOG").map(String::as_str), Some("info"));
+        assert_eq!(plan.services, vec!["postgres".to_string()]);
+        assert_eq!(
+            (plan.network, plan.endpoints.clone(), plan.blocked.clone()),
+            (false, vec![], None)
+        );
+    }
+
+    #[test]
+    fn a_local_runner_has_no_step_and_says_it_needs_a_container() {
+        let plan = setup_plan(
+            &system_recipe(),
+            HASH,
+            &env(RunnerKind::Local, None),
+            &running(),
+            None,
+        )
+        .system
+        .unwrap();
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.blocked.as_deref(), Some(NEEDS_CONTAINER));
+    }
+
+    #[test]
+    fn a_recipe_without_a_system_has_no_section_and_ready_never_reads_it() {
+        assert_eq!(container_plan(&done(), None).system, None);
+        let all = approval(&EVERYTHING);
+        let without = setup_plan(
+            &recipe(),
+            HASH,
+            &env(RunnerKind::Container, Some(colima())),
+            &done(),
+            Some(&all),
+        );
+        let with = setup_plan(
+            &system_recipe(),
+            HASH,
+            &env(RunnerKind::Container, Some(colima())),
+            &done(),
+            Some(&all),
+        );
+        assert!(without.ready);
+        assert_eq!(with.ready, without.ready, "the system never decides ready");
+        let shipped = Facts {
+            clusia_problem: Some("shipped".into()),
+            ..Facts::default()
+        };
+        assert_eq!(
+            setup_plan(
+                &system_recipe(),
+                HASH,
+                &env(RunnerKind::Container, Some(colima())),
+                &shipped,
+                None
+            )
+            .system,
+            None
+        );
     }
 }

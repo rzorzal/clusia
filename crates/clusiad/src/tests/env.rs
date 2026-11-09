@@ -369,6 +369,7 @@ fn plan_of(
             .as_ref()
             .and_then(|c| c.as_ref().err().cloned())
             .or(refused),
+        forwarder_present: false,
     };
     let mut plan = setup_plan(recipe, hash, env, &facts, record.approval.as_ref());
     for step in &mut plan.steps {
