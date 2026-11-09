@@ -61,6 +61,8 @@ pub(crate) struct ProcessLog {
     pub file: Option<CappedLog>,
     pub path: Option<PathBuf>,
     pub pending: Vec<(u64, String)>,
+    /// Pending lines dropped before a flush, so `pending` stays bounded; they count as skipped.
+    pub dropped: usize,
     /// A flush is on its way.
     pub armed: bool,
 }
@@ -74,6 +76,7 @@ impl ProcessLog {
             file,
             path,
             pending: Vec::new(),
+            dropped: 0,
             armed: false,
         }
     }
@@ -92,9 +95,10 @@ impl ProcessLog {
         }
         self.pending.extend(done);
         // Only the newest batch can ever be sent: older lines wait in the ring.
-        let over = self.pending.len().saturating_sub(LOG_LINES_MAX);
+        let over = self.pending.len().saturating_sub(LOG_BATCH_MAX);
         if over > 0 {
             self.pending.drain(..over);
+            self.dropped += over;
         }
         !std::mem::replace(&mut self.armed, true)
     }
@@ -102,14 +106,14 @@ impl ProcessLog {
     /// The pending lines as one batch: the newest `LOG_BATCH_MAX`, and how many were left out.
     fn batch(&mut self) -> Option<(u64, Vec<String>, u32)> {
         self.armed = false;
+        let dropped = std::mem::take(&mut self.dropped);
         if self.pending.is_empty() {
             return None;
         }
         let pending = std::mem::take(&mut self.pending);
-        let skipped = pending.len().saturating_sub(LOG_BATCH_MAX);
-        let first = pending[skipped].0;
-        let lines = pending.into_iter().skip(skipped).map(|(_, l)| l).collect();
-        Some((first, lines, u32::try_from(skipped).unwrap_or(u32::MAX)))
+        let first = pending[0].0;
+        let lines = pending.into_iter().map(|(_, l)| l).collect();
+        Some((first, lines, u32::try_from(dropped).unwrap_or(u32::MAX)))
     }
 
     fn finish(&mut self) {
@@ -1607,6 +1611,7 @@ async fn teardown_quiet(shared: &Shared, pr: &PrRef, id: u64) {
         for log in run.logs.values_mut() {
             log.finish();
             log.pending.clear();
+            log.dropped = 0;
         }
         for port in &mut run.ports {
             port.host_port = None;
@@ -2504,7 +2509,7 @@ mod tests {
         assert_eq!(b.process, "start");
         assert!(b.lines.len() <= LOG_BATCH_MAX);
         assert_eq!(b.lines.last().map(String::as_str), Some("line 5000"));
-        assert_eq!(b.skipped as usize + b.lines.len(), LOG_LINES_MAX);
+        assert_eq!(b.skipped as usize + b.lines.len(), 5000);
         assert_eq!(b.first, 5000 - b.lines.len() as u64 + 1);
         // The ring keeps 2000 lines; the tail is what GetSystemLogs answers.
         let tail = logs_of(&lab, "start", 5000).await;
