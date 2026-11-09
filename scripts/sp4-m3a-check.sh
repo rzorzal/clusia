@@ -257,7 +257,7 @@ check "logs --follow ended with 130" test "$code" = 130
 check "the system still runs" status_has '"state":"running"'
 
 say "${STEPS[8]}"
-go_on "run clusia system network $PR on, then off (each restarts the system)"
+go_on "run clusia system network $PR on (the system's code may reach the internet until off), then off (each restarts the system)"
 clusia system network "$PR" on
 check "the publish network is attached while on" pub_attached
 clusia system network "$PR" off

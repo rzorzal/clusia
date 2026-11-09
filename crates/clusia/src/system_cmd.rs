@@ -286,7 +286,13 @@ async fn start(
     let tests = view_of(client, pr, stop).await?;
     let (plan, system) = system_plan_of(&tests, pr, true)?;
     let mut recipe_hash = plan.recipe_hash.clone();
-    if !plan.ready || !system.approved {
+    // An approved forwarder step whose image is gone is set up again, as the daemon asks.
+    let steps_done = system
+        .steps
+        .iter()
+        .all(|s| matches!(s.state, StepState::Done | StepState::Skipped { .. }));
+    let set_up = !plan.ready || !system.approved || !steps_done;
+    if set_up {
         for line in plan_lines(&plan) {
             eprintln!("{line}");
         }
@@ -310,12 +316,12 @@ async fn start(
             }
         };
     }
-    let reply = ask_system(
+    let mut reply = ask_system(
         client,
         Request::StartSystem {
             pr: pr.clone(),
             side: RunSide::Pr,
-            recipe_hash,
+            recipe_hash: recipe_hash.clone(),
             keep: true,
         },
         true,
@@ -323,6 +329,24 @@ async fn start(
         stop,
     )
     .await?;
+    // A live system answers as it is; one started from the recipe before the one just
+    // approved is restarted so it runs what was approved.
+    if set_up && reply.state.is_live() && reply.note.as_deref() == Some(OLDER_RECIPE_TEXT) {
+        // What was told of the old run is not what the restart settles on.
+        client.take_events();
+        reply = ask_system(
+            client,
+            Request::RestartSystem {
+                pr: pr.clone(),
+                side: RunSide::Pr,
+                recipe_hash,
+            },
+            true,
+            "the system",
+            stop,
+        )
+        .await?;
+    }
     let view = settle(client, pr, reply, json, stop).await?;
     started(&view, json)
 }
@@ -511,6 +535,7 @@ async fn logs(
     if !view.state.is_live() {
         return follow_end(&view.state, ended);
     }
+    let mut state = view.state;
     loop {
         match stop.event(client, "the logs").await? {
             Event::SystemLogs {
@@ -523,6 +548,11 @@ async fn logs(
                 let Some((expected, label)) = next.get_mut(&process) else {
                     continue;
                 };
+                // Each run numbers its lines from 1: a batch from 1 after later lines is a new
+                // run whose `Starting` view this follow did not see.
+                if first == 1 && *expected > 1 {
+                    *expected = 1;
+                }
                 if first > *expected {
                     if json {
                         println!(
@@ -540,14 +570,22 @@ async fn logs(
                 }
                 *expected = (*expected).max(first + lines.len() as u64);
             }
-            Event::SystemChanged { pr: of, view } if of == *pr => {
-                if matches!(
-                    view.state,
-                    SystemState::Stopped { .. } | SystemState::Failed
-                ) {
+            Event::SystemChanged { pr: of, view } if of == *pr => match view.state {
+                SystemState::Stopped { .. } | SystemState::Failed => {
                     return follow_end(&view.state, ended);
                 }
-            }
+                // A restart or a network change starts a new run, numbered from 1 again; a
+                // stage change within one start is the same run.
+                SystemState::Starting { .. } => {
+                    if !matches!(state, SystemState::Starting { .. }) {
+                        for (expected, _) in next.values_mut() {
+                            *expected = 1;
+                        }
+                    }
+                    state = view.state;
+                }
+                _ => state = view.state,
+            },
             _ => {}
         }
     }
@@ -698,7 +736,8 @@ async fn fix(
         Some(system) => system_plan_lines(system),
         None => vec!["The new recipe has no [system] section.".into()],
     };
-    Ok(output(human, json!({ "view": view })))
+    let system = system_of(client, pr, stop).await?;
+    Ok(output(human, view_json(&system)))
 }
 
 /// How many lines of a failure's tail are shown.

@@ -344,6 +344,34 @@ fn the_readme_documents_start_the_system() {
 }
 
 #[test]
+fn the_network_step_says_what_on_allows() {
+    let text = source();
+    let ask = text
+        .lines()
+        .find(|l| l.starts_with("go_on ") && l.contains("system network"))
+        .expect("the network step asks");
+    assert!(ask.contains("may reach the internet until off"), "{ask}");
+}
+
+#[test]
+fn the_readme_lists_the_owner_check() {
+    let readme =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md"))
+            .unwrap();
+    let line = readme
+        .lines()
+        .find(|l| l.starts_with("- `sp4-m3a-check.sh"))
+        .expect("Development lists the check");
+    for needle in [
+        "rzorzal/blog#37",
+        "127.0.0.1 only",
+        "asks before allowing network",
+    ] {
+        assert!(line.contains(needle), "{needle}: {line}");
+    }
+}
+
+#[test]
 fn it_reads_the_json_status_for_its_checks_and_stops_what_it_started() {
     let text = source();
     assert!(text.contains("clusia --json system status"));

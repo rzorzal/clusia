@@ -1282,6 +1282,10 @@ pub enum Event {
     /// New lines of one process's log, at most one batch per process every 250 ms (topic
     /// `tests`). `first` numbers `lines[0]`; `skipped` counts the older pending lines a flood
     /// left out of the batch.
+    ///
+    /// Each run numbers its lines from 1: a view that turns `Starting` (a start, a restart, a
+    /// network change) begins a new numbering from 1, and a follower resets the next line it
+    /// expects to 1. A batch with `first == 1` after later lines is the same new run.
     SystemLogs {
         pr: PrRef,
         side: RunSide,
